@@ -359,3 +359,13 @@ readme = open("README.md", encoding="utf-8").read()
 assert "retention-days: 90" in wf, "workflow retention"
 assert "reports are kept 90 days" in readme, "README retention"
 print("ok")
+
+# A configured review site is the primary comment link without changing comments otherwise.
+site_default = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "5")
+site_empty = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "5", site="")
+site_body = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "5", site="https://kicad-review.example.workers.dev/")
+site_url = "https://kicad-review.example.workers.dev/r/o/r/a/5"
+assert site_default == site_empty, "empty site changes the existing comment"
+assert site_body.count(site_url) == 1 and f"**[Open the review]({site_url})**" in site_body, site_body
+assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in site_body
+print("ok")

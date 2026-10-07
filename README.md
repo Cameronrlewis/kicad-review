@@ -54,6 +54,8 @@ To make checks block merging, require the status check **`review / review`** in 
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
+Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
+
 ## When the workflow repository moves (for example to ParadigmEngineering)
 
 The owner name appears in exactly one place per KiCad repository: the `uses:` line of its `.github/workflows/kicad-review.yml`.
