@@ -136,11 +136,18 @@ function sessionResponse(body, init, active) {
   return response(body, { ...init, headers });
 }
 
-function errorPage(status, title, message, links = [], active, init = {}) {
-  const allLinks = [{ href: '/', label: 'Back to repositories' }, ...links];
+const refusalDetails = [
+  "You're signed in as the right GitHub account",
+  'The repository owner has installed the KiCad review GitHub App on it',
+  'Someone has given you access on GitHub',
+];
+
+function errorPage(status, title, message, links = [], active, init = {}, details = [], includeHome = true) {
+  const allLinks = includeHome ? [{ href: '/', label: 'Back to repositories' }, ...links] : links;
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'text/html; charset=utf-8');
-  return sessionResponse(messagePage({ title, message, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
+  const pageDetails = title === "Can't open this page" ? refusalDetails : details;
+  return sessionResponse(messagePage({ title, message, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
 function gh(path, token, init = {}) {
@@ -168,15 +175,15 @@ export async function access(request, env, owner, repo) {
   }
   if (!repositoryName.test(owner) || !repositoryName.test(repo)
     || !allowedOwners(env).includes(owner.toLowerCase())) {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
   try {
     const repoResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, active.token);
     const data = repoResponse.status === 200 ? await repoResponse.json() : null;
-    if (!data?.permissions?.pull) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    if (!data?.permissions?.pull) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     return { s: active, repo: data };
   } catch {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
 }
 
@@ -184,18 +191,18 @@ async function artifactReport(env, owner, repo, id, active) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
     const metadataResponse = await gh(base, active.token);
-    if (metadataResponse.status !== 200) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    if (metadataResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const metadata = await metadataResponse.json();
     if (metadata.expired) {
       return errorPage(404, 'Review expired', 'This review has expired — rerun the workflow.',
         [{ href: repoPath(owner, repo), label: 'Back to reviews' }], active);
     }
-    if (!metadata.name?.endsWith('.html')) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
     const location = zipResponse.status === 302 ? zipResponse.headers.get('Location') : null;
-    if (!location) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    if (!location) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const blobResponse = await fetch(location);
-    if (!blobResponse.ok || !blobResponse.body) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    if (!blobResponse.ok || !blobResponse.body) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     return sessionResponse(blobResponse.body, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
@@ -204,7 +211,7 @@ async function artifactReport(env, owner, repo, id, active) {
       },
     }, active);
   } catch {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
 }
 
@@ -239,7 +246,7 @@ async function home(request, env) {
   const stored = cookies(request).s;
   const active = await session(request, env);
   if (!active) {
-    return response(signedOutPage(), {
+    return response(signedOutPage({ sessionEnded: Boolean(stored) }), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         ...(stored ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
@@ -282,7 +289,7 @@ async function reviewList(request, env, owner, repo, url) {
       })),
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
 }
 
@@ -301,7 +308,7 @@ async function commits(request, env, owner, repo, url) {
       artifactList(owner, repo, allowed.s.token),
     ]);
     if (commitsResponse.status === 404) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-    if (!commitsResponse.ok) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
+    if (!commitsResponse.ok) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
     const branches = branchesResponse.ok ? (await branchesResponse.json()) : [];
     const commitList = await commitsResponse.json();
     const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
@@ -319,7 +326,7 @@ async function commits(request, env, owner, repo, url) {
       }),
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
 }
 
@@ -378,10 +385,10 @@ async function run(request, env, owner, repo, id) {
   let runData;
   try {
     const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
-    if (runResponse.status !== 200) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
+    if (runResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
     runData = await runResponse.json();
   } catch {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
   const githubUrl = githubRunUrl(runData);
   if (runData.status !== 'completed') {
@@ -391,11 +398,11 @@ async function run(request, env, owner, repo, id) {
   }
   try {
     const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
-    if (artifactsResponse.status !== 200) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
+    if (artifactsResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
     const artifact = reviews((await artifactsResponse.json()).artifacts)[0];
     if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}`, 302, allowed.s);
   } catch {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
   const conclusion = runData.conclusion === 'success'
     ? 'No KiCad changes between these commits.'
@@ -420,22 +427,22 @@ async function callback(request, env) {
   const savedState = cookies(request).st;
   const state = url.searchParams.get('state');
   if (!state || !savedState || state !== savedState) {
-    return errorPage(400, 'Invalid sign-in state', 'Start the sign-in process again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
+    return errorPage(400, "Sign-in didn't complete", 'The sign-in link expired or was opened in a different browser.', [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   }
   let stateData;
   try {
     stateData = JSON.parse(untext.decode(unbase64url(savedState)));
   } catch {
-    return errorPage(400, 'Invalid sign-in state', 'Start the sign-in process again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
+    return errorPage(400, "Sign-in didn't complete", 'The sign-in link expired or was opened in a different browser.', [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   }
   const code = url.searchParams.get('code');
-  if (!code) return errorPage(400, 'Missing sign-in code', 'Start the sign-in process again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!code) return errorPage(400, "Sign-in didn't complete", "GitHub didn't send a sign-in code. You may have cancelled.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const token = await tokenRequest(env, { code });
-  if (!token) return errorPage(502, 'Sign-in failed', 'Try signing in again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!token) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const userResponse = await gh('/user', token.access_token);
-  if (!userResponse.ok) return errorPage(502, 'Sign-in failed', 'Try signing in again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!userResponse.ok) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const user = await userResponse.json();
-  if (!user.login) return errorPage(502, 'Sign-in failed', 'Try signing in again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!user.login) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const value = {
     t: token.access_token,
     r: token.refresh_token,
@@ -464,7 +471,7 @@ export default {
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)$/);
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id] = artifactRoute;
-        if (!/^\d{1,20}$/.test(id)) return errorPage(404, 'Not found', 'The requested page is unavailable.');
+        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
         const allowed = await access(request, env, owner, repo);
         return allowed instanceof Response ? allowed : artifactReport(env, owner, repo, id, allowed.s);
       }
@@ -475,7 +482,7 @@ export default {
       const runRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/run\/([^/]+)$/);
       if (request.method === 'GET' && runRoute) {
         const [, owner, repo, id] = runRoute;
-        if (!/^\d{1,20}$/.test(id)) return errorPage(404, 'Not found', 'The requested page is unavailable.');
+        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
         return run(request, env, owner, repo, id);
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
@@ -486,7 +493,7 @@ export default {
       if (request.method === 'GET' && reviewRoute) {
         return reviewList(request, env, reviewRoute[1], reviewRoute[2], url);
       }
-      return errorPage(404, 'Not found', 'The requested page is unavailable.', [], await session(request, env));
+      return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], await session(request, env));
     } catch {
       return errorPage(500, 'Internal server error', 'Try again later.');
     }
