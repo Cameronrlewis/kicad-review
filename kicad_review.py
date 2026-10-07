@@ -216,19 +216,27 @@ def sheet_pages(proj_dir, name):
     """Schematic pages in hierarchy order: [{path, name, file, parent}]. path is the sheet UUID path."""
     pages = []
 
-    def walk(file, path, sheet_name, parent, depth):
-        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent})
+    # stem: the file name kicad-cli gives the page's SVG, the sheet names along its path joined by "-".
+    def walk(file, path, sheet_name, parent, depth, stem):
+        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem})
         full = posixpath.join(proj_dir, file)
         if depth > 32 or not os.path.exists(full):
             return
         with open(full) as fh:
             root = parse_sexpr(fh.read())
+        names = set()
         for s in findall(root, "sheet"):
             props = properties(s)
-            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", props.get("Sheetname", "?"), path, depth + 1)
+            child = props.get("Sheetname", "?")
+            if child in names:
+                sys.exit(f"{file} has two sheets with the same name {child!r}; kicad-cli renders both to one file, "
+                         "so neither drawing can be shown. Rename one of them.")
+            names.add(child)
+            safe = re.sub(r"[\\/]", "_", child)
+            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
 
     if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
-        walk(f"{name}.kicad_sch", "/", name, None, 0)
+        walk(f"{name}.kicad_sch", "/", name, None, 0, name)
     return pages
 
 
@@ -718,13 +726,11 @@ def project_checks(p, settings, objs):
 
 
 def page_svg(out_dir, name, page):
-    """The SVG kicad-cli wrote for a page: <project>.svg for the root, <project>-<sheet name>.svg otherwise."""
-    if page["parent"] is None:
-        return f"{out_dir}/sch/{name}.svg"
-    for candidate in (page["name"], re.sub(r'[\\/:*?"<>|]', "_", page["name"])):
-        if os.path.exists(f"{out_dir}/sch/{name}-{candidate}.svg"):
-            return f"{out_dir}/sch/{name}-{candidate}.svg"
-    return None  # ponytail: two sheets with the same name collide in kicad-cli output; first one wins
+    """The SVG kicad-cli wrote for a page: <project>-<sheet>-<subsheet>....svg, <project>.svg for the root."""
+    path = f"{out_dir}/sch/{page['stem']}.svg"
+    if not os.path.exists(path):  # never show a page as unchanged because its drawing is missing
+        sys.exit(f"kicad-cli wrote no drawing for sheet {page['name']!r} (expected {path})")
+    return path
 
 
 def svg_body(path):
@@ -765,6 +771,7 @@ def build_project(p, blobs, settings):
     sheets = []
     for pg in pages.values():
         texts = pg.pop("svg")
+        del pg["stem"]
         b, h = texts.get("base"), texts.get("head")
         pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
         if pg["status"] != "unchanged":

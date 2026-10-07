@@ -98,3 +98,34 @@ assert "typeof " not in js and "const KEYS" not in js and "markersFor(view);" no
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme and not os.path.exists("docs/superpowers"), "plan doc removed"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")
+
+# Code review fixes (2026-10-07). Each block guards one finding.
+import tempfile
+from kicad_review import sheet_pages, page_svg
+
+def sheet(name, file, uid):
+    return f'(sheet (uuid "{uid}") (property "Sheetname" "{name}") (property "Sheetfile" "{file}"))'
+
+def write(root, files):
+    for path, text in files.items():
+        os.makedirs(os.path.dirname(f"{root}/{path}") or root, exist_ok=True)
+        with open(f"{root}/{path}", "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+# 1. Nested sheets: kicad-cli names a page's SVG after its whole sheet path, with / and \ replaced by _.
+t = tempfile.mkdtemp()
+write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A: x/y é", "a.kicad_sch", "u1") + sheet("B", "b.kicad_sch", "u2") + ")",
+          "p/a.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u3") + ")",
+          "p/b.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u4") + ")", "p/pw.kicad_sch": "(kicad_sch)",
+          **{f"out/sch/{f}": "<svg/>" for f in ("H.svg", "H-A: x_y é.svg", "H-A: x_y é-Power.svg", "H-B.svg", "H-B-Power.svg")}})
+found = {pg["path"]: page_svg(f"{t}/out", "H", pg) for pg in sheet_pages(f"{t}/p", "H")}
+assert found == {"/": f"{t}/out/sch/H.svg", "/u1/": f"{t}/out/sch/H-A: x_y é.svg", "/u1/u3/": f"{t}/out/sch/H-A: x_y é-Power.svg",
+                 "/u2/": f"{t}/out/sch/H-B.svg", "/u2/u4/": f"{t}/out/sch/H-B-Power.svg"}, found
+# Sibling sheets with one name share one SVG file, so neither drawing can be trusted: stop with a message.
+write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A", "a.kicad_sch", "u1") + sheet("A", "b.kicad_sch", "u2") + ")"})
+try:
+    sheet_pages(f"{t}/p", "H")
+    raise AssertionError("duplicate sibling sheet names must stop the review")
+except SystemExit as e:
+    assert "same name" in str(e), e
+print("ok")
