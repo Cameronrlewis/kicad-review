@@ -297,9 +297,9 @@ readme = open("README.md", encoding="utf-8").read()
 assert "(or the arrow keys)" not in readme and "arrow keys step too after a click on the drawing" in readme, "README arrow keys"
 print("ok")
 
-# Minor: manual runs compare unrelated revision pairs, so one must not cancel another (pushes and PRs still do).
+# Only pull request runs share a concurrency group: each push and manual run reviews its own commits, so none may be cancelled.
 group = wf[wf.index("group:"):].splitlines()[0]
-assert "github.event_name == 'workflow_dispatch' && github.run_id" in group, group
+assert group.endswith("${{ github.event.pull_request.number || github.run_id }}") and "github.ref" not in group, group
 print("ok")
 
 # A failed run replaces the comment with "Review failed — see run"; a later good run restores the summary.

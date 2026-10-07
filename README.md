@@ -28,7 +28,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - the sheet hierarchy with changed sheets marked
 - the change table and the check results, where clicking a row zooms to the object or violation
 
-Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. Runs whose changes touch no KiCad file are not started at all, thanks to the path filters. A newer push cancels the older run for the same pull request or branch.
+Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. Runs whose changes touch no KiCad file are not started at all, thanks to the path filters. A newer push to a pull request cancels that pull request's older run. Every push to a branch gets its own run, so no commit goes unreviewed.
 
 ## Add it to a repository
 
