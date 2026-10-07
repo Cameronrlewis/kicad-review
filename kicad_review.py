@@ -885,8 +885,16 @@ def plural(n, word):
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
+def md(v):
+    """Text from a KiCad file as literal markdown: no HTML, images, links, emphasis or @mentions.
+    Bare URLs (datasheets) stay as GitHub shows them, a visible auto-link, since escapes would end up inside the link."""
+    v = str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return "".join(part if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
+                   for i, part in enumerate(re.split(r"((?:https?://|www\.)[^\s<>]+)", v))).replace("|", "\\|")
+
+
 def refs(rows, limit=3):
-    names = [r["ref"] for r in rows if r["ref"]]
+    names = [md(r["ref"]) for r in rows if r["ref"]]
     return f" ({', '.join(names[:limit])}{', …' if len(names) > limit else ''})" if names else ""
 
 
@@ -903,7 +911,7 @@ def summary_sentence(p):
     for ref, c in values:
         if ref not in seen and len(seen) < 5:
             seen.add(ref)
-            parts.append(f"{ref} value {c[1] or '—'} → {c[2] or '—'}")
+            parts.append(f"{md(ref)} value {md(c[1] or '—')} → {md(c[2] or '—')}")
     if len({v[0] for v in values}) > 5:
         parts.append(f"{len({v[0] for v in values}) - 5} more value changes")
     swapped = [r for r in mod("symbol") + mod("footprint") if changed(r, "Footprint") or changed(r, "footprint")]
@@ -934,7 +942,7 @@ def summary_sentence(p):
 def cell(v):
     v = "—" if v in (None, "") else str(v)
     v = v if len(v) <= 60 else v[:57] + "…"
-    return v.replace("|", "\\|").replace("\n", " ")
+    return md(v.replace("\n", " "))
 
 
 def changes_markdown(p, limit=60):
@@ -967,13 +975,13 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60):
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
                 "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
-        out += ["", f"### {p['name']}" + (f" (`{p['dir']}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
+        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'")}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
         shots = [s for s in images if s["project"] == i]
         if shots:
             out += [""]
             for s in shots:
-                out += [f"**{s['title']}**", "", f"![{s['title']}: before and after]({s['url']})", ""]
+                out += [f"**{md(s['title'])}**", "", f"![{md(s['title'])}: before and after]({s['url']})", ""]
         table = changes_markdown(p, rows)
         other = {k: sum(1 for r in p["changes"] if r["kind"] == k) for k in ("track", "via", "wire", "bus", "junction", "no connect", "power symbol", "graphic")}
         other = ", ".join(plural(n, k) for k, n in other.items() if n)
@@ -1046,13 +1054,13 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {p['name']} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
+            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error"]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
-        lines += [f"- **{n}** {t}: {v['description']}" + (f" ({'; '.join(v['items'][:2])})" if v["items"] else "")
+        lines += [f"- **{md(n)}** {t}: {md(v['description'])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
     return "\n".join(lines) + "\n"

@@ -101,7 +101,7 @@ print("ok")
 
 # Code review fixes (2026-10-07). Each block guards one finding.
 import tempfile
-from kicad_review import sheet_pages, page_svg
+from kicad_review import sheet_pages, page_svg, md
 
 def sheet(name, file, uid):
     return f'(sheet (uuid "{uid}") (property "Sheetname" "{name}") (property "Sheetfile" "{file}"))'
@@ -173,4 +173,20 @@ big = lambda n: {"name": f"P{n}", "dir": f"p{n}", "status": "modified", "sheets"
 body = comment_markdown({**d2, "projects": [big(n) for n in range(3)]}, [], "", "")
 assert len(body) <= 65536 and "| P2 | DRC (required) | ❌ fail |" in body, (len(body), body[-300:])
 assert body.count("<details") == body.count("</details>"), (body.count("<details"), body.count("</details>"))
+print("ok")
+
+# 5. Text from KiCad files cannot add images, links, mentions or HTML to the comment.
+evil = "<!-- ![x](https://e.example/p.png) [l](https://e.example) @org/team *b* `c`"
+p = big(0)
+p.update(name=evil, dir=evil, sheets=[], changes=[
+    {"action": "modified", "kind": "symbol", "ref": evil, "changes": [["Value", evil, evil], [evil, "1", "2"]]},
+    {"action": "added", "kind": "footprint", "ref": evil, "props": {"Value": evil}}])
+p["checks"][0]["violations"] = [{"new": True, "severity": "error", "description": evil, "items": [evil]}]
+body = comment_markdown({**d2, "projects": [p]}, [{"project": 0, "title": evil, "url": "https://img/x.png"}], "", "")
+import re
+plain = re.sub(r"```.*?```|`[^`\n]*`", "", body, flags=re.S)  # code is shown literally by GitHub
+assert "<!-- ![" not in plain and "![x]" not in plain and "[l](" not in plain and "@org" not in plain, plain
+assert "*b*" not in plain and "`c`" not in body, plain
+print("ok")
+assert md("https://x.com/a_b(1).pdf") == "https://x.com/a_b(1).pdf" and md("a|b") == "a\\|b", md("https://x.com/a_b(1).pdf")
 print("ok")
