@@ -368,7 +368,7 @@ test('expired artifacts explain how to get a new review', async () => {
   try {
     const response = await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } });
     assert.equal(response.status, 404);
-    assert.match(await response.text(), /This review has expired — rerun the workflow/);
+    assert.match(await response.text(), /Reviews are kept for 90 days by GitHub\. Generate it again to see it\./);
   } finally { restore(); }
 });
 
@@ -642,7 +642,7 @@ test('compare dispatches the selected commits and follows returned run ID', asyn
   try {
     const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
     assert.equal(response.status, 303);
-    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/run/123');
+    assert.equal(response.headers.get('Location'), `/r/Cameronrlewis/repo/run/123?base=${base}&head=${head}`);
   } finally { restore(); }
 });
 
@@ -677,8 +677,8 @@ test('running review refreshes safely and shows a GitHub run link only', async (
   try {
     const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
     const body = await response.text();
-    assert.match(body, /http-equiv="refresh" content="10"/);
-    assert.match(body, /Review running…/);
+    assert.match(body, /http-equiv="refresh" content="5"/);
+    assert.match(body, /Generating review/);
     assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/12/);
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
@@ -717,7 +717,7 @@ test('successful completed review without artifact reports no KiCad changes', as
   });
   try {
     const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
-    assert.match(await response.text(), /No KiCad changes between these commits\./);
+    assert.match(await response.text(), /No KiCad files changed between these revisions\./);
   } finally { restore(); }
 });
 
@@ -769,4 +769,130 @@ test('compare refuses KiCad-free file changes and lists changed files', async ()
 test('compare page keeps radios in its server-submitted form and includes in-page checks', () => {
   const page = commitsPage({ user: 'octocat', owner: 'owner', repo: 'repo', branch: 'main', branches: ['main'], tags: [], commits: [{ sha: base, message: 'Board', fullMessage: 'Board\nDetails', author: 'Ada', date: 'today', exactDate: '2025-01-01', review: null }] });
   assert.match(page, /<form method="post" action="\/r\/owner\/repo\/compare" class="compare-form">[\s\S]*name="base"/); assert.match(page, /<script>\(\(\)=>/); assert.match(page, /Head is older than Base\. The review would show the change backwards\./);
+
+});
+
+test('generating review maps queued, rendering, and completed job steps', () => {
+  const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', base: 'deadbeef', head: 'cafebabe', startedAt: '2026-10-07T10:00:00Z' };
+  const queued = runPage({ ...common, running: true, status: 'queued', jobs: [] });
+  assert.match(queued, /● in progress <span class="spinner"[^>]*><\/span> Waiting to start/);
+  const rendering = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
+    { name: 'Check out repository', status: 'completed', conclusion: 'success' },
+    { name: 'Render board', status: 'in_progress', conclusion: null },
+  ] }] });
+  assert.match(rendering, /✓ done Getting the files/);
+  assert.match(rendering, /● in progress <span class="spinner"/);
+  const done = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
+    { name: 'Check out', status: 'completed', conclusion: 'success' },
+    { name: 'Render schematic', status: 'completed', conclusion: 'success' },
+    { name: 'Build comparison report', status: 'completed', conclusion: 'success' },
+    { name: 'Publish report', status: 'completed', conclusion: 'success' },
+    { name: 'Cleanup', status: 'completed', conclusion: 'success' },
+  ] }] });
+  assert.match(done, /✓ done Finishing/);
+});
+
+test('run page validates revisions and only refreshes while running', () => {
+  const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', status: 'in_progress', jobs: [] };
+  const running = runPage({ ...common, running: true, base: base, head, startedAt: '2026-10-07T10:00:00Z' });
+  assert.match(running, /http-equiv="refresh" content="5"/);
+  assert.match(running, /deadbee → cafebab/);
+  assert.match(running, /Revisions: <span class="mono">deadbee/);
+  const invalid = runPage({ ...common, running: true, base: '<bad>', head });
+  assert.match(invalid, /Revisions: not recorded/);
+  const finished = runPage({ ...common, running: false, status: 'completed', base, head });
+  assert.doesNotMatch(finished, /http-equiv="refresh"/);
+});
+
+test('run page distinguishes nothing to review, failed runs, and failures with reports', async () => {
+  const sealed = await signedIn();
+  const failedJobs = { jobs: [{ steps: [{ name: 'Render board', status: 'completed', conclusion: 'failure' }] }] };
+  let restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
+    if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call(`/r/Cameronrlewis/repo/run/12?base=${base}&head=${head}`, { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /The run stopped at Rendering and checking \(Render board\)\./);
+    assert.match(body, /method="post" action="\/r\/Cameronrlewis\/repo\/compare"/);
+    assert.match(body, new RegExp(`name="base" value="${base}"`));
+    assert.match(body, new RegExp(`name="head" value="${head}"`));
+  } finally { restore(); }
+  restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /Nothing to review/);
+    assert.match(body, /No KiCad files changed between these revisions\./);
+  } finally { restore(); }
+  restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
+    if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-fail.html' }] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/56');
+  } finally { restore(); }
+});
+
+test('run jobs are fetched as the user only for progress or a failed run without an artifact', async () => {
+  const sealed = await signedIn();
+  const urls = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    urls.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'in_progress', run_started_at: '2026-10-07T10:00:00Z' }));
+    if (url.endsWith('/jobs')) {
+      assert.equal(options.headers.Authorization, 'Bearer user-token');
+      return new Response(JSON.stringify({ jobs: [] }));
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(urls.filter((url) => url.endsWith('/jobs')).length, 1);
+  } finally { restore(); }
+  const completedUrls = [];
+  const restoreCompleted = mockFetch(async (url) => {
+    completedUrls.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(completedUrls.filter((url) => url.endsWith('/jobs')).length, 0);
+  } finally { restoreCompleted(); }
+});
+
+test('expired artifacts offer regeneration only when their name records revisions', async () => {
+  const sealed = await signedIn();
+  for (const [name, expected] of [
+    ['kicad-review-deadbee-cafebad-pass.html', /Generate it again/],
+    ['kicad-review.html', /Back to reviews/],
+  ]) {
+    const restore = mockFetch(async (url) => url.endsWith('/repo')
+      ? new Response(JSON.stringify({ permissions: { pull: true } }))
+      : new Response(JSON.stringify({ name, expired: true })));
+    try {
+      const body = await (await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } })).text();
+      assert.match(body, /Reviews are kept for 90 days by GitHub\. Generate it again to see it\./);
+      assert.match(body, expected);
+      if (name === 'kicad-review-deadbee-cafebad-pass.html') {
+        assert.match(body, /name="base" value="deadbee"/);
+        assert.match(body, /name="head" value="cafebad"/);
+      }
+    } finally { restore(); }
+  }
 });

@@ -194,8 +194,10 @@ async function artifactReport(env, owner, repo, id, active) {
     if (metadataResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const metadata = await metadataResponse.json();
     if (metadata.expired) {
-      return errorPage(404, 'Review expired', 'This review has expired — rerun the workflow.',
-        [{ href: repoPath(owner, repo), label: 'Back to reviews' }], active);
+      const match = String(metadata.name || '').match(/^kicad-review-([0-9a-f]{7})-([0-9a-f]{7})-(?:pass|fail)\.html$/);
+      return sessionResponse(runPage({
+        user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
+      }), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
     }
     if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
@@ -397,7 +399,7 @@ async function compare(request, env, owner, repo) {
   try {
     const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: allowed.repo.default_branch, inputs: { base, head }, return_run_details: true }) });
     if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
-    if (dispatch.status === 200) { const details = await dispatch.json(); if (details.workflow_run_id) return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s); }
+    if (dispatch.status === 200) { const details = await dispatch.json(); if (details.workflow_run_id) return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}?${new URLSearchParams({ base, head })}`, 303, allowed.s); }
     if (dispatch.status === 403 || dispatch.status === 404) return errorPage(403, 'Cannot start review', 'You need write access and the KiCad review workflow.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   } catch { /* Return the generic upstream error below. */ }
   return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
@@ -408,10 +410,28 @@ function githubRunUrl(run) {
   return url.startsWith('https://github.com/') ? url : '';
 }
 
-async function run(request, env, owner, repo, id) {
+function failedStep(jobs) {
+  const stageFor = (name) => {
+    const value = String(name || '').toLowerCase();
+    if (value.includes('check out')) return 'Getting the files';
+    if (value.includes('render') || value.includes('find changed')) return 'Rendering and checking';
+    if (value.includes('build comparison report') || value.includes('upload report') || value.includes('screenshots') || value.includes('publish')) return 'Building the report';
+    return 'Finishing';
+  };
+  for (const job of jobs || []) {
+    for (const step of job.steps || []) {
+      if (step.conclusion === 'failure') return { stage: stageFor(step.name), step: String(step.name || '') };
+    }
+  }
+  return null;
+}
+
+async function run(request, env, owner, repo, id, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const base = url.searchParams.get('base');
+  const head = url.searchParams.get('head');
   let runData;
   try {
     const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
@@ -422,8 +442,16 @@ async function run(request, env, owner, repo, id) {
   }
   const githubUrl = githubRunUrl(runData);
   if (runData.status !== 'completed') {
+    let jobs = [];
+    try {
+      const jobsResponse = await gh(`${root}/actions/runs/${id}/jobs`, allowed.s.token);
+      if (jobsResponse.ok) jobs = (await jobsResponse.json()).jobs || [];
+    } catch {
+      // The run remains useful even when GitHub has not exposed its jobs yet.
+    }
     return sessionResponse(runPage({
       user: allowed.s.login, owner, repo, running: true, status: runData.status, githubUrl,
+      base, head, startedAt: runData.run_started_at, jobs,
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   }
   try {
@@ -434,11 +462,21 @@ async function run(request, env, owner, repo, id) {
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
-  const conclusion = runData.conclusion === 'success'
-    ? 'No KiCad changes between these commits.'
-    : `Review conclusion: ${runData.conclusion}`;
+  if (runData.conclusion === 'success') {
+    return sessionResponse(runPage({ user: allowed.s.login, owner, repo, state: 'nothing', base, head }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+  }
+  let stopped = null;
+  if (['failure', 'cancelled', 'timed_out'].includes(runData.conclusion)) {
+    try {
+      const jobsResponse = await gh(`${root}/actions/runs/${id}/jobs`, allowed.s.token);
+      if (jobsResponse.ok) stopped = failedStep((await jobsResponse.json()).jobs || []);
+    } catch {
+      // Fall back to the generic failed-run explanation.
+    }
+  }
   return sessionResponse(runPage({
-    user: allowed.s.login, owner, repo, running: false, conclusion, githubUrl,
+    user: allowed.s.login, owner, repo, state: 'failed', githubUrl, base, head,
+    failedStage: stopped?.stage, failedStep: stopped?.step,
   }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
 }
 
@@ -513,7 +551,7 @@ export default {
       if (request.method === 'GET' && runRoute) {
         const [, owner, repo, id] = runRoute;
         if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
-        return run(request, env, owner, repo, id);
+        return run(request, env, owner, repo, id, url);
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
       if (request.method === 'GET' && commitsRoute) {
