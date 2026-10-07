@@ -511,6 +511,7 @@ test('commit history uses the access repository default and links reviews', asyn
     urls.push(url);
     if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
     if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
+    if (url.endsWith('/tags?per_page=100')) return new Response(JSON.stringify([]));
     if (url.includes('/commits?')) return new Response(JSON.stringify([{ sha: 'deadbeef000', commit: { message: '<script>bad</script>\nmore', author: { name: 'Ada', date: '2025-02-03T04:05:00Z' } } }]));
     if (url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [{ id: 9, name: 'kicad-review.html', workflow_run: { head_sha: 'deadbeef000' } }] }));
     throw new Error(`unexpected ${url}`);
@@ -629,6 +630,7 @@ test('compare dispatches the selected commits and follows returned run ID', asyn
   const sealed = await signedIn();
   const restore = mockFetch(async (url, options = {}) => {
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return accessibleRepo();
+    if (url.includes('/compare/')) return new Response(JSON.stringify({ status: 'ahead', files: [{ filename: 'board.kicad_pcb' }] }));
     assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/workflows/kicad-review.yml/dispatches');
     assert.equal(options.method, 'POST');
     assert.equal(options.headers['Content-Type'], 'application/json');
@@ -646,7 +648,7 @@ test('compare dispatches the selected commits and follows returned run ID', asyn
 
 test('compare accepts a 204 dispatch response without a run ID', async () => {
   const sealed = await signedIn();
-  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : new Response(null, { status: 204 }));
+  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : url.includes('/compare/') ? new Response(JSON.stringify({ status: 'ahead', files: [{ filename: 'board.kicad_pcb' }] })) : new Response(null, { status: 204 }));
   try {
     const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
     assert.equal(response.status, 303);
@@ -656,7 +658,7 @@ test('compare accepts a 204 dispatch response without a run ID', async () => {
 
 test('compare explains GitHub dispatch authorization failures', async () => {
   const sealed = await signedIn();
-  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : new Response('denied', { status: 403 }));
+  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : url.includes('/compare/') ? new Response(JSON.stringify({ status: 'ahead', files: [{ filename: 'board.kicad_pcb' }] })) : new Response('denied', { status: 403 }));
   try {
     const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
     assert.equal(response.status, 403);
@@ -727,4 +729,44 @@ test('run route rejects non-numeric IDs before fetching', async () => {
     assert.equal(response.status, 404);
     assert.equal(calls, 0);
   } finally { restore(); }
+});
+
+test('commits lists tags and resolves tag selection to its commit SHA', async () => {
+  const sealed = await signedIn(); const urls = [];
+  const restore = mockFetch(async (url) => {
+    urls.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
+    if (url.endsWith('/tags?per_page=100')) return new Response(JSON.stringify([{ name: 'v1.0', commit: { sha: head } }]));
+    if (url.includes('/commits?')) return new Response(JSON.stringify([]));
+    if (url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/commits?tag=v1.0', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /<option value="v1\.0" selected>v1\.0<\/option>/);
+    assert.ok(urls.some((url) => url.includes(`/commits?sha=${head}&per_page=50`)));
+  } finally { restore(); }
+});
+
+
+function compareCommitData(url) {
+  if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
+  if (url.endsWith('/tags?per_page=100')) return new Response(JSON.stringify([]));
+  if (url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
+  if (url.includes('/commits?')) return new Response(JSON.stringify([{ sha: head, commit: { message: 'New board', author: { name: 'Ada', date: '2025-02-03T04:05:00Z' } } }, { sha: base, commit: { message: 'Old board', author: { name: 'Ada', date: '2025-02-02T04:05:00Z' } } }]));
+}
+test('compare rerenders selected pair with swap form when Head is behind', async () => {
+  const sealed = await signedIn(); let dispatched = false;
+  const restore = mockFetch(async (url) => { if (url.endsWith('/repo')) return accessibleRepo(); if (url.includes('/compare/')) return new Response(JSON.stringify({ status: 'behind', files: [] })); if (url.includes('/dispatches')) { dispatched = true; throw new Error('must not dispatch'); } const page = compareCommitData(url); if (page) return page; throw new Error(`unexpected ${url}`); });
+  try { const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed); const body = await response.text(); assert.equal(response.status, 400); assert.equal(dispatched, false); assert.match(body, /Head is older than Base\./); assert.match(body, /Swap and start/); assert.match(body, new RegExp(`name="base" value="${base}"[^>]*checked`)); assert.match(body, /class="compare-bar"/); } finally { restore(); }
+});
+test('compare refuses KiCad-free file changes and lists changed files', async () => {
+  const sealed = await signedIn(); let dispatched = false; const files = Array.from({ length: 11 }, (_, i) => `docs/file-${i}.md`);
+  const restore = mockFetch(async (url) => { if (url.endsWith('/repo')) return accessibleRepo(); if (url.includes('/compare/')) return new Response(JSON.stringify({ status: 'ahead', files: files.map((filename) => ({ filename })) })); if (url.includes('/dispatches')) { dispatched = true; throw new Error('must not dispatch'); } const page = compareCommitData(url); if (page) return page; throw new Error(`unexpected ${url}`); });
+  try { const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed); const body = await response.text(); assert.equal(response.status, 400); assert.equal(dispatched, false); assert.match(body, /No KiCad files changed between deadbee and cafebab, so there is nothing to review\./); assert.match(body, /docs\/file-0\.md/); assert.match(body, /and 1 more/); } finally { restore(); }
+});
+test('compare page keeps radios in its server-submitted form and includes in-page checks', () => {
+  const page = commitsPage({ user: 'octocat', owner: 'owner', repo: 'repo', branch: 'main', branches: ['main'], tags: [], commits: [{ sha: base, message: 'Board', fullMessage: 'Board\nDetails', author: 'Ada', date: 'today', exactDate: '2025-01-01', review: null }] });
+  assert.match(page, /<form method="post" action="\/r\/owner\/repo\/compare" class="compare-form">[\s\S]*name="base"/); assert.match(page, /<script>\(\(\)=>/); assert.match(page, /Head is older than Base\. The review would show the change backwards\./);
 });

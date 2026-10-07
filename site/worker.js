@@ -312,38 +312,53 @@ async function reviewList(request, env, owner, repo, url) {
   }
 }
 
+async function commitsData(owner, repo, token, branch, tag = '') {
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const [branchesResponse, tagsResponse, artifactsResponse] = await Promise.all([
+    gh(`${root}/branches?per_page=100`, token),
+    gh(`${root}/tags?per_page=100`, token),
+    artifactList(owner, repo, token),
+  ]);
+  const branches = branchesResponse.ok ? await branchesResponse.json() : [];
+  const tags = tagsResponse.ok ? await tagsResponse.json() : [];
+  const selectedTag = tag ? tags.find((item) => item.name === tag) : null;
+  const sha = selectedTag?.commit?.sha;
+  if (tag && !sha) return null;
+  const commitsResponse = await gh(`${root}/commits?sha=${encodeURIComponent(sha || branch)}&per_page=50`, token);
+  if (!commitsResponse.ok) return null;
+  const commitList = await commitsResponse.json();
+  const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
+  const byHead = new Map(reviewList.filter((item) => item.head !== '?').map((item) => [String(item.head).slice(0, 7), item]));
+  return {
+    branch, tags: tags.map((item) => ({ name: String(item.name || '') })).filter((item) => item.name),
+    branches: branches.map((item) => item.name), tag,
+    commits: commitList.map((commit) => {
+      const sha = String(commit.sha || ''); const fullMessage = String(commit.commit?.message || '');
+      const exactDate = date(commit.commit?.author?.date);
+      return { sha, fullMessage, message: fullMessage.split('\n', 1)[0], author: commit.author?.login || commit.commit?.author?.name || '?', date: relativeDate(commit.commit?.author?.date), exactDate, review: byHead.get(sha.slice(0, 7))?.id };
+    }),
+  };
+}
+
+function relativeDate(value) {
+  const then = new Date(value).getTime(); const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (!Number.isFinite(then)) return '?';
+  if (seconds < 60) return 'just now';
+  const units = [[31536000, 'year'], [2592000, 'month'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
+  const [size, label] = units.find(([size]) => seconds >= size);
+  const count = Math.floor(seconds / size); return `${count} ${label}${count === 1 ? '' : 's'} ago`;
+}
+
 async function commits(request, env, owner, repo, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   const branch = url.searchParams.get('branch') ?? allowed.repo.default_branch;
-  if (!branch || branch.length > 255 || /[\x00-\x1f\x7f]/.test(branch)) {
-    return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-  }
+  const tag = url.searchParams.get('tag') || '';
+  if (!branch || branch.length > 255 || /[\x00-\x1f\x7f]/.test(branch)) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   try {
-    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-    const [branchesResponse, commitsResponse, artifactsResponse] = await Promise.all([
-      gh(`${root}/branches?per_page=100`, allowed.s.token),
-      gh(`${root}/commits?sha=${encodeURIComponent(branch)}&per_page=50`, allowed.s.token),
-      artifactList(owner, repo, allowed.s.token),
-    ]);
-    if (commitsResponse.status === 404) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-    if (!commitsResponse.ok) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
-    const branches = branchesResponse.ok ? (await branchesResponse.json()) : [];
-    const commitList = await commitsResponse.json();
-    const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
-    const byHead = new Map(reviewList.filter((item) => item.head !== '?')
-      .map((item) => [String(item.head).slice(0, 7), item]));
-    return sessionResponse(commitsPage({
-      user: allowed.s.login, owner, repo, branch, branches: branches.map((item) => item.name),
-      commits: commitList.map((commit) => {
-        const sha = String(commit.sha || '');
-        return {
-          sha, message: String(commit.commit?.message || '').split('\n', 1)[0],
-          author: commit.author?.login || commit.commit?.author?.name || '?',
-          date: date(commit.commit?.author?.date), review: byHead.get(sha.slice(0, 7))?.id,
-        };
-      }),
-    }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+    const data = await commitsData(owner, repo, allowed.s.token, branch, tag);
+    if (!data) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+    return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
@@ -352,43 +367,39 @@ async function commits(request, env, owner, repo, url) {
 const commitSha = /^[0-9a-f]{7,40}$/;
 
 async function compare(request, env, owner, repo) {
-  if (request.headers.get('Origin') !== new URL(request.url).origin) {
-    return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }]);
-  }
+  if (request.headers.get('Origin') !== new URL(request.url).origin) return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }]);
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
-  const form = await request.formData();
-  const base = String(form.get('base') || '');
-  const head = String(form.get('head') || '');
-  if (!commitSha.test(base) || !commitSha.test(head) || base === head) {
-    return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.',
-      [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-  }
+  const form = await request.formData(); const base = String(form.get('base') || ''); const head = String(form.get('head') || '');
+  if (!commitSha.test(base) || !commitSha.test(head) || base === head) return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  let comparison;
   try {
-    const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ref: allowed.repo.default_branch,
-        inputs: { base, head },
-        return_run_details: true,
-      }),
-    });
-    if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
-    if (dispatch.status === 200) {
-      const details = await dispatch.json();
-      if (details.workflow_run_id) {
-        return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s);
-      }
-    }
-    if (dispatch.status === 403 || dispatch.status === 404) {
-      return errorPage(403, 'Cannot start review', 'You need write access and the KiCad review workflow.',
-        [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-    }
-  } catch {
-    // Return the generic upstream error below.
+    const result = await gh(`${root}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, allowed.s.token);
+    if (result.status === 404) return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+    if (!result.ok) throw new Error('compare failed');
+    comparison = await result.json();
+  } catch { return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s); }
+  const changed = (comparison.files || []).map((file) => String(file.filename || ''));
+  const kicad = /\.kicad_(sch|pcb|pro)$|(^|\/)(sym|fp)-lib-table$|(^|\/)kicad-review\.toml$/;
+  const rerender = async (notice, files = [], swap = false) => {
+    try {
+      const data = await commitsData(owner, repo, allowed.s.token, allowed.repo.default_branch);
+      if (!data) throw new Error('commits unavailable');
+      return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data, base, head, notice, files, swap }), { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+    } catch { return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s); }
+  };
+  if (comparison.status === 'behind') return rerender({ kind: 'error', message: 'Head is older than Base.' }, [], true);
+  if (!changed.some((filename) => kicad.test(filename))) {
+    const files = changed.slice(0, 10); if (changed.length > 10) files.push(`and ${changed.length - 10} more`);
+    return rerender({ kind: 'warn', message: `No KiCad files changed between ${base.slice(0, 7)} and ${head.slice(0, 7)}, so there is nothing to review.` }, files);
   }
+  try {
+    const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: allowed.repo.default_branch, inputs: { base, head }, return_run_details: true }) });
+    if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
+    if (dispatch.status === 200) { const details = await dispatch.json(); if (details.workflow_run_id) return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s); }
+    if (dispatch.status === 403 || dispatch.status === 404) return errorPage(403, 'Cannot start review', 'You need write access and the KiCad review workflow.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+  } catch { /* Return the generic upstream error below. */ }
   return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
 }
 
