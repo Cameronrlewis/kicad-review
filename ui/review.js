@@ -350,8 +350,9 @@ function bindCards() { for (const b of document.querySelectorAll("#panel .card[d
 function renderChecks() {
   const p = proj();
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
-  return p.checks.map(c => {
-    const vs = [...c.violations].sort((a, b) => (b.new - a.new) || (a.severity === "error" ? -1 : 1));
+  const nw = c => c.new_errors + c.new_warnings;
+  return p.checks.map((c, i) => [c, i]).sort(([a, i], [b, j]) => (nw(b) - nw(a)) || ((b.status === "fail") - (a.status === "fail")) || (i - j)).map(([c]) => {
+    const vs = [...c.violations].sort((a, b) => (b.new - a.new) || (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1));
     return `<section class="check ${c.status}">
       <h3>${c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "✓"} ${esc(c.title)} <span class="muted">${c.level}</span></h3>
       <p>${c.errors} errors (${c.new_errors} new) · ${c.warnings} warnings (${c.new_warnings} new) · ${c.fixed} fixed</p>

@@ -165,4 +165,21 @@ export const CHECKS = [
     const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'); const before = [S.v, S.x, S.y];
     el.click(); await new Promise(r => setTimeout(r, 300));
     return el.textContent.includes("no location") && S.v === before[0] && S.x === before[1];`],
+  ["checks view: sections with new violations first, new rows first", "p=1&t=checks", `
+    const cs = REVIEW_DATA.projects[1].checks, anyNew = cs.some(c => c.new_errors + c.new_warnings > 0);
+    const secs = [...document.querySelectorAll("#panel .check")], first = document.querySelector("#panel .viol");
+    const nn = el => Number(el.dataset.n);
+    const ok = !anyNew || (secs[0].querySelector('.viol[data-new="true"]') !== null && first.dataset.new === "true");
+    return ok;`],
+  ["checks view: rows new before old, errors before warnings", "p=1&t=checks", `
+    const c0 = REVIEW_DATA.projects[1].checks[0], keep = c0.violations;
+    c0.violations = ["warning", "error", "warning", "error", "warning", "error"].flatMap((sev, i) => [true, false].map(n => ({ ...keep[0], id: "vx" + i + n, severity: sev, new: n })));
+    renderPanel();
+    const res = await (async () => {
+    return [...document.querySelectorAll("#panel .check")].every(g => {
+      const r = [...g.querySelectorAll(".viol")].map(v => [v.dataset.new === "true" ? 0 : 1, v.classList.contains("error") ? 0 : 1]);
+      return r.every((x, i) => i === 0 || r[i-1][0] < x[0] || (r[i-1][0] === x[0] && r[i-1][1] <= x[1]));
+    });})();
+    c0.violations = keep; renderPanel();
+    return res;`],
 ];
