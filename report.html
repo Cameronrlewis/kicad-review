@@ -49,6 +49,17 @@
   #regions { padding:4px 10px; background:var(--panel); border-top:1px solid var(--line); font-size:13px; display:none; max-height:30vh; overflow:auto; }
   #regions a { margin-right:10px; cursor:pointer; color:var(--accent); }
   #msg { margin:auto; color:var(--muted); }
+  .mark.sel { border-color:var(--accent); background:rgba(9,105,218,.15); }
+  #changes { height:34vh; resize:vertical; overflow:auto; background:var(--panel); border-top:1px solid var(--line); }
+  #changes .bar { position:sticky; top:0; background:var(--panel); padding:6px 10px; display:flex; gap:8px; align-items:center; border-bottom:1px solid var(--line); }
+  #changes table { border-collapse:collapse; width:100%; font-size:13px; }
+  #changes td, #changes th { text-align:left; padding:3px 10px; border-bottom:1px solid #eef0f3; vertical-align:top; }
+  #changes th { color:var(--muted); font-weight:600; }
+  #changes tr.r:hover { background:#f3f8ff; cursor:pointer; }
+  #changes tr.r.sel { background:#ddf4ff; }
+  .a-added { color:var(--add); } .a-removed { color:var(--del); } .a-modified { color:var(--mod); }
+  .chg { font-family:ui-monospace, monospace; font-size:12px; }
+  .chg del { color:var(--del); text-decoration:none; } .chg ins { color:var(--add); text-decoration:none; }
 </style>
 </head>
 <body>
@@ -75,6 +86,10 @@
     </div>
     <div id="stage"><div id="msg">Loading…</div></div>
     <div id="regions"></div>
+    <section id="changes">
+      <div class="bar"><b>Object changes</b><select id="kind"></select><input id="q" type="search" placeholder="Filter: R12, GND, Value…"><span id="count"></span></div>
+      <table><thead><tr><th>Change</th><th>Object</th><th>Reference</th><th>Details</th></tr></thead><tbody id="rows"></tbody></table>
+    </section>
   </main>
 </div>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -183,7 +198,8 @@ async function draw() {
   $("#stage").replaceWith(stage);
   if (S.mode === "regions") await showRegions(view, stage.querySelector(".world"));
   drawMarks();
-  if (!S.fitted) { fit(); S.fitted = true; } else apply();
+  if (S.after) { const f = S.after; S.after = null; apply(); f(); }
+  else if (!S.fitted) { fit(); S.fitted = true; } else apply();
 }
 
 function legend() {
@@ -245,12 +261,29 @@ function zoomTo(x0, y0, x1, y1) {
 }
 function fit() { const b = contentBox(); if (b) zoomTo(b.x0, b.y0, b.x1, b.y1); }
 
-// Boxes around changed objects (filled in by the change table).
+// Boxes around changed parts and footprints on the current drawing, plus the selected table row.
+const MARKED = new Set(["symbol", "footprint", "sheet", "zone", "label", "global label", "hierarchical label"]);
+function rowBox(r, side) {
+  const p = side === "base" && r.pos_before ? r.pos_before : r.pos;
+  if (r.box && !(side === "base" && r.pos_before)) return { x0: r.box[0], y0: r.box[1], x1: r.box[2], y1: r.box[3] };
+  return p ? { x0: p[0] - 3, y0: p[1] - 3, x1: p[0] + 3, y1: p[1] + 3 } : null;
+}
+function onCurrent(r) {
+  const it = S.item;
+  return it && r.where && (it.kind === "board" ? r.where.board : r.where.sheet === it.path);
+}
+function computeMarks() {
+  S.marks = proj().changes.filter(r => r.action === "modified" && MARKED.has(r.kind) && onCurrent(r)).map(r => ({ r }));
+}
 function drawMarks() {
   document.querySelectorAll(".world").forEach(w => {
-    for (const m of S.marks) {
+    const side = w.querySelector(".stack.head") && !w.querySelector(".stack.base") ? "head" : w.querySelector(".stack.base") && !w.querySelector(".stack.head") ? "base" : "head";
+    for (const m of S.marks.concat(S.selRow && onCurrent(S.selRow) ? [{ r: S.selRow, sel: true }] : [])) {
+      const b = rowBox(m.r, side);
+      if (!b) continue;
+      Object.assign(m, b);
       const d = document.createElement("div");
-      d.className = "mark";
+      d.className = "mark" + (m.sel ? " sel" : "");
       Object.assign(d.style, { left: m.x0 * PX + "px", top: m.y0 * PX + "px", width: (m.x1 - m.x0) * PX + "px", height: (m.y1 - m.y0) * PX + "px" });
       w.appendChild(d);
     }
@@ -321,7 +354,7 @@ async function showRegions(view, world) {
 }
 
 function badge(status) { return status === "unchanged" ? "" : `<span class="badge b-${status}">${status}</span>`; }
-function select(item) { S.item = item; S.fitted = false; S.marks = []; renderNav(); draw(); }
+function select(item, after) { S.item = item; S.fitted = !!after; S.after = after; computeMarks(); renderNav(); renderRows(); draw(); }
 
 function renderNav() {
   const p = proj();
@@ -359,11 +392,49 @@ function renderNav() {
   }
 }
 
+const esc = s => String(s ?? "").replace(/[<&>]/g, c => ({ "<": "&lt;", "&": "&amp;", ">": "&gt;" })[c]);
+const cut = s => { s = String(s ?? "—"); return s.length > 70 ? s.slice(0, 67) + "…" : s; };
+const SUMMARY_PROPS = ["Value", "footprint", "Footprint", "net", "layer", "layers", "text", "position", "file", "width"];
+function details(r) {
+  if (r.changes) return r.changes.map(([k, a, b]) => `${esc(k)}: <del>${esc(cut(a))}</del> → <ins>${esc(cut(b))}</ins>`).join("<br>");
+  return SUMMARY_PROPS.filter(k => r.props[k]).map(k => `${esc(k)}: ${esc(cut(r.props[k]))}`).join(", ");
+}
+function renderRows() {
+  const p = proj(), kind = $("#kind").value, q = $("#q").value.toLowerCase();
+  const rows = p.changes.filter(r => (!kind || r.kind === kind) &&
+    (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
+  $("#count").textContent = `${rows.length} of ${p.changes.length}`;
+  const tb = $("#rows"); tb.innerHTML = "";
+  for (const r of rows.slice(0, 2000)) {
+    const tr = document.createElement("tr");
+    tr.className = "r" + (r === S.selRow ? " sel" : "");
+    tr.innerHTML = `<td class="a-${r.action}">${r.action}</td><td>${esc(r.kind)}</td><td>${esc(r.ref)}</td><td class="chg">${details(r)}</td>`;
+    tr.onclick = () => goTo(r);
+    tb.appendChild(tr);
+  }
+}
+// Show the drawing that holds the object and zoom to it.
+function goTo(r) {
+  S.selRow = r;
+  const p = proj(), w = r.where || {};
+  const zoom = () => { const b = rowBox(r, r.action === "removed" ? "base" : "head"); if (b) zoomTo(b.x0 - 8, b.y0 - 8, b.x1 + 8, b.y1 + 8); };
+  if (w.board && p.board.changed) return select({ kind: "board" }, zoom);
+  const pg = w.sheet && p.sheets.find(s => s.path === w.sheet);
+  if (pg && pg.status !== "unchanged") return select({ kind: "sheet", path: pg.path }, zoom);
+  renderRows();
+  $("#regions").style.display = "block";
+  $("#regions").textContent = "This change does not alter the drawing (for example a hidden field), so there is nothing to show.";
+}
+
 function openProject(i) {
   S.proj = i;
   $("#proj").value = i;
   const p = proj();
   S.layersOn = new Set(p.board.layers.filter(l => DEFAULT_LAYERS.test(l.name)).map(l => l.name));
+  S.selRow = null;
+  const kinds = [...new Set(p.changes.map(r => r.kind))];
+  $("#kind").innerHTML = `<option value="">All objects (${p.changes.length})</option>` +
+    kinds.map(k => `<option value="${esc(k)}">${esc(k)} (${p.changes.filter(r => r.kind === k).length})</option>`).join("");
   const first = p.sheets.find(s => s.status !== "unchanged");
   select(first ? { kind: "sheet", path: first.path } : p.board.changed ? { kind: "board" } : null);
 }
@@ -376,12 +447,15 @@ function init() {
   $("#proj").onchange = e => openProject(+e.target.value);
   document.querySelectorAll("#toolbar [data-mode]").forEach(b => b.onclick = () => { S.mode = b.dataset.mode; draw(); });
   $("#fit").onclick = fit;
+  $("#kind").onchange = renderRows;
+  $("#q").oninput = renderRows;
   // Deep links: #project=1&mode=overlay&item=board
   const h = new URLSearchParams(location.hash.slice(1));
   if (["side", "overlay", "swipe", "regions"].includes(h.get("mode"))) S.mode = h.get("mode");
   if (!D.projects.length) { $("#msg").textContent = "No KiCad projects changed."; return; }
   openProject(Math.min(+h.get("project") || 0, D.projects.length - 1));
   if (h.get("item") === "board" && proj().board.changed) select({ kind: "board" });
+  if (h.get("row")) goTo(proj().changes[+h.get("row")]);
 }
 init();
 </script>

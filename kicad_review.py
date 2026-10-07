@@ -8,6 +8,7 @@ import base64
 import gzip
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -245,6 +246,293 @@ def sheet_pages(proj_dir, name):
     return pages
 
 
+# ---- Object model: every reviewable object as {kind, ref, props, pos, box, where}, keyed by UUID. ----
+
+def val(node, key, default=None):
+    n = find(node, key) if node else None
+    return n[1] if n and len(n) > 1 else default
+
+
+def num(s):
+    """Format a KiCad number without float noise: '10.160000' -> '10.16'."""
+    try:
+        return f"{float(s):.4f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return s
+
+
+def at(node):
+    a = find(node, "at")
+    return [float(v) for v in a[1:4] if re.match(r"^-?[\d.]+$", v)] if a else None
+
+
+def fmt_at(a):
+    if not a:
+        return None
+    return f"({num(a[0])}, {num(a[1])})" + (f" {num(a[2])}°" if len(a) > 2 and float(a[2]) else "")
+
+
+def points(node):
+    pts = find(node, "pts")
+    return [(float(p[1]), float(p[2])) for p in findall(pts, "xy")] if pts else []
+
+
+def box_of(pts, pad=0.5):
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return [min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad] if pts else None
+
+
+def properties(node):
+    return {p[1]: p[2] for p in findall(node, "property") if len(p) > 2}
+
+
+def flatten(obj, prefix=""):
+    """JSON settings to dotted keys. Lists of named dicts are keyed by name, so reordering is not a change."""
+    out = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.update(flatten(v, f"{prefix}{k}."))
+    elif isinstance(obj, list) and obj and all(isinstance(v, dict) and "name" in v for v in obj):
+        for v in obj:
+            out.update(flatten(v, f"{prefix}{v['name']}."))
+    elif isinstance(obj, list) and any(isinstance(v, (dict, list)) for v in obj):
+        for i, v in enumerate(obj):
+            out.update(flatten(v, f"{prefix}{i}."))
+    else:
+        out[prefix.rstrip(".")] = json.dumps(obj) if isinstance(obj, list) else str(obj)
+    return out
+
+
+def title_block(root, where):
+    tb = find(root, "title_block")
+    if not tb:
+        return {}
+    props = {c[0] if c[0] != "comment" else f"comment {c[1]}": c[-1] for c in tb[1:] if isinstance(c, list)}
+    return {f"meta:title_block:{where}": {"kind": "title block", "ref": where, "props": props, "where": None}}
+
+
+def sch_objects(proj_dir, name):
+    objs = {}
+    root_uuid = None
+    for page in sheet_pages(proj_dir, name):
+        full = posixpath.join(proj_dir, page["file"])
+        if not os.path.exists(full):
+            continue
+        with open(full) as fh:
+            root = parse_sexpr(fh.read())
+        if page["parent"] is None:
+            root_uuid = val(root, "uuid")
+            objs.update(title_block(root, "schematic"))
+        inst_path = f"/{root_uuid}{page['path'].rstrip('/')}" if page["parent"] else f"/{root_uuid}"
+        where = {"sheet": page["path"]}
+        for n in root[1:]:
+            if not isinstance(n, list) or not n:
+                continue
+            kind, uid = n[0], val(n, "uuid")
+            if not uid:
+                continue
+            key = f"{page['path']}{uid}"
+            if kind == "symbol":
+                props = properties(n)
+                ref = props.get("Reference", "?")
+                for inst in findall(find(n, "instances") or [], "project"):
+                    for p in findall(inst, "path"):
+                        if p[1] == inst_path:
+                            ref = val(p, "reference", ref)
+                unit = val(n, "unit", "1")
+                a = at(n)
+                if props.get("Reference", "").startswith("#"):  # power symbols and flags: track as net labels
+                    objs[key] = {"kind": "power symbol", "ref": props.get("Value", "?"),
+                                 "props": {"position": fmt_at(a)}, "pos": a, "where": where}
+                    continue
+                p = {k: v for k, v in props.items() if k != "Reference"}
+                p.update({"reference": ref, "symbol": val(n, "lib_id"), "position": fmt_at(a), "unit": unit,
+                          "mirror": val(n, "mirror"), "dnp": val(n, "dnp"), "in_bom": val(n, "in_bom"),
+                          "on_board": val(n, "on_board")})
+                objs[key] = {"kind": "symbol", "ref": ref if unit == "1" else f"{ref} unit {unit}",
+                             "match": ("symbol", ref, unit), "props": p, "pos": a, "where": where}
+            elif kind in ("wire", "bus"):
+                pts = points(n)
+                objs[key] = {"kind": kind, "ref": "", "props": {"points": " ".join(fmt_at(p) for p in pts)},
+                             "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
+            elif kind in ("label", "global_label", "hierarchical_label"):
+                a = at(n)
+                objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "position": fmt_at(a)},
+                             "pos": a, "where": where}
+            elif kind == "sheet":
+                props = properties(n)
+                objs[key] = {"kind": "sheet", "ref": props.get("Sheetname", "?"),
+                             "props": {"file": props.get("Sheetfile"), "position": fmt_at(at(n))},
+                             "pos": at(n), "where": where}
+            elif kind in ("junction", "no_connect"):
+                objs[key] = {"kind": kind.replace("_", " "), "ref": "", "props": {"position": fmt_at(at(n))},
+                             "pos": at(n), "where": where}
+    return objs
+
+
+def pcb_objects(path):
+    with open(path) as fh:
+        root = parse_sexpr(fh.read())
+    net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2}  # older files number their nets
+    net = lambda node: (lambda n: net_names.get(n[1], n[-1]) if n else None)(find(node, "net"))
+    where = {"board": True}
+    objs = dict(title_block(root, "board"))
+    setup = find(root, "setup")
+    if setup:
+        objs["meta:setup"] = {"kind": "design rules", "ref": "board setup", "where": None,
+                              "props": {k: v for k, v in flatten_sexpr(setup).items()}}
+    for n in root[1:]:
+        if not isinstance(n, list) or not n:
+            continue
+        kind, uid = n[0], val(n, "uuid")
+        if not uid:
+            continue
+        if kind == "footprint":
+            props = properties(n)
+            a = at(n)
+            p = {k: v for k, v in props.items() if k != "Reference"}
+            p.update({"reference": props.get("Reference", "?"), "footprint": n[1], "layer": val(n, "layer"),
+                      "position": fmt_at(a), "attributes": " ".join(x for x in (find(n, "attr") or [])[1:] if isinstance(x, str)) or None,
+                      "locked": "yes" if "locked" in n or val(n, "locked") == "yes" else None})
+            for pad in findall(n, "pad"):
+                if find(pad, "net"):
+                    p[f"pad {pad[1]} net"] = net(pad)
+            objs[uid] = {"kind": "footprint", "ref": p["reference"], "match": ("footprint", p["reference"]),
+                         "props": p, "pos": a, "box": box_of(pad_points(n, a), 1), "where": where}
+        elif kind in ("segment", "arc"):
+            s, e = at_xy(n, "start"), at_xy(n, "end")
+            objs[uid] = {"kind": "track", "ref": net(n) or "", "where": where, "pos": mid(s, e), "box": box_of([s, e]),
+                         "props": {"net": net(n), "layer": val(n, "layer"), "width": num(val(n, "width")),
+                                   "start": fmt_at(s), "end": fmt_at(e), **({"mid": fmt_at(at_xy(n, "mid"))} if kind == "arc" else {})}}
+        elif kind == "via":
+            a = at(n)
+            objs[uid] = {"kind": "via", "ref": net(n) or "", "pos": a, "where": where,
+                         "props": {"net": net(n), "position": fmt_at(a), "size": num(val(n, "size")),
+                                   "drill": num(val(n, "drill")), "layers": " ".join((find(n, "layers") or [])[1:])}}
+        elif kind == "zone":
+            outline = [p for poly in findall(n, "polygon") for p in points(poly)]
+            layers = val(n, "layer") or " ".join((find(n, "layers") or [])[1:])
+            objs[uid] = {"kind": "zone", "ref": val(n, "net_name") or "", "where": where,
+                         "pos": list(outline[0]) if outline else None, "box": box_of(outline, 0),
+                         "props": {"net": val(n, "net_name"), "layers": layers, "name": val(n, "name"),
+                                   "priority": val(n, "priority"), "outline": " ".join(fmt_at(p) for p in outline),
+                                   **{f"setting {k}": v for k, v in flatten_sexpr(n, skip=("polygon", "filled_polygon", "uuid", "net", "net_name", "layer", "layers", "name", "priority")).items()}}}
+        elif kind.startswith("gr_") or kind == "dimension":
+            layer = val(n, "layer")
+            pts = [p for p in (at_xy(n, k) for k in ("start", "end", "center", "mid")) if p] + points(n) or ([tuple(at(n)[:2])] if at(n) else [])
+            props = {"layer": layer, "geometry": " ".join(fmt_at(p) for p in pts)}
+            if kind == "gr_text":
+                props["text"] = n[1]
+            objs[uid] = {"kind": "board outline" if layer == "Edge.Cuts" else "graphic", "ref": kind[3:], "where": where,
+                         "pos": list(pts[0]) if pts else None, "box": box_of(pts), "props": props}
+    return objs
+
+
+def pad_points(fp, a):
+    """Absolute pad centres of a footprint at a = [x, y, rotation]."""
+    if not a:
+        return []
+    t = math.radians(a[2] if len(a) > 2 else 0)
+    pts = []
+    for pad in findall(fp, "pad"):
+        pa = at(pad)
+        if pa:  # KiCad rotates counter-clockwise on screen with y pointing down
+            pts.append((a[0] + pa[0] * math.cos(t) + pa[1] * math.sin(t), a[1] - pa[0] * math.sin(t) + pa[1] * math.cos(t)))
+    return pts
+
+
+def at_xy(node, key):
+    n = find(node, key)
+    return (float(n[1]), float(n[2])) if n and len(n) > 2 else None
+
+
+def mid(a, b):
+    return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] if a and b else None
+
+
+def flatten_sexpr(node, prefix="", skip=()):
+    """Leaf values of an S-expression block as dotted keys (design rules, zone settings)."""
+    out = {}
+    for c in node[1:]:
+        if isinstance(c, list) and c and c[0] not in skip:
+            if all(isinstance(x, str) for x in c[1:]):
+                out[f"{prefix}{c[0]}"] = " ".join(c[1:])
+            else:
+                key = f"{prefix}{c[0]}" + (f"[{c[1]}]" if len(c) > 1 and isinstance(c[1], str) else "")
+                out.update(flatten_sexpr(c, key + "."))
+    return out
+
+
+def pro_objects(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path) as fh:
+        pro = json.load(fh)
+    keep = {k: pro.get(k) for k in ("net_settings",) if k in pro}
+    keep["board"] = (pro.get("board") or {}).get("design_settings")
+    keep["erc"] = (pro.get("erc") or {}).get("rule_severities")
+    return {"meta:pro": {"kind": "design rules", "ref": posixpath.basename(path), "where": None,
+                         "props": {k: v for k, v in flatten(keep).items() if v != "None"}}}
+
+
+def project_objects(proj_dir, name):
+    if not os.path.isdir(proj_dir):
+        return {}
+    objs = sch_objects(proj_dir, name)
+    pcb = posixpath.join(proj_dir, f"{name}.kicad_pcb")
+    if os.path.exists(pcb):
+        objs.update(pcb_objects(pcb))
+    objs.update(pro_objects(posixpath.join(proj_dir, f"{name}.kicad_pro")))
+    dru = posixpath.join(proj_dir, f"{name}.kicad_dru")
+    if os.path.exists(dru):
+        with open(dru) as fh:
+            objs["meta:dru"] = {"kind": "design rules", "ref": f"{name}.kicad_dru", "where": None,
+                                "props": {"custom rules": hashlib.sha1(fh.read().encode()).hexdigest()[:10]}}
+    return objs
+
+
+def diff_objects(base, head):
+    """Rows of added / removed / modified objects. UUID first; unmatched symbols and footprints by reference."""
+    pairs = [(k, k) for k in base if k in head]
+    b_left = {k: o for k, o in base.items() if k not in head}
+    h_left = {k: o for k, o in head.items() if k not in base}
+    by_match = {o["match"]: k for k, o in h_left.items() if o.get("match")}
+    for k, o in list(b_left.items()):
+        hk = by_match.get(o.get("match"))
+        if hk in h_left:
+            pairs.append((k, hk))
+            del b_left[k], h_left[hk]
+    rows = []
+    for bk, hk in pairs:
+        b, h = base[bk], head[hk]
+        changes = [[p, b["props"].get(p), h["props"].get(p)] for p in sorted(set(b["props"]) | set(h["props"]))
+                   if b["props"].get(p) != h["props"].get(p)]
+        if changes:
+            rows.append(row("modified", h, changes, b))
+    rows += [row("removed", o) for o in b_left.values()]
+    rows += [row("added", o) for o in h_left.values()]
+    order = ["title block", "design rules", "symbol", "footprint", "sheet", "label", "global label", "hierarchical label",
+             "power symbol", "zone", "board outline", "track", "via", "wire", "bus", "junction", "no connect", "graphic"]
+    rows.sort(key=lambda r: (order.index(r["kind"]) if r["kind"] in order else 99, natural(r["ref"])))
+    return rows
+
+
+def row(action, o, changes=None, before=None):
+    r = {"action": action, "kind": o["kind"], "ref": o["ref"], "where": o["where"], "pos": o.get("pos"),
+         "box": o.get("box")}
+    if changes is not None:
+        r["changes"] = changes
+        if before and before.get("pos") != o.get("pos"):
+            r["pos_before"] = before.get("pos")
+    else:
+        r["props"] = {k: v for k, v in o["props"].items() if v is not None and not k.startswith("setting ")}
+    return r
+
+
+def natural(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s or "")]
+
+
 def page_svg(out_dir, name, page):
     """The SVG kicad-cli wrote for a page: <project>.svg for the root, <project>-<sheet name>.svg otherwise."""
     if page["parent"] is None:
@@ -316,7 +604,8 @@ def build_project(p, review_dir, blobs):
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
         board["layers"] = [{"name": l["name"], "svg": {"base": blobs.add(l["base"]), "head": blobs.add(l["head"])}}
                            for l in layers]
-    return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board}
+    changes = diff_objects(*(project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")))
+    return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board, "changes": changes}
 
 
 def cmd_report(args):
