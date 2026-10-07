@@ -822,6 +822,18 @@ def review_links(env, det):
     }
 
 
+UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
+
+
+def inline_page(data_js):
+    """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
+    read = lambda name: open(posixpath.join(UI_DIR, name)).read()
+    return (read("review.html")
+            .replace('<link rel="stylesheet" href="review.css">', f"<style>\n{read('review.css')}</style>")
+            .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>")
+            .replace('<script src="review.js"></script>', f"<script>\n{read('review.js')}</script>"))
+
+
 def cmd_report(args):
     with open("review/detect.json") as fh:
         det = json.load(fh)
@@ -841,9 +853,7 @@ def cmd_report(args):
     payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     with open("review/review-data.js", "w") as fh:
         fh.write(f"window.REVIEW_DATA = {payload};\n")
-    with open(posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "report.html")) as fh:
-        template = fh.read()
-    html = template.replace("/*DATA*/", payload)
+    html = inline_page(f"window.REVIEW_DATA = {payload};")
     with open("review/kicad-review.html", "w") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
