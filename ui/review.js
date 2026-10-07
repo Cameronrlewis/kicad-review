@@ -82,7 +82,7 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); }
+function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); if (typeof renderPanel === "function") renderPanel(); }
 function select(view) { S.v = view; S.x = S.y = S.z = null; renderNav(); if (typeof draw === "function") draw(); }
 
 function decodeState(hash) {
@@ -244,7 +244,6 @@ async function oneWorld(stage, view, label) {
   w.appendChild(await stack("base", view)); w.appendChild(await stack("head", view));
   return w;
 }
-function markersFor(view) { return proj().changes.filter(r => onView(r, view.kind === "board" ? "board" : S.v)); }   // Task 7 draws these
 MODES.overlay = async (stage, view) => { await oneWorld(stage, view, "Base ■  Head ■"); };
 MODES.blend = async (stage, view) => {
   const w = await oneWorld(stage, view, "Base under Head");
@@ -279,6 +278,87 @@ function renderModes() {
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { S.m = b.dataset.mode; renderModes(); draw(); };
   const r = document.querySelector("#modes input[type=range]");
   if (r) r.oninput = () => { S.blend = r.value / 100; const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; };
+}
+
+const MARKED = new Set(["symbol", "footprint", "sheet", "zone", "label", "global label", "hierarchical label", "via", "track", "board outline"]);
+function rowBox(r, side) {
+  const p = side === "base" && r.pos_before ? r.pos_before : r.pos;
+  if (r.box && !(side === "base" && r.pos_before)) return r.box;
+  return p ? [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3] : null;
+}
+function hitTest(rows, x, y, after = null) {
+  const TOL = 0.5, area = b => (b[2] - b[0]) * (b[3] - b[1]);
+  const hits = rows.map(r => [r, rowBox(r, "head")]).filter(([, b]) => b && x >= b[0] - TOL && x <= b[2] + TOL && y >= b[1] - TOL && y <= b[3] + TOL)
+    .sort((a, b) => area(a[1]) - area(b[1])).map(([r]) => r);
+  if (!hits.length) return null;
+  const i = after ? hits.indexOf(after) : -1;
+  return hits[(i + 1) % hits.length];
+}
+function markersFor(view) {
+  return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" ? MARKED.has(r.kind) : r.action === "modified" && MARKED.has(r.kind)));
+}
+function afterDraw(view) {
+  if (!view) return;
+  const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
+  for (const w of document.querySelectorAll("#stage .world")) {
+    const side = w.querySelector(".stack.head") ? "head" : "base";
+    const rows = markersFor(view).concat(sel && onView(sel, S.v) ? [{ ...sel, sel: true }] : []);
+    for (const r of rows) {
+      const b = rowBox(r, side); if (!b) continue;
+      const m = document.createElement("div");
+      m.className = `marker ${r.action || "violation"}${r.sel ? " sel" : ""}`;
+      m.dataset.action = r.action || "violation"; m.dataset.glyph = r.sel ? "◎" : (GLYPH[r.action] || "!");
+      Object.assign(m.style, { left: `${b[0] * PX}px`, top: `${b[1] * PX}px`, width: `${(b[2] - b[0]) * PX}px`, height: `${(b[3] - b[1]) * PX}px` });
+      w.appendChild(m);
+    }
+  }
+}
+function pickAt(vp, e) {
+  const r = vp.getBoundingClientRect();
+  const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
+  const rows = proj().changes.filter(c => onView(c, S.v));
+  const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null);
+  if (hit) { S.s = hit.id; renderPanel(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
+}
+function goTo(id) {
+  const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
+  if (!r) return;
+  S.s = id;
+  const view = r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : S.v;
+  const box = rowBox(r, r.action === "removed" ? "base" : "head");
+  const zoom = () => { if (box) zoomTo(box); renderPanel(); };
+  if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); draw().then(zoom); } else { draw().then(zoom); }
+}
+S.filter = { added: true, removed: true, modified: true, kind: "", q: "" };
+const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
+function card(r) {
+  const body = r.changes
+    ? r.changes.map(([k, a, b]) => `<div class="prop"><span>${esc(k)}</span><span class="old">${esc(a ?? "—")}</span><span class="arrow">→</span><span class="new">${esc(b ?? "—")}</span></div>`).join("")
+    : Object.entries(r.props || {}).slice(0, 4).map(([k, v]) => `<div class="prop"><span>${esc(k)}</span><span class="new">${esc(v)}</span></div>`).join("");
+  return `<button class="card" data-id="${r.id}" data-action="${r.action}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
+    <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
+    <span class="badge ${r.action}">${GLYPH[r.action]} ${r.action}</span>${body}</button>`;
+}
+function renderPanel() {
+  const p = proj(), f = S.filter;
+  const rows = p.changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
+    && (!f.q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(f.q)));
+  const kinds = [...new Set(p.changes.map(r => r.kind))];
+  const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
+  $("#panel").innerHTML = `<div role="tablist">
+      <button role="tab" data-tab="changes" aria-selected="${S.t === "changes"}">Changes ${p.changes.length}</button>
+      <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button></div>` +
+    (S.t === "checks" ? (typeof renderChecks === "function" ? renderChecks() : "") : `
+    <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
+    <div class="filters">${["added", "removed", "modified"].map(a =>
+      `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
+      <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
+    <div class="cards">${rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>'}</div>`);
+  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); if (typeof saveHash === "function") saveHash(); };
+  for (const b of document.querySelectorAll("#panel .chip-filter")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
+  const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
+  const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value.toLowerCase(); renderPanel(); $("#panel .q").focus(); };
+  for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id);
 }
 
 renderHeader();

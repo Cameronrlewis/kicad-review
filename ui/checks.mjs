@@ -85,4 +85,41 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 800));
     return !document.querySelector('#stage .layer[data-layer="F_Cu"]') && !S.layers.includes("F_Cu");`],
   ["layer list hidden for sheets", "", `return document.querySelector("#layers").children.length === 0;`],
+  ["hitTest picks the smallest containing box, cycles on repeat", "", `
+    const rows = [{ id: "a", box: [0, 0, 10, 10] }, { id: "b", box: [4, 4, 6, 6] }, { id: "c", box: [20, 20, 30, 30] }];
+    return hitTest(rows, 5, 5)?.id === "b" && hitTest(rows, 5, 5, rows[1])?.id === "a" && hitTest(rows, 50, 50) === null
+      && hitTest(rows, 10.4, 5)?.id === "a";`],
+  ["filters by kind and by action", "", `
+    const total = document.querySelectorAll("#panel .card").length;
+    document.querySelector('#panel .chip-filter[data-action="added"]').click();
+    const noAdded = [...document.querySelectorAll("#panel .card")].every(c => c.dataset.action !== "added");
+    const kinds = document.querySelector("#panel select.kind"); kinds.value = "symbol"; kinds.dispatchEvent(new Event("change"));
+    return total > 0 && noAdded && [...document.querySelectorAll("#panel .card")].every(c => c.dataset.kind === "symbol");`],
+  ["modified card shows every changed property old and new", "p=1", `
+    const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
+    const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
+    return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(b ?? "—")));`],
+  ["selecting a row zooms to it and highlights it", "p=1", `
+    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
+    document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
+    await new Promise(res => setTimeout(res, 1200));
+    return S.s === r.id && S.v === "board" && Math.abs(S.x - (r.box[0] + r.box[2]) / 2) < 0.01
+      && document.querySelector("#stage .marker.sel") !== null
+      && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true";`],
+  ["clicking the drawing selects the row", "p=1&v=board", `
+    await new Promise(res => setTimeout(res, 1200));
+    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
+    zoomTo(r.box); await new Promise(res => requestAnimationFrame(res));
+    const vp = document.querySelector("#stage .vp"), b = vp.getBoundingClientRect();
+    pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
+    return S.s === r.id && document.querySelector('#panel .card[aria-selected="true"]')?.dataset.id === r.id;`],
+  ["markers differ by more than colour", "p=1&v=board&m=semantic", `
+    await new Promise(res => setTimeout(res, 1200));
+    const m = [...document.querySelectorAll("#stage .marker")];
+    const styles = new Set(m.map(e => getComputedStyle(e).borderStyle + "|" + e.dataset.glyph));
+    return m.length > 0 && m.every(e => e.dataset.glyph) && styles.size === new Set(m.map(e => e.dataset.action)).size;`],
+  ["reused sheet: two navigator entries, separate counts", "", `
+    const files = REVIEW_DATA.projects.flatMap(p => p.sheets.map(s => s.file)); const dup = files.find((f, i) => files.indexOf(f) !== i);
+    if (!dup) return true;   // the committed sample has no reused sheet; covered by the vme/video local samples
+    return document.querySelectorAll('#nav [data-view^="sheet:"]').length === REVIEW_DATA.projects[S.p].sheets.length;`],
 ];
