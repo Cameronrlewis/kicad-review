@@ -24,7 +24,7 @@ const send = (method, params = {}) => new Promise(r => { pend[++id] = r; ws.send
 await send("Runtime.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
-if (dark) await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 let failed = 0;
 for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);

@@ -10,7 +10,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - Before/after pictures of each changed sheet and board, zoomed to the largest change.
 - The object-level change table: symbols, footprints, labels, zones, board outline, title block and design rules.
 - ERC, DRC, schematic/board parity and BOM-field results, with errors and warnings counted separately and new ones called out.
-- Open it from the link in the comment (one HTML file, no unzip) or with the `gh run download` command shown there.
+- Open it from the link in the comment (one HTML file, no unzip) or with the `gh api` command shown there.
 
 **On every push to a branch**, comparing the new commit with the previous branch tip, the same content goes to the run's job summary. A push to a branch with an open pull request skips itself, because the pull request run covers it.
 

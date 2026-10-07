@@ -953,9 +953,9 @@ def comment_markdown(data, images, artifact_url):
                + (f"[Workflow run]({data['run_url']})" if data["run_url"] else ""))
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
-    if data.get("run_id") and data.get("repo"):
+    if artifact_url and data.get("repo"):
         out += ["", "<details><summary>From a terminal</summary>", "",
-                "```sh", f"gh run download {data['run_id']} -R {data['repo']} -n kicad-review.html && open kicad-review.html", "```",
+                "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_url.rsplit('/', 1)[-1]}/zip > kicad-review.html && open kicad-review.html", "```",
                 "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
         out += ["", f"### {p['name']}" + (f" (`{p['dir']}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",

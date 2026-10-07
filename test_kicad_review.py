@@ -70,6 +70,6 @@ d = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "run_url": "https://gith
      "repo": "o/r", "run_id": "9", "projects": []}
 body = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5")
 assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in body
-assert "gh run download 9 -R o/r -n kicad-review.html" in body
-assert "zip" not in body.lower()
+assert "gh api repos/o/r/actions/artifacts/5/zip > kicad-review.html" in body
+assert "unzip" not in body.lower()
 print("ok")
