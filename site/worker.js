@@ -143,8 +143,6 @@ async function callback(request, env) {
 export default {
   async fetch(request, env) {
     try {
-      const allowedOwners = env.ALLOWED_OWNERS;
-      void allowedOwners;
       const url = new URL(request.url);
       if (request.method === 'GET' && url.pathname === '/login') {
         const state = stateCookie(nextPath(url.searchParams.get('next')));
