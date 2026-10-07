@@ -263,9 +263,23 @@ test('review route shows the repository after a pull-access check and refreshes 
   } finally { restore(); }
 });
 
-const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'";
+const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
+const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
-test('artifact route streams the signed blob with the sandbox CSP', async () => {
+test('artifact frame and raw route redirect unsigned users without GitHub calls', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    for (const path of ['/r/Cameronrlewis/repo/a/42', '/r/Cameronrlewis/repo/a/42/raw']) {
+      const response = await call(path);
+      assert.equal(response.status, 302);
+      assert.match(response.headers.get('Location'), /^\/login\?next=/);
+    }
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('raw artifact route streams the signed blob with its frame-only sandbox CSP', async () => {
   const sealed = await signedIn();
   const blobUrl = 'https://signed.example/secret-report';
   const seen = [];
@@ -282,13 +296,74 @@ test('artifact route streams the signed blob with the sandbox CSP', async () => 
     return new Response('<!doctype html><svg></svg>');
   });
   try {
-    const response = await call('/r/Cameronrlewis/repo/a/42', { headers: { Cookie: `s=${sealed}` } });
+    const response = await call('/r/Cameronrlewis/repo/a/42/raw', { headers: { Cookie: `s=${sealed}`, 'Sec-Fetch-Dest': 'iframe' } });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('Content-Security-Policy'), reportCsp);
+    assert.equal(response.headers.get('X-Frame-Options'), 'SAMEORIGIN');
     assert.equal(response.headers.get('Location'), null);
     assert.equal(await response.text(), '<!doctype html><svg></svg>');
     assert.equal(cookies(response).length, 0);
     assert.equal(seen.length, 4);
+  } finally { restore(); }
+});
+
+test('raw document navigation redirects to its framed review without downloading', async () => {
+  const sealed = await signedIn(); const seen = [];
+  const restore = mockFetch(async (url) => {
+    seen.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/43')) return new Response(JSON.stringify({ name: 'kicad-review-deadbee-cafebad-pass.html', expired: false }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/43/raw', { headers: { Cookie: `s=${sealed}`, 'Sec-Fetch-Dest': 'document' } });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/43');
+    assert.deepEqual(seen, [
+      'https://api.github.com/repos/Cameronrlewis/repo',
+      'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/43',
+    ]);
+  } finally { restore(); }
+});
+
+test('framed artifact page keeps the report sandboxed and escapes metadata', async () => {
+  const sealed = await signedIn(); const seen = [];
+  const restore = mockFetch(async (url) => {
+    seen.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
+      name: 'kicad-review-deadbee-cafebad-fail.html', expired: false,
+      workflow_run: { id: 123 },
+    }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Content-Security-Policy'), frameCsp);
+    const body = await response.text();
+    assert.match(body, /Review deadbee → cafebad/);
+    assert.match(body, /✕ failing/);
+    assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/123/);
+    assert.match(body, /<iframe[^>]+src="\/r\/Cameronrlewis\/repo\/a\/44\/raw"/);
+    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.doesNotMatch(body, /allow-same-origin/);
+    assert.match(body, /event\.source === iframe\.contentWindow/);
+    assert.match(body, /kicadReviewHash/);
+    assert.deepEqual(seen, [
+      'https://api.github.com/repos/Cameronrlewis/repo',
+      'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/44',
+    ]);
+  } finally { restore(); }
+});
+
+test('framed artifact page uses legacy review crumbs', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : new Response(JSON.stringify({ name: 'kicad-review.html', expired: false })));
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/a/45', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /<span>Review<\/span>/);
+    assert.doesNotMatch(body, /Review \? → \?/);
   } finally { restore(); }
 });
 
@@ -332,9 +407,11 @@ test('artifact route stops before artifact APIs when repository access fails', a
     return new Response('denied', { status: 403 });
   });
   try {
-    const response = await call('/r/Cameronrlewis/repo/a/9', { headers: { Cookie: `s=${sealed}` } });
-    assert.equal(response.status, 404);
-    assert.equal(calls, 1);
+    for (const path of ['/r/Cameronrlewis/repo/a/9', '/r/Cameronrlewis/repo/a/9/raw']) {
+      const response = await call(path, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 404);
+    }
+    assert.equal(calls, 2);
   } finally { restore(); }
 });
 

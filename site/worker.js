@@ -1,4 +1,4 @@
-import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, runPage, signedOutPage } from './pages.js';
+import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage } from './pages.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -180,7 +180,11 @@ export async function access(request, env, owner, repo) {
   }
 }
 
-async function artifactReport(env, owner, repo, id, active) {
+const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
+  + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
+const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+async function artifactReport(request, env, owner, repo, id, active, raw) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
     const metadataResponse = await gh(base, active.token);
@@ -191,6 +195,12 @@ async function artifactReport(env, owner, repo, id, active) {
         [{ href: repoPath(owner, repo), label: 'Back to reviews' }], active);
     }
     if (!metadata.name?.endsWith('.html')) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
+    if (!raw) {
+      return sessionResponse(reviewPage({
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id,
+      }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
+    }
+    if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
     const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
     const location = zipResponse.status === 302 ? zipResponse.headers.get('Location') : null;
     if (!location) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
@@ -199,8 +209,8 @@ async function artifactReport(env, owner, repo, id, active) {
     return sessionResponse(blobResponse.body, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
-          + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'",
+        'Content-Security-Policy': reportCsp,
+        'X-Frame-Options': 'SAMEORIGIN',
       },
     }, active);
   } catch {
@@ -461,12 +471,12 @@ export default {
       if (request.method === 'GET' && url.pathname === '/callback') return await callback(request, env);
       if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
-      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)$/);
+      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw)?$/);
       if (request.method === 'GET' && artifactRoute) {
-        const [, owner, repo, id] = artifactRoute;
+        const [, owner, repo, id, raw] = artifactRoute;
         if (!/^\d{1,20}$/.test(id)) return errorPage(404, 'Not found', 'The requested page is unavailable.');
         const allowed = await access(request, env, owner, repo);
-        return allowed instanceof Response ? allowed : artifactReport(env, owner, repo, id, allowed.s);
+        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, Boolean(raw));
       }
       const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
       if (request.method === 'POST' && compareRoute) {

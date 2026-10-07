@@ -37,6 +37,18 @@ export function commitsPage({ user, owner, repo, branch, branches, commits }) {
   return frame({ title: 'Commit history', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Commit history' }], body: `<main class="page"><div class="page-head"><div><h1>Commit history</h1><p class="lead">Choose a base and head commit to start a review.</p></div></div><form method="get"><label>Branch <select name="branch">${options}</select></label> <button class="btn">Show</button></form><form method="post" action="${path}/compare"><table class="table"><thead><tr><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th>Base</th><th>Head</th></tr></thead><tbody>${rows}</tbody></table><p><button class="btn btn-primary">Compare</button></p></form></main>` });
 }
 
+export function reviewPage({ user, owner, repo, id, name, workflowRunId }) {
+  const path = repoPath(owner, repo);
+  const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
+  const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
+  const result = match ? (match[3] === 'pass' ? '<span class="status status-pass">✓ passing</span>' : '<span class="status status-fail">✕ failing</span>') : '';
+  const raw = `${path}/a/${encodeURIComponent(id)}/raw`;
+  const run = /^\d+$/.test(String(workflowRunId)) ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(workflowRunId)}` : '';
+  const runLink = run ? link(run, 'Open the run on GitHub ↗') : '';
+  const script = `<script>(() => { const iframe = document.getElementById('review-report'); const raw = ${JSON.stringify(raw)}; iframe.src = raw + location.hash; iframe.addEventListener('load', () => document.getElementById('review-loading').hidden = true); addEventListener('message', event => { if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) history.replaceState(null, '', event.data.kicadReviewHash); }); })();</script>`;
+  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}` });
+}
+
 export function runPage({ user, owner, repo, running, status: runStatus, conclusion, githubUrl }) {
   const path = repoPath(owner, repo);
   const action = githubUrl ? `<p>${link(githubUrl, 'View this run on GitHub', 'btn')}</p>` : '';
