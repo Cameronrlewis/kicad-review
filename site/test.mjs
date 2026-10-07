@@ -380,3 +380,179 @@ test('unknown commit branch is a 404 and access refusal makes no further calls',
     assert.equal(calls, 2);
   } finally { restore(); }
 });
+
+
+function compareRequest(path, body, sealed, origin = 'https://site.example') {
+  return call(path, {
+    method: 'POST',
+    headers: {
+      ...(sealed ? { Cookie: `s=${sealed}` } : {}),
+      ...(origin === null ? {} : { Origin: origin }),
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams(body),
+  });
+}
+
+function accessibleRepo() {
+  return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+}
+
+const base = 'deadbeef00000000000000000000000000000000';
+const head = 'cafebabe00000000000000000000000000000000';
+
+test('compare rejects missing or foreign Origin before GitHub', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    for (const origin of [null, 'https://evil.example']) {
+      const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, null, origin);
+      assert.equal(response.status, 403);
+      assert.equal(await response.text(), 'Forbidden');
+    }
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('compare requires a session and accepted repository access', async () => {
+  let calls = 0;
+  let restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head });
+    assert.equal(response.status, 302);
+    assert.match(response.headers.get('Location'), /^\/login\?/);
+    assert.equal(calls, 0);
+  } finally { restore(); }
+  const sealed = await signedIn();
+  restore = mockFetch(async () => {
+    calls += 1;
+    return new Response('denied', { status: 403 });
+  });
+  try {
+    const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
+    assert.equal(response.status, 404);
+    assert.equal(calls, 1);
+  } finally { restore(); }
+});
+
+test('compare rejects malformed or identical commit SHAs without dispatching', async () => {
+  const sealed = await signedIn();
+  let calls = 0;
+  const restore = mockFetch(async (url) => {
+    calls += 1;
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo');
+    return accessibleRepo();
+  });
+  try {
+    for (const body of [{ base: 'not-a-sha', head }, { base, head: base }]) {
+      const response = await compareRequest('/r/Cameronrlewis/repo/compare', body, sealed);
+      assert.equal(response.status, 400);
+      assert.match(await response.text(), /Back to commits/);
+    }
+    assert.equal(calls, 2);
+  } finally { restore(); }
+});
+
+test('compare dispatches the selected commits and follows returned run ID', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return accessibleRepo();
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/workflows/kicad-review.yml/dispatches');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(options.body), {
+      ref: 'main', inputs: { base, head }, return_run_details: true,
+    });
+    return new Response(JSON.stringify({ workflow_run_id: 123, run_url: 'ignored', html_url: 'ignored' }));
+  });
+  try {
+    const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/run/123');
+  } finally { restore(); }
+});
+
+test('compare accepts a 204 dispatch response without a run ID', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : new Response(null, { status: 204 }));
+  try {
+    const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo?started=1');
+  } finally { restore(); }
+});
+
+test('compare explains GitHub dispatch authorization failures', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : new Response('denied', { status: 403 }));
+  try {
+    const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
+    assert.equal(response.status, 403);
+    assert.match(await response.text(), /You need write access to this repository to start a review/);
+  } finally { restore(); }
+});
+
+test('running review refreshes safely and shows a GitHub run link only', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  const restore = mockFetch(async (url) => {
+    if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
+    if (url.endsWith('/repo')) return accessibleRepo();
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12');
+    return new Response(JSON.stringify({ status: 'in_progress', html_url: 'https://github.com/Cameronrlewis/repo/actions/runs/12' }));
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    const body = await response.text();
+    assert.match(body, /http-equiv="refresh" content="10"/);
+    assert.match(body, /Review running…/);
+    assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/12/);
+    assert.ok(cookieValue(response, 's'));
+  } finally { restore(); }
+  const restoreUnsafe = mockFetch(async (url) => url.endsWith('/repo')
+    ? accessibleRepo()
+    : new Response(JSON.stringify({ status: 'queued', html_url: 'https://evil.example/run' })));
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.doesNotMatch(body, /evil\.example/);
+  } finally { restoreUnsafe(); }
+});
+
+test('completed review redirects to its review artifact', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12/artifacts');
+    return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-pass.html' }] }));
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/56');
+  } finally { restore(); }
+});
+
+test('successful completed review without artifact reports no KiCad changes', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({
+      status: 'completed', conclusion: 'success', html_url: 'https://github.com/Cameronrlewis/repo/actions/runs/12',
+    }));
+    return new Response(JSON.stringify({ artifacts: [] }));
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.match(await response.text(), /No KiCad changes between these commits\./);
+  } finally { restore(); }
+});
+
+test('run route rejects non-numeric IDs before fetching', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/nope');
+    assert.equal(response.status, 404);
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});

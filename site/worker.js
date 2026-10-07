@@ -5,6 +5,7 @@ const securityHeaders = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
 };
+const workflowFile = 'kicad-review.yml';
 
 function base64url(bytes) {
   let binary = '';
@@ -113,10 +114,14 @@ function response(body, init = {}) {
   return new Response(body, { ...init, headers });
 }
 
-function redirect(location, cookiesToSet = []) {
+function redirect(location, cookiesToSet = [], status = 302) {
   const headers = new Headers({ Location: location });
   for (const value of cookiesToSet) headers.append('Set-Cookie', value);
-  return response(null, { status: 302, headers });
+  return response(null, { status, headers });
+}
+
+function sessionRedirect(location, status, active) {
+  return redirect(location, active?.setCookie ? [active.setCookie] : [], status);
 }
 
 function escapeHtml(value) {
@@ -264,7 +269,7 @@ async function home(request, env) {
   }, active);
 }
 
-async function reviewList(request, env, owner, repo) {
+async function reviewList(request, env, owner, repo, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   try {
@@ -276,7 +281,8 @@ async function reviewList(request, env, owner, repo) {
       + `<td><a href="${repoPath(owner, repo)}/a/${encodeURIComponent(item.id)}">Open</a></td></tr>`).join('');
     const content = rows ? '<table><thead><tr><th>Date</th><th>Branch</th><th>Base</th><th>Head</th>'
       + `<th>Result</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p>No reviews yet.</p>';
-    return sessionResponse(html(`<p>Reviews for ${escapeHtml(owner)}/${escapeHtml(repo)}</p>`
+    const started = url?.searchParams.get('started') === '1' ? '<p>Review started.</p>' : '';
+    return sessionResponse(html(`<p>Reviews for ${escapeHtml(owner)}/${escapeHtml(repo)}</p>${started}`
       + `<p><a href="${repoPath(owner, repo)}/commits">Commit history</a></p>${content}`), {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     }, allowed.s);
@@ -329,6 +335,92 @@ async function commits(request, env, owner, repo, url) {
   } catch {
     return sessionResponse('Not found', { status: 404 }, allowed.s);
   }
+}
+
+const commitSha = /^[0-9a-f]{7,40}$/;
+
+function page(body) {
+  return { headers: { 'Content-Type': 'text/html; charset=utf-8' } };
+}
+
+async function compare(request, env, owner, repo) {
+  if (request.headers.get('Origin') !== new URL(request.url).origin) {
+    return response('Forbidden', { status: 403 });
+  }
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  const form = await request.formData();
+  const base = String(form.get('base') || '');
+  const head = String(form.get('head') || '');
+  if (!commitSha.test(base) || !commitSha.test(head) || base === head) {
+    return sessionResponse(html(`<p>Choose two different commit SHAs.</p><p><a href="${repoPath(owner, repo)}/commits">`
+      + 'Back to commits</a></p>'), { status: 400, ...page() }, allowed.s);
+  }
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  try {
+    const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ref: allowed.repo.default_branch,
+        inputs: { base, head },
+        return_run_details: true,
+      }),
+    });
+    if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
+    if (dispatch.status === 200) {
+      const details = await dispatch.json();
+      if (details.workflow_run_id) {
+        return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s);
+      }
+    }
+    if (dispatch.status === 403 || dispatch.status === 404) {
+      return sessionResponse(html('<p>You need write access to this repository to start a review, and the repository '
+        + 'needs the KiCad review workflow.</p>'), { status: 403, ...page() }, allowed.s);
+    }
+  } catch {
+    // Return the generic upstream error below.
+  }
+  return sessionResponse('Could not start the review', { status: 502 }, allowed.s);
+}
+
+function githubRunLink(run) {
+  const url = String(run.html_url || '');
+  return url.startsWith('https://github.com/')
+    ? `<p><a href="${escapeHtml(url)}">View this run on GitHub</a></p>`
+    : '';
+}
+
+async function run(request, env, owner, repo, id) {
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  let runData;
+  try {
+    const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
+    if (runResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, allowed.s);
+    runData = await runResponse.json();
+  } catch {
+    return sessionResponse('Not found', { status: 404 }, allowed.s);
+  }
+  const link = githubRunLink(runData);
+  if (runData.status !== 'completed') {
+    return sessionResponse(html('<meta http-equiv="refresh" content="10"><p>Review running…</p>'
+      + `<p>Status: ${escapeHtml(runData.status)}</p>${link}`), page(), allowed.s);
+  }
+  try {
+    const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
+    if (artifactsResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, allowed.s);
+    const artifact = reviews((await artifactsResponse.json()).artifacts)[0];
+    if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}`, 302, allowed.s);
+  } catch {
+    return sessionResponse('Not found', { status: 404 }, allowed.s);
+  }
+  const conclusion = escapeHtml(runData.conclusion);
+  const message = runData.conclusion === 'success'
+    ? 'No KiCad changes between these commits.'
+    : `Review conclusion: ${conclusion}`;
+  return sessionResponse(html(`<p>${message}</p>${link}`), page(), allowed.s);
 }
 
 function nextPath(value) {
@@ -393,12 +485,24 @@ export default {
         const allowed = await access(request, env, owner, repo);
         return allowed instanceof Response ? allowed : artifactReport(env, owner, repo, id, allowed.s);
       }
+      const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
+      if (request.method === 'POST' && compareRoute) {
+        return compare(request, env, compareRoute[1], compareRoute[2]);
+      }
+      const runRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/run\/([^/]+)$/);
+      if (request.method === 'GET' && runRoute) {
+        const [, owner, repo, id] = runRoute;
+        if (!/^\d{1,20}$/.test(id)) return response('Not found', { status: 404 });
+        return run(request, env, owner, repo, id);
+      }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
       if (request.method === 'GET' && commitsRoute) {
         return commits(request, env, commitsRoute[1], commitsRoute[2], url);
       }
       const reviewRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)$/);
-      if (request.method === 'GET' && reviewRoute) return reviewList(request, env, reviewRoute[1], reviewRoute[2]);
+      if (request.method === 'GET' && reviewRoute) {
+        return reviewList(request, env, reviewRoute[1], reviewRoute[2], url);
+      }
       return response('Not found', { status: 404 });
     } catch {
       return response('Internal server error', { status: 500 });
