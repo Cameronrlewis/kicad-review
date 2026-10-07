@@ -202,3 +202,22 @@ data = html[html.index("window.REVIEW_DATA"):]
 data = data[:data.index("</script>")]
 assert "<" not in data and json.loads(data[len("window.REVIEW_DATA = "):-1])["reason"] == "<!--<script></script>", data[:200]
 print("ok")
+
+# 7. Screenshots of a branch with / in its name survive the next run's clean-up. Runs the workflow step itself.
+wf = open(".github/workflows/review.yml", encoding="utf-8").read()
+step = wf[wf.index("- name: Publish screenshots"):]
+step = step[step.index("run: |") + 7:]
+step = "\n".join(l[10:] for l in step[:step.index("\n\n")].splitlines())
+t = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", "--bare", f"{t}/origin.git"], check=True)
+write(t, {"ws/review/images/a.png": "png"})
+for run, key in (("1", "branch-feature/x"), ("2", "pr-3")):
+    env = {**os.environ, "TOKEN": "x", "KEY": key, "GITHUB_SERVER_URL": f"file://{t}", "GITHUB_REPOSITORY": "origin",
+           "RUNNER_TEMP": f"{t}/tmp{run}", "GITHUB_WORKSPACE": f"{t}/ws", "GITHUB_RUN_ID": run, "GITHUB_OUTPUT": f"{t}/out{run}"}
+    r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=f"{t}/ws", capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+files = subprocess.run(["git", "-C", f"{t}/origin.git", "ls-tree", "-r", "--name-only", "kicad-review-assets"],
+                       capture_output=True, text=True).stdout.split()
+url = open(f"{t}/out1").read().strip().split("/raw/kicad-review-assets/")[1]
+assert f"{url}/a.png" in files and "pr-3/2/a.png" in files, (url, files)
+print("ok")

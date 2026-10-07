@@ -107,6 +107,7 @@ jobs:
           KEY: ${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && format('branch-{0}', github.ref_name) || format('run-{0}', github.run_id) }}
         run: |
           ls review/images/*.png >/dev/null 2>&1 || exit 0
+          KEY=${KEY//\//-}  # one folder level per key: the clean-up below reads each top-level folder's .stamp
           branch=kicad-review-assets
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           mkdir -p "$RUNNER_TEMP/assets" && cd "$RUNNER_TEMP/assets"
