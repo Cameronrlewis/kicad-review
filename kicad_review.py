@@ -414,9 +414,9 @@ def pcb_objects(path):
         elif kind == "zone":
             outline = [p for poly in findall(n, "polygon") for p in points(poly)]
             layers = val(n, "layer") or " ".join((find(n, "layers") or [])[1:])
-            objs[uid] = {"kind": "zone", "ref": val(n, "net_name") or "", "where": where,
+            objs[uid] = {"kind": "zone", "ref": net(n) or "", "where": where,
                          "pos": list(outline[0]) if outline else None, "box": box_of(outline, 0),
-                         "props": {"net": val(n, "net_name"), "layers": layers, "name": val(n, "name"),
+                         "props": {"net": net(n), "layers": layers, "name": val(n, "name"),
                                    "priority": val(n, "priority"), "outline": " ".join(fmt_at(p) for p in outline),
                                    **{f"setting {k}": v for k, v in flatten_sexpr(n, skip=("polygon", "filled_polygon", "uuid", "tstamp", "net", "net_name", "layer", "layers", "name", "priority")).items()}}}
         elif kind.startswith("gr_") or kind == "dimension":

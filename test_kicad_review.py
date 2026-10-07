@@ -247,3 +247,10 @@ write(t, {"b.kicad_pcb": k7b, "h.kicad_pcb": k10})
 rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
 assert not [r for r in rows if r["kind"] == "footprint"], rows
 print("ok")
+
+# New: KiCad 10 zones name their net as (net "GND") without net_name, so a zone moved to another net must show.
+zone = lambda n: f'(kicad_pcb (version 20260206) (zone (net "{n}") (layer "B.Cu") (uuid "z1") (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1)))))'
+write(t, {"b.kicad_pcb": zone("GND"), "h.kicad_pcb": zone("VCC")})
+rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+assert rows and rows[0]["ref"] == "VCC" and ["net", "GND", "VCC"] in rows[0]["changes"], rows
+print("ok")
