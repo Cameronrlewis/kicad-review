@@ -18,16 +18,40 @@ export function signedOutPage() {
   return frame({ title: 'Repositories', body: `<main class="page"><section class="card empty"><h1>KiCad review</h1><p>See what changed on the schematic and board in each commit or pull request, with ERC and DRC results.</p><p>${link('/login', 'Sign in with GitHub', 'btn btn-primary')}</p><p>GitHub will ask you to let this app verify your identity, see which repositories you can access, and act on your behalf. It only reads what you can already read.</p></section></main>` });
 }
 
-export function homePage({ user, repositories }) {
-  const body = repositories.length ? `<section class="cards">${repositories.map((repo) => `<a class="card" href="${repoPath(repo.owner.login, repo.name)}"><h2>${e(repo.owner.login)}/${e(repo.name)}</h2><p class="muted">Open review reports and compare commits.</p></a>`).join('')}</section>` : `<section class="card empty"><h2>No repositories yet</h2><p>The GitHub App must be installed on the repository.</p></section>`;
-  return frame({ title: 'Repositories', user, crumbs: [{ label: 'Repositories' }], body: `<main class="page"><div class="page-head"><div><h1>Repositories</h1><p class="lead">Repositories available through the KiCad review GitHub App.</p></div></div>${body}</main>` });
+function relativeTime(value) {
+  const then = new Date(value).getTime();
+  if (!Number.isFinite(then)) return 'unknown time';
+  const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  const units = [[31536000, 'year'], [2592000, 'month'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
+  for (const [size, label] of units) {
+    const amount = Math.floor(seconds / size);
+    if (amount) return `${amount} ${label}${amount === 1 ? '' : 's'} ago`;
+  }
+  return 'just now';
 }
 
-export function reviewsPage({ user, owner, repo, items, started }) {
+export function homePage({ user, repositories }) {
+  const body = repositories.length ? `<section class="cards">${repositories.map((repo) => {
+    const path = repoPath(repo.owner.login, repo.name);
+    return `<article class="card"><p class="muted">${e(repo.owner.login)}</p><h2>${e(repo.name)}</h2><p><span class="badge">${repo.private ? 'private' : 'public'}</span></p><p class="muted" title="${e(repo.pushed_at)}">updated ${e(relativeTime(repo.pushed_at))}</p><p class="card-actions">${link(path, 'Reviews', 'btn btn-primary')} ${link(`${path}/commits`, 'Compare commits', 'btn')}</p></article>`;
+  }).join('')}</section>` : `<section class="card empty"><h2>No repositories yet</h2><p>An owner or admin installs the KiCad review GitHub App on the repositories you can open.</p><p class="muted">Signed in as ${e(user)}</p></section>`;
+  return frame({ title: 'Repositories', user, crumbs: [{ label: 'Repositories' }], body: `<main class="page"><div class="page-head"><div><h1>Repositories</h1><p class="lead">Repositories you can open. Each one needs the KiCad review GitHub App installed.</p></div></div>${body}</main>` });
+}
+
+export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'all', started }) {
   const path = repoPath(owner, repo);
-  const rows = items.map((item) => `<tr><td>${e(item.date)}</td><td>${e(item.branch)}</td><td><span class="revpath"><span>${e(item.base)}</span><span>${e(item.head)}</span></span></td><td>${status(item.result)}</td><td>${link(`${path}/a/${encodeURIComponent(item.id)}`, 'Open', 'btn')}${item.legacy ? '<br><small class="muted">older report: revisions not recorded</small>' : ''}</td></tr>`).join('');
-  const content = rows ? `<table class="table"><thead><tr><th>Date</th><th>Branch</th><th>Revisions</th><th>Result</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<section class="card empty"><h2>No reviews yet</h2><p>Start a comparison from commit history.</p>${link(`${path}/commits`, 'View commit history', 'btn btn-primary')}</section>`;
-  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Commit history', 'btn')}</div></div>${started ? '<div class="notice notice-info">Review started.</div>' : ''}${content}</main>` });
+  const chips = [['all', 'All'], ['passing', 'Passing'], ['failing', 'Failing'], ['older', 'Older']]
+    .map(([value, label]) => `<a class="filter-chip" href="${path}?filter=${value}"${filter === value ? ' aria-current="page"' : ''}>${label} ${counts[value] || 0}</a>`).join('');
+  const cards = items.map((item) => {
+    const branch = item.manual ? 'Manual comparison' : item.branch;
+    const label = item.label ? `<span class="muted">${e(item.label)}</span>` : '';
+    const revision = item.legacy
+      ? '<p class="muted">Revisions not recorded (older report)</p>'
+      : `<div class="revpath"><span class="muted">BASE</span><code>${e(item.base)}</code><span class="muted">↓</span><span class="muted">HEAD</span><code>${e(item.head)}</code></div>`;
+    return `<article class="review-card"><div><h2>${e(branch)}</h2>${label}<p class="muted">${e(relativeTime(item.createdAt))} · ${e(item.date)}</p></div><div><p class="revision-label muted">Revision path</p>${revision}</div><div class="review-result">${status(item.result)}${link(`${path}/a/${encodeURIComponent(item.id)}`, 'Open review →', 'btn')}</div></article>`;
+  }).join('');
+  const content = cards ? `<section class="review-list">${cards}</section>` : `<section class="card empty"><h2>No reviews yet</h2><p>Reviews appear after a push or pull request that changes KiCad files, or after a comparison started here.</p>${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</section>`;
+  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
 }
 
 export function commitsPage({ user, owner, repo, branch, branches, commits }) {
@@ -50,9 +74,9 @@ export function messagePage({ title, message, links = [], user, owner, repo, kin
 }
 
 function status(value) {
-  if (value === 'pass') return '<span class="status status-pass">✓ Pass</span>';
-  if (value === 'fail') return '<span class="status status-fail">✕ Fail</span>';
+  if (value === 'pass') return '<span class="status status-pass">✓ passing</span>';
+  if (value === 'fail') return '<span class="status status-fail">✕ failing</span>';
   if (value === 'new') return '<span class="status status-new">New</span>';
   if (value === 'error') return '<span class="status status-error">⚠ Error</span>';
-  return '<span class="status status-notrun">— Not run</span>';
+  return '<span class="status status-notrun">— not recorded</span>';
 }
