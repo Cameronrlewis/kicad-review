@@ -2,6 +2,10 @@ name: KiCad review
 on:
   workflow_call:
 
+env:
+  # Official KiCad image, pinned by digest so a new upload under the same tag cannot change results.
+  KICAD_IMAGE: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+
 jobs:
   review:
     runs-on: ubuntu-24.04
@@ -62,3 +66,18 @@ jobs:
             git worktree add --detach ../base "${{ steps.detect.outputs.base }}"
           fi
           git worktree list
+
+      - name: Render both revisions
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          time docker pull -q "$KICAD_IMAGE"
+          docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+            sh -c 'python3 --version && time python3 tools/kicad_review.py render'
+
+      - name: Upload review
+        if: steps.detect.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kicad-review
+          path: review/
+          retention-days: 14

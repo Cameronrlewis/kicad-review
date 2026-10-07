@@ -135,12 +135,73 @@ def cmd_detect(args):
     print(summary)
 
 
+def project_id(d):
+    return d.replace("/", "__") or "_root"
+
+
+def kicad_cli(*args):
+    r = subprocess.run(["kicad-cli", *args], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"kicad-cli {' '.join(args)} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}")
+    return r
+
+
+def board_layers(pcb_path):
+    """Layer names declared in the board's (layers ...) block, in KiCad order."""
+    names, inside = [], False
+    with open(pcb_path) as fh:
+        for line in fh:
+            s = line.strip()
+            if s == "(layers":
+                inside = True
+            elif inside and s == ")":
+                break
+            elif inside and s.startswith("("):
+                names.append(s.split('"')[1])
+    return names
+
+
+def render_side(src_dir, name, out):
+    """SVG renders of one revision of one project. Returns {"sch": [...], "pcb": [...]} of paths relative to out."""
+    files = {"sch": [], "pcb": []}
+    sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
+    if os.path.exists(sch):
+        kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "-o", f"{out}/sch", sch)
+        files["sch"] = sorted(f"sch/{f}" for f in os.listdir(f"{out}/sch"))
+    if os.path.exists(pcb):
+        # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
+        kicad_cli("pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1",
+                  "--drill-shape-opt", "2", "-l", ",".join(board_layers(pcb)), "-o", f"{out}/pcb", pcb)
+        files["pcb"] = sorted(f"pcb/{f}" for f in os.listdir(f"{out}/pcb"))
+    return files
+
+
+def cmd_render(args):
+    with open(args.detect) as fh:
+        det = json.load(fh)
+    for p in det["projects"]:
+        out = f"{args.out}/{project_id(p['dir'])}"
+        manifest = {"project": p, "sides": {}}
+        for side in ("base", "head"):
+            if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
+                continue
+            manifest["sides"][side] = render_side(posixpath.join(side, p["dir"]), p["name"], f"{out}/{side}")
+        with open(f"{out}/manifest.json", "w") as fh:
+            json.dump(manifest, fh, indent=2)
+        print(f"{p['name']}: " + ", ".join(f"{s} {len(v['sch'])} sheet(s) {len(v['pcb'])} layer(s)"
+                                          for s, v in manifest["sides"].items()))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(required=True)
     p = sub.add_parser("detect", help="resolve base/head and list changed KiCad projects")
     p.add_argument("--out", default="review/detect.json")
     p.set_defaults(func=cmd_detect)
+    p = sub.add_parser("render", help="SVG renders of both revisions (run inside the KiCad container)")
+    p.add_argument("--detect", default="review/detect.json")
+    p.add_argument("--out", default="review")
+    p.set_defaults(func=cmd_render)
     args = ap.parse_args()
     args.func(args)
 
