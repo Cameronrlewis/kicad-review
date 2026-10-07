@@ -816,7 +816,9 @@ def summary_sentence(p):
         if any(r["kind"] == kind for r in rows):
             parts.append(f"{kind} changed")
     for c in p["checks"]:
-        if c["new_errors"]:
+        if c["new_errors"] and c["name"] == "bom":
+            parts.append(f"**{plural(c['new_errors'], 'part')} newly missing BOM fields**")
+        elif c["new_errors"]:
             parts.append(f"**{plural(c['new_errors'], 'new ' + c['title'] + ' error')}**")
         if c["fixed"]:
             parts.append(f"{c['fixed']} {c['title']} issue{'s' if c['fixed'] > 1 else ''} fixed")
