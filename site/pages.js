@@ -18,9 +18,24 @@ export function signedOutPage() {
   return frame({ title: 'Repositories', body: `<main class="page"><section class="card empty"><h1>KiCad review</h1><p>See what changed on the schematic and board in each commit or pull request, with ERC and DRC results.</p><p>${link('/login', 'Sign in with GitHub', 'btn btn-primary')}</p><p>GitHub will ask you to let this app verify your identity, see which repositories you can access, and act on your behalf. It only reads what you can already read.</p></section></main>` });
 }
 
+function relativeTime(value) {
+  const then = new Date(value).getTime();
+  if (!Number.isFinite(then)) return 'unknown time';
+  const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  const units = [[31536000, 'year'], [2592000, 'month'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
+  for (const [size, label] of units) {
+    const amount = Math.floor(seconds / size);
+    if (amount) return `${amount} ${label}${amount === 1 ? '' : 's'} ago`;
+  }
+  return 'just now';
+}
+
 export function homePage({ user, repositories }) {
-  const body = repositories.length ? `<section class="cards">${repositories.map((repo) => `<a class="card" href="${repoPath(repo.owner.login, repo.name)}"><h2>${e(repo.owner.login)}/${e(repo.name)}</h2><p class="muted">Open review reports and compare commits.</p></a>`).join('')}</section>` : `<section class="card empty"><h2>No repositories yet</h2><p>The GitHub App must be installed on the repository.</p></section>`;
-  return frame({ title: 'Repositories', user, crumbs: [{ label: 'Repositories' }], body: `<main class="page"><div class="page-head"><div><h1>Repositories</h1><p class="lead">Repositories available through the KiCad review GitHub App.</p></div></div>${body}</main>` });
+  const body = repositories.length ? `<section class="cards">${repositories.map((repo) => {
+    const path = repoPath(repo.owner.login, repo.name);
+    return `<article class="card"><p class="muted">${e(repo.owner.login)}</p><h2>${e(repo.name)}</h2><p><span class="badge">${repo.private ? 'private' : 'public'}</span></p><p class="muted" title="${e(repo.pushed_at)}">updated ${e(relativeTime(repo.pushed_at))}</p><p class="card-actions">${link(path, 'Reviews', 'btn btn-primary')} ${link(`${path}/commits`, 'Compare commits', 'btn')}</p></article>`;
+  }).join('')}</section>` : `<section class="card empty"><h2>No repositories yet</h2><p>An owner or admin installs the KiCad review GitHub App on the repositories you can open.</p><p class="muted">Signed in as ${e(user)}</p></section>`;
+  return frame({ title: 'Repositories', user, crumbs: [{ label: 'Repositories' }], body: `<main class="page"><div class="page-head"><div><h1>Repositories</h1><p class="lead">Repositories you can open. Each one needs the KiCad review GitHub App installed.</p></div></div>${body}</main>` });
 }
 
 export function reviewsPage({ user, owner, repo, items, started }) {

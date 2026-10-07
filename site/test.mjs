@@ -373,7 +373,30 @@ test('home explains installation when none are reachable', async () => {
     assert.equal(url, 'https://api.github.com/user/installations');
     return new Response(JSON.stringify({ installations: [] }));
   });
-  try { assert.match(await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text(), /GitHub App must be installed/); } finally { restore(); }
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /No repositories yet/);
+    assert.match(body, /owner or admin installs the KiCad review GitHub App/);
+    assert.match(body, /Signed in as octocat/);
+  } finally { restore(); }
+});
+
+test('repository cards show escaped details, visibility, update time, and two actions', () => {
+  const body = homePage({
+    user: 'octocat',
+    repositories: [{
+      name: '<board>', owner: { login: '<owner>' }, private: true,
+      pushed_at: '2025-02-03T04:05:00Z',
+    }],
+  });
+  assert.match(body, /class="card"/);
+  assert.match(body, /&lt;owner&gt;/);
+  assert.match(body, /&lt;board&gt;/);
+  assert.match(body, /private/);
+  assert.match(body, /updated .* ago/);
+  assert.match(body, /title="2025-02-03T04:05:00Z"/);
+  assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E"[^>]*>Reviews<\/a>/);
+  assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E\/commits"[^>]*>Compare commits<\/a>/);
 });
 
 test('review list filters, parses, escapes, and lists artifacts once', async () => {
