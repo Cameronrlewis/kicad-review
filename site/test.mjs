@@ -766,9 +766,15 @@ test('compare refuses KiCad-free file changes and lists changed files', async ()
   const restore = mockFetch(async (url) => { if (url.endsWith('/repo')) return accessibleRepo(); if (url.includes('/compare/')) return new Response(JSON.stringify({ status: 'ahead', files: files.map((filename) => ({ filename })) })); if (url.includes('/dispatches')) { dispatched = true; throw new Error('must not dispatch'); } const page = compareCommitData(url); if (page) return page; throw new Error(`unexpected ${url}`); });
   try { const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed); const body = await response.text(); assert.equal(response.status, 400); assert.equal(dispatched, false); assert.match(body, /No KiCad files changed between deadbee and cafebab, so there is nothing to review\./); assert.match(body, /docs\/file-0\.md/); assert.match(body, /and 1 more/); } finally { restore(); }
 });
-test('compare page keeps radios in its server-submitted form and includes in-page checks', () => {
+test('compare page renders every inline-script target and keeps Show in its picker row', () => {
   const page = commitsPage({ user: 'octocat', owner: 'owner', repo: 'repo', branch: 'main', branches: ['main'], tags: [], commits: [{ sha: base, message: 'Board', fullMessage: 'Board\nDetails', author: 'Ada', date: 'today', exactDate: '2025-01-01', review: null }] });
-  assert.match(page, /<form method="post" action="\/r\/owner\/repo\/compare" class="compare-form">[\s\S]*name="base"/); assert.match(page, /<script>\(\(\)=>/); assert.match(page, /Head is older than Base\. The review would show the change backwards\./);
+  for (const selector of ['compare-form', 'compare-bar', 'compare-slot']) assert.match(page, new RegExp(`class="[^"]*${selector}[^"]*"`));
+  assert.match(page, /<form[^>]*class="compare-form"[^>]*>[\s\S]*?<button[^>]*type="submit"[^>]*>Start review<\/button>/);
+  assert.match(page, /<div[^>]*class="[^"]*compare-bar[^"]*"[^>]*>[\s\S]*?<[^>]+role="status"/);
+  assert.match(page, /<button class="btn" form="source-picker">Show<\/button>/);
+  assert.doesNotMatch(page, /<button[^>]*type="submit"[^>]*disabled[^>]*>Start review<\/button>/);
+  assert.match(page, /\.compare-slot \{[^}]*min-height:/);
+  assert.match(page, /Head is older than Base\. The review would show the change backwards\./);
 
 });
 

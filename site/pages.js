@@ -65,8 +65,53 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   const rows = commits.map((commit) => `<tr><td><label><input type="radio" name="base" value="${e(commit.sha)}" aria-label="Base ${e(commit.sha)}"${commit.sha === base ? ' checked' : ''}> <span class="sr-only">Base</span></label></td><td><label><input type="radio" name="head" value="${e(commit.sha)}" aria-label="Head ${e(commit.sha)}"${commit.sha === head ? ' checked' : ''}> <span class="sr-only">Head</span></label></td><td><code>${e(commit.sha.slice(0, 7))}</code></td><td title="${e(commit.fullMessage || commit.message)}">${e(commit.message)}</td><td>${e(commit.author)}</td><td title="${e(commit.exactDate || commit.date)}">${e(commit.date)}</td><td>${commit.review ? link(`${path}/a/${encodeURIComponent(commit.review)}`, 'Reviewed') : ''}</td></tr>`).join('');
   const alert = notice ? `<div class="notice notice-${e(notice.kind)}" role="status">${e(notice.message)}${files.length ? `<ul>${files.map((file) => `<li><code>${e(file)}</code></li>`).join('')}</ul>` : ''}</div>` : '';
   const swapForm = swap ? `<form method="post" action="${path}/compare" class="swap-start"><input type="hidden" name="base" value="${e(head)}"><input type="hidden" name="head" value="${e(base)}"><button class="btn btn-primary">Swap and start</button></form>` : '';
-  const script = `<script>(()=>{const form=document.querySelector('.compare-form'),bar=document.querySelector('.compare-bar'),button=form.querySelector('[type="submit"]'),status=bar.querySelector('[role="status"]'),slots=[...bar.querySelectorAll('.compare-slot')],radios=[...form.querySelectorAll('input[type="radio"]')];const data=Object.fromEntries([...form.querySelectorAll('tbody tr')].map(r=>{const a=r.querySelectorAll('input');return [a[0].value,{sha:a[0].value,message:r.children[3].textContent,author:r.children[4].textContent,date:r.children[5].textContent}]}));function add(node,tag,text){const child=document.createElement(tag);child.textContent=text;node.append(child);return child}function show(slot,label,c){slot.replaceChildren();add(slot,'strong',label);if(c){const line=document.createElement('div'),code=add(line,'code',c.sha.slice(0,7));line.append(' '+c.message);slot.append(line);const details=add(slot,'small',c.author+' · '+c.date);details.className='muted'}else{const empty=add(slot,'div','not chosen');empty.className='muted'}}function update(){const base=form.querySelector('[name=base]:checked')?.value,head=form.querySelector('[name=head]:checked')?.value;show(slots[0],'Base',data[base]);show(slots[1],'Head',data[head]);button.disabled=!base||!head||base===head;status.className='muted';status.replaceChildren();if(base&&head&&base===head){status.className='notice-warn';status.textContent='Base and Head are the same commit. Pick two different ones.'}else if(base&&head&&[...form.querySelectorAll('[name=head]')].findIndex(x=>x.value===head)>[...form.querySelectorAll('[name=base]')].findIndex(x=>x.value===base)){status.className='notice-warn';status.append('Head is older than Base. The review would show the change backwards. ');const swap=add(status,'button','Swap');swap.type='button';swap.onclick=()=>{form.querySelector('[name=base][value="'+head+'"]').checked=true;form.querySelector('[name=head][value="'+base+'"]').checked=true;update()}}else if(base&&head){status.textContent='Compares '+base.slice(0,7)+' → '+head.slice(0,7)+'.'}}radios.forEach(r=>r.onchange=update);form.querySelectorAll('tr').forEach(r=>r.onkeydown=e=>{if(e.key==='Enter')e.preventDefault()});update()})()</script>`;
-  return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" disabled>Start review</button><div class="muted" role="status"></div></div></div><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select></div><table class="table"><thead><tr><th>Base</th><th>Head</th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></form><form id="source-picker" method="get"><button class="btn">Show</button></form>${script}</main>` });
+  const script = `<script>(() => {
+    const form = document.querySelector('.compare-form');
+    const bar = document.querySelector('.compare-bar');
+    if (!form || !bar) return;
+    const button = form.querySelector('[type="submit"]');
+    const status = bar.querySelector('[role="status"]');
+    const slots = [...bar.querySelectorAll('.compare-slot')];
+    if (!button || !status || slots.length < 2) return;
+    const radios = [...form.querySelectorAll('input[type="radio"]')];
+    const data = Object.fromEntries([...form.querySelectorAll('tbody tr')].map((row) => {
+      const input = row.querySelector('input');
+      if (!input) return null;
+      return [input.value, { sha: input.value, message: row.children[3]?.textContent || '', author: row.children[4]?.textContent || '', date: row.children[5]?.textContent || '' }];
+    }).filter(Boolean));
+    function add(node, tag, text) { const child = document.createElement(tag); child.textContent = text; node.append(child); return child; }
+    function show(slot, label, commit) {
+      if (!slot) return;
+      slot.replaceChildren(); add(slot, 'strong', label);
+      if (commit) { const line = document.createElement('div'); add(line, 'code', commit.sha.slice(0, 7)); line.append(' ' + commit.message); slot.append(line); const details = add(slot, 'small', commit.author + ' · ' + commit.date); details.className = 'muted'; }
+      else { const empty = add(slot, 'div', 'not chosen'); empty.className = 'muted'; }
+    }
+    function update() {
+      const base = form.querySelector('[name=base]:checked')?.value;
+      const head = form.querySelector('[name=head]:checked')?.value;
+      show(slots[0], 'Base', data[base]); show(slots[1], 'Head', data[head]);
+      button.disabled = !base || !head || base === head;
+      status.className = 'muted'; status.replaceChildren();
+      if (base && head && base === head) { status.className = 'notice-warn'; status.textContent = 'Base and Head are the same commit. Pick two different ones.'; }
+      else if (base && head) {
+        const headIndex = [...form.querySelectorAll('[name=head]')].findIndex((input) => input.value === head);
+        const baseIndex = [...form.querySelectorAll('[name=base]')].findIndex((input) => input.value === base);
+        if (headIndex > baseIndex) {
+          status.className = 'notice-warn'; status.append('Head is older than Base. The review would show the change backwards. ');
+          const swap = add(status, 'button', 'Swap'); swap.type = 'button'; swap.onclick = () => {
+            const nextBase = form.querySelector('[name=base][value="' + head + '"]');
+            const nextHead = form.querySelector('[name=head][value="' + base + '"]');
+            if (!nextBase || !nextHead) return;
+            nextBase.checked = true; nextHead.checked = true; update();
+          };
+        } else status.textContent = 'Compares ' + base.slice(0, 7) + ' → ' + head.slice(0, 7) + '.';
+      }
+    }
+    radios.forEach((radio) => { radio.onchange = update; });
+    form.querySelectorAll('tr').forEach((row) => { row.onkeydown = (event) => { if (event?.key === 'Enter') event.preventDefault(); }; });
+    update();
+  })()</script>`;
+  return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" type="submit">Start review</button><div class="muted" role="status"></div></div></div><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select><button class="btn" form="source-picker">Show</button></div><table class="table"><thead><tr><th>Base</th><th>Head</th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></form><form id="source-picker" method="get"></form>${script}</main>` });
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;
