@@ -1,0 +1,18 @@
+# Optional. Put at the repository root as kicad-review.toml. Every key is optional; these are the defaults.
+
+# "new": a required check fails only on errors this change introduced. "all": any error fails it.
+fail_on = "new"
+
+[checks]
+# required: a failure fails the workflow run. informational: reported only. off: not run.
+erc = "required"
+drc = "required"
+parity = "required"      # schematic and board agree (DRC --schematic-parity)
+bom = "informational"    # every part has the fields below
+
+[bom]
+required_fields = ["Value", "Footprint"]
+
+[fabrication]
+preset = "jlcpcb"        # or "pcbway"
+# part_field = "LCSC"    # symbol field holding the supplier part number; default LCSC (jlcpcb) or MPN (pcbway)
