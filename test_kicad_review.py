@@ -254,3 +254,14 @@ write(t, {"b.kicad_pcb": zone("GND"), "h.kicad_pcb": zone("VCC")})
 rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
 assert rows and rows[0]["ref"] == "VCC" and ["net", "GND", "VCC"] in rows[0]["changes"], rows
 print("ok")
+
+# Minor: every file is read and written as UTF-8 whatever the locale (non-ASCII text, → and — in the comment).
+t = tempfile.mkdtemp()
+write(t, {"review/detect.json": json.dumps({"base": "a", "head": "b", "reason": "Caméra → ü", "projects": []}),
+          "kicad-review.toml": "# réglages\n"})
+for cmd in (["report"], ["summary"]):
+    r = subprocess.run([sys.executable, os.path.abspath("kicad_review.py"), *cmd], cwd=t, capture_output=True, text=True,
+                       env={**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0",
+                            "GITHUB_STEP_SUMMARY": f"{t}/summary.md"})
+    assert r.returncode == 0, (cmd, r.stderr[-300:])
+print("ok")

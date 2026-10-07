@@ -126,15 +126,15 @@ def cmd_detect(args):
     projects = detect(base, head)
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
-    with open("../review/detect.json", "w") as fh:
+    with open("../review/detect.json", "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2)
-    with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
+    with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\n")
     print(f"Comparing {base} -> {head} ({reason})")
     for p in projects:
         print(f"  {p['name']} ({p['dir'] or '.'}, {p['status']})")
     if not projects:  # changed runs get their summary from the summary step
-        with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
+        with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
             fh.write("No KiCad files changed. Nothing to review.\n")
 
 
@@ -151,7 +151,7 @@ def kicad_cli(*args):
 def board_layers(pcb_path):
     """Layer names declared in the board's (layers ...) block, in KiCad order."""
     names, inside = [], False
-    with open(pcb_path) as fh:
+    with open(pcb_path, encoding="utf-8") as fh:
         for line in fh:
             s = line.strip()
             if s == "(layers":
@@ -179,7 +179,7 @@ def render_side(src_dir, name, out):
 
 
 def cmd_render(args):
-    with open("review/detect.json") as fh:
+    with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     for p in det["projects"]:
         for side in ("base", "head"):
@@ -227,7 +227,7 @@ def sheet_pages(proj_dir, name):
         full = posixpath.join(proj_dir, file)
         if depth > 32 or not os.path.exists(full):
             return
-        with open(full) as fh:
+        with open(full, encoding="utf-8") as fh:
             root = parse_sexpr(fh.read())
         names = set()
         for s in findall(root, "sheet"):
@@ -317,7 +317,7 @@ def sch_objects(proj_dir, name):
         full = posixpath.join(proj_dir, page["file"])
         if not os.path.exists(full):
             continue
-        with open(full) as fh:
+        with open(full, encoding="utf-8") as fh:
             root = parse_sexpr(fh.read())
         if page["parent"] is None:
             root_uuid = val(root, "uuid")
@@ -370,7 +370,7 @@ def sch_objects(proj_dir, name):
 
 
 def pcb_objects(path):
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())
     net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2}  # older files number their nets
     net = lambda node: (lambda n: net_names.get(n[1], n[-1]) if n else None)(find(node, "net"))
@@ -468,7 +468,7 @@ def flatten_sexpr(node, prefix="", skip=()):
 def pro_objects(path):
     if not os.path.exists(path):
         return {}
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         pro = json.load(fh)
     keep = {"net_settings": pro.get("net_settings")}
     keep["board"] = (pro.get("board") or {}).get("design_settings")
@@ -487,7 +487,7 @@ def project_objects(proj_dir, name):
     objs.update(pro_objects(posixpath.join(proj_dir, f"{name}.kicad_pro")))
     dru = posixpath.join(proj_dir, f"{name}.kicad_dru")
     if os.path.exists(dru):
-        with open(dru) as fh:
+        with open(dru, encoding="utf-8") as fh:
             objs["meta:dru"] = {"kind": "design rules", "ref": f"{name}.kicad_dru", "where": None,
                                 "props": {"custom rules": hashlib.sha1(fh.read().encode()).hexdigest()[:10]}}
     return objs
@@ -613,7 +613,7 @@ def release_project(pro_path, tag, settings, out_dir):
                 z.write(f"{work}/{f}", f)
         kicad_cli("pcb", "export", "pos", "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
                   "-o", f"{work}/pos.csv", pcb)
-        with open(f"{work}/pos.csv", newline="") as fh, open(f"{stem}-positions.csv", "w", newline="") as out:
+        with open(f"{work}/pos.csv", newline="", encoding="utf-8") as fh, open(f"{stem}-positions.csv", "w", newline="", encoding="utf-8") as out:
             rows = list(csv.reader(fh))
             w = csv.writer(out)
             w.writerow([POS_COLUMNS.get(h, h) for h in rows[0]])
@@ -651,7 +651,7 @@ def load_violations(path, kind):
     """ERC/DRC JSON as a flat list of errors and warnings. kind: erc, drc or parity."""
     if not os.path.exists(path):
         return None
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         d = json.load(fh)
     out = []
     if kind == "erc":
@@ -745,7 +745,7 @@ def svg_body(path):
     """SVG text without the export timestamp, so identical drawings compare equal."""
     if not path or not os.path.exists(path):
         return None
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return re.sub(r"<title>.*?</title>", "", fh.read(), count=1, flags=re.S)
 
 
@@ -850,7 +850,7 @@ def inline_page(data_js):
 
 
 def cmd_report(args):
-    with open("review/detect.json") as fh:
+    with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     blobs = {}
     env = os.environ
@@ -867,14 +867,14 @@ def cmd_report(args):
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
-    with open("review/kicad-review.html", "w") as fh:
+    with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
     del data["blobs"]
-    with open("review/data.json", "w") as fh:
+    with open("review/data.json", "w", encoding="utf-8") as fh:
         json.dump(data, fh)
     failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
-    with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
+    with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
 
 
@@ -1019,7 +1019,7 @@ def shot_list(data, limit=8):
 
 
 def cmd_shots(args):
-    with open(f"review/data.json") as fh:
+    with open(f"review/data.json", encoding="utf-8") as fh:
         data = json.load(fh)
     os.makedirs(f"review/images", exist_ok=True)
     report = os.path.abspath(f"review/kicad-review.html")
@@ -1033,22 +1033,22 @@ def cmd_shots(args):
             done.append(s)
         else:
             print(f"::warning::Screenshot of {s['title']} failed: {r.stderr[-300:]}")
-    with open(f"review/images/shots.json", "w") as fh:
+    with open(f"review/images/shots.json", "w", encoding="utf-8") as fh:
         json.dump(done, fh, indent=2)
     print(f"{len(done)} screenshot(s)")
 
 
 def cmd_summary(args):
-    with open(f"review/data.json") as fh:
+    with open(f"review/data.json", encoding="utf-8") as fh:
         data = json.load(fh)
     images = []
     if args.image_base and os.path.exists(f"review/images/shots.json"):
-        with open(f"review/images/shots.json") as fh:
+        with open(f"review/images/shots.json", encoding="utf-8") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
     body = comment_markdown(data, images, args.artifact_url, args.artifact_id)
-    with open(f"review/comment.md", "w") as fh:
+    with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
-    with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
+    with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
 
@@ -1090,6 +1090,7 @@ def main():
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
     args = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale
     args.func(args)
 
 

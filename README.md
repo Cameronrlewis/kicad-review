@@ -116,7 +116,7 @@ To refresh the sample, take the data out of any generated report (a CI artifact 
 `detect`, `render` and `report`):
 
 ```sh
-python3 -c "import re; h = open('kicad-review.html').read(); open('ui/sample/review-data.js', 'w').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
+python3 -c "import re; h = open('kicad-review.html', encoding='utf-8').read(); open('ui/sample/review-data.js', 'w', encoding='utf-8').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
 ```
 
 ### Data format
