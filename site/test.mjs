@@ -115,7 +115,7 @@ test('expired access tokens refresh once, while refresh errors clear the session
   });
   try {
     const response = await call('/', { headers: { Cookie: `s=${expired}` } });
-    assert.equal(calls, 1);
+    assert.equal(calls, 2);
     assert.match(await response.text(), /Signed in as octocat/);
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
@@ -195,14 +195,15 @@ test('review route shows the repository after a pull-access check and refreshes 
   const restore = mockFetch(async (url, options = {}) => {
     calls += 1;
     if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
-    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo');
     assert.equal(options.headers.Authorization, 'Bearer access-secret');
     assert.equal(options.headers['X-GitHub-Api-Version'], '2022-11-28');
-    return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ permissions: { pull: true } }));
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts?per_page=100');
+    return new Response(JSON.stringify({ artifacts: [] }));
   });
   try {
     const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
-    assert.equal(calls, 2);
+    assert.equal(calls, 3);
     assert.match(await response.text(), /Reviews for Cameronrlewis\/repo/);
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
@@ -290,5 +291,92 @@ test('artifact route rejects non-numeric IDs without fetching', async () => {
     const response = await call('/r/Cameronrlewis/repo/a/not-a-number');
     assert.equal(response.status, 404);
     assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('home lists only allowed repositories, sorted and escaped', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => {
+    if (url === 'https://api.github.com/user/installations') return new Response(JSON.stringify({ installations: [{ id: 1 }, { id: 2 }] }));
+    if (url.endsWith('/1/repositories?per_page=100')) return new Response(JSON.stringify({ repositories: [
+      { name: '<old>', owner: { login: 'Cameronrlewis' }, pushed_at: '2024-01-01T00:00:00Z' },
+      { name: 'other', owner: { login: 'Elsewhere' }, pushed_at: '2025-01-01T00:00:00Z' },
+    ] }));
+    return new Response(JSON.stringify({ repositories: [{ name: 'new', owner: { login: 'cAmErOnRlEwIs' }, pushed_at: '2025-01-01T00:00:00Z' }] }));
+  });
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /cAmErOnRlEwIs\/new/);
+    assert.match(body, /&lt;old&gt;/);
+    assert.doesNotMatch(body, /Elsewhere\/other/);
+    assert.ok(body.indexOf('new') < body.indexOf('&lt;old&gt;'));
+  } finally { restore(); }
+});
+
+test('home explains installation when none are reachable', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => {
+    assert.equal(url, 'https://api.github.com/user/installations');
+    return new Response(JSON.stringify({ installations: [] }));
+  });
+  try { assert.match(await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text(), /GitHub App must be installed/); } finally { restore(); }
+});
+
+test('review list filters, parses, escapes, and lists artifacts once', async () => {
+  const sealed = await signedIn(); let artifactCalls = 0;
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/actions/artifacts?per_page=100')) {
+      artifactCalls += 1;
+      return new Response(JSON.stringify({ artifacts: [
+        { id: 1, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2025-02-03T04:05:00Z', workflow_run: { head_branch: '<b>x', head_sha: 'ignored' } },
+        { id: 2, name: 'kicad-review.html', created_at: '2024-01-01T00:00:00Z', workflow_run: { head_branch: 'legacy', head_sha: '123456789' } },
+        { id: 3, name: 'kicad-review-bad.html', created_at: '2026-01-01T00:00:00Z' },
+        { id: 4, name: 'kicad-review-aaaaaaa-bbbbbbb-fail.html', expired: true, created_at: '2026-01-01T00:00:00Z' },
+      ] }));
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.equal(artifactCalls, 1);
+    assert.match(body, /deadbee/); assert.match(body, /cafebad/); assert.match(body, /pass/);
+    assert.match(body, /1234567/); assert.match(body, /\?/); assert.match(body, /&lt;b&gt;x/);
+    assert.doesNotMatch(body, /kicad-review-bad/); assert.doesNotMatch(body, /bbbbbbb/);
+  } finally { restore(); }
+});
+
+test('commit history uses the access repository default and links reviews', async () => {
+  const sealed = await signedIn(); const urls = [];
+  const restore = mockFetch(async (url) => {
+    urls.push(url);
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+    if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
+    if (url.includes('/commits?')) return new Response(JSON.stringify([{ sha: 'deadbeef000', commit: { message: '<script>bad</script>\nmore', author: { name: 'Ada', date: '2025-02-03T04:05:00Z' } } }]));
+    if (url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [{ id: 9, name: 'kicad-review-none-deadbee-pass.html', workflow_run: {} }] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/commits', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.equal(urls.filter((url) => url.endsWith('/repo')).length, 1);
+    assert.ok(urls.some((url) => url.includes('/commits?sha=main&per_page=50')));
+    assert.match(body, /a\/9/); assert.match(body, /&lt;script&gt;bad&lt;\/script&gt;/); assert.doesNotMatch(body, /<script>bad/);
+  } finally { restore(); }
+});
+
+test('unknown commit branch is a 404 and access refusal makes no further calls', async () => {
+  const sealed = await signedIn();
+  let restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+    if (url.includes('/commits?')) return new Response('missing', { status: 404 });
+    if (url.endsWith('/branches?per_page=100') || url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/commits?branch=gone', { headers: { Cookie: `s=${sealed}` } })).status, 404); } finally { restore(); }
+  let calls = 0;
+  restore = mockFetch(async () => { calls += 1; return new Response('denied', { status: 403 }); });
+  try {
+    for (const path of ['/r/Cameronrlewis/repo', '/r/Cameronrlewis/repo/commits']) assert.equal((await call(path, { headers: { Cookie: `s=${sealed}` } })).status, 404);
+    assert.equal(calls, 2);
   } finally { restore(); }
 });
