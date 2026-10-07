@@ -143,3 +143,23 @@ found = detect(commit("HEAD~1"), commit("HEAD"))
 os.chdir(here)
 assert found == [{"dir": "Caméra 2024-01", "name": "cam", "status": "added"}], found
 print("ok")
+
+# 3. macOS archive junk (__MACOSX folders, ._ AppleDouble files) is never a project or a KiCad file.
+import kicad_review
+from kicad_review import projects_at
+assert not is_kicad_file("__MACOSX/Board/._Board.kicad_pcb") and not is_kicad_file("Board/._Board.kicad_sch")
+t = tempfile.mkdtemp()
+os.chdir(t)
+g("init", "-q")
+write(t, {"__MACOSX/B/._B.kicad_pro": "x", "B/._B.kicad_pro": "x", "B/B.kicad_pro": "{}"})
+g("add", "-A"); g("commit", "-q", "-m", "junk")
+found = projects_at(commit("HEAD"))
+os.makedirs("repo"); os.rename("B", "repo/B"); os.rename("__MACOSX", "repo/__MACOSX")
+seen, real = [], kicad_review.release_project
+kicad_review.release_project = lambda pro, *a: seen.append(pro) or []
+kicad_review.cmd_release(type("A", (), {"tag": "v1"}))
+kicad_review.release_project = real
+os.chdir(here)
+assert found == {"B": "B/B.kicad_pro"}, found
+assert seen == ["repo/B/B.kicad_pro"], seen
+print("ok")

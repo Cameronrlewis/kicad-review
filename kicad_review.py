@@ -41,9 +41,14 @@ def commit(rev):
     return None
 
 
+def is_junk(path):
+    """macOS archive leftovers: __MACOSX folders and ._ AppleDouble files look like KiCad files but are not."""
+    return "__MACOSX" in path.split("/") or posixpath.basename(path).startswith("._")
+
+
 def is_kicad_file(path):
     name = posixpath.basename(path)
-    return name.endswith(KICAD_SUFFIXES) or name in KICAD_NAMES
+    return (name.endswith(KICAD_SUFFIXES) or name in KICAD_NAMES) and not is_junk(path)
 
 
 def resolve_revisions(env):
@@ -74,7 +79,7 @@ def projects_at(rev):
     if not rev:
         return {}
     files = git("ls-tree", "-r", "--name-only", rev).splitlines()
-    return {posixpath.dirname(f): f for f in files if f.endswith(".kicad_pro")}
+    return {posixpath.dirname(f): f for f in files if f.endswith(".kicad_pro") and not is_junk(f)}
 
 
 def owner_project(path, project_dirs):
@@ -625,7 +630,7 @@ def cmd_release(args):
     settings = load_settings(("repo",))
     os.makedirs("release", exist_ok=True)
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
-                  if f.endswith(".kicad_pro"))
+                  if f.endswith(".kicad_pro") and not is_junk(posixpath.join(d, f)))
     for pro in pros:
         for f in release_project(pro, args.tag, settings, "release"):
             print(f)
