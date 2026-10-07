@@ -136,6 +136,27 @@ export async function access(request, env, owner, repo) {
   return { s: active, ...(active.setCookie ? { setCookie: active.setCookie } : {}) };
 }
 
+async function artifactReport(env, owner, repo, id, active) {
+  const headers = { Authorization: `Bearer ${active.token}`, 'User-Agent': 'kicad-review-site', 'X-GitHub-Api-Version': '2022-11-28' };
+  const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
+  try {
+    const metadataResponse = await fetch(base, { headers });
+    if (metadataResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, active);
+    const metadata = await metadataResponse.json();
+    if (metadata.expired) return sessionResponse('<!doctype html><p>This review has expired — rerun the workflow</p>', { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
+    if (!metadata.name?.endsWith('.html')) return sessionResponse('Not found', { status: 404 }, active);
+    const zipResponse = await fetch(`${base}/zip`, { headers, redirect: 'manual' });
+    const location = zipResponse.status === 302 ? zipResponse.headers.get('Location') : null;
+    if (!location) return sessionResponse('Not found', { status: 404 }, active);
+    const blobResponse = await fetch(location);
+    if (!blobResponse.ok || !blobResponse.body) return sessionResponse('Not found', { status: 404 }, active);
+    return sessionResponse(blobResponse.body, { headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy': "sandbox allow-scripts allow-popups; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'",
+    } }, active);
+  } catch { return sessionResponse('Not found', { status: 404 }, active); }
+}
+
 function nextPath(value) { return value?.startsWith('/') && !value.startsWith('//') ? value : '/'; }
 
 function stateCookie(next) {
@@ -187,6 +208,14 @@ export default {
         const active = await session(request, env);
         if (!active) return response('<!doctype html><a href="/login">Sign in with GitHub</a>', { headers: { 'Content-Type': 'text/html; charset=utf-8', ...(stored ? { 'Set-Cookie': clear('s') } : {}) } });
         return response(`<!doctype html><p>Signed in as ${escapeHtml(active.login)}</p><form method="post" action="/logout"><button>Sign out</button></form>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...(active.setCookie ? { 'Set-Cookie': active.setCookie } : {}) } });
+      }
+      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)$/);
+      if (request.method === 'GET' && artifactRoute) {
+        const [, owner, repo, id] = artifactRoute;
+        if (!/^\d{1,20}$/.test(id)) return response('Not found', { status: 404 });
+        const allowed = await access(request, env, owner, repo);
+        if (allowed instanceof Response) return allowed;
+        return await artifactReport(env, owner, repo, id, allowed.s);
       }
       const reviewRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)$/);
       if (request.method === 'GET' && reviewRoute) {

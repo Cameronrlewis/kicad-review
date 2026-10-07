@@ -207,3 +207,88 @@ test('review route shows the repository after a pull-access check and refreshes 
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
 });
+
+const reportCsp = "sandbox allow-scripts allow-popups; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'";
+
+test('artifact route streams the signed blob with the sandbox CSP', async () => {
+  const sealed = await signedIn();
+  const blobUrl = 'https://signed.example/secret-report';
+  const seen = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    seen.push([url, options]);
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42/zip') {
+      assert.equal(options.redirect, 'manual');
+      return new Response(null, { status: 302, headers: { Location: blobUrl } });
+    }
+    assert.equal(url, blobUrl);
+    assert.equal(options.headers?.Authorization, undefined);
+    return new Response('<!doctype html><svg></svg>');
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/42', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Content-Security-Policy'), reportCsp);
+    assert.equal(response.headers.get('Location'), null);
+    assert.equal(await response.text(), '<!doctype html><svg></svg>');
+    assert.equal(cookies(response).length, 0);
+    assert.equal(seen.length, 4);
+  } finally { restore(); }
+});
+
+test('artifact redirect URL remains server-side', async () => {
+  const sealed = await signedIn();
+  const blobUrl = 'https://signed.example/very-secret';
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/artifacts/7')) return new Response(JSON.stringify({ name: 'report.html' }));
+    if (url.endsWith('/artifacts/7/zip')) return new Response(null, { status: 302, headers: { Location: blobUrl } });
+    return new Response('<p>review</p>');
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/7', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Location'), null);
+    const body = await response.text();
+    assert.doesNotMatch(body, new RegExp(blobUrl));
+    for (const [, value] of response.headers) assert.doesNotMatch(value, new RegExp(blobUrl));
+  } finally { restore(); }
+});
+
+test('expired artifacts explain how to get a new review', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url.endsWith('/repo')
+    ? new Response(JSON.stringify({ permissions: { pull: true } }))
+    : new Response(JSON.stringify({ name: 'report.html', expired: true })));
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 404);
+    assert.match(await response.text(), /This review has expired — rerun the workflow/);
+  } finally { restore(); }
+});
+
+test('artifact route stops before artifact APIs when repository access fails', async () => {
+  const sealed = await signedIn();
+  let calls = 0;
+  const restore = mockFetch(async (url) => {
+    calls += 1;
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo');
+    return new Response('denied', { status: 403 });
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/9', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 404);
+    assert.equal(calls, 1);
+  } finally { restore(); }
+});
+
+test('artifact route rejects non-numeric IDs without fetching', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/not-a-number');
+    assert.equal(response.status, 404);
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
