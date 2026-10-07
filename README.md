@@ -21,7 +21,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 **The interactive report** is one self-contained HTML file in the run's artifacts. Download it and open it in any browser. It works offline. It offers:
 
 - five comparison modes: Side by side, Overlay (red removed, green added, black unchanged), Wipe, Blend and Semantic (changed objects marked on a faded drawing)
-- pan and zoom; j / k (or the arrow keys) step through changes and violations
+- pan and zoom; j / k step through changes and violations (the arrow keys step too after a click on the drawing)
 - Copy link, which copies the review link with the exact view, and Go to…, which opens a pasted link at that spot
 - per-layer toggles for boards
 - the sheet hierarchy with changed sheets marked
@@ -116,7 +116,7 @@ To refresh the sample, take the data out of any generated report (a CI artifact 
 `detect`, `render` and `report`):
 
 ```sh
-python3 -c "import re; h = open('kicad-review.html').read(); open('ui/sample/review-data.js', 'w').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
+python3 -c "import re; h = open('kicad-review.html', encoding='utf-8').read(); open('ui/sample/review-data.js', 'w', encoding='utf-8').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
 ```
 
 ### Data format

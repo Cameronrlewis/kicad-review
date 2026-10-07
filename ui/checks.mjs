@@ -356,4 +356,14 @@ export const CHECKS = [
     const p = REVIEW_DATA.projects[1], r = p.changes[0], old = r.id; r.id = 'c"><b id=inj>';
     renderPanel(); const bad = !!document.querySelector("#inj"); r.id = old; renderPanel();
     return !bad || "injected";`],
+  ["changes-only mode marks every located change, wires included", "p=0&v=sheet:/&m=semantic", `
+    await new Promise(res => setTimeout(res, 1200));
+    const want = proj().changes.filter(r => onView(r, S.v) && rowBox(r, "head")), w = document.querySelector("#stage .world");
+    const n = w.querySelectorAll(".marker").length;
+    return (want.some(r => r.kind === "wire") && n === want.length) || \`\${n} markers for \${want.length} changes\`;`],
+  ["arrow keys step after a click on the drawing", "p=1", `
+    document.activeElement?.blur(); S.s = null;  // a click on the drawing (a plain div) leaves focus on the body
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await new Promise(res => setTimeout(res, 300));
+    return S.s !== null || "no step; focus on " + document.activeElement.tagName;`],
 ];

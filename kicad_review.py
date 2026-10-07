@@ -26,7 +26,7 @@ SETTINGS_FILE = "kicad-review.toml"
 
 
 def git(*args, check=True):
-    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *args], capture_output=True, text=True)
     if check and r.returncode:
         sys.exit(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout.strip() if r.returncode == 0 else None
@@ -41,9 +41,14 @@ def commit(rev):
     return None
 
 
+def is_junk(path):
+    """macOS archive leftovers: __MACOSX folders and ._ AppleDouble files look like KiCad files but are not."""
+    return "__MACOSX" in path.split("/") or posixpath.basename(path).startswith("._")
+
+
 def is_kicad_file(path):
     name = posixpath.basename(path)
-    return name.endswith(KICAD_SUFFIXES) or name in KICAD_NAMES
+    return (name.endswith(KICAD_SUFFIXES) or name in KICAD_NAMES) and not is_junk(path)
 
 
 def resolve_revisions(env):
@@ -74,7 +79,7 @@ def projects_at(rev):
     if not rev:
         return {}
     files = git("ls-tree", "-r", "--name-only", rev).splitlines()
-    return {posixpath.dirname(f): f for f in files if f.endswith(".kicad_pro")}
+    return {posixpath.dirname(f): f for f in files if f.endswith(".kicad_pro") and not is_junk(f)}
 
 
 def owner_project(path, project_dirs):
@@ -121,15 +126,15 @@ def cmd_detect(args):
     projects = detect(base, head)
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
-    with open("../review/detect.json", "w") as fh:
+    with open("../review/detect.json", "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2)
-    with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
+    with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\n")
     print(f"Comparing {base} -> {head} ({reason})")
     for p in projects:
         print(f"  {p['name']} ({p['dir'] or '.'}, {p['status']})")
     if not projects:  # changed runs get their summary from the summary step
-        with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
+        with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
             fh.write("No KiCad files changed. Nothing to review.\n")
 
 
@@ -146,7 +151,7 @@ def kicad_cli(*args):
 def board_layers(pcb_path):
     """Layer names declared in the board's (layers ...) block, in KiCad order."""
     names, inside = [], False
-    with open(pcb_path) as fh:
+    with open(pcb_path, encoding="utf-8") as fh:
         for line in fh:
             s = line.strip()
             if s == "(layers":
@@ -174,7 +179,7 @@ def render_side(src_dir, name, out):
 
 
 def cmd_render(args):
-    with open("review/detect.json") as fh:
+    with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     for p in det["projects"]:
         for side in ("base", "head"):
@@ -216,19 +221,27 @@ def sheet_pages(proj_dir, name):
     """Schematic pages in hierarchy order: [{path, name, file, parent}]. path is the sheet UUID path."""
     pages = []
 
-    def walk(file, path, sheet_name, parent, depth):
-        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent})
+    # stem: the file name kicad-cli gives the page's SVG, the sheet names along its path joined by "-".
+    def walk(file, path, sheet_name, parent, depth, stem):
+        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem})
         full = posixpath.join(proj_dir, file)
         if depth > 32 or not os.path.exists(full):
             return
-        with open(full) as fh:
+        with open(full, encoding="utf-8") as fh:
             root = parse_sexpr(fh.read())
+        names = set()
         for s in findall(root, "sheet"):
             props = properties(s)
-            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", props.get("Sheetname", "?"), path, depth + 1)
+            child = props.get("Sheetname", "?")
+            if child in names:
+                sys.exit(f"{file} has two sheets with the same name {child!r}; kicad-cli renders both to one file, "
+                         "so neither drawing can be shown. Rename one of them.")
+            names.add(child)
+            safe = re.sub(r"[\\/]", "_", child)
+            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
 
     if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
-        walk(f"{name}.kicad_sch", "/", name, None, 0)
+        walk(f"{name}.kicad_sch", "/", name, None, 0, name)
     return pages
 
 
@@ -304,7 +317,7 @@ def sch_objects(proj_dir, name):
         full = posixpath.join(proj_dir, page["file"])
         if not os.path.exists(full):
             continue
-        with open(full) as fh:
+        with open(full, encoding="utf-8") as fh:
             root = parse_sexpr(fh.read())
         if page["parent"] is None:
             root_uuid = val(root, "uuid")
@@ -357,7 +370,7 @@ def sch_objects(proj_dir, name):
 
 
 def pcb_objects(path):
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())
     net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2}  # older files number their nets
     net = lambda node: (lambda n: net_names.get(n[1], n[-1]) if n else None)(find(node, "net"))
@@ -370,11 +383,14 @@ def pcb_objects(path):
     for n in root[1:]:
         if not isinstance(n, list) or not n:
             continue
-        kind, uid = n[0], val(n, "uuid")
+        kind, uid = n[0], val(n, "uuid") or val(n, "tstamp")  # tstamp: KiCad 7 and older; upgrading keeps the value
         if not uid:
             continue
         if kind == "footprint":
-            props = properties(n)
+            props = {t[1].capitalize(): t[2] for t in findall(n, "fp_text") if t[1] in ("reference", "value")}
+            props.update(Sheetname=val(n, "sheetname"), Sheetfile=val(n, "sheetfile"))  # tokens since KiCad 8, properties before
+            props.update(properties(n))
+            props = {k: v for k, v in props.items() if v}  # an empty field and a missing one are the same
             a = at(n)
             p = {k: v for k, v in props.items() if k != "Reference"}
             p.update({"reference": props.get("Reference", "?"), "footprint": n[1], "layer": val(n, "layer"),
@@ -398,11 +414,11 @@ def pcb_objects(path):
         elif kind == "zone":
             outline = [p for poly in findall(n, "polygon") for p in points(poly)]
             layers = val(n, "layer") or " ".join((find(n, "layers") or [])[1:])
-            objs[uid] = {"kind": "zone", "ref": val(n, "net_name") or "", "where": where,
+            objs[uid] = {"kind": "zone", "ref": net(n) or "", "where": where,
                          "pos": list(outline[0]) if outline else None, "box": box_of(outline, 0),
-                         "props": {"net": val(n, "net_name"), "layers": layers, "name": val(n, "name"),
+                         "props": {"net": net(n), "layers": layers, "name": val(n, "name"),
                                    "priority": val(n, "priority"), "outline": " ".join(fmt_at(p) for p in outline),
-                                   **{f"setting {k}": v for k, v in flatten_sexpr(n, skip=("polygon", "filled_polygon", "uuid", "net", "net_name", "layer", "layers", "name", "priority")).items()}}}
+                                   **{f"setting {k}": v for k, v in flatten_sexpr(n, skip=("polygon", "filled_polygon", "uuid", "tstamp", "net", "net_name", "layer", "layers", "name", "priority")).items()}}}
         elif kind.startswith("gr_") or kind == "dimension":
             layer = val(n, "layer")
             pts = [p for p in (at_xy(n, k) for k in ("start", "end", "center", "mid")) if p] + points(n) or ([tuple(at(n)[:2])] if at(n) else [])
@@ -452,7 +468,7 @@ def flatten_sexpr(node, prefix="", skip=()):
 def pro_objects(path):
     if not os.path.exists(path):
         return {}
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         pro = json.load(fh)
     keep = {"net_settings": pro.get("net_settings")}
     keep["board"] = (pro.get("board") or {}).get("design_settings")
@@ -471,7 +487,7 @@ def project_objects(proj_dir, name):
     objs.update(pro_objects(posixpath.join(proj_dir, f"{name}.kicad_pro")))
     dru = posixpath.join(proj_dir, f"{name}.kicad_dru")
     if os.path.exists(dru):
-        with open(dru) as fh:
+        with open(dru, encoding="utf-8") as fh:
             objs["meta:dru"] = {"kind": "design rules", "ref": f"{name}.kicad_dru", "where": None,
                                 "props": {"custom rules": hashlib.sha1(fh.read().encode()).hexdigest()[:10]}}
     return objs
@@ -578,13 +594,13 @@ POS_COLUMNS = {"Ref": "Designator", "Val": "Val", "Package": "Package", "PosX": 
 FAB_LAYER = re.compile(r"\.(Cu|Mask|SilkS|Paste)$|^Edge\.Cuts$")
 
 
-def release_project(pro_path, tag, settings, out_dir):
+def release_project(pro_path, tag, settings, out_dir, label):
     src, name = posixpath.dirname(pro_path), posixpath.basename(pro_path)[: -len(".kicad_pro")]
     preset_name = settings["fabrication"]["preset"]
     preset = PRESETS[preset_name]
     part = settings["fabrication"].get("part_field") or preset["part_field"]
     pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
-    stem = f"{out_dir}/{name}-{tag}-{preset_name}"
+    stem = f"{out_dir}/{label}-{tag}-{preset_name}"
     made = []
     if os.path.exists(pcb):
         work = tempfile.mkdtemp()
@@ -597,7 +613,7 @@ def release_project(pro_path, tag, settings, out_dir):
                 z.write(f"{work}/{f}", f)
         kicad_cli("pcb", "export", "pos", "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
                   "-o", f"{work}/pos.csv", pcb)
-        with open(f"{work}/pos.csv", newline="") as fh, open(f"{stem}-positions.csv", "w", newline="") as out:
+        with open(f"{work}/pos.csv", newline="", encoding="utf-8") as fh, open(f"{stem}-positions.csv", "w", newline="", encoding="utf-8") as out:
             rows = list(csv.reader(fh))
             w = csv.writer(out)
             w.writerow([POS_COLUMNS.get(h, h) for h in rows[0]])
@@ -617,9 +633,13 @@ def cmd_release(args):
     settings = load_settings(("repo",))
     os.makedirs("release", exist_ok=True)
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
-                  if f.endswith(".kicad_pro"))
+                  if f.endswith(".kicad_pro") and not is_junk(posixpath.join(d, f)))
+    names = [posixpath.basename(p) for p in pros]
     for pro in pros:
-        for f in release_project(pro, args.tag, settings, "release"):
+        label = posixpath.basename(pro)[: -len(".kicad_pro")]
+        if names.count(posixpath.basename(pro)) > 1 and posixpath.dirname(pro) != "repo":  # keep same-named projects apart
+            label = posixpath.dirname(pro)[len("repo/"):].replace("/", "-") + "-" + label
+        for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
 
 
@@ -635,7 +655,7 @@ def load_violations(path, kind):
     """ERC/DRC JSON as a flat list of errors and warnings. kind: erc, drc or parity."""
     if not os.path.exists(path):
         return None
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         d = json.load(fh)
     out = []
     if kind == "erc":
@@ -705,7 +725,12 @@ def run_check(name, settings, head, base):
 
 def project_checks(p, settings, objs):
     out = f"review/{project_id(p['dir'])}"
-    side = lambda s, f, k: load_violations(f"{out}/{s}/{f}", k)
+
+    def side(s, f, k):
+        src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
+        if os.path.exists(src) and not os.path.exists(f"{out}/{s}/{f}"):  # never drop a check because its output is missing
+            sys.exit(f"kicad-cli wrote no {f} for {src}")
+        return load_violations(f"{out}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
@@ -718,20 +743,18 @@ def project_checks(p, settings, objs):
 
 
 def page_svg(out_dir, name, page):
-    """The SVG kicad-cli wrote for a page: <project>.svg for the root, <project>-<sheet name>.svg otherwise."""
-    if page["parent"] is None:
-        return f"{out_dir}/sch/{name}.svg"
-    for candidate in (page["name"], re.sub(r'[\\/:*?"<>|]', "_", page["name"])):
-        if os.path.exists(f"{out_dir}/sch/{name}-{candidate}.svg"):
-            return f"{out_dir}/sch/{name}-{candidate}.svg"
-    return None  # ponytail: two sheets with the same name collide in kicad-cli output; first one wins
+    """The SVG kicad-cli wrote for a page: <project>-<sheet>-<subsheet>....svg, <project>.svg for the root."""
+    path = f"{out_dir}/sch/{page['stem']}.svg"
+    if not os.path.exists(path):  # never show a page as unchanged because its drawing is missing
+        sys.exit(f"kicad-cli wrote no drawing for sheet {page['name']!r} (expected {path})")
+    return path
 
 
 def svg_body(path):
     """SVG text without the export timestamp, so identical drawings compare equal."""
     if not path or not os.path.exists(path):
         return None
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return re.sub(r"<title>.*?</title>", "", fh.read(), count=1, flags=re.S)
 
 
@@ -765,6 +788,7 @@ def build_project(p, blobs, settings):
     sheets = []
     for pg in pages.values():
         texts = pg.pop("svg")
+        del pg["stem"]
         b, h = texts.get("base"), texts.get("head")
         pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
         if pg["status"] != "unchanged":
@@ -835,7 +859,7 @@ def inline_page(data_js):
 
 
 def cmd_report(args):
-    with open("review/detect.json") as fh:
+    with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     blobs = {}
     env = os.environ
@@ -850,16 +874,16 @@ def cmd_report(args):
     data["projects"] = [build_project(p, blobs, data["settings"]) for p in det["projects"]]
     assign_ids(data["projects"])
     data["blobs"] = blobs
-    payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
+    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
-    with open("review/kicad-review.html", "w") as fh:
+    with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
     del data["blobs"]
-    with open("review/data.json", "w") as fh:
+    with open("review/data.json", "w", encoding="utf-8") as fh:
         json.dump(data, fh)
     failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
-    with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
+    with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
 
 
@@ -873,8 +897,16 @@ def plural(n, word):
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
+def md(v):
+    """Text from a KiCad file as literal markdown: no HTML, images, links, emphasis or @mentions.
+    Bare URLs (datasheets) stay as GitHub shows them, a visible auto-link, since escapes would end up inside the link."""
+    v = str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return "".join(part if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
+                   for i, part in enumerate(re.split(r"((?:https?://|www\.)[^\s<>]+)", v))).replace("|", "\\|")
+
+
 def refs(rows, limit=3):
-    names = [r["ref"] for r in rows if r["ref"]]
+    names = [md(r["ref"]) for r in rows if r["ref"]]
     return f" ({', '.join(names[:limit])}{', …' if len(names) > limit else ''})" if names else ""
 
 
@@ -891,7 +923,7 @@ def summary_sentence(p):
     for ref, c in values:
         if ref not in seen and len(seen) < 5:
             seen.add(ref)
-            parts.append(f"{ref} value {c[1] or '—'} → {c[2] or '—'}")
+            parts.append(f"{md(ref)} value {md(c[1] or '—')} → {md(c[2] or '—')}")
     if len({v[0] for v in values}) > 5:
         parts.append(f"{len({v[0] for v in values}) - 5} more value changes")
     swapped = [r for r in mod("symbol") + mod("footprint") if changed(r, "Footprint") or changed(r, "footprint")]
@@ -922,15 +954,15 @@ def summary_sentence(p):
 def cell(v):
     v = "—" if v in (None, "") else str(v)
     v = v if len(v) <= 60 else v[:57] + "…"
-    return v.replace("|", "\\|").replace("\n", " ")
+    return md(v.replace("\n", " "))
 
 
-def changes_markdown(p):
+def changes_markdown(p, limit=60):
     rows = [r for r in p["changes"] if r["kind"] in TABLE_KINDS]
     if not rows:
         return []
     lines = ["| Change | Object | Ref | Details |", "|---|---|---|---|"]
-    for r in rows[:60]:
+    for r in rows[:limit]:
         if r.get("changes"):
             det = "<br>".join(f"{cell(k)}: {cell(a)} → {cell(b)}" for k, a, b in r["changes"][:6])
             if len(r["changes"]) > 6:
@@ -938,12 +970,12 @@ def changes_markdown(p):
         else:
             det = ", ".join(f"{k}: {cell(r['props'][k])}" for k in ("Value", "Footprint", "footprint", "net", "layer", "text") if r["props"].get(k))
         lines.append(f"| {r['action']} | {r['kind']} | {cell(r['ref'])} | {det or '—'} |")
-    if len(rows) > 60:
-        lines.append(f"| … | | | {len(rows) - 60} more rows in the report |")
+    if len(rows) > limit:
+        lines.append(f"| … | | | {len(rows) - limit} more rows in the report |")
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id=""):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -955,14 +987,14 @@ def comment_markdown(data, images, artifact_url, artifact_id=""):
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
                 "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
-        out += ["", f"### {p['name']}" + (f" (`{p['dir']}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
+        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'")}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
         shots = [s for s in images if s["project"] == i]
         if shots:
             out += [""]
             for s in shots:
-                out += [f"**{s['title']}**", "", f"![{s['title']}: before and after]({s['url']})", ""]
-        table = changes_markdown(p)
+                out += [f"**{md(s['title'])}**", "", f"![{md(s['title'])}: before and after]({s['url']})", ""]
+        table = changes_markdown(p, rows)
         other = {k: sum(1 for r in p["changes"] if r["kind"] == k) for k in ("track", "via", "wire", "bus", "junction", "no connect", "power symbol", "graphic")}
         other = ", ".join(plural(n, k) for k, n in other.items() if n)
         if table:
@@ -972,11 +1004,13 @@ def comment_markdown(data, images, artifact_url, artifact_id=""):
             out += ["</details>"]
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
-    out.append(checks_markdown(data))
-    body = "\n".join(out)
-    if len(body) > 60000:  # GitHub comments are limited to 65536 characters
-        body = body[:60000] + "\n\n… truncated. The full list is in the report.\n"
-    return body
+    body, checks = "\n".join(out), checks_markdown(data)
+    if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
+        if rows:
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2)
+        body = body[:60000 - len(checks)] + "\n\n… truncated. The full list is in the report.\n"
+        body += "\n</details>" * (body.count("<details") - body.count("</details>"))
+    return body + "\n" + checks
 
 
 def shot_list(data, limit=8):
@@ -994,7 +1028,7 @@ def shot_list(data, limit=8):
 
 
 def cmd_shots(args):
-    with open(f"review/data.json") as fh:
+    with open(f"review/data.json", encoding="utf-8") as fh:
         data = json.load(fh)
     os.makedirs(f"review/images", exist_ok=True)
     report = os.path.abspath(f"review/kicad-review.html")
@@ -1008,22 +1042,22 @@ def cmd_shots(args):
             done.append(s)
         else:
             print(f"::warning::Screenshot of {s['title']} failed: {r.stderr[-300:]}")
-    with open(f"review/images/shots.json", "w") as fh:
+    with open(f"review/images/shots.json", "w", encoding="utf-8") as fh:
         json.dump(done, fh, indent=2)
     print(f"{len(done)} screenshot(s)")
 
 
 def cmd_summary(args):
-    with open(f"review/data.json") as fh:
+    with open(f"review/data.json", encoding="utf-8") as fh:
         data = json.load(fh)
     images = []
     if args.image_base and os.path.exists(f"review/images/shots.json"):
-        with open(f"review/images/shots.json") as fh:
+        with open(f"review/images/shots.json", encoding="utf-8") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
     body = comment_markdown(data, images, args.artifact_url, args.artifact_id)
-    with open(f"review/comment.md", "w") as fh:
+    with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
-    with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
+    with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
 
@@ -1032,13 +1066,13 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {p['name']} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
+            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error"]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
-        lines += [f"- **{n}** {t}: {v['description']}" + (f" ({'; '.join(v['items'][:2])})" if v["items"] else "")
+        lines += [f"- **{md(n)}** {t}: {md(v['description'])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
     return "\n".join(lines) + "\n"
@@ -1065,6 +1099,7 @@ def main():
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
     args = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale
     args.func(args)
 
 
