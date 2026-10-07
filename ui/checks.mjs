@@ -44,4 +44,17 @@ export const CHECKS = [
       gesture(); setT({ x: S.x + 0.3, z: S.z * (f < 60 ? 1.02 : 1 / 1.02) }); }
     t.sort((a, b) => a - b); console.log("p95", t[114]); return t[114] <= 20;`],
   ["hash without p keeps its other params", "v=board", `return S.p === 0 && S.v === "board";`],
+  ["fit frames all drawn content in every pane", "p=1&v=board", `
+    await new Promise(r => setTimeout(r, 2500));
+    const bad = [];
+    for (const vp of document.querySelectorAll("#stage .vp")) {
+      const R = vp.getBoundingClientRect();
+      for (const l of vp.querySelectorAll(".layer")) {
+        let u = null;
+        for (const g of l.querySelectorAll("svg > g")) { const r = g.getBoundingClientRect(); if (!r.width && !r.height) continue;
+          u = u ? [Math.min(u[0], r.left), Math.min(u[1], r.top), Math.max(u[2], r.right), Math.max(u[3], r.bottom)] : [r.left, r.top, r.right, r.bottom]; }
+        if (u && (u[0] < R.left - 1 || u[1] < R.top - 1 || u[2] > R.right + 1 || u[3] > R.bottom + 1)) bad.push(l.dataset.layer + " " + u.map(Math.round) + " in " + [R.left, R.top, R.right, R.bottom].map(Math.round));
+      }
+    }
+    return bad.length ? bad.slice(0, 3).join(" ; ") : document.querySelectorAll("#stage .layer").length > 0;`],
 ];

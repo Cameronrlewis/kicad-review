@@ -190,12 +190,19 @@ function attachPanZoom(vp) {
       if (moved < 4 && typeof pickAt === "function") pickAt(vp, ev); }, { once: true });
   });
 }
-function contentBox() {
+function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
+  const v = currentView();
   let b = null;
   for (const svg of document.querySelectorAll("#stage svg")) {
-    try { const r = svg.getBBox(); if (!r.width && !r.height) continue;
-      b = b ? [Math.min(b[0], r.x), Math.min(b[1], r.y), Math.max(b[2], r.x + r.width), Math.max(b[3], r.y + r.height)]
-            : [r.x, r.y, r.x + r.width, r.y + r.height]; } catch {}
+    const R = svg.getBoundingClientRect();
+    if (!v || !R.width) continue;
+    const kx = v.size[0] / R.width, ky = v.size[1] / R.height;
+    for (const g of svg.querySelectorAll(":scope > g")) {
+      const r = g.getBoundingClientRect();
+      if (!r.width && !r.height) continue;
+      const q = [(r.left - R.left) * kx, (r.top - R.top) * ky, (r.right - R.left) * kx, (r.bottom - R.top) * ky];
+      b = b ? [Math.min(b[0], q[0]), Math.min(b[1], q[1]), Math.max(b[2], q[2]), Math.max(b[3], q[3])] : q;
+    }
   }
   return b;
 }
