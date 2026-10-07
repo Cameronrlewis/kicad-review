@@ -67,14 +67,15 @@ jobs:
           fi
           git worktree list
 
-      - name: Render both revisions
+      - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'
         run: |
           time docker pull -q "$KICAD_IMAGE"
           docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
             python3 tools/kicad_review.py render
 
-      - name: Build comparison report
+      - name: Build comparison report and checks
+        id: report
         if: steps.detect.outputs.changed == 'true'
         run: python3 tools/kicad_review.py report
 
@@ -85,3 +86,11 @@ jobs:
           name: kicad-review
           path: review/kicad-review.html
           retention-days: 14
+
+      - name: Fail on required checks
+        if: steps.report.outputs.failed != ''
+        env:
+          FAILED: ${{ steps.report.outputs.failed }}
+        run: |
+          echo "::error::Required checks failed: $FAILED"
+          exit 1

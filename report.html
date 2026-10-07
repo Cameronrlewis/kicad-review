@@ -59,6 +59,10 @@
   #changes tr.r.sel { background:#ddf4ff; }
   .a-added { color:var(--add); } .a-removed { color:var(--del); } .a-modified { color:var(--mod); }
   .chg { font-family:ui-monospace, monospace; font-size:12px; }
+  #changes .tab { border:1px solid var(--line); background:#fff; border-radius:6px; padding:3px 9px; cursor:pointer; font-weight:600; }
+  #changes .tab.on { background:#eef1f4; }
+  .new { font-size:11px; padding:0 5px; border-radius:8px; background:var(--del); color:#fff; }
+  .sev-error { color:var(--del); } .sev-warning { color:var(--mod); }
   .chg del { color:var(--del); text-decoration:none; } .chg ins { color:var(--add); text-decoration:none; }
 </style>
 </head>
@@ -87,8 +91,8 @@
     <div id="stage"><div id="msg">Loading…</div></div>
     <div id="regions"></div>
     <section id="changes">
-      <div class="bar"><b>Object changes</b><select id="kind"></select><input id="q" type="search" placeholder="Filter: R12, GND, Value…"><span id="count"></span></div>
-      <table><thead><tr><th>Change</th><th>Object</th><th>Reference</th><th>Details</th></tr></thead><tbody id="rows"></tbody></table>
+      <div class="bar"><button class="tab" data-tab="changes">Object changes</button><button class="tab" data-tab="checks">Checks</button><select id="kind"></select><input id="q" type="search" placeholder="Filter: R12, GND, Value…"><span id="count"></span></div>
+      <table><thead id="thead"></thead><tbody id="rows"></tbody></table>
     </section>
   </main>
 </div>
@@ -399,7 +403,37 @@ function details(r) {
   if (r.changes) return r.changes.map(([k, a, b]) => `${esc(k)}: <del>${esc(cut(a))}</del> → <ins>${esc(cut(b))}</ins>`).join("<br>");
   return SUMMARY_PROPS.filter(k => r.props[k]).map(k => `${esc(k)}: ${esc(cut(r.props[k]))}`).join(", ");
 }
+function checkRows() {
+  const p = proj();
+  return p.checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title, kind: c.title })));
+}
+function renderChecks() {
+  const p = proj(), kind = $("#kind").value, q = $("#q").value.toLowerCase();
+  $("#thead").innerHTML = "<tr><th>Check</th><th>Severity</th><th></th><th>Description</th><th>Items</th></tr>";
+  const all = S.checkRows, rows = all.filter(v => (!kind || v.check === kind) && (!q || JSON.stringify(v).toLowerCase().includes(q)));
+  $("#count").textContent = `${rows.length} of ${all.length}`;
+  const tb = $("#rows"); tb.innerHTML = "";
+  for (const v of rows.slice(0, 2000)) {
+    const tr = document.createElement("tr");
+    tr.className = "r" + (v === S.selRow ? " sel" : "");
+    tr.innerHTML = `<td>${esc(v.check)}</td><td class="sev-${v.severity}">${v.severity}</td><td>${v.new ? '<span class="new">new</span>' : ""}</td>` +
+      `<td>${esc(v.description)}</td><td class="chg">${v.items.map(esc).join("<br>")}</td>`;
+    tr.onclick = () => goTo(v);
+    tb.appendChild(tr);
+  }
+}
+function setTab(t) {
+  S.tab = t;
+  document.querySelectorAll("#changes .tab").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  const p = proj(), src = t === "checks" ? p.checks.map(c => [c.title, c.violations.length]) :
+    [...new Set(p.changes.map(r => r.kind))].map(k => [k, p.changes.filter(r => r.kind === k).length]);
+  const total = t === "checks" ? S.checkRows.length : p.changes.length;
+  $("#kind").innerHTML = `<option value="">All (${total})</option>` + src.map(([k, n]) => `<option value="${esc(k)}">${esc(k)} (${n})</option>`).join("");
+  renderRows();
+}
 function renderRows() {
+  if (S.tab === "checks") return renderChecks();
+  $("#thead").innerHTML = "<tr><th>Change</th><th>Object</th><th>Reference</th><th>Details</th></tr>";
   const p = proj(), kind = $("#kind").value, q = $("#q").value.toLowerCase();
   const rows = p.changes.filter(r => (!kind || r.kind === kind) &&
     (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
@@ -432,9 +466,11 @@ function openProject(i) {
   const p = proj();
   S.layersOn = new Set(p.board.layers.filter(l => DEFAULT_LAYERS.test(l.name)).map(l => l.name));
   S.selRow = null;
-  const kinds = [...new Set(p.changes.map(r => r.kind))];
-  $("#kind").innerHTML = `<option value="">All objects (${p.changes.length})</option>` +
-    kinds.map(k => `<option value="${esc(k)}">${esc(k)} (${p.changes.filter(r => r.kind === k).length})</option>`).join("");
+  S.checkRows = checkRows();
+  document.querySelector('#changes [data-tab="checks"]').textContent =
+    `Checks (${p.checks.filter(c => c.status === "fail").length ? "❌" : "✅"} ${S.checkRows.filter(v => v.new).length} new)`;
+  document.querySelector('#changes [data-tab="changes"]').textContent = `Object changes (${p.changes.length})`;
+  setTab(S.tab || "changes");
   const first = p.sheets.find(s => s.status !== "unchanged");
   select(first ? { kind: "sheet", path: first.path } : p.board.changed ? { kind: "board" } : null);
 }
@@ -448,6 +484,7 @@ function init() {
   document.querySelectorAll("#toolbar [data-mode]").forEach(b => b.onclick = () => { S.mode = b.dataset.mode; draw(); });
   $("#fit").onclick = fit;
   $("#kind").onchange = renderRows;
+  document.querySelectorAll("#changes .tab").forEach(b => b.onclick = () => setTab(b.dataset.tab));
   $("#q").oninput = renderRows;
   // Deep links: #project=1&mode=overlay&item=board
   const h = new URLSearchParams(location.hash.slice(1));
@@ -455,7 +492,8 @@ function init() {
   if (!D.projects.length) { $("#msg").textContent = "No KiCad projects changed."; return; }
   openProject(Math.min(+h.get("project") || 0, D.projects.length - 1));
   if (h.get("item") === "board" && proj().board.changed) select({ kind: "board" });
-  if (h.get("row")) goTo(proj().changes[+h.get("row")]);
+  if (h.get("tab") === "checks") setTab("checks");
+  if (h.get("row")) goTo((S.tab === "checks" ? S.checkRows : proj().changes)[+h.get("row")]);
 }
 init();
 </script>

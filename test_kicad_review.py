@@ -25,3 +25,16 @@ n = parse_sexpr('(a (b "x \\"y\\" z") (c 1 2))')
 assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]
 assert flatten({"classes": [{"name": "Power", "w": 1}, {"name": "Default", "w": 2}]}) == {"classes.Power.w": "1", "classes.Power.name": "Power", "classes.Default.w": "2", "classes.Default.name": "Default"}
 print("ok")
+
+# Checks: a violation is new only if neither its item UUIDs nor its type/items/position match the base.
+from kicad_review import run_check, DEFAULT_SETTINGS
+V = lambda t, sev, uu, pos, items=("Pad 1 of R1",): {"type": t, "severity": sev, "description": f"{t} 0.1 mm", "items": list(items),
+                                                     "uuids": uu, "pos": pos, "box": None, "where": {"board": True}}
+base = [V("clearance", "error", ["a", "b"], [1, 1]), V("silk_overlap", "warning", [], [5, 5])]
+head = [V("clearance", "error", ["a", "b"], [9, 9]),        # same items moved: not new
+        V("silk_overlap", "warning", [], [5.04, 5]),        # no UUIDs, same place: not new
+        V("clearance", "error", ["c"], [2, 2])]              # new error
+c = run_check("drc", DEFAULT_SETTINGS, head, base)
+assert (c["errors"], c["new_errors"], c["new_warnings"], c["status"]) == (2, 1, 0, "fail"), c
+assert run_check("drc", {**DEFAULT_SETTINGS, "checks": {"drc": "informational"}}, head, base)["status"] == "warn"
+print("ok")

@@ -14,6 +14,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import tomllib
 
 ZERO_SHA = "0" * 40
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
@@ -167,18 +168,21 @@ def board_layers(pcb_path):
 
 
 def render_side(src_dir, name, out):
-    """SVG renders of one revision of one project. Returns {"sch": [...], "pcb": [...]} of paths relative to out."""
+    """SVG renders, ERC and DRC reports of one revision of one project. Returns {"sch": [...], "pcb": [...]} of paths relative to out."""
     files = {"sch": [], "pcb": []}
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
         kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
         files["sch"] = sorted(f"sch/{f}" for f in os.listdir(f"{out}/sch"))
+        kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
     if os.path.exists(pcb):
         # Drill marks off: with them every layer, even an empty one, is full of holes.
         # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
         kicad_cli("pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1",
                   "--drill-shape-opt", "0", "-l", ",".join(board_layers(pcb)), "-o", f"{out}/pcb", pcb)
         files["pcb"] = sorted(f"pcb/{f}" for f in os.listdir(f"{out}/pcb"))
+        parity = ["--schematic-parity"] if os.path.exists(sch) else []
+        kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
     return files
 
 
@@ -533,6 +537,134 @@ def natural(s):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s or "")]
 
 
+# ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
+
+DEFAULT_SETTINGS = {
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
+    "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
+    "bom": {"required_fields": ["Value", "Footprint"]},
+    "fabrication": {"preset": "jlcpcb"},
+}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
+
+
+def load_settings():
+    """Repository settings from kicad-review.toml. The base revision's copy wins, so a change cannot relax its own checks."""
+    settings = json.loads(json.dumps(DEFAULT_SETTINGS))
+    for side in ("base", "head"):
+        path = f"{side}/{SETTINGS_FILE}"
+        if os.path.exists(path):
+            with open(path, "rb") as fh:
+                user = tomllib.load(fh)
+            for k, v in user.items():
+                if isinstance(v, dict) and isinstance(settings.get(k), dict):
+                    settings[k].update(v)
+                else:
+                    settings[k] = v
+            settings["source"] = f"{SETTINGS_FILE} ({side} revision)"
+            break
+    for name, level in settings["checks"].items():
+        if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
+            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
+    if settings["fail_on"] not in ("new", "all"):
+        sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
+    return settings
+
+
+def violation(v, scale, where):
+    items = v.get("items", [])
+    pos = [[round(i["pos"]["x"] * scale, 4), round(i["pos"]["y"] * scale, 4)] for i in items if "pos" in i]
+    return {"type": v["type"], "severity": v["severity"], "description": v["description"],
+            "items": [i.get("description", "") for i in items], "uuids": sorted(i["uuid"] for i in items if i.get("uuid")),
+            "pos": pos[0] if pos else None, "box": box_of(pos, 1.5), "where": where}
+
+
+def load_violations(path, kind):
+    """ERC/DRC JSON as a flat list of errors and warnings. kind: erc, drc or parity."""
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        d = json.load(fh)
+    out = []
+    if kind == "erc":
+        for sheet in d.get("sheets", []):
+            parts = sheet.get("uuid_path", "/").strip("/").split("/")[1:]  # drop the root sheet UUID
+            page = "/" + "".join(f"{p}/" for p in parts)
+            # ponytail: kicad-cli 10 writes ERC positions in units of 100 mm; DRC positions are mm
+            out += [violation(v, 100, {"sheet": page}) for v in sheet.get("violations", [])]
+    else:
+        for key in (("violations", "unconnected_items") if kind == "drc" else ("schematic_parity",)):
+            out += [violation(v, 1, {"board": True}) for v in d.get(key, [])]
+    out = [v for v in out if v["severity"] in ("error", "warning")]
+    # Unconnected items are ratsnest edges; moving one pad re-pairs them. Match by count per net instead of by pair.
+    seen = {}
+    for v in out:
+        if v["type"] == "unconnected_items":
+            nets = tuple(sorted({n for i in v["items"] for n in re.findall(r"\[([^\]]*)\]", i)}))
+            seen[nets] = seen.get(nets, 0) + 1
+            v["key"] = ("unconnected", nets, seen[nets])
+    return out
+
+
+def bom_violations(objs, fields):
+    out = []
+    for o in objs.values():
+        p = o["props"]
+        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+            continue
+        missing = [f for f in fields if (p.get(f) or "").strip() in ("", "~")]
+        if missing and not o["ref"].split(" unit ")[0] in {v["ref"] for v in out}:
+            out.append({"type": "missing_fields", "severity": "error", "ref": o["ref"].split(" unit ")[0],
+                        "description": f"{o['ref'].split(' unit ')[0]} has no {', '.join(missing)}",
+                        "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
+                        "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
+    return out
+
+
+def vkeys(v):
+    """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
+    if v.get("key"):
+        return {v["key"]}
+    desc = re.sub(r"[\d.]+", "#", v["description"])
+    keys = {("p", v["type"], desc, tuple(v["items"]), tuple(tuple(round(c, 1) for c in p) for p in ([v["pos"]] if v["pos"] else [])))}
+    if v["uuids"]:
+        keys.add(("u", v["type"], tuple(v["uuids"])))
+    return keys
+
+
+def run_check(name, settings, head, base):
+    level = settings["checks"].get(name, "off")
+    if level == "off" or head is None:
+        return None
+    base_keys = set().union(*(vkeys(v) for v in base or []))
+    head_keys = set().union(*(vkeys(v) for v in head))
+    for v in head:
+        v["new"] = not (vkeys(v) & base_keys)
+    count = lambda sev, new=False: sum(1 for v in head if v["severity"] == sev and (v["new"] or not new))
+    failing = count("error", new=settings["fail_on"] == "new") > 0
+    head.sort(key=lambda v: (not v["new"], v["severity"] != "error", v["type"]))
+    return {"name": name, "title": CHECK_NAMES[name], "level": level,
+            "status": "pass" if not failing else "fail" if level == "required" else "warn",
+            "errors": count("error"), "warnings": count("warning"),
+            "new_errors": count("error", True), "new_warnings": count("warning", True),
+            "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
+            "violations": head}
+
+
+def project_checks(p, review_dir, settings, objs):
+    out = f"{review_dir}/{project_id(p['dir'])}"
+    side = lambda s, f, k: load_violations(f"{out}/{s}/{f}", k)
+    fields = settings["bom"]["required_fields"]
+    checks = [
+        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
+        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
+        run_check("parity", settings, side("head", "drc.json", "parity"), side("base", "drc.json", "parity")),
+        run_check("bom", settings, bom_violations(objs["head"], fields) if objs["head"] else None,
+                  bom_violations(objs["base"], fields) if objs["base"] else None),
+    ]
+    return [c for c in checks if c]
+
+
 def page_svg(out_dir, name, page):
     """The SVG kicad-cli wrote for a page: <project>.svg for the root, <project>-<sheet name>.svg otherwise."""
     if page["parent"] is None:
@@ -572,7 +704,7 @@ class Blobs(dict):
         return key
 
 
-def build_project(p, review_dir, blobs):
+def build_project(p, review_dir, blobs, settings):
     out = f"{review_dir}/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -604,8 +736,9 @@ def build_project(p, review_dir, blobs):
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
         board["layers"] = [{"name": l["name"], "svg": {"base": blobs.add(l["base"]), "head": blobs.add(l["head"])}}
                            for l in layers]
-    changes = diff_objects(*(project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")))
-    return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board, "changes": changes}
+    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, review_dir, settings, objs)}
 
 
 def cmd_report(args):
@@ -618,8 +751,9 @@ def cmd_report(args):
         "run_url": f"{env.get('GITHUB_SERVER_URL', '')}/{env.get('GITHUB_REPOSITORY', '')}/actions/runs/{env.get('GITHUB_RUN_ID', '')}"
                    if env.get("GITHUB_RUN_ID") else "",
         "base": det["base"], "head": det["head"], "reason": det["reason"],
-        "projects": [build_project(p, args.review, blobs) for p in det["projects"]],
+        "settings": load_settings(),
     }
+    data["projects"] = [build_project(p, args.review, blobs, data["settings"]) for p in det["projects"]]
     data["blobs"] = blobs
     with open(posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "report.html")) as fh:
         template = fh.read()
@@ -627,6 +761,32 @@ def cmd_report(args):
     with open(args.out, "w") as fh:
         fh.write(html)
     print(f"{args.out}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
+    summary = checks_markdown(data)
+    with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
+        fh.write(summary)
+    print(summary)
+    failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
+        fh.write(f"failed={', '.join(failed)}\n")
+
+
+STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
+
+
+def checks_markdown(data):
+    lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
+    for p in data["projects"]:
+        for c in p["checks"]:
+            lines.append(f"| {p['name']} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
+                         f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
+    news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
+            if v["new"] and v["severity"] == "error"]
+    if news:
+        lines += ["", "<details><summary>New errors</summary>", ""]
+        lines += [f"- **{n}** {t}: {v['description']}" + (f" ({'; '.join(v['items'][:2])})" if v["items"] else "")
+                  for n, t, v in news[:50]]
+        lines += ["", "</details>"]
+    return "\n".join(lines) + "\n"
 
 
 def main():
