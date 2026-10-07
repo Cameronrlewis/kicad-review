@@ -279,3 +279,15 @@ except SystemExit as e:
 finally:
     os.chdir(here)
 print("ok")
+
+# Minor: two projects with one file name get release files that do not overwrite each other.
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {"repo/a/B.kicad_pro": "{}", "repo/b/x/B.kicad_pro": "{}", "repo/c/C.kicad_pro": "{}"})
+seen = []
+kicad_review.release_project = lambda pro, tag, s, out, label=None: seen.append(label) or []
+kicad_review.cmd_release(type("A", (), {"tag": "v1"}))
+kicad_review.release_project = real
+os.chdir(here)
+assert seen == ["a-B", "b-x-B", "C"], seen
+print("ok")

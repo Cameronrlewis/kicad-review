@@ -594,13 +594,13 @@ POS_COLUMNS = {"Ref": "Designator", "Val": "Val", "Package": "Package", "PosX": 
 FAB_LAYER = re.compile(r"\.(Cu|Mask|SilkS|Paste)$|^Edge\.Cuts$")
 
 
-def release_project(pro_path, tag, settings, out_dir):
+def release_project(pro_path, tag, settings, out_dir, label):
     src, name = posixpath.dirname(pro_path), posixpath.basename(pro_path)[: -len(".kicad_pro")]
     preset_name = settings["fabrication"]["preset"]
     preset = PRESETS[preset_name]
     part = settings["fabrication"].get("part_field") or preset["part_field"]
     pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
-    stem = f"{out_dir}/{name}-{tag}-{preset_name}"
+    stem = f"{out_dir}/{label}-{tag}-{preset_name}"
     made = []
     if os.path.exists(pcb):
         work = tempfile.mkdtemp()
@@ -634,8 +634,12 @@ def cmd_release(args):
     os.makedirs("release", exist_ok=True)
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
                   if f.endswith(".kicad_pro") and not is_junk(posixpath.join(d, f)))
+    names = [posixpath.basename(p) for p in pros]
     for pro in pros:
-        for f in release_project(pro, args.tag, settings, "release"):
+        label = posixpath.basename(pro)[: -len(".kicad_pro")]
+        if names.count(posixpath.basename(pro)) > 1 and posixpath.dirname(pro) != "repo":  # keep same-named projects apart
+            label = posixpath.dirname(pro)[len("repo/"):].replace("/", "-") + "-" + label
+        for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
 
 
