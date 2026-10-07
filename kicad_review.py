@@ -983,9 +983,9 @@ def shot_list(data, limit=8):
         for pg in p["sheets"]:
             if pg["status"] != "unchanged":
                 shots.append({"project": i, "title": f"{p['name']}: sheet {pg['name']}",
-                              "hash": f"project={i}&sheet={pg['path']}", "file": f"p{i}-sheet-{len(shots)}.png"})
+                              "hash": f"p={i}&v=sheet:{pg['path']}", "file": f"p{i}-sheet-{len(shots)}.png"})
         if p["board"]["changed"]:
-            shots.append({"project": i, "title": f"{p['name']}: board", "hash": f"project={i}&item=board",
+            shots.append({"project": i, "title": f"{p['name']}: board", "hash": f"p={i}&v=board",
                           "file": f"p{i}-board.png"})
     return shots[:limit]
 

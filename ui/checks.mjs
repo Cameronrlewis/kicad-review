@@ -182,4 +182,30 @@ export const CHECKS = [
     });})();
     c0.violations = keep; renderPanel();
     return res;`],
+  ["state round-trips through the address", "", `
+    const s = { p: 1, v: "board", m: "wipe", x: 158.8, y: 78.2, z: 12, s: "c5", t: "checks", layers: ["F_Cu", "Edge_Cuts"] };
+    const back = decodeState(encodeState(s));
+    return Object.keys(s).every(k => JSON.stringify(back[k]) === JSON.stringify(s[k]));`],
+  ["address opens the exact spot", "p=1&v=board&m=overlay&x=158.8&y=78.2&z=12", `
+    await new Promise(r => setTimeout(r, 1200));
+    return S.p === 1 && S.v === "board" && S.m === "overlay" && S.x === 158.8 && S.z === 12;`],
+  ["stale or malformed address falls back to first change", "p=9&v=sheet:/nope/&x=abc&s=c99999", `
+    await new Promise(r => setTimeout(r, 1200));
+    return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x) && document.querySelectorAll("#stage svg").length > 0;`],
+  ["j and k step through changes in list order", "p=1", `
+    const ids = [...document.querySelectorAll("#panel .card")].map(c => c.dataset.id);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "j" })); await new Promise(r => setTimeout(r, 900));
+    const a = S.s; document.dispatchEvent(new KeyboardEvent("keydown", { key: "j" })); await new Promise(r => setTimeout(r, 900));
+    const b = S.s; document.dispatchEvent(new KeyboardEvent("keydown", { key: "k" })); await new Promise(r => setTimeout(r, 900));
+    return a === ids[0] && b === ids[1] && S.s === ids[0];`],
+  ["keys ignored while typing in search", "p=1", `
+    const q = document.querySelector("#panel .q"); q.focus();
+    q.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+    return S.s === null;`],
+  ["copy link carries review link and fragment; go-to applies a pasted line", "p=1&v=board&x=10&y=20&z=5", `
+    await new Promise(r => setTimeout(r, 800));
+    const l = positionLink();
+    applyGoTo("see " + REVIEW_DATA.links.review + " #p=1&v=board&x=158.8&y=78.2&z=12");
+    await new Promise(r => setTimeout(r, 800));
+    return l.includes(REVIEW_DATA.links.review) && l.includes("#p=1&v=board") && S.x === 158.8;`],
 ];

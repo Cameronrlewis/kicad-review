@@ -33,7 +33,7 @@
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--bar-h) 1fr; background: var(--bg);
+body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--bar-h) 1fr auto; background: var(--bg);
        color: var(--text); font: 13px/1.4 var(--font-ui); }
 #app { display: grid; grid-template-columns: var(--nav-w) 1fr var(--panel-w); min-height: 0; }
 @media (max-width: 1500px) { :root { --nav-w: 220px; --panel-w: 320px; } }
@@ -121,3 +121,12 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .viol .rule { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 .viol small { display: block; color: var(--muted); font-family: var(--font-mono); }
 .new-tag { font: 700 11px var(--font-mono); border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; margin-right: var(--space-1); color: var(--accent); }
+#zoombar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-4); background: var(--surface); border-top: 1px solid var(--line); }
+#zoombar button, #zoombar input { font: inherit; color: inherit; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-1) var(--space-3); }
+#zoombar button { cursor: pointer; }
+#zoombar .pct { min-width: 4em; text-align: center; font-family: var(--font-mono); }
+#zoombar .sep { flex: 1; }
+#zoombar .goto { width: 22em; max-width: 30vw; }
+body.shot #hdr, body.shot #nav, body.shot #panel, body.shot #modes, body.shot #zoombar { display: none; }
+body.shot #app { grid-template-columns: 1fr; }
+body.shot { grid-template-rows: 1fr; }

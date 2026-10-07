@@ -187,6 +187,7 @@ function apply() {
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   if (typeof onApply === "function") onApply();
+  const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
 }
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
@@ -384,6 +385,100 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
 }
 
+const KEYS = ["p", "v", "m", "x", "y", "z", "s", "t", "l"];
+function encodeState(s = S) {
+  const q = new URLSearchParams();
+  q.set("p", s.p); q.set("v", s.v); q.set("m", s.m);
+  for (const k of ["x", "y", "z"]) if (Number.isFinite(s[k])) q.set(k, +s[k].toFixed(3));
+  if (s.s) q.set("s", s.s);
+  if (s.t && s.t !== "changes") q.set("t", s.t);
+  if (s.layers) q.set("l", s.layers.join(","));
+  return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
+}
+let hashTimer;
+function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => history.replaceState(null, "", "#" + encodeState()), 200); }
+function step(dir) {
+  const ids = [...document.querySelectorAll(S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : "#panel .card[data-id]")].map(e => e.dataset.id);
+  if (!ids.length) return;
+  const i = ids.indexOf(S.s), next = ids[i < 0 ? (dir > 0 ? 0 : ids.length - 1) : (i + dir + ids.length) % ids.length];
+  goTo(next); document.querySelector(`#panel [data-id="${next}"]`)?.scrollIntoView({ block: "nearest" });
+}
+document.addEventListener("keydown", e => {
+  if (e.target.closest?.("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
+  else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
+  else if (e.key === "f") fit();
+  else if (e.key === "Escape") { S.s = null; renderPanel(); draw(); saveHash(); }
+});
+function positionLink() {
+  const where = S.v === "board" ? `${proj().name} board` : `${proj().name} sheet ${proj().sheets.find(s => `sheet:${s.path}` === S.v)?.name ?? ""}`;
+  return `${D.links.review || D.repo} · ${where} #${encodeState()}`;
+}
+function applyGoTo(text) { const i = text.indexOf("#"); if (i >= 0) applyState(decodeState(text.slice(i))); }
+function renderZoombar() {
+  $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out">−</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in">+</button>
+    <button data-act="fit">Fit</button><span class="sep"></span><span class="muted">j / k: next / previous</span>
+    <button data-act="copy">Copy link</button><input class="goto" placeholder="Go to… paste a link">`;
+  for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => setT({ z: S.z * +b.dataset.z });
+  $("#zoombar [data-act=fit]").onclick = fit;
+  $("#zoombar [data-act=copy]").onclick = () => navigator.clipboard?.writeText(positionLink());
+  $("#zoombar .goto").onchange = e => { applyGoTo(e.target.value); e.target.value = ""; };
+}
+renderZoombar();
+
+// Changed regions: rasterise both sides, compare pixels on a grid, merge touching cells into boxes.
+async function raster(side, view, W, H) {
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  for (const l of view.layers) {
+    const t = await svgText(l.svg[side]);
+    if (!t) continue;
+    const url = URL.createObjectURL(new Blob([t], { type: "image/svg+xml" }));
+    const img = new Image();
+    img.src = url;
+    try { await img.decode(); ctx.drawImage(img, 0, 0, W, H); } catch (_) {}
+    URL.revokeObjectURL(url);
+  }
+  return ctx.getImageData(0, 0, W, H).data;
+}
+async function computeRegions(view) {
+  const W = 2400, H = Math.round(W * view.size[1] / view.size[0]), CELL = 8;
+  const a = await raster("base", view, W, H), b = await raster("head", view, W, H);
+  const gw = Math.ceil(W / CELL), gh = Math.ceil(H / CELL), grid = new Uint8Array(gw * gh);
+  for (let i = 0; i < a.length; i += 4) {
+    if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) + Math.abs(a[i + 3] - b[i + 3]) > 96) {
+      const p = i / 4;
+      grid[Math.floor(Math.floor(p / W) / CELL) * gw + Math.floor((p % W) / CELL)] = 1;
+    }
+  }
+  const seen = new Uint8Array(gw * gh), boxes = [], mm = view.size[0] / gw;
+  for (let s = 0; s < grid.length; s++) {
+    if (!grid[s] || seen[s]) continue;
+    let x0 = gw, y0 = gh, x1 = 0, y1 = 0;
+    const q = [s]; seen[s] = 1;
+    while (q.length) {
+      const c = q.pop(), cx = c % gw, cy = (c - cx) / gw;
+      x0 = Math.min(x0, cx); y0 = Math.min(y0, cy); x1 = Math.max(x1, cx); y1 = Math.max(y1, cy);
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {   // join cells up to 2 apart
+        const nx = cx + dx, ny = cy + dy, n = ny * gw + nx;
+        if (nx >= 0 && ny >= 0 && nx < gw && ny < gh && grid[n] && !seen[n]) { seen[n] = 1; q.push(n); }
+      }
+    }
+    boxes.push({ x0: x0 * mm - 2, y0: y0 * mm - 2, x1: (x1 + 1) * mm + 2, y1: (y1 + 1) * mm + 2 });
+  }
+  return boxes.sort((p, q) => (q.x1 - q.x0) * (q.y1 - q.y0) - (p.x1 - p.x0) * (p.y1 - p.y0));
+}
+
 renderHeader();
-applyState(decodeState(location.hash));
-window.reviewReady = true;
+const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");
+if (shotMode) document.body.classList.add("shot");
+applyState(decodeState(location.hash)).then(async () => {
+  if (S.s) goTo(S.s);
+  if (shotMode) {
+    const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
+    document.title = "ready";
+  }
+  window.reviewReady = true;
+});
+window.addEventListener("hashchange", () => applyState(decodeState(location.hash)));
