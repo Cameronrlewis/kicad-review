@@ -108,6 +108,34 @@ function escapeHtml(value) {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
+function sessionResponse(body, init, active) {
+  const headers = new Headers(init?.headers);
+  if (active?.setCookie) headers.set('Set-Cookie', active.setCookie);
+  return response(body, { ...init, headers });
+}
+
+const repositoryName = /^[A-Za-z0-9_.-]{1,100}$/;
+
+export async function access(request, env, owner, repo) {
+  const active = await session(request, env);
+  if (!active) {
+    const url = new URL(request.url);
+    return redirect(`/login?next=${encodeURIComponent(url.pathname + url.search)}`);
+  }
+  if (!repositoryName.test(owner) || !repositoryName.test(repo)
+    || !env.ALLOWED_OWNERS.split(',').map((name) => name.trim().toLowerCase()).includes(owner.toLowerCase())) {
+    return sessionResponse('Not found', { status: 404 }, active);
+  }
+  try {
+    const repoResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
+      headers: { Authorization: `Bearer ${active.token}`, 'User-Agent': 'kicad-review-site', 'X-GitHub-Api-Version': '2022-11-28' },
+    });
+    const data = repoResponse.status === 200 ? await repoResponse.json() : null;
+    if (!data?.permissions?.pull) return sessionResponse('Not found', { status: 404 }, active);
+  } catch { return sessionResponse('Not found', { status: 404 }, active); }
+  return { s: active, ...(active.setCookie ? { setCookie: active.setCookie } : {}) };
+}
+
 function nextPath(value) { return value?.startsWith('/') && !value.startsWith('//') ? value : '/'; }
 
 function stateCookie(next) {
@@ -159,6 +187,13 @@ export default {
         const active = await session(request, env);
         if (!active) return response('<!doctype html><a href="/login">Sign in with GitHub</a>', { headers: { 'Content-Type': 'text/html; charset=utf-8', ...(stored ? { 'Set-Cookie': clear('s') } : {}) } });
         return response(`<!doctype html><p>Signed in as ${escapeHtml(active.login)}</p><form method="post" action="/logout"><button>Sign out</button></form>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...(active.setCookie ? { 'Set-Cookie': active.setCookie } : {}) } });
+      }
+      const reviewRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)$/);
+      if (request.method === 'GET' && reviewRoute) {
+        const [, owner, repo] = reviewRoute;
+        const allowed = await access(request, env, owner, repo);
+        if (allowed instanceof Response) return allowed;
+        return sessionResponse(`<!doctype html><p>Reviews for ${escapeHtml(owner)}/${escapeHtml(repo)}</p>`, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
       }
       return response('Not found', { status: 404 });
     } catch {

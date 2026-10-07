@@ -147,3 +147,63 @@ test('logout and unknown routes carry security headers', async () => {
   assert.equal((await call('/logout', { method: 'POST' })).status, 302);
   assert.equal((await call('/missing')).status, 404);
 });
+
+async function signedIn(overrides = {}) {
+  return seal({ t: 'user-token', r: 'refresh-token', e: Date.now() + 3_600_000, re: Date.now() + 7_200_000, u: 'octocat', ...overrides }, env);
+}
+
+test('review routes redirect unsigned users without fetching GitHub', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    const response = await call('/r/Cameronrlewis/review-repo?tab=all');
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('Location'), '/login?next=%2Fr%2FCameronrlewis%2Freview-repo%3Ftab%3Dall');
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('review routes reject disallowed owners and invalid repository names before GitHub', async () => {
+  const sealed = await signedIn();
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    for (const path of ['/r/other/repo', '/r/Cameronrlewis/bad%20repo']) {
+      const response = await call(path, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 404);
+      assert.equal(await response.text(), 'Not found');
+    }
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('review route hides inaccessible repositories behind the same 404', async () => {
+  const sealed = await signedIn();
+  for (const repoResponse of [new Response('missing', { status: 404 }), new Response('denied', { status: 403 }), new Response(JSON.stringify({ permissions: { pull: false } }))]) {
+    const restore = mockFetch(async () => repoResponse);
+    try {
+      const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 404);
+      assert.equal(await response.text(), 'Not found');
+    } finally { restore(); }
+  }
+});
+
+test('review route shows the repository after a pull-access check and refreshes the session', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  let calls = 0;
+  const restore = mockFetch(async (url, options = {}) => {
+    calls += 1;
+    if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo');
+    assert.equal(options.headers.Authorization, 'Bearer access-secret');
+    assert.equal(options.headers['X-GitHub-Api-Version'], '2022-11-28');
+    return new Response(JSON.stringify({ permissions: { pull: true } }));
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(calls, 2);
+    assert.match(await response.text(), /Reviews for Cameronrlewis\/repo/);
+    assert.ok(cookieValue(response, 's'));
+  } finally { restore(); }
+});
