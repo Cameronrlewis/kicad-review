@@ -57,7 +57,7 @@ jobs:
           IN_BASE: ${{ github.event.inputs.base }}
           IN_HEAD: ${{ github.event.inputs.head }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: python3 ../tools/kicad_review.py detect --out ../review/detect.json
+        run: python3 ../tools/kicad_review.py detect
 
       - name: Check out both revisions side by side
         if: steps.detect.outputs.changed == 'true'
@@ -67,13 +67,11 @@ jobs:
           if [ -n "${{ steps.detect.outputs.base }}" ]; then
             git worktree add --detach ../base "${{ steps.detect.outputs.base }}"
           fi
-          git worktree list
 
       - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'
         run: |
-          time docker pull -q "$KICAD_IMAGE"
-          docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+          docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
             python3 tools/kicad_review.py render
 
       - name: Build comparison report and checks
@@ -164,8 +162,7 @@ jobs:
       - name: Fabrication outputs for the version tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker pull -q "$KICAD_IMAGE"
-          docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+          docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
             python3 tools/kicad_review.py release --tag "$GITHUB_REF_NAME"
 
       - name: Attach to the GitHub release
@@ -176,8 +173,3 @@ jobs:
           gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber release/*
-          {
-            echo "## Release $GITHUB_REF_NAME"
-            echo
-            for f in release/*; do echo "- \`$(basename "$f")\`"; done
-          } >> "$GITHUB_STEP_SUMMARY"
