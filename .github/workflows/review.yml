@@ -135,16 +135,30 @@ jobs:
           done
           exit 1
 
-      - name: Job summary and pull request comment
+      - name: Job summary
+        id: summary
         if: steps.detect.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
           IMAGES: ${{ steps.images.outputs.base }}
           ARTIFACT: ${{ steps.upload.outputs.artifact-url }}
           ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: python3 tools/kicad_review.py summary --image-base "$IMAGES" --artifact-url "$ARTIFACT" --artifact-id "$ARTIFACT_ID" > /dev/null
+
+      - name: Pull request comment
+        id: comment
+        if: ${{ !cancelled() && github.event.pull_request.number && (steps.detect.outputs.changed == 'true' || failure()) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          SUMMARY: ${{ steps.summary.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          python3 tools/kicad_review.py summary --image-base "$IMAGES" --artifact-url "$ARTIFACT" --artifact-id "$ARTIFACT_ID" > /dev/null
+          if [ "$SUMMARY" != success ]; then
+            mkdir -p review
+            # The failure body prevents earlier results from looking current.
+            printf '<!-- kicad-review -->\n### KiCad review failed — see [run](%s)\n\nNo review for `%s`. Results from earlier commits were removed so they are not mistaken for this one.\n' "$RUN_URL" "${SHA:0:7}" > review/comment.md
+          fi
           [ -n "$PR" ] || exit 0
           # One comment per pull request, edited in place on every run.
           id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \

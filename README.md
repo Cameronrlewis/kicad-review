@@ -11,6 +11,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - The object-level change table: symbols, footprints, labels, zones, board outline, title block and design rules.
 - ERC, DRC, schematic/board parity and BOM-field results, with errors and warnings counted separately and new ones called out.
 - A link that opens the interactive report (one HTML file, no unzip) and the `gh api` command that downloads it.
+- If a run fails, the comment is replaced with "Review failed — see run" and a link to the run, so results from an earlier commit are never left looking current; the next successful run restores the summary.
 
 **On every push to a branch**, comparing the new commit with the previous branch tip, the same content goes to the run's job summary. A push to a branch with an open pull request skips itself, because the pull request run covers it.
 

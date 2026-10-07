@@ -301,3 +301,40 @@ print("ok")
 group = wf[wf.index("group:"):].splitlines()[0]
 assert "github.event_name == 'workflow_dispatch' && github.run_id" in group, group
 print("ok")
+
+# A failed run replaces the comment with "Review failed — see run"; a later good run restores the summary.
+wf = open(".github/workflows/review.yml", encoding="utf-8").read()
+step = wf[wf.index("- name: Pull request comment"):]
+assert "failure()" in step.splitlines()[2] and "!cancelled()" in step.splitlines()[2], step.splitlines()[2]
+step = step[step.index("run: |") + 7:]
+step = "\n".join(l[10:] for l in step[:step.index("\n\n")].splitlines())
+t = tempfile.mkdtemp()
+write(t, {"bin/gh": '''#!/bin/bash
+if [[ "$*" == *"issues/7/comments"* && "$*" == *"--paginate"* ]]; then
+  printf '99\\n'
+elif [[ "$*" == *"-X PATCH"* ]]; then
+  for arg in "$@"; do
+    [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/patched.md"
+  done
+  printf 'https://github.com/o/r/issues/7#issuecomment-99\\n'
+elif [[ "$*" == *"-X POST"* ]]; then
+  for arg in "$@"; do
+    [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/posted.md"
+  done
+fi
+'''})
+os.chmod(f"{t}/bin/gh", 0o755)
+env = {**os.environ, "PATH": f"{t}/bin:{os.environ['PATH']}", "GH_TEST_DIR": t, "PR": "7", "SUMMARY": "failure",
+       "RUN_URL": "https://github.com/o/r/actions/runs/123", "SHA": "abcdef1234", "GITHUB_REPOSITORY": "o/r"}
+r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=t, capture_output=True, text=True)
+assert r.returncode == 0, r.stderr
+patched = open(f"{t}/patched.md", encoding="utf-8").read()
+assert patched.startswith("<!-- kicad-review -->") and "Review failed".lower() in patched.lower() and env["RUN_URL"] in patched and "abcdef1" in patched, patched
+assert not os.path.exists(f"{t}/posted.md")
+normal = "<!-- kicad-review -->\nnormal summary\n"
+write(t, {"review/comment.md": normal})
+env["SUMMARY"] = "success"
+r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=t, capture_output=True, text=True)
+assert r.returncode == 0, r.stderr
+assert open(f"{t}/patched.md", encoding="utf-8").read() == normal
+print("ok")
