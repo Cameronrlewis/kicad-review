@@ -5,6 +5,7 @@ Standard library only. Subcommands are called from the reusable workflow.
 """
 import argparse
 import base64
+import csv
 import gzip
 import hashlib
 import json
@@ -14,7 +15,9 @@ import posixpath
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
+import zipfile
 
 ZERO_SHA = "0" * 40
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
@@ -543,15 +546,15 @@ DEFAULT_SETTINGS = {
     "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"]},
-    "fabrication": {"preset": "jlcpcb"},
+    "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
 
-def load_settings():
+def load_settings(roots=("base", "head")):
     """Repository settings from kicad-review.toml. The base revision's copy wins, so a change cannot relax its own checks."""
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))
-    for side in ("base", "head"):
+    for side in roots:
         path = f"{side}/{SETTINGS_FILE}"
         if os.path.exists(path):
             with open(path, "rb") as fh:
@@ -566,9 +569,80 @@ def load_settings():
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
             sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
+    if settings["fabrication"]["preset"] not in PRESETS:
+        sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if settings["fail_on"] not in ("new", "all"):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
     return settings
+
+
+# ---- Release outputs: Gerbers + drill (one zip), BOM and position file, per fabrication house. ----
+
+PRESETS = {
+    # JLCPCB's KiCad guide: Protel extensions, no X2/netlist attributes, separate PTH/NPTH Excellon in mm.
+    "jlcpcb": {
+        "gerbers": ["--no-x2", "--no-netlist", "--subtract-soldermask"],
+        "drill": ["--excellon-separate-th", "--generate-map", "--map-format", "gerberx2"],
+        "part_field": "LCSC",
+        "bom": [("Value", "Comment"), ("Reference", "Designator"), ("Footprint", "Footprint"), ("{part}", "LCSC Part #")],
+    },
+    # PCBWay accepts KiCad defaults; one Excellon file, BOM in its assembly-quote column layout.
+    "pcbway": {
+        "gerbers": ["--no-x2", "--no-netlist"],
+        "drill": ["--generate-map", "--map-format", "gerberx2"],
+        "part_field": "MPN",
+        "bom": [("Reference", "Designator"), ("${QUANTITY}", "Qty"), ("Manufacturer", "Manufacturer"),
+                ("{part}", "Mfg Part #"), ("Value", "Description/Value"), ("Footprint", "Package/Footprint")],
+    },
+}
+POS_COLUMNS = {"Ref": "Designator", "Val": "Val", "Package": "Package", "PosX": "Mid X", "PosY": "Mid Y",
+               "Rot": "Rotation", "Side": "Layer"}
+FAB_LAYER = re.compile(r"\.(Cu|Mask|SilkS|Paste)$|^Edge\.Cuts$")
+
+
+def release_project(pro_path, tag, settings, out_dir):
+    src, name = posixpath.dirname(pro_path), posixpath.basename(pro_path)[: -len(".kicad_pro")]
+    preset_name = settings["fabrication"]["preset"]
+    preset = PRESETS[preset_name]
+    part = settings["fabrication"].get("part_field") or preset["part_field"]
+    pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
+    stem = f"{out_dir}/{name}-{tag}-{preset_name}"
+    made = []
+    if os.path.exists(pcb):
+        work = tempfile.mkdtemp()
+        layers = [l for l in board_layers(pcb) if FAB_LAYER.search(l)]
+        kicad_cli("pcb", "export", "gerbers", *preset["gerbers"], "--check-zones", "-l", ",".join(layers), "-o", work, pcb)
+        kicad_cli("pcb", "export", "drill", "--format", "excellon", "--excellon-units", "mm", "--excellon-zeros-format", "decimal",
+                  "--excellon-oval-format", "alternate", *preset["drill"], "-o", work + "/", pcb)
+        with zipfile.ZipFile(f"{stem}-gerbers.zip", "w", zipfile.ZIP_DEFLATED) as z:
+            for f in sorted(os.listdir(work)):
+                z.write(f"{work}/{f}", f)
+        kicad_cli("pcb", "export", "pos", "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
+                  "-o", f"{work}/pos.csv", pcb)
+        with open(f"{work}/pos.csv", newline="") as fh, open(f"{stem}-positions.csv", "w", newline="") as out:
+            rows = list(csv.reader(fh))
+            w = csv.writer(out)
+            w.writerow([POS_COLUMNS.get(h, h) for h in rows[0]])
+            side = rows[0].index("Side")
+            w.writerows([*r[:side], r[side].capitalize(), *r[side + 1:]] for r in rows[1:])
+        made += [f"{stem}-gerbers.zip", f"{stem}-positions.csv"]
+    if os.path.exists(sch):
+        fields = [f.replace("{part}", part) for f, _ in preset["bom"]]
+        group = [f for f in ("Value", "Footprint", part) if f in fields]
+        kicad_cli("sch", "export", "bom", "--fields", ",".join(fields), "--labels", ",".join(l for _, l in preset["bom"]),
+                  "--group-by", ",".join(group), "--exclude-dnp", "-o", f"{stem}-bom.csv", sch)
+        made.append(f"{stem}-bom.csv")
+    return made
+
+
+def cmd_release(args):
+    settings = load_settings((args.src,))
+    os.makedirs(args.out, exist_ok=True)
+    pros = sorted(posixpath.join(d, f) for d, _, files in os.walk(args.src) if "/." not in d for f in files
+                  if f.endswith(".kicad_pro"))
+    for pro in pros:
+        for f in release_project(pro, args.tag, settings, args.out):
+            print(f)
 
 
 def violation(v, scale, where):
@@ -955,6 +1029,11 @@ def main():
     p.add_argument("--detect", default="review/detect.json")
     p.add_argument("--out", default="review")
     p.set_defaults(func=cmd_render)
+    p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
+    p.add_argument("--src", default="repo")
+    p.add_argument("--tag", required=True)
+    p.add_argument("--out", default="release")
+    p.set_defaults(func=cmd_release)
     p = sub.add_parser("shots", help="before/after screenshots of changed drawings for the comment")
     p.add_argument("--review", default="review")
     p.add_argument("--chrome", default="google-chrome")

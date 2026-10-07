@@ -46,7 +46,7 @@ jobs:
 
       - name: Find changed KiCad projects
         id: detect
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true' && !startsWith(github.ref, 'refs/tags/')
         working-directory: repo
         env:
           EVENT: ${{ github.event_name }}
@@ -104,7 +104,7 @@ jobs:
         continue-on-error: true
         env:
           TOKEN: ${{ github.token }}
-          KEY: ${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+          KEY: ${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && format('branch-{0}', github.ref_name) || format('run-{0}', github.run_id) }}
         run: |
           ls review/images/*.png >/dev/null 2>&1 || exit 0
           branch=kicad-review-assets
@@ -160,3 +160,24 @@ jobs:
         run: |
           echo "::error::Required checks failed: $FAILED"
           exit 1
+
+      - name: Fabrication outputs for the version tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          docker pull -q "$KICAD_IMAGE"
+          docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+            python3 tools/kicad_review.py release --src repo --tag "$GITHUB_REF_NAME" --out release
+
+      - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber release/*
+          {
+            echo "## Release $GITHUB_REF_NAME"
+            echo
+            for f in release/*; do echo "- \`$(basename "$f")\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
