@@ -339,43 +339,39 @@ async function commits(request, env, owner, repo, url) {
 const commitSha = /^[0-9a-f]{7,40}$/;
 
 async function compare(request, env, owner, repo) {
-  if (request.headers.get('Origin') !== new URL(request.url).origin) {
-    return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }]);
-  }
+  if (request.headers.get('Origin') !== new URL(request.url).origin) return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }]);
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
-  const form = await request.formData();
-  const base = String(form.get('base') || '');
-  const head = String(form.get('head') || '');
-  if (!commitSha.test(base) || !commitSha.test(head) || base === head) {
-    return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.',
-      [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-  }
+  const form = await request.formData(); const base = String(form.get('base') || ''); const head = String(form.get('head') || '');
+  if (!commitSha.test(base) || !commitSha.test(head) || base === head) return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  let comparison;
   try {
-    const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ref: allowed.repo.default_branch,
-        inputs: { base, head },
-        return_run_details: true,
-      }),
-    });
-    if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
-    if (dispatch.status === 200) {
-      const details = await dispatch.json();
-      if (details.workflow_run_id) {
-        return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s);
-      }
-    }
-    if (dispatch.status === 403 || dispatch.status === 404) {
-      return errorPage(403, 'Cannot start review', 'You need write access and the KiCad review workflow.',
-        [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-    }
-  } catch {
-    // Return the generic upstream error below.
+    const result = await gh(`${root}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, allowed.s.token);
+    if (result.status === 404) return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+    if (!result.ok) throw new Error('compare failed');
+    comparison = await result.json();
+  } catch { return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s); }
+  const changed = (comparison.files || []).map((file) => String(file.filename || ''));
+  const kicad = /\.kicad_(sch|pcb|pro)$|(^|\/)(sym|fp)-lib-table$|(^|\/)kicad-review\.toml$/;
+  const rerender = async (notice, files = [], swap = false) => {
+    try {
+      const data = await commitsData(owner, repo, allowed.s.token, allowed.repo.default_branch);
+      if (!data) throw new Error('commits unavailable');
+      return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data, base, head, notice, files, swap }), { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+    } catch { return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s); }
+  };
+  if (comparison.status === 'behind') return rerender({ kind: 'error', message: 'Head is older than Base.' }, [], true);
+  if (!changed.some((filename) => kicad.test(filename))) {
+    const files = changed.slice(0, 10); if (changed.length > 10) files.push(`and ${changed.length - 10} more`);
+    return rerender({ kind: 'warn', message: `No KiCad files changed between ${base.slice(0, 7)} and ${head.slice(0, 7)}, so there is nothing to review.` }, files);
   }
+  try {
+    const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: allowed.repo.default_branch, inputs: { base, head }, return_run_details: true }) });
+    if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
+    if (dispatch.status === 200) { const details = await dispatch.json(); if (details.workflow_run_id) return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s); }
+    if (dispatch.status === 403 || dispatch.status === 404) return errorPage(403, 'Cannot start review', 'You need write access and the KiCad review workflow.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+  } catch { /* Return the generic upstream error below. */ }
   return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
 }
 
