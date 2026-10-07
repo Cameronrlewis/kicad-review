@@ -853,7 +853,7 @@ def inline_page(data_js):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
     read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
     return (read("review.html")
-            .replace('<link rel="stylesheet" href="review.css">', f"<style>\n{read('review.css')}</style>")
+            .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>")
             .replace('<script src="review.js"></script>', f"<script>\n{read('review.js')}</script>"))
 

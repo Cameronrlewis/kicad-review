@@ -59,7 +59,7 @@ print("ok")
 # The shipped page is one file: CSS, data and JS inlined, no external references left.
 from kicad_review import inline_page
 html = inline_page("window.REVIEW_DATA = {\"version\": 1};")
-assert 'href="review.css"' not in html and 'src="review.js"' not in html and 'src="sample/' not in html
+assert 'href="tokens.css"' not in html and 'href="review.css"' not in html and 'src="review.js"' not in html and 'src="sample/' not in html
 assert "window.REVIEW_DATA = {\"version\": 1};" in html and "<style>" in html
 assert "http://" not in html and "https://fonts" not in html
 print("ok")

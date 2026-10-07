@@ -1,30 +1,3 @@
-/* Primitive */
-:root {
-  --gray-0: #ffffff; --gray-50: #f6f7f9; --gray-100: #eef1f4; --gray-300: #d0d7de; --gray-500: #6e7781;
-  --gray-700: #424a53; --gray-800: #24292f; --gray-900: #161b22; --gray-950: #0d1117;
-  --green-500: #2da44e; --green-300: #4ac26b; --red-500: #cf222e; --red-300: #ff6b6b;
-  --amber-500: #bf8700; --amber-300: #e3b341; --blue-500: #0969da; --blue-300: #58a6ff;
-  --paper: #f5f4ef; --board: #001023;           /* KiCad canvas colours, same in both themes */
-  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --radius: 6px;
-}
-/* Semantic: light */
-:root {
-  --bg: var(--gray-50); --surface: var(--gray-0); --surface-2: var(--gray-100); --line: var(--gray-300);
-  --text: var(--gray-800); --muted: var(--gray-500); --accent: var(--blue-500); --focus: var(--blue-500);
-  --added: var(--green-500); --removed: var(--red-500); --modified: var(--amber-500);
-  color-scheme: light;
-}
-/* Semantic: dark, following the system */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: var(--gray-950); --surface: var(--gray-900); --surface-2: var(--gray-800); --line: var(--gray-700);
-    --text: var(--gray-100); --muted: #9aa4af; --accent: var(--blue-300); --focus: var(--blue-300);
-    --added: var(--green-300); --removed: var(--red-300); --modified: var(--amber-300);
-    color-scheme: dark;
-  }
-}
 /* Component */
 :root {
   --nav-w: 260px; --panel-w: 380px; --bar-h: 40px;
@@ -32,8 +5,6 @@
   --marker-halo: #ffffff; --marker-core: #000000;   /* change markers sit on KiCad colours: halo + core */
   --tint-del: #d91a26; --tint-add: #1a9933; --tint-both: #000000;   /* overlay filter colours (review.html #tint-*), same in both themes */
 }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--bar-h) 1fr auto; background: var(--bg);
        color: var(--text); font: 13px/1.4 var(--font-ui); }
 #app { display: grid; grid-template-columns: var(--nav-w) 1fr var(--panel-w); min-height: 0; }
