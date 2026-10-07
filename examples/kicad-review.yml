@@ -1,0 +1,24 @@
+# KiCad review: visual diff, change table and checks on every change; fabrication files on version tags.
+# Copy to .github/workflows/kicad-review.yml in a KiCad repository. Docs: https://github.com/Cameronrlewis/kicad-review
+name: KiCad review
+on:
+  pull_request:
+    paths: ['**.kicad_*', '**-lib-table', 'kicad-review.toml']
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths: ['**.kicad_*', '**-lib-table', 'kicad-review.toml']
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base revision (commit, branch or tag)
+        required: true
+      head:
+        description: Head revision (commit, branch or tag)
+        required: true
+permissions:
+  contents: write       # release assets and the kicad-review-assets screenshot branch
+  pull-requests: write  # the review comment
+jobs:
+  review:
+    uses: Cameronrlewis/kicad-review/.github/workflows/review.yml@v1
