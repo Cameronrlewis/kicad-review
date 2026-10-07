@@ -937,12 +937,12 @@ def cell(v):
     return v.replace("|", "\\|").replace("\n", " ")
 
 
-def changes_markdown(p):
+def changes_markdown(p, limit=60):
     rows = [r for r in p["changes"] if r["kind"] in TABLE_KINDS]
     if not rows:
         return []
     lines = ["| Change | Object | Ref | Details |", "|---|---|---|---|"]
-    for r in rows[:60]:
+    for r in rows[:limit]:
         if r.get("changes"):
             det = "<br>".join(f"{cell(k)}: {cell(a)} → {cell(b)}" for k, a, b in r["changes"][:6])
             if len(r["changes"]) > 6:
@@ -950,12 +950,12 @@ def changes_markdown(p):
         else:
             det = ", ".join(f"{k}: {cell(r['props'][k])}" for k in ("Value", "Footprint", "footprint", "net", "layer", "text") if r["props"].get(k))
         lines.append(f"| {r['action']} | {r['kind']} | {cell(r['ref'])} | {det or '—'} |")
-    if len(rows) > 60:
-        lines.append(f"| … | | | {len(rows) - 60} more rows in the report |")
+    if len(rows) > limit:
+        lines.append(f"| … | | | {len(rows) - limit} more rows in the report |")
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id=""):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -974,7 +974,7 @@ def comment_markdown(data, images, artifact_url, artifact_id=""):
             out += [""]
             for s in shots:
                 out += [f"**{s['title']}**", "", f"![{s['title']}: before and after]({s['url']})", ""]
-        table = changes_markdown(p)
+        table = changes_markdown(p, rows)
         other = {k: sum(1 for r in p["changes"] if r["kind"] == k) for k in ("track", "via", "wire", "bus", "junction", "no connect", "power symbol", "graphic")}
         other = ", ".join(plural(n, k) for k, n in other.items() if n)
         if table:
@@ -984,11 +984,13 @@ def comment_markdown(data, images, artifact_url, artifact_id=""):
             out += ["</details>"]
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
-    out.append(checks_markdown(data))
-    body = "\n".join(out)
-    if len(body) > 60000:  # GitHub comments are limited to 65536 characters
-        body = body[:60000] + "\n\n… truncated. The full list is in the report.\n"
-    return body
+    body, checks = "\n".join(out), checks_markdown(data)
+    if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
+        if rows:
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2)
+        body = body[:60000 - len(checks)] + "\n\n… truncated. The full list is in the report.\n"
+        body += "\n</details>" * (body.count("<details") - body.count("</details>"))
+    return body + "\n" + checks
 
 
 def shot_list(data, limit=8):

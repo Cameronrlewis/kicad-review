@@ -163,3 +163,14 @@ os.chdir(here)
 assert found == {"B": "B/B.kicad_pro"}, found
 assert seen == ["repo/B/B.kicad_pro"], seen
 print("ok")
+
+# 4. A large change never pushes the checks out of the comment, and every <details> stays closed.
+long = lambda i: [[f"Field{k}", "x" * 50, "y" * 50] for k in range(6)]
+big = lambda n: {"name": f"P{n}", "dir": f"p{n}", "status": "modified", "sheets": [], "board": {"changed": False},
+                 "changes": [{"action": "modified", "kind": "symbol", "ref": f"R{i}", "changes": long(i)} for i in range(60)],
+                 "checks": [{"name": "drc", "title": "DRC", "level": "required", "status": "fail", "errors": 3,
+                             "new_errors": 1, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}]}
+body = comment_markdown({**d2, "projects": [big(n) for n in range(3)]}, [], "", "")
+assert len(body) <= 65536 and "| P2 | DRC (required) | ❌ fail |" in body, (len(body), body[-300:])
+assert body.count("<details") == body.count("</details>"), (body.count("<details"), body.count("</details>"))
+print("ok")
