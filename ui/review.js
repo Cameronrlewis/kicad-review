@@ -306,7 +306,7 @@ function hitTest(rows, x, y, after = null, side = "head") {
   return hits[(i + 1) % hits.length];
 }
 function markersFor(view) {
-  return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" ? MARKED.has(r.kind) : r.action === "modified" && MARKED.has(r.kind)));
+  return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" || r.action === "modified" && MARKED.has(r.kind)));
 }
 function afterDraw(view) {
   if (!view) return;
