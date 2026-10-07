@@ -112,14 +112,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/assets" && cd "$RUNNER_TEMP/assets"
           git init -q && git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
           for attempt in 1 2 3; do
-            git rm -rq --cached . 2>/dev/null; rm -rf ./*
+            git read-tree --empty && rm -rf ./*
             lease=""
             if git -c http.extraheader="$auth" fetch -q --depth 1 origin "$branch"; then
               lease=$(git rev-parse FETCH_HEAD); git checkout -q FETCH_HEAD -- .
             fi
             now=$(date +%s)
             for d in */; do  # drop folders untouched for 30 days
-              [ -d "$d" ] && [ $((now - $(cat "$d.stamp" 2>/dev/null || echo 0))) -gt 2592000 ] && rm -rf "$d"
+              if [ -d "$d" ] && [ $((now - $(cat "$d.stamp" 2>/dev/null || echo 0))) -gt 2592000 ]; then rm -rf "$d"; fi
             done
             rm -rf "$KEY" && mkdir -p "$KEY/$GITHUB_RUN_ID" && cp "$GITHUB_WORKSPACE"/review/images/*.png "$KEY/$GITHUB_RUN_ID/"
             echo "$now" > "$KEY/.stamp"
