@@ -67,3 +67,18 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .layer { width: 100%; height: 100%; }   /* else the svg falls back to its own mm width (3.78 px/mm), not the stack's PX */
 .layer svg { width: 100%; height: 100%; display: block; }
 .tag { position: absolute; top: 0; left: 0; background: var(--surface); font: 11px var(--font-mono); padding: 0 var(--space-1); }
+.mode-overlay .world { isolation: isolate; background: #fff; }
+.mode-overlay .base .layer { filter: url(#tint-del); }
+.mode-overlay .head .layer { filter: url(#tint-add); }
+.mode-overlay .head { mix-blend-mode: multiply; }
+.mode-overlay .vp.sheet .base .layer { filter: url(#ink-del); }
+.mode-overlay .vp.sheet .head .layer { filter: url(#ink-add); }
+.mode-semantic .stack.base { display: none; }
+.mode-semantic .stack.head { opacity: .25; filter: grayscale(1); }
+.divider { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1px; background: var(--accent); cursor: ew-resize; z-index: 6; }
+.tag.right { left: auto; right: 8px; }
+#modes { display: flex; align-items: center; gap: var(--space-1); padding: 0 var(--space-4); background: var(--surface); border-bottom: 1px solid var(--line); }
+#modes button { font: inherit; color: inherit; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-1) var(--space-3); cursor: pointer; }
+#modes button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+#modes .blend { margin-left: var(--space-3); }
+.mode-overlay .vp.board { background: #fff; }   /* tints multiply, so they need white, not the navy canvas */

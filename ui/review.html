@@ -15,6 +15,14 @@
   <aside id="panel" aria-label="Changes and checks"></aside>
 </div>
 <div id="zoombar" role="toolbar" aria-label="View"></div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- Keep each drawing's alpha, replace its colour: removed = red, added = green. Multiplied together, unchanged ink turns black. -->
+  <filter id="tint-del" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .85  0 0 0 0 .1  0 0 0 0 .15  0 0 0 1 0"/></filter>
+  <filter id="tint-add" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .1  0 0 0 0 .6  0 0 0 0 .2  0 0 0 1 0"/></filter>
+  <!-- Schematics: opacity from darkness, so pale symbol body fills fade instead of hiding what is inside them. -->
+  <filter id="ink-del" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .85  0 0 0 0 .1  0 0 0 0 .15  -.3 -.59 -.11 1 0"/></filter>
+  <filter id="ink-add" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .1  0 0 0 0 .6  0 0 0 0 .2  -.3 -.59 -.11 1 0"/></filter>
+</svg>
 <script src="sample/review-data.js"></script>
 <script src="review.js"></script>
 </body>

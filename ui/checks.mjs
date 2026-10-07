@@ -57,4 +57,21 @@ export const CHECKS = [
       }
     }
     return bad.length ? bad.slice(0, 3).join(" ; ") : document.querySelectorAll("#stage .layer").length > 0;`],
+  ...["side", "overlay", "wipe", "blend", "semantic"].map(m => [`mode ${m} draws`, `m=${m}`, `
+    await new Promise(r => setTimeout(r, 800));
+    return S.m === "${m}" && document.querySelector("#stage").classList.contains("mode-${m}")
+      && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}";`]),
+  ["wipe divider follows drag", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const d = document.querySelector("#stage .divider"), r = d.parentElement.getBoundingClientRect();
+    d.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, clientX: r.left + r.width / 2 }));
+    d.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: r.left + r.width * 0.25 }));
+    d.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
+    return Math.abs(S.wipe - 0.25) < 0.02;`],
+  ["blend slider sets head opacity", "m=blend", `
+    await new Promise(r => setTimeout(r, 800));
+    const s = document.querySelector("#modes input[type=range]"); s.value = 20; s.dispatchEvent(new Event("input"));
+    return getComputedStyle(document.querySelector("#stage .stack.head")).opacity === "0.2";`],
+  ["added project draws its one side in every mode", "p=0&m=overlay", `
+    await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head svg").length > 0;`],
 ];

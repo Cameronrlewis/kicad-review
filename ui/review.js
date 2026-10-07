@@ -214,6 +214,50 @@ function zoomTo(box, pad = 8) {
 }
 function fit() { const v = currentView(); zoomTo(contentBox() || (v && [0, 0, v.size[0], v.size[1]]), 2); }
 
+const MODE_NAMES = { side: "Side by side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Semantic" };
+S.blend = 0.5; S.wipe = 0.5;
+async function oneWorld(stage, view, label) {
+  const w = viewport(stage, label, view.kind);
+  w.appendChild(await stack("base", view)); w.appendChild(await stack("head", view));
+  return w;
+}
+function markersFor(view) { return proj().changes.filter(r => onView(r, view.kind === "board" ? "board" : S.v)); }   // Task 7 draws these
+MODES.overlay = async (stage, view) => { await oneWorld(stage, view, "Base ■  Head ■"); };
+MODES.blend = async (stage, view) => {
+  const w = await oneWorld(stage, view, "Base under Head");
+  w.querySelector(".stack.head").style.opacity = S.blend;
+};
+MODES.wipe = async (stage, view) => {
+  const w = await oneWorld(stage, view, null), vp = w.parentElement;
+  vp.insertAdjacentHTML("beforeend", `<span class="tag">Base</span><span class="tag right">Head</span>
+    <div class="divider" role="slider" aria-label="Wipe position" tabindex="0"></div>`);
+  const d = vp.querySelector(".divider");
+  d.addEventListener("pointerdown", e => {
+    e.stopPropagation(); try { d.setPointerCapture(e.pointerId); } catch {}
+    const mv = ev => { const r = vp.getBoundingClientRect(); S.wipe = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)); apply(); };
+    d.addEventListener("pointermove", mv);
+    d.addEventListener("pointerup", () => d.removeEventListener("pointermove", mv), { once: true });
+  });
+  d.addEventListener("keydown", e => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    S.wipe = Math.min(1, Math.max(0, S.wipe + (e.key === "ArrowLeft" ? -0.05 : 0.05))); apply(); } });
+};
+MODES.semantic = async (stage, view) => { markersFor(view); await oneWorld(stage, view, "Changes only"); };
+function onApply() {
+  const vp = document.querySelector("#stage.mode-wipe .vp");
+  if (!vp) return;
+  const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, tx = W / 2 - S.x * S.z;
+  vp.querySelector(".divider").style.left = `${x}px`;
+  vp.querySelector(".stack.head").style.clipPath = `inset(0 0 0 ${Math.max(0, (x - tx) / k)}px)`;
+}
+function renderModes() {
+  $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
+    `<button data-mode="${m}" aria-pressed="${S.m === m}">${n}</button>`).join("")
+    + (S.m === "blend" ? `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>` : "");
+  for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { S.m = b.dataset.mode; renderModes(); draw(); };
+  const r = document.querySelector("#modes input[type=range]");
+  if (r) r.oninput = () => { S.blend = r.value / 100; const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; };
+}
+
 renderHeader();
 applyState(decodeState(location.hash));
 window.reviewReady = true;
