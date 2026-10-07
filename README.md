@@ -11,6 +11,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - The object-level change table: symbols, footprints, labels, zones, board outline, title block and design rules.
 - ERC, DRC, schematic/board parity and BOM-field results, with errors and warnings counted separately and new ones called out.
 - A link that opens the interactive report (one HTML file, no unzip) and the `gh api` command that downloads it.
+- If a run fails, the comment is replaced with "Review failed — see run" and a link to the run, so results from an earlier commit are never left looking current; the next successful run restores the summary.
 
 **On every push to a branch**, comparing the new commit with the previous branch tip, the same content goes to the run's job summary. A push to a branch with an open pull request skips itself, because the pull request run covers it.
 
@@ -27,7 +28,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - the sheet hierarchy with changed sheets marked
 - the change table and the check results, where clicking a row zooms to the object or violation
 
-Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. Runs whose changes touch no KiCad file are not started at all, thanks to the path filters. A newer push cancels the older run for the same pull request or branch.
+Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. Runs whose changes touch no KiCad file are not started at all, thanks to the path filters. A newer push to a pull request cancels that pull request's older run. Every push to a branch gets its own run, so no commit goes unreviewed.
 
 ## Add it to a repository
 
