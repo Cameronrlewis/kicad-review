@@ -369,3 +369,16 @@ assert site_default == site_empty, "empty site changes the existing comment"
 assert site_body.count(site_url) == 1 and f"**[Open the review]({site_url})**" in site_body, site_body
 assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in site_body
 print("ok")
+
+# The site deploy workflow is manual, least-privileged, pin-only, and does not contain credentials.
+workflow = open(".github/workflows/site-deploy.yml", encoding="utf-8").read()
+on_block = re.search(r"(?m)^on:\n((?:^[ \t]+[^\n]*\n?)*)", workflow)
+assert on_block and on_block.group(1).strip() == "workflow_dispatch:", on_block.group(1) if on_block else "missing on"
+assert re.search(r"(?m)^permissions:\n[ \t]+contents: read$", workflow), "contents: read"
+for line in workflow.splitlines():
+    if re.match(r"^\s*(?:CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID):", line):
+        assert "secrets." in line, line
+assert not re.search(r"(?im)^\s*(?:GITHUB_CLIENT_ID|GITHUB_CLIENT_SECRET|SESSION_KEY):\s*[^$\s]", workflow), "literal secret"
+for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
+    assert re.fullmatch(r"[0-9a-f]{40}", action), action
+print("ok")

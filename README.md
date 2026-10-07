@@ -56,6 +56,10 @@ For pull requests the base revision's settings file wins, so a change cannot rel
 
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
+## Review site (optional)
+
+The small Cloudflare Worker review site lets people sign in with GitHub and open reviews only in repositories they can already read. See [the site setup guide](site/README.md) to create the GitHub App, run it locally, and deploy it manually.
+
 ## When the workflow repository moves (for example to ParadigmEngineering)
 
 The owner name appears in exactly one place per KiCad repository: the `uses:` line of its `.github/workflows/kicad-review.yml`.
@@ -113,7 +117,7 @@ Run the self-check with `python3 test_kicad_review.py`.
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
 Run the page checks with `node ui/check.mjs` (headless Chrome; set `CHROME=` to its path on Linux),
-or `node ui/check.mjs --dark` for the dark theme.
+or `node ui/check.mjs --dark` for the dark theme. Run the site checks with `node --test site/test.mjs`.
 
 To refresh the sample, take the data out of any generated report (a CI artifact or a local run of
 `detect`, `render` and `report`):
