@@ -846,6 +846,7 @@ def cmd_report(args):
         "run_url": review_links(env, det)["run"],  # kept for the comment builder
         "base": det["base"], "head": det["head"], "reason": det["reason"],
         "settings": load_settings(),
+        "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     data["projects"] = [build_project(p, blobs, data["settings"]) for p in det["projects"]]
     assign_ids(data["projects"])
@@ -949,8 +950,13 @@ def comment_markdown(data, images, artifact_url):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
-               + (f"**[Download the interactive report]({artifact_url})** (zip with one HTML file, open it in a browser). " if artifact_url else "")
                + (f"[Workflow run]({data['run_url']})" if data["run_url"] else ""))
+    if artifact_url:
+        out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
+    if data.get("run_id") and data.get("repo"):
+        out += ["", "<details><summary>From a terminal</summary>", "",
+                "```sh", f"gh run download {data['run_id']} -R {data['repo']} -n kicad-review.html && open kicad-review.html", "```",
+                "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
         out += ["", f"### {p['name']}" + (f" (`{p['dir']}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]

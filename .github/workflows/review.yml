@@ -86,7 +86,7 @@ jobs:
         if: steps.detect.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: kicad-review
+          archive: false
           path: review/kicad-review.html
           retention-days: 14
 

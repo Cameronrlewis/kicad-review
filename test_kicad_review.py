@@ -63,3 +63,13 @@ assert 'href="review.css"' not in html and 'src="review.js"' not in html and 'sr
 assert "window.REVIEW_DATA = {\"version\": 1};" in html and "<style>" in html
 assert "http://" not in html and "https://fonts" not in html
 print("ok")
+
+# Comment: direct link to the single HTML file plus a gh one-liner.
+from kicad_review import comment_markdown
+d = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "run_url": "https://github.com/o/r/actions/runs/9",
+     "repo": "o/r", "run_id": "9", "projects": []}
+body = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5")
+assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in body
+assert "gh run download 9 -R o/r -n kicad-review.html" in body
+assert "zip" not in body.lower()
+print("ok")
