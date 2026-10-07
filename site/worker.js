@@ -204,7 +204,7 @@ async function artifactReport(env, owner, repo, id, active) {
     return sessionResponse(blobResponse.body, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': "sandbox allow-scripts allow-popups; default-src 'none'; "
+        'Content-Security-Policy': "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
           + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'",
       },
     }, active);

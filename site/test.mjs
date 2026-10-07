@@ -234,7 +234,7 @@ test('review route shows the repository after a pull-access check and refreshes 
   } finally { restore(); }
 });
 
-const reportCsp = "sandbox allow-scripts allow-popups; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'";
+const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'";
 
 test('artifact route streams the signed blob with the sandbox CSP', async () => {
   const sealed = await signedIn();
