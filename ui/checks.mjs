@@ -118,10 +118,14 @@ export const CHECKS = [
     const m = [...document.querySelectorAll("#stage .marker")];
     const styles = new Set(m.map(e => getComputedStyle(e).borderStyle + "|" + e.dataset.glyph));
     return m.length > 0 && m.every(e => e.dataset.glyph) && styles.size === new Set(m.map(e => e.dataset.action)).size;`],
-  ["reused sheet: two navigator entries, separate counts", "", `
-    const files = REVIEW_DATA.projects.flatMap(p => p.sheets.map(s => s.file)); const dup = files.find((f, i) => files.indexOf(f) !== i);
-    if (!dup) return true;   // the committed sample has no reused sheet; covered by the vme/video local samples
-    return document.querySelectorAll('#nav [data-view^="sheet:"]').length === REVIEW_DATA.projects[S.p].sheets.length;`],
+  ["reused sheet: two navigator entries, separate counts", "p=1", `
+    const P = REVIEW_DATA.projects[1], s0 = P.sheets[0];
+    P.sheets.push({ ...s0, path: "/copy/", name: "Copy of " + s0.name, parent: s0.path });
+    P.changes.push({ action: "added", kind: "symbol", ref: "R99", where: { sheet: "/copy/" }, pos: [10, 10, 0], box: null, props: { Value: "1k" }, id: "cx1" });
+    renderNav();
+    const a = document.querySelector('#nav [data-view="sheet:/"]'), b = document.querySelector('#nav [data-view="sheet:/copy/"]');
+    const n = e => e.querySelector(".chip.added").textContent;
+    return a && b && n(b) === "＋1" && n(a) !== n(b) && document.querySelectorAll('#nav [data-view^="sheet:"]').length === 2;`],
   ["panel scrolls instead of stretching the page", "p=1", `
     await new Promise(res => setTimeout(res, 1200));
     const cards = document.querySelector("#panel .cards"), one = cards.innerHTML;
@@ -159,12 +163,16 @@ export const CHECKS = [
     document.querySelector('#panel .viol[data-id="' + v.id + '"]').click();
     await new Promise(r => setTimeout(r, 1200));
     return S.v === "board" && S.s === v.id && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < 0.01;`],
-  ["violation without position: listed, no move, no error", "p=0&t=checks", `
-    const v = REVIEW_DATA.projects.flatMap(p => p.checks.flatMap(c => c.violations)).find(v => !v.pos);
-    if (!v) return true;
-    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'); const before = [S.v, S.x, S.y];
+  ["violation without position: listed, no move, no error", "p=1&t=checks", `
+    const v = REVIEW_DATA.projects[1].checks[0].violations[0]; v.pos = null; v.box = null; renderPanel();
+    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'), before = [S.v, S.x, S.y];
     el.click(); await new Promise(r => setTimeout(r, 300));
-    return el.textContent.includes("no location") && S.v === before[0] && S.x === before[1];`],
+    return el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true" && S.v === before[0] && S.x === before[1] && S.s !== v.id;`],
+  ["violation on an unrendered sheet: no location, no move", "p=1&t=checks", `
+    const P = REVIEW_DATA.projects[1], sh = P.sheets[0]; sh.status = "unchanged"; sh.svg = null;
+    const v = P.checks.flatMap(c => c.violations).find(v => v.pos && v.where?.sheet === sh.path); renderPanel();
+    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]');
+    return el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true";`],
   ["checks view: sections with new violations first, new rows first", "p=1&t=checks", `
     const cs = REVIEW_DATA.projects[1].checks, anyNew = cs.some(c => c.new_errors + c.new_warnings > 0);
     const secs = [...document.querySelectorAll("#panel .check")], first = document.querySelector("#panel .viol");
@@ -235,4 +243,72 @@ export const CHECKS = [
   ["drawing background is KiCad's in both themes", "", `
     await new Promise(r => setTimeout(r, 800));
     return getComputedStyle(document.querySelector("#stage .vp.sheet")).backgroundColor === "rgb(245, 244, 239)";`],
+  ["unchanged board: address, violation click and start-up do not throw", "p=1", `
+    const P = REVIEW_DATA.projects[1]; P.board = { changed: false, layers: [], status: "modified" };
+    const bv = P.checks.flatMap(c => c.violations).find(v => v.where?.board && v.pos);
+    await applyState(decodeState("#p=1&v=board"));
+    const addr = S.v !== "board";
+    S.t = "checks"; renderPanel();
+    const el = document.querySelector('#panel .viol[data-id="' + bv.id + '"]');
+    const noLoc = el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true";
+    el.click(); await new Promise(r => setTimeout(r, 300));
+    S.v = "board"; await draw(); const empty = !!document.querySelector("#stage .empty");
+    window.reviewReady = false; history.replaceState(null, "", "#p=1&v=board&s=" + bv.id);
+    await start();
+    return (addr && noLoc && empty && window.reviewReady === true) || JSON.stringify({ addr, noLoc, empty, ready: window.reviewReady });`],
+  ["change cards: long keys and values stay inside their cells", "p=0", `
+    const P = REVIEW_DATA.projects[0], long = "Footprint_Library_With_A_Long_Name:SOME_VERY_LONG_FOOTPRINT_NAME_WITHOUT_ANY_BREAKS_0123456789";
+    P.changes.unshift({ action: "modified", kind: "footprint", ref: "U1", where: { board: true }, pos: null, box: null, id: "cx2",
+                        changes: [["net_settings.classes.Default.diff_pair_via_gap", long, long + "_B"]] },
+                      { action: "added", kind: "design rules", ref: "x.kicad_pro", where: null, pos: null, box: null, id: "cx3",
+                        props: { "net_settings.classes.Default.diff_pair_via_gap": "0.25", footprint: long } });
+    renderPanel();
+    const hit = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+    const bad = [];
+    for (const id of ["cx2", "cx3"]) {
+      const c = document.querySelector('#panel .card[data-id="' + id + '"]');
+      if (c.scrollWidth > c.clientWidth) bad.push(id + " scroll " + c.scrollWidth + ">" + c.clientWidth);
+      for (const p of c.querySelectorAll(".prop")) { const r = [...p.children].map(e => e.getBoundingClientRect());
+        for (let i = 0; i < r.length; i++) for (let j = i + 1; j < r.length; j++) if (hit(r[i], r[j])) bad.push(id + " overlap " + i + "/" + j); }
+    }
+    return bad.length ? bad.join("; ") : true;`],
+  ["added footprint card shows its footprint and layer", "p=0", `
+    const r = REVIEW_DATA.projects[0].changes.find(r => r.kind === "footprint" && r.action === "added" && r.props.layer);
+    const t = document.querySelector('#panel .card[data-id="' + r.id + '"]').textContent;
+    return t.includes(r.props.footprint) && t.includes(r.props.layer) && /\\+\\d+ more/.test(t) && !t.includes("Datasheet");`],
+  ["address with selection and position keeps the position", "p=1&v=board&x=150&y=100&z=8&s=c600", `
+    await new Promise(r => setTimeout(r, 1200));
+    return (S.x === 150 && S.y === 100 && S.z === 8 && S.s === "c600" && document.querySelector("#stage .marker.sel") !== null) || JSON.stringify([S.x, S.z, S.s]);`],
+  ["address with only a selection zooms to it", "p=1&s=c600", `
+    await new Promise(r => setTimeout(r, 1200));
+    const r = REVIEW_DATA.projects[1].changes.find(r => r.id === "c600");
+    return (S.v === "board" && Math.abs(S.x - (r.box[0] + r.box[2]) / 2) < 0.01) || JSON.stringify([S.v, S.x]);`],
+  ["overlay legend names its colours in words", "p=1&v=board&m=overlay", `
+    await new Promise(r => setTimeout(r, 800));
+    const t = document.querySelector("#stage .tag"), sw = [...t.querySelectorAll(".sw")].map(e => getComputedStyle(e).backgroundColor);
+    return t.textContent.includes("red") && t.textContent.includes("green") && sw.length === 3 && new Set(sw).size === 3;`],
+  ["wheel before the first fit does not blank the drawing", "p=1&v=board", `
+    await new Promise(r => setTimeout(r, 800));
+    S.z = null;
+    document.querySelector("#stage .vp").dispatchEvent(new WheelEvent("wheel", { deltaY: -300, clientX: 400, clientY: 400, bubbles: true, cancelable: true }));
+    await draw();
+    return (Number.isFinite(S.z) && S.z > 0 && Number.isFinite(S.x)) || JSON.stringify([S.x, S.z]);`],
+  ["unknown layer in the address draws the default layers", "p=1&v=board&l=Nope", `
+    await new Promise(r => setTimeout(r, 800));
+    return S.layers === null && document.querySelectorAll("#stage .layer").length > 0;`],
+  ["removed project draws its Base in every mode", "p=0", `
+    const P = REVIEW_DATA.projects[0]; P.status = "removed"; P.board.status = "removed";
+    for (const s of P.sheets) { s.status = "removed"; s.svg = { base: s.svg.head, head: null }; }
+    for (const l of P.board.layers) l.svg = { base: l.svg.head, head: null };
+    const bad = [];
+    for (const v of [P.sheets[0] && "sheet:" + P.sheets[0].path, "board"]) for (const m of Object.keys(MODE_NAMES)) {
+      S.m = m; S.v = v; S.x = S.y = S.z = null; await draw();
+      const vis = [...document.querySelectorAll("#stage .stack.base svg")].some(e => e.getBoundingClientRect().width > 0);
+      if (!vis) bad.push(v + " " + m);
+    }
+    return bad.length ? bad.join(", ") : true;`],
+  ["truncated navigator names carry the full name as a tooltip", "p=1", `
+    REVIEW_DATA.projects[1].sheets[0].name = 'A "quoted" <very> long sheet name that will not fit the navigator width at all'; renderNav();
+    const ns = [...document.querySelectorAll("#nav .tree .name")];
+    return ns.length === 2 && ns[0].title === REVIEW_DATA.projects[1].sheets[0].name && ns.every(n => n.title && n.textContent.endsWith(n.title));`],
 ];

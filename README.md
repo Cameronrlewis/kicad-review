@@ -10,7 +10,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - Before/after pictures of each changed sheet and board, zoomed to the largest change.
 - The object-level change table: symbols, footprints, labels, zones, board outline, title block and design rules.
 - ERC, DRC, schematic/board parity and BOM-field results, with errors and warnings counted separately and new ones called out.
-- Open it from the link in the comment (one HTML file, no unzip) or with the `gh api` command shown there.
+- A link that opens the interactive report (one HTML file, no unzip) and the `gh api` command that downloads it.
 
 **On every push to a branch**, comparing the new commit with the previous branch tip, the same content goes to the run's job summary. A push to a branch with an open pull request skips itself, because the pull request run covers it.
 
@@ -20,8 +20,9 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 
 **The interactive report** is one self-contained HTML file in the run's artifacts. Download it and open it in any browser. It works offline. It offers:
 
-- side by side, colour overlay (red removed, green added, black unchanged), swipe and changed-regions views
-- pan and zoom
+- five comparison modes: Side by side, Overlay (red removed, green added, black unchanged), Wipe, Blend and Semantic (changed objects marked on a faded drawing)
+- pan and zoom; j / k (or the arrow keys) step through changes and violations
+- Copy link, which copies the review link with the exact view, and Go to…, which opens a pasted link at that spot
 - per-layer toggles for boards
 - the sheet hierarchy with changed sheets marked
 - the change table and the check results, where clicking a row zooms to the object or violation

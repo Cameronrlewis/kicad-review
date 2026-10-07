@@ -73,3 +73,9 @@ assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5
 assert "gh api repos/o/r/actions/artifacts/5/zip > kicad-review.html" in body
 assert "unzip" not in body.lower()
 print("ok")
+
+# README describes the review page as it is: the five modes, keyboard stepping, Copy link and Go to.
+readme = open("README.md").read()
+assert all(m in readme for m in ("Side by side", "Overlay", "Wipe", "Blend", "Semantic", "j / k", "Copy link", "Go to")), "README modes"
+assert "swipe and changed-regions" not in readme and "Open it from the link" not in readme
+print("ok")

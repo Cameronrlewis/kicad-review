@@ -33,7 +33,7 @@ function layerGroup(n) {
 }
 function renderLayers() {
   const box = $("#layers");
-  if (S.v !== "board") { box.innerHTML = ""; return; }
+  if (S.v !== "board" || !proj().board.changed) { box.innerHTML = ""; return; }
   const on = new Set(layersOn()), groups = {};
   for (const l of proj().board.layers) (groups[layerGroup(l.name)] ||= []).push(l);
   box.innerHTML = `<h3>Layers <span class="muted">${on.size}/${proj().board.layers.length}</span></h3>` +
@@ -62,7 +62,7 @@ function renderNav() {
   const sheetItems = (parent, depth) => kids(parent).map(s => {
     const view = `sheet:${s.path}`;
     return `<li><button data-view="${esc(view)}" data-status="${s.status}" style="--depth:${depth}"
-      aria-current="${S.v === view}"><span class="name">${s.status === "unchanged" ? "" : "● "}${esc(s.name)}</span>${chips(counts(p, view))}</button>
+      aria-current="${S.v === view}"><span class="name" title="${esc(s.name)}">${s.status === "unchanged" ? "" : "● "}${esc(s.name)}</span>${chips(counts(p, view))}</button>
       ${kids(s.path).length ? `<ul>${sheetItems(s.path, depth + 1)}</ul>` : ""}</li>`;
   }).join("");
   $("#nav").innerHTML = `
@@ -71,7 +71,7 @@ function renderNav() {
     <h3>Schematic</h3><ul class="tree">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
     <h3>Board</h3><ul class="tree">${p.board.layers.length || p.board.changed
       ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
-          <span class="name">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
+          <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
       : '<li class="muted">No board changes</li>'}</ul>
     <div id="layers"></div>`;
   $("#proj").onchange = e => openProject(+e.target.value);
@@ -95,12 +95,13 @@ function decodeState(hash) {
 }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
-  if (st.v === "board" || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
+  if ((st.v === "board" && p.board.changed) || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
   if (typeof MODES === "undefined" || MODES[st.m]) if (st.m) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
   if (st.t === "checks" || st.t === "changes") out.t = st.t;
-  if (st.layers) out.layers = st.layers.filter(n => p.board.layers.some(l => l.name === n));
+  const ls = (st.layers || []).filter(n => p.board.layers.some(l => l.name === n));
+  if (ls.length) out.layers = ls;   // none known: default layers, not an empty board
   return out;
 }
 function applyState(st) {
@@ -129,13 +130,14 @@ function layersOn() {
   const p = proj();
   return S.layers || p.board.layers.filter(l => !HIDE_LAYERS.test(l.name)).map(l => l.name);
 }
-function currentView() {
+function currentView(v = S.v) {   // null when the view has no render (unchanged board or sheet)
   const p = proj();
-  if (S.v === "board") {
+  if (v === "board") {
+    if (!p.board.changed) return null;
     const on = new Set(layersOn());
     return { kind: "board", size: p.board.size, layers: p.board.layers.filter(l => on.has(l.name)) };
   }
-  const pg = p.sheets.find(s => `sheet:${s.path}` === S.v);
+  const pg = p.sheets.find(s => `sheet:${s.path}` === v);
   return pg && pg.svg ? { kind: "sheet", size: pg.size, layers: [{ name: "sheet", changed: true, svg: pg.svg }] } : null;
 }
 async function stack(side, view) {
@@ -168,7 +170,7 @@ async function draw() {
   else await MODES[S.m](stage, view);       // defined in Task 5; until then MODES = { side: drawSide }
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
-  if (view && (S.z == null || S.x == null)) fit(); else apply();
+  if (view && !placed()) fit(); else apply();
   if (typeof afterDraw === "function") afterDraw(view);
 }
 async function drawSide(stage, view) {
@@ -178,9 +180,10 @@ async function drawSide(stage, view) {
 var MODES = { side: drawSide };
 
 // Transform: S.x, S.y = the drawing point (mm) at the viewport centre; S.z = CSS px per mm.
+const placed = () => S.z > 0 && Number.isFinite(S.x) && Number.isFinite(S.y);   // else unset: draw() fits
 function apply() {
   const vp = document.querySelector("#stage .vp");
-  if (!vp) return;
+  if (!vp || !placed()) return;
   const W = vp.clientWidth, H = vp.clientHeight, k = S.z / PX;
   for (const w of document.querySelectorAll("#stage .world")) {
     w.style.transform = `translate(${W / 2 - S.x * S.z}px, ${H / 2 - S.y * S.z}px) scale(${k})`;
@@ -198,13 +201,14 @@ function gesture() {           // composite as a bitmap while moving, re-rasteri
 function setT(t) { Object.assign(S, t); apply(); if (typeof saveHash === "function") saveHash(); }
 function attachPanZoom(vp) {
   vp.addEventListener("wheel", e => {
-    e.preventDefault(); gesture();
+    e.preventDefault(); if (!placed()) return;   // not fitted yet (a redraw is pending)
+    gesture();
     const r = vp.getBoundingClientRect(), f = Math.exp(-e.deltaY * 0.0015);
     const mx = (e.clientX - r.left - r.width / 2) / S.z, my = (e.clientY - r.top - r.height / 2) / S.z;
     setT({ z: S.z * f, x: S.x + mx - mx / f, y: S.y + my - my / f });
   }, { passive: false });
   vp.addEventListener("pointerdown", e => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || !placed()) return;
     vp.setPointerCapture(e.pointerId);
     let lx = e.clientX, ly = e.clientY, moved = 0;
     const mv = ev => { gesture(); moved += Math.abs(ev.clientX - lx) + Math.abs(ev.clientY - ly);
@@ -245,7 +249,9 @@ async function oneWorld(stage, view, label) {
   w.appendChild(await stack("base", view)); w.appendChild(await stack("head", view));
   return w;
 }
-MODES.overlay = async (stage, view) => { await oneWorld(stage, view, "Base ■  Head ■"); };
+MODES.overlay = async (stage, view) => {
+  await oneWorld(stage, view, '<i class="sw del"></i>Base (red) · <i class="sw add"></i>Head (green) · <i class="sw both"></i>both (black)');
+};
 MODES.blend = async (stage, view) => {
   const w = await oneWorld(stage, view, "Base under Head");
   w.querySelector(".stack.head").style.opacity = S.blend;
@@ -322,21 +328,27 @@ function pickAt(vp, e) {
   const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
   if (hit) { S.s = hit.id; renderPanel(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
+const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
-  if (!r) return;
+  if (!r) return Promise.resolve();
   S.s = id;
-  const view = r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : S.v;
+  const view = viewOf(r) ?? S.v;
   const box = rowBox(r, r.action === "removed" ? "base" : "head");
   const zoom = () => { if (box) zoomTo(box); renderPanel(); };
-  if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); draw().then(zoom); } else { draw().then(zoom); }
+  if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
+  return draw().then(zoom);
 }
 S.filter = { added: true, removed: true, modified: true, kind: "", q: "" };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
+const PROP_ORDER = ["Value", "Footprint", "footprint", "layer", "position", "net", "layers", "text", "file", "width"];
+const rank = k => { const i = PROP_ORDER.indexOf(k); return i < 0 ? PROP_ORDER.length : i; };
 function card(r) {
+  const props = Object.entries(r.props || {}).filter(([, v]) => v != null && v !== "" && v !== "~").sort(([a], [b]) => rank(a) - rank(b));
   const body = r.changes
     ? r.changes.map(([k, a, b]) => `<div class="prop"><span>${esc(k)}</span><span class="old">${esc(a ?? "—")}</span><span class="arrow">→</span><span class="new">${esc(b ?? "—")}</span></div>`).join("")
-    : Object.entries(r.props || {}).slice(0, 4).map(([k, v]) => `<div class="prop"><span>${esc(k)}</span><span class="new">${esc(v)}</span></div>`).join("");
+    : props.slice(0, 5).map(([k, v]) => `<div class="prop"><span>${esc(k)}</span><span class="new wide">${esc(v)}</span></div>`).join("")
+      + (props.length > 5 ? `<div class="more muted">+${props.length - 5} more</div>` : "");
   return `<button class="card" data-id="${r.id}" data-action="${r.action}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
     <span class="badge ${r.action}">${GLYPH[r.action]} ${r.action}</span>${body}</button>`;
@@ -357,10 +369,10 @@ function renderChecks() {
     return `<section class="check ${c.status}">
       <h3>${c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "✓"} ${esc(c.title)} <span class="muted">${c.level}</span></h3>
       <p>${c.errors} errors (${c.new_errors} new) · ${c.warnings} warnings (${c.new_warnings} new) · ${c.fixed} fixed</p>
-      ${vs.slice(0, 500).map(v => `<button class="viol ${v.severity}" data-id="${v.id}" data-new="${v.new}" ${v.pos ? "" : 'aria-disabled="true"'}>
+      ${vs.slice(0, 500).map(v => { const at = v.pos && currentView(viewOf(v)); return `<button class="viol ${v.severity}" data-id="${v.id}" data-new="${v.new}" ${at ? "" : 'aria-disabled="true"'}>
         ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="sev">${v.severity === "error" ? "✕ error" : "! warning"}</span>
         <span class="rule">${esc(v.type)}</span> ${esc(v.description)}
-        <small>${v.items.map(esc).join(" · ")}${v.pos ? "" : " · no location"}</small></button>`).join("")}
+        <small>${v.items.map(esc).join(" · ")}${at ? "" : " · no location"}</small></button>`; }).join("")}
     </section>`;
   }).join("");
 }
@@ -419,7 +431,7 @@ function renderZoombar() {
   $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out">−</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in">+</button>
     <button data-act="fit">Fit</button><span class="sep"></span><span class="muted">j / k: next / previous</span>
     <button data-act="copy">Copy link</button><input class="goto" placeholder="Go to… paste a link">`;
-  for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => setT({ z: S.z * +b.dataset.z });
+  for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => { if (placed()) setT({ z: S.z * +b.dataset.z }); };
   $("#zoombar [data-act=fit]").onclick = fit;
   $("#zoombar [data-act=copy]").onclick = async e => {
     const b = e.currentTarget, link = positionLink();
@@ -483,12 +495,15 @@ async function computeRegions(view) {
 renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");
 if (shotMode) document.body.classList.add("shot");
-applyState(decodeState(location.hash)).then(async () => {
-  if (S.s) goTo(S.s);
-  if (shotMode) {
-    const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
-    document.title = "ready";
-  }
-  window.reviewReady = true;
-});
+function start() {
+  const drawn = applyState(decodeState(location.hash)), hasPos = S.z != null;   // read before draw() fits
+  return drawn.then(async () => {
+    if (S.s && !hasPos) await goTo(S.s);   // an address with a position keeps it; the selection is only marked
+    if (shotMode) {
+      const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
+      document.title = "ready";
+    }
+  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; });   // cmd_shots must never wait out its budget
+}
+start();
 window.addEventListener("hashchange", () => applyState(decodeState(location.hash)));
