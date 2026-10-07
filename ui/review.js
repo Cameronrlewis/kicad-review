@@ -452,7 +452,7 @@ function encodeState(s = S) {
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
-function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => history.replaceState(null, "", "#" + encodeState()), 200); }
+function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); }, 200); }
 function step(dir) {
   const ids = [...document.querySelectorAll(S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : "#panel .card[data-id]")].map(e => e.dataset.id);
   if (!ids.length) return;
