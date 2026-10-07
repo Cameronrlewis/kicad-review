@@ -19,7 +19,6 @@ import tempfile
 import tomllib
 import zipfile
 
-ZERO_SHA = "0" * 40
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
 KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
@@ -59,8 +58,8 @@ def resolve_revisions(env):
             sys.exit(f"Cannot resolve revisions: base={env['IN_BASE']!r} head={env['IN_HEAD']!r}")
         return base, head, "revisions given by hand"
     head = env["AFTER"]
-    before = env.get("BEFORE") or ZERO_SHA
-    if before != ZERO_SHA and commit(before):
+    before = env.get("BEFORE", "")
+    if before.strip("0") and commit(before):  # all zeros: the branch is new
         return before, head, "push: new commit vs previous branch tip"
     # New branch, or the old tip is gone after a force push: compare with where it left the default branch.
     base = git("merge-base", f"origin/{env['DEFAULT_BRANCH']}", head, check=False)
@@ -121,8 +120,8 @@ def cmd_detect(args):
     base, head, reason = resolve_revisions(env)
     projects = detect(base, head)
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
-    os.makedirs(posixpath.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as fh:
+    os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
+    with open("../review/detect.json", "w") as fh:
         json.dump(result, fh, indent=2)
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
         fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\n")
@@ -999,7 +998,6 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(required=True)
     p = sub.add_parser("detect", help="resolve base/head and list changed KiCad projects")
-    p.add_argument("--out", default="review/detect.json")
     p.set_defaults(func=cmd_detect)
     p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_render)
