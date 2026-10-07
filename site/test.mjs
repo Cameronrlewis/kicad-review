@@ -408,6 +408,7 @@ test('commit history uses the access repository default and links reviews', asyn
     urls.push(url);
     if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
     if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
+    if (url.endsWith('/tags?per_page=100')) return new Response(JSON.stringify([]));
     if (url.includes('/commits?')) return new Response(JSON.stringify([{ sha: 'deadbeef000', commit: { message: '<script>bad</script>\nmore', author: { name: 'Ada', date: '2025-02-03T04:05:00Z' } } }]));
     if (url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [{ id: 9, name: 'kicad-review.html', workflow_run: { head_sha: 'deadbeef000' } }] }));
     throw new Error(`unexpected ${url}`);
@@ -623,5 +624,23 @@ test('run route rejects non-numeric IDs before fetching', async () => {
     const response = await call('/r/Cameronrlewis/repo/run/nope');
     assert.equal(response.status, 404);
     assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('commits lists tags and resolves tag selection to its commit SHA', async () => {
+  const sealed = await signedIn(); const urls = [];
+  const restore = mockFetch(async (url) => {
+    urls.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
+    if (url.endsWith('/tags?per_page=100')) return new Response(JSON.stringify([{ name: 'v1.0', commit: { sha: head } }]));
+    if (url.includes('/commits?')) return new Response(JSON.stringify([]));
+    if (url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/commits?tag=v1.0', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /<option value="v1\.0" selected>v1\.0<\/option>/);
+    assert.ok(urls.some((url) => url.includes(`/commits?sha=${head}&per_page=50`)));
   } finally { restore(); }
 });

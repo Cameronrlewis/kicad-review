@@ -286,41 +286,54 @@ async function reviewList(request, env, owner, repo, url) {
   }
 }
 
+async function commitsData(owner, repo, token, branch, tag = '') {
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const [branchesResponse, tagsResponse, artifactsResponse] = await Promise.all([
+    gh(`${root}/branches?per_page=100`, token),
+    gh(`${root}/tags?per_page=100`, token),
+    artifactList(owner, repo, token),
+  ]);
+  const branches = branchesResponse.ok ? await branchesResponse.json() : [];
+  const tags = tagsResponse.ok ? await tagsResponse.json() : [];
+  const selectedTag = tag ? tags.find((item) => item.name === tag) : null;
+  const sha = selectedTag?.commit?.sha;
+  if (tag && !sha) return null;
+  const commitsResponse = await gh(`${root}/commits?sha=${encodeURIComponent(sha || branch)}&per_page=50`, token);
+  if (!commitsResponse.ok) return null;
+  const commitList = await commitsResponse.json();
+  const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
+  const byHead = new Map(reviewList.filter((item) => item.head !== '?').map((item) => [String(item.head).slice(0, 7), item]));
+  return {
+    branch, tags: tags.map((item) => ({ name: String(item.name || '') })).filter((item) => item.name),
+    branches: branches.map((item) => item.name), tag,
+    commits: commitList.map((commit) => {
+      const sha = String(commit.sha || ''); const fullMessage = String(commit.commit?.message || '');
+      const exactDate = date(commit.commit?.author?.date);
+      return { sha, fullMessage, message: fullMessage.split('\n', 1)[0], author: commit.author?.login || commit.commit?.author?.name || '?', date: relativeDate(commit.commit?.author?.date), exactDate, review: byHead.get(sha.slice(0, 7))?.id };
+    }),
+  };
+}
+
+function relativeDate(value) {
+  const then = new Date(value).getTime(); const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (!Number.isFinite(then)) return '?';
+  if (seconds < 60) return 'just now';
+  const units = [[31536000, 'year'], [2592000, 'month'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
+  const [size, label] = units.find(([size]) => seconds >= size);
+  const count = Math.floor(seconds / size); return `${count} ${label}${count === 1 ? '' : 's'} ago`;
+}
+
 async function commits(request, env, owner, repo, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   const branch = url.searchParams.get('branch') ?? allowed.repo.default_branch;
-  if (!branch || branch.length > 255 || /[\x00-\x1f\x7f]/.test(branch)) {
-    return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-  }
+  const tag = url.searchParams.get('tag') || '';
+  if (!branch || branch.length > 255 || /[\x00-\x1f\x7f]/.test(branch)) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   try {
-    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-    const [branchesResponse, commitsResponse, artifactsResponse] = await Promise.all([
-      gh(`${root}/branches?per_page=100`, allowed.s.token),
-      gh(`${root}/commits?sha=${encodeURIComponent(branch)}&per_page=50`, allowed.s.token),
-      artifactList(owner, repo, allowed.s.token),
-    ]);
-    if (commitsResponse.status === 404) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
-    if (!commitsResponse.ok) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
-    const branches = branchesResponse.ok ? (await branchesResponse.json()) : [];
-    const commitList = await commitsResponse.json();
-    const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
-    const byHead = new Map(reviewList.filter((item) => item.head !== '?')
-      .map((item) => [String(item.head).slice(0, 7), item]));
-    return sessionResponse(commitsPage({
-      user: allowed.s.login, owner, repo, branch, branches: branches.map((item) => item.name),
-      commits: commitList.map((commit) => {
-        const sha = String(commit.sha || '');
-        return {
-          sha, message: String(commit.commit?.message || '').split('\n', 1)[0],
-          author: commit.author?.login || commit.commit?.author?.name || '?',
-          date: date(commit.commit?.author?.date), review: byHead.get(sha.slice(0, 7))?.id,
-        };
-      }),
-    }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
-  } catch {
-    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
-  }
+    const data = await commitsData(owner, repo, allowed.s.token, branch, tag);
+    if (!data) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+    return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+  } catch { return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s); }
 }
 
 const commitSha = /^[0-9a-f]{7,40}$/;
