@@ -196,20 +196,27 @@ test('review routes reject disallowed owners and invalid repository names before
     for (const path of ['/r/other/repo', '/r/Cameronrlewis/bad%20repo']) {
       const response = await call(path, { headers: { Cookie: `s=${sealed}` } });
       assert.equal(response.status, 404);
-      assert.equal(await response.text(), 'Not found');
+      assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8');
+      assert.match(await response.text(), /href="\/"/);
     }
     assert.equal(calls, 0);
   } finally { restore(); }
 });
 
-test('review route hides inaccessible repositories behind the same 404', async () => {
+test('review route hides inaccessible repositories behind the same HTML 404', async () => {
   const sealed = await signedIn();
+  const missing = await call('/not-found');
+  const missingBody = await missing.text();
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get('Content-Type'), 'text/html; charset=utf-8');
+  assert.match(missingBody, /href="\/"/);
   for (const repoResponse of [new Response('missing', { status: 404 }), new Response('denied', { status: 403 }), new Response(JSON.stringify({ permissions: { pull: false } }))]) {
     const restore = mockFetch(async () => repoResponse);
     try {
       const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
       assert.equal(response.status, 404);
-      assert.equal(await response.text(), 'Not found');
+      assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8');
+      assert.equal(await response.text(), missingBody);
     } finally { restore(); }
   }
 });
@@ -435,7 +442,8 @@ test('compare rejects missing or foreign Origin before GitHub', async () => {
     for (const origin of [null, 'https://evil.example']) {
       const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, null, origin);
       assert.equal(response.status, 403);
-      assert.equal(await response.text(), 'Forbidden');
+      assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8');
+      assert.match(await response.text(), /href="\/"/);
     }
     assert.equal(calls, 0);
   } finally { restore(); }
@@ -447,7 +455,8 @@ test('compare rejects Origin null before GitHub', async () => {
   try {
     const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, null, 'null');
     assert.equal(response.status, 403);
-    assert.equal(await response.text(), 'Forbidden');
+    assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8');
+    assert.match(await response.text(), /href="\/"/);
     assert.equal(calls, 0);
   } finally { restore(); }
 });
@@ -526,7 +535,7 @@ test('compare explains GitHub dispatch authorization failures', async () => {
   try {
     const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
     assert.equal(response.status, 403);
-    assert.match(await response.text(), /You need write access to this repository to start a review/);
+    assert.match(await response.text(), /You need write access and the KiCad review workflow/);
   } finally { restore(); }
 });
 

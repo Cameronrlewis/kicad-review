@@ -146,6 +146,15 @@ function html(body) {
     + 'border-bottom:1px solid #ddd}code{white-space:nowrap}.muted{color:#666}</style>' + body;
 }
 
+function errorPage(status, title, message, links = [], active, init = {}) {
+  const allLinks = [{ href: '/', label: 'Back to repositories' }, ...links];
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'text/html; charset=utf-8');
+  return sessionResponse(html(`<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p>${allLinks.map((link) => {
+    return `<a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a>`;
+  }).join(' · ')}</p>`), { ...init, status, headers }, active);
+}
+
 function gh(path, token, init = {}) {
   return fetch(`https://api.github.com${path}`, {
     ...init,
@@ -171,15 +180,15 @@ export async function access(request, env, owner, repo) {
   }
   if (!repositoryName.test(owner) || !repositoryName.test(repo)
     || !allowedOwners(env).includes(owner.toLowerCase())) {
-    return sessionResponse('Not found', { status: 404 }, active);
+    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
   }
   try {
     const repoResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, active.token);
     const data = repoResponse.status === 200 ? await repoResponse.json() : null;
-    if (!data?.permissions?.pull) return sessionResponse('Not found', { status: 404 }, active);
+    if (!data?.permissions?.pull) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
     return { s: active, repo: data };
   } catch {
-    return sessionResponse('Not found', { status: 404 }, active);
+    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
   }
 }
 
@@ -187,20 +196,18 @@ async function artifactReport(env, owner, repo, id, active) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
     const metadataResponse = await gh(base, active.token);
-    if (metadataResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, active);
+    if (metadataResponse.status !== 200) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
     const metadata = await metadataResponse.json();
     if (metadata.expired) {
-      return sessionResponse('<!doctype html><p>This review has expired — rerun the workflow</p>', {
-        status: 404,
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      }, active);
+      return errorPage(404, 'Review expired', 'This review has expired — rerun the workflow.',
+        [{ href: repoPath(owner, repo), label: 'Back to reviews' }], active);
     }
-    if (!metadata.name?.endsWith('.html')) return sessionResponse('Not found', { status: 404 }, active);
+    if (!metadata.name?.endsWith('.html')) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
     const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
     const location = zipResponse.status === 302 ? zipResponse.headers.get('Location') : null;
-    if (!location) return sessionResponse('Not found', { status: 404 }, active);
+    if (!location) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
     const blobResponse = await fetch(location);
-    if (!blobResponse.ok || !blobResponse.body) return sessionResponse('Not found', { status: 404 }, active);
+    if (!blobResponse.ok || !blobResponse.body) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
     return sessionResponse(blobResponse.body, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
@@ -209,7 +216,7 @@ async function artifactReport(env, owner, repo, id, active) {
       },
     }, active);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, active);
+    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
   }
 }
 
@@ -296,7 +303,7 @@ async function reviewList(request, env, owner, repo, url) {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     }, allowed.s);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
 }
 
@@ -305,7 +312,7 @@ async function commits(request, env, owner, repo, url) {
   if (allowed instanceof Response) return allowed;
   const branch = url.searchParams.get('branch') ?? allowed.repo.default_branch;
   if (!branch || branch.length > 255 || /[\x00-\x1f\x7f]/.test(branch)) {
-    return sessionResponse('Branch not found', { status: 404 }, allowed.s);
+    return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   }
   try {
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -314,8 +321,8 @@ async function commits(request, env, owner, repo, url) {
       gh(`${root}/commits?sha=${encodeURIComponent(branch)}&per_page=50`, allowed.s.token),
       artifactList(owner, repo, allowed.s.token),
     ]);
-    if (commitsResponse.status === 404) return sessionResponse('Branch not found', { status: 404 }, allowed.s);
-    if (!commitsResponse.ok) return sessionResponse('Not found', { status: 404 }, allowed.s);
+    if (commitsResponse.status === 404) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+    if (!commitsResponse.ok) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
     const branches = branchesResponse.ok ? (await branchesResponse.json()) : [];
     const commitList = await commitsResponse.json();
     const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
@@ -342,7 +349,7 @@ async function commits(request, env, owner, repo, url) {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     }, allowed.s);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
 }
 
@@ -354,7 +361,7 @@ function page(body) {
 
 async function compare(request, env, owner, repo) {
   if (request.headers.get('Origin') !== new URL(request.url).origin) {
-    return response('Forbidden', { status: 403 });
+    return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }]);
   }
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
@@ -362,8 +369,8 @@ async function compare(request, env, owner, repo) {
   const base = String(form.get('base') || '');
   const head = String(form.get('head') || '');
   if (!commitSha.test(base) || !commitSha.test(head) || base === head) {
-    return sessionResponse(html(`<p>Choose two different commit SHAs.</p><p><a href="${repoPath(owner, repo)}/commits">`
-      + 'Back to commits</a></p>'), { status: 400, ...page() }, allowed.s);
+    return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.',
+      [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   }
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   try {
@@ -384,13 +391,13 @@ async function compare(request, env, owner, repo) {
       }
     }
     if (dispatch.status === 403 || dispatch.status === 404) {
-      return sessionResponse(html('<p>You need write access to this repository to start a review, and the repository '
-        + 'needs the KiCad review workflow.</p>'), { status: 403, ...page() }, allowed.s);
+      return errorPage(403, 'Cannot start review', 'You need write access and the KiCad review workflow.',
+        [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
     }
   } catch {
     // Return the generic upstream error below.
   }
-  return sessionResponse('Could not start the review', { status: 502 }, allowed.s);
+  return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
 }
 
 function githubRunLink(run) {
@@ -407,10 +414,10 @@ async function run(request, env, owner, repo, id) {
   let runData;
   try {
     const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
-    if (runResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, allowed.s);
+    if (runResponse.status !== 200) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
     runData = await runResponse.json();
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
   const link = githubRunLink(runData);
   if (runData.status !== 'completed') {
@@ -419,11 +426,11 @@ async function run(request, env, owner, repo, id) {
   }
   try {
     const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
-    if (artifactsResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, allowed.s);
+    if (artifactsResponse.status !== 200) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
     const artifact = reviews((await artifactsResponse.json()).artifacts)[0];
     if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}`, 302, allowed.s);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
   const conclusion = escapeHtml(runData.conclusion);
   const message = runData.conclusion === 'success'
@@ -447,22 +454,22 @@ async function callback(request, env) {
   const savedState = cookies(request).st;
   const state = url.searchParams.get('state');
   if (!state || !savedState || state !== savedState) {
-    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
+    return errorPage(400, 'Invalid sign-in state', 'Start the sign-in process again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
   }
   let stateData;
   try {
     stateData = JSON.parse(untext.decode(unbase64url(savedState)));
   } catch {
-    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
+    return errorPage(400, 'Invalid sign-in state', 'Start the sign-in process again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
   }
   const code = url.searchParams.get('code');
-  if (!code) return response('Missing sign-in code', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!code) return errorPage(400, 'Missing sign-in code', 'Start the sign-in process again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
   const token = await tokenRequest(env, { code });
-  if (!token) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!token) return errorPage(502, 'Sign-in failed', 'Try signing in again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
   const userResponse = await gh('/user', token.access_token);
-  if (!userResponse.ok) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!userResponse.ok) return errorPage(502, 'Sign-in failed', 'Try signing in again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
   const user = await userResponse.json();
-  if (!user.login) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!user.login) return errorPage(502, 'Sign-in failed', 'Try signing in again.', [], null, { headers: { 'Set-Cookie': clear('st', secure) } });
   const value = {
     t: token.access_token,
     r: token.refresh_token,
@@ -491,7 +498,7 @@ export default {
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)$/);
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id] = artifactRoute;
-        if (!/^\d{1,20}$/.test(id)) return response('Not found', { status: 404 });
+        if (!/^\d{1,20}$/.test(id)) return errorPage(404, 'Not found', 'The requested page is unavailable.');
         const allowed = await access(request, env, owner, repo);
         return allowed instanceof Response ? allowed : artifactReport(env, owner, repo, id, allowed.s);
       }
@@ -502,7 +509,7 @@ export default {
       const runRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/run\/([^/]+)$/);
       if (request.method === 'GET' && runRoute) {
         const [, owner, repo, id] = runRoute;
-        if (!/^\d{1,20}$/.test(id)) return response('Not found', { status: 404 });
+        if (!/^\d{1,20}$/.test(id)) return errorPage(404, 'Not found', 'The requested page is unavailable.');
         return run(request, env, owner, repo, id);
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
@@ -513,9 +520,9 @@ export default {
       if (request.method === 'GET' && reviewRoute) {
         return reviewList(request, env, reviewRoute[1], reviewRoute[2], url);
       }
-      return response('Not found', { status: 404 });
+      return errorPage(404, 'Not found', 'The requested page is unavailable.');
     } catch {
-      return response('Internal server error', { status: 500 });
+      return errorPage(500, 'Internal server error', 'Try again later.');
     }
   },
 };
