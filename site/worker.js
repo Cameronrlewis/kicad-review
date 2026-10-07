@@ -221,7 +221,7 @@ function reviews(artifacts) {
       return {
         ...artifact,
         base: match[1] || '?',
-        head: match[2] || artifact.workflow_run?.head_sha || '?',
+        head: match[2] || '?',
         result: match[3] || '?',
         revisionsRecorded: Boolean(match[1]),
       };
