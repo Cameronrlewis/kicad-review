@@ -37,10 +37,11 @@ export const CHECKS = [
     const during = getComputedStyle(w).willChange; await new Promise(r => setTimeout(r, 300));
     return during === "transform" && getComputedStyle(w).willChange === "auto";`],
   ["dense board pans at 60 fps", "v=board", `
-    if (!REVIEW_DATA.projects[0].name.startsWith("vme")) return true;   // only meaningful on the dense page
+    if (!REVIEW_DATA.projects[0].name.startsWith("vme")) return true;   // only meaningful on the dense page (default layers)
     await new Promise(r => setTimeout(r, 3000));
     const t = []; let last = performance.now();
     for (let f = 0; f < 120; f++) { await new Promise(r => requestAnimationFrame(r)); const n = performance.now(); t.push(n - last); last = n;
       gesture(); setT({ x: S.x + 0.3, z: S.z * (f < 60 ? 1.02 : 1 / 1.02) }); }
     t.sort((a, b) => a - b); console.log("p95", t[114]); return t[114] <= 20;`],
+  ["hash without p keeps its other params", "v=board", `return S.p === 0 && S.v === "board";`],
 ];

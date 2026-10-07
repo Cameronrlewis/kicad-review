@@ -71,9 +71,7 @@ function decodeState(hash) {
   return out;
 }
 function valid(st) {   // drop anything that does not exist in this report
-  const out = {}, p = D.projects[st.p];
-  if (!p) return { p: 0 };
-  out.p = st.p;
+  const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if (st.v === "board" || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
   if (typeof MODES === "undefined" || MODES[st.m]) if (st.m) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
@@ -103,10 +101,10 @@ async function svgText(id) {
   }
   return cache[id];
 }
-const DEFAULT_LAYERS = /^(F|B|In\d+)_Cu$|^(F|B)_Silkscreen$|^Edge_Cuts$/;
+const HIDE_LAYERS = /Fab|Courtyard|CrtYd|Paste|Adhes|Mask|Margin|User|Drawings|Dwgs|Comments|Cmts|Eco/i;
 function layersOn() {
   const p = proj();
-  return S.layers || p.board.layers.filter(l => DEFAULT_LAYERS.test(l.name)).map(l => l.name);
+  return S.layers || p.board.layers.filter(l => !HIDE_LAYERS.test(l.name)).map(l => l.name);
 }
 function currentView() {
   const p = proj();
@@ -163,15 +161,15 @@ function apply() {
   const W = vp.clientWidth, H = vp.clientHeight, k = S.z / PX;
   for (const w of document.querySelectorAll("#stage .world")) {
     w.style.transform = `translate(${W / 2 - S.x * S.z}px, ${H / 2 - S.y * S.z}px) scale(${k})`;
-    w.style.setProperty("--k", k);
+    if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   if (typeof onApply === "function") onApply();
 }
-let settle;
+let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
-  clearTimeout(settle);
-  settle = setTimeout(() => { for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; }, 150);
+  gesturing = true; clearTimeout(settle);
+  settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
 function setT(t) { Object.assign(S, t); apply(); if (typeof saveHash === "function") saveHash(); }
 function attachPanZoom(vp) {
