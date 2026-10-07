@@ -862,7 +862,7 @@ def cmd_report(args):
     data["projects"] = [build_project(p, blobs, data["settings"]) for p in det["projects"]]
     assign_ids(data["projects"])
     data["blobs"] = blobs
-    payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
+    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
     with open("review/kicad-review.html", "w") as fh:
         fh.write(html)

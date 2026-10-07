@@ -81,7 +81,7 @@ assert "swipe and changed-regions" not in readme and "Open it from the link" not
 print("ok")
 
 # Review fixes (ponytail + caveman, 2026-10-07).
-import os, subprocess, sys
+import json, os, subprocess, sys
 d2 = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "repo": "o/r",
       "links": {"run": "https://github.com/o/r/actions/runs/9"}, "projects": []}
 body = comment_markdown(d2, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "77")
@@ -189,4 +189,16 @@ assert "<!-- ![" not in plain and "![x]" not in plain and "[l](" not in plain an
 assert "*b*" not in plain and "`c`" not in body, plain
 print("ok")
 assert md("https://x.com/a_b(1).pdf") == "https://x.com/a_b(1).pdf" and md("a|b") == "a\\|b", md("https://x.com/a_b(1).pdf")
+print("ok")
+
+# 6. No text in the data can end or re-open the data <script> (e.g. "<!--<script>" blanked the page).
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {"review/detect.json": json.dumps({"base": "a", "head": "b", "reason": "<!--<script></script>", "projects": []})})
+kicad_review.cmd_report(None)
+html = open("review/kicad-review.html", encoding="utf-8").read()
+os.chdir(here)
+data = html[html.index("window.REVIEW_DATA"):]
+data = data[:data.index("</script>")]
+assert "<" not in data and json.loads(data[len("window.REVIEW_DATA = "):-1])["reason"] == "<!--<script></script>", data[:200]
 print("ok")
