@@ -291,3 +291,8 @@ kicad_review.release_project = real
 os.chdir(here)
 assert seen == ["a-B", "b-x-B", "C"], seen
 print("ok")
+
+# Minor: the README says what the arrow keys really do (they step only while focus is outside the list and buttons).
+readme = open("README.md", encoding="utf-8").read()
+assert "(or the arrow keys)" not in readme and "arrow keys step too after a click on the drawing" in readme, "README arrow keys"
+print("ok")

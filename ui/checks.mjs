@@ -361,4 +361,9 @@ export const CHECKS = [
     const want = proj().changes.filter(r => onView(r, S.v) && rowBox(r, "head")), w = document.querySelector("#stage .world");
     const n = w.querySelectorAll(".marker").length;
     return (want.some(r => r.kind === "wire") && n === want.length) || \`\${n} markers for \${want.length} changes\`;`],
+  ["arrow keys step after a click on the drawing", "p=1", `
+    document.activeElement?.blur(); S.s = null;  // a click on the drawing (a plain div) leaves focus on the body
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await new Promise(res => setTimeout(res, 300));
+    return S.s !== null || "no step; focus on " + document.activeElement.tagName;`],
 ];
