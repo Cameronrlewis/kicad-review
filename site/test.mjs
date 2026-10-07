@@ -130,6 +130,50 @@ test('a tampered session is cleared and treated as signed out', async () => {
   assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
 });
 
+test('home shows the session-ended notice only when a stale cookie was sent', async () => {
+  const signedOut = await call('/');
+  assert.doesNotMatch(await signedOut.text(), /You were signed out\. Sign in again to continue\./);
+  const response = await call('/', { headers: { Cookie: 's=stale' } });
+  const body = await response.text();
+  assert.match(body, /class="notice notice-info">You were signed out\. Sign in again to continue\./);
+  assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
+});
+
+test('callback errors show the sign-in failure page with their status and reason', async () => {
+  const login = await call('/login');
+  const savedState = cookieValue(login, 'st');
+  const cases = [
+    ['/callback?code=code&state=wrong', 400, "The sign-in link expired or was opened in a different browser."],
+    [`/callback?state=${encodeURIComponent(savedState)}`, 400, "GitHub didn't send a sign-in code. You may have cancelled."],
+  ];
+  const restore = mockFetch(async () => new Response('no', { status: 401 }));
+  try {
+    cases.push([`/callback?code=code&state=${encodeURIComponent(savedState)}`, 502, "GitHub didn't accept the sign-in. Try again."]);
+    for (const [path, status, reason] of cases) {
+      const response = await call(path, { headers: { Cookie: `st=${savedState}` } });
+      assert.equal(response.status, status);
+      const body = await response.text();
+      assert.match(body, /<h1[^>]*>.*Sign-in didn&#39;t complete/);
+      assert.match(body, new RegExp(reason.replaceAll("'", '&#39;').replace(/[.?]/g, '\\$&')));
+      assert.match(body, /href="\/login">Try again/);
+      assert.match(body, /href="\/">Back to the start/);
+    }
+  } finally { restore(); }
+});
+
+test('message pages escape all displayed values and prioritize their first action', () => {
+  const page = messagePage({
+    title: '<title>', message: '<message>', details: ['<detail>'],
+    links: [{ href: '/one', label: '<first>' }, { href: '/two', label: '<second>' }],
+  });
+  assert.doesNotMatch(page, /<script>alert\(1\)<\/script>/);
+  assert.match(page, /&lt;title&gt;/);
+  assert.match(page, /&lt;message&gt;/);
+  assert.match(page, /&lt;detail&gt;/);
+  assert.match(page, /class="btn btn-primary" href="\/one">&lt;first&gt;<\/a>/);
+  assert.match(page, /class="btn" href="\/two">&lt;second&gt;<\/a>/);
+});
+
 test('expired access tokens refresh once, while refresh errors clear the session', async () => {
   const expired = await seal({ t: 'old-token', r: 'old-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
   let calls = 0;
@@ -231,7 +275,12 @@ test('review route hides inaccessible repositories behind the same HTML 404', as
   const missingBody = await missing.text();
   assert.equal(missing.status, 404);
   assert.equal(missing.headers.get('Content-Type'), 'text/html; charset=utf-8');
-  assert.match(missingBody, /href="\/"/);
+  assert.match(missingBody, /<h1[^>]*>.*Can&#39;t open this page/);
+  assert.match(missingBody, /Either it doesn&#39;t exist, or your GitHub account can&#39;t see it\./);
+  assert.match(missingBody, /You&#39;re signed in as the right GitHub account/);
+  assert.match(missingBody, /The repository owner has installed the KiCad review GitHub App on it/);
+  assert.match(missingBody, /Someone has given you access on GitHub/);
+  assert.match(missingBody, /href="\/">Back to repositories/);
   for (const repoResponse of [new Response('missing', { status: 404 }), new Response('denied', { status: 403 }), new Response(JSON.stringify({ permissions: { pull: false } }))]) {
     const restore = mockFetch(async () => repoResponse);
     try {
