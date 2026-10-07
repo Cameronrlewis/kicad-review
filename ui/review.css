@@ -59,3 +59,10 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .chip.added { color: var(--added); } .chip.removed { color: var(--removed); } .chip.modified { color: var(--modified); }
 .tree .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .counts { flex: none; white-space: nowrap; }
+#stage { display: flex; gap: 2px; background: var(--line); min-width: 0; }
+.vp { flex: 1; position: relative; overflow: hidden; cursor: grab; touch-action: none; }
+.vp.sheet { background: var(--paper); } .vp.board { background: var(--board); }
+.world, .stack, .layer { position: absolute; left: 0; top: 0; }
+.world { transform-origin: 0 0; }
+.layer svg { width: 100%; height: 100%; display: block; }
+.tag { position: absolute; top: 0; left: 0; background: var(--surface); font: 11px var(--font-mono); padding: 0 var(--space-1); }
