@@ -38,3 +38,20 @@ c = run_check("drc", DEFAULT_SETTINGS, head, base)
 assert (c["errors"], c["new_errors"], c["new_warnings"], c["status"]) == (2, 1, 0, "fail"), c
 assert run_check("drc", {**DEFAULT_SETTINGS, "checks": {"drc": "informational"}}, head, base)["status"] == "warn"
 print("ok")
+
+# Data format v1: ids unique per file, layer changed flags, links.
+from kicad_review import assign_ids, review_links
+projects = [{"changes": [{"kind": "symbol"}, {"kind": "track"}],
+             "checks": [{"violations": [{"type": "x"}, {"type": "y"}]}]},
+            {"changes": [{"kind": "via"}], "checks": []}]
+assign_ids(projects)
+ids = [r["id"] for p in projects for r in p["changes"]] + [v["id"] for p in projects for c in p["checks"] for v in c["violations"]]
+assert ids == ["c1", "c2", "c3", "v1", "v2"], ids
+env = {"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "9",
+       "PR_NUMBER": "2"}
+links = review_links(env, {"base": "aaa", "head": "bbb"})
+assert links == {"review": "https://github.com/o/r/pull/2", "base": "https://github.com/o/r/commit/aaa",
+                 "head": "https://github.com/o/r/commit/bbb", "run": "https://github.com/o/r/actions/runs/9"}, links
+assert review_links({**env, "PR_NUMBER": ""}, {"base": "aaa", "head": "bbb"})["review"] == "https://github.com/o/r/compare/aaa...bbb"
+assert review_links({}, {"base": None, "head": "bbb"}) == {"review": "", "base": "", "head": "", "run": ""}
+print("ok")

@@ -784,11 +784,42 @@ def build_project(p, blobs, settings):
              "status": "added" if not has["base"] else "removed" if not has["head"] else "modified"}
     if changed:
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
-        board["layers"] = [{"name": l["name"], "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
+        board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
+                            "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs)}
+
+
+def assign_ids(projects):
+    """Give every change row and violation an id unique within this report, for selection and addresses."""
+    n = 0
+    for p in projects:
+        for r in p["changes"]:
+            n += 1
+            r["id"] = f"c{n}"
+    n = 0
+    for p in projects:
+        for c in p["checks"]:
+            for v in c["violations"]:
+                n += 1
+                v["id"] = f"v{n}"
+
+
+def review_links(env, det):
+    """github.com links for the header. Empty strings outside GitHub Actions."""
+    server, repo = env.get("GITHUB_SERVER_URL", ""), env.get("GITHUB_REPOSITORY", "")
+    if not (server and repo):
+        return {"review": "", "base": "", "head": "", "run": ""}
+    base_url = f"{server}/{repo}"
+    pr = env.get("PR_NUMBER", "")
+    return {
+        "review": f"{base_url}/pull/{pr}" if pr else (f"{base_url}/compare/{det['base']}...{det['head']}" if det["base"] else ""),
+        "base": f"{base_url}/commit/{det['base']}" if det["base"] else "",
+        "head": f"{base_url}/commit/{det['head']}",
+        "run": f"{base_url}/actions/runs/{env['GITHUB_RUN_ID']}" if env.get("GITHUB_RUN_ID") else "",
+    }
 
 
 def cmd_report(args):
@@ -797,16 +828,22 @@ def cmd_report(args):
     blobs = {}
     env = os.environ
     data = {
-        "run_url": f"{env.get('GITHUB_SERVER_URL', '')}/{env.get('GITHUB_REPOSITORY', '')}/actions/runs/{env.get('GITHUB_RUN_ID', '')}"
-                   if env.get("GITHUB_RUN_ID") else "",
+        "version": 1,
+        "repo": env.get("GITHUB_REPOSITORY", ""),
+        "links": review_links(env, det),
+        "run_url": review_links(env, det)["run"],  # kept for the comment builder
         "base": det["base"], "head": det["head"], "reason": det["reason"],
         "settings": load_settings(),
     }
     data["projects"] = [build_project(p, blobs, data["settings"]) for p in det["projects"]]
+    assign_ids(data["projects"])
     data["blobs"] = blobs
+    payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
+    with open("review/review-data.js", "w") as fh:
+        fh.write(f"window.REVIEW_DATA = {payload};\n")
     with open(posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "report.html")) as fh:
         template = fh.read()
-    html = template.replace("/*DATA*/", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    html = template.replace("/*DATA*/", payload)
     with open("review/kicad-review.html", "w") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")

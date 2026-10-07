@@ -77,6 +77,8 @@ jobs:
       - name: Build comparison report and checks
         id: report
         if: steps.detect.outputs.changed == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 tools/kicad_review.py report
 
       - name: Upload report
