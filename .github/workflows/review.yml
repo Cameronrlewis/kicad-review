@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:
-      group: kicad-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+      group: kicad-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
       cancel-in-progress: true
     steps:
       - name: Skip push that an open pull request already covers
