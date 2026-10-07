@@ -4,9 +4,13 @@
 Standard library only. Subcommands are called from the reusable workflow.
 """
 import argparse
+import base64
+import gzip
+import hashlib
 import json
 import os
 import posixpath
+import re
 import subprocess
 import sys
 
@@ -166,12 +170,13 @@ def render_side(src_dir, name, out):
     files = {"sch": [], "pcb": []}
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
-        kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "-o", f"{out}/sch", sch)
+        kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
         files["sch"] = sorted(f"sch/{f}" for f in os.listdir(f"{out}/sch"))
     if os.path.exists(pcb):
+        # Drill marks off: with them every layer, even an empty one, is full of holes.
         # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
         kicad_cli("pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1",
-                  "--drill-shape-opt", "2", "-l", ",".join(board_layers(pcb)), "-o", f"{out}/pcb", pcb)
+                  "--drill-shape-opt", "0", "-l", ",".join(board_layers(pcb)), "-o", f"{out}/pcb", pcb)
         files["pcb"] = sorted(f"pcb/{f}" for f in os.listdir(f"{out}/pcb"))
     return files
 
@@ -192,6 +197,149 @@ def cmd_render(args):
                                           for s, v in manifest["sides"].items()))
 
 
+TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
+
+
+def parse_sexpr(text):
+    """KiCad S-expression text to nested lists of strings."""
+    stack = [[]]
+    for m in TOKEN.finditer(text):
+        if m.group(1):
+            stack.append([])
+        elif m.group(2):
+            node = stack.pop()
+            stack[-1].append(node)
+        elif m.group(3) is not None:
+            stack[-1].append(re.sub(r"\\(.)", lambda e: "\n" if e.group(1) == "n" else e.group(1), m.group(3)))
+        elif m.group(4):
+            stack[-1].append(m.group(4))
+    return stack[0][0]
+
+
+def findall(node, key):
+    return [c for c in node[1:] if isinstance(c, list) and c and c[0] == key]
+
+
+def find(node, key):
+    found = findall(node, key)
+    return found[0] if found else None
+
+
+def sheet_pages(proj_dir, name):
+    """Schematic pages in hierarchy order: [{path, name, file, parent}]. path is the sheet UUID path."""
+    pages = []
+
+    def walk(file, path, sheet_name, parent, depth):
+        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent})
+        full = posixpath.join(proj_dir, file)
+        if depth > 32 or not os.path.exists(full):
+            return
+        with open(full) as fh:
+            root = parse_sexpr(fh.read())
+        for s in findall(root, "sheet"):
+            props = {p[1]: p[2] for p in findall(s, "property") if len(p) > 2}
+            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", props.get("Sheetname", "?"), path, depth + 1)
+
+    if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
+        walk(f"{name}.kicad_sch", "/", name, None, 0)
+    return pages
+
+
+def page_svg(out_dir, name, page):
+    """The SVG kicad-cli wrote for a page: <project>.svg for the root, <project>-<sheet name>.svg otherwise."""
+    if page["parent"] is None:
+        return f"{out_dir}/sch/{name}.svg"
+    for candidate in (page["name"], re.sub(r'[\\/:*?"<>|]', "_", page["name"])):
+        if os.path.exists(f"{out_dir}/sch/{name}-{candidate}.svg"):
+            return f"{out_dir}/sch/{name}-{candidate}.svg"
+    return None  # ponytail: two sheets with the same name collide in kicad-cli output; first one wins
+
+
+def svg_body(path):
+    """SVG text without the export timestamp, so identical drawings compare equal."""
+    if not path or not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        return re.sub(r"<title>.*?</title>", "", fh.read(), count=1, flags=re.S)
+
+
+def svg_size(text):
+    w, h = re.search(r'viewBox="[\d.]+ [\d.]+ ([\d.]+) ([\d.]+)"', text).groups()
+    return [float(w), float(h)]
+
+
+def has_drawing(text):
+    return re.search(r"<(path|polyline|polygon|circle|rect|line|ellipse|text)\b", text) is not None
+
+
+class Blobs(dict):
+    """gzip+base64 SVG store, deduplicated by content."""
+
+    def add(self, text):
+        if text is None:
+            return None
+        key = hashlib.sha1(text.encode()).hexdigest()[:12]
+        if key not in self:
+            self[key] = base64.b64encode(gzip.compress(text.encode(), mtime=0)).decode()
+        return key
+
+
+def build_project(p, review_dir, blobs):
+    out = f"{review_dir}/{project_id(p['dir'])}"
+    sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
+    pages = {}
+    for side in sides:
+        for pg in sheet_pages(posixpath.join(side, p["dir"]), p["name"]):
+            entry = pages.setdefault(pg["path"], {**pg, "svg": {}})
+            entry["svg"][side] = svg_body(page_svg(f"{out}/{side}", p["name"], pg))
+    sheets = []
+    for pg in pages.values():
+        texts = pg.pop("svg")
+        b, h = texts.get("base"), texts.get("head")
+        pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
+        if pg["status"] != "unchanged":
+            pg["size"] = svg_size(h or b)
+            pg["svg"] = {"base": blobs.add(b), "head": blobs.add(h)}
+        sheets.append(pg)
+    layers, changed = [], False
+    names = sorted({posixpath.basename(f) for s in sides for f in os.listdir(f"{out}/{s}/pcb")}
+                   if any(os.path.isdir(f"{out}/{s}/pcb") for s in sides) else [])
+    for f in names:
+        b, h = (svg_body(f"{out}/{s}/pcb/{f}") for s in ("base", "head"))
+        changed |= b != h
+        if any(t and has_drawing(t) for t in (b, h)):
+            layers.append({"name": f[len(p["name"]) + 1: -4], "base": b, "head": h})
+    has = {s: any(l[s] for l in layers) for s in ("base", "head")}
+    board = {"changed": changed, "layers": [],
+             "status": "added" if not has["base"] else "removed" if not has["head"] else "modified"}
+    if changed:
+        board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
+        board["layers"] = [{"name": l["name"], "svg": {"base": blobs.add(l["base"]), "head": blobs.add(l["head"])}}
+                           for l in layers]
+    return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board}
+
+
+def cmd_report(args):
+    with open(args.detect) as fh:
+        det = json.load(fh)
+    blobs = Blobs()
+    env = os.environ
+    data = {
+        "repo": env.get("GITHUB_REPOSITORY", ""),
+        "run_url": f"{env.get('GITHUB_SERVER_URL', '')}/{env.get('GITHUB_REPOSITORY', '')}/actions/runs/{env.get('GITHUB_RUN_ID', '')}"
+                   if env.get("GITHUB_RUN_ID") else "",
+        "base": det["base"], "head": det["head"], "reason": det["reason"],
+        "projects": [build_project(p, args.review, blobs) for p in det["projects"]],
+    }
+    data["blobs"] = blobs
+    with open(posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "report.html")) as fh:
+        template = fh.read()
+    html = template.replace("/*DATA*/", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    with open(args.out, "w") as fh:
+        fh.write(html)
+    print(f"{args.out}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(required=True)
@@ -202,6 +350,11 @@ def main():
     p.add_argument("--detect", default="review/detect.json")
     p.add_argument("--out", default="review")
     p.set_defaults(func=cmd_render)
+    p = sub.add_parser("report", help="self-contained HTML comparison report")
+    p.add_argument("--detect", default="review/detect.json")
+    p.add_argument("--review", default="review")
+    p.add_argument("--out", default="review/kicad-review.html")
+    p.set_defaults(func=cmd_report)
     args = ap.parse_args()
     args.func(args)
 

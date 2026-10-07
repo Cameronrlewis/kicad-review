@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KiCad review</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --line:#d8dce2; --text:#1d2329; --muted:#66707a; --accent:#0969da;
+          --add:#1a7f37; --del:#cf222e; --mod:#bf8700; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, sans-serif; color:var(--text); background:var(--bg); height:100vh; display:flex; flex-direction:column; }
+  header { padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header code { background:#eef1f4; padding:1px 5px; border-radius:4px; }
+  #app { flex:1; display:flex; min-height:0; }
+  nav { width:250px; overflow:auto; background:var(--panel); border-right:1px solid var(--line); padding:8px 10px; }
+  nav h3 { font-size:12px; text-transform:uppercase; color:var(--muted); margin:14px 0 4px; }
+  nav ul { list-style:none; margin:0; padding-left:12px; }
+  nav > ul { padding-left:0; }
+  nav li > span { display:block; padding:2px 6px; border-radius:4px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  nav li > span.unchanged { color:var(--muted); cursor:default; }
+  nav li > span.sel { background:#ddf4ff; }
+  .badge { font-size:11px; padding:0 5px; border-radius:8px; color:#fff; margin-left:4px; }
+  .b-added { background:var(--add); } .b-removed { background:var(--del); } .b-modified { background:var(--mod); }
+  #layers label { display:block; font-size:13px; white-space:nowrap; }
+  main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #toolbar { display:flex; gap:6px; padding:6px 10px; background:var(--panel); border-bottom:1px solid var(--line); align-items:center; flex-wrap:wrap; }
+  #toolbar button { border:1px solid var(--line); background:#fff; border-radius:6px; padding:4px 10px; cursor:pointer; }
+  #toolbar button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .legend { margin-left:auto; font-size:12px; color:var(--muted); display:flex; gap:10px; }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:-1px; margin-right:3px; }
+  #stage { flex:1; display:flex; min-height:0; gap:2px; background:var(--line); }
+  .vp { flex:1; position:relative; overflow:hidden; background:#fff; cursor:grab; touch-action:none; }
+  .vp.dark { background:#001023; }
+  .vp .tag { position:absolute; top:6px; left:8px; z-index:5; background:rgba(0,0,0,.6); color:#fff; font-size:12px; padding:1px 6px; border-radius:4px; pointer-events:none; }
+  .world { position:absolute; left:0; top:0; transform-origin:0 0; }
+  .stack, .layer { position:absolute; left:0; top:0; }
+  .layer svg { width:100%; height:100%; display:block; }
+  .overlay .base .layer { filter:url(#tint-del); }
+  .overlay .head .layer { filter:url(#tint-add); }
+  .overlay.sch .base .layer { filter:url(#ink-del); }
+  .overlay.sch .head .layer { filter:url(#ink-add); }
+  .overlay .head { mix-blend-mode:multiply; }
+  .overlay .world { isolation:isolate; background:#fff; }
+  .divider { position:absolute; top:0; bottom:0; width:3px; margin-left:-1px; background:var(--accent); z-index:6; cursor:ew-resize; }
+  .divider::after { content:"◀ ▶"; position:absolute; top:50%; left:-17px; background:var(--accent); color:#fff; font-size:11px; padding:2px 4px; border-radius:4px; }
+  .mark { position:absolute; border:calc(2px / var(--k, 1)) solid var(--mod); background:rgba(191,135,0,.12); pointer-events:none; z-index:4; }
+  .region { position:absolute; border:calc(2px / var(--k, 1)) dashed var(--accent); pointer-events:none; z-index:4; }
+  #regions { padding:4px 10px; background:var(--panel); border-top:1px solid var(--line); font-size:13px; display:none; max-height:30vh; overflow:auto; }
+  #regions a { margin-right:10px; cursor:pointer; color:var(--accent); }
+  #msg { margin:auto; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>KiCad review</h1>
+  <span id="revs"></span>
+  <label>Project <select id="proj"></select></label>
+  <a id="runlink" target="_blank" rel="noopener"></a>
+</header>
+<div id="app">
+  <nav>
+    <h3>Schematic</h3><ul id="tree"></ul>
+    <h3>Board</h3><ul id="boardnav"></ul>
+    <div id="layerbox" hidden><h3>Layers</h3><div id="layers"></div></div>
+  </nav>
+  <main>
+    <div id="toolbar">
+      <button data-mode="side">Side by side</button>
+      <button data-mode="overlay">Overlay</button>
+      <button data-mode="swipe">Swipe</button>
+      <button data-mode="regions">Changed regions</button>
+      <button id="fit">Fit</button>
+      <span class="legend" id="legend"></span>
+    </div>
+    <div id="stage"><div id="msg">Loading…</div></div>
+    <div id="regions"></div>
+  </main>
+</div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- Keep each drawing's alpha, replace its colour: removed = red, added = green. Multiplied together, unchanged ink turns black. -->
+  <filter id="tint-del" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .85  0 0 0 0 .1  0 0 0 0 .15  0 0 0 1 0"/></filter>
+  <filter id="tint-add" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .1  0 0 0 0 .6  0 0 0 0 .2  0 0 0 1 0"/></filter>
+  <!-- Schematics: opacity from darkness, so pale symbol body fills fade instead of hiding what is inside them. -->
+  <filter id="ink-del" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .85  0 0 0 0 .1  0 0 0 0 .15  -.3 -.59 -.11 1 0"/></filter>
+  <filter id="ink-add" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .1  0 0 0 0 .6  0 0 0 0 .2  -.3 -.59 -.11 1 0"/></filter>
+</svg>
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const PX = 4;                       // CSS pixels per millimetre at zoom 1
+const DEFAULT_LAYERS = /^(F|B|In\d+)_Cu$|^(F|B)_Silkscreen$|^Edge_Cuts$/;
+const $ = s => document.querySelector(s);
+const S = { proj: 0, item: null, mode: "side", layersOn: new Set(), T: { x: 0, y: 0, k: 1 }, swipe: 0.5, marks: [], regions: null };
+const textCache = {};
+
+async function svgText(id) {
+  if (!id) return null;
+  if (!(id in textCache)) {
+    const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
+    textCache[id] = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  }
+  return textCache[id];
+}
+
+const proj = () => D.projects[S.proj];
+// The thing being viewed: one schematic page or the board, as {size:[w,h] mm, layers:[{name, svg:{base,head}}]}.
+function current() {
+  const p = proj(), it = S.item;
+  if (!it) return null;
+  if (it.kind === "board") return { size: p.board.size, layers: p.board.layers.filter(l => S.layersOn.has(l.name)), dark: true };
+  const pg = p.sheets.find(s => s.path === it.path);
+  return { size: pg.size, layers: [{ name: "sheet", svg: pg.svg }] };
+}
+
+async function makeStack(side, view) {
+  const st = document.createElement("div");
+  st.className = "stack " + side;
+  st.style.width = view.size[0] * PX + "px";
+  st.style.height = view.size[1] * PX + "px";
+  for (const l of view.layers) {
+    const t = await svgText(l.svg[side]);
+    if (!t) continue;
+    const d = document.createElement("div");
+    d.className = "layer";
+    d.style.width = st.style.width; d.style.height = st.style.height;
+    d.innerHTML = t.slice(t.indexOf("<svg"));
+    st.appendChild(d);
+  }
+  return st;
+}
+
+function makeViewport(stage, tag, dark) {
+  const vp = document.createElement("div");
+  vp.className = "vp" + (dark ? " dark" : "");
+  const w = document.createElement("div");
+  w.className = "world";
+  vp.appendChild(w);
+  if (tag) { const t = document.createElement("div"); t.className = "tag"; t.textContent = tag; vp.appendChild(t); }
+  attachPanZoom(vp);
+  stage.appendChild(vp);
+  return w;
+}
+
+// Builds the new stage off-screen and swaps it in, so a newer draw() started meanwhile wins cleanly.
+async function draw() {
+  const gen = S.gen = (S.gen || 0) + 1;
+  const stage = document.createElement("div");
+  stage.id = "stage";
+  stage.className = (S.mode === "overlay" || S.mode === "regions" ? "overlay " : "") + (S.item && S.item.kind === "sheet" ? "sch" : "");
+  $("#regions").style.display = S.mode === "regions" ? "block" : "none";
+  document.querySelectorAll("#toolbar [data-mode]").forEach(b => b.classList.toggle("on", b.dataset.mode === S.mode));
+  legend();
+  const view = current();
+  if (!view) { stage.innerHTML = '<div id="msg">Nothing changed in this project’s drawings.</div>'; $("#stage").replaceWith(stage); return; }
+  const dark = view.dark && (S.mode === "side" || S.mode === "swipe");
+  if (S.mode === "side") {
+    makeViewport(stage, "Before", dark).appendChild(await makeStack("base", view));
+    makeViewport(stage, "After", dark).appendChild(await makeStack("head", view));
+  } else {
+    const w = makeViewport(stage, S.mode === "swipe" ? null : "Before + after", dark);
+    w.appendChild(await makeStack("base", view));
+    w.appendChild(await makeStack("head", view));
+    if (S.mode === "swipe") {
+      const vp = w.parentElement, div = document.createElement("div");
+      div.className = "divider";
+      vp.appendChild(div);
+      for (const [cls, txt] of [["l", "Before"], ["r", "After"]]) {
+        const t = document.createElement("div"); t.className = "tag"; t.textContent = txt;
+        if (cls === "r") { t.style.left = "auto"; t.style.right = "8px"; }
+        vp.appendChild(t);
+      }
+      div.addEventListener("pointerdown", e => {
+        e.stopPropagation(); div.setPointerCapture(e.pointerId);
+        const mv = ev => { const r = vp.getBoundingClientRect(); S.swipe = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)); apply(); };
+        div.addEventListener("pointermove", mv);
+        div.addEventListener("pointerup", () => div.removeEventListener("pointermove", mv), { once: true });
+      });
+    }
+  }
+  if (gen !== S.gen) return;
+  $("#stage").replaceWith(stage);
+  if (S.mode === "regions") await showRegions(view, stage.querySelector(".world"));
+  drawMarks();
+  if (!S.fitted) { fit(); S.fitted = true; } else apply();
+}
+
+function legend() {
+  const L = $("#legend");
+  if (S.mode === "overlay" || S.mode === "regions")
+    L.innerHTML = '<span><i class="sw" style="background:var(--del)"></i>removed</span><span><i class="sw" style="background:var(--add)"></i>added</span><span><i class="sw" style="background:#000"></i>unchanged</span><span><i class="sw" style="background:var(--mod)"></i>changed object</span>';
+  else L.textContent = "Scroll to zoom, drag to pan.";
+}
+
+// One shared transform for every viewport, so side-by-side panes stay in step.
+function apply() {
+  const { x, y, k } = S.T;
+  document.querySelectorAll(".world").forEach(w => { w.style.transform = `translate(${x}px,${y}px) scale(${k})`; w.style.setProperty("--k", k); });
+  const vp = document.querySelector(".vp");
+  if (S.mode === "swipe" && vp) {
+    const W = vp.clientWidth, sx = S.swipe * W;
+    vp.querySelector(".divider").style.left = sx + "px";
+    vp.querySelector(".stack.head").style.clipPath = `inset(0 0 0 ${Math.max(0, (sx - x) / k)}px)`;
+  }
+}
+
+function attachPanZoom(vp) {
+  vp.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = vp.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    const f = Math.exp(-e.deltaY * 0.0015), T = S.T;
+    T.x = mx - (mx - T.x) * f; T.y = my - (my - T.y) * f; T.k *= f;
+    apply();
+  }, { passive: false });
+  vp.addEventListener("pointerdown", e => {
+    vp.setPointerCapture(e.pointerId);
+    let lx = e.clientX, ly = e.clientY;
+    const mv = ev => { S.T.x += ev.clientX - lx; S.T.y += ev.clientY - ly; lx = ev.clientX; ly = ev.clientY; apply(); };
+    vp.addEventListener("pointermove", mv);
+    vp.addEventListener("pointerup", () => vp.removeEventListener("pointermove", mv), { once: true });
+  });
+}
+
+// Fit the drawn content (not the empty page) into the viewport.
+function contentBox() {
+  let box = null;
+  document.querySelectorAll(".stack .layer svg").forEach(svg => {
+    try {
+      const b = svg.getBBox();
+      if (!b.width && !b.height) return;
+      box = box ? { x0: Math.min(box.x0, b.x), y0: Math.min(box.y0, b.y), x1: Math.max(box.x1, b.x + b.width), y1: Math.max(box.y1, b.y + b.height) }
+                : { x0: b.x, y0: b.y, x1: b.x + b.width, y1: b.y + b.height };
+    } catch (_) {}
+  });
+  return box;
+}
+function zoomTo(x0, y0, x1, y1) {
+  const vp = document.querySelector(".vp");
+  if (!vp) return;
+  const W = vp.clientWidth, H = vp.clientHeight, w = Math.max(x1 - x0, 25) * PX, h = Math.max(y1 - y0, 25) * PX;
+  const k = Math.min(W / w, H / h) * 0.9;
+  S.T = { k, x: W / 2 - (x0 + x1) / 2 * PX * k, y: H / 2 - (y0 + y1) / 2 * PX * k };
+  apply();
+}
+function fit() { const b = contentBox(); if (b) zoomTo(b.x0, b.y0, b.x1, b.y1); }
+
+// Boxes around changed objects (filled in by the change table).
+function drawMarks() {
+  document.querySelectorAll(".world").forEach(w => {
+    for (const m of S.marks) {
+      const d = document.createElement("div");
+      d.className = "mark";
+      Object.assign(d.style, { left: m.x0 * PX + "px", top: m.y0 * PX + "px", width: (m.x1 - m.x0) * PX + "px", height: (m.y1 - m.y0) * PX + "px" });
+      w.appendChild(d);
+    }
+  });
+}
+
+// Changed regions: rasterise both sides, compare pixels on a grid, merge touching cells into boxes.
+async function raster(side, view, W, H) {
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  for (const l of view.layers) {
+    const t = await svgText(l.svg[side]);
+    if (!t) continue;
+    const url = URL.createObjectURL(new Blob([t], { type: "image/svg+xml" }));
+    const img = new Image();
+    img.src = url;
+    try { await img.decode(); ctx.drawImage(img, 0, 0, W, H); } catch (_) {}
+    URL.revokeObjectURL(url);
+  }
+  return ctx.getImageData(0, 0, W, H).data;
+}
+async function computeRegions(view) {
+  const W = 2400, H = Math.round(W * view.size[1] / view.size[0]), CELL = 8;
+  const a = await raster("base", view, W, H), b = await raster("head", view, W, H);
+  const gw = Math.ceil(W / CELL), gh = Math.ceil(H / CELL), grid = new Uint8Array(gw * gh);
+  for (let i = 0; i < a.length; i += 4) {
+    if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) + Math.abs(a[i + 3] - b[i + 3]) > 96) {
+      const p = i / 4;
+      grid[Math.floor(Math.floor(p / W) / CELL) * gw + Math.floor((p % W) / CELL)] = 1;
+    }
+  }
+  const seen = new Uint8Array(gw * gh), boxes = [], mm = view.size[0] / gw;
+  for (let s = 0; s < grid.length; s++) {
+    if (!grid[s] || seen[s]) continue;
+    let x0 = gw, y0 = gh, x1 = 0, y1 = 0;
+    const q = [s]; seen[s] = 1;
+    while (q.length) {
+      const c = q.pop(), cx = c % gw, cy = (c - cx) / gw;
+      x0 = Math.min(x0, cx); y0 = Math.min(y0, cy); x1 = Math.max(x1, cx); y1 = Math.max(y1, cy);
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {   // join cells up to 2 apart
+        const nx = cx + dx, ny = cy + dy, n = ny * gw + nx;
+        if (nx >= 0 && ny >= 0 && nx < gw && ny < gh && grid[n] && !seen[n]) { seen[n] = 1; q.push(n); }
+      }
+    }
+    boxes.push({ x0: x0 * mm - 2, y0: y0 * mm - 2, x1: (x1 + 1) * mm + 2, y1: (y1 + 1) * mm + 2 });
+  }
+  return boxes.sort((p, q) => (q.x1 - q.x0) * (q.y1 - q.y0) - (p.x1 - p.x0) * (p.y1 - p.y0));
+}
+async function showRegions(view, world) {
+  const R = $("#regions");
+  R.textContent = "Comparing pixels…";
+  const boxes = await computeRegions(view);
+  for (const b of boxes) {
+    const d = document.createElement("div");
+    d.className = "region";
+    Object.assign(d.style, { left: b.x0 * PX + "px", top: b.y0 * PX + "px", width: (b.x1 - b.x0) * PX + "px", height: (b.y1 - b.y0) * PX + "px" });
+    world.appendChild(d);
+  }
+  R.innerHTML = boxes.length ? `<b>${boxes.length} changed region${boxes.length > 1 ? "s" : ""}:</b> ` : "No visible pixel changes.";
+  boxes.forEach((b, i) => {
+    const a = document.createElement("a");
+    a.textContent = `Region ${i + 1}`;
+    a.onclick = () => zoomTo(b.x0, b.y0, b.x1, b.y1);
+    R.appendChild(a);
+  });
+  if (boxes.length) { S.fitted = true; zoomTo(boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1); }
+}
+
+function badge(status) { return status === "unchanged" ? "" : `<span class="badge b-${status}">${status}</span>`; }
+function select(item) { S.item = item; S.fitted = false; S.marks = []; renderNav(); draw(); }
+
+function renderNav() {
+  const p = proj();
+  const tree = $("#tree"); tree.innerHTML = "";
+  const kids = parent => p.sheets.filter(s => s.parent === parent);
+  const add = (ul, parent) => kids(parent).forEach(s => {
+    const li = document.createElement("li"), sp = document.createElement("span");
+    sp.className = s.status === "unchanged" ? "unchanged" : "";
+    if (S.item && S.item.path === s.path) sp.classList.add("sel");
+    sp.innerHTML = `${s.status !== "unchanged" ? "● " : ""}${s.name.replace(/[<&]/g, c => c === "<" ? "&lt;" : "&amp;")} ${badge(s.status)}`;
+    sp.title = s.file;
+    if (s.status !== "unchanged") sp.onclick = () => select({ kind: "sheet", path: s.path });
+    li.appendChild(sp);
+    const sub = document.createElement("ul");
+    add(sub, s.path);
+    if (sub.children.length) li.appendChild(sub);
+    ul.appendChild(li);
+  });
+  add(tree, null);
+  if (!p.sheets.length) tree.innerHTML = '<li><span class="unchanged">No schematic</span></li>';
+  const bn = $("#boardnav");
+  bn.innerHTML = p.board.changed
+    ? `<li><span class="${S.item && S.item.kind === "board" ? "sel" : ""}">● ${p.name}.kicad_pcb ${badge(p.board.status)}</span></li>`
+    : '<li><span class="unchanged">Board unchanged</span></li>';
+  if (p.board.changed) bn.querySelector("span").onclick = () => select({ kind: "board" });
+  const lb = $("#layerbox");
+  lb.hidden = !(S.item && S.item.kind === "board");
+  const L = $("#layers"); L.innerHTML = "";
+  for (const l of p.board.layers) {
+    const lab = document.createElement("label"), cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = S.layersOn.has(l.name);
+    cb.onchange = () => { cb.checked ? S.layersOn.add(l.name) : S.layersOn.delete(l.name); draw(); };
+    lab.append(cb, " " + l.name.replace(/_/g, "."), l.svg.base !== l.svg.head ? " ●" : "");
+    L.appendChild(lab);
+  }
+}
+
+function openProject(i) {
+  S.proj = i;
+  $("#proj").value = i;
+  const p = proj();
+  S.layersOn = new Set(p.board.layers.filter(l => DEFAULT_LAYERS.test(l.name)).map(l => l.name));
+  const first = p.sheets.find(s => s.status !== "unchanged");
+  select(first ? { kind: "sheet", path: first.path } : p.board.changed ? { kind: "board" } : null);
+}
+
+function init() {
+  const short = s => s ? s.slice(0, 9) : "nothing";
+  $("#revs").innerHTML = `<code>${short(D.base)}</code> → <code>${short(D.head)}</code> <span style="color:var(--muted)">${D.reason}</span>`;
+  if (D.run_url) { $("#runlink").href = D.run_url; $("#runlink").textContent = "Workflow run"; }
+  D.projects.forEach((p, i) => $("#proj").add(new Option(`${p.name} (${p.status})`, i)));
+  $("#proj").onchange = e => openProject(+e.target.value);
+  document.querySelectorAll("#toolbar [data-mode]").forEach(b => b.onclick = () => { S.mode = b.dataset.mode; draw(); });
+  $("#fit").onclick = fit;
+  // Deep links: #project=1&mode=overlay&item=board
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (["side", "overlay", "swipe", "regions"].includes(h.get("mode"))) S.mode = h.get("mode");
+  if (!D.projects.length) { $("#msg").textContent = "No KiCad projects changed."; return; }
+  openProject(Math.min(+h.get("project") || 0, D.projects.length - 1));
+  if (h.get("item") === "board" && proj().board.changed) select({ kind: "board" });
+}
+init();
+</script>
+</body>
+</html>
