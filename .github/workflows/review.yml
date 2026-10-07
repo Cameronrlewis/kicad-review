@@ -82,13 +82,19 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 tools/kicad_review.py report
 
+      - name: Copy named report
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          REPORT_NAME: ${{ steps.report.outputs.name }}
+        run: cp review/kicad-review.html "review/$REPORT_NAME"
+
       - name: Upload report
         id: upload
         if: steps.detect.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           archive: false
-          path: review/kicad-review.html
+          path: review/${{ steps.report.outputs.name }}
           retention-days: 14
 
       - name: Screenshots of changed drawings

@@ -883,8 +883,11 @@ def cmd_report(args):
     with open("review/data.json", "w", encoding="utf-8") as fh:
         json.dump(data, fh)
     failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    base = det["base"][:7] if det["base"] else "none"
+    name = f"kicad-review-{base}-{det['head'][:7]}-{'fail' if failed else 'pass'}.html"
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
+        fh.write(f"name={name}\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️"}

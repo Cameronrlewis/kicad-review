@@ -338,3 +338,17 @@ r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=t, capture_output=Tr
 assert r.returncode == 0, r.stderr
 assert open(f"{t}/patched.md", encoding="utf-8").read() == normal
 print("ok")
+
+# Reports expose an artifact filename containing the compared revisions and result.
+import re
+def report_output(base, head):
+    t = tempfile.mkdtemp()
+    out = f"{t}/github-output"
+    write(t, {"review/detect.json": json.dumps({"base": base, "head": head, "reason": "test", "projects": []})})
+    r = subprocess.run([sys.executable, os.path.abspath("kicad_review.py"), "report"], cwd=t, capture_output=True, text=True,
+                       env={**os.environ, "GITHUB_OUTPUT": out})
+    assert r.returncode == 0, r.stderr[-300:]
+    return open(out, encoding="utf-8").read()
+assert re.search(r"^name=kicad-review-1234567-abcdef0-pass\.html$", report_output("1234567890abcdef", "abcdef0123456789"), re.M)
+assert re.search(r"^name=kicad-review-none-fedcba9-pass\.html$", report_output("", "fedcba9876543210"), re.M)
+print("ok")
