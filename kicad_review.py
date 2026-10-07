@@ -112,7 +112,6 @@ def detect(base, head):
             "dir": d,
             "name": posixpath.basename(pro)[: -len(".kicad_pro")],
             "status": status,
-            "changed_files": sorted(by_project[d]),
         })
     return projects
 
@@ -127,21 +126,12 @@ def cmd_detect(args):
         json.dump(result, fh, indent=2)
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
         fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\n")
-    lines = [
-        "## KiCad review",
-        "",
-        f"Comparing `{(base or 'nothing')[:9]}` → `{head[:9]}` ({reason}).",
-        "",
-    ]
-    if not projects:
-        lines.append("No KiCad files changed. Nothing to review.")
+    print(f"Comparing {base} -> {head} ({reason})")
     for p in projects:
-        lines.append(f"- **{p['name']}** (`{p['dir'] or '.'}`, {p['status']}): "
-                     + ", ".join(f"`{posixpath.relpath(f, p['dir'] or '.')}`" for f in p["changed_files"]))
-    summary = "\n".join(lines) + "\n"
-    with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
-        fh.write(summary)
-    print(summary)
+        print(f"  {p['name']} ({p['dir'] or '.'}, {p['status']})")
+    if not projects:  # changed runs get their summary from the summary step
+        with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
+            fh.write("No KiCad files changed. Nothing to review.\n")
 
 
 def project_id(d):
@@ -152,7 +142,6 @@ def kicad_cli(*args):
     r = subprocess.run(["kicad-cli", *args], capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"kicad-cli {' '.join(args)} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}")
-    return r
 
 
 def board_layers(pcb_path):
@@ -171,38 +160,29 @@ def board_layers(pcb_path):
 
 
 def render_side(src_dir, name, out):
-    """SVG renders, ERC and DRC reports of one revision of one project. Returns {"sch": [...], "pcb": [...]} of paths relative to out."""
-    files = {"sch": [], "pcb": []}
+    """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
         kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
-        files["sch"] = sorted(f"sch/{f}" for f in os.listdir(f"{out}/sch"))
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
     if os.path.exists(pcb):
         # Drill marks off: with them every layer, even an empty one, is full of holes.
         # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
         kicad_cli("pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1",
                   "--drill-shape-opt", "0", "-l", ",".join(board_layers(pcb)), "-o", f"{out}/pcb", pcb)
-        files["pcb"] = sorted(f"pcb/{f}" for f in os.listdir(f"{out}/pcb"))
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
-    return files
 
 
 def cmd_render(args):
-    with open(args.detect) as fh:
+    with open("review/detect.json") as fh:
         det = json.load(fh)
     for p in det["projects"]:
-        out = f"{args.out}/{project_id(p['dir'])}"
-        manifest = {"project": p, "sides": {}}
         for side in ("base", "head"):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
-            manifest["sides"][side] = render_side(posixpath.join(side, p["dir"]), p["name"], f"{out}/{side}")
-        with open(f"{out}/manifest.json", "w") as fh:
-            json.dump(manifest, fh, indent=2)
-        print(f"{p['name']}: " + ", ".join(f"{s} {len(v['sch'])} sheet(s) {len(v['pcb'])} layer(s)"
-                                          for s, v in manifest["sides"].items()))
+            render_side(posixpath.join(side, p["dir"]), p["name"], f"review/{project_id(p['dir'])}/{side}")
+            print(f"{p['name']}: rendered {side}")
 
 
 TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
@@ -245,7 +225,7 @@ def sheet_pages(proj_dir, name):
         with open(full) as fh:
             root = parse_sexpr(fh.read())
         for s in findall(root, "sheet"):
-            props = {p[1]: p[2] for p in findall(s, "property") if len(p) > 2}
+            props = properties(s)
             walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", props.get("Sheetname", "?"), path, depth + 1)
 
     if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
@@ -387,7 +367,7 @@ def pcb_objects(path):
     setup = find(root, "setup")
     if setup:
         objs["meta:setup"] = {"kind": "design rules", "ref": "board setup", "where": None,
-                              "props": {k: v for k, v in flatten_sexpr(setup).items()}}
+                              "props": flatten_sexpr(setup)}
     for n in root[1:]:
         if not isinstance(n, list) or not n:
             continue
@@ -475,7 +455,7 @@ def pro_objects(path):
         return {}
     with open(path) as fh:
         pro = json.load(fh)
-    keep = {k: pro.get(k) for k in ("net_settings",) if k in pro}
+    keep = {"net_settings": pro.get("net_settings")}
     keep["board"] = (pro.get("board") or {}).get("design_settings")
     keep["erc"] = (pro.get("erc") or {}).get("rule_severities")
     return {"meta:pro": {"kind": "design rules", "ref": posixpath.basename(path), "where": None,
@@ -564,7 +544,6 @@ def load_settings(roots=("base", "head")):
                     settings[k].update(v)
                 else:
                     settings[k] = v
-            settings["source"] = f"{SETTINGS_FILE} ({side} revision)"
             break
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
@@ -636,12 +615,12 @@ def release_project(pro_path, tag, settings, out_dir):
 
 
 def cmd_release(args):
-    settings = load_settings((args.src,))
-    os.makedirs(args.out, exist_ok=True)
-    pros = sorted(posixpath.join(d, f) for d, _, files in os.walk(args.src) if "/." not in d for f in files
+    settings = load_settings(("repo",))
+    os.makedirs("release", exist_ok=True)
+    pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
                   if f.endswith(".kicad_pro"))
     for pro in pros:
-        for f in release_project(pro, args.tag, settings, args.out):
+        for f in release_project(pro, args.tag, settings, "release"):
             print(f)
 
 
@@ -725,8 +704,8 @@ def run_check(name, settings, head, base):
             "violations": head}
 
 
-def project_checks(p, review_dir, settings, objs):
-    out = f"{review_dir}/{project_id(p['dir'])}"
+def project_checks(p, settings, objs):
+    out = f"review/{project_id(p['dir'])}"
     side = lambda s, f, k: load_violations(f"{out}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
@@ -766,20 +745,18 @@ def has_drawing(text):
     return re.search(r"<(path|polyline|polygon|circle|rect|line|ellipse|text)\b", text) is not None
 
 
-class Blobs(dict):
-    """gzip+base64 SVG store, deduplicated by content."""
-
-    def add(self, text):
-        if text is None:
-            return None
-        key = hashlib.sha1(text.encode()).hexdigest()[:12]
-        if key not in self:
-            self[key] = base64.b64encode(gzip.compress(text.encode(), mtime=0)).decode()
-        return key
+def add_blob(blobs, text):
+    """Store SVG text gzip+base64 in blobs, deduplicated by content; return its key."""
+    if text is None:
+        return None
+    key = hashlib.sha1(text.encode()).hexdigest()[:12]
+    if key not in blobs:
+        blobs[key] = base64.b64encode(gzip.compress(text.encode(), mtime=0)).decode()
+    return key
 
 
-def build_project(p, review_dir, blobs, settings):
-    out = f"{review_dir}/{project_id(p['dir'])}"
+def build_project(p, blobs, settings):
+    out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
     for side in sides:
@@ -793,7 +770,7 @@ def build_project(p, review_dir, blobs, settings):
         pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
         if pg["status"] != "unchanged":
             pg["size"] = svg_size(h or b)
-            pg["svg"] = {"base": blobs.add(b), "head": blobs.add(h)}
+            pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
         sheets.append(pg)
     layers, changed = [], False
     names = sorted({posixpath.basename(f) for s in sides for f in os.listdir(f"{out}/{s}/pcb")}
@@ -808,35 +785,34 @@ def build_project(p, review_dir, blobs, settings):
              "status": "added" if not has["base"] else "removed" if not has["head"] else "modified"}
     if changed:
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
-        board["layers"] = [{"name": l["name"], "svg": {"base": blobs.add(l["base"]), "head": blobs.add(l["head"])}}
+        board["layers"] = [{"name": l["name"], "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, review_dir, settings, objs)}
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs)}
 
 
 def cmd_report(args):
-    with open(args.detect) as fh:
+    with open("review/detect.json") as fh:
         det = json.load(fh)
-    blobs = Blobs()
+    blobs = {}
     env = os.environ
     data = {
-        "repo": env.get("GITHUB_REPOSITORY", ""),
         "run_url": f"{env.get('GITHUB_SERVER_URL', '')}/{env.get('GITHUB_REPOSITORY', '')}/actions/runs/{env.get('GITHUB_RUN_ID', '')}"
                    if env.get("GITHUB_RUN_ID") else "",
         "base": det["base"], "head": det["head"], "reason": det["reason"],
         "settings": load_settings(),
     }
-    data["projects"] = [build_project(p, args.review, blobs, data["settings"]) for p in det["projects"]]
+    data["projects"] = [build_project(p, blobs, data["settings"]) for p in det["projects"]]
     data["blobs"] = blobs
     with open(posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "report.html")) as fh:
         template = fh.read()
     html = template.replace("/*DATA*/", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
-    with open(args.out, "w") as fh:
+    with open("review/kicad-review.html", "w") as fh:
         fh.write(html)
-    print(f"{args.out}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
+    print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
     del data["blobs"]
-    with open(posixpath.join(posixpath.dirname(args.out), "data.json"), "w") as fh:
+    with open("review/data.json", "w") as fh:
         json.dump(data, fh)
     failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
@@ -969,13 +945,13 @@ def shot_list(data, limit=8):
 
 
 def cmd_shots(args):
-    with open(f"{args.review}/data.json") as fh:
+    with open(f"review/data.json") as fh:
         data = json.load(fh)
-    os.makedirs(f"{args.review}/images", exist_ok=True)
-    report = os.path.abspath(f"{args.review}/kicad-review.html")
+    os.makedirs(f"review/images", exist_ok=True)
+    report = os.path.abspath(f"review/kicad-review.html")
     done = []
     for s in shot_list(data):
-        out = os.path.abspath(f"{args.review}/images/{s['file']}")
+        out = os.path.abspath(f"review/images/{s['file']}")
         r = subprocess.run([args.chrome, "--headless=new", "--no-sandbox", "--hide-scrollbars", "--window-size=1400,560",
                             "--virtual-time-budget=20000", f"--screenshot={out}", f"file://{report}#{s['hash']}&shot=1"],
                            capture_output=True, text=True, timeout=120)
@@ -983,20 +959,20 @@ def cmd_shots(args):
             done.append(s)
         else:
             print(f"::warning::Screenshot of {s['title']} failed: {r.stderr[-300:]}")
-    with open(f"{args.review}/images/shots.json", "w") as fh:
+    with open(f"review/images/shots.json", "w") as fh:
         json.dump(done, fh, indent=2)
     print(f"{len(done)} screenshot(s)")
 
 
 def cmd_summary(args):
-    with open(f"{args.review}/data.json") as fh:
+    with open(f"review/data.json") as fh:
         data = json.load(fh)
     images = []
-    if args.image_base and os.path.exists(f"{args.review}/images/shots.json"):
-        with open(f"{args.review}/images/shots.json") as fh:
+    if args.image_base and os.path.exists(f"review/images/shots.json"):
+        with open(f"review/images/shots.json") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
     body = comment_markdown(data, images, args.artifact_url)
-    with open(f"{args.review}/comment.md", "w") as fh:
+    with open(f"review/comment.md", "w") as fh:
         fh.write(body)
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
         fh.write(body.replace(MARKER, ""))
@@ -1025,28 +1001,19 @@ def main():
     p = sub.add_parser("detect", help="resolve base/head and list changed KiCad projects")
     p.add_argument("--out", default="review/detect.json")
     p.set_defaults(func=cmd_detect)
-    p = sub.add_parser("render", help="SVG renders of both revisions (run inside the KiCad container)")
-    p.add_argument("--detect", default="review/detect.json")
-    p.add_argument("--out", default="review")
+    p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_render)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
-    p.add_argument("--src", default="repo")
     p.add_argument("--tag", required=True)
-    p.add_argument("--out", default="release")
     p.set_defaults(func=cmd_release)
     p = sub.add_parser("shots", help="before/after screenshots of changed drawings for the comment")
-    p.add_argument("--review", default="review")
     p.add_argument("--chrome", default="google-chrome")
     p.set_defaults(func=cmd_shots)
     p = sub.add_parser("summary", help="markdown for the pull request comment and job summary")
-    p.add_argument("--review", default="review")
     p.add_argument("--image-base", default="")
     p.add_argument("--artifact-url", default="")
     p.set_defaults(func=cmd_summary)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
-    p.add_argument("--detect", default="review/detect.json")
-    p.add_argument("--review", default="review")
-    p.add_argument("--out", default="review/kicad-review.html")
     p.set_defaults(func=cmd_report)
     args = ap.parse_args()
     args.func(args)

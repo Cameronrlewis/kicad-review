@@ -112,7 +112,7 @@ const D = JSON.parse(document.getElementById("data").textContent);
 const PX = 4;                       // CSS pixels per millimetre at zoom 1
 const DEFAULT_LAYERS = /^(F|B|In\d+)_Cu$|^(F|B)_Silkscreen$|^Edge_Cuts$/;
 const $ = s => document.querySelector(s);
-const S = { proj: 0, item: null, mode: "side", layersOn: new Set(), T: { x: 0, y: 0, k: 1 }, swipe: 0.5, marks: [], regions: null };
+const S = { proj: 0, item: null, mode: "side", layersOn: new Set(), T: { x: 0, y: 0, k: 1 }, swipe: 0.5, marks: [] };
 const textCache = {};
 
 async function svgText(id) {
@@ -282,7 +282,7 @@ function computeMarks() {
 }
 function drawMarks() {
   document.querySelectorAll(".world").forEach(w => {
-    const side = w.querySelector(".stack.head") && !w.querySelector(".stack.base") ? "head" : w.querySelector(".stack.base") && !w.querySelector(".stack.head") ? "base" : "head";
+    const side = w.querySelector(".stack.head") ? "head" : "base";
     for (const m of S.marks.concat(S.selRow && onCurrent(S.selRow) ? [{ r: S.selRow, sel: true }] : [])) {
       const b = rowBox(m.r, side);
       if (!b) continue;
