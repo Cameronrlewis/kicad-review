@@ -221,3 +221,29 @@ files = subprocess.run(["git", "-C", f"{t}/origin.git", "ls-tree", "-r", "--name
 url = open(f"{t}/out1").read().strip().split("/raw/kicad-review-assets/")[1]
 assert f"{url}/a.png" in files and "pr-3/2/a.png" in files, (url, files)
 print("ok")
+
+# 8. Boards saved by KiCad 7 or earlier: objects carry (tstamp ...) and footprints use fp_text for reference/value.
+from kicad_review import pcb_objects
+k7 = '''(kicad_pcb (version 20221018) (generator pcbnew)
+  (net 0 "") (net 1 "GND")
+  (footprint "Resistor_SMD:R_0603" (layer "F.Cu") (tstamp 0a1b2c3d-0000-0000-0000-000000000001) (at 100 50)
+    (fp_text reference "R12" (at 0 -1.4) (layer "F.SilkS") (tstamp 0a1b2c3d-0000-0000-0000-000000000002))
+    (fp_text value "10k" (at 0 1.4) (layer "F.Fab") (tstamp 0a1b2c3d-0000-0000-0000-000000000003))
+    (pad "1" smd roundrect (at -0.8 0) (size 0.8 0.9) (layers "F.Cu") (net 1 "GND") (tstamp 0a1b2c3d-0000-0000-0000-000000000004)))
+  (segment (start 1 1) (end 2 2) (width 0.25) (layer "F.Cu") (net 1) (tstamp 0a1b2c3d-0000-0000-0000-000000000005))
+  (via (at 3 3) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (tstamp 0a1b2c3d-0000-0000-0000-000000000006)))'''
+t = tempfile.mkdtemp()
+write(t, {"b.kicad_pcb": k7})
+objs = pcb_objects(f"{t}/b.kicad_pcb")
+fp = objs.get("0a1b2c3d-0000-0000-0000-000000000001", {})
+assert {o["kind"] for o in objs.values()} >= {"footprint", "track", "via"}, objs
+assert fp["ref"] == "R12" and fp["props"]["Value"] == "10k", fp
+print("ok")
+# The same board after KiCad 10 upgraded it: sheet file and name move to tokens, empty fields appear. No change.
+k10 = k7.replace('(tstamp 0a1b2c3d-0000-0000-0000-000000000001) (at 100 50)', '(uuid 0a1b2c3d-0000-0000-0000-000000000001) (at 100 50) '
+                 '(property "Datasheet" "") (property "Description" "") (sheetfile "b.kicad_sch")')
+k7b = k7.replace('(at 100 50)', '(at 100 50) (property "Sheetname" "") (property "Sheetfile" "b.kicad_sch")')
+write(t, {"b.kicad_pcb": k7b, "h.kicad_pcb": k10})
+rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+assert not [r for r in rows if r["kind"] == "footprint"], rows
+print("ok")

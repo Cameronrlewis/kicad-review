@@ -383,11 +383,14 @@ def pcb_objects(path):
     for n in root[1:]:
         if not isinstance(n, list) or not n:
             continue
-        kind, uid = n[0], val(n, "uuid")
+        kind, uid = n[0], val(n, "uuid") or val(n, "tstamp")  # tstamp: KiCad 7 and older; upgrading keeps the value
         if not uid:
             continue
         if kind == "footprint":
-            props = properties(n)
+            props = {t[1].capitalize(): t[2] for t in findall(n, "fp_text") if t[1] in ("reference", "value")}
+            props.update(Sheetname=val(n, "sheetname"), Sheetfile=val(n, "sheetfile"))  # tokens since KiCad 8, properties before
+            props.update(properties(n))
+            props = {k: v for k, v in props.items() if v}  # an empty field and a missing one are the same
             a = at(n)
             p = {k: v for k, v in props.items() if k != "Reference"}
             p.update({"reference": props.get("Reference", "?"), "footprint": n[1], "layer": val(n, "layer"),
@@ -415,7 +418,7 @@ def pcb_objects(path):
                          "pos": list(outline[0]) if outline else None, "box": box_of(outline, 0),
                          "props": {"net": val(n, "net_name"), "layers": layers, "name": val(n, "name"),
                                    "priority": val(n, "priority"), "outline": " ".join(fmt_at(p) for p in outline),
-                                   **{f"setting {k}": v for k, v in flatten_sexpr(n, skip=("polygon", "filled_polygon", "uuid", "net", "net_name", "layer", "layers", "name", "priority")).items()}}}
+                                   **{f"setting {k}": v for k, v in flatten_sexpr(n, skip=("polygon", "filled_polygon", "uuid", "tstamp", "net", "net_name", "layer", "layers", "name", "priority")).items()}}}
         elif kind.startswith("gr_") or kind == "dimension":
             layer = val(n, "layer")
             pts = [p for p in (at_xy(n, k) for k in ("start", "end", "center", "mid")) if p] + points(n) or ([tuple(at(n)[:2])] if at(n) else [])
