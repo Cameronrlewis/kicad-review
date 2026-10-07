@@ -399,15 +399,15 @@ test('repository cards show escaped details, visibility, update time, and two ac
   assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E\/commits"[^>]*>Compare commits<\/a>/);
 });
 
-test('review list filters, parses, escapes, and lists artifacts once', async () => {
+test('review cards parse, escape, and list artifacts once', async () => {
   const sealed = await signedIn(); let artifactCalls = 0;
   const restore = mockFetch(async (url) => {
     if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
     if (url.endsWith('/actions/artifacts?per_page=100')) {
       artifactCalls += 1;
       return new Response(JSON.stringify({ artifacts: [
-        { id: 1, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2025-02-03T04:05:00Z', workflow_run: { head_branch: '<b>x', head_sha: 'ignored' } },
-        { id: 2, name: 'kicad-review.html', created_at: '2024-01-01T00:00:00Z', workflow_run: { head_branch: 'legacy', head_sha: '123456789' } },
+        { id: 1, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2025-02-03T04:05:00Z', workflow_run: { head_branch: '<b>x', event: 'push' } },
+        { id: 2, name: 'kicad-review.html', created_at: '2024-01-01T00:00:00Z', workflow_run: { head_branch: 'legacy' } },
         { id: 3, name: 'kicad-review-bad.html', created_at: '2026-01-01T00:00:00Z' },
         { id: 4, name: 'kicad-review-aaaaaaa-bbbbbbb-fail.html', expired: true, created_at: '2026-01-01T00:00:00Z' },
       ] }));
@@ -417,12 +417,43 @@ test('review list filters, parses, escapes, and lists artifacts once', async () 
   try {
     const body = await (await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } })).text();
     assert.equal(artifactCalls, 1);
-    assert.match(body, /deadbee/); assert.match(body, /cafebad/); assert.match(body, /pass/);
-    assert.match(body, /older report: revisions not recorded/);
-    assert.match(body, /<span>—<\/span><span>—<\/span><\/span><\/td><td><span class="status status-notrun">— Not run/);
-    assert.doesNotMatch(body, /1234567/); assert.doesNotMatch(body, /\?/); assert.match(body, /&lt;b&gt;x/);
+    assert.match(body, /class="review-card"/); assert.match(body, /deadbee/); assert.match(body, /cafebad/);
+    assert.match(body, /✓ passing/); assert.match(body, /branch push/);
+    assert.match(body, /Revisions not recorded \(older report\)/); assert.match(body, /— not recorded/);
+    assert.doesNotMatch(body, /Not run/); assert.doesNotMatch(body, /1234567/); assert.doesNotMatch(body, />\?<\//); assert.match(body, /&lt;b&gt;x/);
     assert.doesNotMatch(body, /kicad-review-bad/); assert.doesNotMatch(body, /bbbbbbb/);
   } finally { restore(); }
+});
+
+test('review filter chips count and filter from one artifact list', async () => {
+  const sealed = await signedIn(); let artifactCalls = 0;
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/actions/artifacts?per_page=100')) {
+      artifactCalls += 1;
+      return new Response(JSON.stringify({ artifacts: [
+        { id: 1, name: 'kicad-review-deadbee-cafebad-pass.html' },
+        { id: 2, name: 'kicad-review-aaaaaaa-bbbbbbb-fail.html' },
+        { id: 3, name: 'kicad-review.html' },
+      ] }));
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo?filter=failing', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.equal(artifactCalls, 1);
+    assert.match(body, /All 3/); assert.match(body, /Passing 1/); assert.match(body, /Failing 1/); assert.match(body, /Older 1/);
+    assert.match(body, /href="\/r\/Cameronrlewis\/repo\?filter=failing" aria-current="page"/);
+    assert.match(body, /bbbbbbb/); assert.doesNotMatch(body, /cafebad/); assert.doesNotMatch(body, /Revisions not recorded/);
+  } finally { restore(); }
+});
+
+test('reviews page gives started and empty states clear guidance', () => {
+  const page = reviewsPage({ user: 'octocat', owner: 'owner', repo: 'repo', items: [], counts: { all: 0, passing: 0, failing: 0, older: 0 }, filter: 'all', started: true });
+  assert.match(page, /Your review has started\. It appears here in about two minutes\. You can leave this page\./);
+  assert.match(page, /No reviews yet/);
+  assert.match(page, /push or pull request that changes KiCad files/);
+  assert.match(page, />Compare commits<\/a>/);
 });
 
 test('commit history uses the access repository default and links reviews', async () => {

@@ -273,13 +273,32 @@ async function reviewList(request, env, owner, repo, url) {
   try {
     const artifactResponse = await artifactList(owner, repo, allowed.s.token);
     const list = artifactResponse.ok ? reviews((await artifactResponse.json()).artifacts) : [];
+    const items = list.map((item) => {
+      const event = item.workflow_run?.event;
+      const branchTip = String(item.workflow_run?.head_sha || '').slice(0, 7);
+      const manual = item.revisionsRecorded && item.base !== 'none' && branchTip && item.head !== branchTip;
+      return {
+        id: item.id, createdAt: item.created_at, date: date(item.created_at),
+        branch: item.workflow_run?.head_branch || 'Unknown branch',
+        label: manual ? 'manual' : ({ push: 'branch push', pull_request: 'pull request' }[event] || ''),
+        manual, base: item.base, head: item.head,
+        result: item.revisionsRecorded ? item.result : 'unknown', legacy: !item.revisionsRecorded,
+      };
+    });
+    const counts = {
+      all: items.length,
+      passing: items.filter((item) => item.result === 'pass').length,
+      failing: items.filter((item) => item.result === 'fail').length,
+      older: items.filter((item) => item.legacy).length,
+    };
+    const requestedFilter = url?.searchParams.get('filter');
+    const filter = ['passing', 'failing', 'older'].includes(requestedFilter) ? requestedFilter : 'all';
+    const filtered = filter === 'passing' ? items.filter((item) => item.result === 'pass')
+      : filter === 'failing' ? items.filter((item) => item.result === 'fail')
+        : filter === 'older' ? items.filter((item) => item.legacy) : items;
     return sessionResponse(reviewsPage({
       user: allowed.s.login, owner, repo, started: url?.searchParams.get('started') === '1',
-      items: list.map((item) => ({
-        id: item.id, date: date(item.created_at), branch: item.workflow_run?.head_branch || '?',
-        base: item.revisionsRecorded ? item.base : '—', head: item.revisionsRecorded ? String(item.head).slice(0, 7) : '—',
-        result: item.revisionsRecorded ? item.result : 'notrun', legacy: !item.revisionsRecorded,
-      })),
+      items: filtered, counts, filter,
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
     return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
