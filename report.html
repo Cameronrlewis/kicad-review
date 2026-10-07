@@ -49,6 +49,7 @@
   #regions { padding:4px 10px; background:var(--panel); border-top:1px solid var(--line); font-size:13px; display:none; max-height:30vh; overflow:auto; }
   #regions a { margin-right:10px; cursor:pointer; color:var(--accent); }
   #msg { margin:auto; color:var(--muted); }
+  body.shot header, body.shot nav, body.shot #toolbar, body.shot #changes, body.shot #regions { display:none !important; }
   .mark.sel { border-color:var(--accent); background:rgba(9,105,218,.15); }
   #changes { height:34vh; resize:vertical; overflow:auto; background:var(--panel); border-top:1px solid var(--line); }
   #changes .bar { position:sticky; top:0; background:var(--panel); padding:6px 10px; display:flex; gap:8px; align-items:center; border-bottom:1px solid var(--line); }
@@ -492,6 +493,16 @@ function init() {
   if (!D.projects.length) { $("#msg").textContent = "No KiCad projects changed."; return; }
   openProject(Math.min(+h.get("project") || 0, D.projects.length - 1));
   if (h.get("item") === "board" && proj().board.changed) select({ kind: "board" });
+  if (h.get("sheet")) select({ kind: "sheet", path: h.get("sheet") });
+  // Screenshot mode for the pull request comment: drawing only, zoomed to the largest changed region.
+  if (h.get("shot")) {
+    document.body.classList.add("shot");
+    select(S.item, async () => {
+      const boxes = await computeRegions(current());
+      if (boxes.length) zoomTo(boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1); else fit();
+      document.title = "ready";
+    });
+  }
   if (h.get("tab") === "checks") setTab("checks");
   if (h.get("row")) goTo((S.tab === "checks" ? S.checkRows : proj().changes)[+h.get("row")]);
 }

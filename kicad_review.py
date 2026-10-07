@@ -761,16 +761,170 @@ def cmd_report(args):
     with open(args.out, "w") as fh:
         fh.write(html)
     print(f"{args.out}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
-    summary = checks_markdown(data)
-    with open(env.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
-        fh.write(summary)
-    print(summary)
+    del data["blobs"]
+    with open(posixpath.join(posixpath.dirname(args.out), "data.json"), "w") as fh:
+        json.dump(data, fh)
     failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
+MARKER = "<!-- kicad-review -->"
+TABLE_KINDS = ("title block", "design rules", "symbol", "footprint", "sheet", "label", "global label",
+               "hierarchical label", "zone", "board outline")
+
+
+def plural(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def refs(rows, limit=3):
+    names = [r["ref"] for r in rows if r["ref"]]
+    return f" ({', '.join(names[:limit])}{', …' if len(names) > limit else ''})" if names else ""
+
+
+def summary_sentence(p):
+    """'3 footprints moved (R1, R2, R3), R12 value 10k → 4.7k, 2 new DRC errors'."""
+    rows, parts = p["changes"], []
+    mod = lambda kind: [r for r in rows if r["action"] == "modified" and r["kind"] == kind]
+    changed = lambda r, prop: any(c[0] == prop for c in r.get("changes", []))
+    moved = [r for r in mod("footprint") if changed(r, "position")]
+    if moved:
+        parts.append(f"{plural(len(moved), 'footprint')} moved{refs(moved)}")
+    values = [(r["ref"], c) for r in mod("symbol") + mod("footprint") for c in r["changes"] if c[0] == "Value"]
+    seen = set()
+    for ref, c in values:
+        if ref not in seen and len(seen) < 5:
+            seen.add(ref)
+            parts.append(f"{ref} value {c[1] or '—'} → {c[2] or '—'}")
+    if len({v[0] for v in values}) > 5:
+        parts.append(f"{len({v[0] for v in values}) - 5} more value changes")
+    swapped = [r for r in mod("symbol") + mod("footprint") if changed(r, "Footprint") or changed(r, "footprint")]
+    if swapped:
+        parts.append(f"{plural(len(swapped), 'footprint assignment')} changed{refs(swapped)}")
+    for kind, word in (("symbol", "part"), ("footprint", "footprint")):
+        for action in ("added", "removed"):
+            rs = [r for r in rows if r["action"] == action and r["kind"] == kind]
+            if rs:
+                parts.append(f"{plural(len(rs), word)} {action}{refs(rs)}")
+    for kind in ("track", "via", "zone", "wire", "board outline"):
+        a, d, m = (sum(1 for r in rows if r["kind"] == kind and r["action"] == x) for x in ("added", "removed", "modified"))
+        if a or d or m:
+            parts.append(f"{kind}s: " + ", ".join(x for x in (a and f"+{a}", d and f"−{d}", m and f"{m} changed") if x))
+    for kind in ("title block", "design rules"):
+        if any(r["kind"] == kind for r in rows):
+            parts.append(f"{kind} changed")
+    for c in p["checks"]:
+        if c["new_errors"]:
+            parts.append(f"**{plural(c['new_errors'], 'new ' + c['title'] + ' error')}**")
+        if c["fixed"]:
+            parts.append(f"{c['fixed']} {c['title']} issue{'s' if c['fixed'] > 1 else ''} fixed")
+    return ", ".join(parts) or "no reviewable changes"
+
+
+def cell(v):
+    v = "—" if v in (None, "") else str(v)
+    v = v if len(v) <= 60 else v[:57] + "…"
+    return v.replace("|", "\\|").replace("\n", " ")
+
+
+def changes_markdown(p):
+    rows = [r for r in p["changes"] if r["kind"] in TABLE_KINDS]
+    if not rows:
+        return []
+    lines = ["| Change | Object | Ref | Details |", "|---|---|---|---|"]
+    for r in rows[:60]:
+        if r.get("changes"):
+            det = "<br>".join(f"{cell(k)}: {cell(a)} → {cell(b)}" for k, a, b in r["changes"][:6])
+            if len(r["changes"]) > 6:
+                det += f"<br>… {len(r['changes']) - 6} more"
+        else:
+            det = ", ".join(f"{k}: {cell(r['props'][k])}" for k in ("Value", "Footprint", "footprint", "net", "layer", "text") if r["props"].get(k))
+        lines.append(f"| {r['action']} | {r['kind']} | {cell(r['ref'])} | {det or '—'} |")
+    if len(rows) > 60:
+        lines.append(f"| … | | | {len(rows) - 60} more rows in the report |")
+    return lines
+
+
+def comment_markdown(data, images, artifact_url):
+    out = [MARKER, "## KiCad review", ""]
+    short = lambda s: s[:9] if s else "nothing"
+    out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
+               + (f"**[Download the interactive report]({artifact_url})** (zip with one HTML file, open it in a browser). " if artifact_url else "")
+               + (f"[Workflow run]({data['run_url']})" if data["run_url"] else ""))
+    for i, p in enumerate(data["projects"]):
+        out += ["", f"### {p['name']}" + (f" (`{p['dir']}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
+                summary_sentence(p) + "."]
+        shots = [s for s in images if s["project"] == i]
+        if shots:
+            out += [""]
+            for s in shots:
+                out += [f"**{s['title']}**", "", f"![{s['title']}: before and after]({s['url']})", ""]
+        table = changes_markdown(p)
+        other = {k: sum(1 for r in p["changes"] if r["kind"] == k) for k in ("track", "via", "wire", "bus", "junction", "no connect", "power symbol", "graphic")}
+        other = ", ".join(plural(n, k) for k, n in other.items() if n)
+        if table:
+            out += ["", f"<details{' open' if len(table) <= 12 else ''}><summary>Object changes ({len(p['changes'])})</summary>", "", *table, ""]
+            if other:
+                out += [f"Also changed: {other}. Full list in the report.", ""]
+            out += ["</details>"]
+        elif other:
+            out += ["", f"Changed: {other}. Full list in the report."]
+    out.append(checks_markdown(data))
+    body = "\n".join(out)
+    if len(body) > 60000:  # GitHub comments are limited to 65536 characters
+        body = body[:60000] + "\n\n… truncated. The full list is in the report.\n"
+    return body
+
+
+def shot_list(data, limit=8):
+    """Drawings worth a before/after picture in the comment: changed sheets, then each changed board."""
+    shots = []
+    for i, p in enumerate(data["projects"]):
+        for pg in p["sheets"]:
+            if pg["status"] != "unchanged":
+                shots.append({"project": i, "title": f"{p['name']}: sheet {pg['name']}",
+                              "hash": f"project={i}&sheet={pg['path']}", "file": f"p{i}-sheet-{len(shots)}.png"})
+        if p["board"]["changed"]:
+            shots.append({"project": i, "title": f"{p['name']}: board", "hash": f"project={i}&item=board",
+                          "file": f"p{i}-board.png"})
+    return shots[:limit]
+
+
+def cmd_shots(args):
+    with open(f"{args.review}/data.json") as fh:
+        data = json.load(fh)
+    os.makedirs(f"{args.review}/images", exist_ok=True)
+    report = os.path.abspath(f"{args.review}/kicad-review.html")
+    done = []
+    for s in shot_list(data):
+        out = os.path.abspath(f"{args.review}/images/{s['file']}")
+        r = subprocess.run([args.chrome, "--headless=new", "--no-sandbox", "--hide-scrollbars", "--window-size=1400,560",
+                            "--virtual-time-budget=20000", f"--screenshot={out}", f"file://{report}#{s['hash']}&shot=1"],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and os.path.exists(out):
+            done.append(s)
+        else:
+            print(f"::warning::Screenshot of {s['title']} failed: {r.stderr[-300:]}")
+    with open(f"{args.review}/images/shots.json", "w") as fh:
+        json.dump(done, fh, indent=2)
+    print(f"{len(done)} screenshot(s)")
+
+
+def cmd_summary(args):
+    with open(f"{args.review}/data.json") as fh:
+        data = json.load(fh)
+    images = []
+    if args.image_base and os.path.exists(f"{args.review}/images/shots.json"):
+        with open(f"{args.review}/images/shots.json") as fh:
+            images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
+    body = comment_markdown(data, images, args.artifact_url)
+    with open(f"{args.review}/comment.md", "w") as fh:
+        fh.write(body)
+    with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
+        fh.write(body.replace(MARKER, ""))
+    print(body)
 
 
 def checks_markdown(data):
@@ -799,6 +953,15 @@ def main():
     p.add_argument("--detect", default="review/detect.json")
     p.add_argument("--out", default="review")
     p.set_defaults(func=cmd_render)
+    p = sub.add_parser("shots", help="before/after screenshots of changed drawings for the comment")
+    p.add_argument("--review", default="review")
+    p.add_argument("--chrome", default="google-chrome")
+    p.set_defaults(func=cmd_shots)
+    p = sub.add_parser("summary", help="markdown for the pull request comment and job summary")
+    p.add_argument("--review", default="review")
+    p.add_argument("--image-base", default="")
+    p.add_argument("--artifact-url", default="")
+    p.set_defaults(func=cmd_summary)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.add_argument("--detect", default="review/detect.json")
     p.add_argument("--review", default="review")

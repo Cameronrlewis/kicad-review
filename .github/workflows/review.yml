@@ -33,6 +33,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: repo
+          persist-credentials: false
 
       - name: Check out review tools
         if: steps.gate.outputs.skip != 'true'
@@ -41,6 +42,7 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: tools
+          persist-credentials: false
 
       - name: Find changed KiCad projects
         id: detect
@@ -80,12 +82,76 @@ jobs:
         run: python3 tools/kicad_review.py report
 
       - name: Upload report
+        id: upload
         if: steps.detect.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kicad-review
           path: review/kicad-review.html
           retention-days: 14
+
+      - name: Screenshots of changed drawings
+        if: steps.detect.outputs.changed == 'true'
+        continue-on-error: true
+        run: python3 tools/kicad_review.py shots
+
+      # Private repositories cannot show artifact images in a comment, so the screenshots go to a separate
+      # kicad-review-assets branch (one commit, rewritten each run) and are linked from github.com/<repo>/raw/...,
+      # which repository members' browsers can load. Project branches are never written to.
+      - name: Publish screenshots
+        id: images
+        if: steps.detect.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          TOKEN: ${{ github.token }}
+          KEY: ${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+        run: |
+          ls review/images/*.png >/dev/null 2>&1 || exit 0
+          branch=kicad-review-assets
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          mkdir -p "$RUNNER_TEMP/assets" && cd "$RUNNER_TEMP/assets"
+          git init -q && git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          for attempt in 1 2 3; do
+            git rm -rq --cached . 2>/dev/null; rm -rf ./*
+            lease=""
+            if git -c http.extraheader="$auth" fetch -q --depth 1 origin "$branch"; then
+              lease=$(git rev-parse FETCH_HEAD); git checkout -q FETCH_HEAD -- .
+            fi
+            now=$(date +%s)
+            for d in */; do  # drop folders untouched for 30 days
+              [ -d "$d" ] && [ $((now - $(cat "$d.stamp" 2>/dev/null || echo 0))) -gt 2592000 ] && rm -rf "$d"
+            done
+            rm -rf "$KEY" && mkdir -p "$KEY/$GITHUB_RUN_ID" && cp "$GITHUB_WORKSPACE"/review/images/*.png "$KEY/$GITHUB_RUN_ID/"
+            echo "$now" > "$KEY/.stamp"
+            git add -A
+            tree=$(git write-tree)
+            commit=$(git -c user.name=kicad-review -c user.email=kicad-review@users.noreply.github.com commit-tree "$tree" -m "KiCad review screenshots")
+            if git -c http.extraheader="$auth" push -q --force-with-lease="$branch:$lease" origin "$commit:refs/heads/$branch"; then
+              echo "base=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/$branch/$KEY/$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((attempt * 3))
+          done
+          exit 1
+
+      - name: Job summary and pull request comment
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          IMAGES: ${{ steps.images.outputs.base }}
+          ARTIFACT: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          python3 tools/kicad_review.py summary --image-base "$IMAGES" --artifact-url "$ARTIFACT" > /dev/null
+          [ -n "$PR" ] || exit 0
+          # One comment per pull request, edited in place on every run.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            -q '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- kicad-review -->"))) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@review/comment.md --jq .html_url
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@review/comment.md --jq .html_url
+          fi
 
       - name: Fail on required checks
         if: steps.report.outputs.failed != ''
