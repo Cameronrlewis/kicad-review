@@ -827,7 +827,7 @@ UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
 
 def inline_page(data_js):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
-    read = lambda name: open(posixpath.join(UI_DIR, name)).read()
+    read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
     return (read("review.html")
             .replace('<link rel="stylesheet" href="review.css">', f"<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>")
@@ -843,7 +843,6 @@ def cmd_report(args):
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
         "links": review_links(env, det),
-        "run_url": review_links(env, det)["run"],  # kept for the comment builder
         "base": det["base"], "head": det["head"], "reason": det["reason"],
         "settings": load_settings(),
         "run_id": env.get("GITHUB_RUN_ID", ""),
@@ -852,8 +851,6 @@ def cmd_report(args):
     assign_ids(data["projects"])
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
-    with open("review/review-data.js", "w") as fh:
-        fh.write(f"window.REVIEW_DATA = {payload};\n")
     html = inline_page(f"window.REVIEW_DATA = {payload};")
     with open("review/kicad-review.html", "w") as fh:
         fh.write(html)
@@ -946,16 +943,16 @@ def changes_markdown(p):
     return lines
 
 
-def comment_markdown(data, images, artifact_url):
+def comment_markdown(data, images, artifact_url, artifact_id=""):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
-               + (f"[Workflow run]({data['run_url']})" if data["run_url"] else ""))
+               + (f"[Workflow run]({data['links']['run']})" if data["links"].get("run") else ""))
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
-    if artifact_url and data.get("repo"):
+    if artifact_id and data.get("repo"):
         out += ["", "<details><summary>From a terminal</summary>", "",
-                "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_url.rsplit('/', 1)[-1]}/zip > kicad-review.html && open kicad-review.html", "```",
+                "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
                 "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
         out += ["", f"### {p['name']}" + (f" (`{p['dir']}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
@@ -1023,7 +1020,7 @@ def cmd_summary(args):
     if args.image_base and os.path.exists(f"review/images/shots.json"):
         with open(f"review/images/shots.json") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
-    body = comment_markdown(data, images, args.artifact_url)
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id)
     with open(f"review/comment.md", "w") as fh:
         fh.write(body)
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
@@ -1063,6 +1060,7 @@ def main():
     p = sub.add_parser("summary", help="markdown for the pull request comment and job summary")
     p.add_argument("--image-base", default="")
     p.add_argument("--artifact-url", default="")
+    p.add_argument("--artifact-id", default="")
     p.set_defaults(func=cmd_summary)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)

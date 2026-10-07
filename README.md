@@ -110,5 +110,21 @@ Run the self-check with `python3 test_kicad_review.py`.
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
 Run the page checks with `node ui/check.mjs` (headless Chrome; set `CHROME=` to its path on Linux),
-or `node ui/check.mjs --dark` for the dark theme. Regenerate the sample with the steps in
-`docs/superpowers/plans/2026-10-07-review-ui.md`, Task 1 Step 5.
+or `node ui/check.mjs --dark` for the dark theme.
+
+To refresh the sample, take the data out of any generated report (a CI artifact or a local run of
+`detect`, `render` and `report`):
+
+```sh
+python3 -c "import re; h = open('kicad-review.html').read(); open('ui/sample/review-data.js', 'w').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
+```
+
+### Data format
+
+The workflow and the page share one contract, `window.REVIEW_DATA` (`version: 1`): `repo`; `links`
+(`review`, `base`, `head`, `run` — github.com URLs, empty outside Actions); `base`, `head`, `reason`;
+`settings`; `projects[]`, each with `sheets[]` (UUID `path`, `parent`, `status`, and for changed sheets
+`size` in mm and `svg.base`/`svg.head` blob ids), `board` (`changed`, `status`, `size`, `layers[]` with
+`changed` and blob ids), `changes[]` (`id`, `action`, `kind`, `ref`, `where`, `pos`, `pos_before`, `box`,
+and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `new`, `severity`, `pos`,
+`box`, `where`); and `blobs` (gzip + base64 SVG text). Positions and boxes are drawing millimetres.

@@ -1,5 +1,5 @@
 "use strict";
-// KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see docs/superpowers/plans/2026-10-07-review-ui.md §A5).
+// KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see README, "Data format").
 const D = window.REVIEW_DATA;
 const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null };
@@ -42,7 +42,7 @@ function renderLayers() {
        ${esc(l.name.replace(/_/g, "."))}${l.changed ? ' <span class="mark" title="changed">≡ changed</span>' : ""}</label>`).join("")).join("");
   for (const cb of box.querySelectorAll("input")) cb.onchange = () => {
     S.layers = [...box.querySelectorAll("input:checked")].map(i => i.dataset.layer);
-    if (typeof saveHash === "function") saveHash();
+    saveHash();
     draw();
   };
 }
@@ -61,13 +61,13 @@ function renderNav() {
   const kids = parent => p.sheets.filter(s => s.parent === parent);
   const sheetItems = (parent, depth) => kids(parent).map(s => {
     const view = `sheet:${s.path}`;
-    return `<li><button data-view="${esc(view)}" data-status="${s.status}" style="--depth:${depth}"
+    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}"
       aria-current="${S.v === view}"><span class="name" title="${esc(s.name)}">${s.status === "unchanged" ? "" : "● "}${esc(s.name)}</span>${chips(counts(p, view))}</button>
       ${kids(s.path).length ? `<ul>${sheetItems(s.path, depth + 1)}</ul>` : ""}</li>`;
   }).join("");
   $("#nav").innerHTML = `
     <label class="projsel">Project <select id="proj">${D.projects.map((q, i) =>
-      `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${q.status})</option>`).join("")}</select></label>
+      `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label>
     <h3>Schematic</h3><ul class="tree">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
     <h3>Board</h3><ul class="tree">${p.board.layers.length || p.board.changed
       ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
@@ -82,8 +82,8 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); if (typeof renderPanel === "function") renderPanel(); }
-function select(view) { S.v = view; S.x = S.y = S.z = null; renderNav(); if (typeof draw === "function") draw(); }
+function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function select(view) { S.v = view; S.x = S.y = S.z = null; renderNav(); draw(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -96,12 +96,14 @@ function decodeState(hash) {
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && p.board.changed) || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
-  if (typeof MODES === "undefined" || MODES[st.m]) if (st.m) out.m = st.m;
+  if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
   if (st.t === "checks" || st.t === "changes") out.t = st.t;
-  const ls = (st.layers || []).filter(n => p.board.layers.some(l => l.name === n));
-  if (ls.length) out.layers = ls;   // none known: default layers, not an empty board
+  if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
+    const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
+    if (!st.layers.length || ls.length) out.layers = ls;
+  }
   return out;
 }
 function applyState(st) {
@@ -109,10 +111,10 @@ function applyState(st) {
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
                      layers: v.layers ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
-  if (typeof renderModes === "function") renderModes();
+  renderModes();
   renderNav();
-  if (typeof renderPanel === "function") renderPanel();
-  return typeof draw === "function" ? draw() : Promise.resolve();
+  renderPanel();
+  return draw();
 }
 
 const PX = 4;                       // CSS px per mm at z = PX
@@ -167,11 +169,11 @@ async function draw() {
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
-  else await MODES[S.m](stage, view);       // defined in Task 5; until then MODES = { side: drawSide }
+  else await MODES[S.m](stage, view);
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
   if (view && !placed()) fit(); else apply();
-  if (typeof afterDraw === "function") afterDraw(view);
+  afterDraw(view);
 }
 async function drawSide(stage, view) {
   viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
@@ -189,7 +191,7 @@ function apply() {
     w.style.transform = `translate(${W / 2 - S.x * S.z}px, ${H / 2 - S.y * S.z}px) scale(${k})`;
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
-  if (typeof onApply === "function") onApply();
+  onApply();
   const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
 }
 let settle, gesturing = false;
@@ -198,7 +200,7 @@ function gesture() {           // composite as a bitmap while moving, re-rasteri
   gesturing = true; clearTimeout(settle);
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
-function setT(t) { Object.assign(S, t); apply(); if (typeof saveHash === "function") saveHash(); }
+function setT(t) { Object.assign(S, t); apply(); saveHash(); }
 function attachPanZoom(vp) {
   vp.addEventListener("wheel", e => {
     e.preventDefault(); if (!placed()) return;   // not fitted yet (a redraw is pending)
@@ -215,7 +217,7 @@ function attachPanZoom(vp) {
       setT({ x: S.x - (ev.clientX - lx) / S.z, y: S.y - (ev.clientY - ly) / S.z }); lx = ev.clientX; ly = ev.clientY; };
     vp.addEventListener("pointermove", mv);
     vp.addEventListener("pointerup", ev => { vp.removeEventListener("pointermove", mv);
-      if (moved < 4 && typeof pickAt === "function") pickAt(vp, ev); }, { once: true });
+      if (moved < 4) pickAt(vp, ev); }, { once: true });
   });
 }
 function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
@@ -265,12 +267,14 @@ MODES.wipe = async (stage, view) => {
     e.stopPropagation(); try { d.setPointerCapture(e.pointerId); } catch {}
     const mv = ev => { const r = vp.getBoundingClientRect(); S.wipe = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)); apply(); };
     d.addEventListener("pointermove", mv);
-    d.addEventListener("pointerup", () => d.removeEventListener("pointermove", mv), { once: true });
+    const end = () => d.removeEventListener("pointermove", mv);
+    d.addEventListener("pointerup", end, { once: true });
+    d.addEventListener("pointercancel", end, { once: true });
   });
   d.addEventListener("keydown", e => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
     S.wipe = Math.min(1, Math.max(0, S.wipe + (e.key === "ArrowLeft" ? -0.05 : 0.05))); apply(); } });
 };
-MODES.semantic = async (stage, view) => { markersFor(view); await oneWorld(stage, view, "Changes only"); };
+MODES.semantic = (stage, view) => oneWorld(stage, view, "Changes only");
 function onApply() {
   const vp = document.querySelector("#stage.mode-wipe .vp");
   if (!vp) return;
@@ -282,7 +286,7 @@ function renderModes() {
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
     `<button data-mode="${m}" aria-pressed="${S.m === m}">${n}</button>`).join("")
     + (S.m === "blend" ? `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>` : "");
-  for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { S.m = b.dataset.mode; renderModes(); draw(); };
+  for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
   const r = document.querySelector("#modes input[type=range]");
   if (r) r.oninput = () => { S.blend = r.value / 100; const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; };
 }
@@ -326,8 +330,9 @@ function pickAt(vp, e) {
   const rows = proj().changes.filter(c => onView(c, S.v));
   const side = vp.querySelector(".stack.head") ? "head" : "base";
   const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
-  if (hit) { S.s = hit.id; renderPanel(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
+  if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
+function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
@@ -335,7 +340,7 @@ function goTo(id) {
   S.s = id;
   const view = viewOf(r) ?? S.v;
   const box = rowBox(r, r.action === "removed" ? "base" : "head");
-  const zoom = () => { if (box) zoomTo(box); renderPanel(); };
+  const zoom = () => { if (box) zoomTo(box); markSelected(); };
   if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
   return draw().then(zoom);
 }
@@ -349,15 +354,16 @@ function card(r) {
     ? r.changes.map(([k, a, b]) => `<div class="prop"><span>${esc(k)}</span><span class="old">${esc(a ?? "—")}</span><span class="arrow">→</span><span class="new">${esc(b ?? "—")}</span></div>`).join("")
     : props.slice(0, 5).map(([k, v]) => `<div class="prop"><span>${esc(k)}</span><span class="new wide">${esc(v)}</span></div>`).join("")
       + (props.length > 5 ? `<div class="more muted">+${props.length - 5} more</div>` : "");
-  return `<button class="card" data-id="${r.id}" data-action="${r.action}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
+  return `<button class="card" data-id="${esc(r.id)}" data-action="${esc(r.action)}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
-    <span class="badge ${r.action}">${GLYPH[r.action]} ${r.action}</span>${body}</button>`;
+    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${body}</button>`;
 }
 function cardsHtml() {
   const f = S.filter, q = f.q.toLowerCase();
   const rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
     && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
-  return rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>';
+  return (rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>')
+    + (rows.length > 1500 ? `<p class="muted">showing 1500 of ${rows.length}; narrow the filter to see the rest</p>` : "");
 }
 function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
 function renderChecks() {
@@ -366,10 +372,10 @@ function renderChecks() {
   const nw = c => c.new_errors + c.new_warnings;
   return p.checks.map((c, i) => [c, i]).sort(([a, i], [b, j]) => (nw(b) - nw(a)) || ((b.status === "fail") - (a.status === "fail")) || (i - j)).map(([c]) => {
     const vs = [...c.violations].sort((a, b) => (b.new - a.new) || (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1));
-    return `<section class="check ${c.status}">
-      <h3>${c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "✓"} ${esc(c.title)} <span class="muted">${c.level}</span></h3>
+    return `<section class="check ${esc(c.status)}">
+      <h3>${c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "✓"} ${esc(c.title)} <span class="muted">${esc(c.level)}</span></h3>
       <p>${c.errors} errors (${c.new_errors} new) · ${c.warnings} warnings (${c.new_warnings} new) · ${c.fixed} fixed</p>
-      ${vs.slice(0, 500).map(v => { const at = v.pos && currentView(viewOf(v)); return `<button class="viol ${v.severity}" data-id="${v.id}" data-new="${v.new}" ${at ? "" : 'aria-disabled="true"'}>
+      ${vs.slice(0, 500).map(v => { const at = v.pos && currentView(viewOf(v)); return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'}>
         ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="sev">${v.severity === "error" ? "✕ error" : "! warning"}</span>
         <span class="rule">${esc(v.type)}</span> ${esc(v.description)}
         <small>${v.items.map(esc).join(" · ")}${at ? "" : " · no location"}</small></button>`; }).join("")}
@@ -383,13 +389,13 @@ function renderPanel() {
   $("#panel").innerHTML = `<div role="tablist">
       <button role="tab" data-tab="changes" aria-selected="${S.t === "changes"}">Changes ${p.changes.length}</button>
       <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button></div>` +
-    (S.t === "checks" ? (typeof renderChecks === "function" ? renderChecks() : "") : `
+    (S.t === "checks" ? renderChecks() : `
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     <div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
     <div class="cards">${cardsHtml()}</div>`);
-  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); if (typeof saveHash === "function") saveHash(); };
+  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); saveHash(); };
   for (const b of document.querySelectorAll("#panel .chip-filter")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
   const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
@@ -397,7 +403,6 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
 }
 
-const KEYS = ["p", "v", "m", "x", "y", "z", "s", "t", "l"];
 function encodeState(s = S) {
   const q = new URLSearchParams();
   q.set("p", s.p); q.set("v", s.v); q.set("m", s.m);
@@ -417,10 +422,12 @@ function step(dir) {
 }
 document.addEventListener("keydown", e => {
   if (e.target.closest?.("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const arrow = e.key === "ArrowDown" || e.key === "ArrowUp";
+  if (arrow && e.target.closest?.("#panel, button, [role=slider]")) return;   // leave arrows to scrolling and widgets
   if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
   else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
   else if (e.key === "f") fit();
-  else if (e.key === "Escape") { S.s = null; renderPanel(); draw(); saveHash(); }
+  else if (e.key === "Escape") { S.s = null; markSelected(); draw(); saveHash(); }
 });
 function positionLink() {
   const where = S.v === "board" ? `${proj().name} board` : `${proj().name} sheet ${proj().sheets.find(s => `sheet:${s.path}` === S.v)?.name ?? ""}`;

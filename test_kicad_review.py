@@ -66,9 +66,9 @@ print("ok")
 
 # Comment: direct link to the single HTML file plus a gh one-liner.
 from kicad_review import comment_markdown
-d = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "run_url": "https://github.com/o/r/actions/runs/9",
+d = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "links": {"run": "https://github.com/o/r/actions/runs/9"},
      "repo": "o/r", "run_id": "9", "projects": []}
-body = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5")
+body = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "5")
 assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in body
 assert "gh api repos/o/r/actions/artifacts/5/zip > kicad-review.html" in body
 assert "unzip" not in body.lower()
@@ -78,4 +78,23 @@ print("ok")
 readme = open("README.md").read()
 assert all(m in readme for m in ("Side by side", "Overlay", "Wipe", "Blend", "Semantic", "j / k", "Copy link", "Go to")), "README modes"
 assert "swipe and changed-regions" not in readme and "Open it from the link" not in readme
+print("ok")
+
+# Review fixes (ponytail + caveman, 2026-10-07).
+import os, subprocess, sys
+d2 = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "repo": "o/r",
+      "links": {"run": "https://github.com/o/r/actions/runs/9"}, "projects": []}
+body = comment_markdown(d2, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "77")
+assert "[Workflow run](https://github.com/o/r/actions/runs/9)" in body, "run link from links.run"
+assert "gh api repos/o/r/actions/artifacts/77/zip" in body, "artifact id passed explicitly"
+src = open("kicad_review.py").read()
+assert '"run_url"' not in src and "review-data.js\", \"w\"" not in src and "rsplit('/', 1)" not in src
+r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_page('')"],
+                   env={**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0"},
+                   capture_output=True, text=True)
+assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
+js = open("ui/review.js").read()
+assert "typeof " not in js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
+assert "docs/superpowers" not in js and "docs/superpowers" not in readme and not os.path.exists("docs/superpowers"), "plan doc removed"
+assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")

@@ -311,4 +311,49 @@ export const CHECKS = [
     REVIEW_DATA.projects[1].sheets[0].name = 'A "quoted" <very> long sheet name that will not fit the navigator width at all'; renderNav();
     const ns = [...document.querySelectorAll("#nav .tree .name")];
     return ns.length === 2 && ns[0].title === REVIEW_DATA.projects[1].sheets[0].name && ns.every(n => n.title && n.textContent.endsWith(n.title));`],
+  ["mode switch updates the address", "p=1&v=board", `
+    await new Promise(r => setTimeout(r, 800));
+    document.querySelector('#modes [data-mode="overlay"]').click();
+    await new Promise(r => setTimeout(r, 1200));
+    return location.hash.includes("m=overlay") || location.hash;`],
+  ["clicking the drawing records the selection in the address", "p=1&v=board", `
+    await new Promise(r => setTimeout(r, 1200));
+    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
+    zoomTo(r.box); await new Promise(res => setTimeout(res, 300));
+    const vp = document.querySelector("#stage .vp"), b = vp.getBoundingClientRect();
+    pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
+    await new Promise(res => setTimeout(res, 1200));
+    return location.hash.includes("s=" + r.id) || location.hash;`],
+  ["inherited object keys are not modes", "p=1&v=board&m=toString", `
+    await new Promise(r => setTimeout(r, 800));
+    return (S.m === "side" && document.querySelectorAll("#stage .vp").length === 2) || S.m;`],
+  ["all layers off survives the address round trip", "p=1&v=board", `
+    await new Promise(r => setTimeout(r, 800));
+    const back = valid(decodeState(encodeState({ ...S, layers: [] })));
+    return Array.isArray(back.layers) && back.layers.length === 0 || JSON.stringify(back.layers);`],
+  ["arrow keys on a focused card do not step or block scrolling", "p=1", `
+    const c = document.querySelector("#panel .card"); c.focus();
+    const e = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+    c.dispatchEvent(e); await new Promise(r => setTimeout(r, 300));
+    return (S.s === null && !e.defaultPrevented) || JSON.stringify([S.s, e.defaultPrevented]);`],
+  ["selecting a row does not rebuild the panel", "p=1", `
+    const list = document.querySelector("#panel .cards"), id = document.querySelector("#panel .card").dataset.id;
+    goTo(id); await new Promise(r => setTimeout(r, 1500));
+    return (list.isConnected && document.querySelector('#panel .card[data-id="' + id + '"]').getAttribute("aria-selected") === "true") || "rebuilt";`],
+  ["a cancelled wipe drag stops tracking", "p=1&v=board&m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const d = document.querySelector("#stage .divider"), r = d.parentElement.getBoundingClientRect();
+    d.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, clientX: r.left + r.width / 2 }));
+    d.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 1 }));
+    d.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: r.left + r.width * 0.1 }));
+    return Math.abs(S.wipe - 0.5) < 0.02 || S.wipe;`],
+  ["a capped change list says so", "p=1", `
+    const p = REVIEW_DATA.projects[1], keep = p.changes;
+    p.changes = Array.from({ length: 1600 }, (_, i) => ({ ...keep[0], id: "x" + i }));
+    renderPanel(); const t = document.querySelector("#panel .cards").textContent; p.changes = keep; renderPanel();
+    return t.includes("showing 1500 of 1600") || t.slice(-80);`],
+  ["generated ids and enums are escaped in markup", "p=1", `
+    const p = REVIEW_DATA.projects[1], r = p.changes[0], old = r.id; r.id = 'c"><b id=inj>';
+    renderPanel(); const bad = !!document.querySelector("#inj"); r.id = old; renderPanel();
+    return !bad || "injected";`],
 ];
