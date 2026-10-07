@@ -347,6 +347,21 @@ function cardsHtml() {
   return rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>';
 }
 function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
+function renderChecks() {
+  const p = proj();
+  if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
+  return p.checks.map(c => {
+    const vs = [...c.violations].sort((a, b) => (b.new - a.new) || (a.severity === "error" ? -1 : 1));
+    return `<section class="check ${c.status}">
+      <h3>${c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "✓"} ${esc(c.title)} <span class="muted">${c.level}</span></h3>
+      <p>${c.errors} errors (${c.new_errors} new) · ${c.warnings} warnings (${c.new_warnings} new) · ${c.fixed} fixed</p>
+      ${vs.slice(0, 500).map(v => `<button class="viol ${v.severity}" data-id="${v.id}" data-new="${v.new}" ${v.pos ? "" : 'aria-disabled="true"'}>
+        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="sev">${v.severity === "error" ? "✕ error" : "! warning"}</span>
+        <span class="rule">${esc(v.type)}</span> ${esc(v.description)}
+        <small>${v.items.map(esc).join(" · ")}${v.pos ? "" : " · no location"}</small></button>`).join("")}
+    </section>`;
+  }).join("");
+}
 function renderPanel() {
   const p = proj(), f = S.filter;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
@@ -365,6 +380,7 @@ function renderPanel() {
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
   const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
   bindCards();
+  for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
 }
 
 renderHeader();

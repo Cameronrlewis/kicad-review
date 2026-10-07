@@ -148,4 +148,21 @@ export const CHECKS = [
     const vp = document.querySelector("#stage .vp.board"), b = vp.getBoundingClientRect();
     pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
     return S.s === r.id;`],
+  ["checks view: per check, errors and warnings apart, new first", "p=1&t=checks", `
+    const groups = [...document.querySelectorAll("#panel .check")];
+    const newFirst = groups.every(g => { const n = [...g.querySelectorAll(".viol")].map(v => v.dataset.new);
+      return n.indexOf("false") === -1 || n.lastIndexOf("true") < n.indexOf("false"); });
+    return groups.length === REVIEW_DATA.projects[1].checks.length && newFirst
+      && groups.every(g => /errors?/.test(g.textContent) && /warnings?/.test(g.textContent));`],
+  ["clicking a located violation moves the drawing", "p=1&t=checks", `
+    const v = REVIEW_DATA.projects[1].checks.flatMap(c => c.violations).find(v => v.pos && v.where?.board && v.new && v.severity === "error");
+    document.querySelector('#panel .viol[data-id="' + v.id + '"]').click();
+    await new Promise(r => setTimeout(r, 1200));
+    return S.v === "board" && S.s === v.id && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < 0.01;`],
+  ["violation without position: listed, no move, no error", "p=0&t=checks", `
+    const v = REVIEW_DATA.projects.flatMap(p => p.checks.flatMap(c => c.violations)).find(v => !v.pos);
+    if (!v) return true;
+    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'); const before = [S.v, S.x, S.y];
+    el.click(); await new Promise(r => setTimeout(r, 300));
+    return el.textContent.includes("no location") && S.v === before[0] && S.x === before[1];`],
 ];

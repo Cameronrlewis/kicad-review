@@ -108,3 +108,16 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 #panel .chip-filter, #panel [role=tab] { font: inherit; color: inherit; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-1) var(--space-3); cursor: pointer; }
 #panel .chip-filter[aria-pressed="true"], #panel [role=tab][aria-selected="true"] { background: var(--accent); color: var(--surface); }
 #panel .chip-filter[aria-pressed="false"] { background: transparent; color: var(--muted); text-decoration: line-through; border-style: dashed; }
+.check { margin-bottom: var(--space-3); }
+.check h3 { margin: var(--space-2) 0 var(--space-1); font-size: 14px; }
+.check.fail h3 { color: var(--removed); } .check.warn h3 { color: var(--modified); } .check.pass h3 { color: var(--added); }
+.viol { display: block; width: 100%; text-align: left; background: var(--card-bg); border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius); padding: var(--space-2); margin-bottom: var(--space-1); }
+.viol.error { border-left-color: var(--removed); border-left-style: solid; }
+.viol.warning { border-left-color: var(--modified); border-left-style: dashed; }
+.viol:hover { background: var(--surface-2); }
+.viol[aria-disabled="true"] { cursor: default; opacity: .6; }
+.viol[aria-disabled="true"]:hover { background: var(--card-bg); }
+.viol .sev { font-weight: 600; margin-right: var(--space-1); }
+.viol .rule { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.viol small { display: block; color: var(--muted); font-family: var(--font-mono); }
+.new-tag { font: 700 11px var(--font-mono); border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; margin-right: var(--space-1); color: var(--accent); }
