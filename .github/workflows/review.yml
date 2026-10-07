@@ -1,0 +1,13 @@
+name: KiCad review
+on: workflow_call
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          cat <<'J'
+          ${{ toJSON(job) }}
+          J
+          cat <<'J'
+          ${{ toJSON(github) }}
+          J
