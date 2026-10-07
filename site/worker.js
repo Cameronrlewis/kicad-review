@@ -57,16 +57,16 @@ function cookies(request) {
   }));
 }
 
-function cookie(name, value, maxAge) {
-  return `${name}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${Math.max(0, Math.floor(maxAge))}`;
+function cookie(name, value, maxAge, secure) {
+  return `${name}=${value}; HttpOnly;${secure ? ' Secure;' : ''} SameSite=Lax; Path=/; Max-Age=${Math.max(0, Math.floor(maxAge))}`;
 }
 
-function clear(name) {
-  return cookie(name, '', 0);
+function clear(name, secure) {
+  return cookie(name, '', 0, secure);
 }
 
-async function sessionCookie(value, env) {
-  return cookie('s', await seal(value, env), (value.re - Date.now()) / 1000);
+async function sessionCookie(value, env, secure) {
+  return cookie('s', await seal(value, env), (value.re - Date.now()) / 1000, secure);
 }
 
 async function tokenRequest(env, fields) {
@@ -105,7 +105,11 @@ export async function session(request, env) {
     re: Date.now() + refreshed.refresh_token_expires_in * 1000,
     u: value.u,
   };
-  return { login: renewed.u, token: renewed.t, setCookie: await sessionCookie(renewed, env) };
+  return {
+    login: renewed.u,
+    token: renewed.t,
+    setCookie: await sessionCookie(renewed, env, new URL(request.url).protocol === 'https:'),
+  };
 }
 
 function response(body, init = {}) {
@@ -240,7 +244,10 @@ async function home(request, env) {
   const active = await session(request, env);
   if (!active) {
     return response(html('<a href="/login">Sign in with GitHub</a>'), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8', ...(stored ? { 'Set-Cookie': clear('s') } : {}) },
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        ...(stored ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
+      },
     });
   }
   let repositories = [];
@@ -434,25 +441,26 @@ function stateCookie(next) {
 
 async function callback(request, env) {
   const url = new URL(request.url);
+  const secure = url.protocol === 'https:';
   const savedState = cookies(request).st;
   const state = url.searchParams.get('state');
   if (!state || !savedState || state !== savedState) {
-    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st') } });
+    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
   }
   let stateData;
   try {
     stateData = JSON.parse(untext.decode(unbase64url(savedState)));
   } catch {
-    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st') } });
+    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
   }
   const code = url.searchParams.get('code');
-  if (!code) return response('Missing sign-in code', { status: 400, headers: { 'Set-Cookie': clear('st') } });
+  if (!code) return response('Missing sign-in code', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
   const token = await tokenRequest(env, { code });
-  if (!token) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st') } });
+  if (!token) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
   const userResponse = await gh('/user', token.access_token);
-  if (!userResponse.ok) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st') } });
+  if (!userResponse.ok) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
   const user = await userResponse.json();
-  if (!user.login) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st') } });
+  if (!user.login) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
   const value = {
     t: token.access_token,
     r: token.refresh_token,
@@ -460,7 +468,7 @@ async function callback(request, env) {
     re: Date.now() + token.refresh_token_expires_in * 1000,
     u: user.login,
   };
-  return redirect(nextPath(stateData.n), [await sessionCookie(value, env), clear('st')]);
+  return redirect(nextPath(stateData.n), [await sessionCookie(value, env, secure), clear('st', secure)]);
 }
 
 export default {
@@ -473,10 +481,10 @@ export default {
         authorize.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
         authorize.searchParams.set('redirect_uri', new URL('/callback', request.url).href);
         authorize.searchParams.set('state', state);
-        return redirect(authorize.href, [cookie('st', state, 10 * 60)]);
+        return redirect(authorize.href, [cookie('st', state, 10 * 60, url.protocol === 'https:')]);
       }
       if (request.method === 'GET' && url.pathname === '/callback') return await callback(request, env);
-      if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s')]);
+      if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)$/);
       if (request.method === 'GET' && artifactRoute) {

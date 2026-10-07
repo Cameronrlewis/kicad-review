@@ -23,6 +23,11 @@ async function call(path, options) {
   checkSecurity(response);
   return response;
 }
+async function callUrl(url, options) {
+  const response = await worker.fetch(new Request(url, options), env);
+  checkSecurity(response);
+  return response;
+}
 function mockFetch(handler) {
   const original = globalThis.fetch;
   globalThis.fetch = handler;
@@ -53,6 +58,25 @@ test('login sends state in its cookie and GitHub authorize redirect', async () =
   assert.equal(location.searchParams.get('client_id'), env.GITHUB_CLIENT_ID);
   assert.equal(location.searchParams.get('redirect_uri'), 'https://site.example/callback');
   assert.equal(location.searchParams.get('state'), cookieValue(response, 'st'));
+});
+
+test('authentication cookies use Secure only over HTTPS', async () => {
+  const restore = mockFetch(async (url) => url.includes('access_token')
+    ? tokenResponse()
+    : new Response(JSON.stringify({ login: 'octocat' }), { headers: { 'Content-Type': 'application/json' } }));
+  try {
+    for (const [origin, secure] of [['https://site.example', true], ['http://localhost:8788', false]]) {
+      const login = await callUrl(`${origin}/login`);
+      const stateCookie = cookies(login).find((value) => value.startsWith('st='));
+      assert.equal(stateCookie.includes('; Secure;'), secure);
+      const state = cookieValue(login, 'st');
+      const callback = await callUrl(`${origin}/callback?code=code&state=${encodeURIComponent(state)}`, {
+        headers: { Cookie: `st=${state}` },
+      });
+      const session = cookies(callback).find((value) => value.startsWith('s='));
+      assert.equal(session.includes('; Secure;'), secure);
+    }
+  } finally { restore(); }
 });
 
 test('callback rejects wrong or missing state before any token exchange', async () => {
