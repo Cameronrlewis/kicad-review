@@ -72,7 +72,7 @@ jobs:
         run: |
           time docker pull -q "$KICAD_IMAGE"
           docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
-            sh -c 'python3 --version && time python3 tools/kicad_review.py render'
+            python3 tools/kicad_review.py render
 
       - name: Upload review
         if: steps.detect.outputs.changed == 'true'
