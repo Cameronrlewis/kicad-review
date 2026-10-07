@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { open, seal } from './worker.js';
+import { commitsPage, homePage, messagePage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 const env = {
   GITHUB_CLIENT_ID: 'client-id',
@@ -177,6 +178,27 @@ async function signedIn(overrides = {}) {
   return seal({ t: 'user-token', r: 'refresh-token', e: Date.now() + 3_600_000, re: Date.now() + 7_200_000, u: 'octocat', ...overrides }, env);
 }
 
+test('HTML pages inline tokens and render the shared frame safely', async () => {
+  const signedOut = signedOutPage();
+  assert.match(signedOut, /--accent/);
+  assert.match(signedOut, /<header class="top">/);
+  assert.doesNotMatch(signedOut, /class="account"/);
+  const base = { user: '<b>octocat</b>', owner: 'owner', repo: 'repo' };
+  const pages = [
+    homePage({ user: base.user, repositories: [] }),
+    reviewsPage({ ...base, items: [], started: false }),
+    commitsPage({ ...base, branch: 'main', branches: ['main'], commits: [] }),
+    runPage({ ...base, running: false, conclusion: 'Done', githubUrl: '' }),
+    messagePage({ title: 'Not found', message: 'Missing', user: base.user }),
+  ];
+  for (const page of pages) {
+    assert.match(page, /--accent/);
+    assert.match(page, /<header class="top">/);
+    assert.match(page, /Signed in as &lt;b&gt;octocat&lt;\/b&gt;/);
+    assert.doesNotMatch(page, /Signed in as <b>/);
+  }
+});
+
 test('review routes redirect unsigned users without fetching GitHub', async () => {
   let calls = 0;
   const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
@@ -205,7 +227,7 @@ test('review routes reject disallowed owners and invalid repository names before
 
 test('review route hides inaccessible repositories behind the same HTML 404', async () => {
   const sealed = await signedIn();
-  const missing = await call('/not-found');
+  const missing = await call('/not-found', { headers: { Cookie: `s=${sealed}` } });
   const missingBody = await missing.text();
   assert.equal(missing.status, 404);
   assert.equal(missing.headers.get('Content-Type'), 'text/html; charset=utf-8');
@@ -236,7 +258,7 @@ test('review route shows the repository after a pull-access check and refreshes 
   try {
     const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
     assert.equal(calls, 3);
-    assert.match(await response.text(), /Reviews for Cameronrlewis\/repo/);
+    assert.match(await response.text(), /<h1>Reviews<\/h1>/);
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
 });
@@ -374,7 +396,7 @@ test('review list filters, parses, escapes, and lists artifacts once', async () 
     assert.equal(artifactCalls, 1);
     assert.match(body, /deadbee/); assert.match(body, /cafebad/); assert.match(body, /pass/);
     assert.match(body, /older report: revisions not recorded/);
-    assert.match(body, /<code>—<\/code><\/td><td><code>—<\/code><\/td><td>—<\/td>/);
+    assert.match(body, /<span>—<\/span><span>—<\/span><\/span><\/td><td><span class="status status-notrun">— Not run/);
     assert.doesNotMatch(body, /1234567/); assert.doesNotMatch(body, /\?/); assert.match(body, /&lt;b&gt;x/);
     assert.doesNotMatch(body, /kicad-review-bad/); assert.doesNotMatch(body, /bbbbbbb/);
   } finally { restore(); }

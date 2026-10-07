@@ -1,3 +1,5 @@
+import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, runPage, signedOutPage } from './pages.js';
+
 const text = new TextEncoder();
 const untext = new TextDecoder();
 const securityHeaders = {
@@ -128,31 +130,17 @@ function sessionRedirect(location, status, active) {
   return redirect(location, active?.setCookie ? [active.setCookie] : [], status);
 }
 
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[char]);
-}
-
 function sessionResponse(body, init, active) {
   const headers = new Headers(init?.headers);
   if (active?.setCookie) headers.set('Set-Cookie', active.setCookie);
   return response(body, { ...init, headers });
 }
 
-function html(body) {
-  return '<!doctype html><style>body{font:16px system-ui;margin:2rem;max-width:70rem}'
-    + 'table{border-collapse:collapse;width:100%}th,td{padding:.4rem;text-align:left;'
-    + 'border-bottom:1px solid #ddd}code{white-space:nowrap}.muted{color:#666}</style>' + body;
-}
-
 function errorPage(status, title, message, links = [], active, init = {}) {
   const allLinks = [{ href: '/', label: 'Back to repositories' }, ...links];
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'text/html; charset=utf-8');
-  return sessionResponse(html(`<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p>${allLinks.map((link) => {
-    return `<a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a>`;
-  }).join(' · ')}</p>`), { ...init, status, headers }, active);
+  return sessionResponse(messagePage({ title, message, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
 function gh(path, token, init = {}) {
@@ -251,7 +239,7 @@ async function home(request, env) {
   const stored = cookies(request).s;
   const active = await session(request, env);
   if (!active) {
-    return response(html('<a href="/login">Sign in with GitHub</a>'), {
+    return response(signedOutPage(), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         ...(stored ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
@@ -274,12 +262,7 @@ async function home(request, env) {
   } catch {
     /* Display the installation guidance below. */
   }
-  const list = repositories.length ? `<ul>${repositories.map((repo) => {
-    return `<li><a href="${repoPath(repo.owner.login, repo.name)}">${escapeHtml(repo.owner.login)}`
-      + `/${escapeHtml(repo.name)}</a></li>`;
-  }).join('')}</ul>` : '<p>The GitHub App must be installed on the repository.</p>';
-  return sessionResponse(html(`<p>Signed in as ${escapeHtml(active.login)}</p>`
-    + '<form method="post" action="/logout"><button>Sign out</button></form>' + list), {
+  return sessionResponse(homePage({ user: active.login, repositories }), {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
   }, active);
 }
@@ -290,18 +273,14 @@ async function reviewList(request, env, owner, repo, url) {
   try {
     const artifactResponse = await artifactList(owner, repo, allowed.s.token);
     const list = artifactResponse.ok ? reviews((await artifactResponse.json()).artifacts) : [];
-    const rows = list.map((item) => `<tr><td>${escapeHtml(date(item.created_at))}</td>`
-      + `<td>${escapeHtml(item.workflow_run?.head_branch || '?')}</td><td><code>${escapeHtml(item.revisionsRecorded ? item.base : '—')}</code></td>`
-      + `<td><code>${escapeHtml(item.revisionsRecorded ? String(item.head).slice(0, 7) : '—')}</code></td><td>${escapeHtml(item.revisionsRecorded ? item.result : '—')}</td>`
-      + `<td><a href="${repoPath(owner, repo)}/a/${encodeURIComponent(item.id)}">Open</a>${item.revisionsRecorded
-        ? '' : '<br><small class="muted">older report: revisions not recorded</small>'}</td></tr>`).join('');
-    const content = rows ? '<table><thead><tr><th>Date</th><th>Branch</th><th>Base</th><th>Head</th>'
-      + `<th>Result</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p>No reviews yet.</p>';
-    const started = url?.searchParams.get('started') === '1' ? '<p>Review started.</p>' : '';
-    return sessionResponse(html(`<p>Reviews for ${escapeHtml(owner)}/${escapeHtml(repo)}</p>${started}`
-      + `<p><a href="${repoPath(owner, repo)}/commits">Commit history</a></p>${content}`), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    }, allowed.s);
+    return sessionResponse(reviewsPage({
+      user: allowed.s.login, owner, repo, started: url?.searchParams.get('started') === '1',
+      items: list.map((item) => ({
+        id: item.id, date: date(item.created_at), branch: item.workflow_run?.head_branch || '?',
+        base: item.revisionsRecorded ? item.base : '—', head: item.revisionsRecorded ? String(item.head).slice(0, 7) : '—',
+        result: item.revisionsRecorded ? item.result : 'notrun', legacy: !item.revisionsRecorded,
+      })),
+    }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
     return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
@@ -328,36 +307,23 @@ async function commits(request, env, owner, repo, url) {
     const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
     const byHead = new Map(reviewList.filter((item) => item.head !== '?')
       .map((item) => [String(item.head).slice(0, 7), item]));
-    const options = branches.map((item) => `<option value="${escapeHtml(item.name)}`
-      + `${item.name === branch ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('');
-    const rows = commitList.map((commit) => {
-      const sha = String(commit.sha || '');
-      const message = String(commit.commit?.message || '').split('\n', 1)[0];
-      const author = commit.author?.login || commit.commit?.author?.name || '?';
-      const review = byHead.get(sha.slice(0, 7));
-      return `<tr><td><code>${escapeHtml(sha.slice(0, 7))}</code></td><td>${escapeHtml(message)}`
-        + `${review ? ` <a href="${repoPath(owner, repo)}/a/${encodeURIComponent(review.id)}">Review</a>` : ''}`
-        + `</td><td>${escapeHtml(author)}</td><td>${escapeHtml(date(commit.commit?.author?.date))}</td>`
-        + `<td><input type="radio" name="base" value="${escapeHtml(sha)}" aria-label="Base ${escapeHtml(sha)}"></td>`
-        + `<td><input type="radio" name="head" value="${escapeHtml(sha)}" aria-label="Head ${escapeHtml(sha)}"></td></tr>`;
-    }).join('');
-    return sessionResponse(html(`<p><a href="${repoPath(owner, repo)}">Reviews</a> for ${escapeHtml(owner)}`
-      + `/${escapeHtml(repo)}</p><form method="get"><label>Branch <select name="branch">${options}</select></label>`
-      + '<button>Show</button></form><form method="post" action="' + `${repoPath(owner, repo)}/compare">`
-      + '<table><thead><tr><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th>Base</th><th>Head</th>'
-      + `</tr></thead><tbody>${rows}</tbody></table><button>Compare</button></form>`), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    }, allowed.s);
+    return sessionResponse(commitsPage({
+      user: allowed.s.login, owner, repo, branch, branches: branches.map((item) => item.name),
+      commits: commitList.map((commit) => {
+        const sha = String(commit.sha || '');
+        return {
+          sha, message: String(commit.commit?.message || '').split('\n', 1)[0],
+          author: commit.author?.login || commit.commit?.author?.name || '?',
+          date: date(commit.commit?.author?.date), review: byHead.get(sha.slice(0, 7))?.id,
+        };
+      }),
+    }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
     return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
 }
 
 const commitSha = /^[0-9a-f]{7,40}$/;
-
-function page(body) {
-  return { headers: { 'Content-Type': 'text/html; charset=utf-8' } };
-}
 
 async function compare(request, env, owner, repo) {
   if (request.headers.get('Origin') !== new URL(request.url).origin) {
@@ -400,11 +366,9 @@ async function compare(request, env, owner, repo) {
   return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
 }
 
-function githubRunLink(run) {
+function githubRunUrl(run) {
   const url = String(run.html_url || '');
-  return url.startsWith('https://github.com/')
-    ? `<p><a href="${escapeHtml(url)}">View this run on GitHub</a></p>`
-    : '';
+  return url.startsWith('https://github.com/') ? url : '';
 }
 
 async function run(request, env, owner, repo, id) {
@@ -419,10 +383,11 @@ async function run(request, env, owner, repo, id) {
   } catch {
     return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
-  const link = githubRunLink(runData);
+  const githubUrl = githubRunUrl(runData);
   if (runData.status !== 'completed') {
-    return sessionResponse(html('<meta http-equiv="refresh" content="10"><p>Review running…</p>'
-      + `<p>Status: ${escapeHtml(runData.status)}</p>${link}`), page(), allowed.s);
+    return sessionResponse(runPage({
+      user: allowed.s.login, owner, repo, running: true, status: runData.status, githubUrl,
+    }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   }
   try {
     const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
@@ -432,11 +397,12 @@ async function run(request, env, owner, repo, id) {
   } catch {
     return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
-  const conclusion = escapeHtml(runData.conclusion);
-  const message = runData.conclusion === 'success'
+  const conclusion = runData.conclusion === 'success'
     ? 'No KiCad changes between these commits.'
-    : `Review conclusion: ${conclusion}`;
-  return sessionResponse(html(`<p>${message}</p>${link}`), page(), allowed.s);
+    : `Review conclusion: ${runData.conclusion}`;
+  return sessionResponse(runPage({
+    user: allowed.s.login, owner, repo, running: false, conclusion, githubUrl,
+  }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
 }
 
 function nextPath(value) {
@@ -520,7 +486,7 @@ export default {
       if (request.method === 'GET' && reviewRoute) {
         return reviewList(request, env, reviewRoute[1], reviewRoute[2], url);
       }
-      return errorPage(404, 'Not found', 'The requested page is unavailable.');
+      return errorPage(404, 'Not found', 'The requested page is unavailable.', [], await session(request, env));
     } catch {
       return errorPage(500, 'Internal server error', 'Try again later.');
     }

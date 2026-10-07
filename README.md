@@ -117,7 +117,7 @@ Run the self-check with `python3 test_kicad_review.py`.
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
 Run the page checks with `node ui/check.mjs` (headless Chrome; set `CHROME=` to its path on Linux),
-or `node ui/check.mjs --dark` for the dark theme. Run the site checks with `node --test site/test.mjs`.
+or `node ui/check.mjs --dark` for the dark theme. Run the site checks with `node --import ./site/css-loader.mjs --test site/test.mjs`.
 
 To refresh the sample, take the data out of any generated report (a CI artifact or a local run of
 `detect`, `render` and `report`):
