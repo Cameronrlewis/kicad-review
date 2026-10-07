@@ -537,7 +537,7 @@ test('compare dispatches the selected commits and follows returned run ID', asyn
   try {
     const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed);
     assert.equal(response.status, 303);
-    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/run/123');
+    assert.equal(response.headers.get('Location'), `/r/Cameronrlewis/repo/run/123?base=${base}&head=${head}`);
   } finally { restore(); }
 });
 
@@ -572,8 +572,8 @@ test('running review refreshes safely and shows a GitHub run link only', async (
   try {
     const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
     const body = await response.text();
-    assert.match(body, /http-equiv="refresh" content="10"/);
-    assert.match(body, /Review running…/);
+    assert.match(body, /http-equiv="refresh" content="5"/);
+    assert.match(body, /Generating review/);
     assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/12/);
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
@@ -625,3 +625,36 @@ test('run route rejects non-numeric IDs before fetching', async () => {
     assert.equal(calls, 0);
   } finally { restore(); }
 });
+
+test('generating review maps queued, rendering, and completed job steps', () => {
+  const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', base: 'deadbeef', head: 'cafebabe', startedAt: '2026-10-07T10:00:00Z' };
+  const queued = runPage({ ...common, running: true, status: 'queued', jobs: [] });
+  assert.match(queued, /● in progress <span class="spinner"[^>]*><\/span> Waiting to start/);
+  const rendering = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
+    { name: 'Check out repository', status: 'completed', conclusion: 'success' },
+    { name: 'Render board', status: 'in_progress', conclusion: null },
+  ] }] });
+  assert.match(rendering, /✓ done Getting the files/);
+  assert.match(rendering, /● in progress <span class="spinner"/);
+  const done = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
+    { name: 'Check out', status: 'completed', conclusion: 'success' },
+    { name: 'Render schematic', status: 'completed', conclusion: 'success' },
+    { name: 'Build comparison report', status: 'completed', conclusion: 'success' },
+    { name: 'Publish report', status: 'completed', conclusion: 'success' },
+    { name: 'Cleanup', status: 'completed', conclusion: 'success' },
+  ] }] });
+  assert.match(done, /✓ done Finishing/);
+});
+
+test('run page validates revisions and only refreshes while running', () => {
+  const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', status: 'in_progress', jobs: [] };
+  const running = runPage({ ...common, running: true, base: base, head, startedAt: '2026-10-07T10:00:00Z' });
+  assert.match(running, /http-equiv="refresh" content="5"/);
+  assert.match(running, /deadbee → cafebab/);
+  assert.match(running, /Revisions: <span class="mono">deadbee/);
+  const invalid = runPage({ ...common, running: true, base: '<bad>', head });
+  assert.match(invalid, /Revisions: not recorded/);
+  const finished = runPage({ ...common, running: false, status: 'completed', base, head });
+  assert.doesNotMatch(finished, /http-equiv="refresh"/);
+});
+

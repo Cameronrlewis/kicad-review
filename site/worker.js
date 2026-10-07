@@ -353,7 +353,8 @@ async function compare(request, env, owner, repo) {
     if (dispatch.status === 200) {
       const details = await dispatch.json();
       if (details.workflow_run_id) {
-        return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s);
+        const params = new URLSearchParams({ base, head });
+        return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}?${params}`, 303, allowed.s);
       }
     }
     if (dispatch.status === 403 || dispatch.status === 404) {
@@ -371,10 +372,28 @@ function githubRunUrl(run) {
   return url.startsWith('https://github.com/') ? url : '';
 }
 
-async function run(request, env, owner, repo, id) {
+function failedStep(jobs) {
+  const stageFor = (name) => {
+    const value = String(name || '').toLowerCase();
+    if (value.includes('check out')) return 'Getting the files';
+    if (value.includes('render') || value.includes('find changed')) return 'Rendering and checking';
+    if (value.includes('build comparison report') || value.includes('upload report') || value.includes('screenshots') || value.includes('publish')) return 'Building the report';
+    return 'Finishing';
+  };
+  for (const job of jobs || []) {
+    for (const step of job.steps || []) {
+      if (step.conclusion === 'failure') return { stage: stageFor(step.name), step: String(step.name || '') };
+    }
+  }
+  return null;
+}
+
+async function run(request, env, owner, repo, id, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const base = url.searchParams.get('base');
+  const head = url.searchParams.get('head');
   let runData;
   try {
     const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
@@ -385,8 +404,16 @@ async function run(request, env, owner, repo, id) {
   }
   const githubUrl = githubRunUrl(runData);
   if (runData.status !== 'completed') {
+    let jobs = [];
+    try {
+      const jobsResponse = await gh(`${root}/actions/runs/${id}/jobs`, allowed.s.token);
+      if (jobsResponse.ok) jobs = (await jobsResponse.json()).jobs || [];
+    } catch {
+      // The run remains useful even when GitHub has not exposed its jobs yet.
+    }
     return sessionResponse(runPage({
       user: allowed.s.login, owner, repo, running: true, status: runData.status, githubUrl,
+      base, head, startedAt: runData.run_started_at, jobs,
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   }
   try {
@@ -397,11 +424,9 @@ async function run(request, env, owner, repo, id) {
   } catch {
     return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
-  const conclusion = runData.conclusion === 'success'
-    ? 'No KiCad changes between these commits.'
-    : `Review conclusion: ${runData.conclusion}`;
   return sessionResponse(runPage({
-    user: allowed.s.login, owner, repo, running: false, conclusion, githubUrl,
+    user: allowed.s.login, owner, repo, running: false, status: runData.status, githubUrl, base, head,
+    startedAt: runData.run_started_at,
   }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
 }
 
@@ -476,7 +501,7 @@ export default {
       if (request.method === 'GET' && runRoute) {
         const [, owner, repo, id] = runRoute;
         if (!/^\d{1,20}$/.test(id)) return errorPage(404, 'Not found', 'The requested page is unavailable.');
-        return run(request, env, owner, repo, id);
+        return run(request, env, owner, repo, id, url);
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
       if (request.method === 'GET' && commitsRoute) {
