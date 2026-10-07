@@ -10,7 +10,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - Before/after pictures of each changed sheet and board, zoomed to the largest change.
 - The object-level change table: symbols, footprints, labels, zones, board outline, title block and design rules.
 - ERC, DRC, schematic/board parity and BOM-field results, with errors and warnings counted separately and new ones called out.
-- A link to the interactive report.
+- A link that opens the interactive report (one HTML file, no unzip) and the `gh api` command that downloads it.
 
 **On every push to a branch**, comparing the new commit with the previous branch tip, the same content goes to the run's job summary. A push to a branch with an open pull request skips itself, because the pull request run covers it.
 
@@ -18,10 +18,11 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 
 **On a `v*` tag**, Gerbers and drill files (one zip), a BOM and a position file per project are attached to the GitHub release, in JLCPCB or PCBWay format.
 
-**The interactive report** is one self-contained HTML file in the run's artifacts. Unzip it and open it in any browser. It works offline. It offers:
+**The interactive report** is one self-contained HTML file in the run's artifacts. Download it and open it in any browser. It works offline. It offers:
 
-- side by side, colour overlay (red removed, green added, black unchanged), swipe and changed-regions views
-- pan and zoom
+- five comparison modes: Side by side, Overlay (red removed, green added, black unchanged), Wipe, Blend and Semantic (changed objects marked on a faded drawing)
+- pan and zoom; j / k (or the arrow keys) step through changes and violations
+- Copy link, which copies the review link with the exact view, and Go to…, which opens a pasted link at that spot
 - per-layer toggles for boards
 - the sheet hierarchy with changed sheets marked
 - the change table and the check results, where clicking a row zooms to the object or violation
@@ -93,7 +94,7 @@ So roughly 900 reviews a month fit in the free minutes, shared by every private 
 4. It then runs, in the official `kicad/kicad:10.0.6-full` image pinned by digest:
    - `kicad-cli` for SVG renders, ERC and DRC with schematic parity
    - Gerber, drill, position and BOM export on tags
-5. Everything else is `kicad_review.py`, which uses only the Python standard library, plus `report.html`, which uses plain JavaScript and no libraries:
+5. Everything else is `kicad_review.py`, which uses only the Python standard library, plus the review page in `ui/` (plain HTML, CSS and JavaScript), filled with the run's data in format v1:
    - parsing the KiCad files
    - matching objects by UUID, with the reference designator as fallback when a UUID was regenerated
    - matching violations between revisions
@@ -104,3 +105,26 @@ So roughly 900 reviews a month fit in the free minutes, shared by every private 
 To update KiCad, change `KICAD_IMAGE` in `review.yml` to a new tag and its digest, taken from https://hub.docker.com/r/kicad/kicad/tags.
 
 Run the self-check with `python3 test_kicad_review.py`.
+
+## Developing the review page
+
+Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
+Run the page checks with `node ui/check.mjs` (headless Chrome; set `CHROME=` to its path on Linux),
+or `node ui/check.mjs --dark` for the dark theme.
+
+To refresh the sample, take the data out of any generated report (a CI artifact or a local run of
+`detect`, `render` and `report`):
+
+```sh
+python3 -c "import re; h = open('kicad-review.html').read(); open('ui/sample/review-data.js', 'w').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
+```
+
+### Data format
+
+The workflow and the page share one contract, `window.REVIEW_DATA` (`version: 1`): `repo`; `links`
+(`review`, `base`, `head`, `run` — github.com URLs, empty outside Actions); `base`, `head`, `reason`;
+`settings`; `projects[]`, each with `sheets[]` (UUID `path`, `parent`, `status`, and for changed sheets
+`size` in mm and `svg.base`/`svg.head` blob ids), `board` (`changed`, `status`, `size`, `layers[]` with
+`changed` and blob ids), `changes[]` (`id`, `action`, `kind`, `ref`, `where`, `pos`, `pos_before`, `box`,
+and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `new`, `severity`, `pos`,
+`box`, `where`); and `blobs` (gzip + base64 SVG text). Positions and boxes are drawing millimetres.

@@ -784,11 +784,54 @@ def build_project(p, blobs, settings):
              "status": "added" if not has["base"] else "removed" if not has["head"] else "modified"}
     if changed:
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
-        board["layers"] = [{"name": l["name"], "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
+        board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
+                            "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs)}
+
+
+def assign_ids(projects):
+    """Give every change row and violation an id unique within this report, for selection and addresses."""
+    n = 0
+    for p in projects:
+        for r in p["changes"]:
+            n += 1
+            r["id"] = f"c{n}"
+    n = 0
+    for p in projects:
+        for c in p["checks"]:
+            for v in c["violations"]:
+                n += 1
+                v["id"] = f"v{n}"
+
+
+def review_links(env, det):
+    """github.com links for the header. Empty strings outside GitHub Actions."""
+    server, repo = env.get("GITHUB_SERVER_URL", ""), env.get("GITHUB_REPOSITORY", "")
+    if not (server and repo):
+        return {"review": "", "base": "", "head": "", "run": ""}
+    base_url = f"{server}/{repo}"
+    pr = env.get("PR_NUMBER", "")
+    return {
+        "review": f"{base_url}/pull/{pr}" if pr else (f"{base_url}/compare/{det['base']}...{det['head']}" if det["base"] else ""),
+        "base": f"{base_url}/commit/{det['base']}" if det["base"] else "",
+        "head": f"{base_url}/commit/{det['head']}",
+        "run": f"{base_url}/actions/runs/{env['GITHUB_RUN_ID']}" if env.get("GITHUB_RUN_ID") else "",
+    }
+
+
+UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
+
+
+def inline_page(data_js):
+    """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
+    read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
+    return (read("review.html")
+            .replace('<link rel="stylesheet" href="review.css">', f"<style>\n{read('review.css')}</style>")
+            .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>")
+            .replace('<script src="review.js"></script>', f"<script>\n{read('review.js')}</script>"))
 
 
 def cmd_report(args):
@@ -797,16 +840,18 @@ def cmd_report(args):
     blobs = {}
     env = os.environ
     data = {
-        "run_url": f"{env.get('GITHUB_SERVER_URL', '')}/{env.get('GITHUB_REPOSITORY', '')}/actions/runs/{env.get('GITHUB_RUN_ID', '')}"
-                   if env.get("GITHUB_RUN_ID") else "",
+        "version": 1,
+        "repo": env.get("GITHUB_REPOSITORY", ""),
+        "links": review_links(env, det),
         "base": det["base"], "head": det["head"], "reason": det["reason"],
         "settings": load_settings(),
+        "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     data["projects"] = [build_project(p, blobs, data["settings"]) for p in det["projects"]]
+    assign_ids(data["projects"])
     data["blobs"] = blobs
-    with open(posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "report.html")) as fh:
-        template = fh.read()
-    html = template.replace("/*DATA*/", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
+    html = inline_page(f"window.REVIEW_DATA = {payload};")
     with open("review/kicad-review.html", "w") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
@@ -898,12 +943,17 @@ def changes_markdown(p):
     return lines
 
 
-def comment_markdown(data, images, artifact_url):
+def comment_markdown(data, images, artifact_url, artifact_id=""):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
-               + (f"**[Download the interactive report]({artifact_url})** (zip with one HTML file, open it in a browser). " if artifact_url else "")
-               + (f"[Workflow run]({data['run_url']})" if data["run_url"] else ""))
+               + (f"[Workflow run]({data['links']['run']})" if data["links"].get("run") else ""))
+    if artifact_url:
+        out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
+    if artifact_id and data.get("repo"):
+        out += ["", "<details><summary>From a terminal</summary>", "",
+                "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
+                "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
         out += ["", f"### {p['name']}" + (f" (`{p['dir']}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
@@ -936,9 +986,9 @@ def shot_list(data, limit=8):
         for pg in p["sheets"]:
             if pg["status"] != "unchanged":
                 shots.append({"project": i, "title": f"{p['name']}: sheet {pg['name']}",
-                              "hash": f"project={i}&sheet={pg['path']}", "file": f"p{i}-sheet-{len(shots)}.png"})
+                              "hash": f"p={i}&v=sheet:{pg['path']}", "file": f"p{i}-sheet-{len(shots)}.png"})
         if p["board"]["changed"]:
-            shots.append({"project": i, "title": f"{p['name']}: board", "hash": f"project={i}&item=board",
+            shots.append({"project": i, "title": f"{p['name']}: board", "hash": f"p={i}&v=board",
                           "file": f"p{i}-board.png"})
     return shots[:limit]
 
@@ -970,7 +1020,7 @@ def cmd_summary(args):
     if args.image_base and os.path.exists(f"review/images/shots.json"):
         with open(f"review/images/shots.json") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
-    body = comment_markdown(data, images, args.artifact_url)
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id)
     with open(f"review/comment.md", "w") as fh:
         fh.write(body)
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as fh:
@@ -1010,6 +1060,7 @@ def main():
     p = sub.add_parser("summary", help="markdown for the pull request comment and job summary")
     p.add_argument("--image-base", default="")
     p.add_argument("--artifact-url", default="")
+    p.add_argument("--artifact-id", default="")
     p.set_defaults(func=cmd_summary)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
