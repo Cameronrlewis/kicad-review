@@ -226,4 +226,13 @@ export const CHECKS = [
     const during = b.textContent;
     await new Promise(r => setTimeout(r, 1700));
     return during.includes("Copied") && b.textContent === "Copy link";`],
+  ["theme follows the system and keeps text contrast", "", `
+    const lum = c => { const [r, g, b] = c.match(/\\d+/g).map(Number).map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
+    const cs = getComputedStyle(document.body), a = lum(cs.color), b = lum(cs.backgroundColor);
+    const ratio = (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    return ratio >= 4.5 && (dark ? b < 0.05 : b > 0.8) || JSON.stringify({ratio, dark, b});`],
+  ["drawing background is KiCad's in both themes", "", `
+    await new Promise(r => setTimeout(r, 800));
+    return getComputedStyle(document.querySelector("#stage .vp.sheet")).backgroundColor === "rgb(245, 244, 239)";`],
 ];

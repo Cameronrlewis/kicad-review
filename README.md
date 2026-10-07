@@ -18,7 +18,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 
 **On a `v*` tag**, Gerbers and drill files (one zip), a BOM and a position file per project are attached to the GitHub release, in JLCPCB or PCBWay format.
 
-**The interactive report** is one self-contained HTML file in the run's artifacts. Unzip it and open it in any browser. It works offline. It offers:
+**The interactive report** is one self-contained HTML file in the run's artifacts. Download it and open it in any browser. It works offline. It offers:
 
 - side by side, colour overlay (red removed, green added, black unchanged), swipe and changed-regions views
 - pan and zoom
@@ -93,7 +93,7 @@ So roughly 900 reviews a month fit in the free minutes, shared by every private 
 4. It then runs, in the official `kicad/kicad:10.0.6-full` image pinned by digest:
    - `kicad-cli` for SVG renders, ERC and DRC with schematic parity
    - Gerber, drill, position and BOM export on tags
-5. Everything else is `kicad_review.py`, which uses only the Python standard library, plus `report.html`, which uses plain JavaScript and no libraries:
+5. Everything else is `kicad_review.py`, which uses only the Python standard library, plus the review page in `ui/` (plain HTML, CSS and JavaScript), filled with the run's data in format v1:
    - parsing the KiCad files
    - matching objects by UUID, with the reference designator as fallback when a UUID was regenerated
    - matching violations between revisions
@@ -104,3 +104,10 @@ So roughly 900 reviews a month fit in the free minutes, shared by every private 
 To update KiCad, change `KICAD_IMAGE` in `review.yml` to a new tag and its digest, taken from https://hub.docker.com/r/kicad/kicad/tags.
 
 Run the self-check with `python3 test_kicad_review.py`.
+
+## Developing the review page
+
+Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
+Run the page checks with `node ui/check.mjs` (headless Chrome; set `CHROME=` to its path on Linux),
+or `node ui/check.mjs --dark` for the dark theme. Regenerate the sample with the steps in
+`docs/superpowers/plans/2026-10-07-review-ui.md`, Task 1 Step 5.
