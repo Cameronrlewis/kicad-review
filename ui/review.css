@@ -45,7 +45,12 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .verdict.fail { color: var(--removed); }
 .verdict.pass { color: var(--added); }
 #nav { overflow: auto; background: var(--surface); border-right: 1px solid var(--line); padding: var(--space-2); }
-#nav h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: var(--space-3) 0 var(--space-1); }
+#nav h3, #layers h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: var(--space-3) 0 var(--space-1); }
+#layers h4 { font-size: 12px; font-weight: 500; margin: var(--space-2) 0 var(--space-1); color: var(--text); }
+#layers label { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) 8px; cursor: pointer; }
+#layers label:hover { background: var(--surface-2); border-radius: var(--radius); }
+#layers input { cursor: pointer; }
+#layers .mark { color: var(--modified); font-size: 11px; white-space: nowrap; }
 .projsel select { width: 100%; margin-top: var(--space-1); }
 .tree, .tree ul { list-style: none; margin: 0; padding: 0; }
 .tree button { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); width: 100%; text-align: left;

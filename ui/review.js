@@ -24,6 +24,28 @@ function checksVerdict() {
   const all = D.projects.flatMap(p => p.checks);
   return { failing: all.filter(c => c.status === "fail").length, newErrors: all.reduce((n, c) => n + c.new_errors, 0) };
 }
+function layerGroup(n) {
+  if (/^F_/.test(n)) return "Top";
+  if (/^B_/.test(n)) return "Bottom";
+  if (/^In\d+_Cu$/.test(n)) return "Inner";
+  if (/^(Edge_Cuts|Margin)$/.test(n)) return "Board";
+  return "User";
+}
+function renderLayers() {
+  const box = $("#layers");
+  if (S.v !== "board") { box.innerHTML = ""; return; }
+  const on = new Set(layersOn()), groups = {};
+  for (const l of proj().board.layers) (groups[layerGroup(l.name)] ||= []).push(l);
+  box.innerHTML = `<h3>Layers <span class="muted">${on.size}/${proj().board.layers.length}</span></h3>` +
+    ["Top", "Inner", "Bottom", "Board", "User"].filter(g => groups[g]).map(g => `<h4>${g}</h4>` + groups[g].map(l =>
+      `<label data-changed="${l.changed}"><input type="checkbox" data-layer="${esc(l.name)}" ${on.has(l.name) ? "checked" : ""}>
+       ${esc(l.name.replace(/_/g, "."))}${l.changed ? ' <span class="mark" title="changed">≡ changed</span>' : ""}</label>`).join("")).join("");
+  for (const cb of box.querySelectorAll("input")) cb.onchange = () => {
+    S.layers = [...box.querySelectorAll("input:checked")].map(i => i.dataset.layer);
+    if (typeof saveHash === "function") saveHash();
+    draw();
+  };
+}
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
@@ -54,6 +76,7 @@ function renderNav() {
     <div id="layers"></div>`;
   $("#proj").onchange = e => openProject(+e.target.value);
   for (const b of document.querySelectorAll("#nav [data-view]")) b.onclick = () => select(b.dataset.view);
+  renderLayers();
 }
 function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");

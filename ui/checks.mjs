@@ -74,4 +74,15 @@ export const CHECKS = [
     return getComputedStyle(document.querySelector("#stage .stack.head")).opacity === "0.2";`],
   ["added project draws its one side in every mode", "p=0&m=overlay", `
     await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head svg").length > 0;`],
+  ["layer list grouped, changed layers marked", "p=1&v=board", `
+    await new Promise(r => setTimeout(r, 800));
+    const L = document.querySelector("#layers");
+    return ["Top", "Bottom"].every(g => L.textContent.includes(g))
+      && L.querySelectorAll('[data-changed="true"] .mark').length === REVIEW_DATA.projects[1].board.layers.filter(l => l.changed).length;`],
+  ["toggling a layer removes it from the drawing", "p=1&v=board", `
+    await new Promise(r => setTimeout(r, 800));
+    const cb = document.querySelector('#layers input[data-layer="F_Cu"]'); cb.click();
+    await new Promise(r => setTimeout(r, 800));
+    return !document.querySelector('#stage .layer[data-layer="F_Cu"]') && !S.layers.includes("F_Cu");`],
+  ["layer list hidden for sheets", "", `return document.querySelector("#layers").children.length === 0;`],
 ];
