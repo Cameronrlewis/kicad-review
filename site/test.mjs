@@ -366,7 +366,9 @@ test('review list filters, parses, escapes, and lists artifacts once', async () 
     const body = await (await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } })).text();
     assert.equal(artifactCalls, 1);
     assert.match(body, /deadbee/); assert.match(body, /cafebad/); assert.match(body, /pass/);
-    assert.match(body, /1234567/); assert.match(body, /\?/); assert.match(body, /&lt;b&gt;x/);
+    assert.match(body, /older report: revisions not recorded/);
+    assert.match(body, /<code>—<\/code><\/td><td><code>—<\/code><\/td><td>—<\/td>/);
+    assert.doesNotMatch(body, /1234567/); assert.doesNotMatch(body, /\?/); assert.match(body, /&lt;b&gt;x/);
     assert.doesNotMatch(body, /kicad-review-bad/); assert.doesNotMatch(body, /bbbbbbb/);
   } finally { restore(); }
 });

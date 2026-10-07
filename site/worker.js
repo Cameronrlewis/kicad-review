@@ -143,7 +143,7 @@ function sessionResponse(body, init, active) {
 function html(body) {
   return '<!doctype html><style>body{font:16px system-ui;margin:2rem;max-width:70rem}'
     + 'table{border-collapse:collapse;width:100%}th,td{padding:.4rem;text-align:left;'
-    + 'border-bottom:1px solid #ddd}code{white-space:nowrap}</style>' + body;
+    + 'border-bottom:1px solid #ddd}code{white-space:nowrap}.muted{color:#666}</style>' + body;
 }
 
 function gh(path, token, init = {}) {
@@ -223,6 +223,7 @@ function reviews(artifacts) {
         base: match[1] || '?',
         head: match[2] || artifact.workflow_run?.head_sha || '?',
         result: match[3] || '?',
+        revisionsRecorded: Boolean(match[1]),
       };
     }).sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
 }
@@ -283,9 +284,10 @@ async function reviewList(request, env, owner, repo, url) {
     const artifactResponse = await artifactList(owner, repo, allowed.s.token);
     const list = artifactResponse.ok ? reviews((await artifactResponse.json()).artifacts) : [];
     const rows = list.map((item) => `<tr><td>${escapeHtml(date(item.created_at))}</td>`
-      + `<td>${escapeHtml(item.workflow_run?.head_branch || '?')}</td><td><code>${escapeHtml(item.base)}</code></td>`
-      + `<td><code>${escapeHtml(String(item.head).slice(0, 7))}</code></td><td>${escapeHtml(item.result)}</td>`
-      + `<td><a href="${repoPath(owner, repo)}/a/${encodeURIComponent(item.id)}">Open</a></td></tr>`).join('');
+      + `<td>${escapeHtml(item.workflow_run?.head_branch || '?')}</td><td><code>${escapeHtml(item.revisionsRecorded ? item.base : '—')}</code></td>`
+      + `<td><code>${escapeHtml(item.revisionsRecorded ? String(item.head).slice(0, 7) : '—')}</code></td><td>${escapeHtml(item.revisionsRecorded ? item.result : '—')}</td>`
+      + `<td><a href="${repoPath(owner, repo)}/a/${encodeURIComponent(item.id)}">Open</a>${item.revisionsRecorded
+        ? '' : '<br><small class="muted">older report: revisions not recorded</small>'}</td></tr>`).join('');
     const content = rows ? '<table><thead><tr><th>Date</th><th>Branch</th><th>Base</th><th>Head</th>'
       + `<th>Result</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p>No reviews yet.</p>';
     const started = url?.searchParams.get('started') === '1' ? '<p>Review started.</p>' : '';
