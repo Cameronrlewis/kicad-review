@@ -26,7 +26,7 @@ SETTINGS_FILE = "kicad-review.toml"
 
 
 def git(*args, check=True):
-    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *args], capture_output=True, text=True)
     if check and r.returncode:
         sys.exit(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout.strip() if r.returncode == 0 else None

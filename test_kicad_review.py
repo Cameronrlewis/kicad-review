@@ -129,3 +129,17 @@ try:
 except SystemExit as e:
     assert "same name" in str(e), e
 print("ok")
+
+# 2. Project folders with non-ASCII names and spaces are found (git quotes such paths unless told not to).
+from kicad_review import detect, commit
+here = os.getcwd()
+t = tempfile.mkdtemp()
+os.chdir(t)
+g = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
+g("init", "-q"); g("commit", "-q", "--allow-empty", "-m", "base")
+write(t, {"Caméra 2024-01/cam.kicad_pro": "{}", "Caméra 2024-01/cam.kicad_sch": "(kicad_sch)"})
+g("add", "-A"); g("commit", "-q", "-m", "head")
+found = detect(commit("HEAD~1"), commit("HEAD"))
+os.chdir(here)
+assert found == [{"dir": "Caméra 2024-01", "name": "cam", "status": "added"}], found
+print("ok")
