@@ -286,9 +286,9 @@ function rowBox(r, side) {
   if (r.box && !(side === "base" && r.pos_before)) return r.box;
   return p ? [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3] : null;
 }
-function hitTest(rows, x, y, after = null) {
+function hitTest(rows, x, y, after = null, side = "head") {
   const TOL = 0.5, area = b => (b[2] - b[0]) * (b[3] - b[1]);
-  const hits = rows.map(r => [r, rowBox(r, "head")]).filter(([, b]) => b && x >= b[0] - TOL && x <= b[2] + TOL && y >= b[1] - TOL && y <= b[3] + TOL)
+  const hits = rows.map(r => [r, rowBox(r, side)]).filter(([, b]) => b && x >= b[0] - TOL && x <= b[2] + TOL && y >= b[1] - TOL && y <= b[3] + TOL)
     .sort((a, b) => area(a[1]) - area(b[1])).map(([r]) => r);
   if (!hits.length) return null;
   const i = after ? hits.indexOf(after) : -1;
@@ -317,7 +317,8 @@ function pickAt(vp, e) {
   const r = vp.getBoundingClientRect();
   const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
   const rows = proj().changes.filter(c => onView(c, S.v));
-  const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null);
+  const side = vp.querySelector(".stack.head") ? "head" : "base";
+  const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
   if (hit) { S.s = hit.id; renderPanel(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
 function goTo(id) {
@@ -339,10 +340,15 @@ function card(r) {
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
     <span class="badge ${r.action}">${GLYPH[r.action]} ${r.action}</span>${body}</button>`;
 }
+function cardsHtml() {
+  const f = S.filter, q = f.q.toLowerCase();
+  const rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
+    && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
+  return rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>';
+}
+function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
 function renderPanel() {
   const p = proj(), f = S.filter;
-  const rows = p.changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
-    && (!f.q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(f.q)));
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   $("#panel").innerHTML = `<div role="tablist">
@@ -353,12 +359,12 @@ function renderPanel() {
     <div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
-    <div class="cards">${rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>'}</div>`);
+    <div class="cards">${cardsHtml()}</div>`);
   for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); if (typeof saveHash === "function") saveHash(); };
   for (const b of document.querySelectorAll("#panel .chip-filter")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
-  const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value.toLowerCase(); renderPanel(); $("#panel .q").focus(); };
-  for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id);
+  const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
+  bindCards();
 }
 
 renderHeader();

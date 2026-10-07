@@ -122,4 +122,30 @@ export const CHECKS = [
     const files = REVIEW_DATA.projects.flatMap(p => p.sheets.map(s => s.file)); const dup = files.find((f, i) => files.indexOf(f) !== i);
     if (!dup) return true;   // the committed sample has no reused sheet; covered by the vme/video local samples
     return document.querySelectorAll('#nav [data-view^="sheet:"]').length === REVIEW_DATA.projects[S.p].sheets.length;`],
+  ["panel scrolls instead of stretching the page", "p=1", `
+    await new Promise(res => setTimeout(res, 1200));
+    const cards = document.querySelector("#panel .cards"), one = cards.innerHTML;
+    cards.innerHTML = one.repeat(150);
+    const p = document.querySelector("#panel"), vp = document.querySelector("#stage .vp");
+    return document.documentElement.scrollHeight <= innerHeight + 1 && p.scrollHeight > p.clientHeight && vp.clientHeight <= innerHeight;`],
+  ["search keeps caret and raw text while typing", "p=1", `
+    const q = document.querySelector("#panel .q"); q.focus();
+    for (const t of ["R", "R1", "R12"]) { q.value = t; q.dispatchEvent(new Event("input")); }
+    const cs = [...document.querySelectorAll("#panel .card")];
+    return document.querySelector("#panel .q") === q && q.value === "R12" && cs.length > 0 && cs.every(c => c.textContent.includes("R12"));`],
+  ["filter chips and tabs show their state", "p=1", `
+    const chip = document.querySelector('#panel .chip-filter[data-action="added"]'), on = getComputedStyle(chip);
+    const onBg = on.backgroundColor, onDeco = on.textDecorationLine;
+    chip.click();
+    const off = getComputedStyle(document.querySelector('#panel .chip-filter[data-action="added"]'));
+    const tab = getComputedStyle(document.querySelector('#panel [role=tab][aria-selected="true"]')), t2 = getComputedStyle(document.querySelector('#panel [role=tab][aria-selected="false"]'));
+    return off.backgroundColor !== onBg && off.textDecorationLine !== onDeco && tab.backgroundColor !== t2.backgroundColor;`],
+  ["clicking the Base pane selects the moved row at its old place", "p=1&v=board", `
+    await new Promise(res => setTimeout(res, 1200));
+    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
+    const o = r.pos_before; zoomTo([o[0] - 3, o[1] - 1, o[0] - 0, o[1] + 1], 1);   // centre = 1.5 mm left of the old centre: inside the Base box, outside the Head box
+     await new Promise(res => requestAnimationFrame(res));
+    const vp = document.querySelector("#stage .vp.board"), b = vp.getBoundingClientRect();
+    pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
+    return S.s === r.id;`],
 ];
