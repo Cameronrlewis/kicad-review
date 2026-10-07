@@ -319,7 +319,7 @@ test('expired artifacts explain how to get a new review', async () => {
   try {
     const response = await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } });
     assert.equal(response.status, 404);
-    assert.match(await response.text(), /This review has expired — rerun the workflow/);
+    assert.match(await response.text(), /Reviews are kept for 90 days by GitHub\. Generate it again to see it\./);
   } finally { restore(); }
 });
 
@@ -612,7 +612,7 @@ test('successful completed review without artifact reports no KiCad changes', as
   });
   try {
     const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
-    assert.match(await response.text(), /No KiCad changes between these commits\./);
+    assert.match(await response.text(), /No KiCad files changed between these revisions\./);
   } finally { restore(); }
 });
 
@@ -658,3 +658,95 @@ test('run page validates revisions and only refreshes while running', () => {
   assert.doesNotMatch(finished, /http-equiv="refresh"/);
 });
 
+test('run page distinguishes nothing to review, failed runs, and failures with reports', async () => {
+  const sealed = await signedIn();
+  const failedJobs = { jobs: [{ steps: [{ name: 'Render board', status: 'completed', conclusion: 'failure' }] }] };
+  let restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
+    if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call(`/r/Cameronrlewis/repo/run/12?base=${base}&head=${head}`, { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /The run stopped at Rendering and checking \(Render board\)\./);
+    assert.match(body, /method="post" action="\/r\/Cameronrlewis\/repo\/compare"/);
+    assert.match(body, new RegExp(`name="base" value="${base}"`));
+    assert.match(body, new RegExp(`name="head" value="${head}"`));
+  } finally { restore(); }
+  restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /Nothing to review/);
+    assert.match(body, /No KiCad files changed between these revisions\./);
+  } finally { restore(); }
+  restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
+    if (url.endsWith('/jobs')) return new Response(JSON.stringify(failedJobs));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-fail.html' }] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/56');
+  } finally { restore(); }
+});
+
+test('run jobs are fetched as the user only for progress or a failed run without an artifact', async () => {
+  const sealed = await signedIn();
+  const urls = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    urls.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'in_progress', run_started_at: '2026-10-07T10:00:00Z' }));
+    if (url.endsWith('/jobs')) {
+      assert.equal(options.headers.Authorization, 'Bearer user-token');
+      return new Response(JSON.stringify({ jobs: [] }));
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(urls.filter((url) => url.endsWith('/jobs')).length, 1);
+  } finally { restore(); }
+  const completedUrls = [];
+  const restoreCompleted = mockFetch(async (url) => {
+    completedUrls.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
+    if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(completedUrls.filter((url) => url.endsWith('/jobs')).length, 0);
+  } finally { restoreCompleted(); }
+});
+
+test('expired artifacts offer regeneration only when their name records revisions', async () => {
+  const sealed = await signedIn();
+  for (const [name, expected] of [
+    ['kicad-review-deadbee-cafebad-pass.html', /Generate it again/],
+    ['kicad-review.html', /Back to reviews/],
+  ]) {
+    const restore = mockFetch(async (url) => url.endsWith('/repo')
+      ? new Response(JSON.stringify({ permissions: { pull: true } }))
+      : new Response(JSON.stringify({ name, expired: true })));
+    try {
+      const body = await (await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } })).text();
+      assert.match(body, /Reviews are kept for 90 days by GitHub\. Generate it again to see it\./);
+      assert.match(body, expected);
+      if (name === 'kicad-review-deadbee-cafebad-pass.html') {
+        assert.match(body, /name="base" value="deadbee"/);
+        assert.match(body, /name="head" value="cafebad"/);
+      }
+    } finally { restore(); }
+  }
+});

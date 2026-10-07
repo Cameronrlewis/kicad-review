@@ -187,8 +187,10 @@ async function artifactReport(env, owner, repo, id, active) {
     if (metadataResponse.status !== 200) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
     const metadata = await metadataResponse.json();
     if (metadata.expired) {
-      return errorPage(404, 'Review expired', 'This review has expired — rerun the workflow.',
-        [{ href: repoPath(owner, repo), label: 'Back to reviews' }], active);
+      const match = String(metadata.name || '').match(/^kicad-review-([0-9a-f]{7})-([0-9a-f]{7})-(?:pass|fail)\.html$/);
+      return sessionResponse(runPage({
+        user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
+      }), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
     }
     if (!metadata.name?.endsWith('.html')) return errorPage(404, 'Not found', 'The requested page is unavailable.', [], active);
     const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
@@ -424,9 +426,21 @@ async function run(request, env, owner, repo, id, url) {
   } catch {
     return errorPage(404, 'Not found', 'The requested page is unavailable.', [], allowed.s);
   }
+  if (runData.conclusion === 'success') {
+    return sessionResponse(runPage({ user: allowed.s.login, owner, repo, state: 'nothing', base, head }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+  }
+  let stopped = null;
+  if (['failure', 'cancelled', 'timed_out'].includes(runData.conclusion)) {
+    try {
+      const jobsResponse = await gh(`${root}/actions/runs/${id}/jobs`, allowed.s.token);
+      if (jobsResponse.ok) stopped = failedStep((await jobsResponse.json()).jobs || []);
+    } catch {
+      // Fall back to the generic failed-run explanation.
+    }
+  }
   return sessionResponse(runPage({
-    user: allowed.s.login, owner, repo, running: false, status: runData.status, githubUrl, base, head,
-    startedAt: runData.run_started_at,
+    user: allowed.s.login, owner, repo, state: 'failed', githubUrl, base, head,
+    failedStage: stopped?.stage, failedStep: stopped?.step,
   }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
 }
 
