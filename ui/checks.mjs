@@ -208,4 +208,22 @@ export const CHECKS = [
     applyGoTo("see " + REVIEW_DATA.links.review + " #p=1&v=board&x=158.8&y=78.2&z=12");
     await new Promise(r => setTimeout(r, 800));
     return l.includes(REVIEW_DATA.links.review) && l.includes("#p=1&v=board") && S.x === 158.8;`],
+  ["copy link falls back to a selected readonly field when clipboard fails", "p=1&v=board", `
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const ok = [undefined, { writeText: () => Promise.reject(new Error("denied")) }];
+    for (const stub of ok) {
+      Object.defineProperty(navigator, "clipboard", { value: stub, configurable: true });
+      document.querySelector("#zoombar [data-act=copy]").click(); await sleep(100);
+      const f = document.querySelector("#zoombar input[readonly]");
+      if (!f || f.value !== positionLink() || document.activeElement !== f || f.selectionStart !== 0 || f.selectionEnd !== f.value.length) return "bad " + (f && f.value);
+      f.remove();
+    }
+    return true;`],
+  ["copy link shows Copied when clipboard works", "p=1&v=board", `
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.resolve() }, configurable: true });
+    const b = document.querySelector("#zoombar [data-act=copy]"); b.click();
+    await new Promise(r => setTimeout(r, 100));
+    const during = b.textContent;
+    await new Promise(r => setTimeout(r, 1700));
+    return during.includes("Copied") && b.textContent === "Copy link";`],
 ];

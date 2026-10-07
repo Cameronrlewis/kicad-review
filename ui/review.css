@@ -130,3 +130,4 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 body.shot #hdr, body.shot #nav, body.shot #panel, body.shot #modes, body.shot #zoombar { display: none; }
 body.shot #app { grid-template-columns: 1fr; }
 body.shot { grid-template-rows: 1fr; }
+#zoombar .copyfield { width: 22em; max-width: 30vw; font-family: var(--font-mono); }

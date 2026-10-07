@@ -421,7 +421,17 @@ function renderZoombar() {
     <button data-act="copy">Copy link</button><input class="goto" placeholder="Go to… paste a link">`;
   for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => setT({ z: S.z * +b.dataset.z });
   $("#zoombar [data-act=fit]").onclick = fit;
-  $("#zoombar [data-act=copy]").onclick = () => navigator.clipboard?.writeText(positionLink());
+  $("#zoombar [data-act=copy]").onclick = async e => {
+    const b = e.currentTarget, link = positionLink();
+    try {
+      await navigator.clipboard.writeText(link);
+      b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy link"; }, 1500);
+    } catch {   // no clipboard API (file://) or write refused: show the text selected so the user can press Cmd/Ctrl+C
+      let f = $("#zoombar input[readonly]");
+      if (!f) { f = document.createElement("input"); f.readOnly = true; f.className = "copyfield"; f.setAttribute("aria-label", "Link to copy"); b.after(f); }
+      f.value = link; f.focus(); f.select();
+    }
+  };
   $("#zoombar .goto").onchange = e => { applyGoTo(e.target.value); e.target.value = ""; };
 }
 renderZoombar();
