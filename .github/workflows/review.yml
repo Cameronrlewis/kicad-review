@@ -166,7 +166,7 @@ jobs:
         run: |
           docker pull -q "$KICAD_IMAGE"
           docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
-            python3 tools/kicad_review.py release --src repo --tag "$GITHUB_REF_NAME" --out release
+            python3 tools/kicad_review.py release --tag "$GITHUB_REF_NAME"
 
       - name: Attach to the GitHub release
         if: startsWith(github.ref, 'refs/tags/')
