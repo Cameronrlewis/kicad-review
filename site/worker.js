@@ -3,7 +3,7 @@ const untext = new TextDecoder();
 const securityHeaders = {
   'Cache-Control': 'private, no-store',
   'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'no-referrer',
+  'Referrer-Policy': 'same-origin',
 };
 const workflowFile = 'kicad-review.yml';
 

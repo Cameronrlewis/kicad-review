@@ -17,6 +17,7 @@ const cookieValue = (response, name) => {
 };
 function checkSecurity(response) {
   for (const header of security) assert.ok(response.headers.get(header), `${header} missing`);
+  assert.equal(response.headers.get('referrer-policy'), 'same-origin');
 }
 async function call(path, options) {
   const response = await worker.fetch(request(path, options), env);
@@ -434,6 +435,17 @@ test('compare rejects missing or foreign Origin before GitHub', async () => {
       assert.equal(response.status, 403);
       assert.equal(await response.text(), 'Forbidden');
     }
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('compare rejects Origin null before GitHub', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, null, 'null');
+    assert.equal(response.status, 403);
+    assert.equal(await response.text(), 'Forbidden');
     assert.equal(calls, 0);
   } finally { restore(); }
 });
