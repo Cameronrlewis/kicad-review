@@ -721,7 +721,12 @@ def run_check(name, settings, head, base):
 
 def project_checks(p, settings, objs):
     out = f"review/{project_id(p['dir'])}"
-    side = lambda s, f, k: load_violations(f"{out}/{s}/{f}", k)
+
+    def side(s, f, k):
+        src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
+        if os.path.exists(src) and not os.path.exists(f"{out}/{s}/{f}"):  # never drop a check because its output is missing
+            sys.exit(f"kicad-cli wrote no {f} for {src}")
+        return load_violations(f"{out}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),

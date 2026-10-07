@@ -265,3 +265,17 @@ for cmd in (["report"], ["summary"]):
                             "GITHUB_STEP_SUMMARY": f"{t}/summary.md"})
     assert r.returncode == 0, (cmd, r.stderr[-300:])
 print("ok")
+
+# Minor: a check whose kicad-cli output is missing stops the review instead of disappearing from it.
+from kicad_review import project_checks
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {"head/P/P.kicad_pcb": "(kicad_pcb)", "review/P/head/erc.json": "{}"})
+try:
+    project_checks({"dir": "P", "name": "P"}, DEFAULT_SETTINGS, {"head": {}, "base": {}})
+    raise AssertionError("missing drc.json must stop the review")
+except SystemExit as e:
+    assert "drc.json" in str(e), e
+finally:
+    os.chdir(here)
+print("ok")
