@@ -95,7 +95,7 @@ jobs:
         with:
           archive: false
           path: review/${{ steps.report.outputs.name }}
-          retention-days: 14
+          retention-days: 90
 
       - name: Screenshots of changed drawings
         if: steps.detect.outputs.changed == 'true'

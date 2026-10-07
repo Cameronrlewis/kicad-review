@@ -78,7 +78,7 @@ Private repositories get 2,000 Actions minutes and 500 MB of artifact storage pe
 - **Review run:** about 110 s, billed as 2 minutes. Pulling the 1.4 GB KiCad image takes 55–100 s of that; the KiCad work itself takes a few seconds.
 - **Skipped run** (a push to a branch with an open pull request): about 15 s, billed as 1 minute.
 - **Release run:** about 100 s.
-- **Storage:** reports are kept 14 days. They are 1–3 MB each for a small project and about 3 MB for KiCad's 8-sheet `video` demo with one sheet and the board changed.
+- **Storage:** reports are kept 90 days. They are 1–3 MB each for a small project and about 3 MB for KiCad's 8-sheet `video` demo with one sheet and the board changed.
 
 So roughly 900 reviews a month fit in the free minutes, shared by every private repository of the owner.
 

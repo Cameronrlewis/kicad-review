@@ -352,3 +352,10 @@ def report_output(base, head):
 assert re.search(r"^name=kicad-review-1234567-abcdef0-pass\.html$", report_output("1234567890abcdef", "abcdef0123456789"), re.M)
 assert re.search(r"^name=kicad-review-none-fedcba9-pass\.html$", report_output("", "fedcba9876543210"), re.M)
 print("ok")
+
+# Reports remain available for 90 days, including the documented retention period.
+wf = open(".github/workflows/review.yml", encoding="utf-8").read()
+readme = open("README.md", encoding="utf-8").read()
+assert "retention-days: 90" in wf, "workflow retention"
+assert "reports are kept 90 days" in readme, "README retention"
+print("ok")
