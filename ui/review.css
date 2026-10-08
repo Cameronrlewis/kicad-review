@@ -87,11 +87,14 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 #panel .chip-filter[aria-pressed="true"], #panel [role=tab][aria-selected="true"] { background: var(--accent); color: var(--surface); }
 #panel .chip-filter[aria-pressed="false"] { background: transparent; color: var(--muted); text-decoration: line-through; border-style: dashed; }
 .checks-summary { display: grid; gap: var(--space-1); margin: var(--space-2); }
-.check { display: grid; grid-template-columns: 6.8em minmax(0, 1fr); gap: 2px var(--space-2); width: 100%; text-align: left; font: inherit; color: inherit; background: var(--card-bg); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-2); cursor: pointer; }
+.check { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: var(--card-bg); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-2); cursor: pointer; }
 .check[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.check-status { font-weight: 600; white-space: nowrap; } .check-pass .check-status { color: var(--added); } .check-fail .check-status { color: var(--removed); } .check-warn .check-status { color: var(--modified); }
-.check-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .check-title small { color: var(--muted); font: 11px var(--font-mono); }
-.check-counts, .check-reason { grid-column: 2; color: var(--muted); font: 11px var(--font-mono); }
+.check-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); }
+.check-status { flex: none; font-weight: 600; white-space: nowrap; } .check-pass .check-status { color: var(--added); } .check-fail .check-status { color: var(--removed); } .check-warn .check-status { color: var(--modified); }
+.check-title { min-width: 0; overflow-wrap: anywhere; } .check-title small { color: var(--muted); font: 11px var(--font-mono); white-space: nowrap; }
+.check-status-detail, .check-counts, .check-reason { display: block; color: var(--muted); font: 11px var(--font-mono); }
+.check-status-detail { flex-basis: 100%; }
+.check-counts, .check-reason { margin-top: 2px; }
 .check-new, .check-fixed { display: inline-block; margin-left: var(--space-1); border: 1px solid var(--modified); border-radius: 4px; padding: 0 3px; color: var(--modified); font-weight: 600; }
 .check-fixed { border-color: var(--added); color: var(--added); }
 .check-not-run { color: var(--muted); border-style: dashed; background: transparent; cursor: default; } .check-not-run .check-status { font-weight: 500; }

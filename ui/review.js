@@ -381,13 +381,13 @@ function renderChecks() {
   const checked = state.check && byName.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
     if (!check || setting === "off") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
-      <span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span>
+      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span></span>
       <span class="check-reason">turned off in kicad-review.toml</span></button>`;
     const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
-    const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : baselineOnly ? "✓ passing · no new errors" : "✓ passing";
+    const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
     const newer = check.new_errors + check.new_warnings;
     return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
-      <span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>
+      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
       <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
   let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity]);

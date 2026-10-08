@@ -156,6 +156,16 @@ export const CHECKS = [
     const P = REVIEW_DATA.projects[1], rows = [...document.querySelectorAll("#panel .checks-summary .check")];
     return rows.length === 4 && P.checks.every(c => { const t = rows.find(r => r.dataset.checkSummary === c.name)?.textContent || "";
       return t.includes(c.title) && t.includes(c.errors + " errors") && t.includes(c.warnings + " warnings") && t.includes(c.new_errors + c.new_warnings ? "+" + (c.new_errors + c.new_warnings) + " new" : ""); });`],
+  ["checks summary status and title do not intersect in a 300px panel", "p=1&t=checks", `
+    const app = document.querySelector("#app"), prior = app.style.gridTemplateColumns;
+    app.style.gridTemplateColumns = "220px minmax(0, 1fr) 300px";
+    const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    const rows = [...document.querySelectorAll("#panel .checks-summary .check")];
+    const ok = document.querySelector("#panel").getBoundingClientRect().width === 300 && rows.length > 0 && rows.every(row => {
+      const status = row.querySelector(".check-status"), title = row.querySelector(".check-title");
+      return !overlaps(status.getBoundingClientRect(), title.getBoundingClientRect());
+    });
+    app.style.gridTemplateColumns = prior; return ok;`],
   ["checks summary marks turned-off checks not run", "p=1&t=checks", `
     const keep = REVIEW_DATA.settings.checks.drc; REVIEW_DATA.settings.checks.drc = "off"; renderPanel();
     const row = document.querySelector('#panel .check-not-run[data-check-summary="drc"]'), ok = row && row.textContent.includes("— not run") && row.textContent.includes("turned off in kicad-review.toml");
@@ -169,7 +179,8 @@ export const CHECKS = [
     const c = REVIEW_DATA.projects[1].checks.find(c => c.errors > 0); if (!c) return true;
     const old = [REVIEW_DATA.settings.fail_on, c.status, c.new_errors];
     REVIEW_DATA.settings.fail_on = "new"; c.status = "pass"; c.new_errors = 0; renderPanel();
-    const ok = document.querySelector('[data-check-summary="' + c.name + '"]').textContent.includes("passing · no new errors");
+    const row = document.querySelector('[data-check-summary="' + c.name + '"]');
+    const ok = row.querySelector(".check-status").textContent.includes("passing") && row.querySelector(".check-status-detail").textContent.includes("no new errors");
     [REVIEW_DATA.settings.fail_on, c.status, c.new_errors] = old; renderPanel(); return ok;`],
   ["checks scope chips default to new and switch to all", "p=1&t=checks", `
     const newChip = document.querySelector('[data-check-scope="new"]'), allChip = document.querySelector('[data-check-scope="all"]');
