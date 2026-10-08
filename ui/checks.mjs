@@ -160,6 +160,11 @@ export const CHECKS = [
     const keep = REVIEW_DATA.settings.checks.drc; REVIEW_DATA.settings.checks.drc = "off"; renderPanel();
     const row = document.querySelector('#panel .check-not-run[data-check-summary="drc"]'), ok = row && row.textContent.includes("— not run") && row.textContent.includes("turned off in kicad-review.toml");
     REVIEW_DATA.settings.checks.drc = keep; renderPanel(); return !!ok;`],
+  ["checks scope and severity chips use non-struck segmented controls", "p=1&t=checks", `
+    const scope = document.querySelector('[data-check-scope="new"]'), all = document.querySelector('[data-check-scope="all"]'), severity = document.querySelector('[data-check-severity="error"]');
+    const plain = getComputedStyle(all), toggle = getComputedStyle(severity);
+    return scope.classList.contains("check-chip") && all.classList.contains("check-chip") && severity.classList.contains("check-chip")
+      && plain.textDecorationLine === "none" && toggle.textDecorationLine === "none" && plain.borderStyle === "solid";`],
   ["checks scope chips default to new and switch to all", "p=1&t=checks", `
     const newChip = document.querySelector('[data-check-scope="new"]'), allChip = document.querySelector('[data-check-scope="all"]');
     const onlyNew = newChip.getAttribute("aria-pressed") === "true" && [...document.querySelectorAll("#panel .viol")].every(v => v.dataset.new === "true");

@@ -411,10 +411,10 @@ function renderChecks() {
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
   return `<div class="checks-summary">${summary}</div><div class="filters checks-filters">
-    <button class="chip-filter" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
-    <button class="chip-filter" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
-    <button class="chip-filter" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
-    <button class="chip-filter" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
+    <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
+    <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
+    <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
+    <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
   </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 function renderPanel() {

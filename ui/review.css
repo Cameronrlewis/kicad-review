@@ -95,7 +95,7 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .check-new, .check-fixed { display: inline-block; margin-left: var(--space-1); border: 1px solid var(--modified); border-radius: 4px; padding: 0 3px; color: var(--modified); font-weight: 600; }
 .check-fixed { border-color: var(--added); color: var(--added); }
 .check-not-run { color: var(--muted); border-style: dashed; background: transparent; cursor: default; } .check-not-run .check-status { font-weight: 500; }
-.checks-filters { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0 var(--space-2) var(--space-2); }
+.checks-filters { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0 var(--space-2) var(--space-2); }.checks-filters .check-chip { font: inherit; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-1) var(--space-3); cursor: pointer; text-decoration: none; }.checks-filters .check-chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--surface); }.checks-filters .check-chip:hover, .checks-filters .check-chip:focus-visible { border-color: var(--accent); }
 .checks-list { padding: 0 var(--space-2) var(--space-2); }
 .check-group { margin-bottom: var(--space-1); border: 1px solid var(--line); border-radius: var(--radius); background: var(--card-bg); }
 .check-group summary { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto auto auto; align-items: baseline; gap: var(--space-1); padding: var(--space-2); cursor: pointer; }
