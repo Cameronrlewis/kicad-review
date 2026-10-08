@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { open, seal } from './worker.js';
-import { commitsPage, homePage, messagePage, reviewsPage, runPage, signedOutPage } from './pages.js';
+import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 const env = {
   GITHUB_CLIENT_ID: 'client-id',
@@ -225,6 +225,14 @@ async function signedIn(overrides = {}) {
 test('site link buttons are inline blocks without underlines', () => {
   const page = signedOutPage();
   assert.match(page, /a\.btn \{ text-decoration: none; display: inline-block; \}/);
+});
+
+test('review page keeps its loading overlay until the framed report is ready and forwards later hashes', () => {
+  const page = reviewPage({ user: 'octocat', owner: 'owner', repo: 'repo', id: 42, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' });
+  assert.match(page, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true/);
+  assert.match(page, /setTimeout[\s\S]*20000/);
+  assert.match(page, /addEventListener\('hashchange'/);
+  assert.match(page, /pointer-events: none/);
 });
 
 test('HTML pages inline tokens and render the shared frame safely', async () => {
