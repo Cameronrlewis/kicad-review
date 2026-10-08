@@ -131,9 +131,9 @@ const stages = ['Waiting to start', 'Getting the files', 'Rendering and checking
 
 function stageForStep(name) {
   const value = String(name || '').toLowerCase();
-  if (value.includes('check out')) return 1;
-  if (value.includes('render') || value.includes('find changed')) return 2;
-  if (value.includes('build comparison report') || value.includes('upload report') || value.includes('screenshots') || value.includes('publish')) return 3;
+  if (value === 'set up job' || value.startsWith('skip push') || value.includes('check out') || value.includes('find changed')) return 1;
+  if (value.includes('render')) return 2;
+  if (value.includes('build comparison report') || value.includes('copy named report') || value.includes('upload report') || value.includes('screenshots') || value.includes('publish')) return 3;
   return 4;
 }
 
@@ -145,10 +145,17 @@ function progressStages(status, jobs) {
   else result[0].state = 'done';
   for (const step of steps) result[stageForStep(step.name)].steps.push(step);
   for (const stage of result.slice(1)) {
-    if (!stage.steps.length) continue;
     if (stage.steps.some((step) => step.conclusion === 'failure')) stage.state = 'failed';
-    else if (stage.steps.some((step) => step.status === 'in_progress')) stage.state = 'active';
-    else if (stage.steps.every((step) => step.status === 'completed')) stage.state = 'done';
+    else if (stage.steps.length && stage.steps.every((step) => step.status === 'completed')) stage.state = 'done';
+  }
+  const startedStages = result.slice(1).filter((stage) => stage.steps.some((step) => step.status === 'in_progress' || step.status === 'completed' || step.started_at));
+  const latestStarted = startedStages.length ? Math.max(...startedStages.map((stage) => stage.index)) : 0;
+  for (const stage of result.slice(1)) {
+    if (stage.state !== 'failed' && stage.steps.some((step) => step.status === 'in_progress')) stage.state = 'active';
+  }
+  if (status === 'in_progress' && !result.some((stage) => stage.state === 'active' && stage.index > 0)) {
+    const firstNotDone = result.slice(1).find((stage) => stage.state !== 'done' && stage.state !== 'failed');
+    if (firstNotDone && latestStarted <= firstNotDone.index) firstNotDone.state = 'active';
   }
   return result;
 }

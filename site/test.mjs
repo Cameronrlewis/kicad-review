@@ -888,6 +888,21 @@ test('generating review maps queued, rendering, and completed job steps', () => 
   assert.match(done, /✓ Finishing <span class="step-state">· done<\/span>/);
 });
 
+test('generating review follows the workflow step order through files, rendering, and publishing', () => {
+  const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', base: 'deadbeef', head: 'cafebabe', startedAt: '2026-10-07T10:00:00Z', running: true, status: 'in_progress' };
+  const workflow = [
+    'Set up job', 'Skip push that an open pull request already covers', 'Check out project history', 'Check out review tools',
+    'Find changed KiCad projects', 'Check out both revisions side by side', 'Render both revisions and run ERC/DRC',
+    'Build comparison report and checks', 'Copy named report', 'Upload report', 'Screenshots of changed drawings', 'Publish screenshots',
+    'Job summary', 'Pull request comment', 'Fail on required checks', 'Post cleanup', 'Complete job',
+  ];
+  const at = (index) => runPage({ ...common, jobs: [{ steps: workflow.map((name, i) => ({ name, status: i < index ? 'completed' : i === index ? 'in_progress' : 'queued', conclusion: i < index ? 'success' : null })) }] });
+  const states = (page) => [...page.matchAll(/<li class="(done|active|todo|failed)">[^<]*?(?:<span[^>]*><\/span> )?([^<]+) <span class="step-state">· ([^<]+)<\/span><\/li>/g)].map(([, state, name]) => [name.replace(/^[○✓✕]\s+/, '').trim(), state]);
+  assert.deepEqual(states(at(4)).slice(1), [['Getting the files', 'active'], ['Rendering and checking', 'todo'], ['Building the report', 'todo'], ['Finishing', 'todo']]);
+  assert.deepEqual(states(at(6)).slice(1), [['Getting the files', 'done'], ['Rendering and checking', 'active'], ['Building the report', 'todo'], ['Finishing', 'todo']]);
+  assert.deepEqual(states(at(11)).slice(1), [['Getting the files', 'done'], ['Rendering and checking', 'done'], ['Building the report', 'active'], ['Finishing', 'todo']]);
+});
+
 test('run page validates revisions and only refreshes while running', () => {
   const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', status: 'in_progress', jobs: [] };
   const running = runPage({ ...common, running: true, base: base, head, startedAt: '2026-10-07T10:00:00Z' });
