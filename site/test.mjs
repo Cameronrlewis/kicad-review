@@ -222,6 +222,11 @@ async function signedIn(overrides = {}) {
   return seal({ t: 'user-token', r: 'refresh-token', e: Date.now() + 3_600_000, re: Date.now() + 7_200_000, u: 'octocat', ...overrides }, env);
 }
 
+test('site link buttons are inline blocks without underlines', () => {
+  const page = signedOutPage();
+  assert.match(page, /a\.btn \{ text-decoration: none; display: inline-block; \}/);
+});
+
 test('HTML pages inline tokens and render the shared frame safely', async () => {
   const signedOut = signedOutPage();
   assert.match(signedOut, /--accent/);
