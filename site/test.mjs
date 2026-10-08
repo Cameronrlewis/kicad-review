@@ -863,13 +863,13 @@ test('compare page renders every inline-script target and keeps Show in its pick
 test('generating review maps queued, rendering, and completed job steps', () => {
   const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', base: 'deadbeef', head: 'cafebabe', startedAt: '2026-10-07T10:00:00Z' };
   const queued = runPage({ ...common, running: true, status: 'queued', jobs: [] });
-  assert.match(queued, /● in progress <span class="spinner"[^>]*><\/span> Waiting to start/);
+  assert.match(queued, /● <span class="spinner"[^>]*><\/span> Waiting to start <span class="step-state">· in progress<\/span>/);
   const rendering = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
     { name: 'Check out repository', status: 'completed', conclusion: 'success' },
     { name: 'Render board', status: 'in_progress', conclusion: null },
   ] }] });
-  assert.match(rendering, /✓ done Getting the files/);
-  assert.match(rendering, /● in progress <span class="spinner"/);
+  assert.match(rendering, /✓ Getting the files <span class="step-state">· done<\/span>/);
+  assert.match(rendering, /● <span class="spinner"/);
   const done = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
     { name: 'Check out', status: 'completed', conclusion: 'success' },
     { name: 'Render schematic', status: 'completed', conclusion: 'success' },
@@ -877,7 +877,7 @@ test('generating review maps queued, rendering, and completed job steps', () => 
     { name: 'Publish report', status: 'completed', conclusion: 'success' },
     { name: 'Cleanup', status: 'completed', conclusion: 'success' },
   ] }] });
-  assert.match(done, /✓ done Finishing/);
+  assert.match(done, /✓ Finishing <span class="step-state">· done<\/span>/);
 });
 
 test('run page validates revisions and only refreshes while running', () => {
