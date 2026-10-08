@@ -165,6 +165,12 @@ export const CHECKS = [
     const plain = getComputedStyle(all), toggle = getComputedStyle(severity);
     return scope.classList.contains("check-chip") && all.classList.contains("check-chip") && severity.classList.contains("check-chip")
       && plain.textDecorationLine === "none" && toggle.textDecorationLine === "none" && plain.borderStyle === "solid";`],
+  ["passing checks with baseline findings say no new errors", "p=1&t=checks", `
+    const c = REVIEW_DATA.projects[1].checks.find(c => c.errors > 0); if (!c) return true;
+    const old = [REVIEW_DATA.settings.fail_on, c.status, c.new_errors];
+    REVIEW_DATA.settings.fail_on = "new"; c.status = "pass"; c.new_errors = 0; renderPanel();
+    const ok = document.querySelector('[data-check-summary="' + c.name + '"]').textContent.includes("passing · no new errors");
+    [REVIEW_DATA.settings.fail_on, c.status, c.new_errors] = old; renderPanel(); return ok;`],
   ["checks scope chips default to new and switch to all", "p=1&t=checks", `
     const newChip = document.querySelector('[data-check-scope="new"]'), allChip = document.querySelector('[data-check-scope="all"]');
     const onlyNew = newChip.getAttribute("aria-pressed") === "true" && [...document.querySelectorAll("#panel .viol")].every(v => v.dataset.new === "true");
