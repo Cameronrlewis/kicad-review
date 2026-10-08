@@ -231,8 +231,11 @@ test('review page keeps its loading overlay until the framed report is ready and
   const page = reviewPage({ user: 'octocat', owner: 'owner', repo: 'repo', id: 42, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' });
   assert.match(page, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true/);
   assert.match(page, /setTimeout[\s\S]*20000/);
-  assert.match(page, /addEventListener\('hashchange'/);
   assert.match(page, /pointer-events: none/);
+  assert.match(page, /const load = \(showLoading\) => \{ if \(showLoading\) \{ loading\.hidden = false; clearTimeout\(fallback\); \} iframe\.src = raw \+ location\.hash; \}; load\(true\);/);
+  const hashchange = page.match(/addEventListener\('hashchange', \(\) => \{ if \(location\.hash !== reportedHash\) load\(false\); \}\);/);
+  assert.ok(hashchange, 'hash changes forward without requesting the loading overlay');
+  assert.doesNotMatch(hashchange[0], /loading\.hidden = false|clearTimeout/);
 });
 
 test('HTML pages inline tokens and render the shared frame safely', async () => {
