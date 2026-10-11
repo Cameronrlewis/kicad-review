@@ -444,3 +444,23 @@ pages = sheet_pages(f"{t}/P", "H")
 assert [p["file"] for p in pages] == ["H.kicad_sch", "sub/child.kicad_sch", "sub/grand.kicad_sch", "leaf.kicad_sch"], "DR-S2: parent-relative sheet paths"
 assert sch_objects(f"{t}/P", "H")["/child/grand/leaf/symbol"]["ref"] == "R1", "DR-S2: nested sheet objects"
 print("ok DR-S2 parent-relative pages and objects")
+
+# DR-S3: changes to shared KiCad files schedule all head projects; unrelated files do not.
+t = tempfile.mkdtemp()
+os.chdir(t)
+g("init", "-q")
+write(t, {"A/A.kicad_pro": "{}", "B/B.kicad_pro": "{}", "Shared/common.kicad_sch": "(kicad_sch)"})
+g("add", "-A"); g("commit", "-q", "-m", "base")
+expected = [{"dir": d, "name": d, "status": "modified"} for d in ("A", "B")]
+for file in ("Shared/common.kicad_sch", "Shared/common.kicad_sym"):
+    write(t, {file: "changed"})
+    g("add", "-A"); g("commit", "-q", "-m", "shared")
+    assert detect(commit("HEAD~1"), commit("HEAD")) == expected, "DR-S3: unowned KiCad change schedules all projects"
+os.remove("Shared/common.kicad_sch")
+g("add", "-A"); g("commit", "-q", "-m", "delete shared")
+assert detect(commit("HEAD~1"), commit("HEAD")) == expected, "DR-S3: deleted shared sheet schedules all projects"
+write(t, {"notes.txt": "notes", "__MACOSX/._common.kicad_sch": "junk"})
+g("add", "-A"); g("commit", "-q", "-m", "unrelated")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [], "DR-S3: unrelated files remain ignored"
+os.chdir(here)
+print("ok DR-S3 unowned KiCad changes schedule all projects")

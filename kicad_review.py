@@ -99,7 +99,7 @@ def detect(base, head):
         changed = git("diff", "--name-only", "--no-renames", base, head).splitlines()
     else:
         changed = git("ls-tree", "-r", "--name-only", head).splitlines()
-    settings_changed = SETTINGS_FILE in changed
+    settings_changed = SETTINGS_FILE in changed or any(is_kicad_file(f) and owner_project(f, dirs) is None for f in changed)
     by_project = {}
     for f in changed:
         if is_kicad_file(f):
