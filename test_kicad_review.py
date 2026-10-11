@@ -889,3 +889,63 @@ for text, error in (("parts = true", "parts must be a table"),
             assert str(e) == "kicad-review.toml: " + error, e
 print("ok parts settings")
 
+# Parts changes follow reference designators, not matching part numbers on different refs.
+from kicad_review import diff_parts
+b = [{"refs": ["R1"], "value": "10k", "lcsc": "C1", "key": "10k|F|C1"}, {"refs": ["R2"], "value": "1k", "lcsc": "C2", "key": "1k|F|C2"},
+     {"refs": ["R9"], "value": "5", "lcsc": None, "key": "5|F|"}]
+h = [{"refs": ["R1"], "value": "10k", "lcsc": "C9", "key": "10k|F|C9"}, {"refs": ["R3"], "value": "1k", "lcsc": "C2", "key": "1k|F|C2"},
+     {"refs": ["R9"], "value": "5", "lcsc": None, "key": "5|F|"}]
+d = {(r["action"], tuple(r["refs"])) for r in diff_parts(b, h)}
+assert d == {("swapped", ("R1",)), ("removed", ("R2",)), ("added", ("R3",))}, d
+assert diff_parts(b, b) == [] and diff_parts([], []) == []
+assert all(r["before"] is None for r in diff_parts([], h))
+assert all(r["after"] is None for r in diff_parts(b, []))
+old = parts_lines({r: sym(r, "10k", "C1") for r in ("R10", "R2")})
+new = parts_lines({r: sym(r, "20k", "C1") for r in ("R10", "R2")})
+assert diff_parts(old, new) == [{"action": "value", "refs": ["R2", "R10"], "before": old[0], "after": new[0]}]
+footprint = [{**new[0], "footprint": "F", "key": "20k|F|C1"}]
+assert diff_parts(new, footprint)[0]["action"] == "value"
+print("ok parts diff")
+
+# Project payload and report settings omit opted-out features; supplier lookup remains deferred.
+import copy
+from kicad_review import supplier_snapshot
+assert supplier_snapshot(new) is None
+here = os.getcwd()
+t = tempfile.mkdtemp()
+try:
+    os.chdir(t)
+    project = {"dir": "P", "name": "P", "status": "modified"}
+    write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [project]})})
+    objects = {"base": {"r": sym("R1", "10k", "C1")}, "head": {"r": sym("R1", "10k", "C9")}}
+    with patch("kicad_review.project_objects", side_effect=lambda path, name: objects[path.split("/")[0]]), \
+         patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+        for parts_enabled in (False, True):
+            for models_enabled in (False, True):
+                settings = copy.deepcopy(DEFAULT_SETTINGS)
+                settings["parts"]["enabled"] = parts_enabled
+                settings["3d"]["enabled"] = models_enabled
+                with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.supplier_snapshot", return_value=None) as lookup:
+                    kicad_review.cmd_report(None)
+                data = json.loads(pathlib.Path("review/data.json").read_text())
+                p = data["projects"][0]
+                assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
+                assert ("3d" in data["settings"]) == models_enabled
+                assert lookup.call_count == int(parts_enabled)
+                if parts_enabled:
+                    lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
+                    assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    lookup.assert_called_once_with(lines["head"])
+                    assert p["parts"]["changes"][0]["action"] == "swapped"
+                html = pathlib.Path("review/kicad-review.html").read_text()
+                payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
+                embedded = json.loads(payload)
+                del embedded["blobs"]
+                assert embedded == data
+        settings["parts"]["enabled"] = True
+        with patch("kicad_review.project_objects", return_value={}):
+            assert build_project(project, {}, settings)["parts"] == {"lines": [], "changes": [], "supplier": None}
+finally:
+    os.chdir(here)
+print("ok parts report data")
+

@@ -798,6 +798,25 @@ def parts_lines(objs):
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
+def diff_parts(base, head):
+    """What a change did to the parts list, per reference designator, grouped back into lines."""
+    at = lambda lines: {r: l for l in lines for r in l["refs"]}
+    b, h = at(base), at(head)
+    rows = {}
+    for ref in sorted(set(b) | set(h), key=natural):
+        x, y = b.get(ref), h.get(ref)
+        if x and y and x["key"] == y["key"]:
+            continue
+        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value"
+        r = rows.setdefault((action, x and x["key"], y and y["key"]), {"action": action, "refs": [], "before": x, "after": y})
+        r["refs"].append(ref)
+    return list(rows.values())
+
+
+def supplier_snapshot(lines):
+    return None
+
+
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
     sig = (v["severity"], tuple(sorted(v["where"].items())))
@@ -951,6 +970,11 @@ def build_project(p, blobs, settings):
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    parts = None
+    if settings["parts"]["enabled"]:
+        lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
+        parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
+                 "supplier": supplier_snapshot(lines["head"])}
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -959,7 +983,8 @@ def build_project(p, blobs, settings):
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs)}
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
+            **({"parts": parts} if parts else {})}
 
 
 def assign_ids(projects):
@@ -1018,7 +1043,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = settings if settings["3d"]["enabled"] else {k: v for k, v in settings.items() if k != "3d"}
+    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
