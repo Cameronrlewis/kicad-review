@@ -19,3 +19,8 @@ preset = "jlcpcb"        # or "pcbway"
 
 [3d]
 enabled = false            # export changed boards as GLB and report footprints without 3D models
+
+# Parts: datasheet and JLCPCB stock per component. Lookups need repository secret JLCPCB_API_KEY;
+# without it the Parts tab still lists datasheets and missing part numbers.
+[parts]
+enabled = false

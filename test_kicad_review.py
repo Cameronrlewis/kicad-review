@@ -838,3 +838,54 @@ assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extr
 print("ok TS-S1 CI browser matrix")
 print("ok")
 
+# Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
+from kicad_review import parts_lines
+sym = lambda ref, v, lcsc=None, ds="~", mpn=None: {"kind": "symbol", "ref": ref, "props": {
+    "Value": v, "Footprint": "R_0805", "Datasheet": ds, **({"LCSC": lcsc} if lcsc is not None else {}),
+    **({"MPN": mpn} if mpn else {})}}
+objs = {"a": sym("R1", "10k", " c17414 "), "b": sym("R2", "10k", "C17414"), "c": sym("R3", "1k", "~"),
+        "d": sym("U1", "AP63203WU-7", ds="https://x/ap.pdf", mpn="AP63203WU-7"), "e": sym("R4", "4.7k", "C17414"),
+        "f": {"kind": "footprint", "ref": "R1", "props": {}},
+        "g": {"kind": "power symbol", "ref": "GND", "props": {"net": "GND", "symbol": "power:GND"}}}
+L = {l["key"]: l for l in parts_lines(objs)}
+r = next(l for l in L.values() if l["refs"] == ["R1", "R2"])
+assert r["lcsc"] == "C17414" and "lcsc_conflict" in r["problems"], r   # C17414 also on 4.7k
+assert next(l for l in L.values() if l["refs"] == ["R3"])["problems"] == ["missing_lcsc", "missing_mpn"]
+u = next(l for l in L.values() if l["refs"] == ["U1"])
+assert u["datasheet"] == "https://x/ap.pdf" and u["problems"] == ["missing_lcsc"]
+assert not any("#PWR01" in l["refs"] or "GND" in l["refs"] for l in L.values())
+assert parts_lines({}) == []
+for props, ref in (({"in_bom": "no"}, "R5"), ({"dnp": "yes"}, "R6"), ({}, "R?")):
+    o = sym(ref, "skip")
+    o["props"].update(props)
+    assert parts_lines({"x": o}) == [], o
+from kicad_review import LCSC_FIELDS, MPN_FIELDS
+for lcsc_field in LCSC_FIELDS:
+    for mpn_field in MPN_FIELDS:
+        o = sym("R10", "10k", ds="local.pdf")
+        o["props"].update({f" {lcsc_field.upper()} ": " c12 ", mpn_field: " Part "})
+        l = parts_lines({"x": o})[0]
+        assert (l["lcsc"], l["mpn"], l["datasheet"], l["problems"]) == ("C12", "Part", None, []), l
+objs = {"a": sym("R10", "10k", "bad"), "b": sym("R2", "10k", "BAD"), "c": sym("R2", "10k", "bad")}
+l = parts_lines(objs)[0]
+assert l["refs"] == ["R2", "R10"] and l["problems"] == ["bad_lcsc"], l
+print("ok parts lines")
+
+# Parts settings: off by default, base wins, tables and booleans only.
+assert DEFAULT_SETTINGS["parts"]["enabled"] is False
+with patch("kicad_review.os.path.exists", return_value=False):
+    assert load_settings()["parts"]["enabled"] is False
+for enabled in ("true", "false"):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(f"[parts]\nenabled = {enabled}\n".encode()), create=True) as opened:
+        assert load_settings()["parts"]["enabled"] is (enabled == "true")
+        opened.assert_called_once_with("base/kicad-review.toml", "rb")
+for text, error in (("parts = true", "parts must be a table"),
+                    *[(f"[parts]\nenabled = {value}", "parts.enabled must be true or false") for value in ('"true"', "1", "[]")]):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        try:
+            load_settings()
+            raise AssertionError("invalid parts settings accepted")
+        except SystemExit as e:
+            assert str(e) == "kicad-review.toml: " + error, e
+print("ok parts settings")
+

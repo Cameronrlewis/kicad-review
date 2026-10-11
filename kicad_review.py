@@ -590,6 +590,7 @@ DEFAULT_SETTINGS = {
     "bom": {"required_fields": ["Value", "Footprint"]},
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
+    "parts": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -608,7 +609,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -622,6 +623,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
     if not isinstance(settings["3d"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
+    if not isinstance(settings["parts"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
     return settings
 
 
@@ -751,6 +754,48 @@ def bom_violations(objs, fields):
                         "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
                         "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
     return out
+
+
+LCSC_FIELDS = ("lcsc", "lcsc part", "lcsc part #", "lcsc part number", "jlcpcb part #")
+MPN_FIELDS = ("mpn", "manufacturer_part_number", "manufacturer part number", "mfr. part #", "mfg part #")
+
+
+def field(props, names):
+    v = next((props[k] for k in props if k.strip().lower() in names), "")
+    v = (v or "").strip()
+    return None if v in ("", "~") else v
+
+
+def parts_lines(objs):
+    """One line per distinct part on the schematic (Value + Footprint + LCSC), with what blocks a supplier lookup."""
+    lines = {}
+    for o in objs.values():
+        p = o["props"]
+        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+            continue
+        lcsc = (field(p, LCSC_FIELDS) or "").upper() or None
+        ds = field(p, ("datasheet",))
+        line = lines.setdefault((p.get("Value", ""), p.get("Footprint", ""), lcsc), {
+            "value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "lcsc": lcsc,
+            "mpn": field(p, MPN_FIELDS), "datasheet": ds if ds and ds.startswith(("http://", "https://")) else None,
+            "refs": [], "problems": []})
+        if o["ref"] not in line["refs"]:
+            line["refs"].append(o["ref"])
+    by_lcsc = {}
+    for l in lines.values():
+        l["refs"].sort(key=natural)
+        l["key"] = "|".join([l["value"], l["footprint"], l["lcsc"] or ""])
+        if l["lcsc"] and not re.fullmatch(r"C\d+", l["lcsc"]):
+            l["problems"].append("bad_lcsc")
+        if not l["lcsc"]:
+            l["problems"].append("missing_lcsc")
+        if not l["mpn"] and not l["lcsc"]:
+            l["problems"].append("missing_mpn")
+        by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
+    for l in lines.values():
+        if l["lcsc"] and len(by_lcsc[l["lcsc"]]) > 1:
+            l["problems"].append("lcsc_conflict")
+    return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
 def vkeys(v):
