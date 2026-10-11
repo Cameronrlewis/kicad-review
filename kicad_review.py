@@ -1014,7 +1014,7 @@ def md(v):
     """Text from a KiCad file as literal markdown: no HTML, images, links, emphasis or @mentions.
     Bare URLs (datasheets) stay as GitHub shows them, a visible auto-link, since escapes would end up inside the link."""
     v = str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return "".join(part.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]") if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
+    return "".join(part.replace("\\", "%5C").replace("[", "%5B").replace("]", "%5D").replace("|", "%7C") if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
                    for i, part in enumerate(re.split(r"((?:https?://|www\.)[^\s<>]+)", v))).replace("|", "\\|")
 
 

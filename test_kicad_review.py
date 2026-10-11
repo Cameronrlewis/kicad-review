@@ -294,13 +294,16 @@ print("ok RC-S4 external asset guard")
 
 # RC-S1: URL-looking text cannot supply Markdown links or images, including screenshot alt text.
 for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)"):
-    assert md(value) == value.replace("[", "\\[").replace("]", "\\]"), "RC-S1: URL Markdown delimiters are unescaped"
+    assert md(value) == value.replace("[", "%5B").replace("]", "%5D"), "RC-S1: URL Markdown delimiters are not encoded"
 shot = {"project": 0, "title": "sheet https://x/](https://e.example/p.png)", "url": "https://trusted.example/shot.png"}
 body = comment_markdown({**d2, "projects": [big(0)]}, [shot], "")
-assert "![sheet https://x/\\](https://e.example/p.png): before and after](https://trusted.example/shot.png)" in body, "RC-S1: screenshot alt text is unescaped"
+assert "![sheet https://x/%5D(https://e.example/p.png): before and after](https://trusted.example/shot.png)" in body, "RC-S1: screenshot alt text is unescaped"
 for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)", shot["title"],
               r"https://x/\[p\](https://e.example/p.png)", r"https://x/\](https://e.example/p.png)"):
     assert all(len(m[1]) % 2 for m in re.finditer(r"(\\*)([\[\]])", md(value))), "RC-S1: URL bracket escape has even backslash count"
+from urllib.parse import unquote
+url = r"https://x.com/a[b]\c|d(1).pdf"
+assert md(url) == "https://x.com/a%5Bb%5D%5Cc%7Cd(1).pdf" and unquote(md(url)) == url, "RC-S1: datasheet URL target changes"
 print("ok RC-S1 URL delimiters")
 
 # 6. No text in the data can end or re-open the data <script> (e.g. "<!--<script>" blanked the page).
