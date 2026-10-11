@@ -2,7 +2,7 @@
 // KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see README, "Data format").
 const D = window.REVIEW_DATA;
 const $ = s => document.querySelector(s);
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, checks: { check: "", scope: null, error: true, warning: true } };
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
 const proj = () => D.projects[S.p];
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const GLYPH = { added: "＋", removed: "−", modified: "≡" };
@@ -33,6 +33,12 @@ function layerGroup(n) {
 }
 function renderLayers() {
   const box = $("#layers");
+  if (S.v === "3d") {
+    const hidden = new Set(S.hidden3d || []), groups = [["bodies", "Component bodies"], ["top", "Top side"], ["bottom", "Bottom side"], ["silk", "Silkscreen"], ["mask", "Soldermask"], ["board", "Board"]];
+    box.innerHTML = `<h3>3D view</h3>${groups.map(([id, label]) => `<label><input type="checkbox" data-3d-group="${id}" ${hidden.has(id) ? "" : "checked"}> ${label}</label>`).join("")}`;
+    box.querySelectorAll("[data-3d-group]").forEach(cb => cb.onchange = () => { const h = new Set(S.hidden3d || []); cb.checked ? h.delete(cb.dataset["3dGroup"]) : h.add(cb.dataset["3dGroup"]); S.hidden3d = [...h]; window.Review3D?.setHidden(S.hidden3d); saveHash(); });
+    return;
+  }
   if (S.v !== "board" || !proj().board.changed) { box.innerHTML = ""; return; }
   const on = new Set(layersOn()), groups = {};
   for (const l of proj().board.layers) (groups[layerGroup(l.name)] ||= []).push(l);
