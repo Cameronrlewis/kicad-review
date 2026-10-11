@@ -1,5 +1,21 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["3D cleanup frees replaced outlines and scene resources", "v=3d&m=overlay", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], change = p.changes.find(c => c.ref === "J2"), seen = {}, watch = (name, resource) => { seen[name] = false; resource?.addEventListener("dispose", () => { seen[name] = true; }); };
+    Review3D.focus(change);
+    const st = Review3D.state, old = st.selected[0];
+    watch("replaced geometry", old.geometry); watch("replaced material", old.material);
+    Review3D.focus(change);
+    const replaced = seen["replaced geometry"] && seen["replaced material"];
+    watch("outline geometry", st.selected[0].geometry); watch("outline material", st.selected[0].material);
+    let ghost, base, block;
+    st.ghosts[0].object.traverse(o => { if (o.isMesh) ghost = o.material; });
+    st.roots[0].traverse(o => { if (o.isMesh) base = o.geometry; });
+    st.blocks[0].object.traverse(o => { if (o.isMesh) block = o.material.map; });
+    watch("ghost material", ghost); watch("detached base geometry", base); watch("placeholder texture", block);
+    Review3D.dispose();
+    return replaced && Object.values(seen).every(Boolean) || JSON.stringify({replaced, ...seen});`],
   ["3D camera animation stops with its owning session", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), change = p.changes.find(c => c.ref === "J2"), raf = window.requestAnimationFrame;
