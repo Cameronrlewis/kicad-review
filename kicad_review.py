@@ -128,6 +128,9 @@ def cmd_detect(args):
     env = dict(os.environ)
     base, head, reason = resolve_revisions(env)
     projects = detect(base, head)
+    ids = [project_id(p["dir"]) for p in projects]
+    if len(set(ids)) < len(ids):
+        sys.exit("Detected project ids collide; rename one project directory")
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
     with open("../review/detect.json", "w", encoding="utf-8") as fh:

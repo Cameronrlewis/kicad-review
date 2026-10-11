@@ -205,6 +205,30 @@ for directory in ("", "P/"):
         os.chdir(here)
 print("ok DR-S4 duplicate project directory")
 
+# DR-S5: detect rejects output id collisions without changing the encoding.
+assert [kicad_review.project_id(d) for d in ("a/b", "a__b", "", "_root")] == ["a__b", "a__b", "_root", "_root"]
+for directories, collision in ((("a/b", "a__b"), True), (("", "_root"), True), (("a__b", "c"), False)):
+    t = tempfile.mkdtemp()
+    os.makedirs(f"{t}/repo")
+    os.chdir(f"{t}/repo")
+    try:
+        g("init", "-q")
+        write(os.getcwd(), {os.path.join(d, "P.kicad_pro"): "{}" for d in directories})
+        g("add", "-A"); g("commit", "-q", "-m", "projects")
+        r = subprocess.run([sys.executable, f"{here}/kicad_review.py", "detect"], capture_output=True, text=True,
+                           env={**os.environ, "EVENT": "push", "AFTER": commit("HEAD"), "BEFORE": "0" * 40,
+                                "DEFAULT_BRANCH": "missing", "GITHUB_OUTPUT": f"{t}/output", "GITHUB_STEP_SUMMARY": f"{t}/summary"})
+        if collision:
+            assert r.returncode != 0, "DR-S5: colliding project ids must stop detection"
+            assert "project ids collide" in r.stderr, r.stderr
+            assert not os.path.exists(f"{t}/review/detect.json") and not os.path.exists(f"{t}/output"), "DR-S5: collision must stop before output"
+        else:
+            assert r.returncode == 0, r.stderr
+            assert len(json.load(open(f"{t}/review/detect.json"))["projects"]) == 2
+    finally:
+        os.chdir(here)
+print("ok DR-S5 project id collision")
+
 # 4. A large change never pushes the checks out of the comment, and every <details> stays closed.
 long = lambda i: [[f"Field{k}", "x" * 50, "y" * 50] for k in range(6)]
 big = lambda n: {"name": f"P{n}", "dir": f"p{n}", "status": "modified", "sheets": [], "board": {"changed": False},
