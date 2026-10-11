@@ -390,7 +390,7 @@ def sch_objects(proj_dir, name):
                              "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
             elif kind in ("label", "global_label", "hierarchical_label"):
                 a = at(n)
-                objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "position": fmt_at(a)},
+                objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "shape": val(n, "shape"), "position": fmt_at(a)},
                              "pos": a, "where": where}
             elif kind == "sheet":
                 props = properties(n)

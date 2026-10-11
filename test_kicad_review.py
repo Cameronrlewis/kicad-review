@@ -452,3 +452,12 @@ write(t, {"b/P.kicad_sch": "(kicad_sch " + sheet("Old", "child.kicad_sch", "shee
 rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
 assert len(rows) == 1 and rows[0]["changes"] == [["name", "Old", "New"]], f"OB-S4 sheet name: {rows}"
 print("ok OB-S4 sheet name")
+
+# OB-O1: global and hierarchical label direction changes show one shape property.
+t = tempfile.mkdtemp()
+for kind in ("global_label", "hierarchical_label"):
+    label = f'(kicad_sch ({kind} "DATA" (uuid "label1") (at 1 2 0) (shape input)))'
+    write(t, {"b/P.kicad_sch": label, "h/P.kicad_sch": label.replace('shape input', 'shape output')})
+    rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+    assert len(rows) == 1 and rows[0]["changes"] == [["shape", "input", "output"]], f"OB-O1 label shape: {rows}"
+print("ok OB-O1 label shape")
