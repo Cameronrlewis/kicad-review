@@ -36,7 +36,7 @@ const evaluate = async expr => (await send("Runtime.evaluate", { expression: exp
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 let failed = 0;
 for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
-  await new Promise(r => process.stdout.write(`RUN ${name}\n`, r));
+  console.log(`RUN ${name}`);
   let timer, body;
   try {
     body = (async () => {

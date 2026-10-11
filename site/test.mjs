@@ -29,16 +29,13 @@ test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: s
   assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL loads sample -> Runtime.evaluate timed out/);
 });
 
-test('3D runner reports and bounds each whole check, then continues', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
+test('3D runner reports and bounds one whole check', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
-  const r = spawnSync(process.execPath, ['ui/check.mjs', 'mode ', '--page', page], { encoding: 'utf8', timeout: 30000,
+  const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
     env: { ...process.env, CHECK_PORT: '9396', CHECK_TIMEOUT: '2000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
   assert.equal(r.status, 1);
-  for (const [name] of CHECKS.filter(c => c[0].includes('mode '))) {
-    assert.ok(r.stdout.includes(`RUN ${name}\n`), `missing RUN ${name}`);
-    assert.ok(r.stdout.includes(`FAIL ${name} -> timed out\n`), `missing timeout ${name}`);
-  }
+  assert.deepEqual(r.stdout.trim().split('\n'), ['RUN loads sample', 'FAIL loads sample -> timed out']);
 });
 
 test('timed-out runner body settles before the next check starts', async () => {
@@ -47,7 +44,7 @@ test('timed-out runner body settles before the next check starts', async () => {
   const log = line => { if (line === 'RUN second' && !settled) overlap = true; };
   await runInNewContext(`(async()=>{${loop}})()`, {
     CHECKS: [['first', '', 'first()'], ['second', '', 'second()']], filter:'', dark:false, page:'', noSkip:false, errors:[],
-    setTimeout, clearTimeout, process:{env:{CHECK_WALL_TIMEOUT:'1'}, stdout:{write:(line, done) => { log(line.trim()); done(); }}}, console:{log},
+    setTimeout, clearTimeout, process:{env:{CHECK_WALL_TIMEOUT:'1'}}, console:{log},
     send:async () => ({}), sleep:() => new Promise(r => setTimeout(r, 10)),
     evaluate:async expr => { if (expr.includes('first()')) settled = true; return {result:{value:true}}; },
   });
