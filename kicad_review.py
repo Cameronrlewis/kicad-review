@@ -921,10 +921,16 @@ UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
 def inline_page(data_js):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
     read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
-    return (read("review.html")
+    has_3d = '"model3d"' in data_js
+    page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
-            .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>")
-            .replace('<script src="review.js"></script>', f"<script>\n{read('review.js')}</script>"))
+            .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
+    if has_3d:
+        bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
+        page = page.replace('<script src="review.js"></script>', f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script><script>\n{read("review.js")}</script>')
+    else:
+        page = page.replace('<script src="review.js"></script>', f"<script>\n{read('review.js')}</script>")
+    return page
 
 
 def cmd_report(args):

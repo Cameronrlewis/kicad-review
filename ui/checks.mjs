@@ -1,5 +1,24 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["3D navigator appears only for opted-in data", "", `
+    return !!REVIEW_DATA.projects[0].board.model3d === !!document.querySelector('#nav [data-view="3d"]');`],
+  ["3D loads GLBs with named component nodes", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const n = window.Review3D.state.nodes || [];
+    return document.querySelectorAll('#stage canvas').length >= 2 && n.includes("J2") && n.includes("C20");`],
+  ["3D camera buttons change the camera", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const a = window.Review3D.state.cameras[0].position.toArray().join(","); document.querySelector('[data-3d-camera="top"]').click();
+    return a !== window.Review3D.state.cameras[0].position.toArray().join(",");`],
+  ["3D camera movement is linked and leaving disposes", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const d = window.Review3D.state, a = d.cameras, before = a[0].position.clone();
+    a[0].position.x += 1; d.controls[0].dispatchEvent({ type: "change" }); await new Promise(r => requestAnimationFrame(r));
+    const linked = a[1] && a[0].position.distanceTo(before) > .001 && a[1].position.distanceTo(a[0].position) < .001;
+    await select("board"); return linked && window.Review3D.state.disposed === true;`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
     const h = document.querySelector("#hdr").textContent;
