@@ -131,11 +131,15 @@ def write(root, files):
 t = tempfile.mkdtemp()
 write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A: x/y é", "a.kicad_sch", "u1") + sheet("B", "b.kicad_sch", "u2") + ")",
           "p/a.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u3") + ")",
-          "p/b.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u4") + ")", "p/pw.kicad_sch": "(kicad_sch)",
+          "p/b.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u4") + ")", "p/pw.kicad_sch": '(kicad_sch (symbol (uuid "r1") (at 10 20 0) (property "Reference" "R1") (property "Value" "10k")))',
           **{f"out/sch/{f}": "<svg/>" for f in ("H.svg", "H-A: x_y é.svg", "H-A: x_y é-Power.svg", "H-B.svg", "H-B-Power.svg")}})
 found = {pg["path"]: page_svg(f"{t}/out", "H", pg) for pg in sheet_pages(f"{t}/p", "H")}
 assert found == {"/": f"{t}/out/sch/H.svg", "/u1/": f"{t}/out/sch/H-A: x_y é.svg", "/u1/u3/": f"{t}/out/sch/H-A: x_y é-Power.svg",
                  "/u2/": f"{t}/out/sch/H-B.svg", "/u2/u4/": f"{t}/out/sch/H-B-Power.svg"}, found
+from kicad_review import sch_objects
+symbols = sch_objects(f"{t}/p", "H")
+assert all(symbols[path]["ref"] == "R1" and symbols[path]["props"]["Value"] == "10k" and symbols[path]["pos"] == [10, 20, 0] for path in ("/u1/u3/r1", "/u2/u4/r1")), "TS-S2 schematic symbols"
+print("ok TS-S2 schematic symbols")
 # Sibling sheets with one name share one SVG file, so neither drawing can be trusted: stop with a message.
 write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A", "a.kicad_sch", "u1") + sheet("A", "b.kicad_sch", "u2") + ")"})
 try:
@@ -480,7 +484,8 @@ from kicad_review import load_settings, build_project, board_changed, export_glb
 here = os.getcwd()
 t = tempfile.mkdtemp()
 os.chdir(t)
-write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n",
+write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n[checks]\nerc = 'required'\n",
+          "head/kicad-review.toml": "[3d]\nenabled = false\n[checks]\nerc = 'off'\n",
           "base/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (layer "F.Cu") (at 10 10 0) (uuid "u5") (fp_text reference "U5") (pad "1" smd (at 0 0)) (model "u.wrl"))
 (footprint "Package:R" (layer "F.Cu") (at 20 10 0) (uuid "r1") (fp_text reference "R1") (pad "1" smd (at -1 0)) (pad "2" smd (at 1 0))))''',
           "head/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (layer "F.Cu") (at 10 10 0) (uuid "u5") (fp_text reference "U5") (pad "1" smd (at 0 0)) (model "u.wrl"))
@@ -491,7 +496,8 @@ write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n",
           "review/P/head/pcb/P-F.Cu.svg": '<svg viewBox="0 0 1 1"><path/></svg>',
           "review/P/base/drc.json": "{}", "review/P/head/drc.json": "{}"})
 assert DEFAULT_SETTINGS["3d"]["enabled"] is False
-assert load_settings()["3d"]["enabled"] is True
+assert load_settings()["3d"]["enabled"] is True and load_settings()["checks"]["erc"] == "required", "TS-S2 base settings win"
+print("ok TS-S2 base settings win")
 # A report with 3D disabled is deterministic; this is the pre-feature HTML baseline for the same fixture.
 os.remove("base/kicad-review.toml")
 write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": []})})
@@ -652,4 +658,63 @@ for noise in ("0.000001", "-0.000001", "0.0"):
     assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["position"], f"OB-S2 pad position noise: {rows}"
 print("ok OB-S2 pad position noise")
 print("ok OB-S2 pad geometry and rotate invariant")
+
+# TS-S2: exercise render/release above the process boundary, not stubs of the functions under test.
+import csv, pathlib, zipfile
+from kicad_review import render_side
+t = tempfile.mkdtemp()
+write(t, {"P/P.kicad_pro": "{}", "P/P.kicad_sch": "(kicad_sch)",
+          "P/P.kicad_pcb": '(kicad_pcb\n(layers\n(0 "F.Cu" signal)\n(31 "B.Cu" signal)\n(44 "Edge.Cuts" user)\n)\n)'})
+os.makedirs(f"{t}/release")
+calls, fail_cli = [], False
+real_run = kicad_review.subprocess.run
+positions = "Ref,Val,Package,PosX,PosY,Rot,Side\nR1,10k,R_0603,10,20,90,top\n"
+bom = "Comment,Designator,Footprint,LCSC Part #\n10k,R1,R_0603,C123\n"
+def fake_cli(args, **kw):
+    if not args[0].endswith("kicad-cli"):
+        return real_run(args, **kw)
+    calls.append(args)
+    if fail_cli:
+        return type("R", (), {"returncode": 7, "stdout": "failure stdout", "stderr": "failure stderr"})()
+    out = pathlib.Path(args[args.index("-o") + 1])
+    kind = args[3] if args[2] == "export" else args[2]
+    files = {"svg": {"P.svg": "<svg/>"}, "gerbers": {"P-F_Cu.gbr": "copper"}, "drill": {"P.drl": "drill"}}
+    if kind in files:
+        out.mkdir(parents=True, exist_ok=True)
+        for name, text in files[kind].items(): (out / name).write_text(text, encoding="utf-8")
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(positions if kind == "pos" else bom if kind == "bom" else "{}", encoding="utf-8")
+    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+kicad_review.subprocess.run = fake_cli
+try:
+    render_side(f"{t}/P", "P", f"{t}/render")
+    assert calls == [
+        ["kicad-cli", "sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
+        ["kicad-cli", "sch", "erc", "--format", "json", "--severity-all", "-o", f"{t}/render/erc.json", f"{t}/P/P.kicad_sch"],
+        ["kicad-cli", "pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1", "--drill-shape-opt", "0", "-l", "F.Cu,B.Cu,Edge.Cuts", "-o", f"{t}/render/pcb", f"{t}/P/P.kicad_pcb"],
+        ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity", "-o", f"{t}/render/drc.json", f"{t}/P/P.kicad_pcb"]], "TS-S2 render commands"
+    assert all(pathlib.Path(f"{t}/render/{f}").read_text() == text for f, text in {"sch/P.svg": "<svg/>", "pcb/P.svg": "<svg/>", "erc.json": "{}", "drc.json": "{}"}.items())
+    fail_cli = True
+    try:
+        render_side(f"{t}/P", "P", f"{t}/render")
+        raise AssertionError("TS-S2 render must propagate CLI failure")
+    except SystemExit as e:
+        assert "failed (7)" in str(e) and "failure stdout" in str(e) and "failure stderr" in str(e), e
+    fail_cli = False
+    print("ok TS-S2 render commands, outputs and failure")
+    calls.clear()
+    made = kicad_review.release_project(f"{t}/P/P.kicad_pro", "v1", DEFAULT_SETTINGS, f"{t}/release", "P")
+    stem = f"{t}/release/P-v1-jlcpcb"
+    assert made == [stem + suffix for suffix in ("-gerbers.zip", "-positions.csv", "-bom.csv")], "TS-S2 release files"
+    with zipfile.ZipFile(made[0]) as z:
+        assert sorted(z.namelist()) == ["P-F_Cu.gbr", "P.drl"] and z.read("P-F_Cu.gbr") == b"copper" and z.read("P.drl") == b"drill"
+    with open(made[1], newline="", encoding="utf-8") as f:
+        assert list(csv.reader(f)) == [["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"], ["R1", "10k", "R_0603", "10", "20", "90", "Top"]]
+    assert pathlib.Path(made[2]).read_text() == bom
+    assert [c[3] for c in calls] == ["gerbers", "drill", "pos", "bom"] and "--check-zones" in calls[0] and "--exclude-dnp" in calls[2] and "--exclude-dnp" in calls[3]
+finally:
+    kicad_review.subprocess.run = real_run
+print("ok TS-S2 release zip and CSV contents")
 print("ok")
+
