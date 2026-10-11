@@ -965,3 +965,13 @@ assert "JLCPCB data as of 2026-10-08T14:02:00Z." in parts_markdown({"projects": 
 assert "#### Parts: X" in comment_markdown({**d2, "projects": [{**p, "dir": "", "status": "modified", "changes": [], "checks": []}]}, [], "")
 print("ok parts markdown")
 
+# A large introduced-parts list stays within GitHub's comment limit, preserving checks.
+large_parts = {"lines": [line], "supplier": None, "changes": [
+    {"action": "added", "refs": ["R" + str(i)], "before": None, "after": line} for i in range(4000)]}
+budget_project = {"name": "Budget", "dir": "", "status": "modified", "changes": [], "checks": [], "parts": large_parts}
+budget_data = {**d2, "projects": [budget_project]}
+body = comment_markdown(budget_data, [], "")
+assert len(body) <= 65536 and "Parts truncated" in body and "### Checks" in body, len(body)
+assert "#### Parts: Budget" in body
+print("ok parts comment budget")
+

@@ -450,10 +450,13 @@ function renderChecks() {
   </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
+const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "out_of_stock", "not_found", "discontinued"]);
+const partsProblemCount = parts => parts.lines.filter(l => l.problems.some(p => PARTS_BLOCKING.has(p))).length;
 const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
 function partsAge(s) {
   if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
   const h = (Date.now() - Date.parse(s.fetched_at)) / 36e5;
+  if (!Number.isFinite(h)) return { text: `JLCPCB data age unavailable: invalid timestamp ${esc(s.fetched_at)}`, stale: true };
   return { text: `JLCPCB data as of ${esc(s.fetched_at.replace("T", " ").slice(0, 16))} UTC (${h < 48 ? Math.round(h) + " h" : Math.round(h / 24) + " days"} old)`,
            stale: h > 24, warn: h > 6 };
 }
@@ -474,7 +477,9 @@ function renderParts() {
       };
       const problems = l.problems.map(p => PARTS_PROBLEMS[p] || p);
       let stock = "—";
-      if (parts.supplier && parts.supplier.fetched_at) {
+      if (parts.supplier?.error || parts.supplier && l.status === "unavailable") {
+        stock = `unavailable${l.error || parts.supplier.error ? `: ${l.error || parts.supplier.error}` : ""}`;
+      } else if (parts.supplier && parts.supplier.fetched_at) {
         stock = l.status === "ok" ? `${age.stale ? "" : "✔ "}${l.stock ?? "—"}${l.price != null ? ` $${l.price}` : ""}${l.category === "basic" ? " B" : l.category === "extended" ? ` Ext${l.fee != null ? ` (fee $${l.fee})` : ""}` : ""}`
           : `${PARTS_PROBLEMS[l.status] || l.status || "—"}${l.stock != null ? ` (${l.stock})` : ""}${l.error ? `: ${l.error}` : ""}`;
       }
@@ -491,7 +496,7 @@ function renderPanel() {
   $("#panel").innerHTML = `<div role="tablist">
       <button role="tab" data-tab="changes" aria-selected="${S.t === "changes"}">Changes ${p.changes.length}</button>
       <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button>
-      ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}</button>` : ""}</div>` +
+      ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}</button>` : ""}</div>` +
     (S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     <div class="filters">${["added", "removed", "modified"].map(a =>
