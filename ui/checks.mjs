@@ -1,5 +1,24 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 800));
+    const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:st.renderers[0].getClearColor(new THREE.Color()).getHexString()}, dark = !matchMedia("(prefers-color-scheme: dark)").matches;
+    await new Promise(r => { window.__themeFlipped = r; window.__flipTheme(dark ? "dark" : "light"); });
+    await new Promise(r => setTimeout(r, 150));
+    const css = getComputedStyle(document.documentElement), token = n => new THREE.Color(css.getPropertyValue(n).trim()), facts = {
+      clear:st.renderers.every(r => r.getClearColor(new THREE.Color()).equals(token(dark ? "--bg" : "--paper"))),
+      highlight:h.materials.every((m,i) => m.color.equals(h.original[i].color.clone().lerp(token("--modified"), .7)) && (!m.emissive || m.emissive.equals(token("--modified")))),
+      outline:st.selected.every(o => o.material.color.equals(token("--accent"))),
+      changed:before.highlight !== h.materials[0].color.getHexString() && before.outline !== st.selected[0].material.color.getHexString() && before.clear !== st.renderers[0].getClearColor(new THREE.Color()).getHexString(),
+      camera:JSON.stringify(before.camera) === JSON.stringify(st.cameras.map(c => c.position.toArray())), parses:before.parses === st.parseCount && st.parseCount === 2, selection:S.s === "c2", same:st === Review3D.state,
+      marker:getComputedStyle(h.marker.el).color === (() => { const e=document.createElement("span");e.style.color="var(--modified)";document.body.append(e);const c=getComputedStyle(e).color;e.remove();return c; })(),
+      ghosts:true
+    };
+    if ("${mode}" === "overlay") st.ghosts.forEach(g => g.object.traverse(o => { if (o.isMesh && !o.material.color.equals(token("--removed"))) facts.ghosts=false; }));
+    return Object.values(facts).every(Boolean) || JSON.stringify(facts);`]),
+
   ["3D navigator appears only for opted-in data", "", `
     return !!REVIEW_DATA.projects[0].board.model3d === !!document.querySelector('#nav [data-view="3d"]');`],
   ["3D loads GLBs with named component nodes", "v=3d", `
@@ -456,10 +475,10 @@ export const CHECKS = [
   ["3D change card keeps 3D and frames J2", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
-    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
+    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 1200));
     const { THREE } = window.THREE3D, st = window.Review3D.state, n = (() => { let f; st.roots[1].traverse(o => { if (!f && o.name === "J2") f = o; }); return f; })(),
       c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[0]);
-    return S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15;`],
+    return (S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15) || JSON.stringify({v:S.v,hash:location.hash,s:S.s,x:c.x,y:c.y});`],
   ["3D selection outline in each pane wraps that pane's own J2", "v=3d&m=side", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
