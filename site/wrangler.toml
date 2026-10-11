@@ -1,0 +1,8 @@
+name = "kicad-review-site"
+main = "worker.js"
+compatibility_date = "2026-10-07"
+
+# Set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and SESSION_KEY with
+# npx wrangler secret put NAME; never commit those secrets.
+[vars]
+ALLOWED_OWNERS = "Cameronrlewis"

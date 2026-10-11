@@ -338,3 +338,47 @@ r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=t, capture_output=Tr
 assert r.returncode == 0, r.stderr
 assert open(f"{t}/patched.md", encoding="utf-8").read() == normal
 print("ok")
+
+# Reports expose an artifact filename containing the compared revisions and result.
+import re
+def report_output(base, head):
+    t = tempfile.mkdtemp()
+    out = f"{t}/github-output"
+    write(t, {"review/detect.json": json.dumps({"base": base, "head": head, "reason": "test", "projects": []})})
+    r = subprocess.run([sys.executable, os.path.abspath("kicad_review.py"), "report"], cwd=t, capture_output=True, text=True,
+                       env={**os.environ, "GITHUB_OUTPUT": out})
+    assert r.returncode == 0, r.stderr[-300:]
+    return open(out, encoding="utf-8").read()
+assert re.search(r"^name=kicad-review-1234567-abcdef0-pass\.html$", report_output("1234567890abcdef", "abcdef0123456789"), re.M)
+assert re.search(r"^name=kicad-review-none-fedcba9-pass\.html$", report_output("", "fedcba9876543210"), re.M)
+print("ok")
+
+# Reports remain available for 90 days, including the documented retention period.
+wf = open(".github/workflows/review.yml", encoding="utf-8").read()
+readme = open("README.md", encoding="utf-8").read()
+assert "retention-days: 90" in wf, "workflow retention"
+assert "reports are kept 90 days" in readme, "README retention"
+print("ok")
+
+# A configured review site is the primary comment link without changing comments otherwise.
+site_default = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "5")
+site_empty = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "5", site="")
+site_body = comment_markdown(d, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "5", site="https://kicad-review.example.workers.dev/")
+site_url = "https://kicad-review.example.workers.dev/r/o/r/a/5"
+assert site_default == site_empty, "empty site changes the existing comment"
+assert site_body.count(site_url) == 1 and f"**[Open the review]({site_url})**" in site_body, site_body
+assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in site_body
+print("ok")
+
+# The site deploy workflow is manual, least-privileged, pin-only, and does not contain credentials.
+workflow = open(".github/workflows/site-deploy.yml", encoding="utf-8").read()
+on_block = re.search(r"(?m)^on:\n((?:^[ \t]+[^\n]*\n?)*)", workflow)
+assert on_block and on_block.group(1).strip() == "workflow_dispatch:", on_block.group(1) if on_block else "missing on"
+assert re.search(r"(?m)^permissions:\n[ \t]+contents: read$", workflow), "contents: read"
+for line in workflow.splitlines():
+    if re.match(r"^\s*(?:CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID):", line):
+        assert "secrets." in line, line
+assert not re.search(r"(?im)^\s*(?:GITHUB_CLIENT_ID|GITHUB_CLIENT_SECRET|SESSION_KEY):\s*[^$\s]", workflow), "literal secret"
+for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
+    assert re.fullmatch(r"[0-9a-f]{40}", action), action
+print("ok")

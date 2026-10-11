@@ -54,6 +54,12 @@ To make checks block merging, require the status check **`review / review`** in 
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
+Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
+
+## Review site (optional)
+
+The small Cloudflare Worker review site lets people sign in with GitHub and open reviews only in repositories they can already read. See [the site setup guide](site/README.md) to create the GitHub App, run it locally, and deploy it manually.
+
 ## When the workflow repository moves (for example to ParadigmEngineering)
 
 The owner name appears in exactly one place per KiCad repository: the `uses:` line of its `.github/workflows/kicad-review.yml`.
@@ -78,7 +84,7 @@ Private repositories get 2,000 Actions minutes and 500 MB of artifact storage pe
 - **Review run:** about 110 s, billed as 2 minutes. Pulling the 1.4 GB KiCad image takes 55–100 s of that; the KiCad work itself takes a few seconds.
 - **Skipped run** (a push to a branch with an open pull request): about 15 s, billed as 1 minute.
 - **Release run:** about 100 s.
-- **Storage:** reports are kept 14 days. They are 1–3 MB each for a small project and about 3 MB for KiCad's 8-sheet `video` demo with one sheet and the board changed.
+- **Storage:** reports are kept 90 days. They are 1–3 MB each for a small project and about 3 MB for KiCad's 8-sheet `video` demo with one sheet and the board changed.
 
 So roughly 900 reviews a month fit in the free minutes, shared by every private repository of the owner.
 
@@ -111,7 +117,7 @@ Run the self-check with `python3 test_kicad_review.py`.
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
 Run the page checks with `node ui/check.mjs` (headless Chrome; set `CHROME=` to its path on Linux),
-or `node ui/check.mjs --dark` for the dark theme.
+or `node ui/check.mjs --dark` for the dark theme. Run the site checks with `node --test site/test.mjs`.
 
 To refresh the sample, take the data out of any generated report (a CI artifact or a local run of
 `detect`, `render` and `report`):

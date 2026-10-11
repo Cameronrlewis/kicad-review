@@ -12,3 +12,4 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 test_kicad_review.py
+      - run: node --test site/test.mjs

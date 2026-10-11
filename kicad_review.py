@@ -883,8 +883,11 @@ def cmd_report(args):
     with open("review/data.json", "w", encoding="utf-8") as fh:
         json.dump(data, fh)
     failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    base = det["base"][:7] if det["base"] else "none"
+    name = f"kicad-review-{base}-{det['head'][:7]}-{'fail' if failed else 'pass'}.html"
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
+        fh.write(f"name={name}\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
@@ -975,11 +978,14 @@ def changes_markdown(p, limit=60):
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id="", rows=60):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site=""):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
                + (f"[Workflow run]({data['links']['run']})" if data["links"].get("run") else ""))
+    if site and artifact_id and data.get("repo"):
+        site = site.rstrip("/")
+        out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id})**")
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
     if artifact_id and data.get("repo"):
@@ -1007,7 +1013,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60):
     body, checks = "\n".join(out), checks_markdown(data)
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
-            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2)
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
         body = body[:60000 - len(checks)] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
@@ -1054,7 +1060,8 @@ def cmd_summary(args):
     if args.image_base and os.path.exists(f"review/images/shots.json"):
         with open(f"review/images/shots.json", encoding="utf-8") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
-    body = comment_markdown(data, images, args.artifact_url, args.artifact_id)
+    site = os.environ.get("SITE", "").rstrip("/")
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
