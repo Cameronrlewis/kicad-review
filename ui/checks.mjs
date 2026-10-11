@@ -475,7 +475,7 @@ export const CHECKS = [
   ["3D change card keeps 3D and frames J2", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
-    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 1200));
+    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, n = (() => { let f; st.roots[1].traverse(o => { if (!f && o.name === "J2") f = o; }); return f; })(),
       c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[0]);
     return (S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15) || JSON.stringify({v:S.v,hash:location.hash,s:S.s,x:c.x,y:c.y});`],

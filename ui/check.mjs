@@ -29,7 +29,8 @@ const evaluate = async expr => (await send("Runtime.evaluate", { expression: exp
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 let failed = 0;
 for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
-  await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }] });
+  // The framing check tests final geometry, not the two-pane camera animation.
+  await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);
   await send("Page.navigate", { url: `file://${page}#${hash}` });
   await evaluate("new Promise(r => { const t = () => window.reviewReady ? r() : setTimeout(t, 50); t(); })");
