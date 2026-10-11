@@ -302,6 +302,12 @@ group = wf[wf.index("group:"):].splitlines()[0]
 assert group.endswith("${{ github.event.pull_request.number || github.run_id }}") and "github.ref" not in group, group
 print("ok")
 
+# WF-S1: fork PRs cannot write comments; keep report and required-check steps running.
+wf = open(".github/workflows/review.yml", encoding="utf-8").read()
+comment = wf[wf.index("- name: Pull request comment"):wf.index("- name: Fail on required checks")]
+assert "github.event.pull_request.head.repo.full_name == github.repository" in comment.splitlines()[2], "WF-S1: fork comment guard missing"
+print("ok WF-S1: fork comment guard")
+
 # A failed run replaces the comment with "Review failed — see run"; a later good run restores the summary.
 wf = open(".github/workflows/review.yml", encoding="utf-8").read()
 step = wf[wf.index("- name: Pull request comment"):]
