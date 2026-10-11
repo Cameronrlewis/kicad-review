@@ -379,6 +379,25 @@ os.chdir(here)
 assert seen == ["a-B", "b-x-B", "C"], seen
 print("ok")
 
+# DR-S6: flattened directory labels must not overwrite earlier fabrication outputs.
+for paths in (("a/b/P", "a-b/P"), ("a/b/P", "x/P", "a-b-P")):
+    t = tempfile.mkdtemp()
+    os.chdir(t)
+    write(t, {f"repo/{p}.kicad_pro": "{}" for p in paths})
+    seen = []
+    kicad_review.release_project = lambda pro, tag, s, out, label: seen.append(label) or []
+    try:
+        try:
+            kicad_review.cmd_release(type("A", (), {"tag": "v1"}))
+            raise AssertionError("DR-S6: duplicate release label must stop fabrication")
+        except SystemExit as e:
+            assert "Duplicate release label" in str(e) and "a-b-P" in str(e), e
+        assert seen == ["a-b-P"], "DR-S6: duplicate label must stop before exporting again"
+    finally:
+        kicad_review.release_project = real
+        os.chdir(here)
+print("ok DR-S6 duplicate release label")
+
 # Minor: the README says what the arrow keys really do (they step only while focus is outside the list and buttons).
 readme = open("README.md", encoding="utf-8").read()
 assert "(or the arrow keys)" not in readme and "arrow keys step too after a click on the drawing" in readme, "README arrow keys"

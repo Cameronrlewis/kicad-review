@@ -689,10 +689,14 @@ def cmd_release(args):
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
                   if f.endswith(".kicad_pro") and not is_junk(posixpath.join(d, f)))
     names = [posixpath.basename(p) for p in pros]
+    seen = set()
     for pro in pros:
         label = posixpath.basename(pro)[: -len(".kicad_pro")]
         if names.count(posixpath.basename(pro)) > 1 and posixpath.dirname(pro) != "repo":  # keep same-named projects apart
             label = posixpath.dirname(pro)[len("repo/"):].replace("/", "-") + "-" + label
+        if label in seen:
+            sys.exit(f"Duplicate release label {label!r}; rename one project or directory")
+        seen.add(label)
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
 
