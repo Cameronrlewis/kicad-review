@@ -791,7 +791,8 @@ def parts_lines(objs):
             l["problems"].append("missing_lcsc")
         if not l["mpn"] and not l["lcsc"]:
             l["problems"].append("missing_mpn")
-        by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
+        if l["lcsc"]:
+            by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
     for l in lines.values():
         if l["lcsc"] and len(by_lcsc[l["lcsc"]]) > 1:
             l["problems"].append("lcsc_conflict")
@@ -1274,7 +1275,7 @@ def parts_markdown(data):
         s = parts["supplier"]
         head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
         when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
-               f"Supplier lookup not run ({md((s or {}).get('error') or 'no key in this run')})."
+               f"Supplier lookup not run ({md((s or {}).get('error') or 'not available')})."
         bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]

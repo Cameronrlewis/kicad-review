@@ -955,7 +955,7 @@ line = {"refs": ["R1"], "value": "10k", "lcsc": None, "problems": ["missing_lcsc
 p = {"name": "X", "parts": {"lines": [line], "changes": [
     {"action": "added", "refs": ["R1"], "before": None, "after": line}], "supplier": None}}
 m = parts_markdown({"projects": [p]})
-assert "1 problem introduced" in m and "R1 missing LCSC number" in m and "lookup not run" in m, m
+assert "1 problem introduced" in m and "R1 missing LCSC number" in m and "Supplier lookup not run (not available)." in m, m
 assert parts_markdown({"projects": [{"name": "Y"}]}) == ""
 for action, before, after in (("value", line, line), ("removed", line, None)):
     p["parts"]["changes"] = [{"action": action, "refs": ["R1"], "before": before, "after": after}]
