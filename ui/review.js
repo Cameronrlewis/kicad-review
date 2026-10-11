@@ -342,6 +342,7 @@ function pickAt(vp, e) {
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
 function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); }
+window.Review3D && (window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); });
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
@@ -349,7 +350,7 @@ function goTo(id) {
   S.s = id;
   const view = viewOf(r) ?? S.v;
   const box = rowBox(r, r.action === "removed" ? "base" : "head");
-  const zoom = () => { if (box) zoomTo(box); markSelected(); };
+  const zoom = () => { if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
   if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
   return draw().then(zoom);
 }
