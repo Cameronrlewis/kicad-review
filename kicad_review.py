@@ -376,7 +376,7 @@ def sch_objects(proj_dir, name):
                 a = at(n)
                 if props.get("Reference", "").startswith("#"):  # power symbols and flags: track as net labels
                     objs[key] = {"kind": "power symbol", "ref": props.get("Value", "?"),
-                                 "props": {"position": fmt_at(a)}, "pos": a, "where": where}
+                                 "props": {"net": props.get("Value"), "symbol": val(n, "lib_id"), "position": fmt_at(a)}, "pos": a, "where": where}
                     continue
                 p = {k: v for k, v in props.items() if k != "Reference"}
                 p.update({"reference": ref, "symbol": val(n, "lib_id"), "position": fmt_at(a), "unit": unit,
@@ -390,12 +390,12 @@ def sch_objects(proj_dir, name):
                              "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
             elif kind in ("label", "global_label", "hierarchical_label"):
                 a = at(n)
-                objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "position": fmt_at(a)},
+                objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "shape": val(n, "shape"), "position": fmt_at(a)},
                              "pos": a, "where": where}
             elif kind == "sheet":
                 props = properties(n)
                 objs[key] = {"kind": "sheet", "ref": props.get("Sheetname", "?"),
-                             "props": {"file": props.get("Sheetfile"), "position": fmt_at(at(n))},
+                             "props": {"name": props.get("Sheetname"), "file": props.get("Sheetfile"), "position": fmt_at(at(n))},
                              "pos": at(n), "where": where}
             elif kind in ("junction", "no_connect"):
                 objs[key] = {"kind": kind.replace("_", " "), "ref": "", "props": {"position": fmt_at(at(n))},
@@ -430,6 +430,11 @@ def pcb_objects(path):
             p.update({"reference": props.get("Reference", "?"), "footprint": n[1], "layer": val(n, "layer"),
                       "position": fmt_at(a), "attributes": " ".join(x for x in (find(n, "attr") or [])[1:] if isinstance(x, str)) or None,
                       "locked": "yes" if "locked" in n or val(n, "locked") == "yes" else None})
+            pads = [([c for c in pad[1:] if not (isinstance(c, list) and c and c[0] in ("net", "uuid", "tstamp", "at"))],
+                     [round(v, 4) + 0.0 for v in pa[:2]] if (pa := at(pad)) else None,
+                     round(((pa[2] if len(pa) > 2 else 0.0) - (a[2] if a and len(a) > 2 else 0.0)) % 360, 3) % 360 if pa else None) for pad in findall(n, "pad")]
+            p["pads"] = f"{len(pads)} pads, geom {hashlib.sha1(repr(pads).encode()).hexdigest()[:10]}" if pads else None
+            p["3D model"] = "; ".join(f"{m[1]} " + " ".join(f"{k}={v}" for k, v in flatten_sexpr(m).items()) for m in findall(n, "model")) or None
             for pad in findall(n, "pad"):
                 if find(pad, "net"):
                     p[f"pad {pad[1]} net"] = net(pad)

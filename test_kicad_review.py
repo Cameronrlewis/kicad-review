@@ -513,4 +513,81 @@ g("add", "-A"); g("commit", "-q", "-m", "remove")
 assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", "status": "removed"}], "DR-S1: deleted project is removed"
 os.chdir(here)
 print("ok DR-S1 renamed project is added")
+# OB-S1: power net and library symbol changes retain UUID and position.
+from kicad_review import sch_objects
+t = tempfile.mkdtemp()
+power = '(kicad_sch (uuid "root") (symbol (uuid "power") (at 1 2 0) (lib_id "power:+3V3") (property "Reference" "#PWR01") (property "Value" "+3V3")))'
+write(t, {"b/P.kicad_sch": power})
+for changed, expected in ((power.replace('+3V3', '+5V'), [["net", "+3V3", "+5V"], ["symbol", "power:+3V3", "power:+5V"]]),
+                          (power.replace('power:+3V3', 'power:VCC'), [["symbol", "power:+3V3", "power:VCC"]])):
+    write(t, {"h/P.kicad_sch": changed})
+    rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+    assert len(rows) == 1 and rows[0]["changes"] == expected, f"OB-S1 power props: {rows}"
+print("ok OB-S1 power props")
+
+# OB-S4: a sheet rename alone changes its review properties.
+t = tempfile.mkdtemp()
+write(t, {"b/P.kicad_sch": "(kicad_sch " + sheet("Old", "child.kicad_sch", "sheet1") + ")",
+          "h/P.kicad_sch": "(kicad_sch " + sheet("New", "child.kicad_sch", "sheet1") + ")"})
+rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+assert len(rows) == 1 and rows[0]["changes"] == [["name", "Old", "New"]], f"OB-S4 sheet name: {rows}"
+print("ok OB-S4 sheet name")
+
+# OB-O1: global and hierarchical label direction changes show one shape property.
+t = tempfile.mkdtemp()
+for kind in ("global_label", "hierarchical_label"):
+    label = f'(kicad_sch ({kind} "DATA" (uuid "label1") (at 1 2 0) (shape input)))'
+    write(t, {"b/P.kicad_sch": label, "h/P.kicad_sch": label.replace('shape input', 'shape output')})
+    rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+    assert len(rows) == 1 and rows[0]["changes"] == [["shape", "input", "output"]], f"OB-O1 label shape: {rows}"
+print("ok OB-O1 label shape")
+
+# OB-S3: all models and their transforms are one property; absent models stay absent in rows.
+t = tempfile.mkdtemp()
+model = '(model "part.step" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))'
+board = '(kicad_pcb (footprint "Lib:Part" (uuid "fp1") (at 10 20 0) (property "Reference" "R1") MODEL))'
+write(t, {"b.kicad_pcb": board.replace('MODEL', model)})
+for changed in (model.replace('part.step', 'new.step'), model.replace('offset (xyz 0', 'offset (xyz 2'),
+                model.replace('scale (xyz 1', 'scale (xyz 2'), model.replace('rotate (xyz 0', 'rotate (xyz 90'),
+                model + ' (model "second.step")', ''):
+    write(t, {"h.kicad_pcb": board.replace('MODEL', changed)})
+    rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["3D model"], f"OB-S3 model props: {rows}"
+write(t, {"h.kicad_pcb": board.replace('MODEL', '')})
+empty_model = pcb_objects(f"{t}/h.kicad_pcb")
+assert empty_model["fp1"]["props"].get("3D model") is None and "3D model" not in diff_objects({}, empty_model)[0]["props"]
+print("ok OB-S3 model props")
+
+# OB-S2: one compact pad geometry prop, excluding identity/nets and absolute rotation.
+t = tempfile.mkdtemp()
+pad = '(pad "1" thru_hole oval (at 1 2) (size 1 2) (drill 0.5) (layers "*.Cu" "*.Mask") (net 1 "GND") (uuid "pad1") (tstamp "old"))'
+board = '(kicad_pcb (footprint "Lib:Part" (uuid "fp1") (at 10 20 0) (property "Reference" "R1") PAD))'
+write(t, {"b.kicad_pcb": board.replace('PAD', pad)})
+pad_base = pcb_objects(f"{t}/b.kicad_pcb")
+for changed in (pad.replace('size 1 2', 'size 2 2'), pad.replace('oval', 'circle'), pad.replace('thru_hole', 'np_thru_hole'),
+                pad.replace('drill 0.5', 'drill 0.8'), pad.replace('"*.Cu"', '"F.Cu"'), pad.replace('at 1 2', 'at 2 2'),
+                pad.replace('at 1 2', 'at 1 2 45'), pad + ' (pad "2" smd rect (size 1 1))'):
+    write(t, {"h.kicad_pcb": board.replace('PAD', changed)})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["pads"], f"OB-S2 pad geometry: {rows}"
+assert re.fullmatch(r"1 pads, geom [0-9a-f]{10}", pad_base["fp1"]["props"]["pads"])
+for angle in (90, -90, 360):
+    rotated = board.replace('at 10 20 0', f'at 10 20 {angle}').replace('PAD', pad.replace('at 1 2', f'at 1 2 {angle}'))
+    write(t, {"h.kicad_pcb": rotated})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["position"], f"OB-S2 rotate invariant: {rows}"
+for changed in (pad.replace('"pad1"', '"pad2"').replace('"old"', '"new"'), pad.replace('net 1 "GND"', 'net 2 "VCC"')):
+    write(t, {"h.kicad_pcb": board.replace('PAD', changed)})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert all(c[0] != "pads" for r in rows for c in r["changes"]), f"OB-S2 excluded fields: {rows}"
+write(t, {"h.kicad_pcb": board.replace('PAD', '')})
+assert pcb_objects(f"{t}/h.kicad_pcb")["fp1"]["props"].get("pads") is None
+# KiCad's rotate/save round trip leaves float noise in local coordinates.
+for noise in ("0.000001", "-0.000001", "0.0"):
+    write(t, {"b.kicad_pcb": board.replace('PAD', pad.replace('at 1 2', 'at 1 -0.0 0')),
+              "h.kicad_pcb": board.replace('at 10 20 0', 'at 10 20 90').replace('PAD', pad.replace('at 1 2', f'at 1 {noise} 90'))})
+    rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["position"], f"OB-S2 pad position noise: {rows}"
+print("ok OB-S2 pad position noise")
+print("ok OB-S2 pad geometry and rotate invariant")
 print("ok")
