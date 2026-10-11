@@ -1,5 +1,15 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["3D base-only models mark removals in overlay and changes only", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), project = {...p, board:{...p.board, model3d:{...p.board.model3d, head:null}}, changes:[{...p.changes.find(c => c.ref === "J2"), action:"removed"}]};
+    const facts = [];
+    for (const m of ["overlay", "semantic"]) {
+      await Review3D.show(stage, project, {...S, m, s:null});
+      const h = Review3D.state.highlights.find(h => h.ref === "J2" && h.side === "base" && h.action === "removed");
+      facts.push(!!h && h.marker.el.textContent.includes("− J2") && h.materials.some((material, i) => material !== h.original[i]));
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
   ["3D cleanup frees replaced outlines and scene resources", "v=3d&m=overlay", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     const p = REVIEW_DATA.projects[0], change = p.changes.find(c => c.ref === "J2"), seen = {}, watch = (name, resource) => { seen[name] = false; resource?.addEventListener("dispose", () => { seen[name] = true; }); };
