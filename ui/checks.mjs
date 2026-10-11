@@ -49,7 +49,7 @@ export const CHECKS = [
   ["3D Changes only fades unchanged components and disables Wipe", "v=3d&m=semantic", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 5000));
-    const u = (window.Review3D.state.faded || []).find(x => x.ref === "U4"), faded = u?.materials.some(m => m.opacity === .25);
+    const u = (window.Review3D.state.faded || []).find(x => x.ref === "U4"), faded = u?.materials.some(m => m.opacity === .12);
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
