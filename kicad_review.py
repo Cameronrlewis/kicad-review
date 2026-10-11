@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import pathlib
 import posixpath
 import re
 import subprocess
@@ -182,15 +183,10 @@ def board_path(p, side):
     return posixpath.join(side, p["dir"], f"{p['name']}.kicad_pcb")
 
 
-def read_bytes(path):
-    with open(path, "rb") as fh:
-        return fh.read()
-
-
 def board_changed(p):
     """Whether the project's board bytes differ between the two checked-out revisions."""
     paths = [board_path(p, side) for side in ("base", "head")]
-    contents = [read_bytes(path) if os.path.exists(path) else None for path in paths]
+    contents = [pathlib.Path(path).read_bytes() if os.path.exists(path) else None for path in paths]
     return contents[0] != contents[1]
 
 
@@ -886,10 +882,8 @@ def build_project(p, blobs, settings):
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
         if any(os.path.exists(path) for path in (*models.values(), *logs.values())):
-            board["model3d"] = {side: add_blob(blobs, read_bytes(path)) if os.path.exists(path) else None
+            board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
                                 for side, path in models.items()}
-            board["model3d_failed"] = {side: os.path.exists(logs[side]) and not os.path.exists(models[side])
-                                       for side in ("base", "head")}
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs)}
@@ -935,12 +929,11 @@ def inline_page(data_js):
     page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
+    prefix = ""
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
-        page = page.replace('<script src="review.js"></script>', f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script><script>\n{read("review.js")}</script>')
-    else:
-        page = page.replace('<script src="review.js"></script>', f"<script>\n{read('review.js')}</script>")
-    return page
+        prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
+    return page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
 
 
 def cmd_report(args):
