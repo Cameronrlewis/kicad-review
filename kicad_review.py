@@ -1193,7 +1193,11 @@ def checks_markdown(data):
         lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
-    return "\n".join(lines) + "\n"
+    checks = "\n".join(lines) + "\n"
+    if len(checks) > 50000:  # leave room for the comment body and closing details tags
+        checks = checks[:49900] + "\n\n… checks truncated. Full list in the report.\n"
+        checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
+    return checks
 
 
 def main():

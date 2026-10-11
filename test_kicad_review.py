@@ -268,6 +268,22 @@ finally:
     kicad_review.checks_markdown = real_checks
 print("ok RC-S2 check budget")
 
+# RC-A: titles, reasons and item names cannot exhaust the checks section budget.
+for field in ("title", "reason", "items"):
+    p = big(0)
+    p["changes"] = []
+    c = p["checks"][0]
+    c["violations"] = [{"new": True, "severity": "error", "description": "net changed", "items": []}]
+    if field == "items":
+        c["violations"][0][field] = ["x" * 70000, "y" * 70000]
+    else:
+        c[field] = "x" * 70000
+    data = {**d2, "projects": [p]}
+    body = comment_markdown(data, [], "")
+    assert len(body) < 65536 and "… checks truncated" in body, "RC-A: long " + field + " exceeds comment limit"
+    assert body.count("<details") == body.count("</details>"), "RC-A: truncated checks leave details open"
+print("ok RC-A checks section cap")
+
 # RC-S3: Directory CR/LF cannot break out of the literal code span.
 p = big(0)
 p["dir"] = "foo\r\n\n![proof](https://e.example/dir.png)\r\n\nbar`"
