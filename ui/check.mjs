@@ -14,19 +14,21 @@ const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), f
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
 const port = Number(process.env.CHECK_PORT || 9334);
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const proc = spawn(chrome, ["--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
+const proc = spawn(chrome, ["--headless=new", "--no-sandbox", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
   "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--window-size=1920,1080", "about:blank"], { stdio: "ignore" });
 process.on("exit", () => proc.kill());
 process.on("uncaughtException", e => { console.error("FAIL startup -> " + e.message); process.exit(1); });
+const timeout = Number(process.env.CHECK_TIMEOUT || 15000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let tab;
 for (let i = 0; i < 50 && !tab; i++) { await sleep(200); try { tab = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === "page"); } catch {} }
-const ws = new WebSocket(tab.webSocketDebuggerUrl); await new Promise(r => ws.onopen = r);
+if (!tab) { console.error(`FAIL startup -> Chrome did not start on port ${port}`); process.exit(1); }
+const ws = new WebSocket(tab.webSocketDebuggerUrl); await Promise.race([new Promise(r => ws.onopen = r), new Promise((_, reject) => setTimeout(() => reject(new Error("WebSocket open timed out")), timeout).unref())]);
 let id = 0; const pend = {}, errors = [];
 ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
   if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate("window.__themeFlipped()")); }
   if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text); };
-const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), Number(process.env.CHECK_TIMEOUT || 15000)).unref())]);
+const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
 await send("Emulation.setDeviceMetricsOverride", { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });

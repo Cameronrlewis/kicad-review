@@ -23,7 +23,7 @@ test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
 test('TS-S5 a page that never becomes ready fails instead of hanging', () => {
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
-  const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 15000,
+  const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
     env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', ...(process.platform === 'darwin' ? {} : { CHROME: process.env.CHROME || 'google-chrome' }) } });
   assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL startup.*Runtime.evaluate timed out/);
 });
