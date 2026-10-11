@@ -358,6 +358,7 @@ function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
   if (!r) return Promise.resolve();
   S.s = id;
+  if (S.v === "3d") { markSelected(); window.Review3D?.focus(r); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); return Promise.resolve(); }
   const view = viewOf(r) ?? S.v;
   const box = rowBox(r, r.action === "removed" ? "base" : "head");
   const zoom = () => { if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };

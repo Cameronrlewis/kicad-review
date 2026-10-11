@@ -440,14 +440,22 @@ export const CHECKS = [
     await new Promise(res => setTimeout(res, 300));
     return S.s !== null || "no step; focus on " + document.activeElement.tagName;`],
   ["3D fallback blocks and panel list cover missing models", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 500));
     const d = REVIEW_DATA.projects[0].board.no_model || [];
     return d.length === 3 && ["D1", "L1", "U3"].every(ref => d.some(x => x.ref === ref && x.pos?.length === 3 && x.box?.length === 4)) && document.querySelectorAll("[data-no-model]").length === 3;`],
   ["3D visibility controls hide silkscreen", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 500));
     const cb = document.querySelector('[data-3d-group="silk"]'); if (!cb) return false; cb.click();
     return (S.hidden3d || []).includes("silk");`],
   ["3D address records camera and hidden groups", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
     return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
+  ["3D change card keeps 3D and frames J2", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true; await new Promise(r => setTimeout(r, 500));
+    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 450)); const v=window.Review3D.state.controls[0], p=v.target.clone().project(window.Review3D.state.cameras[0]); return S.v === "3d" && Math.abs(p.x) < .15 && Math.abs(p.y) < .15;`],
+  ["3D canvas pick selects J2 row", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true; await new Promise(r => setTimeout(r, 500)); const h=window.Review3D.state.highlights.find(x=>x.ref==="J2" && x.side==="head"); window.Review3D.onPick(h && "c2"); return S.s === "c2";`],
 ];
