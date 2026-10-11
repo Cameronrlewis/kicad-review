@@ -809,6 +809,14 @@ for numbers in (("1", "1"), ("1", "2")):
         write(t, {"h.kicad_pcb": board.replace("PAD", " ".join(changed))})
         rows = diff_objects(before, pcb_objects(f"{t}/h.kicad_pcb"))
         assert len(rows) == 1 and len(rows[0]["changes"]) == 1 and rows[0]["changes"][0][1:] == ["GND", "VCC"], f"OB-C: pad {index} net change lost for {numbers}: {rows}"
+    if numbers == ("1", "1"):
+        unrelated = '(pad "2" smd rect (at 0 0) (size 1 1))'
+        for changed in (False, True):
+            head_pads = [pads[0], pads[1].replace('net 1 "GND"', 'net 2 "VCC"') if changed else pads[1]]
+            write(t, {"h.kicad_pcb": board.replace("PAD", " ".join([unrelated, *head_pads]))})
+            rows = diff_objects(before, pcb_objects(f"{t}/h.kicad_pcb"))
+            nets = [c for r in rows for c in r["changes"] if c[0].startswith("pad ")]
+            assert nets == ([["pad 1#2 net", "GND", "VCC"]] if changed else []), f"OB-C: unrelated pad shifts duplicate net keys: {nets}"
 print("ok OB-C duplicate pad nets and unique keys")
 
 # TS-S2: exercise render/release above the process boundary, not stubs of the functions under test.
