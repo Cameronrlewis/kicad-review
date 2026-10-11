@@ -253,6 +253,13 @@ for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](http
 shot = {"project": 0, "title": "sheet https://x/](https://e.example/p.png)", "url": "https://trusted.example/shot.png"}
 body = comment_markdown({**d2, "projects": [big(0)]}, [shot], "")
 assert "![sheet https://x/\\](https://e.example/p.png): before and after](https://trusted.example/shot.png)" in body, "RC-S1: screenshot alt text is unescaped"
+from markdown_it import MarkdownIt
+render = MarkdownIt("commonmark", {"html": True}).render
+html = render(md(r"https://x/\[p\](https://e.example/p.png)"))
+assert '<a href="https://e.example/' not in html and '<img src="https://e.example/' not in html, "RC-S1: URL backslashes cancel bracket escapes"
+shot = {**shot, "title": r"https://x/\](https://e.example/p.png)"}
+html = render(comment_markdown({**d2, "projects": [big(0)]}, [shot], ""))
+assert '<a href="https://e.example/' not in html and '<img src="https://e.example/' not in html, "RC-S1: URL backslashes replace the screenshot"
 print("ok RC-S1 URL delimiters")
 
 # 6. No text in the data can end or re-open the data <script> (e.g. "<!--<script>" blanked the page).
