@@ -12,4 +12,22 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 test_kicad_review.py
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
+      - name: Build browser fixtures
+        run: |
+          echo "CHROME=google-chrome" >> "$GITHUB_ENV"
+          export PAGES=$(mktemp -d)
+          echo "PAGES=$PAGES" >> "$GITHUB_ENV"
+          python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js")]]'
+      - run: node ui/check.mjs
+      - run: node ui/check.mjs --dark
+      - run: node ui/check.mjs --no-skip "selection-only address"
+      - run: node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"
+      - run: node ui/check.mjs --no-skip "passing checks with baseline findings"
+      - run: node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"
+      - run: node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"
+      - run: node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"
+      - run: node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"

@@ -1,7 +1,47 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { runInNewContext } from 'node:vm';
 import worker, { open, seal } from './worker.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
+
+import { CHECKS } from '../ui/checks.mjs';
+import { writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
+  const absent = { REVIEW_DATA: { projects: [{ name: 'sample', board: {}, sheets: [], changes: [] }, { checks: [] }] },
+    D: { projects: [{ board: { changed: true }, sheets: [] }] }, proj: () => ({ changes: [], sheets: [] }) };
+  const checks = CHECKS.filter(c => /if \([^\n]+\) return (?:true|"skip");/.test(c[2]));
+  assert.ok(checks.length >= 20);
+  for (const [name, , body] of checks) assert.equal(await runInNewContext(`(async()=>{${body}})()`, absent), 'skip', name);
+  const r = spawnSync(process.execPath, ['ui/check.mjs', 'TS-S6-no-such-check'], { encoding: 'utf8' });
+  assert.equal(r.status, 1); assert.match(r.stderr, /no check matches/);
+});
+
+const chrome = process.env.CHROME || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
+test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
+  const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
+  writeFileSync(page, '<!doctype html><title>Never ready</title>');
+  const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
+  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL startup.*Runtime.evaluate timed out/);
+});
+
+test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {
+  const run = (name, globals) => runInNewContext(`(async()=>{${CHECKS.find(c => c[0] === name)[2]}})()`, {
+    setTimeout: f => setTimeout(f, 0), requestAnimationFrame: f => setTimeout(f, 0), ...globals });
+  assert.notEqual(await run('modified card shows every changed property old and new', {
+    REVIEW_DATA: { projects: [{}, { changes: [{ id: 'c1', action: 'modified', changes: [['Value', '10k', '20k']] }] }] },
+    document: { querySelector: () => ({ textContent: 'Value 20k' }) } }), true);
+  assert.notEqual(await run('wheel zoom keeps both panes in step', { S: { z: 1 }, WheelEvent: class {},
+    document: { querySelector: () => ({ dispatchEvent() {} }), querySelectorAll: () => [{ style: { transform: 'scale(1)' } }, { style: { transform: 'scale(1)' } }] } }), true);
+  for (const m of ['side', 'overlay', 'wipe', 'blend', 'semantic']) assert.notEqual(await run(`mode ${m} draws`, {
+    S: { m }, document: { querySelector: s => s === '#stage' ? { classList: { contains: () => true } } : { dataset: { mode: m } }, querySelectorAll: () => [] } }), true);
+  assert.notEqual(await run('unchanged sheet still reachable', {
+    proj: () => ({ sheets: [{ status: 'unchanged', path: '/same/' }] }), document: { querySelector: () => null } }), true);
+});
 
 const env = {
   GITHUB_CLIENT_ID: 'client-id',
@@ -43,6 +83,16 @@ function tokenResponse(overrides = {}) {
 }
 
 // All checked responses also assert the security headers required on every route.
+test('ordinary routes deny framing without overriding report CSPs', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : compareCommitData(url) || new Response(JSON.stringify({ installations: [] })));
+  try {
+    for (const [path, options] of [['/', {}], ['/missing', {}], ['/login', {}], ['/callback?state=bad', {}], ['/logout', { method: 'POST' }], ['/r/Cameronrlewis/repo/commits', { headers: { Cookie: `s=${sealed}` } }]]) {
+      assert.equal((await call(path, options)).headers.get('Content-Security-Policy'), "frame-ancestors 'none'", path);
+    }
+  } finally { restore(); }
+});
+
 test('home without a cookie offers GitHub sign-in', async () => {
   const response = await call('/');
   assert.equal(response.status, 200);
@@ -213,6 +263,23 @@ test('unsafe next is ignored and login text is HTML escaped', async () => {
   } finally { restore(); }
 });
 
+test('OAuth next rejects slash, backslash, and whitespace prefixes', async () => {
+  const restore = mockFetch(async (url) => url.includes('access_token') ? tokenResponse() : new Response(JSON.stringify({ login: 'octocat' })));
+  try {
+    for (const next of ['/\\evil.example/phish', '//evil.example', '/\t/evil.example', '/\n\\evil.example', '/\r/evil.example', '/ evil.example', '/\\[', '/', '/ok?x=1#h', '/%zz']) {
+      const expected = ['/', '/ok?x=1#h', '/%zz'].includes(next) ? next : '/';
+      const login = await call(`/login?next=${encodeURIComponent(next)}`);
+      const state = cookieValue(login, 'st');
+      assert.equal(JSON.parse(Buffer.from(state, 'base64url')).n, expected, JSON.stringify(next));
+      for (const saved of [state, Buffer.from(JSON.stringify({ s: 'state', n: next })).toString('base64url')]) {
+        const callback = await call(`/callback?code=x&state=${encodeURIComponent(saved)}`, { headers: { Cookie: `st=${saved}` } });
+        assert.equal(callback.status, 302);
+        assert.equal(callback.headers.get('Location'), expected, JSON.stringify(next));
+      }
+    }
+  } finally { restore(); }
+});
+
 test('logout and unknown routes carry security headers', async () => {
   assert.equal((await call('/logout', { method: 'POST' })).status, 302);
   assert.equal((await call('/missing')).status, 404);
@@ -285,6 +352,23 @@ test('review routes reject disallowed owners and invalid repository names before
   } finally { restore(); }
 });
 
+test('repository access checks the canonical owner after redirects', async () => {
+  const sealed = await signedIn();
+  for (const owner of ['DisallowedOwner', 'cAmErOnRlEwIs']) {
+    for (const suffix of ['', '/commits', '/a/42', '/a/42/raw', '/run/42', '/compare']) {
+      let calls = 0;
+      const restore = mockFetch(async () => { calls += 1; return new Response(JSON.stringify({ owner: { login: owner }, permissions: { pull: true }, default_branch: 'main' })); });
+      try {
+        const response = suffix === '/compare'
+          ? await compareRequest(`/r/Cameronrlewis/repo${suffix}`, { base: 'invalid', head: 'invalid' }, sealed)
+          : await call(`/r/Cameronrlewis/repo${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+        if (owner === 'DisallowedOwner') { assert.equal(response.status, 404, suffix); assert.equal(calls, 1, suffix); }
+        else assert.ok(calls > 1 || response.status === 400, suffix);
+      } finally { restore(); }
+    }
+  }
+});
+
 test('review route hides inaccessible repositories behind the same HTML 404', async () => {
   const sealed = await signedIn();
   const missing = await call('/not-found', { headers: { Cookie: `s=${sealed}` } });
@@ -316,7 +400,7 @@ test('review route shows the repository after a pull-access check and refreshes 
     if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
     assert.equal(options.headers.Authorization, 'Bearer access-secret');
     assert.equal(options.headers['X-GitHub-Api-Version'], '2022-11-28');
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts?per_page=100');
     return new Response(JSON.stringify({ artifacts: [] }));
   });
@@ -350,7 +434,7 @@ test('raw artifact route streams the signed blob with its frame-only sandbox CSP
   const seen = [];
   const restore = mockFetch(async (url, options = {}) => {
     seen.push([url, options]);
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42/zip') {
       assert.equal(options.redirect, 'manual');
@@ -436,7 +520,7 @@ test('artifact redirect URL remains server-side', async () => {
   const sealed = await signedIn();
   const blobUrl = 'https://signed.example/very-secret';
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/artifacts/7')) return new Response(JSON.stringify({ name: 'report.html' }));
     if (url.endsWith('/artifacts/7/zip')) return new Response(null, { status: 302, headers: { Location: blobUrl } });
     return new Response('<p>review</p>');
@@ -454,7 +538,7 @@ test('artifact redirect URL remains server-side', async () => {
 test('expired artifacts explain how to get a new review', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => url.endsWith('/repo')
-    ? new Response(JSON.stringify({ permissions: { pull: true } }))
+    ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
     : new Response(JSON.stringify({ name: 'report.html', expired: true })));
   try {
     const response = await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } });
@@ -544,7 +628,7 @@ test('repository cards show escaped details, visibility, update time, and two ac
 test('review cards parse, escape, and list artifacts once', async () => {
   const sealed = await signedIn(); let artifactCalls = 0;
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/actions/artifacts?per_page=100')) {
       artifactCalls += 1;
       return new Response(JSON.stringify({ artifacts: [
@@ -570,7 +654,7 @@ test('review cards parse, escape, and list artifacts once', async () => {
 test('review filter chips count and filter from one artifact list', async () => {
   const sealed = await signedIn(); let artifactCalls = 0;
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/actions/artifacts?per_page=100')) {
       artifactCalls += 1;
       return new Response(JSON.stringify({ artifacts: [
@@ -602,7 +686,7 @@ test('commit history uses the access repository default and links reviews', asyn
   const sealed = await signedIn(); const urls = [];
   const restore = mockFetch(async (url) => {
     urls.push(url);
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
     if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
     if (url.endsWith('/tags?per_page=100')) return new Response(JSON.stringify([]));
     if (url.includes('/commits?')) return new Response(JSON.stringify([{ sha: 'deadbeef000', commit: { message: '<script>bad</script>\nmore', author: { name: 'Ada', date: '2025-02-03T04:05:00Z' } } }]));
@@ -620,7 +704,7 @@ test('commit history uses the access repository default and links reviews', asyn
 test('unknown commit branch is a 404 and access refusal makes no further calls', async () => {
   const sealed = await signedIn();
   let restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
     if (url.includes('/commits?')) return new Response('missing', { status: 404 });
     if (url.endsWith('/branches?per_page=100') || url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
@@ -648,7 +732,7 @@ function compareRequest(path, body, sealed, origin = 'https://site.example') {
 }
 
 function accessibleRepo() {
-  return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+  return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
 }
 
 const base = 'deadbeef00000000000000000000000000000000';
@@ -859,6 +943,33 @@ test('compare refuses KiCad-free file changes and lists changed files', async ()
   const restore = mockFetch(async (url) => { if (url.endsWith('/repo')) return accessibleRepo(); if (url.includes('/compare/')) return new Response(JSON.stringify({ status: 'ahead', files: files.map((filename) => ({ filename })) })); if (url.includes('/dispatches')) { dispatched = true; throw new Error('must not dispatch'); } const page = compareCommitData(url); if (page) return page; throw new Error(`unexpected ${url}`); });
   try { const response = await compareRequest('/r/Cameronrlewis/repo/compare', { base, head }, sealed); const body = await response.text(); assert.equal(response.status, 400); assert.equal(dispatched, false); assert.match(body, /No KiCad files changed between deadbee and cafebab, so there is nothing to review\./); assert.match(body, /class=\"changed-files mono\"/); assert.match(body, /docs\/file-0\.md/); assert.match(body, /and 1 more/); } finally { restore(); }
 });
+function commitsScript() {
+  const node = () => ({ append() {}, replaceChildren() {} });
+  const branch = { value: 'main' }; const tag = { value: 'v1' }; const row = {}; const button = {}; const status = node();
+  const form = { querySelector: (selector) => selector === '[type="submit"]' ? button : null, querySelectorAll: (selector) => selector === 'tr' ? [row] : [] };
+  const bar = { querySelector: () => status, querySelectorAll: () => [node(), node()] };
+  const document = { createElement: node, querySelector: (selector) => ({ '.compare-form': form, '.compare-bar': bar, '[name=branch]': branch, '[name=tag]': tag, '#tag': tag })[selector] };
+  const page = commitsPage({ owner: 'owner', repo: 'repo', branch: 'main', branches: ['main', 'dev'], tag: 'v1', tags: [{ name: 'v1' }], commits: [] });
+  runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document });
+  return { branch, tag, row };
+}
+
+test('changing branch clears the selected tag before Show', () => {
+  const { branch, tag } = commitsScript();
+  branch.value = 'dev'; branch.onchange?.();
+  assert.equal(tag.value, '');
+  assert.equal(branch.value, 'dev');
+});
+
+test('row Enter guard blocks radios but preserves Reviewed links', () => {
+  const { row } = commitsScript();
+  for (const [radio, key, expected] of [[false, 'Enter', false], [true, 'Enter', true], [true, ' ', false]]) {
+    let prevented = false;
+    row.onkeydown({ key, target: { matches: (selector) => { assert.equal(selector, 'input[type=radio]'); return radio; } }, preventDefault() { prevented = true; } });
+    assert.equal(prevented, expected, `${radio ? 'radio' : 'Reviewed link'} ${key}`);
+  }
+});
+
 test('compare page renders every inline-script target and keeps Show in its picker row', () => {
   const page = commitsPage({ user: 'octocat', owner: 'owner', repo: 'repo', branch: 'main', branches: ['main'], tags: [], commits: [{ sha: base, message: 'Board', fullMessage: 'Board\nDetails', author: 'Ada', date: 'today', exactDate: '2025-01-01', review: null }] });
   for (const selector of ['compare-form', 'compare-bar', 'compare-slot']) assert.match(page, new RegExp(`class="[^"]*${selector}[^"]*"`));
@@ -997,7 +1108,7 @@ test('expired artifacts offer regeneration only when their name records revision
     ['kicad-review.html', /Back to reviews/],
   ]) {
     const restore = mockFetch(async (url) => url.endsWith('/repo')
-      ? new Response(JSON.stringify({ permissions: { pull: true } }))
+      ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
       : new Response(JSON.stringify({ name, expired: true })));
     try {
       const body = await (await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } })).text();

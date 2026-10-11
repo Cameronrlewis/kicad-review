@@ -99,7 +99,7 @@ def detect(base, head):
         changed = git("diff", "--name-only", "--no-renames", base, head).splitlines()
     else:
         changed = git("ls-tree", "-r", "--name-only", head).splitlines()
-    settings_changed = SETTINGS_FILE in changed
+    settings_changed = SETTINGS_FILE in changed or any(is_kicad_file(f) and owner_project(f, dirs) is None for f in changed)
     by_project = {}
     for f in changed:
         if is_kicad_file(f):
@@ -111,7 +111,7 @@ def detect(base, head):
             by_project.setdefault(d, [])
     projects = []
     for d in sorted(by_project):
-        status = "added" if d not in base_projects else "removed" if d not in head_projects else "modified"
+        status = "removed" if d not in head_projects else "added" if d not in base_projects or base_projects[d] != head_projects[d] else "modified"
         pro = head_projects.get(d) or base_projects[d]
         projects.append({
             "dir": d,
@@ -272,7 +272,7 @@ def sheet_pages(proj_dir, name):
                          "so neither drawing can be shown. Rename one of them.")
             names.add(child)
             safe = re.sub(r"[\\/]", "_", child)
-            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
+            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
 
     if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
         walk(f"{name}.kicad_sch", "/", name, None, 0, name)
@@ -376,7 +376,7 @@ def sch_objects(proj_dir, name):
                 a = at(n)
                 if props.get("Reference", "").startswith("#"):  # power symbols and flags: track as net labels
                     objs[key] = {"kind": "power symbol", "ref": props.get("Value", "?"),
-                                 "props": {"position": fmt_at(a)}, "pos": a, "where": where}
+                                 "props": {"net": props.get("Value"), "symbol": val(n, "lib_id"), "position": fmt_at(a)}, "pos": a, "where": where}
                     continue
                 p = {k: v for k, v in props.items() if k != "Reference"}
                 p.update({"reference": ref, "symbol": val(n, "lib_id"), "position": fmt_at(a), "unit": unit,
@@ -390,12 +390,12 @@ def sch_objects(proj_dir, name):
                              "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
             elif kind in ("label", "global_label", "hierarchical_label"):
                 a = at(n)
-                objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "position": fmt_at(a)},
+                objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "shape": val(n, "shape"), "position": fmt_at(a)},
                              "pos": a, "where": where}
             elif kind == "sheet":
                 props = properties(n)
                 objs[key] = {"kind": "sheet", "ref": props.get("Sheetname", "?"),
-                             "props": {"file": props.get("Sheetfile"), "position": fmt_at(at(n))},
+                             "props": {"name": props.get("Sheetname"), "file": props.get("Sheetfile"), "position": fmt_at(at(n))},
                              "pos": at(n), "where": where}
             elif kind in ("junction", "no_connect"):
                 objs[key] = {"kind": kind.replace("_", " "), "ref": "", "props": {"position": fmt_at(at(n))},
@@ -430,6 +430,11 @@ def pcb_objects(path):
             p.update({"reference": props.get("Reference", "?"), "footprint": n[1], "layer": val(n, "layer"),
                       "position": fmt_at(a), "attributes": " ".join(x for x in (find(n, "attr") or [])[1:] if isinstance(x, str)) or None,
                       "locked": "yes" if "locked" in n or val(n, "locked") == "yes" else None})
+            pads = [([c for c in pad[1:] if not (isinstance(c, list) and c and c[0] in ("net", "uuid", "tstamp", "at"))],
+                     [round(v, 4) + 0.0 for v in pa[:2]] if (pa := at(pad)) else None,
+                     round(((pa[2] if len(pa) > 2 else 0.0) - (a[2] if a and len(a) > 2 else 0.0)) % 360, 3) % 360 if pa else None) for pad in findall(n, "pad")]
+            p["pads"] = f"{len(pads)} pads, geom {hashlib.sha1(repr(pads).encode()).hexdigest()[:10]}" if pads else None
+            p["3D model"] = "; ".join(f"{m[1]} " + " ".join(f"{k}={v}" for k, v in flatten_sexpr(m).items()) for m in findall(n, "model")) or None
             for pad in findall(n, "pad"):
                 if find(pad, "net"):
                     p[f"pad {pad[1]} net"] = net(pad)
@@ -596,6 +601,11 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
+    for section in ("checks", "bom", "fabrication", "3d"):
+        if not isinstance(settings[section], dict):
+            sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
+    if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
+        sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
             sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
@@ -733,13 +743,14 @@ def bom_violations(objs, fields):
 
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
+    sig = (v["severity"], tuple(sorted(v["where"].items())))
     if v.get("key"):
-        return {v["key"]}
+        return {v["key"] + sig}
     desc = re.sub(r"[\d.]+", "#", v["description"])
     keys = {("p", v["type"], desc, tuple(v["items"]), tuple(tuple(round(c, 1) for c in p) for p in ([v["pos"]] if v["pos"] else [])))}
     if v["uuids"]:
         keys.add(("u", v["type"], tuple(v["uuids"])))
-    return keys
+    return {k + sig for k in keys}
 
 
 def run_check(name, settings, head, base):
@@ -763,6 +774,7 @@ def run_check(name, settings, head, base):
 
 def project_checks(p, settings, objs):
     out = f"review/{project_id(p['dir'])}"
+    sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
@@ -773,11 +785,15 @@ def project_checks(p, settings, objs):
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
         run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
-        run_check("parity", settings, side("head", "drc.json", "parity"), side("base", "drc.json", "parity")),
-        run_check("bom", settings, bom_violations(objs["head"], fields) if objs["head"] else None,
-                  bom_violations(objs["base"], fields) if objs["base"] else None),
+        run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
+                  side("base", "drc.json", "parity") if sch("base") else None),
+        run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
+                  bom_violations(objs["base"], fields) if sch("base") else None),
     ]
-    return [c for c in checks if c]
+    return [c for c in checks if c] + [
+        {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
+         "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+        for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
 
 
 def page_svg(out_dir, name, page):
@@ -971,7 +987,7 @@ def cmd_report(args):
         fh.write(f"name={name}\n")
 
 
-STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
+STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
 MARKER = "<!-- kicad-review -->"
 TABLE_KINDS = ("title block", "design rules", "symbol", "footprint", "sheet", "label", "global label",
                "hierarchical label", "zone", "board outline")
@@ -1154,7 +1170,7 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
+            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error"]

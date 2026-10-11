@@ -1,7 +1,117 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["mode activation retains keyboard focus", "", `
+    const b = document.querySelector('#modes [data-mode="overlay"]'); b.focus(); b.click();
+    return document.activeElement === document.querySelector('#modes [data-mode="overlay"]') || document.activeElement.tagName;`],
+  ...['[data-tab="checks"]', 'select.kind', '[data-check-scope="all"]'].map(selector => [`panel activation retains keyboard focus on ${selector}`, selector.includes("data-check-") ? "p=1&t=checks" : "p=1", `
+    const selector = '${selector}', b = document.querySelector("#panel " + selector); b.focus();
+    if (b.matches("select")) { b.value = b.options[1].value; b.dispatchEvent(new Event("change")); } else b.click();
+    return document.activeElement === document.querySelector("#panel " + selector) || document.activeElement.tagName;`]),
+  ["show-all activation retains keyboard focus when its button disappears", "p=1&t=checks", `
+    S.checks.error = S.checks.warning = false; renderPanel();
+    const b = document.querySelector("#panel .show-all"); b.focus(); b.click();
+    return document.activeElement === document.querySelector('#panel [data-check-scope="all"]') && document.querySelectorAll("#panel .viol").length > 0 || document.activeElement.tagName;`],
+  ...["pasted", "hashchange"].map(path => [`${path} selection-only address opens its drawing`, "", `
+    const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    await new Promise(r => setTimeout(r, 400));
+    const hash = "#p=0&s=" + row.id;
+    if ("${path}" === "pasted") { const input = document.querySelector("#zoombar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
+    else location.hash = hash;
+    const until = performance.now() + 5000, box = rowBox(row, "head");
+    while ((S.v !== "board" || S.x == null || Math.abs(S.x - (box[0] + box[2]) / 2) >= .01) && performance.now() < until) await new Promise(r => setTimeout(r, 50));
+    return S.v === "board" && S.s === row.id && Math.abs(S.x - (box[0] + box[2]) / 2) < .01 && !!document.querySelector("#stage .marker.sel") || JSON.stringify({view:S.v, selection:S.s, x:S.x});`]),
+  ["pasted selection address preserves an explicit position", "", `
+    const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    applyGoTo("#p=0&v=board&s=" + row.id + "&x=10&y=20&z=5");
+    await new Promise(r => setTimeout(r, 800));
+    return S.x === 10 && S.y === 20 && S.z === 5 && S.s === row.id;`],
+  ["reloading a saved sheet address keeps its explicit view", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.sheet && rowBox(r, "head"));
+    await goTo(row.id);
+    const sheet = P.sheets.find(s => s.path === row.where.sheet);
+    P.sheets.push({...sheet, path:"/second/", name:"Second sheet", status:"unchanged", svg:null}); renderNav();
+    document.querySelector('#nav [data-view="sheet:/second/"]').click();
+    await new Promise(r => setTimeout(r, 400));
+    const saved = location.hash; S.v = null; S.s = null;
+    history.replaceState(null, "", saved); await start();
+    return S.v === "sheet:/second/" && S.s === row.id || JSON.stringify({saved, view:S.v, selection:S.s});`],
+  ["unchanged sheet selection saves the address", "", `
+    const sheet = proj().sheets.find(s => s.status === "unchanged" && !s.svg); if (!sheet) return "skip";
+    await new Promise(r => setTimeout(r, 400));
+    document.querySelector('#nav [data-view="sheet:' + sheet.path + '"]').click();
+    await new Promise(r => setTimeout(r, 400));
+    return new URLSearchParams(location.hash.slice(1)).get("v") === "sheet:" + sheet.path || location.hash;`],
+  ["unchanged project selection saves the address", "", `
+    const i = D.projects.findIndex(p => !p.board.changed && p.sheets.length && p.sheets.every(s => !s.svg)); if (i < 0) return "skip";
+    await new Promise(r => setTimeout(r, 400));
+    const select = document.querySelector("#proj"); select.value = i; select.dispatchEvent(new Event("change"));
+    await new Promise(r => setTimeout(r, 400));
+    return new URLSearchParams(location.hash.slice(1)).get("p") === String(i) || location.hash;`],
+  ["3D base-only models mark removals in overlay and changes only", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), project = {...p, board:{...p.board, model3d:{...p.board.model3d, head:null}}, changes:[{...p.changes.find(c => c.ref === "J2"), action:"removed"}]};
+    const facts = [];
+    for (const m of ["overlay", "semantic"]) {
+      await Review3D.show(stage, project, {...S, m, s:null});
+      const h = Review3D.state.highlights.find(h => h.ref === "J2" && h.side === "base" && h.action === "removed");
+      facts.push(!!h && h.marker.el.textContent.includes("− J2") && h.materials.some((material, i) => material !== h.original[i]));
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D cleanup frees replaced outlines and scene resources", "v=3d&m=overlay", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const p = REVIEW_DATA.projects[0], change = p.changes.find(c => c.ref === "J2"), seen = {}, watch = (name, resource) => { seen[name] = false; resource?.addEventListener("dispose", () => { seen[name] = true; }); };
+    Review3D.focus(change);
+    const st = Review3D.state, old = st.selected[0];
+    watch("replaced geometry", old.geometry); watch("replaced material", old.material);
+    Review3D.focus(change);
+    const replaced = seen["replaced geometry"] && seen["replaced material"];
+    watch("outline geometry", st.selected[0].geometry); watch("outline material", st.selected[0].material);
+    let ghost, base, block;
+    st.ghosts[0].object.traverse(o => { if (o.isMesh) ghost = o.material; });
+    st.roots[0].traverse(o => { if (o.isMesh) base = o.geometry; });
+    st.blocks[0].object.traverse(o => { if (o.isMesh) block = o.material.map; });
+    watch("ghost material", ghost); watch("detached base geometry", base); watch("placeholder texture", block);
+    Review3D.dispose();
+    return replaced && Object.values(seen).every(Boolean) || JSON.stringify({replaced, ...seen});`],
+  ["3D camera animation stops with its owning session", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), change = p.changes.find(c => c.ref === "J2"), raf = window.requestAnimationFrame;
+    const facts = [];
+    for (const reopen of [false, true]) {
+      await Review3D.show(stage, p, {...S, s:null});
+      const st = Review3D.state, ticks = []; let updates = 0;
+      st.controls.forEach(c => { const update = c.update; c.update = (...a) => { updates++; return update.apply(c, a); }; });
+      window.requestAnimationFrame = tick => { ticks.push(tick); return 1; };
+      Review3D.focus(change); window.requestAnimationFrame = raf;
+      Review3D.dispose();
+      if (reopen) await Review3D.show(stage, p, {...S, s:null});
+      const camera = Review3D.cameraState(); let error = false;
+      try { ticks.forEach(tick => tick(performance.now() + 500)); } catch { error = true; }
+      facts.push(ticks.length > 0 && !error && updates === 0 && JSON.stringify(camera) === JSON.stringify(Review3D.cameraState()));
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D bad model data settles and keeps the valid side", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), good = p.board.model3d.head;
+    const gzip = async text => btoa(String.fromCharCode(...new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer())));
+    const bad = [btoa("not gzip"), await gzip("not GLB")];
+    const facts = [];
+    for (const blob of bad) for (const both of [false, true]) for (const side of ["base", "head"]) {
+      REVIEW_DATA.blobs.__bad3d = blob;
+      const project = {...p, board:{...p.board, no_model:[], model3d:{base:both || side === "base" ? "__bad3d" : good, head:both || side === "head" ? "__bad3d" : good}}};
+      const result = await Promise.race([Review3D.show(stage, project, {...S, s:null}).then(() => "done"), new Promise(r => setTimeout(() => r("pending"), 3000))]);
+      facts.push(result === "done" && !stage.querySelector(".loading") && stage.textContent.includes("3D model could not be loaded") && !stage.textContent.includes("Board not in this revision") && !stage.textContent.includes("No 3D board model was exported") && (both ? !!stage.querySelector(".empty") : !!Review3D.state.roots[side === "base" ? 1 : 0] && !Review3D.state.roots[side === "base" ? 0 : 1]));
+      Review3D.dispose();
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D bundle failure leaves Loading", "", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    document.querySelector("#three-bundle").textContent = btoa("not gzip");
+    const stage = document.querySelector("#stage");
+    const result = await Promise.race([Review3D.show(stage, REVIEW_DATA.projects[0], {...S, s:null}).then(() => "done", () => "rejected"), new Promise(r => setTimeout(() => r("pending"), 3000))]);
+    return result === "done" && !stage.querySelector(".loading") && !!stage.textContent.trim() || result;`],
   ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
     await new Promise(r => setTimeout(r, 800));
     const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:st.renderers[0].getClearColor(new THREE.Color()).getHexString()}, dark = !matchMedia("(prefers-color-scheme: dark)").matches;
@@ -23,51 +133,51 @@ export const CHECKS = [
   ["3D navigator appears only for opted-in data", "", `
     return !!REVIEW_DATA.projects[0].board.model3d === !!document.querySelector('#nav [data-view="3d"]');`],
   ["3D loads GLBs with named component nodes", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const n = window.Review3D.state.nodes || [];
     return document.querySelectorAll('#stage canvas').length >= 2 && n.includes("J2") && n.includes("C20");`],
   ["3D camera buttons change the camera", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const a = window.Review3D.state.cameras[0].position.toArray().join(","); document.querySelector('[data-3d-camera="top"]').click();
     return a !== window.Review3D.state.cameras[0].position.toArray().join(",");`],
   ["3D preset uses world-up and sits above the board", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     document.querySelector('[data-3d-camera="top"]').click(); document.querySelector('[data-3d-camera="3d"]').click();
     const d = window.Review3D.state;
     return d.cameras.every(c => c.up.x === 0 && c.up.y === 1 && c.up.z === 0 && c.position.y > d.box.max.y);`],
   ["3D camera movement is linked and leaving disposes", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const d = window.Review3D.state, r = window.__3dInputResult;
     const delta = (p, q) => Math.hypot(...p.map((v, i) => v - q[i]));
     const linked = r && delta(r.after[0], r.before[0]) > .001 && delta(r.after[0], r.after[1]) < .001;
     await select("board"); return linked && window.Review3D.state.disposed === true;`],
   ["3D changed footprints use cloned highlight materials", "v=3d&m=side", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const h = window.Review3D.state.highlights || [], refs = new Set(h.map(x => x.ref));
     return ["J2", "C20"].every(ref => refs.has(ref) && h.some(x => x.ref === ref && x.materials.some((m, i) => m !== x.original[i])));`],
   ["3D glyph marker labels are visible over their canvas", "v=3d&m=side", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const l = document.querySelector('.marker3d[data-ref="J2"]'), c = l?.parentElement.querySelector("canvas"), a = l?.getBoundingClientRect(), b = c?.getBoundingClientRect();
     return !!l && l.textContent.includes("≡ J2") && a.left >= b.left && a.right <= b.right && a.top >= b.top && a.bottom <= b.bottom;`],
   ["3D Overlay shows old-position ghosts", "v=3d&m=overlay", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const d = window.Review3D.state, g = d.ghosts.find(x => x.ref === "J2"), h = d.highlights.find(x => x.ref === "J2" && x.side === "head");
     return !!g && !!h && Math.hypot(...g.translation.map((v, i) => v - h.marker.position.toArray()[i])) > .001;`],
   ["3D Blend slider and B switch cross-fade without moving camera", "v=3d&m=blend", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const d = window.Review3D.state, r = document.querySelector("#modes input[type=range]"); r.value = 20; r.dispatchEvent(new Event("input"));
     const faded = d.blend === .2, p = d.cameras[0].position.toArray(); document.dispatchEvent(new KeyboardEvent("keydown", { key:"b" }));
     return faded && d.blend === 1 && p.join(",") === d.cameras[0].position.toArray().join(",");`],
   ["3D Changes only fades unchanged components and disables Wipe", "v=3d&m=semantic", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const u = (window.Review3D.state.faded || []).find(x => x.ref === "U4"), faded = u?.materials.some(m => m.opacity === .12);
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
@@ -86,8 +196,9 @@ export const CHECKS = [
     }
     return REVIEW_DATA.projects.length === 2 && boards === 2 && ok;`],
   ["unchanged sheet still reachable", "", `
-    const u = document.querySelector('#nav [data-status="unchanged"]');
-    return u === null || !u.hasAttribute("aria-disabled");`],
+    const sheet = proj().sheets.find(s => s.status === "unchanged"); if (!sheet) return "skip";
+    const u = document.querySelector('#nav [data-view="sheet:' + sheet.path + '"]');
+    return !!u && !u.hasAttribute("aria-disabled");`],
   ["added project with no base renders without errors", "p=0", `return S.p === 0 && document.querySelector("#nav").textContent.includes("added");`],
   ["address picks project and view; bad values fall back", "p=9&v=sheet:/nope/&x=abc", `
     return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x);`],
@@ -96,11 +207,11 @@ export const CHECKS = [
     return document.querySelectorAll("#stage .vp").length === 2 && document.querySelectorAll("#stage svg").length >= 2;`],
   ["wheel zoom keeps both panes in step", "", `
     await new Promise(r => setTimeout(r, 800));
-    const vp = document.querySelector("#stage .vp");
+    const vp = document.querySelector("#stage .vp"), before = S.z;
     vp.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, clientX: 400, clientY: 400, bubbles: true, cancelable: true }));
     await new Promise(r => requestAnimationFrame(r));
     const t = [...document.querySelectorAll("#stage .world")].map(w => w.style.transform);
-    return t.length === 2 && t[0] === t[1] && S.z > 0;`],
+    return t.length === 2 && t[0] === t[1] && S.z > 0 && S.z !== before;`],
   ["will-change only during a gesture", "", `
     await new Promise(r => setTimeout(r, 800));
     const w = document.querySelector("#stage .world");
@@ -108,7 +219,7 @@ export const CHECKS = [
     const during = getComputedStyle(w).willChange; await new Promise(r => setTimeout(r, 300));
     return during === "transform" && getComputedStyle(w).willChange === "auto";`],
   ["dense board pans at 60 fps", "v=board", `
-    if (!REVIEW_DATA.projects[0].name.startsWith("vme")) return true;   // only meaningful on the dense page (default layers)
+    if (!REVIEW_DATA.projects[0].name.startsWith("vme")) return "skip";   // only meaningful on the dense page (default layers)
     await new Promise(r => setTimeout(r, 3000));
     const t = []; let last = performance.now();
     for (let f = 0; f < 120; f++) { await new Promise(r => requestAnimationFrame(r)); const n = performance.now(); t.push(n - last); last = n;
@@ -131,7 +242,8 @@ export const CHECKS = [
   ...["side", "overlay", "wipe", "blend", "semantic"].map(m => [`mode ${m} draws`, `m=${m}`, `
     await new Promise(r => setTimeout(r, 800));
     return S.m === "${m}" && document.querySelector("#stage").classList.contains("mode-${m}")
-      && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}";`]),
+      && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}"
+      && [...document.querySelectorAll('#stage svg path, #stage svg line, #stage svg rect, #stage svg circle, #stage svg polyline, #stage svg polygon, #stage svg text')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; });`]),
   ["wipe divider follows drag", "m=wipe", `
     await new Promise(r => setTimeout(r, 800));
     const d = document.querySelector("#stage .divider"), r = d.parentElement.getBoundingClientRect();
@@ -169,7 +281,7 @@ export const CHECKS = [
   ["modified card shows every changed property old and new", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
     const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
-    return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(b ?? "—")));`],
+    return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
     document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
@@ -247,7 +359,7 @@ export const CHECKS = [
     return scope.classList.contains("check-chip") && all.classList.contains("check-chip") && severity.classList.contains("check-chip")
       && plain.textDecorationLine === "none" && toggle.textDecorationLine === "none" && plain.borderStyle === "solid";`],
   ["passing checks with baseline findings say no new errors", "p=1&t=checks", `
-    const c = REVIEW_DATA.projects[1].checks.find(c => c.errors > 0); if (!c) return true;
+    const c = REVIEW_DATA.projects[1].checks.find(c => c.errors > 0); if (!c) return "skip";
     const old = [REVIEW_DATA.settings.fail_on, c.status, c.new_errors];
     REVIEW_DATA.settings.fail_on = "new"; c.status = "pass"; c.new_errors = 0; renderPanel();
     const row = document.querySelector('[data-check-summary="' + c.name + '"]');
@@ -460,17 +572,17 @@ export const CHECKS = [
     await new Promise(res => setTimeout(res, 300));
     return S.s !== null || "no step; focus on " + document.activeElement.tagName;`],
   ["3D fallback blocks and panel list cover missing models", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 500));
     const d = REVIEW_DATA.projects[0].board.no_model || [];
     return d.length === 3 && ["D1", "L1", "U3"].every(ref => d.some(x => x.ref === ref && x.pos?.length === 3 && x.box?.length === 4)) && document.querySelectorAll("[data-no-model]").length === 3;`],
   ["3D visibility controls hide silkscreen", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 500));
     const cb = document.querySelector('[data-3d-group="silk"]'); if (!cb) return false; cb.click();
     return (S.hidden3d || []).includes("silk");`],
   ["3D visibility classifies geometry on both board sides", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     const st = Review3D.state, {THREE} = THREE3D, bad = [], layers = [];
     st.roots.forEach((root, i) => {
@@ -497,25 +609,25 @@ export const CHECKS = [
     layers.forEach(({object, side}) => { if (object.visible !== (side === "top")) bad.push("bottom toggle " + object.name + " " + side); });
     return bad.length ? bad.join("; ") : true;`],
   ["3D address records camera and hidden groups", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
     return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
   ["3D change card keeps 3D and frames J2", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, n = (() => { let f; st.roots[1].traverse(o => { if (!f && o.name === "J2") f = o; }); return f; })(),
       c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[0]);
     return (S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15) || JSON.stringify({v:S.v,hash:location.hash,s:S.s,x:c.x,y:c.y});`],
   ["3D selection outline in each pane wraps that pane's own J2", "v=3d&m=side", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, sel = st.selected || [];
     const j2 = r => { let f; r.traverse(o => { if (!f && o.name === "J2") f = o; }); return new THREE.Box3().setFromObject(f).getCenter(new THREE.Vector3()); };
     return sel.length === 2 && [0, 1].every(i => sel[i].position.distanceTo(j2(st.roots[i])) < 1e-4);`],
   ["3D no-model U3 block sits on the board, overlaps its footprint and is not hidden by silkscreen", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     const { THREE } = window.THREE3D, st = window.Review3D.state, row = REVIEW_DATA.projects[0].board.no_model.find(x => x.ref === "U3"), blk = st.blocks.filter(b => b.ref === "U3");
     if (!blk.length) return "no U3 block";
@@ -533,12 +645,12 @@ export const CHECKS = [
     }
     return true;`],
   ["3D no-model list item frames its block and labels it", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('[data-no-model="U3"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, b = st.blocks.find(x => x.ref === "U3" && x.side === "head"), c = new THREE.Box3().setFromObject(b.object).getCenter(new THREE.Vector3()).project(st.cameras[0]);
     return Math.abs(c.x) < .15 && Math.abs(c.y) < .15 && /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "");`],
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
 ];

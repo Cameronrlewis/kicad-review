@@ -39,6 +39,21 @@ assert (c["errors"], c["new_errors"], c["new_warnings"], c["status"]) == (2, 1, 
 assert run_check("drc", {**DEFAULT_SETTINGS, "checks": {"drc": "informational"}}, head, base)["status"] == "warn"
 print("ok")
 
+# Reused schematic sheets have distinct violation identities, even with the same pin UUIDs and positions.
+for uuids in (["pin"], []):
+    base = [{**V("pin_not_connected", "error", uuids, [1, 1]), "where": {"sheet": "/a/"}}]
+    head = [dict(base[0]), {**base[0], "where": {"sheet": "/b/"}}]
+    c = run_check("erc", DEFAULT_SETTINGS, head, base)
+    assert (c["new_errors"], c["fixed"], c["status"]) == (1, 0, "fail"), "CK-S1: second sheet error must be new"
+print("ok CK-S1 sheet instance")
+
+# Promoting a warning to an error is new for UUID, positional and explicit violation keys.
+for identity in ({"uuids": ["pin"]}, {"uuids": []}, {"key": ("unconnected", ("GND",), 1)}):
+    base = [{**V("clearance", "warning", [], [1, 1]), **identity}]
+    c = run_check("drc", DEFAULT_SETTINGS, [{**base[0], "severity": "error"}], base)
+    assert (c["new_errors"], c["fixed"], c["status"]) == (1, 1, "fail"), "CK-S2: promoted warning must be a new error"
+print("ok CK-S2 severity promotion")
+
 # Data format v1: ids unique per file, layer changed flags, links.
 from kicad_review import assign_ids, review_links
 projects = [{"changes": [{"kind": "symbol"}, {"kind": "track"}],
@@ -116,11 +131,15 @@ def write(root, files):
 t = tempfile.mkdtemp()
 write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A: x/y é", "a.kicad_sch", "u1") + sheet("B", "b.kicad_sch", "u2") + ")",
           "p/a.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u3") + ")",
-          "p/b.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u4") + ")", "p/pw.kicad_sch": "(kicad_sch)",
+          "p/b.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u4") + ")", "p/pw.kicad_sch": '(kicad_sch (symbol (uuid "r1") (at 10 20 0) (property "Reference" "R1") (property "Value" "10k")))',
           **{f"out/sch/{f}": "<svg/>" for f in ("H.svg", "H-A: x_y é.svg", "H-A: x_y é-Power.svg", "H-B.svg", "H-B-Power.svg")}})
 found = {pg["path"]: page_svg(f"{t}/out", "H", pg) for pg in sheet_pages(f"{t}/p", "H")}
 assert found == {"/": f"{t}/out/sch/H.svg", "/u1/": f"{t}/out/sch/H-A: x_y é.svg", "/u1/u3/": f"{t}/out/sch/H-A: x_y é-Power.svg",
                  "/u2/": f"{t}/out/sch/H-B.svg", "/u2/u4/": f"{t}/out/sch/H-B-Power.svg"}, found
+from kicad_review import sch_objects
+symbols = sch_objects(f"{t}/p", "H")
+assert all(symbols[path]["ref"] == "R1" and symbols[path]["props"]["Value"] == "10k" and symbols[path]["pos"] == [10, 20, 0] for path in ("/u1/u3/r1", "/u2/u4/r1")), "TS-S2 schematic symbols"
+print("ok TS-S2 schematic symbols")
 # Sibling sheets with one name share one SVG file, so neither drawing can be trusted: stop with a message.
 write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A", "a.kicad_sch", "u1") + sheet("A", "b.kicad_sch", "u2") + ")"})
 try:
@@ -280,6 +299,28 @@ finally:
     os.chdir(here)
 print("ok")
 
+# Board-only projects cannot pass parity or BOM checks that require a schematic.
+t = tempfile.mkdtemp()
+os.chdir(t)
+try:
+    write(t, {"head/P/P.kicad_pcb": "(kicad_pcb)", "review/P/head/drc.json": "{}"})
+    objs = {"head": {"r1": {"kind": "footprint", "props": {}}}, "base": {}}
+    checks = project_checks({"dir": "P", "name": "P"}, DEFAULT_SETTINGS, objs)
+    assert [c["name"] for c in checks] == ["drc", "parity", "bom"], "CK-S3: board-only parity and BOM must explicitly report not run"
+    assert all(c["status"] == "not_run" and c["reason"] == "no schematic" and not c["violations"] for c in checks[1:]), checks
+    assert all(c["status"] != "fail" for c in checks), checks
+    comment = kicad_review.checks_markdown({"projects": [{"name": "P", "checks": checks}]})
+    assert comment.count("not run") == 2 and comment.count("no schematic") == 2, comment
+    off = {**DEFAULT_SETTINGS, "checks": {**DEFAULT_SETTINGS["checks"], "parity": "off", "bom": "off"}}
+    assert [c["name"] for c in project_checks({"dir": "P", "name": "P"}, off, objs)] == ["drc"]
+    write(t, {"head/P/P.kicad_sch": "(kicad_sch)", "review/P/head/erc.json": "{}"})
+    checks = project_checks({"dir": "P", "name": "P"}, DEFAULT_SETTINGS, objs)
+    assert [c["name"] for c in checks] == ["erc", "drc", "parity", "bom"], checks
+    assert all(c["status"] == "pass" for c in checks), checks
+finally:
+    os.chdir(here)
+print("ok CK-S3 schematic-required checks")
+
 # Minor: two projects with one file name get release files that do not overwrite each other.
 t = tempfile.mkdtemp()
 os.chdir(t)
@@ -302,16 +343,22 @@ group = wf[wf.index("group:"):].splitlines()[0]
 assert group.endswith("${{ github.event.pull_request.number || github.run_id }}") and "github.ref" not in group, group
 print("ok")
 
+# WF-S1: fork PRs cannot write comments; keep report and required-check steps running.
+wf = open(".github/workflows/review.yml", encoding="utf-8").read()
+comment = wf[wf.index("- name: Pull request comment"):wf.index("- name: Fail on required checks")]
+assert "github.event.pull_request.head.repo.full_name == github.repository" in comment.splitlines()[2], "WF-S1: fork comment guard missing"
+print("ok WF-S1: fork comment guard")
+
 # A failed run replaces the comment with "Review failed — see run"; a later good run restores the summary.
 wf = open(".github/workflows/review.yml", encoding="utf-8").read()
 step = wf[wf.index("- name: Pull request comment"):]
-assert "failure()" in step.splitlines()[2] and "!cancelled()" in step.splitlines()[2], step.splitlines()[2]
+assert "!cancelled()" in step.splitlines()[2] and "success()" not in step.splitlines()[2], step.splitlines()[2]
 step = step[step.index("run: |") + 7:]
 step = "\n".join(l[10:] for l in step[:step.index("\n\n")].splitlines())
 t = tempfile.mkdtemp()
 write(t, {"bin/gh": '''#!/bin/bash
 if [[ "$*" == *"issues/7/comments"* && "$*" == *"--paginate"* ]]; then
-  printf '99\\n'
+  printf '%s\\n' "${GH_TEST_ID-99}"
 elif [[ "$*" == *"-X PATCH"* ]]; then
   for arg in "$@"; do
     [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/patched.md"
@@ -321,6 +368,7 @@ elif [[ "$*" == *"-X POST"* ]]; then
   for arg in "$@"; do
     [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/posted.md"
   done
+  printf 'https://github.com/o/r/issues/7#issuecomment-100\\n'
 fi
 '''})
 os.chmod(f"{t}/bin/gh", 0o755)
@@ -338,6 +386,24 @@ r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=t, capture_output=Tr
 assert r.returncode == 0, r.stderr
 assert open(f"{t}/patched.md", encoding="utf-8").read() == normal
 print("ok")
+
+# WF-S2: unchanged PRs clear an existing comment, never create one; detect failure still reports failure.
+comment = wf[wf.index("- name: Pull request comment"):wf.index("- name: Fail on required checks")]
+assert "steps.detect.outputs.changed" not in comment.splitlines()[2], "WF-S2: unchanged PR comment is skipped"
+assert "CHANGED: ${{ steps.detect.outputs.changed }}" in comment, "WF-S2: changed output missing"
+for changed, summary, existing in (("false", "skipped", "99"), ("false", "skipped", ""), ("", "failure", "99"), ("", "failure", "")):
+    t = tempfile.mkdtemp()
+    r = subprocess.run(["bash", "-e", "-c", step], cwd=t, capture_output=True, text=True,
+                       env={**env, "GH_TEST_DIR": t, "CHANGED": changed, "SUMMARY": summary, "GH_TEST_ID": existing})
+    assert r.returncode == 0, r.stderr
+    target = "patched.md" if existing else "posted.md"
+    if changed == "false" and not existing:
+        assert not os.path.exists(f"{t}/{target}"), "WF-S2: unchanged PR creates a comment"
+    else:
+        body = open(f"{t}/{target}", encoding="utf-8").read()
+        assert ("No KiCad changes in this commit" if changed == "false" else "KiCad review failed") in body, body
+    assert not os.path.exists(f"{t}/{'posted.md' if existing else 'patched.md'}")
+print("ok WF-S2: unchanged comment and detect failure")
 
 # Reports expose an artifact filename containing the compared revisions and result.
 import re
@@ -383,13 +449,44 @@ for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
     assert re.fullmatch(r"[0-9a-f]{40}", action), action
 print("ok")
 
+
+# WF-S3: deployment tooling with credentials must use an exact Wrangler 4.x version.
+assert re.search(r"npx --yes wrangler@4\.\d+\.\d+ deploy", workflow), "WF-S3: floating Wrangler version"
+print("ok WF-S3: exact Wrangler version")
+
+# Settings reject invalid BOM fields and non-table sections with a clear configuration error.
+from kicad_review import load_settings
+t = tempfile.mkdtemp()
+invalid = [("[bom]\nrequired_fields = " + value, "bom.required_fields", "list of strings")
+           for value in ('"MPN"', '[1]', '["MPN", 1]', 'true', '{ MPN = "x" }')]
+invalid += [(f'{section} = "x"', section, "table") for section in ("checks", "bom", "fabrication")]
+invalid += [("3d = true", "3d", "table")]
+failures = []
+for text, field, expected in invalid:
+    write(t, {"kicad-review.toml": text + "\n"})
+    try:
+        load_settings((t,))
+    except SystemExit as e:
+        assert "kicad-review.toml" in str(e) and field in str(e) and expected in str(e), e
+    except (TypeError, AttributeError):
+        failures.append(field + " traceback")
+    else:
+        failures.append(field + " accepted")
+assert not failures, "CK-S4: invalid settings must exit clearly: " + ", ".join(failures)
+for fields in ('[]', '["MPN", "Value"]'):
+    write(t, {"kicad-review.toml": "[bom]\nrequired_fields = " + fields + "\n"})
+    assert load_settings((t,))["bom"]["required_fields"] == json.loads(fields)
+print("ok CK-S4 settings validation")
+
+
 # Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
 import base64, gzip
 from kicad_review import load_settings, build_project, board_changed, export_glb
 here = os.getcwd()
 t = tempfile.mkdtemp()
 os.chdir(t)
-write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n",
+write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n[checks]\nerc = 'required'\n",
+          "head/kicad-review.toml": "[3d]\nenabled = false\n[checks]\nerc = 'off'\n",
           "base/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (layer "F.Cu") (at 10 10 0) (uuid "u5") (fp_text reference "U5") (pad "1" smd (at 0 0)) (model "u.wrl"))
 (footprint "Package:R" (layer "F.Cu") (at 20 10 0) (uuid "r1") (fp_text reference "R1") (pad "1" smd (at -1 0)) (pad "2" smd (at 1 0))))''',
           "head/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (layer "F.Cu") (at 10 10 0) (uuid "u5") (fp_text reference "U5") (pad "1" smd (at 0 0)) (model "u.wrl"))
@@ -400,7 +497,8 @@ write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n",
           "review/P/head/pcb/P-F.Cu.svg": '<svg viewBox="0 0 1 1"><path/></svg>',
           "review/P/base/drc.json": "{}", "review/P/head/drc.json": "{}"})
 assert DEFAULT_SETTINGS["3d"]["enabled"] is False
-assert load_settings()["3d"]["enabled"] is True
+assert load_settings()["3d"]["enabled"] is True and load_settings()["checks"]["erc"] == "required", "TS-S2 base settings win"
+print("ok TS-S2 base settings win")
 # A report with 3D disabled is deterministic; this is the pre-feature HTML baseline for the same fixture.
 os.remove("base/kicad-review.toml")
 write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": []})})
@@ -432,3 +530,198 @@ write(t, {"head/P/P.kicad_pcb": "(kicad_pcb changed)"})
 assert board_changed({"dir": "P", "name": "P"})
 os.chdir(here)
 print("ok")
+
+# DR-S2: child sheet files are relative to their parent, including ..; objects use the same paths.
+from kicad_review import sch_objects
+t = tempfile.mkdtemp()
+write(t, {"P/H.kicad_sch": '(kicad_sch (uuid "root") ' + sheet("Child", "sub/child.kicad_sch", "child") + ')',
+          "P/sub/child.kicad_sch": '(kicad_sch ' + sheet("Grand", "grand.kicad_sch", "grand") + ')',
+          "P/sub/grand.kicad_sch": '(kicad_sch ' + sheet("Leaf", "../leaf.kicad_sch", "leaf") + ')',
+          "P/leaf.kicad_sch": '(kicad_sch (symbol (uuid "symbol") (property "Reference" "R1")))'})
+pages = sheet_pages(f"{t}/P", "H")
+assert [p["file"] for p in pages] == ["H.kicad_sch", "sub/child.kicad_sch", "sub/grand.kicad_sch", "leaf.kicad_sch"], "DR-S2: parent-relative sheet paths"
+assert sch_objects(f"{t}/P", "H")["/child/grand/leaf/symbol"]["ref"] == "R1", "DR-S2: nested sheet objects"
+print("ok DR-S2 parent-relative pages and objects")
+
+# DR-S3: changes to shared KiCad files schedule all head projects; unrelated files do not.
+t = tempfile.mkdtemp()
+os.chdir(t)
+g("init", "-q")
+write(t, {"A/A.kicad_pro": "{}", "B/B.kicad_pro": "{}", "Shared/common.kicad_sch": "(kicad_sch)"})
+g("add", "-A"); g("commit", "-q", "-m", "base")
+expected = [{"dir": d, "name": d, "status": "modified"} for d in ("A", "B")]
+for file in ("Shared/common.kicad_sch", "Shared/common.kicad_sym"):
+    write(t, {file: "changed"})
+    g("add", "-A"); g("commit", "-q", "-m", "shared")
+    assert detect(commit("HEAD~1"), commit("HEAD")) == expected, "DR-S3: unowned KiCad change schedules all projects"
+os.remove("Shared/common.kicad_sch")
+g("add", "-A"); g("commit", "-q", "-m", "delete shared")
+assert detect(commit("HEAD~1"), commit("HEAD")) == expected, "DR-S3: deleted shared sheet schedules all projects"
+write(t, {"notes.txt": "notes", "__MACOSX/._common.kicad_sch": "junk"})
+g("add", "-A"); g("commit", "-q", "-m", "unrelated")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [], "DR-S3: unrelated files remain ignored"
+os.chdir(here)
+print("ok DR-S3 unowned KiCad changes schedule all projects")
+
+# DR-S1: a project renamed in place is new; unchanged names retain modified/removed statuses.
+t = tempfile.mkdtemp()
+os.chdir(t)
+g("init", "-q")
+write(t, {f"P/old.{ext}": "{}" for ext in ("kicad_pro", "kicad_sch", "kicad_pcb")})
+g("add", "-A"); g("commit", "-q", "-m", "base")
+for ext in ("kicad_pro", "kicad_sch", "kicad_pcb"):
+    os.rename(f"P/old.{ext}", f"P/new.{ext}")
+g("add", "-A"); g("commit", "-q", "-m", "rename")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", "status": "added"}], "DR-S1: renamed project is added"
+write(t, {"P/new.kicad_sch": "changed"})
+g("add", "-A"); g("commit", "-q", "-m", "modify")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", "status": "modified"}], "DR-S1: same name is modified"
+for ext in ("kicad_pro", "kicad_sch", "kicad_pcb"):
+    os.remove(f"P/new.{ext}")
+g("add", "-A"); g("commit", "-q", "-m", "remove")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", "status": "removed"}], "DR-S1: deleted project is removed"
+os.chdir(here)
+print("ok DR-S1 renamed project is added")
+# OB-S1: power net and library symbol changes retain UUID and position.
+from kicad_review import sch_objects
+t = tempfile.mkdtemp()
+power = '(kicad_sch (uuid "root") (symbol (uuid "power") (at 1 2 0) (lib_id "power:+3V3") (property "Reference" "#PWR01") (property "Value" "+3V3")))'
+write(t, {"b/P.kicad_sch": power})
+for changed, expected in ((power.replace('+3V3', '+5V'), [["net", "+3V3", "+5V"], ["symbol", "power:+3V3", "power:+5V"]]),
+                          (power.replace('power:+3V3', 'power:VCC'), [["symbol", "power:+3V3", "power:VCC"]])):
+    write(t, {"h/P.kicad_sch": changed})
+    rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+    assert len(rows) == 1 and rows[0]["changes"] == expected, f"OB-S1 power props: {rows}"
+print("ok OB-S1 power props")
+
+# OB-S4: a sheet rename alone changes its review properties.
+t = tempfile.mkdtemp()
+write(t, {"b/P.kicad_sch": "(kicad_sch " + sheet("Old", "child.kicad_sch", "sheet1") + ")",
+          "h/P.kicad_sch": "(kicad_sch " + sheet("New", "child.kicad_sch", "sheet1") + ")"})
+rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+assert len(rows) == 1 and rows[0]["changes"] == [["name", "Old", "New"]], f"OB-S4 sheet name: {rows}"
+print("ok OB-S4 sheet name")
+
+# OB-O1: global and hierarchical label direction changes show one shape property.
+t = tempfile.mkdtemp()
+for kind in ("global_label", "hierarchical_label"):
+    label = f'(kicad_sch ({kind} "DATA" (uuid "label1") (at 1 2 0) (shape input)))'
+    write(t, {"b/P.kicad_sch": label, "h/P.kicad_sch": label.replace('shape input', 'shape output')})
+    rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+    assert len(rows) == 1 and rows[0]["changes"] == [["shape", "input", "output"]], f"OB-O1 label shape: {rows}"
+print("ok OB-O1 label shape")
+
+# OB-S3: all models and their transforms are one property; absent models stay absent in rows.
+t = tempfile.mkdtemp()
+model = '(model "part.step" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))'
+board = '(kicad_pcb (footprint "Lib:Part" (uuid "fp1") (at 10 20 0) (property "Reference" "R1") MODEL))'
+write(t, {"b.kicad_pcb": board.replace('MODEL', model)})
+for changed in (model.replace('part.step', 'new.step'), model.replace('offset (xyz 0', 'offset (xyz 2'),
+                model.replace('scale (xyz 1', 'scale (xyz 2'), model.replace('rotate (xyz 0', 'rotate (xyz 90'),
+                model + ' (model "second.step")', ''):
+    write(t, {"h.kicad_pcb": board.replace('MODEL', changed)})
+    rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["3D model"], f"OB-S3 model props: {rows}"
+write(t, {"h.kicad_pcb": board.replace('MODEL', '')})
+empty_model = pcb_objects(f"{t}/h.kicad_pcb")
+assert empty_model["fp1"]["props"].get("3D model") is None and "3D model" not in diff_objects({}, empty_model)[0]["props"]
+print("ok OB-S3 model props")
+
+# OB-S2: one compact pad geometry prop, excluding identity/nets and absolute rotation.
+t = tempfile.mkdtemp()
+pad = '(pad "1" thru_hole oval (at 1 2) (size 1 2) (drill 0.5) (layers "*.Cu" "*.Mask") (net 1 "GND") (uuid "pad1") (tstamp "old"))'
+board = '(kicad_pcb (footprint "Lib:Part" (uuid "fp1") (at 10 20 0) (property "Reference" "R1") PAD))'
+write(t, {"b.kicad_pcb": board.replace('PAD', pad)})
+pad_base = pcb_objects(f"{t}/b.kicad_pcb")
+for changed in (pad.replace('size 1 2', 'size 2 2'), pad.replace('oval', 'circle'), pad.replace('thru_hole', 'np_thru_hole'),
+                pad.replace('drill 0.5', 'drill 0.8'), pad.replace('"*.Cu"', '"F.Cu"'), pad.replace('at 1 2', 'at 2 2'),
+                pad.replace('at 1 2', 'at 1 2 45'), pad + ' (pad "2" smd rect (size 1 1))'):
+    write(t, {"h.kicad_pcb": board.replace('PAD', changed)})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["pads"], f"OB-S2 pad geometry: {rows}"
+assert re.fullmatch(r"1 pads, geom [0-9a-f]{10}", pad_base["fp1"]["props"]["pads"])
+for angle in (90, -90, 360):
+    rotated = board.replace('at 10 20 0', f'at 10 20 {angle}').replace('PAD', pad.replace('at 1 2', f'at 1 2 {angle}'))
+    write(t, {"h.kicad_pcb": rotated})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["position"], f"OB-S2 rotate invariant: {rows}"
+for changed in (pad.replace('"pad1"', '"pad2"').replace('"old"', '"new"'), pad.replace('net 1 "GND"', 'net 2 "VCC"')):
+    write(t, {"h.kicad_pcb": board.replace('PAD', changed)})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert all(c[0] != "pads" for r in rows for c in r["changes"]), f"OB-S2 excluded fields: {rows}"
+write(t, {"h.kicad_pcb": board.replace('PAD', '')})
+assert pcb_objects(f"{t}/h.kicad_pcb")["fp1"]["props"].get("pads") is None
+# KiCad's rotate/save round trip leaves float noise in local coordinates.
+for noise in ("0.000001", "-0.000001", "0.0"):
+    write(t, {"b.kicad_pcb": board.replace('PAD', pad.replace('at 1 2', 'at 1 -0.0 0')),
+              "h.kicad_pcb": board.replace('at 10 20 0', 'at 10 20 90').replace('PAD', pad.replace('at 1 2', f'at 1 {noise} 90'))})
+    rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["position"], f"OB-S2 pad position noise: {rows}"
+print("ok OB-S2 pad position noise")
+print("ok OB-S2 pad geometry and rotate invariant")
+
+# TS-S2: exercise render/release above the process boundary, not stubs of the functions under test.
+import csv, pathlib, zipfile
+from kicad_review import render_side
+t = tempfile.mkdtemp()
+write(t, {"P/P.kicad_pro": "{}", "P/P.kicad_sch": "(kicad_sch)",
+          "P/P.kicad_pcb": '(kicad_pcb\n(layers\n(0 "F.Cu" signal)\n(31 "B.Cu" signal)\n(44 "Edge.Cuts" user)\n)\n)'})
+os.makedirs(f"{t}/release")
+calls, fail_cli = [], False
+real_run = kicad_review.subprocess.run
+positions = "Ref,Val,Package,PosX,PosY,Rot,Side\nR1,10k,R_0603,10,20,90,top\n"
+bom = "Comment,Designator,Footprint,LCSC Part #\n10k,R1,R_0603,C123\n"
+def fake_cli(args, **kw):
+    if not args[0].endswith("kicad-cli"):
+        return real_run(args, **kw)
+    calls.append(args)
+    if fail_cli:
+        return type("R", (), {"returncode": 7, "stdout": "failure stdout", "stderr": "failure stderr"})()
+    out = pathlib.Path(args[args.index("-o") + 1])
+    kind = args[3] if args[2] == "export" else args[2]
+    name, text = {"svg": ("P.svg", "<svg/>"), "gerbers": ("P-F_Cu.gbr", "copper"), "drill": ("P.drl", "drill"), "pos": ("", positions), "bom": ("", bom)}.get(kind, ("", "{}"))
+    out /= name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+kicad_review.subprocess.run = fake_cli
+try:
+    render_side(f"{t}/P", "P", f"{t}/render")
+    assert calls == [
+        ["kicad-cli", "sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
+        ["kicad-cli", "sch", "erc", "--format", "json", "--severity-all", "-o", f"{t}/render/erc.json", f"{t}/P/P.kicad_sch"],
+        ["kicad-cli", "pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1", "--drill-shape-opt", "0", "-l", "F.Cu,B.Cu,Edge.Cuts", "-o", f"{t}/render/pcb", f"{t}/P/P.kicad_pcb"],
+        ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity", "-o", f"{t}/render/drc.json", f"{t}/P/P.kicad_pcb"]], "TS-S2 render commands"
+    assert all(pathlib.Path(f"{t}/render/{f}").read_text() == text for f, text in {"sch/P.svg": "<svg/>", "pcb/P.svg": "<svg/>", "erc.json": "{}", "drc.json": "{}"}.items())
+    fail_cli = True
+    try:
+        render_side(f"{t}/P", "P", f"{t}/render")
+        raise AssertionError("TS-S2 render must propagate CLI failure")
+    except SystemExit as e:
+        assert "failed (7)" in str(e) and "failure stdout" in str(e) and "failure stderr" in str(e), e
+    fail_cli = False
+    print("ok TS-S2 render commands, outputs and failure")
+    calls.clear()
+    made = kicad_review.release_project(f"{t}/P/P.kicad_pro", "v1", DEFAULT_SETTINGS, f"{t}/release", "P")
+    stem = f"{t}/release/P-v1-jlcpcb"
+    assert made == [stem + suffix for suffix in ("-gerbers.zip", "-positions.csv", "-bom.csv")], "TS-S2 release files"
+    with zipfile.ZipFile(made[0]) as z:
+        assert sorted(z.namelist()) == ["P-F_Cu.gbr", "P.drl"] and z.read("P-F_Cu.gbr") == b"copper" and z.read("P.drl") == b"drill"
+    with open(made[1], newline="", encoding="utf-8") as f:
+        assert list(csv.reader(f)) == [["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"], ["R1", "10k", "R_0603", "10", "20", "90", "Top"]]
+    assert pathlib.Path(made[2]).read_text() == bom
+    assert [c[3] for c in calls] == ["gerbers", "drill", "pos", "bom"] and "--check-zones" in calls[0] and "--exclude-dnp" in calls[2] and "--exclude-dnp" in calls[3]
+finally:
+    kicad_review.subprocess.run = real_run
+print("ok TS-S2 release zip and CSV contents")
+
+# TS-S1: CI exercises default, real 3D and unchanged two-project pages without extra installs.
+test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
+assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
+for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"'):
+    assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
+assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
+print("ok TS-S1 CI browser matrix")
+print("ok")
+

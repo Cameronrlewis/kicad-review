@@ -117,6 +117,7 @@ export async function session(request, env) {
 function response(body, init = {}) {
   const headers = new Headers(init.headers);
   for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
+  if (!headers.has('Content-Security-Policy')) headers.set('Content-Security-Policy', "frame-ancestors 'none'");
   return new Response(body, { ...init, headers });
 }
 
@@ -180,7 +181,7 @@ export async function access(request, env, owner, repo) {
   try {
     const repoResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, active.token);
     const data = repoResponse.status === 200 ? await repoResponse.json() : null;
-    if (!data?.permissions?.pull) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    if (!data?.permissions?.pull || !allowedOwners(env).includes(data.owner.login.toLowerCase())) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     return { s: active, repo: data };
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
@@ -491,7 +492,7 @@ async function run(request, env, owner, repo, id, url) {
 }
 
 function nextPath(value) {
-  return value?.startsWith('/') && !value.startsWith('//') ? value : '/';
+  return value?.startsWith('/') && !/^\/[\/\\\s]/.test(value) ? value : '/';
 }
 
 function stateCookie(next) {
