@@ -186,8 +186,9 @@ export const CHECKS = [
     }
     return REVIEW_DATA.projects.length === 2 && boards === 2 && ok;`],
   ["unchanged sheet still reachable", "", `
-    const u = document.querySelector('#nav [data-status="unchanged"]');
-    return u === null || !u.hasAttribute("aria-disabled");`],
+    const sheet = proj().sheets.find(s => s.status === "unchanged"); if (!sheet) return "skip";
+    const u = document.querySelector('#nav [data-view="sheet:' + sheet.path + '"]');
+    return !!u && !u.hasAttribute("aria-disabled");`],
   ["added project with no base renders without errors", "p=0", `return S.p === 0 && document.querySelector("#nav").textContent.includes("added");`],
   ["address picks project and view; bad values fall back", "p=9&v=sheet:/nope/&x=abc", `
     return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x);`],
@@ -196,11 +197,11 @@ export const CHECKS = [
     return document.querySelectorAll("#stage .vp").length === 2 && document.querySelectorAll("#stage svg").length >= 2;`],
   ["wheel zoom keeps both panes in step", "", `
     await new Promise(r => setTimeout(r, 800));
-    const vp = document.querySelector("#stage .vp");
+    const vp = document.querySelector("#stage .vp"), before = S.z;
     vp.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, clientX: 400, clientY: 400, bubbles: true, cancelable: true }));
     await new Promise(r => requestAnimationFrame(r));
     const t = [...document.querySelectorAll("#stage .world")].map(w => w.style.transform);
-    return t.length === 2 && t[0] === t[1] && S.z > 0;`],
+    return t.length === 2 && t[0] === t[1] && S.z > 0 && S.z !== before;`],
   ["will-change only during a gesture", "", `
     await new Promise(r => setTimeout(r, 800));
     const w = document.querySelector("#stage .world");
@@ -231,7 +232,8 @@ export const CHECKS = [
   ...["side", "overlay", "wipe", "blend", "semantic"].map(m => [`mode ${m} draws`, `m=${m}`, `
     await new Promise(r => setTimeout(r, 800));
     return S.m === "${m}" && document.querySelector("#stage").classList.contains("mode-${m}")
-      && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}";`]),
+      && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}"
+      && [...document.querySelectorAll('#stage svg path, #stage svg line, #stage svg rect, #stage svg circle, #stage svg polyline, #stage svg polygon, #stage svg text')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; });`]),
   ["wipe divider follows drag", "m=wipe", `
     await new Promise(r => setTimeout(r, 800));
     const d = document.querySelector("#stage .divider"), r = d.parentElement.getBoundingClientRect();
@@ -269,7 +271,7 @@ export const CHECKS = [
   ["modified card shows every changed property old and new", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
     const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
-    return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(b ?? "—")));`],
+    return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
     document.querySelector('#panel .card[data-id="' + r.id + '"]').click();

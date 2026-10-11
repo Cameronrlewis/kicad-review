@@ -33,6 +33,20 @@ test('TS-S5 browser waits are bounded and startup errors fail', () => {
   assert.equal(r.status, 1); assert.match(r.stderr, /FAIL startup/);
 });
 
+test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {
+  const run = (name, globals) => runInNewContext(`(async()=>{${CHECKS.find(c => c[0] === name)[2]}})()`, {
+    setTimeout: f => setTimeout(f, 0), requestAnimationFrame: f => setTimeout(f, 0), ...globals });
+  assert.notEqual(await run('modified card shows every changed property old and new', {
+    REVIEW_DATA: { projects: [{}, { changes: [{ id: 'c1', action: 'modified', changes: [['Value', '10k', '20k']] }] }] },
+    document: { querySelector: () => ({ textContent: 'Value 20k' }) } }), true);
+  assert.notEqual(await run('wheel zoom keeps both panes in step', { S: { z: 1 }, WheelEvent: class {},
+    document: { querySelector: () => ({ dispatchEvent() {} }), querySelectorAll: () => [{ style: { transform: 'scale(1)' } }, { style: { transform: 'scale(1)' } }] } }), true);
+  for (const m of ['side', 'overlay', 'wipe', 'blend', 'semantic']) assert.notEqual(await run(`mode ${m} draws`, {
+    S: { m }, document: { querySelector: s => s === '#stage' ? { classList: { contains: () => true } } : { dataset: { mode: m } }, querySelectorAll: () => [] } }), true);
+  assert.notEqual(await run('unchanged sheet still reachable', {
+    proj: () => ({ sheets: [{ status: 'unchanged', path: '/same/' }] }), document: { querySelector: () => null } }), true);
+});
+
 const env = {
   GITHUB_CLIENT_ID: 'client-id',
   GITHUB_CLIENT_SECRET: 'client-secret',
