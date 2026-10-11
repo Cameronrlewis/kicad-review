@@ -37,9 +37,9 @@ await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-sch
 let failed = 0;
 for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   await new Promise(r => process.stdout.write(`RUN ${name}\n`, r));
-  let timer;
+  let timer, body;
   try {
-    const [line, bad] = await Promise.race([(async () => {
+    body = (async () => {
   // The framing check tests final geometry, not the two-pane camera animation.
   await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });
   errors.length = 0;
@@ -64,9 +64,10 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   if (r.result?.value === "skip" && !errors.length) return ["SKIP " + name, noSkip];
   const ok = r.result?.value === true && !errors.length;
   return [`${ok ? "PASS" : "FAIL"} ${name}${ok ? "" : ` -> ${JSON.stringify(r.result?.value ?? r.exceptionDetails?.exception?.description)} ${errors.join(" | ")}`}`, !ok];
-    })(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), Number(process.env.CHECK_WALL_TIMEOUT || 60000)); })]);
+    })();
+    const [line, bad] = await Promise.race([body, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), Number(process.env.CHECK_WALL_TIMEOUT || 60000)); })]);
     console.log(line); if (bad) failed++;
-  } catch (e) { console.log(`FAIL ${name} -> ${e.message}`); failed++; }
+  } catch (e) { console.log(`FAIL ${name} -> ${e.message}`); failed++; await body.catch(() => {}); }
   finally { clearTimeout(timer); }
 }
 if (shot) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }

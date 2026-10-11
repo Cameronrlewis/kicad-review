@@ -5,7 +5,7 @@ import worker, { open, seal } from './worker.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { CHECKS } from '../ui/checks.mjs';
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -33,12 +33,25 @@ test('3D runner reports and bounds each whole check, then continues', { skip: sp
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'mode ', '--page', page], { encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, CHECK_PORT: '9396', CHECK_TIMEOUT: '20000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
+    env: { ...process.env, CHECK_PORT: '9396', CHECK_TIMEOUT: '2000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
   assert.equal(r.status, 1);
   for (const [name] of CHECKS.filter(c => c[0].includes('mode '))) {
     assert.ok(r.stdout.includes(`RUN ${name}\n`), `missing RUN ${name}`);
     assert.ok(r.stdout.includes(`FAIL ${name} -> timed out\n`), `missing timeout ${name}`);
   }
+});
+
+test('timed-out runner body settles before the next check starts', async () => {
+  const source = readFileSync('ui/check.mjs', 'utf8'), loop = source.slice(source.indexOf('let failed = 0;'), source.indexOf('if (shot)'));
+  let settled = false, overlap = false;
+  const log = line => { if (line === 'RUN second' && !settled) overlap = true; };
+  await runInNewContext(`(async()=>{${loop}})()`, {
+    CHECKS: [['first', '', 'first()'], ['second', '', 'second()']], filter:'', dark:false, page:'', noSkip:false, errors:[],
+    setTimeout, clearTimeout, process:{env:{CHECK_WALL_TIMEOUT:'1'}, stdout:{write:(line, done) => { log(line.trim()); done(); }}}, console:{log},
+    send:async () => ({}), sleep:() => new Promise(r => setTimeout(r, 10)),
+    evaluate:async expr => { if (expr.includes('first()')) settled = true; return {result:{value:true}}; },
+  });
+  assert.equal(overlap, false, 'next check starts while timed-out body is still running');
 });
 
 test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {
