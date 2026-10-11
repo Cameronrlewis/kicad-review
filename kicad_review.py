@@ -596,6 +596,11 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
+    for section in ("checks", "bom", "fabrication"):
+        if not isinstance(settings[section], dict):
+            sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
+    if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
+        sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
             sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")

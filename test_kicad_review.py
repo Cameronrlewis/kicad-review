@@ -414,6 +414,29 @@ for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
     assert re.fullmatch(r"[0-9a-f]{40}", action), action
 print("ok")
 
+# Settings reject invalid BOM fields and non-table sections with a clear configuration error.
+from kicad_review import load_settings
+t = tempfile.mkdtemp()
+invalid = [("[bom]\nrequired_fields = " + value, "bom.required_fields", "list of strings")
+           for value in ('"MPN"', '[1]', '["MPN", 1]', 'true', '{ MPN = "x" }')]
+invalid += [(f'{section} = "x"', section, "table") for section in ("checks", "bom", "fabrication")]
+failures = []
+for text, field, expected in invalid:
+    write(t, {"kicad-review.toml": text + "\n"})
+    try:
+        load_settings((t,))
+    except SystemExit as e:
+        assert "kicad-review.toml" in str(e) and field in str(e) and expected in str(e), e
+    except (TypeError, AttributeError):
+        failures.append(field + " traceback")
+    else:
+        failures.append(field + " accepted")
+assert not failures, "CK-S4: invalid settings must exit clearly: " + ", ".join(failures)
+for fields in ('[]', '["MPN", "Value"]'):
+    write(t, {"kicad-review.toml": "[bom]\nrequired_fields = " + fields + "\n"})
+    assert load_settings((t,))["bom"]["required_fields"] == json.loads(fields)
+print("ok CK-S4 settings validation")
+
 # Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
 import base64, gzip
 from kicad_review import load_settings, build_project, board_changed, export_glb
