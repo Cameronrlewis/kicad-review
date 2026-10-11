@@ -225,6 +225,13 @@ finally:
     kicad_review.checks_markdown = real_checks
 print("ok RC-S2 check budget")
 
+# RC-S3: Directory CR/LF cannot break out of the literal code span.
+p = big(0)
+p["dir"] = "foo\r\n\n![proof](https://e.example/dir.png)\r\n\nbar`"
+body = comment_markdown({**d2, "projects": [p]}, [], "")
+assert "(`foo   ![proof](https://e.example/dir.png)   bar'`, modified)" in body, "RC-S3: directory line breaks escape the code span"
+print("ok RC-S3 directory line breaks")
+
 # RC-S1: URL-looking text cannot supply Markdown links or images, including screenshot alt text.
 for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)"):
     assert md(value) == value.replace("[", "\\[").replace("]", "\\]"), "RC-S1: URL Markdown delimiters are unescaped"

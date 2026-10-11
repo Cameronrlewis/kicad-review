@@ -1090,7 +1090,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
                 "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
-        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'")}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
+        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'").replace('\n', ' ').replace('\r', ' ')}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
         shots = [s for s in images if s["project"] == i]
         if shots:
