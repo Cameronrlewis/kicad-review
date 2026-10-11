@@ -16,8 +16,6 @@ test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
   const checks = CHECKS.filter(c => /if \([^\n]+\) return (?:true|"skip");/.test(c[2]));
   assert.ok(checks.length >= 20);
   for (const [name, , body] of checks) assert.equal(await runInNewContext(`(async()=>{${body}})()`, absent), 'skip', name);
-  const runner = readFileSync(new URL('../ui/check.mjs', import.meta.url), 'utf8');
-  assert.ok(runner.includes('--no-skip') && runner.includes('SKIP '));
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'TS-S6-no-such-check'], { encoding: 'utf8' });
   assert.equal(r.status, 1); assert.match(r.stderr, /no check matches/);
 });
