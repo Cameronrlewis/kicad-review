@@ -502,5 +502,12 @@ for changed in (pad.replace('"pad1"', '"pad2"').replace('"old"', '"new"'), pad.r
     assert all(c[0] != "pads" for r in rows for c in r["changes"]), f"OB-S2 excluded fields: {rows}"
 write(t, {"h.kicad_pcb": board.replace('PAD', '')})
 assert pcb_objects(f"{t}/h.kicad_pcb")["fp1"]["props"].get("pads") is None
+# KiCad's rotate/save round trip leaves float noise in local coordinates.
+for noise in ("0.000001", "-0.000001", "0.0"):
+    write(t, {"b.kicad_pcb": board.replace('PAD', pad.replace('at 1 2', 'at 1 -0.0 0')),
+              "h.kicad_pcb": board.replace('at 10 20 0', 'at 10 20 90').replace('PAD', pad.replace('at 1 2', f'at 1 {noise} 90'))})
+    rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["position"], f"OB-S2 pad position noise: {rows}"
+print("ok OB-S2 pad position noise")
 print("ok OB-S2 pad geometry and rotate invariant")
 print("ok")

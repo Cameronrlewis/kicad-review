@@ -430,9 +430,9 @@ def pcb_objects(path):
             p.update({"reference": props.get("Reference", "?"), "footprint": n[1], "layer": val(n, "layer"),
                       "position": fmt_at(a), "attributes": " ".join(x for x in (find(n, "attr") or [])[1:] if isinstance(x, str)) or None,
                       "locked": "yes" if "locked" in n or val(n, "locked") == "yes" else None})
-            fa = a[2] if a and len(a) > 2 else 0.0
             pads = [([c for c in pad[1:] if not (isinstance(c, list) and c and c[0] in ("net", "uuid", "tstamp", "at"))],
-                     pa[:2] if (pa := at(pad)) else None, round(((pa[2] if len(pa) > 2 else 0.0) - fa) % 360, 3) % 360 if pa else None) for pad in findall(n, "pad")]
+                     [round(v, 4) + 0.0 for v in pa[:2]] if (pa := at(pad)) else None,
+                     round(((pa[2] if len(pa) > 2 else 0.0) - (a[2] if a and len(a) > 2 else 0.0)) % 360, 3) % 360 if pa else None) for pad in findall(n, "pad")]
             p["pads"] = f"{len(pads)} pads, geom {hashlib.sha1(repr(pads).encode()).hexdigest()[:10]}" if pads else None
             p["3D model"] = "; ".join(f"{m[1]} " + " ".join(f"{k}={v}" for k, v in flatten_sexpr(m).items()) for m in findall(n, "model")) or None
             for pad in findall(n, "pad"):
