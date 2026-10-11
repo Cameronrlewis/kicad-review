@@ -18,7 +18,8 @@ window.Review3D = (() => {
     })();
     return bundle;
   };
-  const rgb = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#f5f4ef";
+  // Page theme wins: dark follows --bg, light uses the --paper neutral. Read on every show and on theme change.
+  const bg = () => getComputedStyle(document.documentElement).getPropertyValue(matchMedia("(prefers-color-scheme: dark)").matches ? "--bg" : "--paper").trim() || "#f5f4ef";
   const disposeObject = root => root?.traverse(o => { if (o.geometry) o.geometry.dispose(); const m = o.material; (Array.isArray(m) ? m : [m]).filter(Boolean).forEach(x => x.dispose()); });
   function dispose() {
     if (!active) return;
@@ -76,7 +77,7 @@ window.Review3D = (() => {
       host.innerHTML = `<span class="tag">${side === "base" ? "Base" : "Head"}</span>`;
       stage.appendChild(host);
       if (!g) { host.innerHTML += '<p class="empty3d">Board not in this revision</p>'; return; }
-      const renderer = new T.THREE.WebGLRenderer({ antialias: true }); renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setClearColor(rgb(matchMedia("(prefers-color-scheme: dark)").matches ? "--bg" : "--paper"));
+      const renderer = new T.THREE.WebGLRenderer({ antialias: true }); renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setClearColor(bg());
       const camera = new T.THREE.PerspectiveCamera(35, 1, .01, 1000), scene = new T.THREE.Scene();
       scene.add(new T.THREE.HemisphereLight(0xffffff, 0x334455, 2)); const light = new T.THREE.DirectionalLight(0xffffff, 3); light.position.set(1, -1, 2); scene.add(light, g.scene);
       host.appendChild(renderer.domElement);
@@ -88,7 +89,9 @@ window.Review3D = (() => {
     window.Review3D.state.cameras = session.views.map(v => v.camera); window.Review3D.state.controls = session.views.map(v => v.controls);
     await new Promise(requestAnimationFrame); // timing means a composited frame containing both parsed models
     window.Review3D.state.firstFrameMs = performance.now() - session.start; window.Review3D.state.firstFrame = true;
-    window.addEventListener("resize", resize, { signal: (session.abort = new AbortController()).signal });
+    const signal = (session.abort = new AbortController()).signal;
+    window.addEventListener("resize", resize, { signal });
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { session.views.forEach(v => v.renderer.setClearColor(bg())); render(); }, { signal });
   }
   return { show, dispose, cameraBar, frame, get state() { return window.__review3dState; }, set state(v) { window.__review3dState = v; } };
 })();
