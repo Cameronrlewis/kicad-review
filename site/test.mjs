@@ -26,7 +26,19 @@ test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: s
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
     env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
-  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL startup.*Runtime.evaluate timed out/);
+  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL loads sample -> Runtime.evaluate timed out/);
+});
+
+test('3D runner reports and bounds each whole check, then continues', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
+  const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
+  writeFileSync(page, '<!doctype html><title>Never ready</title>');
+  const r = spawnSync(process.execPath, ['ui/check.mjs', 'mode ', '--page', page], { encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, CHECK_PORT: '9396', CHECK_TIMEOUT: '20000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
+  assert.equal(r.status, 1);
+  for (const [name] of CHECKS.filter(c => c[0].includes('mode '))) {
+    assert.ok(r.stdout.includes(`RUN ${name}\n`), `missing RUN ${name}`);
+    assert.ok(r.stdout.includes(`FAIL ${name} -> timed out\n`), `missing timeout ${name}`);
+  }
 });
 
 test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {

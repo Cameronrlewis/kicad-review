@@ -23,11 +23,20 @@ jobs:
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
           python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js")]]'
       - run: node ui/check.mjs
+        timeout-minutes: 10
       - run: node ui/check.mjs --dark
+        timeout-minutes: 10
       - run: node ui/check.mjs --no-skip "selection-only address"
+        timeout-minutes: 10
       - run: node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"
+        timeout-minutes: 10
       - run: node ui/check.mjs --no-skip "passing checks with baseline findings"
+        timeout-minutes: 10
       - run: node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"
+        timeout-minutes: 10
       - run: node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"
+        timeout-minutes: 10
       - run: node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"
+        timeout-minutes: 10
       - run: node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"
+        timeout-minutes: 10
