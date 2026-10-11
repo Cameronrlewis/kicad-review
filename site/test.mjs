@@ -1028,7 +1028,7 @@ test('PG-S3 compression keeps Rendering active and Building waiting', () => {
   assert.match(page, /<li class="todo">○ Finishing /);
 });
 
-test('PG-O1 failed compression-free runs name the same stage as progress', async () => {
+test('PG-O1 failed runs name the same stage as progress', async () => {
   const sealed = await signedIn();
   for (const name of ['Find changed KiCad projects', 'Set up job', 'Skip push that an open pull request already covers', 'Copy named report']) {
     const jobs = [{ steps: [{ name, status: 'completed', conclusion: 'failure' }] }];

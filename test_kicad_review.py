@@ -96,7 +96,8 @@ assert "swipe and changed-regions" not in readme and "Open it from the link" not
 print("ok")
 
 # Review fixes (ponytail + caveman, 2026-10-07).
-import json, os, subprocess, sys
+import io, json, os, subprocess, sys
+from unittest.mock import patch
 d2 = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "repo": "o/r",
       "links": {"run": "https://github.com/o/r/actions/runs/9"}, "projects": []}
 body = comment_markdown(d2, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "77")
@@ -277,8 +278,6 @@ print("ok RC-S3 directory line breaks")
 # RC-S4: Template changes must not silently leave any of the four external assets, even under -O.
 r = subprocess.run([sys.executable, "-O", "-c", 'import io, kicad_review as k; from unittest.mock import patch\nwith patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(\'<script data-check src="review.js"></script>\' if path.endswith("review.html") else ""), create=True):\n k.inline_page("")'], capture_output=True, text=True)
 assert r.returncode != 0 and "RuntimeError: external report assets remain" in r.stderr, "RC-S4: optimized Python silently leaves external assets"
-import io
-from unittest.mock import patch
 template = open("ui/review.html", encoding="utf-8").read()
 for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
     changed = template.replace(marker, "data-check " + marker)
@@ -287,7 +286,6 @@ for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-dat
             inline_page("window.REVIEW_DATA={};")
         except RuntimeError as e:
             assert "external report assets remain" in str(e), e
-            pass
         else:
             raise AssertionError("RC-S4: template change silently leaves " + marker)
 print("ok RC-S4 external asset guard")
