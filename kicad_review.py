@@ -764,6 +764,7 @@ def run_check(name, settings, head, base):
 
 def project_checks(p, settings, objs):
     out = f"review/{project_id(p['dir'])}"
+    sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
@@ -774,9 +775,10 @@ def project_checks(p, settings, objs):
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
         run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
-        run_check("parity", settings, side("head", "drc.json", "parity"), side("base", "drc.json", "parity")),
-        run_check("bom", settings, bom_violations(objs["head"], fields) if objs["head"] else None,
-                  bom_violations(objs["base"], fields) if objs["base"] else None),
+        run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
+                  side("base", "drc.json", "parity") if sch("base") else None),
+        run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
+                  bom_violations(objs["base"], fields) if sch("base") else None),
     ]
     return [c for c in checks if c]
 

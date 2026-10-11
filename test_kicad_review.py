@@ -295,6 +295,22 @@ finally:
     os.chdir(here)
 print("ok")
 
+# Board-only projects cannot pass parity or BOM checks that require a schematic.
+t = tempfile.mkdtemp()
+os.chdir(t)
+try:
+    write(t, {"head/P/P.kicad_pcb": "(kicad_pcb)", "review/P/head/drc.json": "{}"})
+    objs = {"head": {"r1": {"kind": "footprint", "props": {}}}, "base": {}}
+    checks = project_checks({"dir": "P", "name": "P"}, DEFAULT_SETTINGS, objs)
+    assert [c["name"] for c in checks] == ["drc"], "CK-S3: board-only parity and BOM must be not run"
+    write(t, {"head/P/P.kicad_sch": "(kicad_sch)", "review/P/head/erc.json": "{}"})
+    checks = project_checks({"dir": "P", "name": "P"}, DEFAULT_SETTINGS, objs)
+    assert [c["name"] for c in checks] == ["erc", "drc", "parity", "bom"], checks
+    assert all(c["status"] == "pass" for c in checks), checks
+finally:
+    os.chdir(here)
+print("ok CK-S3 schematic-required checks")
+
 # Minor: two projects with one file name get release files that do not overwrite each other.
 t = tempfile.mkdtemp()
 os.chdir(t)
