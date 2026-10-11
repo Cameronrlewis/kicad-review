@@ -432,3 +432,15 @@ write(t, {"head/P/P.kicad_pcb": "(kicad_pcb changed)"})
 assert board_changed({"dir": "P", "name": "P"})
 os.chdir(here)
 print("ok")
+
+# OB-S1: power net and library symbol changes retain UUID and position.
+from kicad_review import sch_objects
+t = tempfile.mkdtemp()
+power = '(kicad_sch (uuid "root") (symbol (uuid "power") (at 1 2 0) (lib_id "power:+3V3") (property "Reference" "#PWR01") (property "Value" "+3V3")))'
+write(t, {"b/P.kicad_sch": power})
+for changed, expected in ((power.replace('+3V3', '+5V'), [["net", "+3V3", "+5V"], ["symbol", "power:+3V3", "power:+5V"]]),
+                          (power.replace('power:+3V3', 'power:VCC'), [["symbol", "power:+3V3", "power:VCC"]])):
+    write(t, {"h/P.kicad_sch": changed})
+    rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+    assert len(rows) == 1 and rows[0]["changes"] == expected, f"OB-S1 power props: {rows}"
+print("ok OB-S1 power props")

@@ -376,7 +376,7 @@ def sch_objects(proj_dir, name):
                 a = at(n)
                 if props.get("Reference", "").startswith("#"):  # power symbols and flags: track as net labels
                     objs[key] = {"kind": "power symbol", "ref": props.get("Value", "?"),
-                                 "props": {"position": fmt_at(a)}, "pos": a, "where": where}
+                                 "props": {"net": props.get("Value"), "symbol": val(n, "lib_id"), "position": fmt_at(a)}, "pos": a, "where": where}
                     continue
                 p = {k: v for k, v in props.items() if k != "Reference"}
                 p.update({"reference": ref, "symbol": val(n, "lib_id"), "position": fmt_at(a), "unit": unit,
