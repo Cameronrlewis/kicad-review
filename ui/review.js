@@ -98,6 +98,8 @@ function decodeState(hash) {
   for (const k of ["v", "m", "s", "t"]) if (q.has(k)) out[k] = q.get(k);
   for (const k of ["x", "y", "z"]) if (q.has(k)) out[k] = +q.get(k);
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
+  if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
+  if (q.has("h")) out.hidden3d = q.get("h").split(",").filter(Boolean);
   return out;
 }
 function valid(st) {   // drop anything that does not exist in this report
@@ -111,12 +113,14 @@ function valid(st) {   // drop anything that does not exist in this report
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
   }
+  if (Array.isArray(st.camera3d) && st.camera3d.length === 6 && st.camera3d.every(Number.isFinite)) out.camera3d = st.camera3d;
+  if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => ["bodies", "top", "bottom", "silk", "mask", "board"].includes(x));
   return out;
 }
 function applyState(st) {
   const v = valid(st);
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
-                     layers: v.layers ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   renderModes();
   renderNav();
@@ -348,7 +352,7 @@ function pickAt(vp, e) {
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
 function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); }
-window.Review3D && (window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); });
+if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
@@ -466,6 +470,8 @@ function encodeState(s = S) {
   if (s.s) q.set("s", s.s);
   if (s.t && s.t !== "changes") q.set("t", s.t);
   if (s.layers) q.set("l", s.layers.join(","));
+  if (s.v === "3d" && Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
+  if (s.v === "3d" && s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
