@@ -4,6 +4,22 @@ import { runInNewContext } from 'node:vm';
 import worker, { open, seal } from './worker.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
+import { CHECKS } from '../ui/checks.mjs';
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+
+test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
+  const absent = { REVIEW_DATA: { projects: [{ name: 'sample', board: {}, sheets: [], changes: [] }, { checks: [] }] },
+    D: { projects: [{ board: { changed: true }, sheets: [] }] }, proj: () => ({ changes: [], sheets: [] }) };
+  const checks = CHECKS.filter(c => /if \([^\n]+\) return (?:true|"skip");/.test(c[2]));
+  assert.ok(checks.length >= 20);
+  for (const [name, , body] of checks) assert.equal(await runInNewContext(`(async()=>{${body}})()`, absent), 'skip', name);
+  const runner = readFileSync(new URL('../ui/check.mjs', import.meta.url), 'utf8');
+  assert.ok(runner.includes('--no-skip') && runner.includes('SKIP '));
+  const r = spawnSync(process.execPath, ['ui/check.mjs', 'TS-S6-no-such-check'], { encoding: 'utf8' });
+  assert.equal(r.status, 1); assert.match(r.stderr, /no check matches/);
+});
+
 const env = {
   GITHUB_CLIENT_ID: 'client-id',
   GITHUB_CLIENT_SECRET: 'client-secret',

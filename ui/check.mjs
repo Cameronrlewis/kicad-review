@@ -9,7 +9,9 @@ import { CHECKS } from "./checks.mjs";
 const args = process.argv.slice(2);
 const opt = k => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : null; };
 const dark = args.includes("--dark"); if (dark) args.splice(args.indexOf("--dark"), 1);
+const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
 const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), filter = args[0] || "";
+if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const proc = spawn(chrome, ["--headless=new", "--remote-debugging-port=9334", `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
   "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--window-size=1920,1080", "about:blank"], { stdio: "ignore" });
@@ -49,6 +51,7 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
     await sleep(300);
   }
   const r = await evaluate(`(async () => { ${expr} })()`);
+  if (r.result?.value === "skip" && !errors.length) { console.log("SKIP " + name); if (noSkip) failed++; continue; }
   const ok = r.result?.value === true && !errors.length;
   if (!ok) failed++;
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${ok ? "" : ` -> ${JSON.stringify(r.result?.value ?? r.exceptionDetails?.exception?.description)} ${errors.join(" | ")}`}`);
