@@ -439,4 +439,15 @@ export const CHECKS = [
     document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     await new Promise(res => setTimeout(res, 300));
     return S.s !== null || "no step; focus on " + document.activeElement.tagName;`],
+  ["3D fallback blocks and panel list cover missing models", "v=3d", `
+    await new Promise(r => setTimeout(r, 500));
+    const d = REVIEW_DATA.projects[0].board.no_model || [];
+    return d.length === 3 && ["D1", "L1", "U3"].every(ref => d.some(x => x.ref === ref && x.pos?.length === 3 && x.box?.length === 4)) && document.querySelectorAll("[data-no-model]").length === 3;`],
+  ["3D visibility controls hide silkscreen", "v=3d", `
+    await new Promise(r => setTimeout(r, 500));
+    const cb = document.querySelector('[data-3d-group="silk"]'); if (!cb) return false; cb.click();
+    return (S.hidden3d || []).includes("silk");`],
+  ["3D address records camera and hidden groups", "v=3d", `
+    await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
+    return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
 ];

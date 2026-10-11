@@ -833,8 +833,18 @@ def model3d_missing(out, objs):
         for obj in objs[side].values():
             if obj["kind"] == "footprint" and not obj.get("has_model"):
                 add(obj["ref"], side, "no model in footprint")
-    return [{"ref": ref, "side": "both" if sides == {"base", "head"} else next(iter(sides)), "reason": reason}
-            for (ref, reason), sides in sorted(missing.items(), key=lambda e: (natural(e[0][0]), e[0][1]))]
+    rows = []
+    for (ref, reason), sides in sorted(missing.items(), key=lambda e: (natural(e[0][0]), e[0][1])):
+        side = "both" if sides == {"base", "head"} else next(iter(sides))
+        # The block is rendered from the footprint's board-space data, including unchanged parts.
+        obj = next((o for s in ("head", "base") for o in objs[s].values()
+                    if o["kind"] == "footprint" and o["ref"] == ref and s in sides), None)
+        row = {"ref": ref, "side": side, "reason": reason}
+        if obj:
+            pos = obj.get("pos")
+            row.update({"pos": (pos + [0])[:3] if pos else None, "box": obj.get("box"), "layer": obj.get("props", {}).get("layer")})
+        rows.append(row)
+    return rows
 
 
 def build_project(p, blobs, settings):
