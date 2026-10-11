@@ -601,6 +601,11 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
+    for section in ("checks", "bom", "fabrication"):
+        if not isinstance(settings[section], dict):
+            sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
+    if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
+        sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
             sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
@@ -738,13 +743,14 @@ def bom_violations(objs, fields):
 
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
+    sig = (v["severity"], tuple(sorted(v["where"].items())))
     if v.get("key"):
-        return {v["key"]}
+        return {v["key"] + sig}
     desc = re.sub(r"[\d.]+", "#", v["description"])
     keys = {("p", v["type"], desc, tuple(v["items"]), tuple(tuple(round(c, 1) for c in p) for p in ([v["pos"]] if v["pos"] else [])))}
     if v["uuids"]:
         keys.add(("u", v["type"], tuple(v["uuids"])))
-    return keys
+    return {k + sig for k in keys}
 
 
 def run_check(name, settings, head, base):
@@ -768,6 +774,7 @@ def run_check(name, settings, head, base):
 
 def project_checks(p, settings, objs):
     out = f"review/{project_id(p['dir'])}"
+    sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
@@ -778,11 +785,15 @@ def project_checks(p, settings, objs):
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
         run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
-        run_check("parity", settings, side("head", "drc.json", "parity"), side("base", "drc.json", "parity")),
-        run_check("bom", settings, bom_violations(objs["head"], fields) if objs["head"] else None,
-                  bom_violations(objs["base"], fields) if objs["base"] else None),
+        run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
+                  side("base", "drc.json", "parity") if sch("base") else None),
+        run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
+                  bom_violations(objs["base"], fields) if sch("base") else None),
     ]
-    return [c for c in checks if c]
+    return [c for c in checks if c] + [
+        {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
+         "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+        for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
 
 
 def page_svg(out_dir, name, page):
@@ -976,7 +987,7 @@ def cmd_report(args):
         fh.write(f"name={name}\n")
 
 
-STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
+STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
 MARKER = "<!-- kicad-review -->"
 TABLE_KINDS = ("title block", "design rules", "symbol", "footprint", "sheet", "label", "global label",
                "hierarchical label", "zone", "board outline")
@@ -1159,7 +1170,7 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
+            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error"]
