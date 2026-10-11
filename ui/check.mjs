@@ -39,6 +39,11 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
     await sleep(100);
     await evaluate(`window.__3dInputResult = ${JSON.stringify({ before: r.before })}; window.__3dInputResult.after = window.Review3D.state.cameras.map(c => c.position.toArray())`);
   }
+  if (name === "3D canvas click via mouse input selects J2 row") {
+    const q = (await evaluate(`(async()=>{ if(!REVIEW_DATA.projects[0].board.model3d) return null; while(!window.Review3D?.state?.firstFrame) await new Promise(r=>setTimeout(r,50)); const {THREE}=window.THREE3D, st=window.Review3D.state; let n; st.roots[1].traverse(o=>{ if(!n&&o.name==="J2") n=o; }); const p=new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[1]), r=document.querySelectorAll('#stage canvas')[1].getBoundingClientRect(); return {x:r.left+(p.x*.5+.5)*r.width,y:r.top+(-p.y*.5+.5)*r.height}; })()`)).result.value;
+    if (q) for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: q.x, y: q.y, button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
+    await sleep(300);
+  }
   const r = await evaluate(`(async () => { ${expr} })()`);
   const ok = r.result?.value === true && !errors.length;
   if (!ok) failed++;

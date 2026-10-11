@@ -454,8 +454,37 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
     return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
   ["3D change card keeps 3D and frames J2", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true; await new Promise(r => setTimeout(r, 500));
-    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 450)); const v=window.Review3D.state.controls[0], p=v.target.clone().project(window.Review3D.state.cameras[0]); return S.v === "3d" && Math.abs(p.x) < .15 && Math.abs(p.y) < .15;`],
-  ["3D canvas pick selects J2 row", "v=3d", `
-    if (!REVIEW_DATA.projects[0].board.model3d) return true; await new Promise(r => setTimeout(r, 500)); const h=window.Review3D.state.highlights.find(x=>x.ref==="J2" && x.side==="head"); window.Review3D.onPick(h && "c2"); return S.s === "c2";`],
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, n = (() => { let f; st.roots[1].traverse(o => { if (!f && o.name === "J2") f = o; }); return f; })(),
+      c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[0]);
+    return S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15;`],
+  ["3D no-model U3 block sits on the board, overlaps its footprint and is not hidden by silkscreen", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, row = REVIEW_DATA.projects[0].board.no_model.find(x => x.ref === "U3"), blk = st.blocks.filter(b => b.ref === "U3");
+    if (!blk.length) return "no U3 block";
+    const fp = new THREE.Box3(new THREE.Vector3(row.box[0] / 1000, -1, row.box[1] / 1000), new THREE.Vector3(row.box[2] / 1000, 1, row.box[3] / 1000));
+    for (const b of blk) {
+      const root = st.roots[b.side === "head" ? 1 : 0]; let top = -Infinity;
+      root.traverse(o => { if (o.isMesh && /PCB|silkscreen|soldermask/i.test(o.name)) top = Math.max(top, new THREE.Box3().setFromObject(o).max.y); });
+      b.object.updateWorldMatrix(true, true); const w = new THREE.Box3().setFromObject(b.object), ctr = w.getCenter(new THREE.Vector3());
+      if (!w.intersectsBox(fp)) return "no overlap " + JSON.stringify([w.min, w.max]);
+      if (w.min.y < top - 1e-9 || w.min.y > top + 1e-4) return "not resting on board top " + w.min.y + " vs " + top;
+      if (Math.abs(w.max.y - w.min.y - .001) > 1e-6) return "not 1 mm tall";
+      const ray = new THREE.Raycaster(new THREE.Vector3(ctr.x, w.max.y + .01, ctr.z), new THREE.Vector3(0, -1, 0)), h = ray.intersectObject(root, true)[0];
+      let a = h?.object; while (a && a !== b.object) a = a.parent;
+      if (!a) return "first hit from above is " + h?.object.name;
+    }
+    return true;`],
+  ["3D no-model list item frames its block and labels it", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('[data-no-model="U3"]').click(); await new Promise(r => setTimeout(r, 600));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, b = st.blocks.find(x => x.ref === "U3" && x.side === "head"), c = new THREE.Box3().setFromObject(b.object).getCenter(new THREE.Vector3()).project(st.cameras[0]);
+    return Math.abs(c.x) < .15 && Math.abs(c.y) < .15 && /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "");`],
+  ["3D canvas click via mouse input selects J2 row", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    return S.s === "c2" && S.v === "3d";`],
 ];
