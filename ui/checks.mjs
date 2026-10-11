@@ -460,6 +460,13 @@ export const CHECKS = [
     const { THREE } = window.THREE3D, st = window.Review3D.state, n = (() => { let f; st.roots[1].traverse(o => { if (!f && o.name === "J2") f = o; }); return f; })(),
       c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[0]);
     return S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15;`],
+  ["3D selection outline in each pane wraps that pane's own J2", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, sel = st.selected || [];
+    const j2 = r => { let f; r.traverse(o => { if (!f && o.name === "J2") f = o; }); return new THREE.Box3().setFromObject(f).getCenter(new THREE.Vector3()); };
+    return sel.length === 2 && [0, 1].every(i => sel[i].position.distanceTo(j2(st.roots[i])) < 1e-4);`],
   ["3D no-model U3 block sits on the board, overlaps its footprint and is not hidden by silkscreen", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
