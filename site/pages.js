@@ -108,6 +108,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
       }
     }
     radios.forEach((radio) => { radio.onchange = update; });
+    document.querySelector('[name=branch]').onchange = () => { document.querySelector('[name=tag]').value = ''; };
     form.querySelectorAll('tr').forEach((row) => { row.onkeydown = (event) => { if (event?.key === 'Enter') event.preventDefault(); }; });
     update();
   })()</script>`;
