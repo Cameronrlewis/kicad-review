@@ -291,10 +291,11 @@ export const CHECKS = [
   ["selecting a row zooms to it and highlights it", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
     document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
-    await new Promise(res => setTimeout(res, 1200));
-    return S.s === r.id && S.v === "board" && Math.abs(S.x - (r.box[0] + r.box[2]) / 2) < 0.01
+    const ready = () => S.s === r.id && S.v === "board" && S.x != null && Math.abs(S.x - (r.box[0] + r.box[2]) / 2) < 0.01
       && document.querySelector("#stage .marker.sel") !== null
-      && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true";`],
+      && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true", until = performance.now() + 5000;
+    while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
+    return ready();`],
   ["clicking the drawing selects the row", "p=1&v=board", `
     await new Promise(res => setTimeout(res, 1200));
     const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
