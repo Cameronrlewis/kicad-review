@@ -99,7 +99,7 @@ def detect(base, head):
         changed = git("diff", "--name-only", "--no-renames", base, head).splitlines()
     else:
         changed = git("ls-tree", "-r", "--name-only", head).splitlines()
-    settings_changed = SETTINGS_FILE in changed
+    settings_changed = SETTINGS_FILE in changed or any(is_kicad_file(f) and owner_project(f, dirs) is None for f in changed)
     by_project = {}
     for f in changed:
         if is_kicad_file(f):
@@ -111,7 +111,7 @@ def detect(base, head):
             by_project.setdefault(d, [])
     projects = []
     for d in sorted(by_project):
-        status = "added" if d not in base_projects else "removed" if d not in head_projects else "modified"
+        status = "removed" if d not in head_projects else "added" if d not in base_projects or base_projects[d] != head_projects[d] else "modified"
         pro = head_projects.get(d) or base_projects[d]
         projects.append({
             "dir": d,
@@ -272,7 +272,7 @@ def sheet_pages(proj_dir, name):
                          "so neither drawing can be shown. Rename one of them.")
             names.add(child)
             safe = re.sub(r"[\\/]", "_", child)
-            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
+            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
 
     if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
         walk(f"{name}.kicad_sch", "/", name, None, 0, name)
