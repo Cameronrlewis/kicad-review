@@ -20,12 +20,19 @@ test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
   assert.equal(r.status, 1); assert.match(r.stderr, /no check matches/);
 });
 
-test('TS-S5 a page that never becomes ready fails instead of hanging', () => {
+const chrome = process.env.CHROME || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
+test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', ...(process.platform === 'darwin' ? {} : { CHROME: process.env.CHROME || 'google-chrome' }) } });
+    env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
   assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL startup.*Runtime.evaluate timed out/);
+});
+
+test('TS-S5 runtime check skips when Chrome is unavailable', () => {
+  const r = spawnSync(process.execPath, ['--import', './site/css-loader.mjs', '--test', '--test-name-pattern', '^TS-S5 a page', 'site/test.mjs'], {
+    encoding: 'utf8', timeout: 35000, env: { ...process.env, NODE_TEST_CONTEXT: undefined, CHROME: '/no-such-chrome' } });
+  assert.equal(r.status, 0); assert.match(r.stdout, /# skipped 1/);
 });
 
 test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {
