@@ -43,6 +43,16 @@ function tokenResponse(overrides = {}) {
 }
 
 // All checked responses also assert the security headers required on every route.
+test('ordinary routes deny framing without overriding report CSPs', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : compareCommitData(url) || new Response(JSON.stringify({ installations: [] })));
+  try {
+    for (const [path, options] of [['/', {}], ['/missing', {}], ['/login', {}], ['/callback?state=bad', {}], ['/logout', { method: 'POST' }], ['/r/Cameronrlewis/repo/commits', { headers: { Cookie: `s=${sealed}` } }]]) {
+      assert.equal((await call(path, options)).headers.get('Content-Security-Policy'), "frame-ancestors 'none'", path);
+    }
+  } finally { restore(); }
+});
+
 test('home without a cookie offers GitHub sign-in', async () => {
   const response = await call('/');
   assert.equal(response.status, 200);

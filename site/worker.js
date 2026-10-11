@@ -117,6 +117,7 @@ export async function session(request, env) {
 function response(body, init = {}) {
   const headers = new Headers(init.headers);
   for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
+  if (!headers.has('Content-Security-Policy')) headers.set('Content-Security-Policy', "frame-ancestors 'none'");
   return new Response(body, { ...init, headers });
 }
 
