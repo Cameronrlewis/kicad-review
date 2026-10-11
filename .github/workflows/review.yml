@@ -183,16 +183,19 @@ jobs:
 
       - name: Pull request comment
         id: comment
-        if: ${{ !cancelled() && github.event.pull_request.number && (steps.detect.outputs.changed == 'true' || failure()) && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ !cancelled() && github.event.pull_request.number && (success() || failure()) && github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           SUMMARY: ${{ steps.summary.outcome }}
+          CHANGED: ${{ steps.detect.outputs.changed }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "$SUMMARY" != success ]; then
-            mkdir -p review
+          mkdir -p review
+          if [ "$CHANGED" = false ]; then
+            printf '<!-- kicad-review -->\n### No KiCad changes in this commit\n' > review/comment.md
+          elif [ "$SUMMARY" != success ]; then
             # The failure body prevents earlier results from looking current.
             printf '<!-- kicad-review -->\n### KiCad review failed — see [run](%s)\n\nNo review for `%s`. Results from earlier commits were removed so they are not mistaken for this one.\n' "$RUN_URL" "${SHA:0:7}" > review/comment.md
           fi
@@ -200,6 +203,7 @@ jobs:
           # One comment per pull request, edited in place on every run.
           id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
             -q '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- kicad-review -->"))) | .id' | head -1)
+          [ -n "$id" ] || [ "$CHANGED" != false ] || exit 0
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@review/comment.md --jq .html_url
           else

@@ -317,7 +317,7 @@ step = "\n".join(l[10:] for l in step[:step.index("\n\n")].splitlines())
 t = tempfile.mkdtemp()
 write(t, {"bin/gh": '''#!/bin/bash
 if [[ "$*" == *"issues/7/comments"* && "$*" == *"--paginate"* ]]; then
-  printf '99\\n'
+  printf '%s\\n' "${GH_TEST_ID-99}"
 elif [[ "$*" == *"-X PATCH"* ]]; then
   for arg in "$@"; do
     [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/patched.md"
@@ -327,6 +327,7 @@ elif [[ "$*" == *"-X POST"* ]]; then
   for arg in "$@"; do
     [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/posted.md"
   done
+  printf 'https://github.com/o/r/issues/7#issuecomment-100\\n'
 fi
 '''})
 os.chmod(f"{t}/bin/gh", 0o755)
@@ -344,6 +345,26 @@ r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=t, capture_output=Tr
 assert r.returncode == 0, r.stderr
 assert open(f"{t}/patched.md", encoding="utf-8").read() == normal
 print("ok")
+
+# WF-S2: unchanged PRs clear an existing comment, never create one; detect failure still reports failure.
+comment = wf[wf.index("- name: Pull request comment"):wf.index("- name: Fail on required checks")]
+assert "steps.detect.outputs.changed" not in comment.splitlines()[2], "WF-S2: unchanged PR comment is skipped"
+assert "CHANGED: ${{ steps.detect.outputs.changed }}" in comment, "WF-S2: changed output missing"
+for changed, summary, existing in (("false", "skipped", "99"), ("false", "skipped", ""), ("", "failure", "99"), ("", "failure", "")):
+    for f in ("patched.md", "posted.md"):
+        if os.path.exists(f"{t}/{f}"): os.remove(f"{t}/{f}")
+    if os.path.exists(f"{t}/review/comment.md"): os.remove(f"{t}/review/comment.md")
+    r = subprocess.run(["bash", "-e", "-c", step], cwd=t, capture_output=True, text=True,
+                       env={**env, "CHANGED": changed, "SUMMARY": summary, "GH_TEST_ID": existing})
+    assert r.returncode == 0, r.stderr
+    target = "patched.md" if existing else "posted.md"
+    if changed == "false" and not existing:
+        assert not os.path.exists(f"{t}/{target}"), "WF-S2: unchanged PR creates a comment"
+    else:
+        body = open(f"{t}/{target}", encoding="utf-8").read()
+        assert ("No KiCad changes in this commit" if changed == "false" else "KiCad review failed") in body, body
+    assert not os.path.exists(f"{t}/{'posted.md' if existing else 'patched.md'}")
+print("ok WF-S2: unchanged comment and detect failure")
 
 # Reports expose an artifact filename containing the compared revisions and result.
 import re
