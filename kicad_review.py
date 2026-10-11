@@ -272,7 +272,7 @@ def sheet_pages(proj_dir, name):
                          "so neither drawing can be shown. Rename one of them.")
             names.add(child)
             safe = re.sub(r"[\\/]", "_", child)
-            walk(props.get("Sheetfile", ""), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
+            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
 
     if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
         walk(f"{name}.kicad_sch", "/", name, None, 0, name)

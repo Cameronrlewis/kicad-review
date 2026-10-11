@@ -432,3 +432,15 @@ write(t, {"head/P/P.kicad_pcb": "(kicad_pcb changed)"})
 assert board_changed({"dir": "P", "name": "P"})
 os.chdir(here)
 print("ok")
+
+# DR-S2: child sheet files are relative to their parent, including ..; objects use the same paths.
+from kicad_review import sch_objects
+t = tempfile.mkdtemp()
+write(t, {"P/H.kicad_sch": '(kicad_sch (uuid "root") ' + sheet("Child", "sub/child.kicad_sch", "child") + ')',
+          "P/sub/child.kicad_sch": '(kicad_sch ' + sheet("Grand", "grand.kicad_sch", "grand") + ')',
+          "P/sub/grand.kicad_sch": '(kicad_sch ' + sheet("Leaf", "../leaf.kicad_sch", "leaf") + ')',
+          "P/leaf.kicad_sch": '(kicad_sch (symbol (uuid "symbol") (property "Reference" "R1")))'})
+pages = sheet_pages(f"{t}/P", "H")
+assert [p["file"] for p in pages] == ["H.kicad_sch", "sub/child.kicad_sch", "sub/grand.kicad_sch", "leaf.kicad_sch"], "DR-S2: parent-relative sheet paths"
+assert sch_objects(f"{t}/P", "H")["/child/grand/leaf/symbol"]["ref"] == "R1", "DR-S2: nested sheet objects"
+print("ok DR-S2 parent-relative pages and objects")
