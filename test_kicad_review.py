@@ -282,6 +282,16 @@ for field in ("title", "reason", "items"):
     body = comment_markdown(data, [], "")
     assert len(body) < 65536 and "… checks truncated" in body, "RC-A: long " + field + " exceeds comment limit"
     assert body.count("<details") == body.count("</details>"), "RC-A: truncated checks leave details open"
+# Place the section limit inside each opening tag, not only inside long text.
+for tag_offset in (5, 13):
+    p = big(0)
+    p["checks"][0].update(title="", violations=[{"new": True, "severity": "error", "description": "x", "items": []}])
+    data = {**d2, "projects": [p]}
+    start = kicad_review.checks_markdown(data).index("<details>")
+    p["checks"][0]["title"] = "x" * (49900 - start - tag_offset)
+    p["checks"][0]["violations"][0]["items"] = ["x" * 70000]
+    checks = kicad_review.checks_markdown(data)
+    assert checks.count("<details>") == checks.count("</details>") and not re.search(r"<[^>\n]*(?:\n|$)", checks), "RC-A: checks cap splits a details tag"
 print("ok RC-A checks section cap")
 
 # RC-S3: Directory CR/LF cannot break out of the literal code span.

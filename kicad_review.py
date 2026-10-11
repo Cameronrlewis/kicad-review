@@ -1198,7 +1198,7 @@ def checks_markdown(data):
         lines += ["", "</details>"]
     checks = "\n".join(lines) + "\n"
     if len(checks) > 50000:  # leave room for the comment body and closing details tags
-        checks = checks[:49900] + "\n\n… checks truncated. Full list in the report.\n"
+        checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
     return checks
 
