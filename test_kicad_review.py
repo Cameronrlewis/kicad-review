@@ -719,6 +719,7 @@ print("ok TS-S2 release zip and CSV contents")
 
 # TS-S1: CI exercises default, real 3D and unchanged two-project pages without extra installs.
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
 for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip 3D --page', 'node ui/check.mjs --no-skip 3D --dark --page', '"unchanged sheet"', '"unchanged project"'):
     assert command in test_wf, "TS-S1 CI missing " + command
