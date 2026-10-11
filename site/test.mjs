@@ -922,6 +922,15 @@ test('changing branch clears the selected tag before Show', () => {
   assert.equal(branch.value, 'dev');
 });
 
+test('row Enter guard blocks radios but preserves Reviewed links', () => {
+  const { row } = commitsScript();
+  for (const [radio, key, expected] of [[false, 'Enter', false], [true, 'Enter', true], [true, ' ', false]]) {
+    let prevented = false;
+    row.onkeydown({ key, target: { matches: (selector) => { assert.equal(selector, 'input[type=radio]'); return radio; } }, preventDefault() { prevented = true; } });
+    assert.equal(prevented, expected, `${radio ? 'radio' : 'Reviewed link'} ${key}`);
+  }
+});
+
 test('compare page renders every inline-script target and keeps Show in its picker row', () => {
   const page = commitsPage({ user: 'octocat', owner: 'owner', repo: 'repo', branch: 'main', branches: ['main'], tags: [], commits: [{ sha: base, message: 'Board', fullMessage: 'Board\nDetails', author: 'Ada', date: 'today', exactDate: '2025-01-01', review: null }] });
   for (const selector of ['compare-form', 'compare-bar', 'compare-slot']) assert.match(page, new RegExp(`class="[^"]*${selector}[^"]*"`));
