@@ -37,6 +37,69 @@ export const CHECKS = [
     const select = document.querySelector("#proj"); select.value = i; select.dispatchEvent(new Event("change"));
     await new Promise(r => setTimeout(r, 400));
     return new URLSearchParams(location.hash.slice(1)).get("p") === String(i) || location.hash;`],
+  ["3D base-only models mark removals in overlay and changes only", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), project = {...p, board:{...p.board, model3d:{...p.board.model3d, head:null}}, changes:[{...p.changes.find(c => c.ref === "J2"), action:"removed"}]};
+    const facts = [];
+    for (const m of ["overlay", "semantic"]) {
+      await Review3D.show(stage, project, {...S, m, s:null});
+      const h = Review3D.state.highlights.find(h => h.ref === "J2" && h.side === "base" && h.action === "removed");
+      facts.push(!!h && h.marker.el.textContent.includes("− J2") && h.materials.some((material, i) => material !== h.original[i]));
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D cleanup frees replaced outlines and scene resources", "v=3d&m=overlay", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], change = p.changes.find(c => c.ref === "J2"), seen = {}, watch = (name, resource) => { seen[name] = false; resource?.addEventListener("dispose", () => { seen[name] = true; }); };
+    Review3D.focus(change);
+    const st = Review3D.state, old = st.selected[0];
+    watch("replaced geometry", old.geometry); watch("replaced material", old.material);
+    Review3D.focus(change);
+    const replaced = seen["replaced geometry"] && seen["replaced material"];
+    watch("outline geometry", st.selected[0].geometry); watch("outline material", st.selected[0].material);
+    let ghost, base, block;
+    st.ghosts[0].object.traverse(o => { if (o.isMesh) ghost = o.material; });
+    st.roots[0].traverse(o => { if (o.isMesh) base = o.geometry; });
+    st.blocks[0].object.traverse(o => { if (o.isMesh) block = o.material.map; });
+    watch("ghost material", ghost); watch("detached base geometry", base); watch("placeholder texture", block);
+    Review3D.dispose();
+    return replaced && Object.values(seen).every(Boolean) || JSON.stringify({replaced, ...seen});`],
+  ["3D camera animation stops with its owning session", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), change = p.changes.find(c => c.ref === "J2"), raf = window.requestAnimationFrame;
+    const facts = [];
+    for (const reopen of [false, true]) {
+      await Review3D.show(stage, p, {...S, s:null});
+      const st = Review3D.state, ticks = []; let updates = 0;
+      st.controls.forEach(c => { const update = c.update; c.update = (...a) => { updates++; return update.apply(c, a); }; });
+      window.requestAnimationFrame = tick => { ticks.push(tick); return 1; };
+      Review3D.focus(change); window.requestAnimationFrame = raf;
+      Review3D.dispose();
+      if (reopen) await Review3D.show(stage, p, {...S, s:null});
+      const camera = Review3D.cameraState(); let error = false;
+      try { ticks.forEach(tick => tick(performance.now() + 500)); } catch { error = true; }
+      facts.push(ticks.length > 0 && !error && updates === 0 && JSON.stringify(camera) === JSON.stringify(Review3D.cameraState()));
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D bad model data settles and keeps the valid side", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), good = p.board.model3d.head;
+    const gzip = async text => btoa(String.fromCharCode(...new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer())));
+    const bad = [btoa("not gzip"), await gzip("not GLB")];
+    const facts = [];
+    for (const blob of bad) for (const both of [false, true]) {
+      REVIEW_DATA.blobs.__bad3d = blob;
+      const project = {...p, board:{...p.board, no_model:[], model3d:{base:"__bad3d", head:both ? "__bad3d" : good}}};
+      const result = await Promise.race([Review3D.show(stage, project, {...S, s:null}).then(() => "done"), new Promise(r => setTimeout(() => r("pending"), 3000))]);
+      facts.push(result === "done" && !stage.querySelector(".loading") && (both ? stage.textContent.includes("No 3D board model") : !!Review3D.state.roots[1] && !Review3D.state.roots[0]));
+      Review3D.dispose();
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D bundle failure leaves Loading", "", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    document.querySelector("#three-bundle").textContent = btoa("not gzip");
+    const stage = document.querySelector("#stage");
+    const result = await Promise.race([Review3D.show(stage, REVIEW_DATA.projects[0], {...S, s:null}).then(() => "done", () => "rejected"), new Promise(r => setTimeout(() => r("pending"), 3000))]);
+    return result === "done" && !stage.querySelector(".loading") && !!stage.textContent.trim() || result;`],
   ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
