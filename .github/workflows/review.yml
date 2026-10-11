@@ -75,6 +75,35 @@ jobs:
           docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
             python3 tools/kicad_review.py render
 
+      - name: Compress 3D board models
+        if: steps.detect.outputs.changed == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          shopt -s nullglob
+          models=(review/*/{base,head}/board.glb)
+          [ ${#models[@]} -gt 0 ] || exit 0
+          deps=$(mktemp -d)
+          trap 'rm -rf "$deps"' EXIT
+          if ! npm install --prefix "$deps" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0; then
+            echo "::warning::Meshopt dependencies unavailable; keeping original GLBs."
+            exit 0
+          fi
+          for model in "${models[@]}"; do
+            # Write beside the original, replacing it only after a successful export.
+            tmp=$(mktemp -d "${model%/*}/meshopt.XXXXXX") || continue
+            start=$SECONDS
+            before=$(wc -c < "$model")
+            if NODE_PATH="$deps/node_modules" node tools/ui/compress3d.cjs "$model" "$tmp/board.glb" && [ -s "$tmp/board.glb" ]; then
+              if mv "$tmp/board.glb" "$model"; then
+                echo "Meshopt $model: $before -> $(wc -c < "$model") bytes in $((SECONDS - start))s"
+              fi
+            else
+              echo "::warning::Meshopt failed for $model; keeping the original GLB."
+            fi
+            rm -rf "$tmp"
+          done
+
       - name: Build comparison report and checks
         id: report
         if: steps.detect.outputs.changed == 'true'

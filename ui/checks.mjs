@@ -1,5 +1,76 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 800));
+    const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:st.renderers[0].getClearColor(new THREE.Color()).getHexString()}, dark = !matchMedia("(prefers-color-scheme: dark)").matches;
+    await new Promise(r => { window.__themeFlipped = r; window.__flipTheme(dark ? "dark" : "light"); });
+    const until = performance.now() + 3000;
+    while (st.renderers[0].getClearColor(new THREE.Color()).getHexString() === before.clear && performance.now() < until) await new Promise(r => setTimeout(r, 25));
+    const css = getComputedStyle(document.documentElement), token = n => new THREE.Color(css.getPropertyValue(n).trim()), facts = {
+      clear:st.renderers.every(r => r.getClearColor(new THREE.Color()).equals(token(dark ? "--bg" : "--paper"))),
+      highlight:h.materials.every((m,i) => m.color.equals(h.original[i].color.clone().lerp(token("--modified"), .7)) && (!m.emissive || m.emissive.equals(token("--modified")))),
+      outline:st.selected.every(o => o.material.color.equals(token("--accent"))),
+      changed:before.highlight !== h.materials[0].color.getHexString() && before.outline !== st.selected[0].material.color.getHexString() && before.clear !== st.renderers[0].getClearColor(new THREE.Color()).getHexString(),
+      camera:JSON.stringify(before.camera) === JSON.stringify(st.cameras.map(c => c.position.toArray())), parses:before.parses === st.parseCount && st.parseCount === 2, selection:S.s === "c2", same:st === Review3D.state,
+      marker:getComputedStyle(h.marker.el).color === (() => { const e=document.createElement("span");e.style.color="var(--modified)";document.body.append(e);const c=getComputedStyle(e).color;e.remove();return c; })(),
+      ghosts:true
+    };
+    if ("${mode}" === "overlay") st.ghosts.forEach(g => g.object.traverse(o => { if (o.isMesh && !o.material.color.equals(token("--removed"))) facts.ghosts=false; }));
+    return Object.values(facts).every(Boolean) || JSON.stringify(facts);`]),
+
+  ["3D navigator appears only for opted-in data", "", `
+    return !!REVIEW_DATA.projects[0].board.model3d === !!document.querySelector('#nav [data-view="3d"]');`],
+  ["3D loads GLBs with named component nodes", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const n = window.Review3D.state.nodes || [];
+    return document.querySelectorAll('#stage canvas').length >= 2 && n.includes("J2") && n.includes("C20");`],
+  ["3D camera buttons change the camera", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const a = window.Review3D.state.cameras[0].position.toArray().join(","); document.querySelector('[data-3d-camera="top"]').click();
+    return a !== window.Review3D.state.cameras[0].position.toArray().join(",");`],
+  ["3D preset uses world-up and sits above the board", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    document.querySelector('[data-3d-camera="top"]').click(); document.querySelector('[data-3d-camera="3d"]').click();
+    const d = window.Review3D.state;
+    return d.cameras.every(c => c.up.x === 0 && c.up.y === 1 && c.up.z === 0 && c.position.y > d.box.max.y);`],
+  ["3D camera movement is linked and leaving disposes", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const d = window.Review3D.state, r = window.__3dInputResult;
+    const delta = (p, q) => Math.hypot(...p.map((v, i) => v - q[i]));
+    const linked = r && delta(r.after[0], r.before[0]) > .001 && delta(r.after[0], r.after[1]) < .001;
+    await select("board"); return linked && window.Review3D.state.disposed === true;`],
+  ["3D changed footprints use cloned highlight materials", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const h = window.Review3D.state.highlights || [], refs = new Set(h.map(x => x.ref));
+    return ["J2", "C20"].every(ref => refs.has(ref) && h.some(x => x.ref === ref && x.materials.some((m, i) => m !== x.original[i])));`],
+  ["3D glyph marker labels are visible over their canvas", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const l = document.querySelector('.marker3d[data-ref="J2"]'), c = l?.parentElement.querySelector("canvas"), a = l?.getBoundingClientRect(), b = c?.getBoundingClientRect();
+    return !!l && l.textContent.includes("≡ J2") && a.left >= b.left && a.right <= b.right && a.top >= b.top && a.bottom <= b.bottom;`],
+  ["3D Overlay shows old-position ghosts", "v=3d&m=overlay", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const d = window.Review3D.state, g = d.ghosts.find(x => x.ref === "J2"), h = d.highlights.find(x => x.ref === "J2" && x.side === "head");
+    return !!g && !!h && Math.hypot(...g.translation.map((v, i) => v - h.marker.position.toArray()[i])) > .001;`],
+  ["3D Blend slider and B switch cross-fade without moving camera", "v=3d&m=blend", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const d = window.Review3D.state, r = document.querySelector("#modes input[type=range]"); r.value = 20; r.dispatchEvent(new Event("input"));
+    const faded = d.blend === .2, p = d.cameras[0].position.toArray(); document.dispatchEvent(new KeyboardEvent("keydown", { key:"b" }));
+    return faded && d.blend === 1 && p.join(",") === d.cameras[0].position.toArray().join(",");`],
+  ["3D Changes only fades unchanged components and disables Wipe", "v=3d&m=semantic", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const u = (window.Review3D.state.faded || []).find(x => x.ref === "U4"), faded = u?.materials.some(m => m.opacity === .12);
+    return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
     const h = document.querySelector("#hdr").textContent;
@@ -388,4 +459,86 @@ export const CHECKS = [
     document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     await new Promise(res => setTimeout(res, 300));
     return S.s !== null || "no step; focus on " + document.activeElement.tagName;`],
+  ["3D fallback blocks and panel list cover missing models", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 500));
+    const d = REVIEW_DATA.projects[0].board.no_model || [];
+    return d.length === 3 && ["D1", "L1", "U3"].every(ref => d.some(x => x.ref === ref && x.pos?.length === 3 && x.box?.length === 4)) && document.querySelectorAll("[data-no-model]").length === 3;`],
+  ["3D visibility controls hide silkscreen", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 500));
+    const cb = document.querySelector('[data-3d-group="silk"]'); if (!cb) return false; cb.click();
+    return (S.hidden3d || []).includes("silk");`],
+  ["3D visibility classifies geometry on both board sides", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    const st = Review3D.state, {THREE} = THREE3D, bad = [], layers = [];
+    st.roots.forEach((root, i) => {
+      if (!root) return;
+      const meshes = []; root.traverse(o => { if (o.isMesh) meshes.push(o); });
+      const pcb = meshes.filter(o => /PCB/i.test(o.name)), box = new THREE.Box3(); pcb.forEach(o => box.union(new THREE.Box3().setFromObject(o)));
+      const middle = box.getCenter(new THREE.Vector3()).y, groups = o => st.groups.find(g => g.object === o)?.groups || [];
+      for (const [pattern, group] of [[/silkscreen/i, "silk"], [/soldermask/i, "mask"]]) {
+        const found = meshes.filter(o => pattern.test(o.name));
+        for (const side of ["top", "bottom"]) if (new Set(found.filter(o => groups(o).includes(side)).map(o => group === "silk" ? o.parent : o)).size !== 1) bad.push(i + " " + group + " " + side);
+        found.forEach(o => { const side = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3()).y > middle ? "top" : "bottom"; layers.push({object:o, side}); if (groups(o).join(",") !== [group, side].join(",")) bad.push(i + " " + group + " geometry " + side); });
+      }
+      if (!pcb.length || pcb.some(o => groups(o).join(",") !== "board")) bad.push(i + " PCB groups");
+      const j2 = root.getObjectByName("J2"), parts = [];
+      root.traverse(o => { if (/^[A-Z]+\\d+$/.test(o.name)) parts.push(o); });
+      for (const part of parts.filter(o => o === j2 || new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3()).y < middle)) {
+        const side = part === j2 ? "top" : "bottom"; let count = 0;
+        part.traverse(o => { if (o.isMesh) { count++; if (groups(o).join(",") !== "bodies," + side) bad.push(i + " " + part.name + " " + side); } });
+        if (!count) bad.push(i + " missing meshes " + part.name);
+      }
+      if (!j2) bad.push(i + " missing J2");
+    });
+    document.querySelector('[data-3d-group="bottom"]').click();
+    layers.forEach(({object, side}) => { if (object.visible !== (side === "top")) bad.push("bottom toggle " + object.name + " " + side); });
+    return bad.length ? bad.join("; ") : true;`],
+  ["3D address records camera and hidden groups", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
+    return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
+  ["3D change card keeps 3D and frames J2", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, n = (() => { let f; st.roots[1].traverse(o => { if (!f && o.name === "J2") f = o; }); return f; })(),
+      c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[0]);
+    return (S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15) || JSON.stringify({v:S.v,hash:location.hash,s:S.s,x:c.x,y:c.y});`],
+  ["3D selection outline in each pane wraps that pane's own J2", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, sel = st.selected || [];
+    const j2 = r => { let f; r.traverse(o => { if (!f && o.name === "J2") f = o; }); return new THREE.Box3().setFromObject(f).getCenter(new THREE.Vector3()); };
+    return sel.length === 2 && [0, 1].every(i => sel[i].position.distanceTo(j2(st.roots[i])) < 1e-4);`],
+  ["3D no-model U3 block sits on the board, overlaps its footprint and is not hidden by silkscreen", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, row = REVIEW_DATA.projects[0].board.no_model.find(x => x.ref === "U3"), blk = st.blocks.filter(b => b.ref === "U3");
+    if (!blk.length) return "no U3 block";
+    const fp = new THREE.Box3(new THREE.Vector3(row.box[0] / 1000, -1, row.box[1] / 1000), new THREE.Vector3(row.box[2] / 1000, 1, row.box[3] / 1000));
+    for (const b of blk) {
+      const root = st.roots[b.side === "head" ? 1 : 0]; let top = -Infinity;
+      root.traverse(o => { if (o.isMesh && /PCB|silkscreen|soldermask/i.test(o.name)) top = Math.max(top, new THREE.Box3().setFromObject(o).max.y); });
+      b.object.updateWorldMatrix(true, true); const w = new THREE.Box3().setFromObject(b.object), ctr = w.getCenter(new THREE.Vector3());
+      if (!w.intersectsBox(fp)) return "no overlap " + JSON.stringify([w.min, w.max]);
+      if (w.min.y < top - 1e-9 || w.min.y > top + 1e-4) return "not resting on board top " + w.min.y + " vs " + top;
+      if (Math.abs(w.max.y - w.min.y - .001) > 1e-6) return "not 1 mm tall";
+      const ray = new THREE.Raycaster(new THREE.Vector3(ctr.x, w.max.y + .01, ctr.z), new THREE.Vector3(0, -1, 0)), h = ray.intersectObject(root, true)[0];
+      let a = h?.object; while (a && a !== b.object) a = a.parent;
+      if (!a) return "first hit from above is " + h?.object.name;
+    }
+    return true;`],
+  ["3D no-model list item frames its block and labels it", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('[data-no-model="U3"]').click(); await new Promise(r => setTimeout(r, 600));
+    const { THREE } = window.THREE3D, st = window.Review3D.state, b = st.blocks.find(x => x.ref === "U3" && x.side === "head"), c = new THREE.Box3().setFromObject(b.object).getCenter(new THREE.Vector3()).project(st.cameras[0]);
+    return Math.abs(c.x) < .15 && Math.abs(c.y) < .15 && /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "");`],
+  ["3D canvas click via mouse input selects J2 row", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    return S.s === "c2" && S.v === "3d";`],
 ];

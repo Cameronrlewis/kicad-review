@@ -382,3 +382,53 @@ assert not re.search(r"(?im)^\s*(?:GITHUB_CLIENT_ID|GITHUB_CLIENT_SECRET|SESSION
 for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
     assert re.fullmatch(r"[0-9a-f]{40}", action), action
 print("ok")
+
+# Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
+import base64, gzip
+from kicad_review import load_settings, build_project, board_changed, export_glb
+here = os.getcwd()
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n",
+          "base/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (layer "F.Cu") (at 10 10 0) (uuid "u5") (fp_text reference "U5") (pad "1" smd (at 0 0)) (model "u.wrl"))
+(footprint "Package:R" (layer "F.Cu") (at 20 10 0) (uuid "r1") (fp_text reference "R1") (pad "1" smd (at -1 0)) (pad "2" smd (at 1 0))))''',
+          "head/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (layer "F.Cu") (at 10 10 0) (uuid "u5") (fp_text reference "U5") (pad "1" smd (at 0 0)) (model "u.wrl"))
+(footprint "Package:R" (layer "F.Cu") (at 20 10 0) (uuid "r1") (fp_text reference "R1") (pad "1" smd (at -1 0)) (pad "2" smd (at 1 0))))''',
+          "review/P/base/board.glb": "base glb\x00", "review/P/head/board.glb": "head glb\x00",
+          "review/P/head/glb.log": "Could not add 3D model for U5.\n",
+          "review/P/base/pcb/P-F.Cu.svg": '<svg viewBox="0 0 1 1"><path/></svg>',
+          "review/P/head/pcb/P-F.Cu.svg": '<svg viewBox="0 0 1 1"><path/></svg>',
+          "review/P/base/drc.json": "{}", "review/P/head/drc.json": "{}"})
+assert DEFAULT_SETTINGS["3d"]["enabled"] is False
+assert load_settings()["3d"]["enabled"] is True
+# A report with 3D disabled is deterministic; this is the pre-feature HTML baseline for the same fixture.
+os.remove("base/kicad-review.toml")
+write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": []})})
+kicad_review.cmd_report(None)
+html_before = open("review/kicad-review.html", "rb").read()
+# A disabled report is still byte-for-byte deterministic even though the viewer code is bundled.
+kicad_review.cmd_report(None)
+assert open("review/kicad-review.html", "rb").read() == html_before
+write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n"})
+# KiCad 10.0.0 emits this warning on stdout; the retained log must include both streams.
+real_run = kicad_review.subprocess.run
+kicad_review.subprocess.run = lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "Could not add 3D model for U5.\n", "stderr": "other diagnostic\n"})()
+export_glb({"dir": "P", "name": "P"}, "head", "review/P/head")
+kicad_review.subprocess.run = real_run
+assert open("review/P/head/glb.log", encoding="utf-8").read() == "Could not add 3D model for U5.\nother diagnostic\n"
+settings = load_settings(("base", "head"))
+blobs = {}
+p = build_project({"dir": "P", "name": "P", "status": "modified"}, blobs, settings)
+assert gzip.decompress(base64.b64decode(blobs[p["board"]["model3d"]["base"]])) == b"base glb\x00"
+assert gzip.decompress(base64.b64decode(blobs[p["board"]["model3d"]["head"]])) == b"head glb\x00"
+missing = {x["ref"]: x for x in p["board"]["no_model"]}
+assert {ref: (x["side"], x["reason"]) for ref, x in missing.items()} == {
+    "U5": ("head", "file not found"), "R1": ("both", "no model in footprint")}, missing
+# 3D fallback blocks need geometry for unchanged as well as changed footprints.
+for x in missing.values():
+    assert len(x["pos"]) == 3 and len(x["box"]) == 4 and x["layer"] in ("F.Cu", "B.Cu"), x
+assert not board_changed({"dir": "P", "name": "P"})
+write(t, {"head/P/P.kicad_pcb": "(kicad_pcb changed)"})
+assert board_changed({"dir": "P", "name": "P"})
+os.chdir(here)
+print("ok")

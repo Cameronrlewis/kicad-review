@@ -2,10 +2,11 @@
 // KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see README, "Data format").
 const D = window.REVIEW_DATA;
 const $ = s => document.querySelector(s);
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, checks: { check: "", scope: null, error: true, warning: true } };
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
 const proj = () => D.projects[S.p];
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const GLYPH = { added: "＋", removed: "−", modified: "≡" };
+const GROUPS3D = [["bodies", "Component bodies"], ["top", "Top side"], ["bottom", "Bottom side"], ["silk", "Silkscreen"], ["mask", "Soldermask"], ["board", "Board"]];
 
 function onView(r, view) {
   if (!r.where) return false;
@@ -33,6 +34,12 @@ function layerGroup(n) {
 }
 function renderLayers() {
   const box = $("#layers");
+  if (S.v === "3d") {
+    const hidden = new Set(S.hidden3d || []);
+    box.innerHTML = `<h3>3D view</h3>${GROUPS3D.map(([id, label]) => `<label><input type="checkbox" data-3d-group="${id}" ${hidden.has(id) ? "" : "checked"}> ${label}</label>`).join("")}`;
+    box.querySelectorAll("[data-3d-group]").forEach(cb => cb.onchange = () => { const h = new Set(S.hidden3d || []); cb.checked ? h.delete(cb.dataset["3dGroup"]) : h.add(cb.dataset["3dGroup"]); S.hidden3d = [...h]; window.Review3D?.setHidden(S.hidden3d); saveHash(); });
+    return;
+  }
   if (S.v !== "board" || !proj().board.changed) { box.innerHTML = ""; return; }
   const on = new Set(layersOn()), groups = {};
   for (const l of proj().board.layers) (groups[layerGroup(l.name)] ||= []).push(l);
@@ -72,7 +79,8 @@ function renderNav() {
     <h3>Board</h3><ul class="tree">${p.board.layers.length || p.board.changed
       ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
           <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
-      : '<li class="muted">No board changes</li>'}</ul>
+      : '<li class="muted">No board changes</li>'}
+      ${p.board.model3d && (p.board.model3d.base || p.board.model3d.head) ? `<li><button data-view='3d' aria-current="${S.v === '3d'}"><span class="name">3D view</span></button></li>` : ""}</ul>
     <div id="layers"></div>`;
   $("#proj").onchange = e => openProject(+e.target.value);
   for (const b of document.querySelectorAll("#nav [data-view]")) b.onclick = () => select(b.dataset.view);
@@ -83,7 +91,7 @@ function firstChangedView(p) {
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
-function select(view) { S.v = view; S.x = S.y = S.z = null; renderNav(); draw(); }
+function select(view) { S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -91,11 +99,13 @@ function decodeState(hash) {
   for (const k of ["v", "m", "s", "t"]) if (q.has(k)) out[k] = q.get(k);
   for (const k of ["x", "y", "z"]) if (q.has(k)) out[k] = +q.get(k);
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
+  if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
+  if (q.has("h")) out.hidden3d = q.get("h").split(",").filter(Boolean);
   return out;
 }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
-  if ((st.v === "board" && p.board.changed) || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
+  if ((st.v === "board" && p.board.changed) || (st.v === '3d' && p.board.model3d && (p.board.model3d.base || p.board.model3d.head)) || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
@@ -104,16 +114,19 @@ function valid(st) {   // drop anything that does not exist in this report
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
   }
+  if (Array.isArray(st.camera3d) && st.camera3d.length === 6 && st.camera3d.every(Number.isFinite)) out.camera3d = st.camera3d;
+  if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
   return out;
 }
 function applyState(st) {
   const v = valid(st);
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
-                     layers: v.layers ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   renderModes();
   renderNav();
   renderPanel();
+  renderZoombar();
   return draw();
 }
 
@@ -168,12 +181,16 @@ let gen = 0;
 async function draw() {
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
-  if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
+  if (S.v === '3d') {
+    $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
+    await window.Review3D.show(stage, proj(), S);
+    return;
+  }
+  window.Review3D?.dispose(); if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
   else await MODES[S.m](stage, view);
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
-  if (view && !placed()) fit(); else apply();
-  afterDraw(view);
+  if (view && !placed()) fit(); else apply(); afterDraw(view);
 }
 async function drawSide(stage, view) {
   viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
@@ -282,13 +299,21 @@ function onApply() {
   vp.querySelector(".divider").style.left = `${x}px`;
   vp.querySelector(".stack.head").style.clipPath = `inset(0 0 0 ${Math.max(0, (x - tx) / k)}px)`;
 }
+function toggleBlend3D() {
+  window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend;
+  const r = $("#modes input[type=range]"); if (r) r.value = Math.round(S.blend * 100);
+  const b = $("#modes [data-3d-blend-toggle]"); if (b) b.textContent = S.blend < .5 ? "Show head" : "Show base";
+}
 function renderModes() {
+  const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
-    `<button data-mode="${m}" aria-pressed="${S.m === m}">${n}</button>`).join("")
-    + (S.m === "blend" ? `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>` : "");
-  for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
+    `<button data-mode="${m}" aria-pressed="${S.m === m}" ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${is3d && m === "semantic" ? "Changes only" : n}</button>`).join("")
+    + (S.m === "blend" ? (is3d ? `<label class="blend"><span>Base</span><input type="range" aria-label="Base to Head blend" min="0" max="100" value="${Math.round(S.blend * 100)}"><span>Head</span></label><button data-3d-blend-toggle>${S.blend < .5 ? "Show head" : "Show base"}</button>` : `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>`) : "");
+  for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { if (b.getAttribute("aria-disabled") === "true") return; S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
   const r = document.querySelector("#modes input[type=range]");
-  if (r) r.oninput = () => { S.blend = r.value / 100; const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; };
+  const blendButton = $("#modes [data-3d-blend-toggle]"), buttonText = () => { if (blendButton) blendButton.textContent = S.blend < .5 ? "Show head" : "Show base"; };
+  if (r) r.oninput = () => { S.blend = r.value / 100; if (is3d) window.Review3D?.setBlend(S.blend); else { const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; } buttonText(); };
+  blendButton?.addEventListener("click", toggleBlend3D);
 }
 
 const MARKED = new Set(["symbol", "footprint", "sheet", "zone", "label", "global label", "hierarchical label", "via", "track", "board outline"]);
@@ -333,14 +358,16 @@ function pickAt(vp, e) {
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
 function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); }
+if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
   if (!r) return Promise.resolve();
   S.s = id;
+  if (S.v === "3d") { markSelected(); window.Review3D?.focus(r); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); return Promise.resolve(); }
   const view = viewOf(r) ?? S.v;
   const box = rowBox(r, r.action === "removed" ? "base" : "head");
-  const zoom = () => { if (box) zoomTo(box); markSelected(); };
+  const zoom = () => { if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
   if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
   return draw().then(zoom);
 }
@@ -430,7 +457,7 @@ function renderPanel() {
     <div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
-    <div class="cards">${cardsHtml()}</div>`);
+    <div class="cards">${cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
   for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); saveHash(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
@@ -440,6 +467,7 @@ function renderPanel() {
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
   const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
   bindCards();
+  for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
 }
 
@@ -450,6 +478,8 @@ function encodeState(s = S) {
   if (s.s) q.set("s", s.s);
   if (s.t && s.t !== "changes") q.set("t", s.t);
   if (s.layers) q.set("l", s.layers.join(","));
+  if (s.v === "3d" && Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
+  if (s.v === "3d" && s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
@@ -466,6 +496,7 @@ document.addEventListener("keydown", e => {
   if (arrow && e.target.closest?.("#panel, button, [role=slider]")) return;   // leave arrows to scrolling and widgets
   if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
   else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
+  else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
   else if (e.key === "f") fit();
   else if (e.key === "Escape") { S.s = null; markSelected(); draw(); saveHash(); }
 });
@@ -475,6 +506,7 @@ function positionLink() {
 }
 function applyGoTo(text) { const i = text.indexOf("#"); if (i >= 0) applyState(decodeState(text.slice(i))); }
 function renderZoombar() {
+  if (S.v === '3d' && window.Review3D) { window.Review3D.cameraBar(); return; }
   $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out">−</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in">+</button>
     <button data-act="fit">Fit</button><span class="sep"></span><span class="muted">j / k: next / previous</span>
     <button data-act="copy">Copy link</button><input class="goto" placeholder="Go to… paste a link">`;
