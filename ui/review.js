@@ -291,11 +291,12 @@ function onApply() {
 function renderModes() {
   const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
-    `<button data-mode="${m}" aria-pressed="${S.m === m}" ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${n}</button>`).join("")
-    + (!is3d && S.m === "blend" ? `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>` : "");
+    `<button data-mode="${m}" aria-pressed="${S.m === m}" ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${is3d && m === "semantic" ? "Changes only" : n}</button>`).join("")
+    + (S.m === "blend" ? `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>${is3d ? '<button data-3d-blend-toggle>Show base / Show head</button>' : ""}` : "");
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { if (b.getAttribute("aria-disabled") === "true") return; S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
   const r = document.querySelector("#modes input[type=range]");
-  if (r) r.oninput = () => { S.blend = r.value / 100; const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; };
+  if (r) r.oninput = () => { S.blend = r.value / 100; if (is3d) window.Review3D?.setBlend(S.blend); else { const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; } };
+  $("#modes [data-3d-blend-toggle]")?.addEventListener("click", () => { window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend; const input = $("#modes input[type=range]"); if (input) input.value = Math.round(S.blend * 100); });
 }
 
 const MARKED = new Set(["symbol", "footprint", "sheet", "zone", "label", "global label", "hierarchical label", "via", "track", "board outline"]);
@@ -473,6 +474,7 @@ document.addEventListener("keydown", e => {
   if (arrow && e.target.closest?.("#panel, button, [role=slider]")) return;   // leave arrows to scrolling and widgets
   if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
   else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
+  else if (e.key === "b" && S.v === '3d' && S.m === "blend") { window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend; const r = $("#modes input[type=range]"); if (r) r.value = Math.round(S.blend * 100); }
   else if (e.key === "f") fit();
   else if (e.key === "Escape") { S.s = null; markSelected(); draw(); saveHash(); }
 });
