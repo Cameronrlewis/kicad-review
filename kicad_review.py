@@ -81,8 +81,9 @@ def projects_at(rev):
         return {}
     files = git("ls-tree", "-r", "--name-only", rev).splitlines()
     pros = [f for f in files if f.endswith(".kicad_pro") and not is_junk(f)]
-    if len({posixpath.dirname(f) for f in pros}) < len(pros):
-        sys.exit("Multiple .kicad_pro files in one directory; KiCad allows one project per directory")
+    dirs = [posixpath.dirname(f) for f in pros]
+    if len(set(dirs)) < len(dirs):
+        sys.exit(f"Multiple .kicad_pro files in {next(d or '.' for d in dirs if dirs.count(d) > 1)!r}; KiCad allows one project per directory")
     return {posixpath.dirname(f): f for f in pros}
 
 

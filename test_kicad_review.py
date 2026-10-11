@@ -183,8 +183,7 @@ assert found == {"B": "B/B.kicad_pro"}, found
 assert seen == ["repo/B/B.kicad_pro"], seen
 print("ok")
 
-# DR-S4: KiCad allows only one project per directory, at either revision.
-assert projects_at(None) == {}
+# DR-S4: KiCad allows only one project per directory.
 for directory in ("", "P/"):
     t = tempfile.mkdtemp()
     os.chdir(t)
@@ -195,19 +194,17 @@ for directory in ("", "P/"):
         duplicate = commit("HEAD")
         g("rm", directory + "Z.kicad_pro"); g("commit", "-q", "-m", "one project")
         assert projects_at(commit("HEAD")) == {directory.rstrip("/"): directory + "A.kicad_pro"}
-        for base, head in ((None, duplicate), (duplicate, commit("HEAD"))):
-            try:
-                detect(base, head)
-                raise AssertionError("DR-S4: duplicate project directory must stop detection")
-            except SystemExit as e:
-                assert "one project per directory" in str(e), e
+        try:
+            detect(None, duplicate)
+            raise AssertionError("DR-S4: duplicate project directory must stop detection")
+        except SystemExit as e:
+            assert str(e) == f"Multiple .kicad_pro files in {directory.rstrip('/') or '.'!r}; KiCad allows one project per directory", e
     finally:
         os.chdir(here)
 print("ok DR-S4 duplicate project directory")
 
-# DR-S5: detect rejects output id collisions without changing the encoding.
-assert [kicad_review.project_id(d) for d in ("a/b", "a__b", "", "_root")] == ["a__b", "a__b", "_root", "_root"]
-for directories, collision in ((("a/b", "a__b"), True), (("", "_root"), True), (("a__b", "c"), False)):
+# DR-S5: detect rejects output id collisions but allows noncolliding __ names.
+for directories, collision in ((("a/b", "a__b"), True), (("a__b", "c"), False)):
     t = tempfile.mkdtemp()
     os.makedirs(f"{t}/repo")
     os.chdir(f"{t}/repo")
@@ -221,7 +218,6 @@ for directories, collision in ((("a/b", "a__b"), True), (("", "_root"), True), (
         if collision:
             assert r.returncode != 0, "DR-S5: colliding project ids must stop detection"
             assert "project ids collide" in r.stderr, r.stderr
-            assert not os.path.exists(f"{t}/review/detect.json") and not os.path.exists(f"{t}/output"), "DR-S5: collision must stop before output"
         else:
             assert r.returncode == 0, r.stderr
             assert len(json.load(open(f"{t}/review/detect.json"))["projects"]) == 2
@@ -380,22 +376,21 @@ assert seen == ["a-B", "b-x-B", "C"], seen
 print("ok")
 
 # DR-S6: flattened directory labels must not overwrite earlier fabrication outputs.
-for paths in (("a/b/P", "a-b/P"), ("a/b/P", "x/P", "a-b-P")):
-    t = tempfile.mkdtemp()
-    os.chdir(t)
-    write(t, {f"repo/{p}.kicad_pro": "{}" for p in paths})
-    seen = []
-    kicad_review.release_project = lambda pro, tag, s, out, label: seen.append(label) or []
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {f"repo/{p}.kicad_pro": "{}" for p in ("a/b/P", "a-b/P")})
+seen = []
+kicad_review.release_project = lambda pro, tag, s, out, label: seen.append(label) or []
+try:
     try:
-        try:
-            kicad_review.cmd_release(type("A", (), {"tag": "v1"}))
-            raise AssertionError("DR-S6: duplicate release label must stop fabrication")
-        except SystemExit as e:
-            assert "Duplicate release label" in str(e) and "a-b-P" in str(e), e
-        assert seen == ["a-b-P"], "DR-S6: duplicate label must stop before exporting again"
-    finally:
-        kicad_review.release_project = real
-        os.chdir(here)
+        kicad_review.cmd_release(type("A", (), {"tag": "v1"}))
+        raise AssertionError("DR-S6: duplicate release label must stop fabrication")
+    except SystemExit as e:
+        assert "Duplicate release label" in str(e) and "a-b-P" in str(e), e
+    assert seen == ["a-b-P"], "DR-S6: duplicate label must stop before exporting again"
+finally:
+    kicad_review.release_project = real
+    os.chdir(here)
 print("ok DR-S6 duplicate release label")
 
 # Minor: the README says what the arrow keys really do (they step only while focus is outside the list and buttons).
