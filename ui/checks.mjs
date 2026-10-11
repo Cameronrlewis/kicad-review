@@ -1,5 +1,42 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["mode activation retains keyboard focus", "", `
+    const b = document.querySelector('#modes [data-mode="overlay"]'); b.focus(); b.click();
+    return document.activeElement === document.querySelector('#modes [data-mode="overlay"]') || document.activeElement.tagName;`],
+  ...['[data-tab="checks"]', 'select.kind', '[data-check-scope="all"]'].map(selector => [`panel activation retains keyboard focus on ${selector}`, selector.includes("data-check-") ? "p=1&t=checks" : "p=1", `
+    const selector = '${selector}', b = document.querySelector("#panel " + selector); b.focus();
+    if (b.matches("select")) { b.value = b.options[1].value; b.dispatchEvent(new Event("change")); } else b.click();
+    return document.activeElement === document.querySelector("#panel " + selector) || document.activeElement.tagName;`]),
+  ["show-all activation retains keyboard focus when its button disappears", "p=1&t=checks", `
+    S.checks.error = S.checks.warning = false; renderPanel();
+    const b = document.querySelector("#panel .show-all"); b.focus(); b.click();
+    return document.activeElement === document.querySelector('#panel [data-check-scope="all"]') && document.querySelectorAll("#panel .viol").length > 0 || document.activeElement.tagName;`],
+  ...["pasted", "hashchange"].map(path => [`${path} selection-only address opens its drawing`, "", `
+    const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return true;
+    await new Promise(r => setTimeout(r, 400));
+    const hash = "#p=0&s=" + row.id;
+    if ("${path}" === "pasted") { const input = document.querySelector("#zoombar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
+    else location.hash = hash;
+    const until = performance.now() + 5000, box = rowBox(row, "head");
+    while ((S.v !== "board" || S.x == null || Math.abs(S.x - (box[0] + box[2]) / 2) >= .01) && performance.now() < until) await new Promise(r => setTimeout(r, 50));
+    return S.v === "board" && S.s === row.id && Math.abs(S.x - (box[0] + box[2]) / 2) < .01 && !!document.querySelector("#stage .marker.sel") || JSON.stringify({view:S.v, selection:S.s, x:S.x});`]),
+  ["pasted selection address preserves an explicit position", "", `
+    const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return true;
+    applyGoTo("#p=0&v=board&s=" + row.id + "&x=10&y=20&z=5");
+    await new Promise(r => setTimeout(r, 800));
+    return S.x === 10 && S.y === 20 && S.z === 5 && S.s === row.id;`],
+  ["unchanged sheet selection saves the address", "", `
+    const sheet = proj().sheets.find(s => s.status === "unchanged" && !s.svg); if (!sheet) return true;
+    await new Promise(r => setTimeout(r, 400));
+    document.querySelector('#nav [data-view="sheet:' + sheet.path + '"]').click();
+    await new Promise(r => setTimeout(r, 400));
+    return new URLSearchParams(location.hash.slice(1)).get("v") === "sheet:" + sheet.path || location.hash;`],
+  ["unchanged project selection saves the address", "", `
+    const i = D.projects.findIndex(p => !p.board.changed && p.sheets.length && p.sheets.every(s => !s.svg)); if (i < 0) return true;
+    await new Promise(r => setTimeout(r, 400));
+    const select = document.querySelector("#proj"); select.value = i; select.dispatchEvent(new Event("change"));
+    await new Promise(r => setTimeout(r, 400));
+    return new URLSearchParams(location.hash.slice(1)).get("p") === String(i) || location.hash;`],
   ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));

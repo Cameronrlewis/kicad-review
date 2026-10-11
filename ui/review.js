@@ -91,7 +91,7 @@ function firstChangedView(p) {
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
-function select(view) { S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); }
+function select(view) { S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -123,11 +123,12 @@ function applyState(st) {
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
+  const hasPos = S.z != null;
   renderModes();
   renderNav();
   renderPanel();
   renderZoombar();
-  return draw();
+  return draw().then(() => S.s && !hasPos && goTo(S.s));
 }
 
 const PX = 4;                       // CSS px per mm at z = PX
@@ -305,6 +306,7 @@ function toggleBlend3D() {
   const b = $("#modes [data-3d-blend-toggle]"); if (b) b.textContent = S.blend < .5 ? "Show head" : "Show base";
 }
 function renderModes() {
+  const focus = document.activeElement?.dataset.mode;
   const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
     `<button data-mode="${m}" aria-pressed="${S.m === m}" ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${is3d && m === "semantic" ? "Changes only" : n}</button>`).join("")
@@ -314,6 +316,7 @@ function renderModes() {
   const blendButton = $("#modes [data-3d-blend-toggle]"), buttonText = () => { if (blendButton) blendButton.textContent = S.blend < .5 ? "Show head" : "Show base"; };
   if (r) r.oninput = () => { S.blend = r.value / 100; if (is3d) window.Review3D?.setBlend(S.blend); else { const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; } buttonText(); };
   blendButton?.addEventListener("click", toggleBlend3D);
+  if (focus) $(`#modes [data-mode="${CSS.escape(focus)}"]`)?.focus();
 }
 
 const MARKED = new Set(["symbol", "footprint", "sheet", "zone", "label", "global label", "hierarchical label", "via", "track", "board outline"]);
@@ -446,6 +449,7 @@ function renderChecks() {
   </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 function renderPanel() {
+  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
@@ -469,6 +473,7 @@ function renderPanel() {
   bindCards();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
+  if (focus) ($(`#panel ${focus}`) || (focus === ".show-all" ? $('#panel [data-check-scope="all"]') : null))?.focus();
 }
 
 function encodeState(s = S) {
@@ -575,9 +580,8 @@ renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");
 if (shotMode) document.body.classList.add("shot");
 function start() {
-  const drawn = applyState(decodeState(location.hash)), hasPos = S.z != null;   // read before draw() fits
+  const drawn = applyState(decodeState(location.hash));
   return drawn.then(async () => {
-    if (S.s && !hasPos) await goTo(S.s);   // an address with a position keeps it; the selection is only marked
     if (shotMode) {
       const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
       document.title = "ready";
