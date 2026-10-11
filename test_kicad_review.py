@@ -410,6 +410,10 @@ for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
     assert re.fullmatch(r"[0-9a-f]{40}", action), action
 print("ok")
 
+# WF-S3: deployment tooling with credentials must use an exact Wrangler 4.x version.
+assert re.search(r"npx --yes wrangler@4\.\d+\.\d+ deploy", workflow), "WF-S3: floating Wrangler version"
+print("ok WF-S3: exact Wrangler version")
+
 # Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
 import base64, gzip
 from kicad_review import load_settings, build_project, board_changed, export_glb
