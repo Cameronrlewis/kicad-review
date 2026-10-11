@@ -47,6 +47,13 @@ for uuids in (["pin"], []):
     assert (c["new_errors"], c["fixed"], c["status"]) == (1, 0, "fail"), "CK-S1: second sheet error must be new"
 print("ok CK-S1 sheet instance")
 
+# Promoting a warning to an error is new for UUID, positional and explicit violation keys.
+for identity in ({"uuids": ["pin"]}, {"uuids": []}, {"key": ("unconnected", ("GND",), 1)}):
+    base = [{**V("clearance", "warning", [], [1, 1]), **identity}]
+    c = run_check("drc", DEFAULT_SETTINGS, [{**base[0], "severity": "error"}], base)
+    assert (c["new_errors"], c["fixed"], c["status"]) == (1, 1, "fail"), "CK-S2: promoted warning must be a new error"
+print("ok CK-S2 severity promotion")
+
 # Data format v1: ids unique per file, layer changed flags, links.
 from kicad_review import assign_ids, review_links
 projects = [{"changes": [{"kind": "symbol"}, {"kind": "track"}],

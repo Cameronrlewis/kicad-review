@@ -733,7 +733,7 @@ def bom_violations(objs, fields):
 
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
-    sig = (tuple(sorted(v["where"].items())),)
+    sig = (v["severity"], tuple(sorted(v["where"].items())))
     if v.get("key"):
         return {v["key"] + sig}
     desc = re.sub(r"[\d.]+", "#", v["description"])
