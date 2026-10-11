@@ -407,9 +407,9 @@ function renderChecks() {
   const scope = state.scope ?? (totalNew ? "new" : "all");
   const checked = state.check && byName.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
-    if (!check || setting === "off") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
+    if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
       <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span></span>
-      <span class="check-reason">turned off in kicad-review.toml</span></button>`;
+      <span class="check-reason">${esc(check?.reason || "turned off in kicad-review.toml")}</span></button>`;
     const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
     const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
     const newer = check.new_errors + check.new_warnings;

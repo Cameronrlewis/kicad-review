@@ -302,7 +302,13 @@ try:
     write(t, {"head/P/P.kicad_pcb": "(kicad_pcb)", "review/P/head/drc.json": "{}"})
     objs = {"head": {"r1": {"kind": "footprint", "props": {}}}, "base": {}}
     checks = project_checks({"dir": "P", "name": "P"}, DEFAULT_SETTINGS, objs)
-    assert [c["name"] for c in checks] == ["drc"], "CK-S3: board-only parity and BOM must be not run"
+    assert [c["name"] for c in checks] == ["drc", "parity", "bom"], "CK-S3: board-only parity and BOM must explicitly report not run"
+    assert all(c["status"] == "not_run" and c["reason"] == "no schematic" and not c["violations"] for c in checks[1:]), checks
+    assert all(c["status"] != "fail" for c in checks), checks
+    comment = kicad_review.checks_markdown({"projects": [{"name": "P", "checks": checks}]})
+    assert comment.count("not run") == 2 and comment.count("no schematic") == 2, comment
+    off = {**DEFAULT_SETTINGS, "checks": {**DEFAULT_SETTINGS["checks"], "parity": "off", "bom": "off"}}
+    assert [c["name"] for c in project_checks({"dir": "P", "name": "P"}, off, objs)] == ["drc"]
     write(t, {"head/P/P.kicad_sch": "(kicad_sch)", "review/P/head/erc.json": "{}"})
     checks = project_checks({"dir": "P", "name": "P"}, DEFAULT_SETTINGS, objs)
     assert [c["name"] for c in checks] == ["erc", "drc", "parity", "bom"], checks

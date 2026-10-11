@@ -785,7 +785,10 @@ def project_checks(p, settings, objs):
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
-    return [c for c in checks if c]
+    return [c for c in checks if c] + [
+        {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
+         "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+        for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
 
 
 def page_svg(out_dir, name, page):
@@ -979,7 +982,7 @@ def cmd_report(args):
         fh.write(f"name={name}\n")
 
 
-STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
+STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
 MARKER = "<!-- kicad-review -->"
 TABLE_KINDS = ("title block", "design rules", "symbol", "footprint", "sheet", "label", "global label",
                "hierarchical label", "zone", "board outline")
@@ -1162,7 +1165,7 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status']} | "
+            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error"]
