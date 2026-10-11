@@ -1,13 +1,24 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["mode activation retains keyboard focus", "", `
+    const b = document.querySelector('#modes [data-mode="overlay"]'); b.focus(); b.click();
+    return document.activeElement === document.querySelector('#modes [data-mode="overlay"]') || document.activeElement.tagName;`],
+  ...['[data-tab="checks"]', '.chip-filter[data-action="added"]', 'select.kind', '[data-check-summary="erc"]', '[data-check-scope="all"]', '[data-check-severity="warning"]'].map(selector => [`panel activation retains keyboard focus on ${selector}`, selector.includes("data-check-") ? "p=1&t=checks" : "p=1", `
+    const selector = '${selector}', b = document.querySelector("#panel " + selector); b.focus();
+    if (b.matches("select")) { b.value = b.options[1].value; b.dispatchEvent(new Event("change")); } else b.click();
+    return document.activeElement === document.querySelector("#panel " + selector) || document.activeElement.tagName;`]),
+  ["show-all activation retains keyboard focus when its button disappears", "p=1&t=checks", `
+    S.checks.error = S.checks.warning = false; renderPanel();
+    const b = document.querySelector("#panel .show-all"); b.focus(); b.click();
+    return document.activeElement === document.querySelector('#panel [data-check-scope="all"]') && document.querySelectorAll("#panel .viol").length > 0 || document.activeElement.tagName;`],
   ...["pasted", "hashchange"].map(path => [`${path} selection-only address opens its drawing`, "", `
     const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return true;
     await new Promise(r => setTimeout(r, 400));
     const hash = "#p=0&s=" + row.id;
     if ("${path}" === "pasted") { const input = document.querySelector("#zoombar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
     else location.hash = hash;
-    await new Promise(r => setTimeout(r, 1200));
-    const box = rowBox(row, "head");
+    const until = performance.now() + 5000, box = rowBox(row, "head");
+    while ((S.v !== "board" || S.x == null || Math.abs(S.x - (box[0] + box[2]) / 2) >= .01) && performance.now() < until) await new Promise(r => setTimeout(r, 50));
     return S.v === "board" && S.s === row.id && Math.abs(S.x - (box[0] + box[2]) / 2) < .01 && !!document.querySelector("#stage .marker.sel") || JSON.stringify({view:S.v, selection:S.s, x:S.x});`]),
   ["pasted selection address preserves an explicit position", "", `
     const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return true;
