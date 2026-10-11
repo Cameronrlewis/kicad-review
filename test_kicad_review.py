@@ -477,3 +477,30 @@ write(t, {"h.kicad_pcb": board.replace('MODEL', '')})
 empty_model = pcb_objects(f"{t}/h.kicad_pcb")
 assert empty_model["fp1"]["props"].get("3D model") is None and "3D model" not in diff_objects({}, empty_model)[0]["props"]
 print("ok OB-S3 model props")
+
+# OB-S2: one compact pad geometry prop, excluding identity/nets and absolute rotation.
+t = tempfile.mkdtemp()
+pad = '(pad "1" thru_hole oval (at 1 2) (size 1 2) (drill 0.5) (layers "*.Cu" "*.Mask") (net 1 "GND") (uuid "pad1") (tstamp "old"))'
+board = '(kicad_pcb (footprint "Lib:Part" (uuid "fp1") (at 10 20 0) (property "Reference" "R1") PAD))'
+write(t, {"b.kicad_pcb": board.replace('PAD', pad)})
+pad_base = pcb_objects(f"{t}/b.kicad_pcb")
+for changed in (pad.replace('size 1 2', 'size 2 2'), pad.replace('oval', 'circle'), pad.replace('thru_hole', 'np_thru_hole'),
+                pad.replace('drill 0.5', 'drill 0.8'), pad.replace('"*.Cu"', '"F.Cu"'), pad.replace('at 1 2', 'at 2 2'),
+                pad.replace('at 1 2', 'at 1 2 45'), pad + ' (pad "2" smd rect (size 1 1))'):
+    write(t, {"h.kicad_pcb": board.replace('PAD', changed)})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["pads"], f"OB-S2 pad geometry: {rows}"
+assert re.fullmatch(r"1 pads, geom [0-9a-f]{10}", pad_base["fp1"]["props"]["pads"])
+for angle in (90, -90, 360):
+    rotated = board.replace('at 10 20 0', f'at 10 20 {angle}').replace('PAD', pad.replace('at 1 2', f'at 1 2 {angle}'))
+    write(t, {"h.kicad_pcb": rotated})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["position"], f"OB-S2 rotate invariant: {rows}"
+for changed in (pad.replace('"pad1"', '"pad2"').replace('"old"', '"new"'), pad.replace('net 1 "GND"', 'net 2 "VCC"')):
+    write(t, {"h.kicad_pcb": board.replace('PAD', changed)})
+    rows = diff_objects(pad_base, pcb_objects(f"{t}/h.kicad_pcb"))
+    assert all(c[0] != "pads" for r in rows for c in r["changes"]), f"OB-S2 excluded fields: {rows}"
+write(t, {"h.kicad_pcb": board.replace('PAD', '')})
+assert pcb_objects(f"{t}/h.kicad_pcb")["fp1"]["props"].get("pads") is None
+print("ok OB-S2 pad geometry and rotate invariant")
+print("ok")
