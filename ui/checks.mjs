@@ -152,44 +152,66 @@ export const CHECKS = [
     const vp = document.querySelector("#stage .vp.board"), b = vp.getBoundingClientRect();
     pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
     return S.s === r.id;`],
-  ["checks view: per check, errors and warnings apart, new first", "p=1&t=checks", `
-    const groups = [...document.querySelectorAll("#panel .check")];
-    const newFirst = groups.every(g => { const n = [...g.querySelectorAll(".viol")].map(v => v.dataset.new);
-      return n.indexOf("false") === -1 || n.lastIndexOf("true") < n.indexOf("false"); });
-    return groups.length === REVIEW_DATA.projects[1].checks.length && newFirst
-      && groups.every(g => /errors?/.test(g.textContent) && /warnings?/.test(g.textContent));`],
-  ["clicking a located violation moves the drawing", "p=1&t=checks", `
-    const v = REVIEW_DATA.projects[1].checks.flatMap(c => c.violations).find(v => v.pos && v.where?.board && v.new && v.severity === "error");
-    document.querySelector('#panel .viol[data-id="' + v.id + '"]').click();
+  ["checks summary rows show every count", "p=1&t=checks", `
+    const P = REVIEW_DATA.projects[1], rows = [...document.querySelectorAll("#panel .checks-summary .check")];
+    return rows.length === 4 && P.checks.every(c => { const t = rows.find(r => r.dataset.checkSummary === c.name)?.textContent || "";
+      return t.includes(c.title) && t.includes(c.errors + " errors") && t.includes(c.warnings + " warnings") && t.includes(c.new_errors + c.new_warnings ? "+" + (c.new_errors + c.new_warnings) + " new" : ""); });`],
+  ["checks summary status and title do not intersect in a 300px panel", "p=1&t=checks", `
+    const app = document.querySelector("#app"), prior = app.style.gridTemplateColumns;
+    app.style.gridTemplateColumns = "220px minmax(0, 1fr) 300px";
+    const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    const rows = [...document.querySelectorAll("#panel .checks-summary .check")];
+    const ok = document.querySelector("#panel").getBoundingClientRect().width === 300 && rows.length > 0 && rows.every(row => {
+      const status = row.querySelector(".check-status"), title = row.querySelector(".check-title");
+      return !overlaps(status.getBoundingClientRect(), title.getBoundingClientRect());
+    });
+    app.style.gridTemplateColumns = prior; return ok;`],
+  ["checks summary marks turned-off checks not run", "p=1&t=checks", `
+    const keep = REVIEW_DATA.settings.checks.drc; REVIEW_DATA.settings.checks.drc = "off"; renderPanel();
+    const row = document.querySelector('#panel .check-not-run[data-check-summary="drc"]'), ok = row && row.textContent.includes("— not run") && row.textContent.includes("turned off in kicad-review.toml");
+    REVIEW_DATA.settings.checks.drc = keep; renderPanel(); return !!ok;`],
+  ["checks scope and severity chips use non-struck segmented controls", "p=1&t=checks", `
+    const scope = document.querySelector('[data-check-scope="new"]'), all = document.querySelector('[data-check-scope="all"]'), severity = document.querySelector('[data-check-severity="error"]');
+    const plain = getComputedStyle(all), toggle = getComputedStyle(severity);
+    return scope.classList.contains("check-chip") && all.classList.contains("check-chip") && severity.classList.contains("check-chip")
+      && plain.textDecorationLine === "none" && toggle.textDecorationLine === "none" && plain.borderStyle === "solid";`],
+  ["passing checks with baseline findings say no new errors", "p=1&t=checks", `
+    const c = REVIEW_DATA.projects[1].checks.find(c => c.errors > 0); if (!c) return true;
+    const old = [REVIEW_DATA.settings.fail_on, c.status, c.new_errors];
+    REVIEW_DATA.settings.fail_on = "new"; c.status = "pass"; c.new_errors = 0; renderPanel();
+    const row = document.querySelector('[data-check-summary="' + c.name + '"]');
+    const ok = row.querySelector(".check-status").textContent.includes("passing") && row.querySelector(".check-status-detail").textContent.includes("no new errors");
+    [REVIEW_DATA.settings.fail_on, c.status, c.new_errors] = old; renderPanel(); return ok;`],
+  ["checks scope chips default to new and switch to all", "p=1&t=checks", `
+    const newChip = document.querySelector('[data-check-scope="new"]'), allChip = document.querySelector('[data-check-scope="all"]');
+    const onlyNew = newChip.getAttribute("aria-pressed") === "true" && [...document.querySelectorAll("#panel .viol")].every(v => v.dataset.new === "true");
+    allChip.click(); return onlyNew && document.querySelector('[data-check-scope="all"]').getAttribute("aria-pressed") === "true" && document.querySelectorAll('#panel .viol[data-new="false"]').length > 0;`],
+  ["checks violations group by rule with new groups open first", "p=1&t=checks", `
+    document.querySelector('[data-check-scope="all"]').click();
+    const groups = [...document.querySelectorAll("#panel .check-group")], keys = new Set(groups.map(g => g.querySelector(".rule").textContent));
+    const expected = new Set(REVIEW_DATA.projects[1].checks.flatMap(c => c.violations.map(v => c.name + "\\0" + v.type)));
+    const newGroups = groups.filter(g => g.querySelector('.viol[data-new="true"]'));
+    return groups.length >= keys.size && groups.length === expected.size && newGroups.every(g => g.open) && groups.slice(0, newGroups.length).every(g => g.querySelector('.viol[data-new="true"]'));`],
+  ["clicking a located violation selects it and moves the drawing", "p=1&t=checks", `
+    S.v = "board"; await draw(); S.checks.scope = "all"; renderPanel();
+    const v = REVIEW_DATA.projects[1].checks.flatMap(c => c.violations).find(v => v.where?.board && v.pos), el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'); el.click();
     await new Promise(r => setTimeout(r, 1200));
-    return S.v === "board" && S.s === v.id && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < 0.01;`],
-  ["violation without position: listed, no move, no error", "p=1&t=checks", `
-    const v = REVIEW_DATA.projects[1].checks[0].violations[0]; v.pos = null; v.box = null; renderPanel();
-    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'), before = [S.v, S.x, S.y];
-    el.click(); await new Promise(r => setTimeout(r, 300));
-    return el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true" && S.v === before[0] && S.x === before[1] && S.s !== v.id;`],
-  ["violation on an unrendered sheet: no location, no move", "p=1&t=checks", `
-    const P = REVIEW_DATA.projects[1], sh = P.sheets[0]; sh.status = "unchanged"; sh.svg = null;
+    return S.s === v.id && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < .01 && document.querySelector('#panel .viol[data-id="' + v.id + '"]').getAttribute("aria-selected") === "true";`],
+  ["j steps through rendered checks violations", "p=1&t=checks", `
+    S.v = "board"; await draw(); S.checks.scope = "all"; renderPanel(); S.s = null;
+    const ids = [...document.querySelectorAll('#panel .viol[data-id]:not([aria-disabled])')].map(v => v.dataset.id);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "j" })); await new Promise(r => setTimeout(r, 900));
+    return ids.length > 1 && S.s === ids[0];`],
+  ["violation without position is listed and does not move", "p=1&t=checks", `
+    S.checks.scope = "all"; const v = REVIEW_DATA.projects[1].checks[0].violations[0], old = [v.pos, v.box]; v.pos = null; v.box = null; renderPanel();
+    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'), before = [S.v, S.x, S.y]; el.click(); await new Promise(r => setTimeout(r, 300));
+    const ok = el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true" && S.v === before[0] && S.x === before[1] && S.s !== v.id;
+    [v.pos, v.box] = old; renderPanel(); return ok;`],
+  ["violation on an unrendered sheet has no location", "p=1&t=checks", `
+    S.checks.scope = "all"; const P = REVIEW_DATA.projects[1], sh = P.sheets[0], old = [sh.status, sh.svg]; sh.status = "unchanged"; sh.svg = null;
     const v = P.checks.flatMap(c => c.violations).find(v => v.pos && v.where?.sheet === sh.path); renderPanel();
-    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]');
-    return el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true";`],
-  ["checks view: sections with new violations first, new rows first", "p=1&t=checks", `
-    const cs = REVIEW_DATA.projects[1].checks, anyNew = cs.some(c => c.new_errors + c.new_warnings > 0);
-    const secs = [...document.querySelectorAll("#panel .check")], first = document.querySelector("#panel .viol");
-    const nn = el => Number(el.dataset.n);
-    const ok = !anyNew || (secs[0].querySelector('.viol[data-new="true"]') !== null && first.dataset.new === "true");
-    return ok;`],
-  ["checks view: rows new before old, errors before warnings", "p=1&t=checks", `
-    const c0 = REVIEW_DATA.projects[1].checks[0], keep = c0.violations;
-    c0.violations = ["warning", "error", "warning", "error", "warning", "error"].flatMap((sev, i) => [true, false].map(n => ({ ...keep[0], id: "vx" + i + n, severity: sev, new: n })));
-    renderPanel();
-    const res = await (async () => {
-    return [...document.querySelectorAll("#panel .check")].every(g => {
-      const r = [...g.querySelectorAll(".viol")].map(v => [v.dataset.new === "true" ? 0 : 1, v.classList.contains("error") ? 0 : 1]);
-      return r.every((x, i) => i === 0 || r[i-1][0] < x[0] || (r[i-1][0] === x[0] && r[i-1][1] <= x[1]));
-    });})();
-    c0.violations = keep; renderPanel();
-    return res;`],
+    const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'), ok = el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true";
+    [sh.status, sh.svg] = old; renderPanel(); return ok;`],
   ["state round-trips through the address", "", `
     const s = { p: 1, v: "board", m: "wipe", x: 158.8, y: 78.2, z: 12, s: "c5", t: "checks", layers: ["F_Cu", "Edge_Cuts"] };
     const back = decodeState(encodeState(s));

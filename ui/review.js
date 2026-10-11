@@ -2,7 +2,7 @@
 // KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see README, "Data format").
 const D = window.REVIEW_DATA;
 const $ = s => document.querySelector(s);
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null };
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, checks: { check: "", scope: null, error: true, warning: true } };
 const proj = () => D.projects[S.p];
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const GLYPH = { added: "＋", removed: "−", modified: "≡" };
@@ -367,20 +367,56 @@ function cardsHtml() {
 }
 function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
 function renderChecks() {
-  const p = proj();
+  const p = proj(), state = S.checks;
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
-  const nw = c => c.new_errors + c.new_warnings;
-  return p.checks.map((c, i) => [c, i]).sort(([a, i], [b, j]) => (nw(b) - nw(a)) || ((b.status === "fail") - (a.status === "fail")) || (i - j)).map(([c]) => {
-    const vs = [...c.violations].sort((a, b) => (b.new - a.new) || (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1));
-    return `<section class="check ${esc(c.status)}">
-      <h3>${c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "✓"} ${esc(c.title)} <span class="muted">${esc(c.level)}</span></h3>
-      <p>${c.errors} errors (${c.new_errors} new) · ${c.warnings} warnings (${c.new_warnings} new) · ${c.fixed} fixed</p>
-      ${vs.slice(0, 500).map(v => { const at = v.pos && currentView(viewOf(v)); return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'}>
-        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="sev">${v.severity === "error" ? "✕ error" : "! warning"}</span>
-        <span class="rule">${esc(v.type)}</span> ${esc(v.description)}
-        <small>${v.items.map(esc).join(" · ")}${at ? "" : " · no location"}</small></button>`; }).join("")}
-    </section>`;
+  const order = ["erc", "drc", "parity", "bom"];
+  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields" };
+  const byName = new Map(p.checks.map(c => [c.name, c]));
+  const names = [...order, ...p.checks.map(c => c.name).filter(n => !order.includes(n))];
+  const configured = names.map(name => ({ name, check: byName.get(name), setting: D.settings?.checks?.[name] }));
+  const ran = configured.filter(r => r.check && r.setting !== "off").map(r => r.check);
+  const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
+  const totalNew = all.filter(v => v.new).length;
+  const scope = state.scope ?? (totalNew ? "new" : "all");
+  const checked = state.check && byName.has(state.check) ? state.check : "";
+  const summary = configured.map(({ name, check, setting }) => {
+    if (!check || setting === "off") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
+      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span></span>
+      <span class="check-reason">turned off in kicad-review.toml</span></button>`;
+    const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
+    const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
+    const newer = check.new_errors + check.new_warnings;
+    return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
+      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
+      <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
+  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity]);
+  const totalShown = shown.length;
+  const groups = new Map();
+  for (const v of shown) {
+    const key = `${v.check.name}\u0000${v.type}`;
+    if (!groups.has(key)) groups.set(key, { check: v.check, type: v.type, violations: [] });
+    groups.get(key).violations.push(v);
+  }
+  const groupHtml = [...groups.values()].sort((a, b) => {
+    const an = a.violations.some(v => v.new), bn = b.violations.some(v => v.new);
+    const ae = a.violations.some(v => v.severity === "error"), be = b.violations.some(v => v.severity === "error");
+    return (bn - an) || (be - ae) || a.type.localeCompare(b.type);
+  }).map(g => {
+    const vs = g.violations.sort((a, b) => (b.new - a.new) || ((a.severity === "error") ? -1 : 1) - ((b.severity === "error") ? -1 : 1));
+    const newCount = vs.filter(v => v.new).length, errors = vs.some(v => v.severity === "error");
+    return `<details class="check-group" ${newCount ? "open" : ""}><summary><span class="rule">${esc(g.type)}</span><span class="group-description">${esc(vs[0].description)}</span><span class="group-count">${vs.length}</span>${newCount ? `<b class="new-tag">NEW ${newCount}</b>` : ""}<span class="sev">${errors ? "✕ error" : "! warning"}</span></summary>${vs.slice(0, 200).map(v => {
+      const at = v.pos && currentView(viewOf(v));
+      return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'} aria-selected="${S.s === v.id}">
+        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>`;
+    }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
+  }).join("");
+  return `<div class="checks-summary">${summary}</div><div class="filters checks-filters">
+    <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
+    <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
+    <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
+    <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
+  </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 function renderPanel() {
   const p = proj(), f = S.filter;
@@ -396,7 +432,11 @@ function renderPanel() {
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
     <div class="cards">${cardsHtml()}</div>`);
   for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); saveHash(); };
-  for (const b of document.querySelectorAll("#panel .chip-filter")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-check-severity]")) b.onclick = () => { S.checks[b.dataset.checkSeverity] = !S.checks[b.dataset.checkSeverity]; renderPanel(); };
+  $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true }); renderPanel(); });
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
   const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
   bindCards();
@@ -413,7 +453,7 @@ function encodeState(s = S) {
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
-function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => history.replaceState(null, "", "#" + encodeState()), 200); }
+function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); }, 200); }
 function step(dir) {
   const ids = [...document.querySelectorAll(S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : "#panel .card[data-id]")].map(e => e.dataset.id);
   if (!ids.length) return;
@@ -510,7 +550,7 @@ function start() {
       const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
       document.title = "ready";
     }
-  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; });   // cmd_shots must never wait out its budget
+  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage({ kicadReviewReady: true }, "*"); });   // cmd_shots must never wait out its budget
 }
 start();
 window.addEventListener("hashchange", () => applyState(decodeState(location.hash)));

@@ -1,3 +1,5 @@
+import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage } from './pages.js';
+
 const text = new TextEncoder();
 const untext = new TextDecoder();
 const securityHeaders = {
@@ -128,22 +130,24 @@ function sessionRedirect(location, status, active) {
   return redirect(location, active?.setCookie ? [active.setCookie] : [], status);
 }
 
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[char]);
-}
-
 function sessionResponse(body, init, active) {
   const headers = new Headers(init?.headers);
   if (active?.setCookie) headers.set('Set-Cookie', active.setCookie);
   return response(body, { ...init, headers });
 }
 
-function html(body) {
-  return '<!doctype html><style>body{font:16px system-ui;margin:2rem;max-width:70rem}'
-    + 'table{border-collapse:collapse;width:100%}th,td{padding:.4rem;text-align:left;'
-    + 'border-bottom:1px solid #ddd}code{white-space:nowrap}</style>' + body;
+const refusalDetails = [
+  "You're signed in as the right GitHub account",
+  'The repository owner has installed the KiCad review GitHub App on it',
+  'Someone has given you access on GitHub',
+];
+
+function errorPage(status, title, message, links = [], active, init = {}, details = [], includeHome = true) {
+  const allLinks = includeHome ? [{ href: '/', label: 'Back to repositories' }, ...links] : links;
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'text/html; charset=utf-8');
+  const pageDetails = title === "Can't open this page" ? refusalDetails : details;
+  return sessionResponse(messagePage({ title, message, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
 function gh(path, token, init = {}) {
@@ -171,45 +175,55 @@ export async function access(request, env, owner, repo) {
   }
   if (!repositoryName.test(owner) || !repositoryName.test(repo)
     || !allowedOwners(env).includes(owner.toLowerCase())) {
-    return sessionResponse('Not found', { status: 404 }, active);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
   try {
     const repoResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, active.token);
     const data = repoResponse.status === 200 ? await repoResponse.json() : null;
-    if (!data?.permissions?.pull) return sessionResponse('Not found', { status: 404 }, active);
+    if (!data?.permissions?.pull) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     return { s: active, repo: data };
   } catch {
-    return sessionResponse('Not found', { status: 404 }, active);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
 }
 
-async function artifactReport(env, owner, repo, id, active) {
+const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
+  + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
+const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+async function artifactReport(request, env, owner, repo, id, active, raw) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
     const metadataResponse = await gh(base, active.token);
-    if (metadataResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, active);
+    if (metadataResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const metadata = await metadataResponse.json();
     if (metadata.expired) {
-      return sessionResponse('<!doctype html><p>This review has expired — rerun the workflow</p>', {
-        status: 404,
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      }, active);
+      const match = String(metadata.name || '').match(/^kicad-review-([0-9a-f]{7})-([0-9a-f]{7})-(?:pass|fail)\.html$/);
+      return sessionResponse(runPage({
+        user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
+      }), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
     }
-    if (!metadata.name?.endsWith('.html')) return sessionResponse('Not found', { status: 404 }, active);
+    if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    if (!raw) {
+      return sessionResponse(reviewPage({
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id,
+      }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
+    }
+    if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
     const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
     const location = zipResponse.status === 302 ? zipResponse.headers.get('Location') : null;
-    if (!location) return sessionResponse('Not found', { status: 404 }, active);
+    if (!location) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const blobResponse = await fetch(location);
-    if (!blobResponse.ok || !blobResponse.body) return sessionResponse('Not found', { status: 404 }, active);
+    if (!blobResponse.ok || !blobResponse.body) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     return sessionResponse(blobResponse.body, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Security-Policy': "sandbox allow-scripts allow-popups; default-src 'none'; "
-          + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'",
+        'Content-Security-Policy': reportCsp,
+        'X-Frame-Options': 'SAMEORIGIN',
       },
     }, active);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, active);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
 }
 
@@ -221,8 +235,9 @@ function reviews(artifacts) {
       return {
         ...artifact,
         base: match[1] || '?',
-        head: match[2] || artifact.workflow_run?.head_sha || '?',
+        head: match[2] || '?',
         result: match[3] || '?',
+        revisionsRecorded: Boolean(match[1]),
       };
     }).sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
 }
@@ -243,7 +258,7 @@ async function home(request, env) {
   const stored = cookies(request).s;
   const active = await session(request, env);
   if (!active) {
-    return response(html('<a href="/login">Sign in with GitHub</a>'), {
+    return response(signedOutPage({ sessionEnded: Boolean(stored) }), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         ...(stored ? { 'Set-Cookie': clear('s', new URL(request.url).protocol === 'https:') } : {}),
@@ -266,12 +281,7 @@ async function home(request, env) {
   } catch {
     /* Display the installation guidance below. */
   }
-  const list = repositories.length ? `<ul>${repositories.map((repo) => {
-    return `<li><a href="${repoPath(repo.owner.login, repo.name)}">${escapeHtml(repo.owner.login)}`
-      + `/${escapeHtml(repo.name)}</a></li>`;
-  }).join('')}</ul>` : '<p>The GitHub App must be installed on the repository.</p>';
-  return sessionResponse(html(`<p>Signed in as ${escapeHtml(active.login)}</p>`
-    + '<form method="post" action="/logout"><button>Sign out</button></form>' + list), {
+  return sessionResponse(homePage({ user: active.login, repositories }), {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
   }, active);
 }
@@ -282,152 +292,202 @@ async function reviewList(request, env, owner, repo, url) {
   try {
     const artifactResponse = await artifactList(owner, repo, allowed.s.token);
     const list = artifactResponse.ok ? reviews((await artifactResponse.json()).artifacts) : [];
-    const rows = list.map((item) => `<tr><td>${escapeHtml(date(item.created_at))}</td>`
-      + `<td>${escapeHtml(item.workflow_run?.head_branch || '?')}</td><td><code>${escapeHtml(item.base)}</code></td>`
-      + `<td><code>${escapeHtml(String(item.head).slice(0, 7))}</code></td><td>${escapeHtml(item.result)}</td>`
-      + `<td><a href="${repoPath(owner, repo)}/a/${encodeURIComponent(item.id)}">Open</a></td></tr>`).join('');
-    const content = rows ? '<table><thead><tr><th>Date</th><th>Branch</th><th>Base</th><th>Head</th>'
-      + `<th>Result</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p>No reviews yet.</p>';
-    const started = url?.searchParams.get('started') === '1' ? '<p>Review started.</p>' : '';
-    return sessionResponse(html(`<p>Reviews for ${escapeHtml(owner)}/${escapeHtml(repo)}</p>${started}`
-      + `<p><a href="${repoPath(owner, repo)}/commits">Commit history</a></p>${content}`), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    }, allowed.s);
+    const items = list.map((item) => {
+      const event = item.workflow_run?.event;
+      const branchTip = String(item.workflow_run?.head_sha || '').slice(0, 7);
+      const manual = item.revisionsRecorded && item.base !== 'none' && branchTip && item.head !== branchTip;
+      return {
+        id: item.id, createdAt: item.created_at, date: date(item.created_at),
+        branch: item.workflow_run?.head_branch || 'Unknown branch',
+        label: manual ? 'manual' : ({ push: 'branch push', pull_request: 'pull request' }[event] || ''),
+        manual, base: item.base, head: item.head,
+        result: item.revisionsRecorded ? item.result : 'unknown', legacy: !item.revisionsRecorded,
+      };
+    });
+    const counts = {
+      all: items.length,
+      passing: items.filter((item) => item.result === 'pass').length,
+      failing: items.filter((item) => item.result === 'fail').length,
+      older: items.filter((item) => item.legacy).length,
+    };
+    const requestedFilter = url?.searchParams.get('filter');
+    const filter = ['passing', 'failing', 'older'].includes(requestedFilter) ? requestedFilter : 'all';
+    const filtered = filter === 'passing' ? items.filter((item) => item.result === 'pass')
+      : filter === 'failing' ? items.filter((item) => item.result === 'fail')
+        : filter === 'older' ? items.filter((item) => item.legacy) : items;
+    return sessionResponse(reviewsPage({
+      user: allowed.s.login, owner, repo, started: url?.searchParams.get('started') === '1',
+      items: filtered, counts, filter,
+    }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
+}
+
+async function commitsData(owner, repo, token, branch, tag = '') {
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const [branchesResponse, tagsResponse, artifactsResponse] = await Promise.all([
+    gh(`${root}/branches?per_page=100`, token),
+    gh(`${root}/tags?per_page=100`, token),
+    artifactList(owner, repo, token),
+  ]);
+  const branches = branchesResponse.ok ? await branchesResponse.json() : [];
+  const tags = tagsResponse.ok ? await tagsResponse.json() : [];
+  const selectedTag = tag ? tags.find((item) => item.name === tag) : null;
+  const sha = selectedTag?.commit?.sha;
+  if (tag && !sha) return null;
+  const commitsResponse = await gh(`${root}/commits?sha=${encodeURIComponent(sha || branch)}&per_page=50`, token);
+  if (!commitsResponse.ok) return null;
+  const commitList = await commitsResponse.json();
+  const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
+  const byHead = new Map(reviewList.filter((item) => item.head !== '?').map((item) => [String(item.head).slice(0, 7), item]));
+  return {
+    branch, tags: tags.map((item) => ({ name: String(item.name || '') })).filter((item) => item.name),
+    branches: branches.map((item) => item.name), tag,
+    commits: commitList.map((commit) => {
+      const sha = String(commit.sha || ''); const fullMessage = String(commit.commit?.message || '');
+      const exactDate = date(commit.commit?.author?.date);
+      return { sha, fullMessage, message: fullMessage.split('\n', 1)[0], author: commit.author?.login || commit.commit?.author?.name || '?', date: relativeDate(commit.commit?.author?.date), exactDate, review: byHead.get(sha.slice(0, 7))?.id };
+    }),
+  };
+}
+
+function relativeDate(value) {
+  const then = new Date(value).getTime(); const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (!Number.isFinite(then)) return '?';
+  if (seconds < 60) return 'just now';
+  const units = [[31536000, 'year'], [2592000, 'month'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
+  const [size, label] = units.find(([size]) => seconds >= size);
+  const count = Math.floor(seconds / size); return `${count} ${label}${count === 1 ? '' : 's'} ago`;
 }
 
 async function commits(request, env, owner, repo, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   const branch = url.searchParams.get('branch') ?? allowed.repo.default_branch;
-  if (!branch || branch.length > 255 || /[\x00-\x1f\x7f]/.test(branch)) {
-    return sessionResponse('Branch not found', { status: 404 }, allowed.s);
-  }
+  const tag = url.searchParams.get('tag') || '';
+  if (!branch || branch.length > 255 || /[\x00-\x1f\x7f]/.test(branch)) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   try {
-    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-    const [branchesResponse, commitsResponse, artifactsResponse] = await Promise.all([
-      gh(`${root}/branches?per_page=100`, allowed.s.token),
-      gh(`${root}/commits?sha=${encodeURIComponent(branch)}&per_page=50`, allowed.s.token),
-      artifactList(owner, repo, allowed.s.token),
-    ]);
-    if (commitsResponse.status === 404) return sessionResponse('Branch not found', { status: 404 }, allowed.s);
-    if (!commitsResponse.ok) return sessionResponse('Not found', { status: 404 }, allowed.s);
-    const branches = branchesResponse.ok ? (await branchesResponse.json()) : [];
-    const commitList = await commitsResponse.json();
-    const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
-    const byHead = new Map(reviewList.filter((item) => item.head !== '?')
-      .map((item) => [String(item.head).slice(0, 7), item]));
-    const options = branches.map((item) => `<option value="${escapeHtml(item.name)}`
-      + `${item.name === branch ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('');
-    const rows = commitList.map((commit) => {
-      const sha = String(commit.sha || '');
-      const message = String(commit.commit?.message || '').split('\n', 1)[0];
-      const author = commit.author?.login || commit.commit?.author?.name || '?';
-      const review = byHead.get(sha.slice(0, 7));
-      return `<tr><td><code>${escapeHtml(sha.slice(0, 7))}</code></td><td>${escapeHtml(message)}`
-        + `${review ? ` <a href="${repoPath(owner, repo)}/a/${encodeURIComponent(review.id)}">Review</a>` : ''}`
-        + `</td><td>${escapeHtml(author)}</td><td>${escapeHtml(date(commit.commit?.author?.date))}</td>`
-        + `<td><input type="radio" name="base" value="${escapeHtml(sha)}" aria-label="Base ${escapeHtml(sha)}"></td>`
-        + `<td><input type="radio" name="head" value="${escapeHtml(sha)}" aria-label="Head ${escapeHtml(sha)}"></td></tr>`;
-    }).join('');
-    return sessionResponse(html(`<p><a href="${repoPath(owner, repo)}">Reviews</a> for ${escapeHtml(owner)}`
-      + `/${escapeHtml(repo)}</p><form method="get"><label>Branch <select name="branch">${options}</select></label>`
-      + '<button>Show</button></form><form method="post" action="' + `${repoPath(owner, repo)}/compare">`
-      + '<table><thead><tr><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th>Base</th><th>Head</th>'
-      + `</tr></thead><tbody>${rows}</tbody></table><button>Compare</button></form>`), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    }, allowed.s);
+    const data = await commitsData(owner, repo, allowed.s.token, branch, tag);
+    if (!data) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+    return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
 }
 
 const commitSha = /^[0-9a-f]{7,40}$/;
 
-function page(body) {
-  return { headers: { 'Content-Type': 'text/html; charset=utf-8' } };
-}
-
 async function compare(request, env, owner, repo) {
-  if (request.headers.get('Origin') !== new URL(request.url).origin) {
-    return response('Forbidden', { status: 403 });
-  }
+  if (request.headers.get('Origin') !== new URL(request.url).origin) return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }]);
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
-  const form = await request.formData();
-  const base = String(form.get('base') || '');
-  const head = String(form.get('head') || '');
-  if (!commitSha.test(base) || !commitSha.test(head) || base === head) {
-    return sessionResponse(html(`<p>Choose two different commit SHAs.</p><p><a href="${repoPath(owner, repo)}/commits">`
-      + 'Back to commits</a></p>'), { status: 400, ...page() }, allowed.s);
-  }
+  const form = await request.formData(); const base = String(form.get('base') || ''); const head = String(form.get('head') || '');
+  if (!commitSha.test(base) || !commitSha.test(head) || base === head) return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  let comparison;
   try {
-    const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ref: allowed.repo.default_branch,
-        inputs: { base, head },
-        return_run_details: true,
-      }),
-    });
-    if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
-    if (dispatch.status === 200) {
-      const details = await dispatch.json();
-      if (details.workflow_run_id) {
-        return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}`, 303, allowed.s);
-      }
-    }
-    if (dispatch.status === 403 || dispatch.status === 404) {
-      return sessionResponse(html('<p>You need write access to this repository to start a review, and the repository '
-        + 'needs the KiCad review workflow.</p>'), { status: 403, ...page() }, allowed.s);
-    }
-  } catch {
-    // Return the generic upstream error below.
+    const result = await gh(`${root}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`, allowed.s.token);
+    if (result.status === 404) return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+    if (!result.ok) throw new Error('compare failed');
+    comparison = await result.json();
+  } catch { return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s); }
+  const changed = (comparison.files || []).map((file) => String(file.filename || ''));
+  const kicad = /\.kicad_(sch|pcb|pro)$|(^|\/)(sym|fp)-lib-table$|(^|\/)kicad-review\.toml$/;
+  const rerender = async (notice, files = [], swap = false) => {
+    try {
+      const data = await commitsData(owner, repo, allowed.s.token, allowed.repo.default_branch);
+      if (!data) throw new Error('commits unavailable');
+      return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data, base, head, notice, files, swap }), { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+    } catch { return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s); }
+  };
+  if (comparison.status === 'behind') return rerender({ kind: 'error', message: 'Head is older than Base.' }, [], true);
+  if (!changed.some((filename) => kicad.test(filename))) {
+    const files = changed.slice(0, 10); if (changed.length > 10) files.push(`and ${changed.length - 10} more`);
+    return rerender({ kind: 'warn', message: `No KiCad files changed between ${base.slice(0, 7)} and ${head.slice(0, 7)}, so there is nothing to review.` }, files);
   }
-  return sessionResponse('Could not start the review', { status: 502 }, allowed.s);
+  try {
+    const dispatch = await gh(`${root}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: allowed.repo.default_branch, inputs: { base, head }, return_run_details: true }) });
+    if (dispatch.status === 204) return sessionRedirect(`${repoPath(owner, repo)}?started=1`, 303, allowed.s);
+    if (dispatch.status === 200) { const details = await dispatch.json(); if (details.workflow_run_id) return sessionRedirect(`${repoPath(owner, repo)}/run/${encodeURIComponent(details.workflow_run_id)}?${new URLSearchParams({ base, head })}`, 303, allowed.s); }
+    if (dispatch.status === 403 || dispatch.status === 404) return errorPage(403, 'Cannot start review', 'You need write access and the KiCad review workflow.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+  } catch { /* Return the generic upstream error below. */ }
+  return errorPage(502, 'Could not start the review', 'The review could not be started. Try again later.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
 }
 
-function githubRunLink(run) {
+function githubRunUrl(run) {
   const url = String(run.html_url || '');
-  return url.startsWith('https://github.com/')
-    ? `<p><a href="${escapeHtml(url)}">View this run on GitHub</a></p>`
-    : '';
+  return url.startsWith('https://github.com/') ? url : '';
 }
 
-async function run(request, env, owner, repo, id) {
+function failedStep(jobs) {
+  const stageFor = (name) => {
+    const value = String(name || '').toLowerCase();
+    if (value.includes('check out')) return 'Getting the files';
+    if (value.includes('render') || value.includes('find changed')) return 'Rendering and checking';
+    if (value.includes('build comparison report') || value.includes('upload report') || value.includes('screenshots') || value.includes('publish')) return 'Building the report';
+    return 'Finishing';
+  };
+  for (const job of jobs || []) {
+    for (const step of job.steps || []) {
+      if (step.conclusion === 'failure') return { stage: stageFor(step.name), step: String(step.name || '') };
+    }
+  }
+  return null;
+}
+
+async function run(request, env, owner, repo, id, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const base = url.searchParams.get('base');
+  const head = url.searchParams.get('head');
   let runData;
   try {
     const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
-    if (runResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, allowed.s);
+    if (runResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
     runData = await runResponse.json();
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
-  const link = githubRunLink(runData);
+  const githubUrl = githubRunUrl(runData);
   if (runData.status !== 'completed') {
-    return sessionResponse(html('<meta http-equiv="refresh" content="10"><p>Review running…</p>'
-      + `<p>Status: ${escapeHtml(runData.status)}</p>${link}`), page(), allowed.s);
+    let jobs = [];
+    try {
+      const jobsResponse = await gh(`${root}/actions/runs/${id}/jobs`, allowed.s.token);
+      if (jobsResponse.ok) jobs = (await jobsResponse.json()).jobs || [];
+    } catch {
+      // The run remains useful even when GitHub has not exposed its jobs yet.
+    }
+    return sessionResponse(runPage({
+      user: allowed.s.login, owner, repo, running: true, status: runData.status, githubUrl,
+      base, head, startedAt: runData.run_started_at, jobs,
+    }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   }
   try {
     const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
-    if (artifactsResponse.status !== 200) return sessionResponse('Not found', { status: 404 }, allowed.s);
+    if (artifactsResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
     const artifact = reviews((await artifactsResponse.json()).artifacts)[0];
     if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}`, 302, allowed.s);
   } catch {
-    return sessionResponse('Not found', { status: 404 }, allowed.s);
+    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
-  const conclusion = escapeHtml(runData.conclusion);
-  const message = runData.conclusion === 'success'
-    ? 'No KiCad changes between these commits.'
-    : `Review conclusion: ${conclusion}`;
-  return sessionResponse(html(`<p>${message}</p>${link}`), page(), allowed.s);
+  if (runData.conclusion === 'success') {
+    return sessionResponse(runPage({ user: allowed.s.login, owner, repo, state: 'nothing', base, head }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
+  }
+  let stopped = null;
+  if (['failure', 'cancelled', 'timed_out'].includes(runData.conclusion)) {
+    try {
+      const jobsResponse = await gh(`${root}/actions/runs/${id}/jobs`, allowed.s.token);
+      if (jobsResponse.ok) stopped = failedStep((await jobsResponse.json()).jobs || []);
+    } catch {
+      // Fall back to the generic failed-run explanation.
+    }
+  }
+  return sessionResponse(runPage({
+    user: allowed.s.login, owner, repo, state: 'failed', githubUrl, base, head,
+    failedStage: stopped?.stage, failedStep: stopped?.step,
+  }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
 }
 
 function nextPath(value) {
@@ -445,22 +505,22 @@ async function callback(request, env) {
   const savedState = cookies(request).st;
   const state = url.searchParams.get('state');
   if (!state || !savedState || state !== savedState) {
-    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
+    return errorPage(400, "Sign-in didn't complete", 'The sign-in link expired or was opened in a different browser.', [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   }
   let stateData;
   try {
     stateData = JSON.parse(untext.decode(unbase64url(savedState)));
   } catch {
-    return response('Invalid sign-in state', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
+    return errorPage(400, "Sign-in didn't complete", 'The sign-in link expired or was opened in a different browser.', [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   }
   const code = url.searchParams.get('code');
-  if (!code) return response('Missing sign-in code', { status: 400, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!code) return errorPage(400, "Sign-in didn't complete", "GitHub didn't send a sign-in code. You may have cancelled.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const token = await tokenRequest(env, { code });
-  if (!token) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!token) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const userResponse = await gh('/user', token.access_token);
-  if (!userResponse.ok) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!userResponse.ok) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const user = await userResponse.json();
-  if (!user.login) return response('Sign-in failed', { status: 502, headers: { 'Set-Cookie': clear('st', secure) } });
+  if (!user.login) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const value = {
     t: token.access_token,
     r: token.refresh_token,
@@ -486,12 +546,12 @@ export default {
       if (request.method === 'GET' && url.pathname === '/callback') return await callback(request, env);
       if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
-      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)$/);
+      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw)?$/);
       if (request.method === 'GET' && artifactRoute) {
-        const [, owner, repo, id] = artifactRoute;
-        if (!/^\d{1,20}$/.test(id)) return response('Not found', { status: 404 });
+        const [, owner, repo, id, raw] = artifactRoute;
+        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
         const allowed = await access(request, env, owner, repo);
-        return allowed instanceof Response ? allowed : artifactReport(env, owner, repo, id, allowed.s);
+        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, Boolean(raw));
       }
       const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
       if (request.method === 'POST' && compareRoute) {
@@ -500,8 +560,8 @@ export default {
       const runRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/run\/([^/]+)$/);
       if (request.method === 'GET' && runRoute) {
         const [, owner, repo, id] = runRoute;
-        if (!/^\d{1,20}$/.test(id)) return response('Not found', { status: 404 });
-        return run(request, env, owner, repo, id);
+        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+        return run(request, env, owner, repo, id, url);
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
       if (request.method === 'GET' && commitsRoute) {
@@ -511,9 +571,9 @@ export default {
       if (request.method === 'GET' && reviewRoute) {
         return reviewList(request, env, reviewRoute[1], reviewRoute[2], url);
       }
-      return response('Not found', { status: 404 });
+      return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], await session(request, env));
     } catch {
-      return response('Internal server error', { status: 500 });
+      return errorPage(500, 'Internal server error', 'Try again later.');
     }
   },
 };

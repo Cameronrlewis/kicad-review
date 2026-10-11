@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: node --test site/test.mjs
+      - run: node --import ./site/css-loader.mjs --test site/test.mjs
       - run: npx --yes wrangler@4 deploy
         working-directory: site
         env:

@@ -34,7 +34,7 @@ GITHUB_CLIENT_SECRET=…
 SESSION_KEY=…
 ```
 
-Make a session key with `openssl rand -base64 32`. Open <http://localhost:8787>. Run the tests with `node --test site/test.mjs`.
+Make a session key with `openssl rand -base64 32`. Open <http://localhost:8787>. Run the tests with `node --import ./site/css-loader.mjs --test site/test.mjs`.
 
 ## Deploy
 
