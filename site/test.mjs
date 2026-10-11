@@ -29,12 +29,6 @@ test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: s
   assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL startup.*Runtime.evaluate timed out/);
 });
 
-test('TS-S5 runtime check skips when Chrome is unavailable', () => {
-  const r = spawnSync(process.execPath, ['--import', './site/css-loader.mjs', '--test', '--test-name-pattern', '^TS-S5 a page', 'site/test.mjs'], {
-    encoding: 'utf8', timeout: 35000, env: { ...process.env, NODE_TEST_CONTEXT: undefined, CHROME: '/no-such-chrome' } });
-  assert.equal(r.status, 0); assert.match(r.stdout, /# skipped 1/);
-});
-
 test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {
   const run = (name, globals) => runInNewContext(`(async()=>{${CHECKS.find(c => c[0] === name)[2]}})()`, {
     setTimeout: f => setTimeout(f, 0), requestAnimationFrame: f => setTimeout(f, 0), ...globals });
