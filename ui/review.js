@@ -109,7 +109,7 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes") out.t = st.t;
+  if (st.t === "checks" || st.t === "changes" || st.t === "parts" && p.parts) out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -449,21 +449,57 @@ function renderChecks() {
     <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
   </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
+S.partsFilter = { problems: false, changed: false };
+const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
+function partsAge(s) {
+  if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
+  const h = (Date.now() - Date.parse(s.fetched_at)) / 36e5;
+  return { text: `JLCPCB data as of ${esc(s.fetched_at.replace("T", " ").slice(0, 16))} UTC (${h < 48 ? Math.round(h) + " h" : Math.round(h / 24) + " days"} old)`,
+           stale: h > 24, warn: h > 6 };
+}
+function renderParts() {
+  const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter;
+  const changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
+  const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
+  // Removed lines are not in the head BOM; keep them visible for change review.
+  for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
+  const shown = rows.filter(r => (!f.problems || r.line.problems.length) && (!f.changed || r.changes.length))
+    .sort((a, b) => Number(!!b.line.problems.length) - Number(!!a.line.problems.length));
+  return `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
+    <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
+    <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "JLCPCB", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
+      const changeText = field => {
+        const old = [...new Set(cs.filter(r => r.before && r.after && r.before[field] !== r.after[field]).map(r => r.before[field] || "—"))];
+        return esc(old.length ? `${old.join(", ")} → ${l[field] || "—"}` : l[field] || "—");
+      };
+      const problems = l.problems.map(p => PARTS_PROBLEMS[p] || p);
+      let stock = "—";
+      if (parts.supplier && parts.supplier.fetched_at) {
+        stock = l.status === "ok" ? `${age.stale ? "" : "✔ "}${l.stock ?? "—"}${l.price != null ? ` $${l.price}` : ""}${l.category === "basic" ? " B" : l.category === "extended" ? ` Ext${l.fee != null ? ` (fee $${l.fee})` : ""}` : ""}`
+          : `${PARTS_PROBLEMS[l.status] || l.status || "—"}${l.stock != null ? ` (${l.stock})` : ""}${l.error ? `: ${l.error}` : ""}`;
+      }
+      const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
+      return `<tr class="parts-row${problems.length ? " problem" : ""}${l.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${problems.length ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~"})[r.action] || "").join("")}</td><td>${esc(l.refs.join(", "))}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${esc(stock)}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
+    }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
+}
 function renderPanel() {
-  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
+  if (S.t === "parts" && !p.parts) S.t = "changes";
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   $("#panel").innerHTML = `<div role="tablist">
       <button role="tab" data-tab="changes" aria-selected="${S.t === "changes"}">Changes ${p.changes.length}</button>
-      <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button></div>` +
-    (S.t === "checks" ? renderChecks() : `
+      <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button>
+      ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}</button>` : ""}</div>` +
+    (S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     <div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
     <div class="cards">${cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
   for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); saveHash(); };
+  for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };

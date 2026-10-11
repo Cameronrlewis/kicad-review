@@ -1192,6 +1192,9 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
     body, checks = "\n".join(out), checks_markdown(data)
+    parts = parts_markdown(data)
+    if parts:
+        checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
             return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
@@ -1248,6 +1251,29 @@ def cmd_summary(args):
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
+
+
+PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
+                "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "out_of_stock", "not_found", "discontinued"}
+
+
+def parts_markdown(data):
+    out = []
+    for p in data["projects"]:
+        parts = p.get("parts")
+        if not parts:
+            continue
+        introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
+                      for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
+        s = parts["supplier"]
+        head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
+        when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
+               f"Supplier lookup not run ({md((s or {}).get('error') or 'no key in this run')})."
+        bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
+        out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
+        out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
+    return "\n".join(out)
 
 
 def checks_markdown(data):

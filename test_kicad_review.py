@@ -949,3 +949,19 @@ finally:
     os.chdir(here)
 print("ok parts report data")
 
+# Parts comments count only newly introduced blocking problems, not missing MPN or removals.
+from kicad_review import parts_markdown
+line = {"refs": ["R1"], "value": "10k", "lcsc": None, "problems": ["missing_lcsc", "missing_mpn"]}
+p = {"name": "X", "parts": {"lines": [line], "changes": [
+    {"action": "added", "refs": ["R1"], "before": None, "after": line}], "supplier": None}}
+m = parts_markdown({"projects": [p]})
+assert "1 problem introduced" in m and "R1 missing LCSC number" in m and "lookup not run" in m, m
+assert parts_markdown({"projects": [{"name": "Y"}]}) == ""
+for action, before, after in (("value", line, line), ("removed", line, None)):
+    p["parts"]["changes"] = [{"action": action, "refs": ["R1"], "before": before, "after": after}]
+    assert "introduced" not in parts_markdown({"projects": [p]})
+p["parts"]["supplier"] = {"fetched_at": "2026-10-08T14:02:00Z", "error": None}
+assert "JLCPCB data as of 2026-10-08T14:02:00Z." in parts_markdown({"projects": [p]})
+assert "#### Parts: X" in comment_markdown({**d2, "projects": [{**p, "dir": "", "status": "modified", "changes": [], "checks": []}]}, [], "")
+print("ok parts markdown")
+
