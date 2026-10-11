@@ -121,11 +121,3 @@ body.shot #hdr, body.shot #nav, body.shot #panel, body.shot #modes, body.shot #z
 body.shot #app { grid-template-columns: 1fr; }
 body.shot { grid-template-rows: 1fr; }
 #zoombar .copyfield { width: 22em; max-width: 30vw; font-family: var(--font-mono); }
-
-/* Lazy WebGL 3D board view. */
-.mode-3d { background: var(--line); }
-.mode-3d .view3d { background: var(--paper); min-width: 0; }
-@media (prefers-color-scheme: dark) { .mode-3d .view3d { background: var(--bg); } }
-.mode-3d canvas { display: block; width: 100%; height: 100%; }
-.loading, .empty3d { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); margin: 0; }
-#modes button[aria-disabled="true"] { cursor: not-allowed; opacity: .55; }

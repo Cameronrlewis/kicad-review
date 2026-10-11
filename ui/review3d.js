@@ -1,6 +1,7 @@
 "use strict";
 /* Lazy 3D board viewer. The three.js bundle is inert compressed text until this view opens. */
 window.Review3D = (() => {
+  const style = document.createElement("style"); style.textContent = `.mode-3d{background:var(--line)}.mode-3d .view3d{background:var(--paper);min-width:0}@media (prefers-color-scheme:dark){.mode-3d .view3d{background:var(--bg)}}.mode-3d canvas{display:block;width:100%;height:100%}.loading,.empty3d{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);margin:0}#modes button[aria-disabled=true]{cursor:not-allowed;opacity:.55}`; document.head.appendChild(style);
   let active = null, bundle;
   const decode = async id => {
     const bin = Uint8Array.from(atob(window.REVIEW_DATA.blobs[id]), c => c.charCodeAt(0));

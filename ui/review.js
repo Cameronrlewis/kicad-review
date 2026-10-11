@@ -73,7 +73,7 @@ function renderNav() {
       ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
           <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
       : '<li class="muted">No board changes</li>'}
-      ${p.board.model3d && (p.board.model3d.base || p.board.model3d.head) ? `<li><button data-view="3d" aria-current="${S.v === "3d"}"><span class="name">3D view</span></button></li>` : ""}</ul>
+      ${p.board.model3d && (p.board.model3d.base || p.board.model3d.head) ? `<li><button data-view='3d' aria-current="${S.v === '3d'}"><span class="name">3D view</span></button></li>` : ""}</ul>
     <div id="layers"></div>`;
   $("#proj").onchange = e => openProject(+e.target.value);
   for (const b of document.querySelectorAll("#nav [data-view]")) b.onclick = () => select(b.dataset.view);
@@ -96,7 +96,7 @@ function decodeState(hash) {
 }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
-  if ((st.v === "board" && p.board.changed) || (st.v === "3d" && p.board.model3d && (p.board.model3d.base || p.board.model3d.head)) || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
+  if ((st.v === "board" && p.board.changed) || (st.v === '3d' && p.board.model3d && (p.board.model3d.base || p.board.model3d.head)) || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
@@ -170,7 +170,7 @@ let gen = 0;
 async function draw() {
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
-  if (S.v === "3d") {
+  if (S.v === '3d') {
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
     await window.Review3D.show(stage, proj(), S);
     return;
@@ -289,7 +289,7 @@ function onApply() {
   vp.querySelector(".stack.head").style.clipPath = `inset(0 0 0 ${Math.max(0, (x - tx) / k)}px)`;
 }
 function renderModes() {
-  const is3d = S.v === "3d";
+  const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
     `<button data-mode="${m}" aria-pressed="${S.m === m}" ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${n}</button>`).join("")
     + (!is3d && S.m === "blend" ? `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>` : "");
@@ -482,7 +482,7 @@ function positionLink() {
 }
 function applyGoTo(text) { const i = text.indexOf("#"); if (i >= 0) applyState(decodeState(text.slice(i))); }
 function renderZoombar() {
-  if (S.v === "3d" && window.Review3D) { window.Review3D.cameraBar(); return; }
+  if (S.v === '3d' && window.Review3D) { window.Review3D.cameraBar(); return; }
   $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out">−</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in">+</button>
     <button data-act="fit">Fit</button><span class="sep"></span><span class="muted">j / k: next / previous</span>
     <button data-act="copy">Copy link</button><input class="goto" placeholder="Go to… paste a link">`;
