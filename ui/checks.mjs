@@ -12,6 +12,12 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 5000));
     const a = window.Review3D.state.cameras[0].position.toArray().join(","); document.querySelector('[data-3d-camera="top"]').click();
     return a !== window.Review3D.state.cameras[0].position.toArray().join(",");`],
+  ["3D preset uses world-up and sits above the board", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    document.querySelector('[data-3d-camera="top"]').click(); document.querySelector('[data-3d-camera="3d"]').click();
+    const d = window.Review3D.state;
+    return d.cameras.every(c => c.up.x === 0 && c.up.y === 1 && c.up.z === 0 && c.position.y > d.box.max.y);`],
   ["3D camera movement is linked and leaving disposes", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 5000));
