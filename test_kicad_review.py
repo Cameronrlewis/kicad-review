@@ -441,7 +441,8 @@ try:
         raise AssertionError("DR-S6: duplicate release label must stop fabrication")
     except SystemExit as e:
         assert "Duplicate release label" in str(e) and "a-b-P" in str(e), e
-    assert seen == ["a-b-P"], "DR-S6: duplicate label must stop before exporting again"
+    assert seen == [], "DR-S6: duplicate label must stop before any export"
+    assert not os.path.exists("release"), "DR-S6: duplicate label creates release output"
 finally:
     kicad_review.release_project = real
     os.chdir(here)
