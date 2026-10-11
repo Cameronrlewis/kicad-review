@@ -213,6 +213,23 @@ test('unsafe next is ignored and login text is HTML escaped', async () => {
   } finally { restore(); }
 });
 
+test('OAuth next rejects slash, backslash, and whitespace prefixes', async () => {
+  const restore = mockFetch(async (url) => url.includes('access_token') ? tokenResponse() : new Response(JSON.stringify({ login: 'octocat' })));
+  try {
+    for (const next of ['/\\evil.example/phish', '//evil.example', '/\t/evil.example', '/\n\\evil.example', '/\r/evil.example', '/ evil.example', '/\\[', '/', '/ok?x=1#h', '/%zz']) {
+      const expected = ['/', '/ok?x=1#h', '/%zz'].includes(next) ? next : '/';
+      const login = await call(`/login?next=${encodeURIComponent(next)}`);
+      const state = cookieValue(login, 'st');
+      assert.equal(JSON.parse(Buffer.from(state, 'base64url')).n, expected, JSON.stringify(next));
+      for (const saved of [state, Buffer.from(JSON.stringify({ s: 'state', n: next })).toString('base64url')]) {
+        const callback = await call(`/callback?code=x&state=${encodeURIComponent(saved)}`, { headers: { Cookie: `st=${saved}` } });
+        assert.equal(callback.status, 302);
+        assert.equal(callback.headers.get('Location'), expected, JSON.stringify(next));
+      }
+    }
+  } finally { restore(); }
+});
+
 test('logout and unknown routes carry security headers', async () => {
   assert.equal((await call('/logout', { method: 'POST' })).status, 302);
   assert.equal((await call('/missing')).status, 404);

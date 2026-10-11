@@ -491,7 +491,7 @@ async function run(request, env, owner, repo, id, url) {
 }
 
 function nextPath(value) {
-  return value?.startsWith('/') && !value.startsWith('//') ? value : '/';
+  return value?.startsWith('/') && !/^\/[\/\\\s]/.test(value) ? value : '/';
 }
 
 function stateCookie(next) {
