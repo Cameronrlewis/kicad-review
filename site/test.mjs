@@ -302,6 +302,23 @@ test('review routes reject disallowed owners and invalid repository names before
   } finally { restore(); }
 });
 
+test('repository access checks the canonical owner after redirects', async () => {
+  const sealed = await signedIn();
+  for (const owner of ['DisallowedOwner', 'cAmErOnRlEwIs']) {
+    for (const suffix of ['', '/commits', '/a/42', '/a/42/raw', '/run/42', '/compare']) {
+      let calls = 0;
+      const restore = mockFetch(async () => { calls += 1; return new Response(JSON.stringify({ owner: { login: owner }, permissions: { pull: true }, default_branch: 'main' })); });
+      try {
+        const response = suffix === '/compare'
+          ? await compareRequest(`/r/Cameronrlewis/repo${suffix}`, { base: 'invalid', head: 'invalid' }, sealed)
+          : await call(`/r/Cameronrlewis/repo${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+        if (owner === 'DisallowedOwner') { assert.equal(response.status, 404, suffix); assert.equal(calls, 1, suffix); }
+        else assert.ok(calls > 1 || response.status === 400, suffix);
+      } finally { restore(); }
+    }
+  }
+});
+
 test('review route hides inaccessible repositories behind the same HTML 404', async () => {
   const sealed = await signedIn();
   const missing = await call('/not-found', { headers: { Cookie: `s=${sealed}` } });
@@ -333,7 +350,7 @@ test('review route shows the repository after a pull-access check and refreshes 
     if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
     assert.equal(options.headers.Authorization, 'Bearer access-secret');
     assert.equal(options.headers['X-GitHub-Api-Version'], '2022-11-28');
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts?per_page=100');
     return new Response(JSON.stringify({ artifacts: [] }));
   });
@@ -367,7 +384,7 @@ test('raw artifact route streams the signed blob with its frame-only sandbox CSP
   const seen = [];
   const restore = mockFetch(async (url, options = {}) => {
     seen.push([url, options]);
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42/zip') {
       assert.equal(options.redirect, 'manual');
@@ -453,7 +470,7 @@ test('artifact redirect URL remains server-side', async () => {
   const sealed = await signedIn();
   const blobUrl = 'https://signed.example/very-secret';
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/artifacts/7')) return new Response(JSON.stringify({ name: 'report.html' }));
     if (url.endsWith('/artifacts/7/zip')) return new Response(null, { status: 302, headers: { Location: blobUrl } });
     return new Response('<p>review</p>');
@@ -471,7 +488,7 @@ test('artifact redirect URL remains server-side', async () => {
 test('expired artifacts explain how to get a new review', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => url.endsWith('/repo')
-    ? new Response(JSON.stringify({ permissions: { pull: true } }))
+    ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
     : new Response(JSON.stringify({ name: 'report.html', expired: true })));
   try {
     const response = await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } });
@@ -561,7 +578,7 @@ test('repository cards show escaped details, visibility, update time, and two ac
 test('review cards parse, escape, and list artifacts once', async () => {
   const sealed = await signedIn(); let artifactCalls = 0;
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/actions/artifacts?per_page=100')) {
       artifactCalls += 1;
       return new Response(JSON.stringify({ artifacts: [
@@ -587,7 +604,7 @@ test('review cards parse, escape, and list artifacts once', async () => {
 test('review filter chips count and filter from one artifact list', async () => {
   const sealed = await signedIn(); let artifactCalls = 0;
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true } }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/actions/artifacts?per_page=100')) {
       artifactCalls += 1;
       return new Response(JSON.stringify({ artifacts: [
@@ -619,7 +636,7 @@ test('commit history uses the access repository default and links reviews', asyn
   const sealed = await signedIn(); const urls = [];
   const restore = mockFetch(async (url) => {
     urls.push(url);
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
     if (url.endsWith('/branches?per_page=100')) return new Response(JSON.stringify([{ name: 'main' }]));
     if (url.endsWith('/tags?per_page=100')) return new Response(JSON.stringify([]));
     if (url.includes('/commits?')) return new Response(JSON.stringify([{ sha: 'deadbeef000', commit: { message: '<script>bad</script>\nmore', author: { name: 'Ada', date: '2025-02-03T04:05:00Z' } } }]));
@@ -637,7 +654,7 @@ test('commit history uses the access repository default and links reviews', asyn
 test('unknown commit branch is a 404 and access refusal makes no further calls', async () => {
   const sealed = await signedIn();
   let restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
     if (url.includes('/commits?')) return new Response('missing', { status: 404 });
     if (url.endsWith('/branches?per_page=100') || url.endsWith('/actions/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
@@ -665,7 +682,7 @@ function compareRequest(path, body, sealed, origin = 'https://site.example') {
 }
 
 function accessibleRepo() {
-  return new Response(JSON.stringify({ permissions: { pull: true }, default_branch: 'main' }));
+  return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
 }
 
 const base = 'deadbeef00000000000000000000000000000000';
@@ -1014,7 +1031,7 @@ test('expired artifacts offer regeneration only when their name records revision
     ['kicad-review.html', /Back to reviews/],
   ]) {
     const restore = mockFetch(async (url) => url.endsWith('/repo')
-      ? new Response(JSON.stringify({ permissions: { pull: true } }))
+      ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
       : new Response(JSON.stringify({ name, expired: true })));
     try {
       const body = await (await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } })).text();
