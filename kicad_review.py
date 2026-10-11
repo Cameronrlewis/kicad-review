@@ -80,7 +80,11 @@ def projects_at(rev):
     if not rev:
         return {}
     files = git("ls-tree", "-r", "--name-only", rev).splitlines()
-    return {posixpath.dirname(f): f for f in files if f.endswith(".kicad_pro") and not is_junk(f)}
+    pros = [f for f in files if f.endswith(".kicad_pro") and not is_junk(f)]
+    dirs = [posixpath.dirname(f) for f in pros]
+    if len(set(dirs)) < len(dirs):
+        sys.exit(f"Multiple .kicad_pro files in {next(d or '.' for d in dirs if dirs.count(d) > 1)!r}; KiCad allows one project per directory")
+    return {posixpath.dirname(f): f for f in pros}
 
 
 def owner_project(path, project_dirs):
@@ -125,6 +129,9 @@ def cmd_detect(args):
     env = dict(os.environ)
     base, head, reason = resolve_revisions(env)
     projects = detect(base, head)
+    ids = [project_id(p["dir"]) for p in projects]
+    if len(set(ids)) < len(ids):
+        sys.exit("Detected project ids collide; rename one project directory")
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
     with open("../review/detect.json", "w", encoding="utf-8") as fh:
@@ -683,10 +690,14 @@ def cmd_release(args):
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
                   if f.endswith(".kicad_pro") and not is_junk(posixpath.join(d, f)))
     names = [posixpath.basename(p) for p in pros]
+    seen = set()
     for pro in pros:
         label = posixpath.basename(pro)[: -len(".kicad_pro")]
         if names.count(posixpath.basename(pro)) > 1 and posixpath.dirname(pro) != "repo":  # keep same-named projects apart
             label = posixpath.dirname(pro)[len("repo/"):].replace("/", "-") + "-" + label
+        if label in seen:
+            sys.exit(f"Duplicate release label {label!r}; rename one project or directory")
+        seen.add(label)
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
 

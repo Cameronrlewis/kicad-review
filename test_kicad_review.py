@@ -183,6 +183,48 @@ assert found == {"B": "B/B.kicad_pro"}, found
 assert seen == ["repo/B/B.kicad_pro"], seen
 print("ok")
 
+# DR-S4: KiCad allows only one project per directory.
+for directory in ("", "P/"):
+    t = tempfile.mkdtemp()
+    os.chdir(t)
+    try:
+        g("init", "-q")
+        write(t, {directory + "A.kicad_pro": "{}", directory + "Z.kicad_pro": "{}"})
+        g("add", "-A"); g("commit", "-q", "-m", "two projects")
+        duplicate = commit("HEAD")
+        g("rm", directory + "Z.kicad_pro"); g("commit", "-q", "-m", "one project")
+        assert projects_at(commit("HEAD")) == {directory.rstrip("/"): directory + "A.kicad_pro"}
+        try:
+            detect(None, duplicate)
+            raise AssertionError("DR-S4: duplicate project directory must stop detection")
+        except SystemExit as e:
+            assert str(e) == f"Multiple .kicad_pro files in {directory.rstrip('/') or '.'!r}; KiCad allows one project per directory", e
+    finally:
+        os.chdir(here)
+print("ok DR-S4 duplicate project directory")
+
+# DR-S5: detect rejects output id collisions but allows noncolliding __ names.
+for directories, collision in ((("a/b", "a__b"), True), (("a__b", "c"), False)):
+    t = tempfile.mkdtemp()
+    os.makedirs(f"{t}/repo")
+    os.chdir(f"{t}/repo")
+    try:
+        g("init", "-q")
+        write(os.getcwd(), {os.path.join(d, "P.kicad_pro"): "{}" for d in directories})
+        g("add", "-A"); g("commit", "-q", "-m", "projects")
+        r = subprocess.run([sys.executable, f"{here}/kicad_review.py", "detect"], capture_output=True, text=True,
+                           env={**os.environ, "EVENT": "push", "AFTER": commit("HEAD"), "BEFORE": "0" * 40,
+                                "DEFAULT_BRANCH": "missing", "GITHUB_OUTPUT": f"{t}/output", "GITHUB_STEP_SUMMARY": f"{t}/summary"})
+        if collision:
+            assert r.returncode != 0, "DR-S5: colliding project ids must stop detection"
+            assert "project ids collide" in r.stderr, r.stderr
+        else:
+            assert r.returncode == 0, r.stderr
+            assert len(json.load(open(f"{t}/review/detect.json"))["projects"]) == 2
+    finally:
+        os.chdir(here)
+print("ok DR-S5 project id collision")
+
 # 4. A large change never pushes the checks out of the comment, and every <details> stays closed.
 long = lambda i: [[f"Field{k}", "x" * 50, "y" * 50] for k in range(6)]
 big = lambda n: {"name": f"P{n}", "dir": f"p{n}", "status": "modified", "sheets": [], "board": {"changed": False},
@@ -332,6 +374,24 @@ kicad_review.release_project = real
 os.chdir(here)
 assert seen == ["a-B", "b-x-B", "C"], seen
 print("ok")
+
+# DR-S6: flattened directory labels must not overwrite earlier fabrication outputs.
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {f"repo/{p}.kicad_pro": "{}" for p in ("a/b/P", "a-b/P")})
+seen = []
+kicad_review.release_project = lambda pro, tag, s, out, label: seen.append(label) or []
+try:
+    try:
+        kicad_review.cmd_release(type("A", (), {"tag": "v1"}))
+        raise AssertionError("DR-S6: duplicate release label must stop fabrication")
+    except SystemExit as e:
+        assert "Duplicate release label" in str(e) and "a-b-P" in str(e), e
+    assert seen == ["a-b-P"], "DR-S6: duplicate label must stop before exporting again"
+finally:
+    kicad_review.release_project = real
+    os.chdir(here)
+print("ok DR-S6 duplicate release label")
 
 # Minor: the README says what the arrow keys really do (they step only while focus is outside the list and buttons).
 readme = open("README.md", encoding="utf-8").read()
