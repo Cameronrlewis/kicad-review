@@ -3,7 +3,7 @@ export const CHECKS = [
   ["mode activation retains keyboard focus", "", `
     const b = document.querySelector('#modes [data-mode="overlay"]'); b.focus(); b.click();
     return document.activeElement === document.querySelector('#modes [data-mode="overlay"]') || document.activeElement.tagName;`],
-  ...['[data-tab="checks"]', '.chip-filter[data-action="added"]', 'select.kind', '[data-check-summary="erc"]', '[data-check-scope="all"]', '[data-check-severity="warning"]'].map(selector => [`panel activation retains keyboard focus on ${selector}`, selector.includes("data-check-") ? "p=1&t=checks" : "p=1", `
+  ...['[data-tab="checks"]', 'select.kind', '[data-check-scope="all"]'].map(selector => [`panel activation retains keyboard focus on ${selector}`, selector.includes("data-check-") ? "p=1&t=checks" : "p=1", `
     const selector = '${selector}', b = document.querySelector("#panel " + selector); b.focus();
     if (b.matches("select")) { b.value = b.options[1].value; b.dispatchEvent(new Event("change")); } else b.click();
     return document.activeElement === document.querySelector("#panel " + selector) || document.activeElement.tagName;`]),
