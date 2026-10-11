@@ -96,11 +96,11 @@ export const CHECKS = [
     const gzip = async text => btoa(String.fromCharCode(...new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer())));
     const bad = [btoa("not gzip"), await gzip("not GLB")];
     const facts = [];
-    for (const blob of bad) for (const both of [false, true]) {
+    for (const blob of bad) for (const both of [false, true]) for (const side of ["base", "head"]) {
       REVIEW_DATA.blobs.__bad3d = blob;
-      const project = {...p, board:{...p.board, no_model:[], model3d:{base:"__bad3d", head:both ? "__bad3d" : good}}};
+      const project = {...p, board:{...p.board, no_model:[], model3d:{base:both || side === "base" ? "__bad3d" : good, head:both || side === "head" ? "__bad3d" : good}}};
       const result = await Promise.race([Review3D.show(stage, project, {...S, s:null}).then(() => "done"), new Promise(r => setTimeout(() => r("pending"), 3000))]);
-      facts.push(result === "done" && !stage.querySelector(".loading") && (both ? stage.textContent.includes("No 3D board model") : !!Review3D.state.roots[1] && !Review3D.state.roots[0]));
+      facts.push(result === "done" && !stage.querySelector(".loading") && stage.textContent.includes("3D model could not be loaded") && !stage.textContent.includes("Board not in this revision") && !stage.textContent.includes("No 3D board model was exported") && (both ? !!stage.querySelector(".empty") : !!Review3D.state.roots[side === "base" ? 1 : 0] && !Review3D.state.roots[side === "base" ? 0 : 1]));
       Review3D.dispose();
     }
     return facts.every(Boolean) || JSON.stringify(facts);`],
