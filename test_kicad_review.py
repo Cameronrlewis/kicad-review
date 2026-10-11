@@ -307,7 +307,7 @@ assert r.returncode != 0 and "RuntimeError: external report assets remain" in r.
 template = open("ui/review.html", encoding="utf-8").read()
 for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
     changed = template.replace(marker, "data-check " + marker)
-    single_quoted = "<" + ("script " if marker.startswith("src") else "link ") + marker.replace('"', "'") + "></script>"
+    single_quoted = "<" + ("script " if marker.startswith("src") else "link ") + marker.replace('"', "'") + ("></script>" if marker.startswith("src") else ">")
     with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(single_quoted if path.endswith("review.html") else ""), create=True):
         try:
             inline_page("window.REVIEW_DATA={};")
