@@ -298,6 +298,7 @@ function onApply() {
   if (!vp) return;
   const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, tx = W / 2 - S.x * S.z;
   vp.querySelector(".divider").style.left = `${x}px`;
+  vp.querySelector(".divider").setAttribute("aria-valuenow", Math.round(S.wipe * 100));
   vp.querySelector(".stack.head").style.clipPath = `inset(0 0 0 ${Math.max(0, (x - tx) / k)}px)`;
 }
 function toggleBlend3D() {

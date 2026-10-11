@@ -80,7 +80,11 @@ def projects_at(rev):
     if not rev:
         return {}
     files = git("ls-tree", "-r", "--name-only", rev).splitlines()
-    return {posixpath.dirname(f): f for f in files if f.endswith(".kicad_pro") and not is_junk(f)}
+    pros = [f for f in files if f.endswith(".kicad_pro") and not is_junk(f)]
+    dirs = [posixpath.dirname(f) for f in pros]
+    if len(set(dirs)) < len(dirs):
+        sys.exit(f"Multiple .kicad_pro files in {next(d or '.' for d in dirs if dirs.count(d) > 1)!r}; KiCad allows one project per directory")
+    return {posixpath.dirname(f): f for f in pros}
 
 
 def owner_project(path, project_dirs):
@@ -125,6 +129,9 @@ def cmd_detect(args):
     env = dict(os.environ)
     base, head, reason = resolve_revisions(env)
     projects = detect(base, head)
+    ids = [project_id(p["dir"]) for p in projects]
+    if len(set(ids)) < len(ids):
+        sys.exit("Detected project ids collide; rename one project directory")
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
     with open("../review/detect.json", "w", encoding="utf-8") as fh:
@@ -679,14 +686,19 @@ def release_project(pro_path, tag, settings, out_dir, label):
 
 def cmd_release(args):
     settings = load_settings(("repo",))
-    os.makedirs("release", exist_ok=True)
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
                   if f.endswith(".kicad_pro") and not is_junk(posixpath.join(d, f)))
     names = [posixpath.basename(p) for p in pros]
+    labels = {}
     for pro in pros:
         label = posixpath.basename(pro)[: -len(".kicad_pro")]
         if names.count(posixpath.basename(pro)) > 1 and posixpath.dirname(pro) != "repo":  # keep same-named projects apart
             label = posixpath.dirname(pro)[len("repo/"):].replace("/", "-") + "-" + label
+        if label in labels:
+            sys.exit(f"Duplicate release label {label!r}; rename one project or directory")
+        labels[label] = pro
+    os.makedirs("release", exist_ok=True)
+    for label, pro in labels.items():
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
 
@@ -949,7 +961,9 @@ def inline_page(data_js):
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
-    return page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
+    page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
+    if any(ref in page for ref in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"')): raise RuntimeError("external report assets remain: template did not match")
+    return page
 
 
 def cmd_report(args):
@@ -1001,7 +1015,7 @@ def md(v):
     """Text from a KiCad file as literal markdown: no HTML, images, links, emphasis or @mentions.
     Bare URLs (datasheets) stay as GitHub shows them, a visible auto-link, since escapes would end up inside the link."""
     v = str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return "".join(part if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
+    return "".join(part.replace("\\", "%5C").replace("[", "%5B").replace("]", "%5D").replace("|", "%7C") if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
                    for i, part in enumerate(re.split(r"((?:https?://|www\.)[^\s<>]+)", v))).replace("|", "\\|")
 
 
@@ -1090,7 +1104,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
                 "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
-        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'")}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
+        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'").replace('\n', ' ').replace('\r', ' ')}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
         shots = [s for s in images if s["project"] == i]
         if shots:
@@ -1111,7 +1125,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
             return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
-        body = body[:60000 - len(checks)] + "\n\n… truncated. The full list is in the report.\n"
+        body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
 
@@ -1176,7 +1190,7 @@ def checks_markdown(data):
             if v["new"] and v["severity"] == "error"]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
-        lines += [f"- **{md(n)}** {t}: {md(v['description'])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
+        lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
     return "\n".join(lines) + "\n"

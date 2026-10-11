@@ -34,11 +34,12 @@ GITHUB_CLIENT_SECRET=…
 SESSION_KEY=…
 ```
 
-Make a session key with `openssl rand -base64 32`. Open <http://localhost:8787>. Run the tests with `node --import ./site/css-loader.mjs --test site/test.mjs`.
+Make a session key with `openssl rand -base64 32`. Open <http://localhost:8787>. Run the tests from the repository root with `node --import ./site/css-loader.mjs --test site/test.mjs`.
 
 ## Deploy
 
 Each deploy needs the owner's approval.
+For [the deployment workflow](../.github/workflows/site-deploy.yml), set the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 
 ```sh
 npx wrangler login
@@ -48,7 +49,7 @@ npx wrangler secret put SESSION_KEY
 npx wrangler deploy
 ```
 
-Or use the manual workflow below. Then set the Actions variable `KICAD_REVIEW_SITE` to the site URL in each KiCad repository, or for the organisation, so that comments link to it.
+Then set the Actions variable `KICAD_REVIEW_SITE` to the site URL in each KiCad repository, or for the organisation, so that comments link to it.
 
 ## Settings
 

@@ -1,4 +1,4 @@
-import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage } from './pages.js';
+import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -422,16 +422,9 @@ function githubRunUrl(run) {
 }
 
 function failedStep(jobs) {
-  const stageFor = (name) => {
-    const value = String(name || '').toLowerCase();
-    if (value.includes('check out')) return 'Getting the files';
-    if (value.includes('render') || value.includes('find changed')) return 'Rendering and checking';
-    if (value.includes('build comparison report') || value.includes('upload report') || value.includes('screenshots') || value.includes('publish')) return 'Building the report';
-    return 'Finishing';
-  };
   for (const job of jobs || []) {
     for (const step of job.steps || []) {
-      if (step.conclusion === 'failure') return { stage: stageFor(step.name), step: String(step.name || '') };
+      if (step.conclusion === 'failure') return { stage: stages[stageForStep(step.name)], step: String(step.name || '') };
     }
   }
   return null;

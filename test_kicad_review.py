@@ -96,7 +96,8 @@ assert "swipe and changed-regions" not in readme and "Open it from the link" not
 print("ok")
 
 # Review fixes (ponytail + caveman, 2026-10-07).
-import json, os, subprocess, sys
+import io, json, os, subprocess, sys
+from unittest.mock import patch
 d2 = {"base": "a" * 40, "head": "b" * 40, "reason": "r", "repo": "o/r",
       "links": {"run": "https://github.com/o/r/actions/runs/9"}, "projects": []}
 body = comment_markdown(d2, [], "https://github.com/o/r/actions/runs/9/artifacts/5", "77")
@@ -183,6 +184,48 @@ assert found == {"B": "B/B.kicad_pro"}, found
 assert seen == ["repo/B/B.kicad_pro"], seen
 print("ok")
 
+# DR-S4: KiCad allows only one project per directory.
+for directory in ("", "P/"):
+    t = tempfile.mkdtemp()
+    os.chdir(t)
+    try:
+        g("init", "-q")
+        write(t, {directory + "A.kicad_pro": "{}", directory + "Z.kicad_pro": "{}"})
+        g("add", "-A"); g("commit", "-q", "-m", "two projects")
+        duplicate = commit("HEAD")
+        g("rm", directory + "Z.kicad_pro"); g("commit", "-q", "-m", "one project")
+        assert projects_at(commit("HEAD")) == {directory.rstrip("/"): directory + "A.kicad_pro"}
+        try:
+            detect(None, duplicate)
+            raise AssertionError("DR-S4: duplicate project directory must stop detection")
+        except SystemExit as e:
+            assert str(e) == f"Multiple .kicad_pro files in {directory.rstrip('/') or '.'!r}; KiCad allows one project per directory", e
+    finally:
+        os.chdir(here)
+print("ok DR-S4 duplicate project directory")
+
+# DR-S5: detect rejects output id collisions but allows noncolliding __ names.
+for directories, collision in ((("a/b", "a__b"), True), (("a__b", "c"), False)):
+    t = tempfile.mkdtemp()
+    os.makedirs(f"{t}/repo")
+    os.chdir(f"{t}/repo")
+    try:
+        g("init", "-q")
+        write(os.getcwd(), {os.path.join(d, "P.kicad_pro"): "{}" for d in directories})
+        g("add", "-A"); g("commit", "-q", "-m", "projects")
+        r = subprocess.run([sys.executable, f"{here}/kicad_review.py", "detect"], capture_output=True, text=True,
+                           env={**os.environ, "EVENT": "push", "AFTER": commit("HEAD"), "BEFORE": "0" * 40,
+                                "DEFAULT_BRANCH": "missing", "GITHUB_OUTPUT": f"{t}/output", "GITHUB_STEP_SUMMARY": f"{t}/summary"})
+        if collision:
+            assert r.returncode != 0, "DR-S5: colliding project ids must stop detection"
+            assert "project ids collide" in r.stderr, r.stderr
+        else:
+            assert r.returncode == 0, r.stderr
+            assert len(json.load(open(f"{t}/review/detect.json"))["projects"]) == 2
+    finally:
+        os.chdir(here)
+print("ok DR-S5 project id collision")
+
 # 4. A large change never pushes the checks out of the comment, and every <details> stays closed.
 long = lambda i: [[f"Field{k}", "x" * 50, "y" * 50] for k in range(6)]
 big = lambda n: {"name": f"P{n}", "dir": f"p{n}", "status": "modified", "sheets": [], "board": {"changed": False},
@@ -209,6 +252,57 @@ assert "*b*" not in plain and "`c`" not in body, plain
 print("ok")
 assert md("https://x.com/a_b(1).pdf") == "https://x.com/a_b(1).pdf" and md("a|b") == "a\\|b", md("https://x.com/a_b(1).pdf")
 print("ok")
+
+# RC-S2: Long check descriptions fit the comment limit; an exhausted body budget never slices backwards.
+p = big(0)
+p["changes"] = []
+p["checks"][0]["violations"] = [{"new": True, "severity": "error", "description": "Long net " + "x" * 1500, "items": []} for _ in range(50)]
+body = comment_markdown({**d2, "projects": [p]}, [], "")
+assert len(body) < 65536 and "x" * 301 not in body, "RC-S2: long check descriptions exceed the comment budget"
+real_checks = kicad_review.checks_markdown
+try:
+    kicad_review.checks_markdown = lambda data: "x" * 60001
+    body = comment_markdown(d2, [], "", rows=0)
+    assert body.startswith("\n\n… truncated."), "RC-S2: negative body budget retains comment text"
+finally:
+    kicad_review.checks_markdown = real_checks
+print("ok RC-S2 check budget")
+
+# RC-S3: Directory CR/LF cannot break out of the literal code span.
+p = big(0)
+p["dir"] = "foo\r\n\n![proof](https://e.example/dir.png)\r\n\nbar`"
+body = comment_markdown({**d2, "projects": [p]}, [], "")
+assert "(`foo   ![proof](https://e.example/dir.png)   bar'`, modified)" in body, "RC-S3: directory line breaks escape the code span"
+print("ok RC-S3 directory line breaks")
+
+# RC-S4: Template changes must not silently leave any of the four external assets, even under -O.
+r = subprocess.run([sys.executable, "-O", "-c", 'import io, kicad_review as k; from unittest.mock import patch\nwith patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(\'<script data-check src="review.js"></script>\' if path.endswith("review.html") else ""), create=True):\n k.inline_page("")'], capture_output=True, text=True)
+assert r.returncode != 0 and "RuntimeError: external report assets remain" in r.stderr, "RC-S4: optimized Python silently leaves external assets"
+template = open("ui/review.html", encoding="utf-8").read()
+for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
+    changed = template.replace(marker, "data-check " + marker)
+    with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(changed if path.endswith("review.html") else ""), create=True):
+        try:
+            inline_page("window.REVIEW_DATA={};")
+        except RuntimeError as e:
+            assert "external report assets remain" in str(e), e
+        else:
+            raise AssertionError("RC-S4: template change silently leaves " + marker)
+print("ok RC-S4 external asset guard")
+
+# RC-S1: URL-looking text cannot supply Markdown links or images, including screenshot alt text.
+for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)"):
+    assert md(value) == value.replace("[", "%5B").replace("]", "%5D"), "RC-S1: URL Markdown delimiters are not encoded"
+shot = {"project": 0, "title": "sheet https://x/](https://e.example/p.png)", "url": "https://trusted.example/shot.png"}
+body = comment_markdown({**d2, "projects": [big(0)]}, [shot], "")
+assert "![sheet https://x/%5D(https://e.example/p.png): before and after](https://trusted.example/shot.png)" in body, "RC-S1: screenshot alt text is unescaped"
+for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)", shot["title"],
+              r"https://x/\[p\](https://e.example/p.png)", r"https://x/\](https://e.example/p.png)"):
+    assert all(len(m[1]) % 2 for m in re.finditer(r"(\\*)([\[\]])", md(value))), "RC-S1: URL bracket escape has even backslash count"
+from urllib.parse import unquote
+url = r"https://x.com/a[b]\c|d(1).pdf"
+assert md(url) == "https://x.com/a%5Bb%5D%5Cc%7Cd(1).pdf" and unquote(md(url)) == url, "RC-S1: datasheet URL target changes"
+print("ok RC-S1 URL delimiters")
 
 # 6. No text in the data can end or re-open the data <script> (e.g. "<!--<script>" blanked the page).
 t = tempfile.mkdtemp()
@@ -332,6 +426,25 @@ kicad_review.release_project = real
 os.chdir(here)
 assert seen == ["a-B", "b-x-B", "C"], seen
 print("ok")
+
+# DR-S6: flattened directory labels must not overwrite earlier fabrication outputs.
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {f"repo/{p}.kicad_pro": "{}" for p in ("a/b/P", "a-b/P")})
+seen = []
+kicad_review.release_project = lambda pro, tag, s, out, label: seen.append(label) or []
+try:
+    try:
+        kicad_review.cmd_release(type("A", (), {"tag": "v1"}))
+        raise AssertionError("DR-S6: duplicate release label must stop fabrication")
+    except SystemExit as e:
+        assert "Duplicate release label" in str(e) and "a-b-P" in str(e), e
+    assert seen == [], "DR-S6: duplicate label must stop before any export"
+    assert not os.path.exists("release"), "DR-S6: duplicate label creates release output"
+finally:
+    kicad_review.release_project = real
+    os.chdir(here)
+print("ok DR-S6 duplicate release label")
 
 # Minor: the README says what the arrow keys really do (they step only while focus is outside the list and buttons).
 readme = open("README.md", encoding="utf-8").read()

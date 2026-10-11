@@ -1017,6 +1017,38 @@ test('generating review follows the workflow step order through files, rendering
   assert.deepEqual(states(at(11)).slice(1), [['Getting the files', 'done'], ['Rendering and checking', 'done'], ['Building the report', 'active'], ['Finishing', 'todo']]);
 });
 
+test('PG-S3 compression keeps Rendering active and Building waiting', () => {
+  const page = runPage({ owner: 'Cameronrlewis', repo: 'repo', running: true, status: 'in_progress', jobs: [{ steps: [
+    { name: 'Render board', status: 'completed', conclusion: 'success' },
+    { name: 'Compress 3D board models', status: 'in_progress' },
+    { name: 'Build comparison report', status: 'queued' },
+  ] }] });
+  assert.match(page, /<li class="active">[^<]*<span[^>]*><\/span> Rendering and checking /);
+  assert.match(page, /<li class="todo">○ Building the report /);
+  assert.match(page, /<li class="todo">○ Finishing /);
+});
+
+test('PG-O1 failed runs name the same stage as progress', async () => {
+  const sealed = await signedIn();
+  for (const name of ['Find changed KiCad projects', 'Set up job', 'Skip push that an open pull request already covers', 'Copy named report']) {
+    const jobs = [{ steps: [{ name, status: 'completed', conclusion: 'failure' }] }];
+    const progress = runPage({ owner: 'Cameronrlewis', repo: 'repo', status: 'in_progress', jobs });
+    const stage = progress.match(/<li class="failed">✕ ([^<]+) <span/)[1];
+    const restore = mockFetch(async (url) => {
+      if (url.endsWith('/repo')) return accessibleRepo();
+      if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
+      if (url.endsWith('/jobs')) return new Response(JSON.stringify({ jobs }));
+      if (url.endsWith('/artifacts')) return new Response(JSON.stringify({ artifacts: [] }));
+      throw new Error(`unexpected ${url}`);
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      assert.ok((await response.text()).includes(`The run stopped at ${stage} (${name}).`), name);
+    } finally { restore(); }
+  }
+});
+
 test('run page validates revisions and only refreshes while running', () => {
   const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', status: 'in_progress', jobs: [] };
   const running = runPage({ ...common, running: true, base: base, head, startedAt: '2026-10-07T10:00:00Z' });
