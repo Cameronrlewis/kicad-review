@@ -111,7 +111,7 @@ def detect(base, head):
             by_project.setdefault(d, [])
     projects = []
     for d in sorted(by_project):
-        status = "added" if d not in base_projects else "removed" if d not in head_projects else "modified"
+        status = "removed" if d not in head_projects else "added" if d not in base_projects or base_projects[d] != head_projects[d] else "modified"
         pro = head_projects.get(d) or base_projects[d]
         projects.append({
             "dir": d,

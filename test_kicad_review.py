@@ -464,3 +464,24 @@ g("add", "-A"); g("commit", "-q", "-m", "unrelated")
 assert detect(commit("HEAD~1"), commit("HEAD")) == [], "DR-S3: unrelated files remain ignored"
 os.chdir(here)
 print("ok DR-S3 unowned KiCad changes schedule all projects")
+
+# DR-S1: a project renamed in place is new; unchanged names retain modified/removed statuses.
+t = tempfile.mkdtemp()
+os.chdir(t)
+g("init", "-q")
+write(t, {f"P/old.{ext}": "{}" for ext in ("kicad_pro", "kicad_sch", "kicad_pcb")})
+g("add", "-A"); g("commit", "-q", "-m", "base")
+for ext in ("kicad_pro", "kicad_sch", "kicad_pcb"):
+    os.rename(f"P/old.{ext}", f"P/new.{ext}")
+g("add", "-A"); g("commit", "-q", "-m", "rename")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", "status": "added"}], "DR-S1: renamed project is added"
+write(t, {"P/new.kicad_sch": "changed"})
+g("add", "-A"); g("commit", "-q", "-m", "modify")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", "status": "modified"}], "DR-S1: same name is modified"
+for ext in ("kicad_pro", "kicad_sch", "kicad_pcb"):
+    os.remove(f"P/new.{ext}")
+g("add", "-A"); g("commit", "-q", "-m", "remove")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", "status": "removed"}], "DR-S1: deleted project is removed"
+os.chdir(here)
+print("ok DR-S1 renamed project is added")
+print("ok")
