@@ -797,6 +797,20 @@ for noise in ("0.000001", "-0.000001", "0.0"):
 print("ok OB-S2 pad position noise")
 print("ok OB-S2 pad geometry and rotate invariant")
 
+# OB-C: duplicate pad numbers retain each net, while unique numbers keep readable keys.
+for numbers in (("1", "1"), ("1", "2")):
+    pads = [pad.replace('"1" thru_hole', f'"{number}" thru_hole').replace('"pad1"', f'"pad{i}"') for i, number in enumerate(numbers)]
+    write(t, {"b.kicad_pcb": board.replace("PAD", " ".join(pads))})
+    before = pcb_objects(f"{t}/b.kicad_pcb")
+    if numbers == ("1", "2"):
+        assert {k: v for k, v in before["fp1"]["props"].items() if k.startswith("pad ")} == {"pad 1 net": "GND", "pad 2 net": "GND"}, "OB-C: unique pad keys changed"
+    for index in (0, 1):
+        changed = [p.replace('net 1 "GND"', 'net 2 "VCC"') if i == index else p for i, p in enumerate(pads)]
+        write(t, {"h.kicad_pcb": board.replace("PAD", " ".join(changed))})
+        rows = diff_objects(before, pcb_objects(f"{t}/h.kicad_pcb"))
+        assert len(rows) == 1 and len(rows[0]["changes"]) == 1 and rows[0]["changes"][0][1:] == ["GND", "VCC"], f"OB-C: pad {index} net change lost for {numbers}: {rows}"
+print("ok OB-C duplicate pad nets and unique keys")
+
 # TS-S2: exercise render/release above the process boundary, not stubs of the functions under test.
 import csv, pathlib, zipfile
 from kicad_review import render_side

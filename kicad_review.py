@@ -442,9 +442,12 @@ def pcb_objects(path):
                      round(((pa[2] if len(pa) > 2 else 0.0) - (a[2] if a and len(a) > 2 else 0.0)) % 360, 3) % 360 if pa else None) for pad in findall(n, "pad")]
             p["pads"] = f"{len(pads)} pads, geom {hashlib.sha1(repr(pads).encode()).hexdigest()[:10]}" if pads else None
             p["3D model"] = "; ".join(f"{m[1]} " + " ".join(f"{k}={v}" for k, v in flatten_sexpr(m).items()) for m in findall(n, "model")) or None
+            pad_numbers = {}
             for pad in findall(n, "pad"):
+                pad_numbers[pad[1]] = pad_numbers.get(pad[1], 0) + 1
+            for i, pad in enumerate(findall(n, "pad")):
                 if find(pad, "net"):
-                    p[f"pad {pad[1]} net"] = net(pad)
+                    p[f"pad {pad[1]}{f' (index {i})' if pad_numbers[pad[1]] > 1 else ''} net"] = net(pad)
             objs[uid] = {"kind": "footprint", "ref": p["reference"], "match": ("footprint", p["reference"]),
                          "props": p, "pos": a, "box": box_of(pad_points(n, a), 1), "where": where,
                          "has_model": bool(findall(n, "model"))}
