@@ -183,6 +183,28 @@ assert found == {"B": "B/B.kicad_pro"}, found
 assert seen == ["repo/B/B.kicad_pro"], seen
 print("ok")
 
+# DR-S4: KiCad allows only one project per directory, at either revision.
+assert projects_at(None) == {}
+for directory in ("", "P/"):
+    t = tempfile.mkdtemp()
+    os.chdir(t)
+    try:
+        g("init", "-q")
+        write(t, {directory + "A.kicad_pro": "{}", directory + "Z.kicad_pro": "{}"})
+        g("add", "-A"); g("commit", "-q", "-m", "two projects")
+        duplicate = commit("HEAD")
+        g("rm", directory + "Z.kicad_pro"); g("commit", "-q", "-m", "one project")
+        assert projects_at(commit("HEAD")) == {directory.rstrip("/"): directory + "A.kicad_pro"}
+        for base, head in ((None, duplicate), (duplicate, commit("HEAD"))):
+            try:
+                detect(base, head)
+                raise AssertionError("DR-S4: duplicate project directory must stop detection")
+            except SystemExit as e:
+                assert "one project per directory" in str(e), e
+    finally:
+        os.chdir(here)
+print("ok DR-S4 duplicate project directory")
+
 # 4. A large change never pushes the checks out of the comment, and every <details> stays closed.
 long = lambda i: [[f"Field{k}", "x" * 50, "y" * 50] for k in range(6)]
 big = lambda n: {"name": f"P{n}", "dir": f"p{n}", "status": "modified", "sheets": [], "board": {"changed": False},
