@@ -395,7 +395,7 @@ def sch_objects(proj_dir, name):
             elif kind == "sheet":
                 props = properties(n)
                 objs[key] = {"kind": "sheet", "ref": props.get("Sheetname", "?"),
-                             "props": {"file": props.get("Sheetfile"), "position": fmt_at(at(n))},
+                             "props": {"name": props.get("Sheetname"), "file": props.get("Sheetfile"), "position": fmt_at(at(n))},
                              "pos": at(n), "where": where}
             elif kind in ("junction", "no_connect"):
                 objs[key] = {"kind": kind.replace("_", " "), "ref": "", "props": {"position": fmt_at(at(n))},

@@ -444,3 +444,11 @@ for changed, expected in ((power.replace('+3V3', '+5V'), [["net", "+3V3", "+5V"]
     rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
     assert len(rows) == 1 and rows[0]["changes"] == expected, f"OB-S1 power props: {rows}"
 print("ok OB-S1 power props")
+
+# OB-S4: a sheet rename alone changes its review properties.
+t = tempfile.mkdtemp()
+write(t, {"b/P.kicad_sch": "(kicad_sch " + sheet("Old", "child.kicad_sch", "sheet1") + ")",
+          "h/P.kicad_sch": "(kicad_sch " + sheet("New", "child.kicad_sch", "sheet1") + ")"})
+rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
+assert len(rows) == 1 and rows[0]["changes"] == [["name", "Old", "New"]], f"OB-S4 sheet name: {rows}"
+print("ok OB-S4 sheet name")
