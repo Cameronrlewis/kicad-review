@@ -244,6 +244,12 @@ export const CHECKS = [
     return S.m === "${m}" && document.querySelector("#stage").classList.contains("mode-${m}")
       && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}"
       && [...document.querySelectorAll('#stage svg path, #stage svg line, #stage svg rect, #stage svg circle, #stage svg polyline, #stage svg polygon, #stage svg text')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; });`]),
+  ["wipe divider exposes its current keyboard position", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const d = document.querySelector('#stage .divider[role="slider"]'), before = S.wipe;
+    const initial = d.getAttribute("aria-valuenow") === String(Math.round(S.wipe * 100)); d.focus();
+    d.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    return initial && S.wipe > before && d.getAttribute("aria-valuenow") === String(Math.round(S.wipe * 100)) || JSON.stringify({initial, before, wipe:S.wipe, value:d.getAttribute("aria-valuenow")});`],
   ["wipe divider follows drag", "m=wipe", `
     await new Promise(r => setTimeout(r, 800));
     const d = document.querySelector("#stage .divider"), r = d.parentElement.getBoundingClientRect();
