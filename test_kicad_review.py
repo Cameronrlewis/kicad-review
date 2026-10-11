@@ -210,6 +210,14 @@ print("ok")
 assert md("https://x.com/a_b(1).pdf") == "https://x.com/a_b(1).pdf" and md("a|b") == "a\\|b", md("https://x.com/a_b(1).pdf")
 print("ok")
 
+# RC-S1: URL-looking text cannot supply Markdown links or images, including screenshot alt text.
+for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)"):
+    assert md(value) == value.replace("[", "\\[").replace("]", "\\]"), "RC-S1: URL Markdown delimiters are unescaped"
+shot = {"project": 0, "title": "sheet https://x/](https://e.example/p.png)", "url": "https://trusted.example/shot.png"}
+body = comment_markdown({**d2, "projects": [big(0)]}, [shot], "")
+assert "![sheet https://x/\\](https://e.example/p.png): before and after](https://trusted.example/shot.png)" in body, "RC-S1: screenshot alt text is unescaped"
+print("ok RC-S1 URL delimiters")
+
 # 6. No text in the data can end or re-open the data <script> (e.g. "<!--<script>" blanked the page).
 t = tempfile.mkdtemp()
 os.chdir(t)
