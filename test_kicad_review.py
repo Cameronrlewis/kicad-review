@@ -39,6 +39,14 @@ assert (c["errors"], c["new_errors"], c["new_warnings"], c["status"]) == (2, 1, 
 assert run_check("drc", {**DEFAULT_SETTINGS, "checks": {"drc": "informational"}}, head, base)["status"] == "warn"
 print("ok")
 
+# Reused schematic sheets have distinct violation identities, even with the same pin UUIDs and positions.
+for uuids in (["pin"], []):
+    base = [{**V("pin_not_connected", "error", uuids, [1, 1]), "where": {"sheet": "/a/"}}]
+    head = [dict(base[0]), {**base[0], "where": {"sheet": "/b/"}}]
+    c = run_check("erc", DEFAULT_SETTINGS, head, base)
+    assert (c["new_errors"], c["fixed"], c["status"]) == (1, 0, "fail"), "CK-S1: second sheet error must be new"
+print("ok CK-S1 sheet instance")
+
 # Data format v1: ids unique per file, layer changed flags, links.
 from kicad_review import assign_ids, review_links
 projects = [{"changes": [{"kind": "symbol"}, {"kind": "track"}],

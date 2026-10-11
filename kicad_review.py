@@ -733,13 +733,14 @@ def bom_violations(objs, fields):
 
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
+    sig = (tuple(sorted(v["where"].items())),)
     if v.get("key"):
-        return {v["key"]}
+        return {v["key"] + sig}
     desc = re.sub(r"[\d.]+", "#", v["description"])
     keys = {("p", v["type"], desc, tuple(v["items"]), tuple(tuple(round(c, 1) for c in p) for p in ([v["pos"]] if v["pos"] else [])))}
     if v["uuids"]:
         keys.add(("u", v["type"], tuple(v["uuids"])))
-    return keys
+    return {k + sig for k in keys}
 
 
 def run_check(name, settings, head, base):
