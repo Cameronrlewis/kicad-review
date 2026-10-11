@@ -1111,7 +1111,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
             return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
-        body = body[:60000 - len(checks)] + "\n\n… truncated. The full list is in the report.\n"
+        body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
 
@@ -1176,7 +1176,7 @@ def checks_markdown(data):
             if v["new"] and v["severity"] == "error"]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
-        lines += [f"- **{md(n)}** {t}: {md(v['description'])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
+        lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
     return "\n".join(lines) + "\n"

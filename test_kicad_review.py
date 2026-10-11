@@ -210,6 +210,21 @@ print("ok")
 assert md("https://x.com/a_b(1).pdf") == "https://x.com/a_b(1).pdf" and md("a|b") == "a\\|b", md("https://x.com/a_b(1).pdf")
 print("ok")
 
+# RC-S2: Long check descriptions fit the comment limit; an exhausted body budget never slices backwards.
+p = big(0)
+p["changes"] = []
+p["checks"][0]["violations"] = [{"new": True, "severity": "error", "description": "Long net " + "x" * 1500, "items": []} for _ in range(50)]
+body = comment_markdown({**d2, "projects": [p]}, [], "")
+assert len(body) < 65536 and "x" * 301 not in body, "RC-S2: long check descriptions exceed the comment budget"
+real_checks = kicad_review.checks_markdown
+try:
+    kicad_review.checks_markdown = lambda data: "x" * 60001
+    body = comment_markdown(d2, [], "", rows=0)
+    assert body.startswith("\n\n… truncated."), "RC-S2: negative body budget retains comment text"
+finally:
+    kicad_review.checks_markdown = real_checks
+print("ok RC-S2 check budget")
+
 # RC-S1: URL-looking text cannot supply Markdown links or images, including screenshot alt text.
 for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)"):
     assert md(value) == value.replace("[", "\\[").replace("]", "\\]"), "RC-S1: URL Markdown delimiters are unescaped"
