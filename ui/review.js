@@ -6,6 +6,7 @@ const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "ch
 const proj = () => D.projects[S.p];
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const GLYPH = { added: "＋", removed: "−", modified: "≡" };
+const GROUPS3D = [["bodies", "Component bodies"], ["top", "Top side"], ["bottom", "Bottom side"], ["silk", "Silkscreen"], ["mask", "Soldermask"], ["board", "Board"]];
 
 function onView(r, view) {
   if (!r.where) return false;
@@ -34,8 +35,8 @@ function layerGroup(n) {
 function renderLayers() {
   const box = $("#layers");
   if (S.v === "3d") {
-    const hidden = new Set(S.hidden3d || []), groups = [["bodies", "Component bodies"], ["top", "Top side"], ["bottom", "Bottom side"], ["silk", "Silkscreen"], ["mask", "Soldermask"], ["board", "Board"]];
-    box.innerHTML = `<h3>3D view</h3>${groups.map(([id, label]) => `<label><input type="checkbox" data-3d-group="${id}" ${hidden.has(id) ? "" : "checked"}> ${label}</label>`).join("")}`;
+    const hidden = new Set(S.hidden3d || []);
+    box.innerHTML = `<h3>3D view</h3>${GROUPS3D.map(([id, label]) => `<label><input type="checkbox" data-3d-group="${id}" ${hidden.has(id) ? "" : "checked"}> ${label}</label>`).join("")}`;
     box.querySelectorAll("[data-3d-group]").forEach(cb => cb.onchange = () => { const h = new Set(S.hidden3d || []); cb.checked ? h.delete(cb.dataset["3dGroup"]) : h.add(cb.dataset["3dGroup"]); S.hidden3d = [...h]; window.Review3D?.setHidden(S.hidden3d); saveHash(); });
     return;
   }
@@ -114,7 +115,7 @@ function valid(st) {   // drop anything that does not exist in this report
     if (!st.layers.length || ls.length) out.layers = ls;
   }
   if (Array.isArray(st.camera3d) && st.camera3d.length === 6 && st.camera3d.every(Number.isFinite)) out.camera3d = st.camera3d;
-  if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => ["bodies", "top", "bottom", "silk", "mask", "board"].includes(x));
+  if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
   return out;
 }
 function applyState(st) {
@@ -298,6 +299,11 @@ function onApply() {
   vp.querySelector(".divider").style.left = `${x}px`;
   vp.querySelector(".stack.head").style.clipPath = `inset(0 0 0 ${Math.max(0, (x - tx) / k)}px)`;
 }
+function toggleBlend3D() {
+  window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend;
+  const r = $("#modes input[type=range]"); if (r) r.value = Math.round(S.blend * 100);
+  const b = $("#modes [data-3d-blend-toggle]"); if (b) b.textContent = S.blend < .5 ? "Show head" : "Show base";
+}
 function renderModes() {
   const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
@@ -307,7 +313,7 @@ function renderModes() {
   const r = document.querySelector("#modes input[type=range]");
   const blendButton = $("#modes [data-3d-blend-toggle]"), buttonText = () => { if (blendButton) blendButton.textContent = S.blend < .5 ? "Show head" : "Show base"; };
   if (r) r.oninput = () => { S.blend = r.value / 100; if (is3d) window.Review3D?.setBlend(S.blend); else { const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; } buttonText(); };
-  blendButton?.addEventListener("click", () => { window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend; const input = $("#modes input[type=range]"); if (input) input.value = Math.round(S.blend * 100); buttonText(); });
+  blendButton?.addEventListener("click", toggleBlend3D);
 }
 
 const MARKED = new Set(["symbol", "footprint", "sheet", "zone", "label", "global label", "hierarchical label", "via", "track", "board outline"]);
@@ -490,7 +496,7 @@ document.addEventListener("keydown", e => {
   if (arrow && e.target.closest?.("#panel, button, [role=slider]")) return;   // leave arrows to scrolling and widgets
   if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
   else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
-  else if (e.key === "b" && S.v === '3d' && S.m === "blend") { window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend; const r = $("#modes input[type=range]"); if (r) r.value = Math.round(S.blend * 100); const b = $("#modes [data-3d-blend-toggle]"); if (b) b.textContent = S.blend < .5 ? "Show head" : "Show base"; }
+  else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
   else if (e.key === "f") fit();
   else if (e.key === "Escape") { S.s = null; markSelected(); draw(); saveHash(); }
 });
