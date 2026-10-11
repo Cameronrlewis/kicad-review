@@ -1,5 +1,25 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["3D bad model data settles and keeps the valid side", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), good = p.board.model3d.head;
+    const gzip = async text => btoa(String.fromCharCode(...new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer())));
+    const bad = [btoa("not gzip"), await gzip("not GLB")];
+    const facts = [];
+    for (const blob of bad) for (const both of [false, true]) {
+      REVIEW_DATA.blobs.__bad3d = blob;
+      const project = {...p, board:{...p.board, no_model:[], model3d:{base:"__bad3d", head:both ? "__bad3d" : good}}};
+      const result = await Promise.race([Review3D.show(stage, project, {...S, s:null}).then(() => "done"), new Promise(r => setTimeout(() => r("pending"), 3000))]);
+      facts.push(result === "done" && !stage.querySelector(".loading") && (both ? stage.textContent.includes("No 3D board model") : !!Review3D.state.roots[1] && !Review3D.state.roots[0]));
+      Review3D.dispose();
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D bundle failure leaves Loading", "", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    document.querySelector("#three-bundle").textContent = btoa("not gzip");
+    const stage = document.querySelector("#stage");
+    const result = await Promise.race([Review3D.show(stage, REVIEW_DATA.projects[0], {...S, s:null}).then(() => "done", () => "rejected"), new Promise(r => setTimeout(() => r("pending"), 3000))]);
+    return result === "done" && !stage.querySelector(".loading") && !!stage.textContent.trim() || result;`],
   ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
