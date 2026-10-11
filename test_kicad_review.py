@@ -678,13 +678,10 @@ def fake_cli(args, **kw):
         return type("R", (), {"returncode": 7, "stdout": "failure stdout", "stderr": "failure stderr"})()
     out = pathlib.Path(args[args.index("-o") + 1])
     kind = args[3] if args[2] == "export" else args[2]
-    files = {"svg": {"P.svg": "<svg/>"}, "gerbers": {"P-F_Cu.gbr": "copper"}, "drill": {"P.drl": "drill"}}
-    if kind in files:
-        out.mkdir(parents=True, exist_ok=True)
-        for name, text in files[kind].items(): (out / name).write_text(text, encoding="utf-8")
-    else:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(positions if kind == "pos" else bom if kind == "bom" else "{}", encoding="utf-8")
+    name, text = {"svg": ("P.svg", "<svg/>"), "gerbers": ("P-F_Cu.gbr", "copper"), "drill": ("P.drl", "drill"), "pos": ("", positions), "bom": ("", bom)}.get(kind, ("", "{}"))
+    out /= name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
     return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 kicad_review.subprocess.run = fake_cli
 try:
