@@ -1,5 +1,17 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["unchanged sheet selection saves the address", "", `
+    const sheet = proj().sheets.find(s => s.status === "unchanged" && !s.svg); if (!sheet) return true;
+    await new Promise(r => setTimeout(r, 400));
+    document.querySelector('#nav [data-view="sheet:' + sheet.path + '"]').click();
+    await new Promise(r => setTimeout(r, 400));
+    return new URLSearchParams(location.hash.slice(1)).get("v") === "sheet:" + sheet.path || location.hash;`],
+  ["unchanged project selection saves the address", "", `
+    const i = D.projects.findIndex(p => !p.board.changed && p.sheets.length && p.sheets.every(s => !s.svg)); if (i < 0) return true;
+    await new Promise(r => setTimeout(r, 400));
+    const select = document.querySelector("#proj"); select.value = i; select.dispatchEvent(new Event("change"));
+    await new Promise(r => setTimeout(r, 400));
+    return new URLSearchParams(location.hash.slice(1)).get("p") === String(i) || location.hash;`],
   ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));

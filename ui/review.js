@@ -91,7 +91,7 @@ function firstChangedView(p) {
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
-function select(view) { S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); }
+function select(view) { S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
