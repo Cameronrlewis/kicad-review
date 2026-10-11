@@ -6,7 +6,8 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 800));
     const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:st.renderers[0].getClearColor(new THREE.Color()).getHexString()}, dark = !matchMedia("(prefers-color-scheme: dark)").matches;
     await new Promise(r => { window.__themeFlipped = r; window.__flipTheme(dark ? "dark" : "light"); });
-    await new Promise(r => setTimeout(r, 150));
+    const until = performance.now() + 3000;
+    while (st.renderers[0].getClearColor(new THREE.Color()).getHexString() === before.clear && performance.now() < until) await new Promise(r => setTimeout(r, 25));
     const css = getComputedStyle(document.documentElement), token = n => new THREE.Color(css.getPropertyValue(n).trim()), facts = {
       clear:st.renderers.every(r => r.getClearColor(new THREE.Color()).equals(token(dark ? "--bg" : "--paper"))),
       highlight:h.materials.every((m,i) => m.color.equals(h.original[i].color.clone().lerp(token("--modified"), .7)) && (!m.emissive || m.emissive.equals(token("--modified")))),
@@ -468,6 +469,33 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 500));
     const cb = document.querySelector('[data-3d-group="silk"]'); if (!cb) return false; cb.click();
     return (S.hidden3d || []).includes("silk");`],
+  ["3D visibility classifies geometry on both board sides", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    while (!Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    const st = Review3D.state, {THREE} = THREE3D, bad = [], layers = [];
+    st.roots.forEach((root, i) => {
+      if (!root) return;
+      const meshes = []; root.traverse(o => { if (o.isMesh) meshes.push(o); });
+      const pcb = meshes.filter(o => /PCB/i.test(o.name)), box = new THREE.Box3(); pcb.forEach(o => box.union(new THREE.Box3().setFromObject(o)));
+      const middle = box.getCenter(new THREE.Vector3()).y, groups = o => st.groups.find(g => g.object === o)?.groups || [];
+      for (const [pattern, group] of [[/silkscreen/i, "silk"], [/soldermask/i, "mask"]]) {
+        const found = meshes.filter(o => pattern.test(o.name));
+        for (const side of ["top", "bottom"]) if (new Set(found.filter(o => groups(o).includes(side)).map(o => group === "silk" ? o.parent : o)).size !== 1) bad.push(i + " " + group + " " + side);
+        found.forEach(o => { const side = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3()).y > middle ? "top" : "bottom"; layers.push({object:o, side}); if (groups(o).join(",") !== [group, side].join(",")) bad.push(i + " " + group + " geometry " + side); });
+      }
+      if (!pcb.length || pcb.some(o => groups(o).join(",") !== "board")) bad.push(i + " PCB groups");
+      const j2 = root.getObjectByName("J2"), parts = [];
+      root.traverse(o => { if (/^[A-Z]+\\d+$/.test(o.name)) parts.push(o); });
+      for (const part of parts.filter(o => o === j2 || new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3()).y < middle)) {
+        const side = part === j2 ? "top" : "bottom"; let count = 0;
+        part.traverse(o => { if (o.isMesh) { count++; if (groups(o).join(",") !== "bodies," + side) bad.push(i + " " + part.name + " " + side); } });
+        if (!count) bad.push(i + " missing meshes " + part.name);
+      }
+      if (!j2) bad.push(i + " missing J2");
+    });
+    document.querySelector('[data-3d-group="bottom"]').click();
+    layers.forEach(({object, side}) => { if (object.visible !== (side === "top")) bad.push("bottom toggle " + object.name + " " + side); });
+    return bad.length ? bad.join("; ") : true;`],
   ["3D address records camera and hidden groups", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
