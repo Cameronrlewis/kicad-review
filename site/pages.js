@@ -128,12 +128,12 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId }) {
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;
-const stages = ['Waiting to start', 'Getting the files', 'Rendering and checking', 'Building the report', 'Finishing'];
+export const stages = ['Waiting to start', 'Getting the files', 'Rendering and checking', 'Building the report', 'Finishing'];
 
-function stageForStep(name) {
+export function stageForStep(name) {
   const value = String(name || '').toLowerCase();
   if (value === 'set up job' || value.startsWith('skip push') || value.includes('check out') || value.includes('find changed')) return 1;
-  if (value.includes('render')) return 2;
+  if (value.includes('render') || value.includes('compress')) return 2;
   if (value.includes('build comparison report') || value.includes('copy named report') || value.includes('upload report') || value.includes('screenshots') || value.includes('publish')) return 3;
   return 4;
 }
