@@ -297,6 +297,14 @@ assert r.returncode != 0 and "RuntimeError: external report assets remain" in r.
 template = open("ui/review.html", encoding="utf-8").read()
 for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
     changed = template.replace(marker, "data-check " + marker)
+    single_quoted = "<" + ("script " if marker.startswith("src") else "link ") + marker.replace('"', "'") + "></script>"
+    with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(single_quoted if path.endswith("review.html") else ""), create=True):
+        try:
+            inline_page("window.REVIEW_DATA={};")
+        except RuntimeError as e:
+            assert "external report assets remain" in str(e), e
+        else:
+            raise AssertionError("RC-S4: single-quoted asset silently remains " + marker)
     with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(changed if path.endswith("review.html") else ""), create=True):
         try:
             inline_page("window.REVIEW_DATA={};")
