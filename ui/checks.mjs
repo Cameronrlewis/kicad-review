@@ -1,5 +1,22 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["3D camera animation stops with its owning session", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), change = p.changes.find(c => c.ref === "J2"), raf = window.requestAnimationFrame;
+    const facts = [];
+    for (const reopen of [false, true]) {
+      await Review3D.show(stage, p, {...S, s:null});
+      const st = Review3D.state, ticks = []; let updates = 0;
+      st.controls.forEach(c => { const update = c.update; c.update = (...a) => { updates++; return update.apply(c, a); }; });
+      window.requestAnimationFrame = tick => { ticks.push(tick); return 1; };
+      Review3D.focus(change); window.requestAnimationFrame = raf;
+      Review3D.dispose();
+      if (reopen) await Review3D.show(stage, p, {...S, s:null});
+      const camera = Review3D.cameraState(); let error = false;
+      try { ticks.forEach(tick => tick(performance.now() + 500)); } catch { error = true; }
+      facts.push(ticks.length > 0 && !error && updates === 0 && JSON.stringify(camera) === JSON.stringify(Review3D.cameraState()));
+    }
+    return facts.every(Boolean) || JSON.stringify(facts);`],
   ["3D bad model data settles and keeps the valid side", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), good = p.board.model3d.head;
