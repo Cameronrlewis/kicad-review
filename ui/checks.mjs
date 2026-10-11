@@ -25,6 +25,27 @@ export const CHECKS = [
     const delta = (p, q) => Math.hypot(...p.map((v, i) => v - q[i]));
     const linked = r && delta(r.after[0], r.before[0]) > .001 && delta(r.after[0], r.after[1]) < .001;
     await select("board"); return linked && window.Review3D.state.disposed === true;`],
+  ["3D changed footprints use cloned highlight materials", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const h = window.Review3D.state.highlights || [], refs = new Set(h.map(x => x.ref));
+    return ["J2", "C20"].every(ref => refs.has(ref) && h.some(x => x.ref === ref && x.materials.some((m, i) => m !== x.original[i])));`],
+  ["3D Overlay shows old-position ghosts", "v=3d&m=overlay", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const d = window.Review3D.state, g = d.ghosts.find(x => x.ref === "J2"), h = d.highlights.find(x => x.ref === "J2" && x.side === "head");
+    return !!g && !!h && Math.hypot(...g.translation.map((v, i) => v - h.marker.position.toArray()[i])) > .001;`],
+  ["3D Blend slider and B switch cross-fade without moving camera", "v=3d&m=blend", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const d = window.Review3D.state, r = document.querySelector("#modes input[type=range]"); r.value = 20; r.dispatchEvent(new Event("input"));
+    const faded = d.blend === .2, p = d.cameras[0].position.toArray(); document.dispatchEvent(new KeyboardEvent("keydown", { key:"b" }));
+    return faded && d.blend === 1 && p.join(",") === d.cameras[0].position.toArray().join(",");`],
+  ["3D Changes only fades unchanged components and disables Wipe", "v=3d&m=semantic", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const u = (window.Review3D.state.faded || []).find(x => x.ref === "U4"), faded = u?.materials.some(m => m.opacity === .25);
+    return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
     const h = document.querySelector("#hdr").textContent;
