@@ -638,6 +638,18 @@ export const CHECKS = [
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
     return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
+  ["3D saved selection address keeps its camera and draws outlines", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    while (!Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('[data-3d-camera="top"]').click();
+    const camera = Review3D.cameraState(), row = proj().changes.find(r => r.ref === "J2");
+    const saved = "#" + encodeState({...S, s:row.id, camera3d:camera, x:null, y:null, z:null});
+    history.replaceState(null, "", saved); S.s = null; S.camera3d = null; await start();
+    await new Promise(r => setTimeout(r, 700));
+    const actual = Review3D.cameraState(), st = Review3D.state, {THREE} = THREE3D;
+    const outlined = st.selected?.length === 2 && st.selected.every((o, i) => o.position.distanceTo(new THREE.Box3().setFromObject(st.roots[i].getObjectByName(row.ref)).getCenter(new THREE.Vector3())) < 1e-4);
+    return S.s === row.id && outlined && camera.every((n, i) => Math.abs(n - actual[i]) < .2) || JSON.stringify({saved, camera, actual, outlined, selection:S.s});
+  `],
   ["3D change card keeps 3D and frames J2", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
