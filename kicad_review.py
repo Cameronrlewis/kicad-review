@@ -430,6 +430,7 @@ def pcb_objects(path):
             p.update({"reference": props.get("Reference", "?"), "footprint": n[1], "layer": val(n, "layer"),
                       "position": fmt_at(a), "attributes": " ".join(x for x in (find(n, "attr") or [])[1:] if isinstance(x, str)) or None,
                       "locked": "yes" if "locked" in n or val(n, "locked") == "yes" else None})
+            p["3D model"] = "; ".join(f"{m[1]} " + " ".join(f"{k}={v}" for k, v in flatten_sexpr(m).items()) for m in findall(n, "model")) or None
             for pad in findall(n, "pad"):
                 if find(pad, "net"):
                     p[f"pad {pad[1]} net"] = net(pad)

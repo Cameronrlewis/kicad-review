@@ -461,3 +461,19 @@ for kind in ("global_label", "hierarchical_label"):
     rows = diff_objects(sch_objects(f"{t}/b", "P"), sch_objects(f"{t}/h", "P"))
     assert len(rows) == 1 and rows[0]["changes"] == [["shape", "input", "output"]], f"OB-O1 label shape: {rows}"
 print("ok OB-O1 label shape")
+
+# OB-S3: all models and their transforms are one property; absent models stay absent in rows.
+t = tempfile.mkdtemp()
+model = '(model "part.step" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))'
+board = '(kicad_pcb (footprint "Lib:Part" (uuid "fp1") (at 10 20 0) (property "Reference" "R1") MODEL))'
+write(t, {"b.kicad_pcb": board.replace('MODEL', model)})
+for changed in (model.replace('part.step', 'new.step'), model.replace('offset (xyz 0', 'offset (xyz 2'),
+                model.replace('scale (xyz 1', 'scale (xyz 2'), model.replace('rotate (xyz 0', 'rotate (xyz 90'),
+                model + ' (model "second.step")', ''):
+    write(t, {"h.kicad_pcb": board.replace('MODEL', changed)})
+    rows = diff_objects(pcb_objects(f"{t}/b.kicad_pcb"), pcb_objects(f"{t}/h.kicad_pcb"))
+    assert len(rows) == 1 and [c[0] for c in rows[0]["changes"]] == ["3D model"], f"OB-S3 model props: {rows}"
+write(t, {"h.kicad_pcb": board.replace('MODEL', '')})
+empty_model = pcb_objects(f"{t}/h.kicad_pcb")
+assert empty_model["fp1"]["props"].get("3D model") is None and "3D model" not in diff_objects({}, empty_model)[0]["props"]
+print("ok OB-S3 model props")
