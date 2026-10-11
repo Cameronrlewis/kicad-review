@@ -81,13 +81,20 @@ jobs:
         shell: bash
         run: |
           shopt -s nullglob
-          for model in review/*/{base,head}/board.glb; do
-            # meshopt alone preserves named nodes and layers; do not flatten/join/instance.
+          models=(review/*/{base,head}/board.glb)
+          [ ${#models[@]} -gt 0 ] || exit 0
+          deps=$(mktemp -d)
+          trap 'rm -rf "$deps"' EXIT
+          if ! npm install --prefix "$deps" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0; then
+            echo "::warning::Meshopt dependencies unavailable; keeping original GLBs."
+            exit 0
+          fi
+          for model in "${models[@]}"; do
             # Write beside the original, replacing it only after a successful export.
             tmp=$(mktemp -d "${model%/*}/meshopt.XXXXXX") || continue
             start=$SECONDS
             before=$(wc -c < "$model")
-            if npx --yes @gltf-transform/cli@4.2.1 meshopt "$model" "$tmp/board.glb" --level high && [ -s "$tmp/board.glb" ]; then
+            if NODE_PATH="$deps/node_modules" node tools/ui/compress3d.cjs "$model" "$tmp/board.glb" && [ -s "$tmp/board.glb" ]; then
               if mv "$tmp/board.glb" "$model"; then
                 echo "Meshopt $model: $before -> $(wc -c < "$model") bytes in $((SECONDS - start))s"
               fi
