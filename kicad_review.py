@@ -960,7 +960,9 @@ def inline_page(data_js):
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
-    return page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
+    page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
+    if any(ref in page for ref in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"')): raise RuntimeError("external report assets remain: template did not match")
+    return page
 
 
 def cmd_report(args):
@@ -1012,7 +1014,7 @@ def md(v):
     """Text from a KiCad file as literal markdown: no HTML, images, links, emphasis or @mentions.
     Bare URLs (datasheets) stay as GitHub shows them, a visible auto-link, since escapes would end up inside the link."""
     v = str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return "".join(part if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
+    return "".join(part.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]") if i % 2 else re.sub(r"([\\`*_\[\]()!~#])", r"\\\1", part).replace("@", "@\u200b")
                    for i, part in enumerate(re.split(r"((?:https?://|www\.)[^\s<>]+)", v))).replace("|", "\\|")
 
 
@@ -1101,7 +1103,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
                 "", "`open` is macOS; use `xdg-open` on Linux or `start` on Windows.", "", "</details>"]
     for i, p in enumerate(data["projects"]):
-        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'")}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
+        out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'").replace('\n', ' ').replace('\r', ' ')}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
         shots = [s for s in images if s["project"] == i]
         if shots:
@@ -1122,7 +1124,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
             return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
-        body = body[:60000 - len(checks)] + "\n\n… truncated. The full list is in the report.\n"
+        body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
 
@@ -1187,7 +1189,7 @@ def checks_markdown(data):
             if v["new"] and v["severity"] == "error"]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
-        lines += [f"- **{md(n)}** {t}: {md(v['description'])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
+        lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
     return "\n".join(lines) + "\n"
