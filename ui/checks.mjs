@@ -1,5 +1,19 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ...["pasted", "hashchange"].map(path => [`${path} selection-only address opens its drawing`, "", `
+    const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return true;
+    await new Promise(r => setTimeout(r, 400));
+    const hash = "#p=0&s=" + row.id;
+    if ("${path}" === "pasted") { const input = document.querySelector("#zoombar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
+    else location.hash = hash;
+    await new Promise(r => setTimeout(r, 1200));
+    const box = rowBox(row, "head");
+    return S.v === "board" && S.s === row.id && Math.abs(S.x - (box[0] + box[2]) / 2) < .01 && !!document.querySelector("#stage .marker.sel") || JSON.stringify({view:S.v, selection:S.s, x:S.x});`]),
+  ["pasted selection address preserves an explicit position", "", `
+    const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return true;
+    applyGoTo("#p=0&v=board&s=" + row.id + "&x=10&y=20&z=5");
+    await new Promise(r => setTimeout(r, 800));
+    return S.x === 10 && S.y === 20 && S.z === 5 && S.s === row.id;`],
   ["unchanged sheet selection saves the address", "", `
     const sheet = proj().sheets.find(s => s.status === "unchanged" && !s.svg); if (!sheet) return true;
     await new Promise(r => setTimeout(r, 400));

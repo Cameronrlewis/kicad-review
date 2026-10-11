@@ -123,11 +123,12 @@ function applyState(st) {
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
+  const hasPos = S.z != null;
   renderModes();
   renderNav();
   renderPanel();
   renderZoombar();
-  return draw();
+  return draw().then(() => S.s && !hasPos && goTo(S.s));
 }
 
 const PX = 4;                       // CSS px per mm at z = PX
@@ -575,9 +576,8 @@ renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");
 if (shotMode) document.body.classList.add("shot");
 function start() {
-  const drawn = applyState(decodeState(location.hash)), hasPos = S.z != null;   // read before draw() fits
+  const drawn = applyState(decodeState(location.hash));
   return drawn.then(async () => {
-    if (S.s && !hasPos) await goTo(S.s);   // an address with a position keeps it; the selection is only marked
     if (shotMode) {
       const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
       document.title = "ready";
