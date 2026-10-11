@@ -716,5 +716,18 @@ try:
 finally:
     kicad_review.subprocess.run = real_run
 print("ok TS-S2 release zip and CSV contents")
+
+# TS-S1: CI exercises default, real 3D and unchanged two-project pages without extra installs.
+test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
+assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
+for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip 3D --page', 'node ui/check.mjs --no-skip 3D --dark --page', '"unchanged sheet"', '"unchanged project"'):
+    assert command in test_wf, "TS-S1 CI missing " + command
+assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
+fixture = lambda name: json.loads(pathlib.Path("ui/sample/" + name).read_text(encoding="utf-8").split("=", 1)[1].strip().removesuffix(";"))
+assert fixture("review-data-3d.js")["projects"][0]["board"]["model3d"], "TS-S1 real 3D fixture"
+pages = fixture("review-data-2.js")["projects"]
+assert len(pages) == 2 and any(s["status"] == "unchanged" and not s.get("svg") for p in pages for s in p["sheets"])
+assert any(not p["board"]["changed"] and p["sheets"] and all(not s.get("svg") for s in p["sheets"]) for p in pages)
+print("ok TS-S1 CI browser matrix and fixtures")
 print("ok")
 
