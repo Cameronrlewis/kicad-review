@@ -12,14 +12,15 @@ const dark = args.includes("--dark"); if (dark) args.splice(args.indexOf("--dark
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
 const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), filter = args[0] || "";
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
+const port = Number(process.env.CHECK_PORT || 9334);
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const proc = spawn(chrome, ["--headless=new", "--remote-debugging-port=9334", `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
+const proc = spawn(chrome, ["--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
   "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--window-size=1920,1080", "about:blank"], { stdio: "ignore" });
 process.on("exit", () => proc.kill());
 process.on("uncaughtException", e => { console.error("FAIL startup -> " + e.message); process.exit(1); });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let tab;
-for (let i = 0; i < 50 && !tab; i++) { await sleep(200); try { tab = (await (await fetch("http://127.0.0.1:9334/json")).json()).find(t => t.type === "page"); } catch {} }
+for (let i = 0; i < 50 && !tab; i++) { await sleep(200); try { tab = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === "page"); } catch {} }
 const ws = new WebSocket(tab.webSocketDebuggerUrl); await new Promise(r => ws.onopen = r);
 let id = 0; const pend = {}, errors = [];
 ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }

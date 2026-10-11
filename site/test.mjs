@@ -5,7 +5,7 @@ import worker, { open, seal } from './worker.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { CHECKS } from '../ui/checks.mjs';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -21,11 +21,10 @@ test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
 });
 
 test('TS-S5 a page that never becomes ready fails instead of hanging', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'check-')), runner = join(dir, 'check.mjs'), page = join(dir, 'never-ready.html');
+  const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
-  writeFileSync(runner, readFileSync(new URL('../ui/check.mjs', import.meta.url), 'utf8').replaceAll('9334', '9395').replace('"./checks.mjs"', JSON.stringify(new URL('../ui/checks.mjs', import.meta.url).href)));
-  const r = spawnSync(process.execPath, [runner, 'loads sample', '--page', page], { encoding: 'utf8', timeout: 15000,
-    env: { ...process.env, CHECK_TIMEOUT: '2000', ...(process.platform === 'darwin' ? {} : { CHROME: process.env.CHROME || 'google-chrome' }) } });
+  const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', ...(process.platform === 'darwin' ? {} : { CHROME: process.env.CHROME || 'google-chrome' }) } });
   assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL startup.*Runtime.evaluate timed out/);
 });
 
