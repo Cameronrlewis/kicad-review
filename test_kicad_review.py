@@ -302,16 +302,22 @@ group = wf[wf.index("group:"):].splitlines()[0]
 assert group.endswith("${{ github.event.pull_request.number || github.run_id }}") and "github.ref" not in group, group
 print("ok")
 
+# WF-S1: fork PRs cannot write comments; keep report and required-check steps running.
+wf = open(".github/workflows/review.yml", encoding="utf-8").read()
+comment = wf[wf.index("- name: Pull request comment"):wf.index("- name: Fail on required checks")]
+assert "github.event.pull_request.head.repo.full_name == github.repository" in comment.splitlines()[2], "WF-S1: fork comment guard missing"
+print("ok WF-S1: fork comment guard")
+
 # A failed run replaces the comment with "Review failed — see run"; a later good run restores the summary.
 wf = open(".github/workflows/review.yml", encoding="utf-8").read()
 step = wf[wf.index("- name: Pull request comment"):]
-assert "failure()" in step.splitlines()[2] and "!cancelled()" in step.splitlines()[2], step.splitlines()[2]
+assert "!cancelled()" in step.splitlines()[2] and "success()" not in step.splitlines()[2], step.splitlines()[2]
 step = step[step.index("run: |") + 7:]
 step = "\n".join(l[10:] for l in step[:step.index("\n\n")].splitlines())
 t = tempfile.mkdtemp()
 write(t, {"bin/gh": '''#!/bin/bash
 if [[ "$*" == *"issues/7/comments"* && "$*" == *"--paginate"* ]]; then
-  printf '99\\n'
+  printf '%s\\n' "${GH_TEST_ID-99}"
 elif [[ "$*" == *"-X PATCH"* ]]; then
   for arg in "$@"; do
     [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/patched.md"
@@ -321,6 +327,7 @@ elif [[ "$*" == *"-X POST"* ]]; then
   for arg in "$@"; do
     [[ "$arg" == body=@* ]] && cp "${arg#body=@}" "$GH_TEST_DIR/posted.md"
   done
+  printf 'https://github.com/o/r/issues/7#issuecomment-100\\n'
 fi
 '''})
 os.chmod(f"{t}/bin/gh", 0o755)
@@ -338,6 +345,24 @@ r = subprocess.run(["bash", "-e", "-c", step], env=env, cwd=t, capture_output=Tr
 assert r.returncode == 0, r.stderr
 assert open(f"{t}/patched.md", encoding="utf-8").read() == normal
 print("ok")
+
+# WF-S2: unchanged PRs clear an existing comment, never create one; detect failure still reports failure.
+comment = wf[wf.index("- name: Pull request comment"):wf.index("- name: Fail on required checks")]
+assert "steps.detect.outputs.changed" not in comment.splitlines()[2], "WF-S2: unchanged PR comment is skipped"
+assert "CHANGED: ${{ steps.detect.outputs.changed }}" in comment, "WF-S2: changed output missing"
+for changed, summary, existing in (("false", "skipped", "99"), ("false", "skipped", ""), ("", "failure", "99"), ("", "failure", "")):
+    t = tempfile.mkdtemp()
+    r = subprocess.run(["bash", "-e", "-c", step], cwd=t, capture_output=True, text=True,
+                       env={**env, "GH_TEST_DIR": t, "CHANGED": changed, "SUMMARY": summary, "GH_TEST_ID": existing})
+    assert r.returncode == 0, r.stderr
+    target = "patched.md" if existing else "posted.md"
+    if changed == "false" and not existing:
+        assert not os.path.exists(f"{t}/{target}"), "WF-S2: unchanged PR creates a comment"
+    else:
+        body = open(f"{t}/{target}", encoding="utf-8").read()
+        assert ("No KiCad changes in this commit" if changed == "false" else "KiCad review failed") in body, body
+    assert not os.path.exists(f"{t}/{'posted.md' if existing else 'patched.md'}")
+print("ok WF-S2: unchanged comment and detect failure")
 
 # Reports expose an artifact filename containing the compared revisions and result.
 import re
@@ -382,6 +407,10 @@ assert not re.search(r"(?im)^\s*(?:GITHUB_CLIENT_ID|GITHUB_CLIENT_SECRET|SESSION
 for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
     assert re.fullmatch(r"[0-9a-f]{40}", action), action
 print("ok")
+
+# WF-S3: deployment tooling with credentials must use an exact Wrangler 4.x version.
+assert re.search(r"npx --yes wrangler@4\.\d+\.\d+ deploy", workflow), "WF-S3: floating Wrangler version"
+print("ok WF-S3: exact Wrangler version")
 
 # Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
 import base64, gzip

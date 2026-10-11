@@ -16,7 +16,7 @@ jobs:
         with:
           persist-credentials: false
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
-      - run: npx --yes wrangler@4 deploy
+      - run: npx --yes wrangler@4.148.0 deploy
         working-directory: site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
