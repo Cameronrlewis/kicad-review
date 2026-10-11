@@ -57,6 +57,26 @@ export const CHECKS = [
       facts.push(!!h && h.marker.el.textContent.includes("− J2") && h.materials.some((material, i) => material !== h.original[i]));
     }
     return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D cancelled GLB loads dispose parsed resources", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), loader = THREE3D.GLTFLoader.prototype, parse = loader.parseAsync, resources = new Set(), disposed = new Set();
+    let release, parsed = 0;
+    const gate = new Promise(r => release = r);
+    loader.parseAsync = async function(...args) {
+      const g = await parse.apply(this, args);
+      g.scene.traverse(o => [o.geometry, ...[o.material].flat().filter(Boolean).flatMap(m => [m, m.map])].filter(Boolean).forEach(r => {
+        if (!resources.has(r)) r.addEventListener("dispose", () => disposed.add(r)); resources.add(r);
+      }));
+      parsed++; await gate; return g;
+    };
+    try {
+      const cancelled = Review3D.show(stage, p, {...S, s:null});
+      while (parsed < Object.values(p.board.model3d).filter(Boolean).length) await new Promise(r => setTimeout(r, 20));
+      await Review3D.show(stage, {...p, board:{...p.board, model3d:{}, no_model:[]}}, {...S, m:"overlay", s:null});
+      release(); await cancelled;
+      return resources.size > 0 && disposed.size === resources.size || JSON.stringify({parsed, resources:resources.size, disposed:disposed.size});
+    } finally { release(); loader.parseAsync = parse; }
+  `],
   ["3D cleanup frees replaced outlines and scene resources", "v=3d&m=overlay", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     const p = REVIEW_DATA.projects[0], change = p.changes.find(c => c.ref === "J2"), seen = {}, watch = (name, resource) => { seen[name] = false; resource?.addEventListener("dispose", () => { seen[name] = true; }); };
