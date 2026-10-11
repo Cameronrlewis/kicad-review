@@ -16,3 +16,6 @@ required_fields = ["Value", "Footprint"]
 [fabrication]
 preset = "jlcpcb"        # or "pcbway"
 # part_field = "LCSC"    # symbol field holding the supplier part number; default LCSC (jlcpcb) or MPN (pcbway)
+
+[3d]
+enabled = false            # export changed boards as GLB and report footprints without 3D models

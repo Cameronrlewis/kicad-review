@@ -178,14 +178,52 @@ def render_side(src_dir, name, out):
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
 
 
+def board_path(p, side):
+    return posixpath.join(side, p["dir"], f"{p['name']}.kicad_pcb")
+
+
+def read_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def board_changed(p):
+    """Whether the project's board bytes differ between the two checked-out revisions."""
+    paths = [board_path(p, side) for side in ("base", "head")]
+    contents = [read_bytes(path) if os.path.exists(path) else None for path in paths]
+    return contents[0] != contents[1]
+
+
+def export_glb(p, side, out):
+    """Best-effort 3D export. Its output is useful evidence when a footprint model is absent."""
+    pcb, log = board_path(p, side), f"{out}/glb.log"
+    if not os.path.exists(pcb):
+        return
+    try:
+        r = subprocess.run(["kicad-cli", "pcb", "export", "glb", "--include-silkscreen", "--include-soldermask",
+                            "--output", f"{out}/board.glb", pcb], capture_output=True, text=True)
+        output = r.stdout + r.stderr  # KiCad 10.0.0 writes missing-model warnings to stdout.
+    except OSError as e:
+        r, output = None, str(e)
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write(output)
+    if r is None or r.returncode:
+        print(f"{p['name']}: 3D export failed for {side}; see {log}")
+
+
 def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
+    settings = load_settings()
     for p in det["projects"]:
+        export_3d = settings["3d"]["enabled"] and board_changed(p)
         for side in ("base", "head"):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
-            render_side(posixpath.join(side, p["dir"]), p["name"], f"review/{project_id(p['dir'])}/{side}")
+            out = f"review/{project_id(p['dir'])}/{side}"
+            render_side(posixpath.join(side, p["dir"]), p["name"], out)
+            if export_3d:
+                export_glb(p, side, out)
             print(f"{p['name']}: rendered {side}")
 
 
@@ -400,7 +438,8 @@ def pcb_objects(path):
                 if find(pad, "net"):
                     p[f"pad {pad[1]} net"] = net(pad)
             objs[uid] = {"kind": "footprint", "ref": p["reference"], "match": ("footprint", p["reference"]),
-                         "props": p, "pos": a, "box": box_of(pad_points(n, a), 1), "where": where}
+                         "props": p, "pos": a, "box": box_of(pad_points(n, a), 1), "where": where,
+                         "has_model": bool(findall(n, "model"))}
         elif kind in ("segment", "arc"):
             s, e = at_xy(n, "start"), at_xy(n, "end")
             objs[uid] = {"kind": "track", "ref": net(n) or "", "where": where, "pos": mid(s, e), "box": box_of([s, e]),
@@ -542,6 +581,7 @@ DEFAULT_SETTINGS = {
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"]},
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
+    "3d": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -567,6 +607,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if settings["fail_on"] not in ("new", "all"):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
+    if not isinstance(settings["3d"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     return settings
 
 
@@ -767,14 +809,32 @@ def has_drawing(text):
     return re.search(r"<(path|polyline|polygon|circle|rect|line|ellipse|text)\b", text) is not None
 
 
-def add_blob(blobs, text):
-    """Store SVG text gzip+base64 in blobs, deduplicated by content; return its key."""
-    if text is None:
+def add_blob(blobs, content):
+    """Store text or bytes gzip+base64 in blobs, deduplicated by content; return its key."""
+    if content is None:
         return None
-    key = hashlib.sha1(text.encode()).hexdigest()[:12]
+    content = content.encode() if isinstance(content, str) else content
+    key = hashlib.sha1(content).hexdigest()[:12]
     if key not in blobs:
-        blobs[key] = base64.b64encode(gzip.compress(text.encode(), mtime=0)).decode()
+        blobs[key] = base64.b64encode(gzip.compress(content, mtime=0)).decode()
     return key
+
+
+def model3d_missing(out, objs):
+    """Missing 3D models from KiCad's export log and footprints without a model declaration."""
+    missing = {}
+    add = lambda ref, side, reason: missing.setdefault((ref, reason), set()).add(side)
+    for side in ("base", "head"):
+        log = f"{out}/{side}/glb.log"
+        if os.path.exists(log):
+            with open(log, encoding="utf-8") as fh:
+                for ref in re.findall(r"Could not add 3D model for ([^.\s]+)", fh.read()):
+                    add(ref, side, "file not found")
+        for obj in objs[side].values():
+            if obj["kind"] == "footprint" and not obj.get("has_model"):
+                add(obj["ref"], side, "no model in footprint")
+    return [{"ref": ref, "side": "both" if sides == {"base", "head"} else next(iter(sides)), "reason": reason}
+            for (ref, reason), sides in sorted(missing.items(), key=lambda e: (natural(e[0][0]), e[0][1]))]
 
 
 def build_project(p, blobs, settings):
@@ -812,6 +872,15 @@ def build_project(p, blobs, settings):
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    if settings["3d"]["enabled"]:
+        models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
+        logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
+        if any(os.path.exists(path) for path in (*models.values(), *logs.values())):
+            board["model3d"] = {side: add_blob(blobs, read_bytes(path)) if os.path.exists(path) else None
+                                for side, path in models.items()}
+            board["model3d_failed"] = {side: os.path.exists(logs[side]) and not os.path.exists(models[side])
+                                       for side in ("base", "head")}
+            board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs)}
 
@@ -863,15 +932,18 @@ def cmd_report(args):
         det = json.load(fh)
     blobs = {}
     env = os.environ
+    settings = load_settings()
+    # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
+    report_settings = settings if settings["3d"]["enabled"] else {k: v for k, v in settings.items() if k != "3d"}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
         "links": review_links(env, det),
         "base": det["base"], "head": det["head"], "reason": det["reason"],
-        "settings": load_settings(),
+        "settings": report_settings,
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
-    data["projects"] = [build_project(p, blobs, data["settings"]) for p in det["projects"]]
+    data["projects"] = [build_project(p, blobs, settings) for p in det["projects"]]
     assign_ids(data["projects"])
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data

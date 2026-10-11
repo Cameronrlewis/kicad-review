@@ -382,3 +382,59 @@ assert not re.search(r"(?im)^\s*(?:GITHUB_CLIENT_ID|GITHUB_CLIENT_SECRET|SESSION
 for action in re.findall(r"(?m)^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", workflow):
     assert re.fullmatch(r"[0-9a-f]{40}", action), action
 print("ok")
+
+# Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
+import base64, gzip
+from kicad_review import load_settings, build_project, board_changed, export_glb
+here = os.getcwd()
+t = tempfile.mkdtemp()
+os.chdir(t)
+write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n",
+          "base/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (uuid "u5") (fp_text reference "U5") (model "u.wrl"))
+(footprint "Package:R" (uuid "r1") (fp_text reference "R1")))''',
+          "head/P/P.kicad_pcb": '''(kicad_pcb (footprint "Package:U" (uuid "u5") (fp_text reference "U5") (model "u.wrl"))
+(footprint "Package:R" (uuid "r1") (fp_text reference "R1")))''',
+          "review/P/base/board.glb": "base glb\x00", "review/P/head/board.glb": "head glb\x00",
+          "review/P/head/glb.log": "Could not add 3D model for U5.\n",
+          "review/P/base/pcb/P-F.Cu.svg": '<svg viewBox="0 0 1 1"><path/></svg>',
+          "review/P/head/pcb/P-F.Cu.svg": '<svg viewBox="0 0 1 1"><path/></svg>',
+          "review/P/base/drc.json": "{}", "review/P/head/drc.json": "{}"})
+assert DEFAULT_SETTINGS["3d"]["enabled"] is False
+assert load_settings()["3d"]["enabled"] is True
+# A report with 3D disabled is deterministic; this is the pre-feature HTML baseline for the same fixture.
+os.remove("base/kicad-review.toml")
+write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": []})})
+kicad_review.cmd_report(None)
+html_before = open("review/kicad-review.html", "rb").read()
+assert b'"3d"' not in html_before
+# The exact pre-3D reporter produces the same fixture bytes, not merely equivalent data.
+import shutil
+old_tools, old_fixture = tempfile.mkdtemp(), tempfile.mkdtemp()
+write(old_tools, {"kicad_review.py": subprocess.check_output(["git", "show", "HEAD^:kicad_review.py"], cwd=here).decode()})
+shutil.copytree(f"{here}/ui", f"{old_tools}/ui")
+write(old_fixture, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": []})})
+r = subprocess.run([sys.executable, f"{old_tools}/kicad_review.py", "report"], cwd=old_fixture, capture_output=True, text=True)
+assert r.returncode == 0, r.stderr
+assert open(f"{old_fixture}/review/kicad-review.html", "rb").read() == html_before
+kicad_review.cmd_report(None)
+assert open("review/kicad-review.html", "rb").read() == html_before
+write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n"})
+# KiCad 10.0.0 emits this warning on stdout; the retained log must include both streams.
+real_run = kicad_review.subprocess.run
+kicad_review.subprocess.run = lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "Could not add 3D model for U5.\n", "stderr": "other diagnostic\n"})()
+export_glb({"dir": "P", "name": "P"}, "head", "review/P/head")
+kicad_review.subprocess.run = real_run
+assert open("review/P/head/glb.log", encoding="utf-8").read() == "Could not add 3D model for U5.\nother diagnostic\n"
+settings = load_settings(("base", "head"))
+blobs = {}
+p = build_project({"dir": "P", "name": "P", "status": "modified"}, blobs, settings)
+assert gzip.decompress(base64.b64decode(blobs[p["board"]["model3d"]["base"]])) == b"base glb\x00"
+assert gzip.decompress(base64.b64decode(blobs[p["board"]["model3d"]["head"]])) == b"head glb\x00"
+assert {tuple(sorted(x.items())) for x in p["board"]["no_model"]} == {
+    tuple(sorted({"ref": "U5", "side": "head", "reason": "file not found"}.items())),
+    tuple(sorted({"ref": "R1", "side": "both", "reason": "no model in footprint"}.items()))}, p["board"]["no_model"]
+assert not board_changed({"dir": "P", "name": "P"})
+write(t, {"head/P/P.kicad_pcb": "(kicad_pcb changed)"})
+assert board_changed({"dir": "P", "name": "P"})
+os.chdir(here)
+print("ok")

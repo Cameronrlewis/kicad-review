@@ -51,6 +51,7 @@ To make checks block merging, require the status check **`review / review`** in 
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
+| `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
@@ -134,4 +135,7 @@ The workflow and the page share one contract, `window.REVIEW_DATA` (`version: 1`
 `size` in mm and `svg.base`/`svg.head` blob ids), `board` (`changed`, `status`, `size`, `layers[]` with
 `changed` and blob ids), `changes[]` (`id`, `action`, `kind`, `ref`, `where`, `pos`, `pos_before`, `box`,
 and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `new`, `severity`, `pos`,
-`box`, `where`); and `blobs` (gzip + base64 SVG text). Positions and boxes are drawing millimetres.
+`box`, `where`); and `blobs` (gzip + base64 SVG text, and opted-in GLB bytes). When `3d.enabled` is true
+and an export runs, `board.model3d` has base/head GLB blob ids (or `null`), `board.model3d_failed` marks
+failed exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
+footprint`). Positions and boxes are drawing millimetres.
