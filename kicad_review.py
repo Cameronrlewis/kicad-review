@@ -601,7 +601,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication"):
+    for section in ("checks", "bom", "fabrication", "3d"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):

@@ -460,6 +460,7 @@ t = tempfile.mkdtemp()
 invalid = [("[bom]\nrequired_fields = " + value, "bom.required_fields", "list of strings")
            for value in ('"MPN"', '[1]', '["MPN", 1]', 'true', '{ MPN = "x" }')]
 invalid += [(f'{section} = "x"', section, "table") for section in ("checks", "bom", "fabrication")]
+invalid += [("3d = true", "3d", "table")]
 failures = []
 for text, field, expected in invalid:
     write(t, {"kicad-review.toml": text + "\n"})
