@@ -30,6 +30,11 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 5000));
     const h = window.Review3D.state.highlights || [], refs = new Set(h.map(x => x.ref));
     return ["J2", "C20"].every(ref => refs.has(ref) && h.some(x => x.ref === ref && x.materials.some((m, i) => m !== x.original[i])));`],
+  ["3D glyph marker labels are visible over their canvas", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return true;
+    await new Promise(r => setTimeout(r, 5000));
+    const l = document.querySelector('.marker3d[data-ref="J2"]'), c = l?.parentElement.querySelector("canvas"), a = l?.getBoundingClientRect(), b = c?.getBoundingClientRect();
+    return !!l && l.textContent.includes("≡ J2") && a.left >= b.left && a.right <= b.right && a.top >= b.top && a.bottom <= b.bottom;`],
   ["3D Overlay shows old-position ghosts", "v=3d&m=overlay", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 5000));
