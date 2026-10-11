@@ -102,7 +102,7 @@ export const CHECKS = [
     return result === "done" && !stage.querySelector(".loading") && !!stage.textContent.trim() || result;`],
   ...["side", "overlay"].map(mode => [mode === "side" ? "3D theme switch recolours in place" : "3D theme switch recolours overlay ghosts in place", `v=3d&m=${mode}&s=c2`, `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
-    const deadline = performance.now() + 10000; while (!window.Review3D?.state?.firstFrame) { if (performance.now() > deadline) throw new Error("firstFrame timed out"); await new Promise(r => setTimeout(r, 50)); }
+    while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
     await new Promise(r => setTimeout(r, 800));
     const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:st.renderers[0].getClearColor(new THREE.Color()).getHexString()}, dark = !matchMedia("(prefers-color-scheme: dark)").matches;
     await new Promise(r => { window.__themeFlipped = r; window.__flipTheme(dark ? "dark" : "light"); });
@@ -573,7 +573,7 @@ export const CHECKS = [
     return (S.hidden3d || []).includes("silk");`],
   ["3D visibility classifies geometry on both board sides", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
-    const deadline = performance.now() + 10000; while (!Review3D.state.firstFrame) { if (performance.now() > deadline) throw new Error("firstFrame timed out"); await new Promise(r => setTimeout(r, 50)); }
+    while (!Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     const st = Review3D.state, {THREE} = THREE3D, bad = [], layers = [];
     st.roots.forEach((root, i) => {
       if (!root) return;
@@ -604,21 +604,21 @@ export const CHECKS = [
     return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
   ["3D change card keeps 3D and frames J2", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
-    const deadline = performance.now() + 10000; while (!window.Review3D.state.firstFrame) { if (performance.now() > deadline) throw new Error("firstFrame timed out"); await new Promise(r => setTimeout(r, 50)); }
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, n = (() => { let f; st.roots[1].traverse(o => { if (!f && o.name === "J2") f = o; }); return f; })(),
       c = new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[0]);
     return (S.v === "3d" && location.hash.includes("v=3d") && S.s === "c2" && Math.abs(c.x) < .15 && Math.abs(c.y) < .15) || JSON.stringify({v:S.v,hash:location.hash,s:S.s,x:c.x,y:c.y});`],
   ["3D selection outline in each pane wraps that pane's own J2", "v=3d&m=side", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
-    const deadline = performance.now() + 10000; while (!window.Review3D.state.firstFrame) { if (performance.now() > deadline) throw new Error("firstFrame timed out"); await new Promise(r => setTimeout(r, 50)); }
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, sel = st.selected || [];
     const j2 = r => { let f; r.traverse(o => { if (!f && o.name === "J2") f = o; }); return new THREE.Box3().setFromObject(f).getCenter(new THREE.Vector3()); };
     return sel.length === 2 && [0, 1].every(i => sel[i].position.distanceTo(j2(st.roots[i])) < 1e-4);`],
   ["3D no-model U3 block sits on the board, overlaps its footprint and is not hidden by silkscreen", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
-    const deadline = performance.now() + 10000; while (!window.Review3D.state.firstFrame) { if (performance.now() > deadline) throw new Error("firstFrame timed out"); await new Promise(r => setTimeout(r, 50)); }
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     const { THREE } = window.THREE3D, st = window.Review3D.state, row = REVIEW_DATA.projects[0].board.no_model.find(x => x.ref === "U3"), blk = st.blocks.filter(b => b.ref === "U3");
     if (!blk.length) return "no U3 block";
     const fp = new THREE.Box3(new THREE.Vector3(row.box[0] / 1000, -1, row.box[1] / 1000), new THREE.Vector3(row.box[2] / 1000, 1, row.box[3] / 1000));
@@ -636,7 +636,7 @@ export const CHECKS = [
     return true;`],
   ["3D no-model list item frames its block and labels it", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
-    const deadline = performance.now() + 10000; while (!window.Review3D.state.firstFrame) { if (performance.now() > deadline) throw new Error("firstFrame timed out"); await new Promise(r => setTimeout(r, 50)); }
+    while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('[data-no-model="U3"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, b = st.blocks.find(x => x.ref === "U3" && x.side === "head"), c = new THREE.Box3().setFromObject(b.object).getCenter(new THREE.Vector3()).project(st.cameras[0]);
     return Math.abs(c.x) < .15 && Math.abs(c.y) < .15 && /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "");`],

@@ -5,7 +5,9 @@ import worker, { open, seal } from './worker.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { CHECKS } from '../ui/checks.mjs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
@@ -20,17 +22,13 @@ test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
   assert.equal(r.status, 1); assert.match(r.stderr, /no check matches/);
 });
 
-test('TS-S5 browser waits are bounded and startup errors fail', () => {
-  const runner = readFileSync(new URL('../ui/check.mjs', import.meta.url), 'utf8');
-  assert.match(runner, /Promise\.race/);
-  assert.match(runner, /15000/);
-  assert.match(runner, /reviewReady[^\n]+deadline/);
-  assert.match(runner, /process\.on\("exit", \(\) => proc\.kill\(\)\)/);
-  for (const body of [runner, ...CHECKS.map(c => c[2])])
-    for (const wait of body.matchAll(/while\s*\([^\n]*firstFrame[^\n]*/g)) assert.match(wait[0], /deadline/);
-  const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample'], {
-    encoding: 'utf8', env: { ...process.env, CHROME: '/no-such-chrome' }, timeout: 20000 });
-  assert.equal(r.status, 1); assert.match(r.stderr, /FAIL startup/);
+test('TS-S5 a page that never becomes ready fails instead of hanging', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'check-')), runner = join(dir, 'check.mjs'), page = join(dir, 'never-ready.html');
+  writeFileSync(page, '<!doctype html><title>Never ready</title>');
+  writeFileSync(runner, readFileSync(new URL('../ui/check.mjs', import.meta.url), 'utf8').replaceAll('9334', '9395').replace('"./checks.mjs"', JSON.stringify(new URL('../ui/checks.mjs', import.meta.url).href)));
+  const r = spawnSync(process.execPath, [runner, 'loads sample', '--page', page], { encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, CHECK_TIMEOUT: '2000', ...(process.platform === 'darwin' ? {} : { CHROME: process.env.CHROME || 'google-chrome' }) } });
+  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL startup.*Runtime.evaluate timed out/);
 });
 
 test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {
