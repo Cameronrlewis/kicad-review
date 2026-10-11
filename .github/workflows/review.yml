@@ -75,6 +75,28 @@ jobs:
           docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
             python3 tools/kicad_review.py render
 
+      - name: Compress 3D board models
+        if: steps.detect.outputs.changed == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for model in review/*/{base,head}/board.glb; do
+            # meshopt alone preserves named nodes and layers; do not flatten/join/instance.
+            # Write beside the original, replacing it only after a successful export.
+            tmp=$(mktemp -d "${model%/*}/meshopt.XXXXXX") || continue
+            start=$SECONDS
+            before=$(wc -c < "$model")
+            if npx --yes @gltf-transform/cli@4.2.1 meshopt "$model" "$tmp/board.glb" --level high && [ -s "$tmp/board.glb" ]; then
+              if mv "$tmp/board.glb" "$model"; then
+                echo "Meshopt $model: $before -> $(wc -c < "$model") bytes in $((SECONDS - start))s"
+              fi
+            else
+              echo "::warning::Meshopt failed for $model; keeping the original GLB."
+            fi
+            rm -rf "$tmp"
+          done
+
       - name: Build comparison report and checks
         id: report
         if: steps.detect.outputs.changed == 'true'
