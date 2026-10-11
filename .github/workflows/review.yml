@@ -183,7 +183,7 @@ jobs:
 
       - name: Pull request comment
         id: comment
-        if: ${{ !cancelled() && github.event.pull_request.number && (success() || failure()) && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ !cancelled() && github.event.pull_request.number && github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}

@@ -311,7 +311,7 @@ print("ok WF-S1: fork comment guard")
 # A failed run replaces the comment with "Review failed — see run"; a later good run restores the summary.
 wf = open(".github/workflows/review.yml", encoding="utf-8").read()
 step = wf[wf.index("- name: Pull request comment"):]
-assert "failure()" in step.splitlines()[2] and "!cancelled()" in step.splitlines()[2], step.splitlines()[2]
+assert "!cancelled()" in step.splitlines()[2] and "success()" not in step.splitlines()[2], step.splitlines()[2]
 step = step[step.index("run: |") + 7:]
 step = "\n".join(l[10:] for l in step[:step.index("\n\n")].splitlines())
 t = tempfile.mkdtemp()
@@ -351,11 +351,9 @@ comment = wf[wf.index("- name: Pull request comment"):wf.index("- name: Fail on 
 assert "steps.detect.outputs.changed" not in comment.splitlines()[2], "WF-S2: unchanged PR comment is skipped"
 assert "CHANGED: ${{ steps.detect.outputs.changed }}" in comment, "WF-S2: changed output missing"
 for changed, summary, existing in (("false", "skipped", "99"), ("false", "skipped", ""), ("", "failure", "99"), ("", "failure", "")):
-    for f in ("patched.md", "posted.md"):
-        if os.path.exists(f"{t}/{f}"): os.remove(f"{t}/{f}")
-    if os.path.exists(f"{t}/review/comment.md"): os.remove(f"{t}/review/comment.md")
+    t = tempfile.mkdtemp()
     r = subprocess.run(["bash", "-e", "-c", step], cwd=t, capture_output=True, text=True,
-                       env={**env, "CHANGED": changed, "SUMMARY": summary, "GH_TEST_ID": existing})
+                       env={**env, "GH_TEST_DIR": t, "CHANGED": changed, "SUMMARY": summary, "GH_TEST_ID": existing})
     assert r.returncode == 0, r.stderr
     target = "patched.md" if existing else "posted.md"
     if changed == "false" and not existing:
