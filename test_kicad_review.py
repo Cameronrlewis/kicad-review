@@ -232,6 +232,21 @@ body = comment_markdown({**d2, "projects": [p]}, [], "")
 assert "(`foo   ![proof](https://e.example/dir.png)   bar'`, modified)" in body, "RC-S3: directory line breaks escape the code span"
 print("ok RC-S3 directory line breaks")
 
+# RC-S4: Template changes must not silently leave any of the four external assets.
+import io
+from unittest.mock import patch
+template = open("ui/review.html", encoding="utf-8").read()
+for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
+    changed = template.replace(marker, "data-check " + marker)
+    with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(changed if path.endswith("review.html") else ""), create=True):
+        try:
+            inline_page("window.REVIEW_DATA={};")
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("RC-S4: template change silently leaves " + marker)
+print("ok RC-S4 external asset guard")
+
 # RC-S1: URL-looking text cannot supply Markdown links or images, including screenshot alt text.
 for value in ("https://x/![proof](https://e.example/p.png)", "www.x/[proof](https://e.example/p.png)"):
     assert md(value) == value.replace("[", "\\[").replace("]", "\\]"), "RC-S1: URL Markdown delimiters are unescaped"

@@ -949,7 +949,9 @@ def inline_page(data_js):
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
-    return page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
+    page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
+    assert not any(ref in page for ref in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"')), "external report assets remain"
+    return page
 
 
 def cmd_report(args):
