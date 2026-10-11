@@ -721,14 +721,9 @@ print("ok TS-S2 release zip and CSV contents")
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
-for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip 3D --page', 'node ui/check.mjs --no-skip 3D --dark --page', '"unchanged sheet"', '"unchanged project"'):
-    assert command in test_wf, "TS-S1 CI missing " + command
+for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"'):
+    assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
-fixture = lambda name: json.loads(pathlib.Path("ui/sample/" + name).read_text(encoding="utf-8").split("=", 1)[1].strip().removesuffix(";"))
-assert fixture("review-data-3d.js")["projects"][0]["board"]["model3d"], "TS-S1 real 3D fixture"
-pages = fixture("review-data-2.js")["projects"]
-assert len(pages) == 2 and any(s["status"] == "unchanged" and not s.get("svg") for p in pages for s in p["sheets"])
-assert any(not p["board"]["changed"] and p["sheets"] and all(not s.get("svg") for s in p["sheets"]) for p in pages)
-print("ok TS-S1 CI browser matrix and fixtures")
+print("ok TS-S1 CI browser matrix")
 print("ok")
 

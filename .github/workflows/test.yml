@@ -18,9 +18,9 @@ jobs:
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
       - name: Build browser fixtures
         run: |
-          echo "CHROME=$(command -v google-chrome || printf /usr/bin/google-chrome)" >> "$GITHUB_ENV"
-          echo "PAGES=$(mktemp -d)" >> "$GITHUB_ENV"
-      - run: |
+          echo "CHROME=google-chrome" >> "$GITHUB_ENV"
+          export PAGES=$(mktemp -d)
+          echo "PAGES=$PAGES" >> "$GITHUB_ENV"
           python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js")]]'
       - run: node ui/check.mjs
       - run: node ui/check.mjs --dark
