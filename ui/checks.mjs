@@ -57,6 +57,26 @@ export const CHECKS = [
       facts.push(!!h && h.marker.el.textContent.includes("− J2") && h.materials.some((material, i) => material !== h.original[i]));
     }
     return facts.every(Boolean) || JSON.stringify(facts);`],
+  ["3D cancelled GLB loads dispose parsed resources", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), loader = THREE3D.GLTFLoader.prototype, parse = loader.parseAsync, resources = new Set(), disposed = new Set();
+    let release, parsed = 0;
+    const gate = new Promise(r => release = r);
+    loader.parseAsync = async function(...args) {
+      const g = await parse.apply(this, args);
+      g.scene.traverse(o => [o.geometry, ...[o.material].flat().filter(Boolean).flatMap(m => [m, m.map])].filter(Boolean).forEach(r => {
+        if (!resources.has(r)) r.addEventListener("dispose", () => disposed.add(r)); resources.add(r);
+      }));
+      parsed++; await gate; return g;
+    };
+    try {
+      const cancelled = Review3D.show(stage, p, {...S, s:null});
+      while (parsed < Object.values(p.board.model3d).filter(Boolean).length) await new Promise(r => setTimeout(r, 20));
+      await Review3D.show(stage, {...p, board:{...p.board, model3d:{}, no_model:[]}}, {...S, m:"overlay", s:null});
+      release(); await cancelled;
+      return resources.size > 0 && disposed.size === resources.size || JSON.stringify({parsed, resources:resources.size, disposed:disposed.size});
+    } finally { release(); loader.parseAsync = parse; }
+  `],
   ["3D cleanup frees replaced outlines and scene resources", "v=3d&m=overlay", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     const p = REVIEW_DATA.projects[0], change = p.changes.find(c => c.ref === "J2"), seen = {}, watch = (name, resource) => { seen[name] = false; resource?.addEventListener("dispose", () => { seen[name] = true; }); };
@@ -619,6 +639,18 @@ export const CHECKS = [
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 500)); S.camera3d = window.Review3D.cameraState(); S.hidden3d=["silk"]; const q=decodeState(encodeState());
     return q.camera3d?.length === 6 && q.hidden3d?.[0] === "silk";`],
+  ["3D saved selection address keeps its camera and draws outlines", "v=3d&m=side", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    while (!Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
+    document.querySelector('[data-3d-camera="top"]').click();
+    const camera = Review3D.cameraState(), row = proj().changes.find(r => r.ref === "J2");
+    const saved = "#" + encodeState({...S, s:row.id, camera3d:camera, x:null, y:null, z:null});
+    history.replaceState(null, "", saved); S.s = null; S.camera3d = null; await start();
+    await new Promise(r => setTimeout(r, 700));
+    const actual = Review3D.cameraState(), st = Review3D.state, {THREE} = THREE3D;
+    const outlined = st.selected?.length === 2 && st.selected.every((o, i) => o.position.distanceTo(new THREE.Box3().setFromObject(st.roots[i].getObjectByName(row.ref)).getCenter(new THREE.Vector3())) < 1e-4);
+    return S.s === row.id && outlined && camera.every((n, i) => Math.abs(n - actual[i]) < .2) || JSON.stringify({saved, camera, actual, outlined, selection:S.s});
+  `],
   ["3D change card keeps 3D and frames J2", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));

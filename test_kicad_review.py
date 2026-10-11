@@ -880,6 +880,7 @@ assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
 for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
+assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 40\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
 print("ok TS-S1 CI browser matrix")
 print("ok")
