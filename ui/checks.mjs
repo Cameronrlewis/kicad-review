@@ -256,7 +256,7 @@ export const CHECKS = [
     d.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, clientX: r.left + r.width / 2 }));
     d.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: r.left + r.width * 0.25 }));
     d.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
-    return Math.abs(S.wipe - 0.25) < 0.02;`],
+    return Math.abs(S.wipe - 0.25) < 0.02 && d.getAttribute("aria-valuenow") === "25";`],
   ["blend slider sets head opacity", "m=blend", `
     await new Promise(r => setTimeout(r, 800));
     const s = document.querySelector("#modes input[type=range]"); s.value = 20; s.dispatchEvent(new Event("input"));
