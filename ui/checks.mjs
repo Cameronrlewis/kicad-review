@@ -25,6 +25,16 @@ export const CHECKS = [
     applyGoTo("#p=0&v=board&s=" + row.id + "&x=10&y=20&z=5");
     await new Promise(r => setTimeout(r, 800));
     return S.x === 10 && S.y === 20 && S.z === 5 && S.s === row.id;`],
+  ["reloading a saved sheet address keeps its explicit view", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.sheet && rowBox(r, "head"));
+    await goTo(row.id);
+    const sheet = P.sheets.find(s => s.path === row.where.sheet);
+    P.sheets.push({...sheet, path:"/second/", name:"Second sheet", status:"unchanged", svg:null}); renderNav();
+    document.querySelector('#nav [data-view="sheet:/second/"]').click();
+    await new Promise(r => setTimeout(r, 400));
+    const saved = location.hash; S.v = null; S.s = null;
+    history.replaceState(null, "", saved); await start();
+    return S.v === "sheet:/second/" && S.s === row.id || JSON.stringify({saved, view:S.v, selection:S.s});`],
   ["unchanged sheet selection saves the address", "", `
     const sheet = proj().sheets.find(s => s.status === "unchanged" && !s.svg); if (!sheet) return "skip";
     await new Promise(r => setTimeout(r, 400));

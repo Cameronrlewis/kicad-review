@@ -128,7 +128,7 @@ function applyState(st) {
   renderNav();
   renderPanel();
   renderZoombar();
-  return draw().then(() => S.s && !hasPos && goTo(S.s));
+  return draw().then(() => S.s && !hasPos && !v.v && goTo(S.s));
 }
 
 const PX = 4;                       // CSS px per mm at z = PX
