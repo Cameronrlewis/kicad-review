@@ -34,11 +34,18 @@ window.Review3D = (() => {
   }
   function frame(direction = "3d") {
     if (!active?.box) return;
-    const { THREE } = window.THREE3D, b = active.box, c = b.getCenter(new THREE.Vector3()), size = b.getSize(new THREE.Vector3());
-    const radius = Math.max(size.x, size.y, size.z, .001) * 1.6;
-    const dirs = { top:[0,0,1], bottom:[0,0,-1], front:[0,-1,0], back:[0,1,0], left:[-1,0,0], right:[1,0,0], "3d":[1,-1,1], reset:[1,-1,1] };
+    const { THREE } = window.THREE3D, b = active.box, c = b.getCenter(new THREE.Vector3());
+    // KiCad GLB is Y-up: X runs left/right and +Z runs down a 2D board view.
+    const dirs = { top:[0,1,0], bottom:[0,-1,0], front:[0,0,-1], back:[0,0,1], left:[-1,0,0], right:[1,0,0], "3d":[1,1,-1], reset:[1,1,-1] };
     const d = new THREE.Vector3(...dirs[direction]).normalize();
-    active.views.forEach(v => { v.camera.position.copy(c).addScaledVector(d, radius); v.controls.target.copy(c); v.camera.near = radius / 100; v.camera.far = radius * 100; v.camera.updateProjectionMatrix(); v.controls.update(); });
+    const radius = b.getBoundingSphere(new THREE.Sphere()).radius;
+    active.views.forEach(v => {
+      const vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect);
+      const distance = radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.08; // per-pane fit, including tall parts
+      v.camera.up.set(0, 0, -1); // top: GLB +Z points down the screen like the 2D board
+      v.camera.position.copy(c).addScaledVector(d, distance); v.controls.target.copy(c);
+      v.camera.near = distance / 100; v.camera.far = distance * 100; v.camera.updateProjectionMatrix(); v.controls.update();
+    });
     render();
   }
   function render() { active?.views.forEach(v => v.renderer.render(v.scene, v.camera)); }
@@ -75,7 +82,9 @@ window.Review3D = (() => {
       g.scene.traverse(n => { if (n.name) window.Review3D.state.nodes.push(n.name); });
     });
     resize(); frame("3d");
-    window.Review3D.state.cameras = session.views.map(v => v.camera); window.Review3D.state.controls = session.views.map(v => v.controls); window.Review3D.state.firstFrameMs = performance.now() - session.start;
+    window.Review3D.state.cameras = session.views.map(v => v.camera); window.Review3D.state.controls = session.views.map(v => v.controls);
+    await new Promise(requestAnimationFrame); // timing means a composited frame containing both parsed models
+    window.Review3D.state.firstFrameMs = performance.now() - session.start; window.Review3D.state.firstFrame = true;
     window.addEventListener("resize", resize, { signal: (session.abort = new AbortController()).signal });
   }
   return { show, dispose, cameraBar, frame, get state() { return window.__review3dState; }, set state(v) { window.__review3dState = v; } };
