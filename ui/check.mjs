@@ -31,6 +31,14 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   await send("Page.navigate", { url: `file://${page}#${hash}` });
   await evaluate("new Promise(r => { const t = () => window.reviewReady ? r() : setTimeout(t, 50); t(); })");
   errors.length = 0;
+  if (name === "3D camera movement is linked and leaving disposes" && await evaluate("!!window.Review3D?.state?.cameras?.length").then(r => r.result?.value)) {
+    const r = (await evaluate(`(()=>{const r=document.querySelector('#stage canvas').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2,before:window.Review3D.state.cameras.map(c=>c.position.toArray())}})()`)).result.value;
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x: r.x, y: r.y, button: "left", clickCount: 1 });
+    for (let n = 1; n <= 4; n++) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: r.x + n * 20, y: r.y + n * 8, button: "left", buttons: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: r.x + 80, y: r.y + 32, button: "left", buttons: 0 });
+    await sleep(100);
+    await evaluate(`window.__3dInputResult = ${JSON.stringify({ before: r.before })}; window.__3dInputResult.after = window.Review3D.state.cameras.map(c => c.position.toArray())`);
+  }
   const r = await evaluate(`(async () => { ${expr} })()`);
   const ok = r.result?.value === true && !errors.length;
   if (!ok) failed++;

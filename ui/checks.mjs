@@ -15,9 +15,9 @@ export const CHECKS = [
   ["3D camera movement is linked and leaving disposes", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return true;
     await new Promise(r => setTimeout(r, 5000));
-    const d = window.Review3D.state, a = d.cameras, before = a[0].position.clone();
-    a[0].position.x += 1; d.controls[0].dispatchEvent({ type: "change" }); await new Promise(r => requestAnimationFrame(r));
-    const linked = a[1] && a[0].position.distanceTo(before) > .001 && a[1].position.distanceTo(a[0].position) < .001;
+    const d = window.Review3D.state, r = window.__3dInputResult;
+    const delta = (p, q) => Math.hypot(...p.map((v, i) => v - q[i]));
+    const linked = r && delta(r.after[0], r.before[0]) > .001 && delta(r.after[0], r.after[1]) < .001;
     await select("board"); return linked && window.Review3D.state.disposed === true;`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
