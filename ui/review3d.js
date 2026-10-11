@@ -36,13 +36,16 @@ window.Review3D = (() => {
     if (!active?.box) return;
     const { THREE } = window.THREE3D, b = active.box, c = b.getCenter(new THREE.Vector3());
     // KiCad GLB is Y-up: X runs left/right and +Z runs down a 2D board view.
-    const dirs = { top:[0,1,0], bottom:[0,-1,0], front:[0,0,-1], back:[0,0,1], left:[-1,0,0], right:[1,0,0], "3d":[1,1,-1], reset:[1,1,-1] };
+    const dirs = { top:[0,1,0], bottom:[0,-1,0], front:[0,0,-1], back:[0,0,1], left:[-1,0,0], right:[1,0,0], "3d":[1,.99,-1], reset:[1,.99,-1] };
     const d = new THREE.Vector3(...dirs[direction]).normalize();
     const radius = b.getBoundingSphere(new THREE.Sphere()).radius;
     active.views.forEach(v => {
       const vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect);
       const distance = radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.08; // per-pane fit, including tall parts
-      v.camera.up.set(0, 0, -1); // top: GLB +Z points down the screen like the 2D board
+      // Top/bottom: GLB +Z points down the screen like the 2D board. Everything else: world up, so the board reads as a floor.
+      if (direction === "top" || direction === "bottom") v.camera.up.set(0, 0, -1); else v.camera.up.set(0, 1, 0);
+      // OrbitControls bakes `up` in at construction; re-derive it so orbiting after a preset does not flip.
+      v.controls._quat.setFromUnitVectors(v.camera.up, new THREE.Vector3(0, 1, 0)); v.controls._quatInverse.copy(v.controls._quat).invert();
       v.camera.position.copy(c).addScaledVector(d, distance); v.controls.target.copy(c);
       v.camera.near = distance / 100; v.camera.far = distance * 100; v.camera.updateProjectionMatrix(); v.controls.update();
     });
@@ -67,7 +70,7 @@ window.Review3D = (() => {
     const box = new T.THREE.Box3();
     models.forEach(g => { if (g) box.union(new T.THREE.Box3().setFromObject(g.scene)); });
     if (box.isEmpty()) { stage.innerHTML = '<p class="empty">No 3D board model was exported.</p>'; return; }
-    session.box = box;
+    session.box = box; window.Review3D.state.box = box;
     models.forEach((g, i) => {
       const side = sides[i], host = document.createElement("section"); host.className = "vp view3d";
       host.innerHTML = `<span class="tag">${side === "base" ? "Base" : "Head"}</span>`;
