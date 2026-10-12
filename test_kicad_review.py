@@ -888,10 +888,150 @@ print("ok TS-S2 release zip and CSV contents")
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
-for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"'):
+for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 40\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
 print("ok TS-S1 CI browser matrix")
 print("ok")
+
+# Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
+from kicad_review import parts_lines
+sym = lambda ref, v, lcsc=None, ds="~", mpn=None: {"kind": "symbol", "ref": ref, "props": {
+    "Value": v, "Footprint": "R_0805", "Datasheet": ds, **({"LCSC": lcsc} if lcsc is not None else {}),
+    **({"MPN": mpn} if mpn else {})}}
+objs = {"a": sym("R1", "10k", " c17414 "), "b": sym("R2", "10k", "C17414"), "c": sym("R3", "1k", "~"),
+        "d": sym("U1", "AP63203WU-7", ds="https://x/ap.pdf", mpn="AP63203WU-7"), "e": sym("R4", "4.7k", "C17414"),
+        "f": {"kind": "footprint", "ref": "R1", "props": {}},
+        "g": {"kind": "power symbol", "ref": "GND", "props": {"net": "GND", "symbol": "power:GND"}}}
+L = {l["key"]: l for l in parts_lines(objs)}
+r = next(l for l in L.values() if l["refs"] == ["R1", "R2"])
+assert r["lcsc"] == "C17414" and "lcsc_conflict" in r["problems"], r   # C17414 also on 4.7k
+assert next(l for l in L.values() if l["refs"] == ["R3"])["problems"] == ["missing_lcsc", "missing_mpn"]
+u = next(l for l in L.values() if l["refs"] == ["U1"])
+assert u["datasheet"] == "https://x/ap.pdf" and u["problems"] == ["missing_lcsc"]
+assert not any("#PWR01" in l["refs"] or "GND" in l["refs"] for l in L.values())
+assert parts_lines({}) == []
+for props, ref in (({"in_bom": "no"}, "R5"), ({"dnp": "yes"}, "R6"), ({}, "R?")):
+    o = sym(ref, "skip")
+    o["props"].update(props)
+    assert parts_lines({"x": o}) == [], o
+from kicad_review import LCSC_FIELDS, MPN_FIELDS
+for lcsc_field in LCSC_FIELDS:
+    for mpn_field in MPN_FIELDS:
+        o = sym("R10", "10k", ds="local.pdf")
+        o["props"].update({f" {lcsc_field.upper()} ": " c12 ", mpn_field: " Part "})
+        l = parts_lines({"x": o})[0]
+        assert (l["lcsc"], l["mpn"], l["datasheet"], l["problems"]) == ("C12", "Part", None, []), l
+objs = {"a": sym("R10", "10k", "bad"), "b": sym("R2", "10k", "BAD"), "c": sym("R2", "10k", "bad")}
+l = parts_lines(objs)[0]
+assert l["refs"] == ["R2", "R10"] and l["problems"] == ["bad_lcsc"], l
+print("ok parts lines")
+
+# Parts settings: off by default, base wins, tables and booleans only.
+assert DEFAULT_SETTINGS["parts"]["enabled"] is False
+with patch("kicad_review.os.path.exists", return_value=False):
+    assert load_settings()["parts"]["enabled"] is False
+for enabled in ("true", "false"):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(f"[parts]\nenabled = {enabled}\n".encode()), create=True) as opened:
+        assert load_settings()["parts"]["enabled"] is (enabled == "true")
+        opened.assert_called_once_with("base/kicad-review.toml", "rb")
+for text, error in (("parts = true", "parts must be a table"),
+                    *[(f"[parts]\nenabled = {value}", "parts.enabled must be true or false") for value in ('"true"', "1", "[]")]):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        try:
+            load_settings()
+            raise AssertionError("invalid parts settings accepted")
+        except SystemExit as e:
+            assert str(e) == "kicad-review.toml: " + error, e
+print("ok parts settings")
+
+# Parts changes follow reference designators, not matching part numbers on different refs.
+from kicad_review import diff_parts
+b = [{"refs": ["R1"], "value": "10k", "lcsc": "C1", "key": "10k|F|C1"}, {"refs": ["R2"], "value": "1k", "lcsc": "C2", "key": "1k|F|C2"},
+     {"refs": ["R9"], "value": "5", "lcsc": None, "key": "5|F|"}]
+h = [{"refs": ["R1"], "value": "10k", "lcsc": "C9", "key": "10k|F|C9"}, {"refs": ["R3"], "value": "1k", "lcsc": "C2", "key": "1k|F|C2"},
+     {"refs": ["R9"], "value": "5", "lcsc": None, "key": "5|F|"}]
+d = {(r["action"], tuple(r["refs"])) for r in diff_parts(b, h)}
+assert d == {("swapped", ("R1",)), ("removed", ("R2",)), ("added", ("R3",))}, d
+assert diff_parts(b, b) == [] and diff_parts([], []) == []
+assert all(r["before"] is None for r in diff_parts([], h))
+assert all(r["after"] is None for r in diff_parts(b, []))
+old = parts_lines({r: sym(r, "10k", "C1") for r in ("R10", "R2")})
+new = parts_lines({r: sym(r, "20k", "C1") for r in ("R10", "R2")})
+assert diff_parts(old, new) == [{"action": "value", "refs": ["R2", "R10"], "before": old[0], "after": new[0]}]
+footprint = [{**new[0], "footprint": "F", "key": "20k|F|C1"}]
+assert diff_parts(new, footprint)[0]["action"] == "footprint", "same value and LCSC, new footprint"
+assert parts_lines({"r": sym("R1", "1k", "C1", ds="HTTPS://x/r.pdf")})[0]["datasheet"] == "HTTPS://x/r.pdf", "scheme is case-insensitive"
+print("ok parts diff")
+
+# Project payload and report settings omit opted-out features; supplier lookup remains deferred.
+import copy
+here = os.getcwd()
+t = tempfile.mkdtemp()
+try:
+    os.chdir(t)
+    project = {"dir": "P", "name": "P", "status": "modified"}
+    write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [project]})})
+    objects = {"base": {"r": sym("R1", "10k", "C1")}, "head": {"r": sym("R1", "10k", "C9")}}
+    with patch("kicad_review.project_objects", side_effect=lambda path, name: objects[path.split("/")[0]]), \
+         patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+        for parts_enabled in (False, True):
+            for models_enabled in (False, True):
+                settings = copy.deepcopy(DEFAULT_SETTINGS)
+                settings["parts"]["enabled"] = parts_enabled
+                settings["3d"]["enabled"] = models_enabled
+                with patch("kicad_review.load_settings", return_value=settings):
+                    kicad_review.cmd_report(None)
+                data = json.loads(pathlib.Path("review/data.json").read_text())
+                p = data["projects"][0]
+                assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
+                assert ("3d" in data["settings"]) == models_enabled
+                if parts_enabled:
+                    lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
+                    assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    assert p["parts"]["changes"][0]["action"] == "swapped"
+                html = pathlib.Path("review/kicad-review.html").read_text()
+                payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
+                embedded = json.loads(payload)
+                del embedded["blobs"]
+                assert embedded == data
+        settings["parts"]["enabled"] = True
+        with patch("kicad_review.project_objects", return_value={}):
+            assert build_project(project, {}, settings)["parts"] == {"lines": [], "changes": [], "supplier": None}
+finally:
+    os.chdir(here)
+print("ok parts report data")
+
+# Parts comments count only newly introduced blocking problems, not missing MPN or removals.
+from kicad_review import parts_markdown
+line = {"refs": ["R1"], "value": "10k", "lcsc": None, "problems": ["missing_lcsc", "missing_mpn"]}
+p = {"name": "X", "parts": {"lines": [line], "changes": [
+    {"action": "added", "refs": ["R1"], "before": None, "after": line}], "supplier": None}}
+m = parts_markdown({"projects": [p]})
+assert "1 problem introduced" in m and "R1 missing LCSC number" in m and "Supplier lookup not run (not available)." in m, m
+assert parts_markdown({"projects": [{"name": "Y"}]}) == ""
+for action, before, after in (("value", line, line), ("removed", line, None)):
+    p["parts"]["changes"] = [{"action": action, "refs": ["R1"], "before": before, "after": after}]
+    assert "introduced" not in parts_markdown({"projects": [p]})
+p["parts"]["supplier"] = {"fetched_at": "2026-10-08T14:02:00Z", "error": None}
+assert "JLCPCB data as of 2026-10-08T14:02:00Z." in parts_markdown({"projects": [p]})
+assert "#### Parts: X" in comment_markdown({**d2, "projects": [{**p, "dir": "", "status": "modified", "changes": [], "checks": []}]}, [], "")
+conflict = {"refs": ["R2"], "value": "1k", "lcsc": "C1", "problems": ["lcsc_conflict"]}
+m = parts_markdown({"projects": [{"name": "C", "parts": {"lines": [conflict], "supplier": None,
+    "changes": [{"action": "added", "refs": ["R2"], "before": None, "after": conflict}]}}]})
+assert "1 with a problem" in m and "R2 one LCSC number on several values" in m, "conflict counts as a problem: " + m
+print("ok parts markdown")
+
+# A large introduced-parts list stays within GitHub's comment limit, preserving checks.
+large_parts = {"lines": [line], "supplier": None, "changes": [
+    {"action": "added", "refs": ["R" + str(i)], "before": None, "after": line} for i in range(4000)]}
+budget_project = {"name": "Budget", "dir": "", "status": "modified", "changes": [], "checks": [], "parts": large_parts}
+budget_data = {**d2, "projects": [budget_project]}
+body = comment_markdown(budget_data, [], "")
+assert len(body) <= 65536 and "Parts truncated" in body and "### Checks" in body, len(body)
+cut = body[:body.index("… Parts truncated")].rstrip("\n").rsplit("\n", 1)[1]
+assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cut at a whole line: " + cut
+assert "#### Parts: Budget" in body
+print("ok parts comment budget")
 

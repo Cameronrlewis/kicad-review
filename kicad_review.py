@@ -593,6 +593,7 @@ DEFAULT_SETTINGS = {
     "bom": {"required_fields": ["Value", "Footprint"]},
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
+    "parts": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -611,7 +612,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -625,6 +626,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
     if not isinstance(settings["3d"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
+    if not isinstance(settings["parts"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
     return settings
 
 
@@ -754,6 +757,64 @@ def bom_violations(objs, fields):
                         "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
                         "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
     return out
+
+
+LCSC_FIELDS = ("lcsc", "lcsc part", "lcsc part #", "lcsc part number", "jlcpcb part #")
+MPN_FIELDS = ("mpn", "manufacturer_part_number", "manufacturer part number", "mfr. part #", "mfg part #")
+
+
+def field(props, names):
+    v = next((props[k] for k in props if k.strip().lower() in names), "")
+    v = (v or "").strip()
+    return None if v in ("", "~") else v
+
+
+def parts_lines(objs):
+    """One line per distinct part on the schematic (Value + Footprint + LCSC), with what blocks a supplier lookup."""
+    lines = {}
+    for o in objs.values():
+        p = o["props"]
+        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+            continue
+        lcsc = (field(p, LCSC_FIELDS) or "").upper() or None
+        ds = field(p, ("datasheet",))
+        line = lines.setdefault((p.get("Value", ""), p.get("Footprint", ""), lcsc), {
+            "value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "lcsc": lcsc,
+            "mpn": field(p, MPN_FIELDS), "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
+            "refs": [], "problems": []})
+        if o["ref"] not in line["refs"]:
+            line["refs"].append(o["ref"])
+    by_lcsc = {}
+    for l in lines.values():
+        l["refs"].sort(key=natural)
+        l["key"] = "|".join([l["value"], l["footprint"], l["lcsc"] or ""])
+        if l["lcsc"] and not re.fullmatch(r"C\d+", l["lcsc"]):
+            l["problems"].append("bad_lcsc")
+        if not l["lcsc"]:
+            l["problems"].append("missing_lcsc")
+        if not l["mpn"] and not l["lcsc"]:
+            l["problems"].append("missing_mpn")
+        if l["lcsc"]:
+            by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
+    for l in lines.values():
+        if l["lcsc"] and len(by_lcsc[l["lcsc"]]) > 1:
+            l["problems"].append("lcsc_conflict")
+    return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
+
+
+def diff_parts(base, head):
+    """What a change did to the parts list, per reference designator, grouped back into lines."""
+    at = lambda lines: {r: l for l in lines for r in l["refs"]}
+    b, h = at(base), at(head)
+    rows = {}
+    for ref in sorted(set(b) | set(h), key=natural):
+        x, y = b.get(ref), h.get(ref)
+        if x and y and x["key"] == y["key"]:
+            continue
+        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint"
+        r = rows.setdefault((action, x and x["key"], y and y["key"]), {"action": action, "refs": [], "before": x, "after": y})
+        r["refs"].append(ref)
+    return list(rows.values())
 
 
 def vkeys(v):
@@ -909,6 +970,11 @@ def build_project(p, blobs, settings):
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    parts = None
+    if settings["parts"]["enabled"]:
+        lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
+        parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
+                 "supplier": None}  # JLCPCB lookup not built yet: no approved API access
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -917,7 +983,8 @@ def build_project(p, blobs, settings):
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs)}
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
+            **({"parts": parts} if parts else {})}
 
 
 def assign_ids(projects):
@@ -976,7 +1043,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = settings if settings["3d"]["enabled"] else {k: v for k, v in settings.items() if k != "3d"}
+    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -1125,6 +1192,14 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
     body, checks = "\n".join(out), checks_markdown(data)
+    parts = parts_markdown(data)
+    if parts:
+        # Reserve room for the body truncation notice and closing details tags.
+        budget = max(0, 60000 - len(checks) - 200)
+        notice = "\n\n… Parts truncated. The full list is in the report.\n"
+        if len(parts) > budget:
+            parts = parts[:max(0, budget - len(notice))].rsplit("\n", 1)[0] + notice if budget >= len(notice) else ""  # whole lines only
+        checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
             return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
@@ -1181,6 +1256,29 @@ def cmd_summary(args):
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
+
+
+PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
+                "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"}
+
+
+def parts_markdown(data):
+    out = []
+    for p in data["projects"]:
+        parts = p.get("parts")
+        if not parts:
+            continue
+        introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
+                      for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
+        s = parts["supplier"]
+        head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
+        when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
+               f"Supplier lookup not run ({md((s or {}).get('error') or 'not available')})."
+        bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
+        out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
+        out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
+    return "\n".join(out)
 
 
 def checks_markdown(data):

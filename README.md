@@ -52,10 +52,24 @@ To make checks block merging, require the status check **`review / review`** in 
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
+| `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
+
+## Parts (optional)
+
+Set `enabled = true` under `[parts]` in `kicad-review.toml` (default: `false`). The Parts tab and pull request comment section list each distinct part's value, footprint, references, LCSC number and manufacturer part number, with a datasheet link from the symbol's `Datasheet` field (http/https only). They flag missing or malformed LCSC numbers and one LCSC number used on several values, and show which parts the change added, removed, swapped to another LCSC number, or gave a new value or footprint.
+
+Add an `LCSC` field to each symbol for its JLCPCB part (for example `C17414`), and `Manufacturer_Part_Number` for the PCBWay BOM. Optionally add `"LCSC"` to `bom.required_fields` to require it.
+
+Recognised field names (case-insensitive):
+
+- LCSC: `lcsc`, `lcsc part`, `lcsc part #`, `lcsc part number`, `jlcpcb part #`.
+- Manufacturer part number: `mpn`, `manufacturer_part_number`, `manufacturer part number`, `mfr. part #`, `mfg part #`.
+
+Supplier stock/price is not yet available; a JLCPCB Components API lookup at workflow time is planned and needs approved API access. Today nothing is sent to any supplier, and no supplier API secret is needed. PCBWay publishes no parts API.
 
 ## Review site (optional)
 
