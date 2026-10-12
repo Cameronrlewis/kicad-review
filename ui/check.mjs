@@ -21,7 +21,13 @@ CHECKS.push(["Parts fixture sorts problems and greys stale stock", "", `
   if (document.querySelectorAll('.parts-row').length !== 3) return 'problems filter';
   document.querySelector('[data-parts-filter=changed]').click();
   if (document.querySelectorAll('.parts-row').length !== 1) return 'changed filter';
-  S.partsFilter.problems = S.partsFilter.changed = false;
+  S.partsFilter.problems = false; renderPanel();
+  const moved = [...document.querySelectorAll('.parts-row')].find(r => r.textContent.includes('R7'));
+  if (moved.children[1].textContent !== 'R7' || !moved.textContent.includes('10k → 4.7k')) return 'changed refs only';
+  S.partsFilter.changed = false; renderPanel();
+  const line = [...document.querySelectorAll('.parts-row')].find(r => r.textContent.includes('R7'));
+  if (!line.classList.contains('changed') || line.children[1].textContent !== 'R6, R7' || line.querySelector('strong').textContent !== 'R7'
+    || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 2) return 'changed marking';
   REVIEW_DATA.projects[0].parts.supplier = null; renderPanel();
   if (!document.querySelector('.parts-age').textContent.includes('Supplier lookup not run') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
   if (valid({t:'parts'}).t !== 'parts') return 'hash';

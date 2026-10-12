@@ -93,6 +93,7 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .parts-table td { overflow-wrap: anywhere; }
 .parts-table a { color: var(--accent); }
 .parts-row.problem td:first-child, .parts-problems { color: var(--modified); }
+.parts-row.changed td:first-child { box-shadow: inset 3px 0 var(--modified); }
 .parts-problems { display: block; margin-top: var(--space-1); }
 .parts-stock { white-space: nowrap; }
 .parts-age.stale, .parts-stock.stale, .parts-row.unavailable { color: var(--muted); }
