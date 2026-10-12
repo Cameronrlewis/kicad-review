@@ -268,6 +268,32 @@ finally:
     kicad_review.checks_markdown = real_checks
 print("ok RC-S2 check budget")
 
+# RC-A: titles, reasons and item names cannot exhaust the checks section budget.
+for field in ("title", "reason", "items"):
+    p = big(0)
+    p["changes"] = []
+    c = p["checks"][0]
+    c["violations"] = [{"new": True, "severity": "error", "description": "net changed", "items": []}]
+    if field == "items":
+        c["violations"][0][field] = ["x" * 70000, "y" * 70000]
+    else:
+        c[field] = "x" * 70000
+    data = {**d2, "projects": [p]}
+    body = comment_markdown(data, [], "")
+    assert len(body) < 65536 and "… checks truncated" in body, "RC-A: long " + field + " exceeds comment limit"
+    assert body.count("<details") == body.count("</details>"), "RC-A: truncated checks leave details open"
+# Place the section limit inside each opening tag, not only inside long text.
+for tag_offset in (5, 13):
+    p = big(0)
+    p["checks"][0].update(title="", violations=[{"new": True, "severity": "error", "description": "x", "items": []}])
+    data = {**d2, "projects": [p]}
+    start = kicad_review.checks_markdown(data).index("<details>")
+    p["checks"][0]["title"] = "x" * (49900 - start - tag_offset)
+    p["checks"][0]["violations"][0]["items"] = ["x" * 70000]
+    checks = kicad_review.checks_markdown(data)
+    assert checks.count("<details>") == checks.count("</details>") and not re.search(r"<[^>\n]*(?:\n|$)", checks), "RC-A: checks cap splits a details tag"
+print("ok RC-A checks section cap")
+
 # RC-S3: Directory CR/LF cannot break out of the literal code span.
 p = big(0)
 p["dir"] = "foo\r\n\n![proof](https://e.example/dir.png)\r\n\nbar`"
@@ -281,6 +307,14 @@ assert r.returncode != 0 and "RuntimeError: external report assets remain" in r.
 template = open("ui/review.html", encoding="utf-8").read()
 for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
     changed = template.replace(marker, "data-check " + marker)
+    single_quoted = "<" + ("script " if marker.startswith("src") else "link ") + marker.replace('"', "'") + ("></script>" if marker.startswith("src") else ">")
+    with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(single_quoted if path.endswith("review.html") else ""), create=True):
+        try:
+            inline_page("window.REVIEW_DATA={};")
+        except RuntimeError as e:
+            assert "external report assets remain" in str(e), e
+        else:
+            raise AssertionError("RC-S4: single-quoted asset silently remains " + marker)
     with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(changed if path.endswith("review.html") else ""), create=True):
         try:
             inline_page("window.REVIEW_DATA={};")
@@ -773,6 +807,28 @@ for noise in ("0.000001", "-0.000001", "0.0"):
 print("ok OB-S2 pad position noise")
 print("ok OB-S2 pad geometry and rotate invariant")
 
+# OB-C: duplicate pad numbers retain each net, while unique numbers keep readable keys.
+for numbers in (("1", "1"), ("1", "2")):
+    pads = [pad.replace('"1" thru_hole', f'"{number}" thru_hole').replace('"pad1"', f'"pad{i}"') for i, number in enumerate(numbers)]
+    write(t, {"b.kicad_pcb": board.replace("PAD", " ".join(pads))})
+    before = pcb_objects(f"{t}/b.kicad_pcb")
+    if numbers == ("1", "2"):
+        assert {k: v for k, v in before["fp1"]["props"].items() if k.startswith("pad ")} == {"pad 1 net": "GND", "pad 2 net": "GND"}, "OB-C: unique pad keys changed"
+    for index in (0, 1):
+        changed = [p.replace('net 1 "GND"', 'net 2 "VCC"') if i == index else p for i, p in enumerate(pads)]
+        write(t, {"h.kicad_pcb": board.replace("PAD", " ".join(changed))})
+        rows = diff_objects(before, pcb_objects(f"{t}/h.kicad_pcb"))
+        assert len(rows) == 1 and len(rows[0]["changes"]) == 1 and rows[0]["changes"][0][1:] == ["GND", "VCC"], f"OB-C: pad {index} net change lost for {numbers}: {rows}"
+    if numbers == ("1", "1"):
+        unrelated = '(pad "2" smd rect (at 0 0) (size 1 1))'
+        for changed in (False, True):
+            head_pads = [pads[0], pads[1].replace('net 1 "GND"', 'net 2 "VCC"') if changed else pads[1]]
+            write(t, {"h.kicad_pcb": board.replace("PAD", " ".join([unrelated, *head_pads]))})
+            rows = diff_objects(before, pcb_objects(f"{t}/h.kicad_pcb"))
+            nets = [c for r in rows for c in r["changes"] if c[0].startswith("pad ")]
+            assert nets == ([["pad 1#2 net", "GND", "VCC"]] if changed else []), f"OB-C: unrelated pad shifts duplicate net keys: {nets}"
+print("ok OB-C duplicate pad nets and unique keys")
+
 # TS-S2: exercise render/release above the process boundary, not stubs of the functions under test.
 import csv, pathlib, zipfile
 from kicad_review import render_side
@@ -834,6 +890,7 @@ assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
 for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
+assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 40\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
 print("ok TS-S1 CI browser matrix")
 print("ok")
