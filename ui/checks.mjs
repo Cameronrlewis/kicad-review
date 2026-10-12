@@ -692,4 +692,53 @@ export const CHECKS = [
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
+  ["Parts fixture sorts problems and greys stale stock", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  const rows = [...document.querySelectorAll('#panel .parts-row')];
+  if (rows.length !== REVIEW_DATA.projects[0].parts.lines.length || !rows[0].classList.contains('problem')) return 'rows';
+  if (!document.querySelector('.parts-age.stale') || rows.some(r => !r.querySelector('.parts-stock.stale') || r.querySelector('.parts-stock').textContent.includes('✔'))) return 'stale';
+  if (document.querySelector('.parts-table img') || [...document.querySelectorAll('.parts-table a')].some(a => !/^https?:/.test(a.href) || a.rel !== 'noopener noreferrer' || a.target !== '_blank')) return 'escaping';
+  document.querySelector('[data-parts-filter=problems]').click();
+  if (document.querySelectorAll('.parts-row').length !== 3) return 'problems filter';
+  document.querySelector('[data-parts-filter=changed]').click();
+  if (document.querySelectorAll('.parts-row').length !== 1) return 'changed filter';
+  S.partsFilter.problems = false; renderPanel();
+  const moved = [...document.querySelectorAll('.parts-row')].find(r => r.textContent.includes('R7'));
+  if (moved.children[1].textContent !== 'R7' || !moved.textContent.includes('10k → 4.7k')) return 'changed refs only';
+  S.partsFilter.changed = false; renderPanel();
+  const line = [...document.querySelectorAll('.parts-row')].find(r => r.textContent.includes('R7'));
+  if (!line.classList.contains('changed') || line.children[1].textContent !== 'R6, R7' || line.querySelector('strong').textContent !== 'R7'
+    || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 2) return 'changed marking';
+  REVIEW_DATA.projects[0].parts.supplier = null; renderPanel();
+  if (!document.querySelector('.parts-age').textContent.includes('Supplier lookup not run') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
+  if (valid({t:'parts'}).t !== 'parts') return 'hash';
+  const parts = REVIEW_DATA.projects[0].parts;
+  if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 5 · 2 ⚠') return 'blocking count';
+  parts.supplier = {error:'503'}; renderPanel();
+  const unavailable = document.querySelector('.parts-row.unavailable .parts-stock').textContent;
+  if (!unavailable.includes('unavailable') || !unavailable.includes('503') || document.querySelector('.parts-table img')) return 'failed lookup';
+  parts.supplier = {fetched_at:'invalid <timestamp>'}; renderPanel();
+  if (!document.querySelector('.parts-age.stale') || document.querySelector('.parts-age').textContent.includes('NaN')
+      || [...document.querySelectorAll('.parts-stock')].some(c => !c.classList.contains('stale') || c.textContent.includes('✔'))) return 'invalid timestamp';
+  const savedProblems = parts.lines.map(l => l.problems);
+  parts.lines.forEach(l => l.problems = ['missing_mpn', 'unavailable']); renderPanel();
+  if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 5') return 'zero blocking count';
+  parts.lines.forEach((l, i) => l.problems = savedProblems[i]);
+  parts.supplier = {fetched_at: new Date(Date.now() - 2 * 36e5).toISOString()}; renderPanel();
+  if (![...document.querySelectorAll('.parts-stock')].some(c => c.textContent.includes('✔')) || document.querySelector('.parts-stock.stale')) return 'fresh';
+  parts.changes.push({action:'removed',refs:['R8'],before:{...parts.lines[0],refs:['R8']},after:null}); renderPanel();
+  if (document.querySelectorAll('.parts-row').length !== 6 || !document.querySelector('.parts-table').textContent.includes('R8')) return 'removed';
+  delete REVIEW_DATA.projects[0].parts; renderPanel();
+  return !document.querySelector('[data-tab=parts]') && S.t === 'changes';
+`],
+  ["Parts report matches head BOM line count", "t=parts", `
+  const parts = REVIEW_DATA.projects[S.p].parts;
+  if (!parts || REVIEW_DATA.repo === 'example/parts') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  return document.querySelector('[data-tab=parts]').textContent === 'Parts ' + parts.lines.length + (partsProblemCount(parts) ? ' · ' + partsProblemCount(parts) + ' ⚠' : '')
+    && document.querySelectorAll('.parts-row').length === parts.lines.length
+    && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
+    && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
+`],
 ];

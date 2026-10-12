@@ -1202,7 +1202,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         budget = max(0, 60000 - len(checks) - 200)
         notice = "\n\n… Parts truncated. The full list is in the report.\n"
         if len(parts) > budget:
-            parts = parts[:max(0, budget - len(notice))] + notice if budget >= len(notice) else ""
+            parts = parts[:max(0, budget - len(notice))].rsplit("\n", 1)[0] + notice if budget >= len(notice) else ""  # whole lines only
         checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
