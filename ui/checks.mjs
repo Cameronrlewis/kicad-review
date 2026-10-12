@@ -697,10 +697,11 @@ export const CHECKS = [
   document.querySelector('[data-tab=parts]').click();
   const rows = [...document.querySelectorAll('#panel .parts-row')];
   if (rows.length !== REVIEW_DATA.projects[0].parts.lines.length || !rows[0].classList.contains('problem')) return 'rows';
-  if (!document.querySelector('.parts-age.stale') || rows.some(r => !r.querySelector('.parts-stock.stale') || r.querySelector('.parts-stock').textContent.includes('✔'))) return 'stale';
+  if (!document.querySelector('.parts-age.stale') || rows.some(r => !r.querySelector('.parts-stock.stale') || r.querySelector('.parts-stock').textContent.includes('✔'))
+    || !rows.some(r => r.querySelector('.parts-stock').textContent.endsWith('(stale)'))) return 'stale';
   if (document.querySelector('.parts-table img') || [...document.querySelectorAll('.parts-table a')].some(a => !/^https?:/.test(a.href) || a.rel !== 'noopener noreferrer' || a.target !== '_blank')) return 'escaping';
   document.querySelector('[data-parts-filter=problems]').click();
-  if (document.querySelectorAll('.parts-row').length !== 3) return 'problems filter';
+  if (document.querySelectorAll('.parts-row').length !== 2 || document.querySelector('.parts-table').textContent.includes('U5')) return 'problems filter';
   document.querySelector('[data-parts-filter=changed]').click();
   if (document.querySelectorAll('.parts-row').length !== 1) return 'changed filter';
   S.partsFilter.problems = false; renderPanel();
@@ -729,6 +730,8 @@ export const CHECKS = [
   if (![...document.querySelectorAll('.parts-stock')].some(c => c.textContent.includes('✔')) || document.querySelector('.parts-stock.stale')) return 'fresh';
   parts.changes.push({action:'removed',refs:['R8'],before:{...parts.lines[0],refs:['R8']},after:null}); renderPanel();
   if (document.querySelectorAll('.parts-row').length !== 6 || !document.querySelector('.parts-table').textContent.includes('R8')) return 'removed';
+  parts.changes.push({action:'footprint',refs:['R1'],before:{...parts.lines[0],footprint:'R_0402'},after:parts.lines[0]}); renderPanel();
+  if (!document.querySelector('.parts-footprint')?.textContent.includes('R_0402 → R_0603')) return 'footprint change';
   delete REVIEW_DATA.projects[0].parts; renderPanel();
   return !document.querySelector('[data-tab=parts]') && S.t === 'changes';
 `],

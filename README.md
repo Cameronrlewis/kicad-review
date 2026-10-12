@@ -60,7 +60,7 @@ Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL
 
 ## Parts (optional)
 
-Set `enabled = true` under `[parts]` in `kicad-review.toml` (default: `false`). The Parts tab and pull request comment section list each distinct part's value, footprint, references, LCSC number and manufacturer part number, with a datasheet link from the symbol's `Datasheet` field (http/https only). They flag missing or malformed LCSC numbers and one LCSC number used on several values, and show what the change added, removed or swapped.
+Set `enabled = true` under `[parts]` in `kicad-review.toml` (default: `false`). The Parts tab and pull request comment section list each distinct part's value, footprint, references, LCSC number and manufacturer part number, with a datasheet link from the symbol's `Datasheet` field (http/https only). They flag missing or malformed LCSC numbers and one LCSC number used on several values, and show which parts the change added, removed, swapped to another LCSC number, or gave a new value or footprint.
 
 Add an `LCSC` field to each symbol for its JLCPCB part (for example `C17414`), and `Manufacturer_Part_Number` for the PCBWay BOM. Optionally add `"LCSC"` to `bom.required_fields` to require it.
 

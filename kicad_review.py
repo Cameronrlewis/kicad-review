@@ -780,7 +780,7 @@ def parts_lines(objs):
         ds = field(p, ("datasheet",))
         line = lines.setdefault((p.get("Value", ""), p.get("Footprint", ""), lcsc), {
             "value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "lcsc": lcsc,
-            "mpn": field(p, MPN_FIELDS), "datasheet": ds if ds and ds.startswith(("http://", "https://")) else None,
+            "mpn": field(p, MPN_FIELDS), "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
             "refs": [], "problems": []})
         if o["ref"] not in line["refs"]:
             line["refs"].append(o["ref"])
@@ -811,14 +811,10 @@ def diff_parts(base, head):
         x, y = b.get(ref), h.get(ref)
         if x and y and x["key"] == y["key"]:
             continue
-        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value"
+        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint"
         r = rows.setdefault((action, x and x["key"], y and y["key"]), {"action": action, "refs": [], "before": x, "after": y})
         r["refs"].append(ref)
     return list(rows.values())
-
-
-def supplier_snapshot(lines):
-    return None
 
 
 def vkeys(v):
@@ -978,7 +974,7 @@ def build_project(p, blobs, settings):
     if settings["parts"]["enabled"]:
         lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
-                 "supplier": supplier_snapshot(lines["head"])}
+                 "supplier": None}  # JLCPCB lookup not built yet: no approved API access
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -1264,7 +1260,7 @@ def cmd_summary(args):
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
                 "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
-BLOCKING = {"missing_lcsc", "bad_lcsc", "out_of_stock", "not_found", "discontinued"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
 def parts_markdown(data):

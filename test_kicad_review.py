@@ -961,13 +961,12 @@ old = parts_lines({r: sym(r, "10k", "C1") for r in ("R10", "R2")})
 new = parts_lines({r: sym(r, "20k", "C1") for r in ("R10", "R2")})
 assert diff_parts(old, new) == [{"action": "value", "refs": ["R2", "R10"], "before": old[0], "after": new[0]}]
 footprint = [{**new[0], "footprint": "F", "key": "20k|F|C1"}]
-assert diff_parts(new, footprint)[0]["action"] == "value"
+assert diff_parts(new, footprint)[0]["action"] == "footprint", "same value and LCSC, new footprint"
+assert parts_lines({"r": sym("R1", "1k", "C1", ds="HTTPS://x/r.pdf")})[0]["datasheet"] == "HTTPS://x/r.pdf", "scheme is case-insensitive"
 print("ok parts diff")
 
 # Project payload and report settings omit opted-out features; supplier lookup remains deferred.
 import copy
-from kicad_review import supplier_snapshot
-assert supplier_snapshot(new) is None
 here = os.getcwd()
 t = tempfile.mkdtemp()
 try:
@@ -982,17 +981,15 @@ try:
                 settings = copy.deepcopy(DEFAULT_SETTINGS)
                 settings["parts"]["enabled"] = parts_enabled
                 settings["3d"]["enabled"] = models_enabled
-                with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.supplier_snapshot", return_value=None) as lookup:
+                with patch("kicad_review.load_settings", return_value=settings):
                     kicad_review.cmd_report(None)
                 data = json.loads(pathlib.Path("review/data.json").read_text())
                 p = data["projects"][0]
                 assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
                 assert ("3d" in data["settings"]) == models_enabled
-                assert lookup.call_count == int(parts_enabled)
                 if parts_enabled:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
                     assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
-                    lookup.assert_called_once_with(lines["head"])
                     assert p["parts"]["changes"][0]["action"] == "swapped"
                 html = pathlib.Path("review/kicad-review.html").read_text()
                 payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
@@ -1020,6 +1017,10 @@ for action, before, after in (("value", line, line), ("removed", line, None)):
 p["parts"]["supplier"] = {"fetched_at": "2026-10-08T14:02:00Z", "error": None}
 assert "JLCPCB data as of 2026-10-08T14:02:00Z." in parts_markdown({"projects": [p]})
 assert "#### Parts: X" in comment_markdown({**d2, "projects": [{**p, "dir": "", "status": "modified", "changes": [], "checks": []}]}, [], "")
+conflict = {"refs": ["R2"], "value": "1k", "lcsc": "C1", "problems": ["lcsc_conflict"]}
+m = parts_markdown({"projects": [{"name": "C", "parts": {"lines": [conflict], "supplier": None,
+    "changes": [{"action": "added", "refs": ["R2"], "before": None, "after": conflict}]}}]})
+assert "1 with a problem" in m and "R2 one LCSC number on several values" in m, "conflict counts as a problem: " + m
 print("ok parts markdown")
 
 # A large introduced-parts list stays within GitHub's comment limit, preserving checks.

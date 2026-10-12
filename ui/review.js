@@ -450,8 +450,10 @@ function renderChecks() {
   </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
-const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "out_of_stock", "not_found", "discontinued"]);
-const partsProblemCount = parts => parts.lines.filter(l => l.problems.some(p => PARTS_BLOCKING.has(p))).length;
+const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"]);
+// One rule for every count, filter, sort and ⚠: a problem blocks ordering the part.
+const blocking = l => l.problems.some(p => PARTS_BLOCKING.has(p));
+const partsProblemCount = parts => parts.lines.filter(blocking).length;
 const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
 function partsAge(s) {
   if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
@@ -466,8 +468,8 @@ function renderParts() {
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
-  const shown = rows.filter(r => (!f.problems || r.line.problems.length) && (!f.changed || r.changes.length))
-    .sort((a, b) => Number(!!b.line.problems.length) - Number(!!a.line.problems.length));
+  const shown = rows.filter(r => (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
+    .sort((a, b) => Number(blocking(b.line)) - Number(blocking(a.line)));
   return `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
     <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
     <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "JLCPCB", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
@@ -483,11 +485,11 @@ function renderParts() {
       if (parts.supplier?.error || parts.supplier && l.status === "unavailable") {
         stock = `unavailable${l.error || parts.supplier.error ? `: ${l.error || parts.supplier.error}` : ""}`;
       } else if (parts.supplier && parts.supplier.fetched_at) {
-        stock = l.status === "ok" ? `${age.stale ? "" : "✔ "}${l.stock ?? "—"}${l.price != null ? ` $${l.price}` : ""}${l.category === "basic" ? " B" : l.category === "extended" ? ` Ext${l.fee != null ? ` (fee $${l.fee})` : ""}` : ""}`
+        stock = l.status === "ok" ? `${age.stale ? "" : "✔ "}${l.stock ?? "—"}${l.price != null ? ` $${l.price}` : ""}${l.category === "basic" ? " B" : l.category === "extended" ? ` Ext${l.fee != null ? ` (fee $${l.fee})` : ""}` : ""}${age.stale ? " (stale)" : ""}`
           : `${PARTS_PROBLEMS[l.status] || l.status || "—"}${l.stock != null ? ` (${l.stock})` : ""}${l.error ? `: ${l.error}` : ""}`;
       }
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${problems.length ? " problem" : ""}${cs.length ? " changed" : ""}${l.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${problems.length ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${esc(stock)}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${l.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${esc(stock)}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
 }
 function renderPanel() {
