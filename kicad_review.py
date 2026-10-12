@@ -19,6 +19,7 @@ import sys
 import tempfile
 import tomllib
 import zipfile
+from collections import Counter
 
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
@@ -442,9 +443,11 @@ def pcb_objects(path):
                      round(((pa[2] if len(pa) > 2 else 0.0) - (a[2] if a and len(a) > 2 else 0.0)) % 360, 3) % 360 if pa else None) for pad in findall(n, "pad")]
             p["pads"] = f"{len(pads)} pads, geom {hashlib.sha1(repr(pads).encode()).hexdigest()[:10]}" if pads else None
             p["3D model"] = "; ".join(f"{m[1]} " + " ".join(f"{k}={v}" for k, v in flatten_sexpr(m).items()) for m in findall(n, "model")) or None
+            pad_numbers, occurrences = Counter(pad[1] for pad in findall(n, "pad")), Counter()
             for pad in findall(n, "pad"):
+                occurrences[pad[1]] += 1
                 if find(pad, "net"):
-                    p[f"pad {pad[1]} net"] = net(pad)
+                    p[f"pad {pad[1]}{f'#{occurrences[pad[1]]}' if pad_numbers[pad[1]] > 1 else ''} net"] = net(pad)
             objs[uid] = {"kind": "footprint", "ref": p["reference"], "match": ("footprint", p["reference"]),
                          "props": p, "pos": a, "box": box_of(pad_points(n, a), 1), "where": where,
                          "has_model": bool(findall(n, "model"))}
@@ -1033,7 +1036,7 @@ def inline_page(data_js):
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
-    if any(ref in page for ref in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"')): raise RuntimeError("external report assets remain: template did not match")
+    if re.search(r'''(?:href|src)=(["'])(?:tokens\.css|review\.css|sample/review-data\.js|review\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
 
@@ -1295,7 +1298,11 @@ def checks_markdown(data):
         lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
-    return "\n".join(lines) + "\n"
+    checks = "\n".join(lines) + "\n"
+    if len(checks) > 50000:  # leave room for the comment body and closing details tags
+        checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
+        checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
+    return checks
 
 
 def main():

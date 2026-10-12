@@ -84,13 +84,17 @@ const evaluate = async expr => (await send("Runtime.evaluate", { expression: exp
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 let failed = 0;
 for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
+  console.log(`RUN ${name}`);
+  let timer, body;
+  try {
+    body = (async () => {
   // The framing check tests final geometry, not the two-pane camera animation.
   await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });
   errors.length = 0;
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);
   await send("Page.navigate", { url: `file://${page}#${hash}` });
   const ready = await evaluate("new Promise((r, reject) => { const deadline = performance.now() + 10000, t = () => window.reviewReady ? r(true) : performance.now() > deadline ? reject(new Error('reviewReady timed out')) : setTimeout(t, 50); t(); })");
-  if (ready.exceptionDetails || errors.length) { console.log(`FAIL startup ${name} -> ${ready.exceptionDetails?.exception?.description || errors.join(' | ')}`); failed++; continue; }
+  if (ready.exceptionDetails || errors.length) return [`FAIL startup ${name} -> ${ready.exceptionDetails?.exception?.description || errors.join(' | ')}`, true];
   if (name === "3D camera movement is linked and leaving disposes" && await evaluate("!!window.Review3D?.state?.cameras?.length").then(r => r.result?.value)) {
     const r = (await evaluate(`(()=>{const r=document.querySelector('#stage canvas').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2,before:window.Review3D.state.cameras.map(c=>c.position.toArray())}})()`)).result.value;
     await send("Input.dispatchMouseEvent", { type: "mousePressed", x: r.x, y: r.y, button: "left", clickCount: 1 });
@@ -106,10 +110,14 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   }
   if (name.startsWith("Parts fixture")) await evaluate(readFileSync(new URL("./sample/review-data-parts.js", import.meta.url), "utf8") + '\nObject.assign(D, window.REVIEW_DATA); renderHeader(); applyState({p:0,t:"changes"});');
   const r = await evaluate(`(async () => { ${expr} })()`);
-  if (r.result?.value === "skip" && !errors.length) { console.log("SKIP " + name); if (noSkip) failed++; continue; }
+  if (r.result?.value === "skip" && !errors.length) return ["SKIP " + name, noSkip];
   const ok = r.result?.value === true && !errors.length;
-  if (!ok) failed++;
-  console.log(`${ok ? "PASS" : "FAIL"} ${name}${ok ? "" : ` -> ${JSON.stringify(r.result?.value ?? r.exceptionDetails?.exception?.description)} ${errors.join(" | ")}`}`);
+  return [`${ok ? "PASS" : "FAIL"} ${name}${ok ? "" : ` -> ${JSON.stringify(r.result?.value ?? r.exceptionDetails?.exception?.description)} ${errors.join(" | ")}`}`, !ok];
+    })();
+    const [line, bad] = await Promise.race([body, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), Number(process.env.CHECK_WALL_TIMEOUT || 60000)); })]);
+    console.log(line); if (bad) failed++;
+  } catch (e) { console.log(`FAIL ${name} -> ${e.message}`); failed++; await body.catch(() => {}); }
+  finally { clearTimeout(timer); }
 }
 if (shot) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
 ws.close(); proc.kill();
