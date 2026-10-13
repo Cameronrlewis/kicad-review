@@ -1240,7 +1240,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
     body = "\n".join(out)
-    checks = "\n".join(readiness_markdown(data, threads)) + checks_markdown(data)
+    checks = "\n".join(readiness_markdown(data, threads, threads_required=data.get("settings", {}).get("threads", {}).get("block_merge", False))) + checks_markdown(data)
     parts = parts_markdown(data)
     if parts:
         # Reserve room for the body truncation notice and closing details tags.
@@ -1303,7 +1303,14 @@ def cmd_summary(args):
     if data["settings"].get("threads", {}).get("enabled") and os.path.exists("review/threads.json"):
         with open("review/threads.json", encoding="utf-8") as fh:
             try:
-                threads = thread_counts(json.load(fh))
+                raw = json.load(fh)
+                review_threads = raw
+                for key in ("data", "repository", "pullRequest", "reviewThreads"):
+                    review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
+                if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
+                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                else:
+                    threads = thread_counts(raw)
             except ValueError:
                 print("::warning::review/threads.json is not JSON; thread counts left out")
     body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads)
@@ -1427,16 +1434,19 @@ def check_runs(data):
     return out
 
 
-def readiness_markdown(data, threads=None):
+def readiness_markdown(data, threads=None, threads_required=False):
     """The 'Ready to merge?' block: required checks, blocking threads, and where approvals live."""
     failing = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
-    failures = md(", ".join(failing))
+    failures = ", ".join(failing)
     if len(failures) > 1000:
         failures = failures[:1000] + "… (full list in Checks)"
+    failures = md(failures)
     lines = ["", "#### Ready to merge?", "",
              f"- ✕ **Required checks:** failing ({failures})" if failing else "- ✓ **Required checks:** passing"]
     if threads is not None:
         lines.append(f"- ✕ **Blocking threads:** {threads['blocking']} open" if threads["blocking"] else "- ✓ **Blocking threads:** none open")
+    elif threads_required:
+        lines.append("- ✕ **Blocking threads:** could not be read")
     lines.append("- ↗ **Approvals:** see the pull request's reviewers (the review site shows them per commit).")
     return lines
 

@@ -1212,9 +1212,12 @@ _cwd = os.getcwd()
 with tempfile.TemporaryDirectory() as d:
     try:
         os.chdir(d); os.makedirs("review")
-        for enabled, gate, contents, failed in (
+        for check_runs, gate, contents, failed in (
             (True, True, None, "blocking threads could not be read"),
             (True, True, "not json", "blocking threads could not be read"),
+            (True, True, _json.dumps({"errors": [{"type": "FORBIDDEN"}]}), "blocking threads could not be read"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {}}}}), "blocking threads could not be read"),
+            (True, True, _json.dumps([]), "blocking threads could not be read"),
             (True, True, _json.dumps(gql), "1 blocking thread open"),
             (True, True, _json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}), ""),
             (False, True, None, "blocking threads could not be read"),
@@ -1227,14 +1230,16 @@ with tempfile.TemporaryDirectory() as d:
             if contents is not None:
                 with open("review/threads.json", "w") as fh: fh.write(contents)
             with open("review/data.json", "w") as fh:
-                _json.dump({**ok, "settings": {"threads": {"enabled": True, "block_merge": gate}, "github": {"check_runs": enabled}}}, fh)
+                _json.dump({**ok, "settings": {"threads": {"enabled": True, "block_merge": gate}, "github": {"check_runs": check_runs}}}, fh)
             with open("outputs", "w") as fh: pass
             with patch.dict(os.environ, {"GITHUB_OUTPUT": "outputs", "GITHUB_STEP_SUMMARY": os.devnull}), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+            with open("review/comment.md") as fh: comment = fh.read()
+            assert ("- ✕ **Blocking threads:** could not be read" in comment) == (failed == "blocking threads could not be read"), comment
             with open("outputs") as fh: outputs = fh.read()
-            assert outputs == f"check_runs={'true' if enabled else 'false'}\nthreads_failed={failed}\n", outputs
-            assert os.path.exists("review/check-runs.json") == enabled
-            if enabled:
+            assert outputs == f"check_runs={'true' if check_runs else 'false'}\nthreads_failed={failed}\n", outputs
+            assert os.path.exists("review/check-runs.json") == check_runs
+            if check_runs:
                 with open("review/check-runs.json") as fh: runs = _json.load(fh)
                 thread_runs = [r for r in runs if r["name"] == "kicad-review / Threads"]
                 assert len(thread_runs) == int(gate)
@@ -1244,3 +1249,10 @@ with tempfile.TemporaryDirectory() as d:
     finally:
         os.chdir(_cwd)
 print("ok readiness summary gate")
+
+# Cap raw names before Markdown escaping, including an escape at the boundary.
+escaped = {**ok, "projects": [{**ok["projects"][0], "name": "a" * 999 + "*", "checks": [ck("erc", "ERC", "fail")]}]}
+from kicad_review import md
+assert md("a" * 999 + "*… (full list in Checks)") in "\n".join(readiness_markdown(escaped))
+assert "- ✕ **Blocking threads:** could not be read" in readiness_markdown(ok, threads_required=True)
+print("ok readiness unreadable threads and escape boundary")
