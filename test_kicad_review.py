@@ -1102,8 +1102,8 @@ assert thread_anchor("no anchor") is None and thread_anchor(None) is None
 assert thread_anchor("<!-- kicad-review-anchor !!!notbase64 -->") is None
 assert thread_anchor("<!-- kicad-review-anchor abc -->") is None
 assert thread_anchor(enc([1])) is None
-print("ok threads anchor decode failures")
 assert thread_anchor("<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(b'{"v":2}').decode().rstrip("=") + " -->") is None
+print("ok threads anchor decode failures")
 gql = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
     {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "blocking"})}]}},
     {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "comment"})}]}},
@@ -1113,8 +1113,10 @@ gql = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
 assert thread_counts(gql) == {"open": 2, "blocking": 1, "resolved": 1}, thread_counts(gql)
 assert thread_counts({"errors": [{"message": "x"}]}) == {"open": 0, "blocking": 0, "resolved": 0}
 tdata = {**d2, "projects": [{"name": "T", "dir": "", "status": "modified", "changes": [], "checks": []}]}
-body = comment_markdown(tdata, [], "", threads={"open": 2, "blocking": 1, "resolved": 1})
-assert "Threads: 2 open (1 blocking), 1 resolved" in body, body
+body = comment_markdown(tdata, [], "", "77", site="https://site.example",
+                        threads={"open": 2, "blocking": 1, "resolved": 1})
+assert "Threads: 2 open (1 blocking), 1 resolved." in body.splitlines(), body
+assert body.count("https://site.example/r/o/r/a/77") == 1, body
 assert "Threads:" not in comment_markdown(tdata, [], "")
 print("ok threads summary")
 
@@ -1128,10 +1130,12 @@ with tempfile.TemporaryDirectory() as t:
         os.makedirs("review")
         with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": os.devnull, "GITHUB_OUTPUT": os.devnull}):
             for settings, contents, expected in (
-                ({"threads": {"enabled": True}}, _json.dumps(gql), "Threads: 2 open (1 blocking), 1 resolved"),
+                ({"threads": {"enabled": True}}, _json.dumps(gql), "Threads: 2 open (1 blocking), 1 resolved."),
                 ({"threads": {"enabled": True}}, "not json", None),
                 ({}, _json.dumps(gql), None),
             ):
+                if os.path.exists("review/comment.md"):
+                    os.remove("review/comment.md")
                 with open("review/data.json", "w", encoding="utf-8") as fh:
                     _json.dump({**tdata, "settings": settings}, fh)
                 with open("review/threads.json", "w", encoding="utf-8") as fh:
