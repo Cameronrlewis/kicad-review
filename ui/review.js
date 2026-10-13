@@ -375,6 +375,47 @@ function goTo(id) {
   if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
   return draw().then(zoom);
 }
+// ---- Threads: anchors pin a discussion to a KiCad object (UUID, reference fallback) or a point, in mm. ----
+const round3 = n => Math.round(n * 1000) / 1000;
+const objView = o => o.sheet === undefined ? "board" : `sheet:${o.sheet}`;
+function viewFile(P, view) {
+  const f = view === "board" ? `${P.name}.kicad_pcb` : P.sheets.find(s => `sheet:${s.path}` === view)?.file;
+  return f && (P.dir ? `${P.dir}/${f}` : f);
+}
+function anchorAt(x, y, side) {
+  const P = proj();
+  if (!S.v || S.v === "3d") return null;
+  const objs = (P.objects || []).filter(o => objView(o) === S.v && (side === "head" ? o.side === "head" : o.side === "base" || !o.added))
+    .map(o => side === "base" && o.pos_before ? { ...o, pos: o.pos_before, box: null } : o);
+  const hit = hitTest(objs, x, y, null, "head");
+  const a = { v: 1, project: P.dir, file: viewFile(P, S.v), sheet: S.v === "board" ? null : S.v.slice(6), layer: null,
+              side, commit: side === "base" ? D.base : D.head, severity: "comment" };
+  return hit ? { ...a, target: "object", uuid: hit.uuid, kind: hit.kind, ref: hit.ref, layer: hit.layer ?? null, x: round3(hit.pos[0]), y: round3(hit.pos[1]) }
+             : { ...a, target: "point", uuid: null, kind: null, ref: null, x: round3(x), y: round3(y) };
+}
+function resolveAnchor(a) {
+  const P = D.projects.find(p => p.dir === a.project);
+  if (!P) return { detached: "its project is not part of this review" };
+  const short = s => String(s || "").slice(0, 7), notes = [];
+  if (a.commit && a.commit !== D.head && a.commit !== D.base) notes.push(`pinned on ${short(a.commit)}, viewing ${short(D.head)}`);
+  if (a.target === "point") {
+    const view = a.sheet == null ? "board" : `sheet:${a.sheet}`;
+    const inside = b => b && a.x >= b[0] && a.x <= b[2] && a.y >= b[1] && a.y <= b[3];
+    if (a.commit !== D.head && P.changes.some(r => viewOf(r) === view && inside(rowBox(r, "head")))) notes.push(`this area changed since ${short(a.commit)}`);
+    return { view, side: a.side === "base" ? "base" : "head", pos: [a.x, a.y], notes };
+  }
+  const objs = P.objects || [];
+  const sameUuid = o => o.uuid === a.uuid && (o.sheet ?? null) === (a.sheet ?? null);
+  const sameRef = o => o.kind === a.kind && o.ref === a.ref;   // ref carries " unit N", so this matches the unit too
+  const head = objs.find(o => o.side === "head" && sameUuid(o)) || objs.find(o => o.side === "head" && sameRef(o));
+  if (head) {
+    if (Math.hypot(head.pos[0] - a.x, head.pos[1] - a.y) > 0.01) notes.push(`moved since ${short(a.commit)}`);
+    return { view: objView(head), side: "head", pos: head.pos, pos_before: head.pos_before, added: !!head.added, notes };
+  }
+  const base = objs.find(o => o.side === "base" && (sameUuid(o) || sameRef(o)));
+  if (base) return { view: objView(base), side: "base", pos: base.pos, notes: [...notes, `${a.ref} was removed in this change`] };
+  return { detached: `${a.ref || "its object"} is not in either revision of this review` };
+}
 S.filter = { added: true, removed: true, modified: true, kind: "", q: "" };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
 const PROP_ORDER = ["Value", "Footprint", "footprint", "layer", "position", "net", "layers", "text", "file", "width"];

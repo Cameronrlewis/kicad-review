@@ -744,4 +744,35 @@ export const CHECKS = [
     && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
     && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
 `],
+  ["Threads anchorAt pins an object and falls back to a point", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    await goTo(row.id); const b = rowBox(row, "head"), cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+    P.objects = [{ uuid: "u-1", kind: "footprint", ref: "RX1", value: "1k", side: "head", pos: [cx, cy, 0], box: b, layer: "F.Cu" }];
+    const a = anchorAt(cx, cy, "head"), pt = anchorAt(b[2] + 500, b[3] + 500, "head");
+    return a.target === "object" && a.uuid === "u-1" && a.ref === "RX1" && a.file.endsWith(P.name + ".kicad_pcb") && a.commit === D.head
+      && a.v === 1 && a.severity === "comment" && pt.target === "point" && pt.uuid === null && pt.x === round3(b[2] + 500) || JSON.stringify({a, pt});`],
+  ["Threads anchorAt uses the sub-sheet file", "", `
+    const P = proj(), sheet = P.sheets.find(s => s.status !== "unchanged" && s.svg); if (!sheet) return "skip";
+    S.v = "sheet:" + sheet.path; S.x = S.y = S.z = null; renderNav(); await draw();
+    const a = anchorAt(1, 1, "head");
+    return a.sheet === sheet.path && a.file === (P.dir ? P.dir + "/" : "") + sheet.file || JSON.stringify(a);`],
+  ["Threads resolveAnchor follows UUID, then reference, and flags moves", "", `
+    const P = proj(); P.objects = [{ uuid: "u-2", kind: "footprint", ref: "R9", side: "head", pos: [10, 10, 0], box: [9, 9, 11, 11], layer: "F.Cu", pos_before: [5, 5, 0] }];
+    const base = { v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", kind: "footprint", side: "head", commit: "0ld1234", severity: "comment" };
+    const byUuid = resolveAnchor({ ...base, uuid: "u-2", ref: "R9", x: 10, y: 10 });
+    const byRef = resolveAnchor({ ...base, uuid: "gone", ref: "R9", x: 3, y: 3 });
+    return byUuid.view === "board" && byUuid.side === "head" && byUuid.pos[0] === 10 && !byUuid.notes.some(n => n.startsWith("moved"))
+      && byRef.pos[0] === 10 && byRef.notes.some(n => n.startsWith("moved since 0ld1234"))
+      && byUuid.notes.includes("pinned on 0ld1234, viewing " + D.head.slice(0, 7)) || JSON.stringify({byUuid, byRef});`],
+  ["Threads resolveAnchor removed object pins base", "", `
+    const P = proj(); P.objects = [{ uuid: "u-3", kind: "footprint", ref: "C4", side: "base", pos: [7, 7, 0], box: [6, 6, 8, 8], layer: "F.Cu" }];
+    const r = resolveAnchor({ v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", uuid: "u-3", kind: "footprint", ref: "C4", x: 7, y: 7, side: "head", commit: D.head, severity: "comment" });
+    const gone = resolveAnchor({ v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: null, target: "object", uuid: "nope", kind: "footprint", ref: "C99", x: 1, y: 1, side: "head", commit: D.head, severity: "comment" });
+    return r.side === "base" && r.notes.includes("C4 was removed in this change") && typeof gone.detached === "string" || JSON.stringify({r, gone});`],
+  ["Threads resolveAnchor point flags a changed area", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && r.box); if (!row) return "skip";
+    const x = (row.box[0] + row.box[2]) / 2, y = (row.box[1] + row.box[3]) / 2;
+    const pt = { v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x, y, side: "head", severity: "comment" };
+    const old = resolveAnchor({ ...pt, commit: "0ld1234" }), same = resolveAnchor({ ...pt, commit: D.head });
+    return old.notes.includes("this area changed since 0ld1234") && !same.notes.some(n => n.startsWith("this area")) || JSON.stringify({old, same});`],
 ];
