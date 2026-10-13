@@ -1231,3 +1231,86 @@ class DigiKeyReviewTests(unittest.TestCase):
 
 review_result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DigiKeyReviewTests))
 assert review_result.wasSuccessful(), "DigiKey review regressions failed"
+
+class DigiKeyIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.here = os.getcwd()
+        self.tmp = tempfile.TemporaryDirectory()
+        os.chdir(self.tmp.name)
+        write(self.tmp.name, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [{"dir": "p", "name": "P", "status": "modified"}]})})
+        self.settings = copy.deepcopy(DEFAULT_SETTINGS)
+        self.settings["parts"]["enabled"] = self.settings["digikey"]["enabled"] = True
+        self.objects = {"1": sym("U1", "reg", "C1"), "2": sym("R1", "10k", "C2"), "3": sym("R2", "20k", "C3")}
+        self.objects["1"]["props"].update(MPN=" mp3302dj-lf-z ", Manufacturer=" MPS ")
+        self.objects["3"]["props"]["MPN"] = "<invalid>"
+
+    def tearDown(self):
+        os.chdir(self.here)
+        self.tmp.cleanup()
+
+    def lookup(self, creds=("", "")):
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch.dict(os.environ, {"DIGIKEY_CLIENT_ID": creds[0], "DIGIKEY_CLIENT_SECRET": creds[1]}), patch("kicad_review.digikey_lookup") as client:
+            client.return_value = {"supplier": {"name": "DigiKey", "fetched_at": "2026-10-13T12:00:00Z", "currency": "USD", "calls": 2, "looked_up": 1, "error": None, "skipped": None}, "results": {"MP3302DJ-LF-Z": {"status": "ok", "mpn": "MP3302DJ-LF-Z", "quantity": 1234, "unit_price": 1.5}}}
+            kicad_review.cmd_lookup(None)
+            return client
+
+    def test_no_credentials_and_off(self):
+        client = self.lookup()
+        self.assertFalse(client.called)
+        data = json.loads(pathlib.Path("review/supplier.json").read_text())
+        self.assertEqual(data["supplier"]["calls"], 0)
+        self.assertEqual(data["supplier"]["skipped"], "no credentials (forked pull request or secrets not set)")
+        self.assertEqual(data["results"], {})
+        self.assertEqual(data["projects"]["p"], {"no_mpn": 1, "invalid_mpn": 1})
+        pathlib.Path("review/supplier.json").unlink()
+        self.settings["digikey"]["enabled"] = False
+        self.assertFalse(self.lookup(("id", "secret")).called)
+        self.assertFalse(pathlib.Path("review/supplier.json").exists())
+
+    def test_deduplication_and_conflicting_manufacturers(self):
+        self.objects["3"]["props"].update(MPN="MP3302DJ-LF-Z", Manufacturer="Renata")
+        client = self.lookup(("id", "secret"))
+        self.assertEqual(client.call_args.args[0], {"MP3302DJ-LF-Z": {"mpn": "MP3302DJ-LF-Z", "manufacturer": None}})
+        self.assertNotIn("secret", pathlib.Path("review/supplier.json").read_text())
+
+    def test_merge_and_opt_out_identity(self):
+        self.lookup(("id", "secret"))
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+            kicad_review.cmd_report(None)
+            data = json.loads(pathlib.Path("review/data.json").read_text())
+            parts = data["projects"][0]["parts"]
+            self.assertEqual(next(line for line in parts["lines"] if "U1" in line["refs"])["supplier"]["status"], "ok")
+            self.assertEqual(parts["supplier"]["not_looked_up"], {"no_mpn": 1, "invalid_mpn": 1, "run_limit": 0})
+            self.settings["digikey"]["enabled"] = False
+            kicad_review.cmd_report(None)
+            before = {name: pathlib.Path(f"review/{name}").read_bytes() for name in ("data.json", "kicad-review.html")}
+            pathlib.Path("review/supplier.json").unlink()
+            kicad_review.cmd_report(None)
+            self.assertTrue(all(pathlib.Path(f"review/{name}").read_bytes() == content for name, content in before.items()))
+            self.assertIsNone(json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]["supplier"])
+
+    def test_missing_lookup_and_run_limit(self):
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+            kicad_review.cmd_report(None)
+            parts = json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]
+            self.assertIn("did not finish", parts["supplier"]["error"])
+            self.assertEqual(next(l for l in parts["lines"] if "U1" in l["refs"])["supplier"]["status"], "unavailable")
+            pathlib.Path("review/supplier.json").write_text(json.dumps({"supplier": {"name": "DigiKey", "error": None}, "results": {"MP3302DJ-LF-Z": {"status": "run_limit", "mpn": "MP3302DJ-LF-Z"}}}))
+            kicad_review.cmd_report(None)
+            self.assertEqual(json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]["supplier"]["not_looked_up"]["run_limit"], 1)
+
+    def test_workflow_secrets_step_scope(self):
+        workflow = pathlib.Path(self.here, ".github/workflows/review.yml").read_text()
+        self.assertIn("DIGIKEY_CLIENT_ID:\n        required: false", workflow)
+        self.assertIn("DIGIKEY_CLIENT_SECRET:\n        required: false", workflow)
+        step = workflow.split("      - name: Look up parts at DigiKey\n")[1].split("      - name:")[0]
+        self.assertIn("continue-on-error: true", step)
+        self.assertIn("timeout-minutes: 5", step)
+        self.assertIn("if: steps.detect.outputs.changed == 'true'", step)
+        self.assertIn("run: python3 tools/kicad_review.py lookup", step)
+        self.assertNotIn("${{", step.split("run:")[1])
+        self.assertEqual(workflow.count("${{ secrets.DIGIKEY_CLIENT_ID }}"), 1)
+        self.assertEqual(workflow.count("${{ secrets.DIGIKEY_CLIENT_SECRET }}"), 1)
+
+integration_result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DigiKeyIntegrationTests))
+assert integration_result.wasSuccessful(), "DigiKey integration regressions failed"

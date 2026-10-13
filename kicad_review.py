@@ -1205,6 +1205,76 @@ def inline_page(data_js):
     return page
 
 
+def cmd_lookup(args):
+    settings = load_settings()
+    if not settings["digikey"]["enabled"]:
+        return
+    with open("review/detect.json", encoding="utf-8") as fh:
+        det = json.load(fh)
+    wanted, projects, manufacturers = {}, {}, {}
+    for project in det["projects"]:
+        objects = project_objects(posixpath.join("head", project["dir"]), project["name"])
+        counts = {"no_mpn": 0, "invalid_mpn": 0}
+        for line in parts_lines(objects):
+            raw = line["mpn"] or ""
+            mpn = mpn_for_lookup(raw)
+            if not mpn:
+                counts["no_mpn" if digikey_placeholder(raw.lower()) else "invalid_mpn"] += 1
+                continue
+            key = mpn.upper()
+            wanted.setdefault(key, {"mpn": key, "manufacturer": None})
+            hints = manufacturers.setdefault(key, set())
+            for obj in objects.values():
+                if obj["kind"] == "symbol" and obj["ref"] in line["refs"]:
+                    name = field(obj["props"], ("manufacturer",))
+                    if name and not digikey_placeholder(name.lower()):
+                        hints.add(name.strip().lower())
+        projects[project["dir"]] = counts
+    for key, hints in manufacturers.items():
+        wanted[key]["manufacturer"] = next(iter(hints)) if len(hints) == 1 else None
+    cfg = settings["digikey"]
+    supplier = {"name": "DigiKey", "fetched_at": None, "currency": cfg["currency"], "calls": 0,
+                "looked_up": 0, "error": None, "skipped": None}
+    creds = (os.environ.get("DIGIKEY_CLIENT_ID", ""), os.environ.get("DIGIKEY_CLIENT_SECRET", ""))
+    output = {"supplier": supplier, "results": {}}
+    if not all(creds):
+        supplier["skipped"] = "no credentials (forked pull request or secrets not set)"
+    elif wanted:
+        try:
+            output = digikey_lookup(wanted, creds, settings)
+        except Exception as error:
+            # No response bodies or exception messages: they may contain credentials.
+            supplier["error"] = f"lookup unavailable ({type(error).__name__})"
+    else:
+        supplier["skipped"] = "no valid MPNs"
+    output["projects"] = projects
+    with open("review/supplier.json", "w", encoding="utf-8") as fh:
+        json.dump(output, fh)
+    print(f"DigiKey lookup: {output['supplier']['calls']} calls")
+
+
+def merge_supplier(projects, lookup):
+    for project in projects:
+        parts = project.get("parts")
+        if parts is None:
+            continue
+        counts = {"no_mpn": 0, "invalid_mpn": 0, "run_limit": 0}
+        for line in parts["lines"]:
+            raw = line["mpn"] or ""
+            mpn = mpn_for_lookup(raw)
+            if not mpn:
+                counts["no_mpn" if digikey_placeholder(raw.lower()) else "invalid_mpn"] += 1
+                continue
+            result = lookup["results"].get(mpn.upper())
+            if result:
+                line["supplier"] = result
+                if result["status"] == "run_limit":
+                    counts["run_limit"] += 1
+            elif not lookup["supplier"].get("skipped"):
+                line["supplier"] = {"status": "unavailable", "mpn": mpn}
+        parts["supplier"] = {**lookup["supplier"], "not_looked_up": counts}
+
+
 def cmd_report(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
@@ -1222,6 +1292,16 @@ def cmd_report(args):
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     data["projects"] = [build_project(p, blobs, settings) for p in det["projects"]]
+    if settings.get("digikey", {}).get("enabled"):
+        try:
+            with open("review/supplier.json", encoding="utf-8") as fh:
+                lookup = json.load(fh)
+            if not isinstance(lookup.get("supplier"), dict) or not isinstance(lookup.get("results"), dict):
+                raise ValueError("invalid supplier file")
+        except (OSError, ValueError, AttributeError):
+            lookup = {"supplier": {"name": "DigiKey", "fetched_at": None, "currency": settings["digikey"]["currency"],
+                                   "calls": 0, "looked_up": 0, "error": "lookup unavailable (lookup step did not finish)", "skipped": None}, "results": {}}
+        merge_supplier(data["projects"], lookup)
     assign_ids(data["projects"])
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
@@ -1488,6 +1568,8 @@ def main():
     p.add_argument("--artifact-url", default="")
     p.add_argument("--artifact-id", default="")
     p.set_defaults(func=cmd_summary)
+    p = sub.add_parser("lookup", help="DigiKey stock and price for MPNs (needs DIGIKEY_CLIENT_ID/SECRET; off by default)")
+    p.set_defaults(func=cmd_lookup)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
     args = ap.parse_args()
