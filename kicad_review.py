@@ -6,6 +6,7 @@ Standard library only. Subcommands are called from the reusable workflow.
 import argparse
 import base64
 import csv
+import datetime
 import gzip
 import hashlib
 import json
@@ -630,6 +631,7 @@ DEFAULT_SETTINGS = {
     "parts": {"enabled": False},
     "threads": {"enabled": False, "block_merge": False},
     "github": {"check_runs": False},
+    "waivers": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -648,7 +650,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -669,6 +671,8 @@ def load_settings(roots=("base", "head")):
     for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
         if not isinstance(value, bool):
             sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
+    if not isinstance(settings["waivers"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: waivers.enabled must be true or false")
     if settings["threads"]["block_merge"] and not settings["threads"]["enabled"]:
         sys.exit(f"{SETTINGS_FILE}: threads.block_merge needs threads.enabled = true")
     return settings
@@ -885,7 +889,79 @@ def waiver_key(v):
     return "w-" + hashlib.sha1(repr(ident + sig).encode()).hexdigest()[:12]
 
 
-def run_check(name, settings, head, base):
+WAIVERS_FILE = "kicad-review-waivers.toml"
+WAIVABLE = ("erc", "drc", "parity")
+
+
+def parse_waivers(text, source):
+    """Entries of one waivers file, and messages for the ones that cannot apply. Never exits: a bad entry must not stop reviews."""
+    try:
+        raw = tomllib.loads(text).get("waiver", [])
+    except tomllib.TOMLDecodeError as e:
+        return [], [f"{source}: not valid TOML ({e})"]
+    if not isinstance(raw, list):
+        return [], [f"{source}: waiver must be a list of tables"]
+    good, bad = [], []
+    for i, w in enumerate(raw, 1):
+        where = f"{source} waiver {i}"
+        if not isinstance(w, dict):
+            bad.append(f"{where}: must be a table")
+            continue
+        problems = [p for p, ok in (
+            (f"check must be one of {', '.join(WAIVABLE)}, not {w.get('check')!r}", w.get("check") in WAIVABLE),
+            ("match must be a waiver key like w-1a2b3c4d5e6f", isinstance(w.get("match"), str) and re.fullmatch(r"w-[0-9a-f]{12}", w["match"])),
+            ("reason must not be empty", isinstance(w.get("reason"), str) and w["reason"].strip()),
+            ("by must be a GitHub login", isinstance(w.get("by"), str) and w["by"].strip()),
+            ("date must be a date like 2026-10-12", type(w.get("date")) is datetime.date),
+            ("permanent must be true or false", "permanent" not in w or isinstance(w["permanent"], bool)),
+            ("ref must be a string", "ref" not in w or isinstance(w["ref"], str)),
+            ("until must be a date like 2026-12-31", "until" not in w or type(w["until"]) is datetime.date),
+            ("set until = <date> or permanent = true", type(w.get("until")) is datetime.date or w.get("permanent") is True),
+        ) if not ok]
+        if problems:
+            bad.append(f"{where}: {'; '.join(problems)}")
+            continue
+        good.append({"check": w["check"], "match": w["match"], "reason": w["reason"].strip(), "by": w["by"].strip(),
+                     "date": w["date"].isoformat(), "until": w["until"].isoformat() if type(w.get("until")) is datetime.date else None,
+                     "permanent": w.get("permanent") is True, "ref": w.get("ref") if isinstance(w.get("ref"), str) else None})
+    return good, bad
+
+
+def load_waivers(ref, head_path=f"head/{WAIVERS_FILE}", today=None):
+    """Waivers that apply come from the target branch at ref (repo/ history), so a change cannot waive its own violations.
+    The head copy's extra entries are only proposals."""
+    today = today or datetime.datetime.now(datetime.timezone.utc).date()
+    out = {"active": {}, "expired": [], "proposed": [], "invalid": []}
+    try:
+        text = git("-C", "repo", "show", f"{ref}:{WAIVERS_FILE}", check=False) if ref else None
+    except UnicodeError as e:
+        text = None
+        out["invalid"].append(f"{WAIVERS_FILE} at {ref}: cannot read ({e})")
+    resolved = git("-C", "repo", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False) if ref else None
+    label = resolved.strip()[:7] if resolved else ref
+    applied = set()
+    if text:
+        entries, out["invalid"] = parse_waivers(text, f"{WAIVERS_FILE} at {label}")
+        for e in entries:
+            applied.add((e["check"], e["match"]))
+            if e["until"] and datetime.date.fromisoformat(e["until"]) < today:
+                out["expired"].append(e)
+            else:
+                out["active"][(e["check"], e["match"])] = e
+    if os.path.exists(head_path):
+        try:
+            with open(head_path, encoding="utf-8") as fh:
+                entries, invalid = parse_waivers(fh.read(), f"{WAIVERS_FILE} in this change")
+        except (OSError, UnicodeError) as e:
+            entries, invalid = [], [f"{WAIVERS_FILE} in this change: cannot read ({e})"]
+        out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in applied]
+        out["invalid"] += [m for m in invalid if text is None or m.split(": ", 1)[1] not in " ".join(out["invalid"])]
+    for m in out["invalid"]:
+        print(f"::warning::{m}")
+    return out
+
+
+def run_check(name, settings, head, base, waivers=None):
     level = settings["checks"].get(name, "off")
     if level == "off" or head is None:
         return None
@@ -893,18 +969,27 @@ def run_check(name, settings, head, base):
     head_keys = set().union(*(vkeys(v) for v in head))
     for v in head:
         v["new"] = not (vkeys(v) & base_keys)
-    count = lambda sev, new=False: sum(1 for v in head if v["severity"] == sev and (v["new"] or not new))
+        if waivers is not None:
+            v["waiver_key"] = waiver_key(v)
+            w = waivers["active"].get((name, v["waiver_key"]))
+            if w:
+                v["waived"] = {"reason": w["reason"], "by": w["by"], "until": w["until"], "ref": w["ref"]}
+    live = [v for v in head if not v.get("waived")]
+    count = lambda sev, new=False: sum(1 for v in live if v["severity"] == sev and (v["new"] or not new))
     failing = count("error", new=settings["fail_on"] == "new") > 0
     head.sort(key=lambda v: (not v["new"], v["severity"] != "error", v["type"]))
-    return {"name": name, "title": CHECK_NAMES[name], "level": level,
-            "status": "pass" if not failing else "fail" if level == "required" else "warn",
-            "errors": count("error"), "warnings": count("warning"),
-            "new_errors": count("error", True), "new_warnings": count("warning", True),
-            "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
-            "violations": head}
+    result = {"name": name, "title": CHECK_NAMES[name], "level": level,
+              "status": "pass" if not failing else "fail" if level == "required" else "warn",
+              "errors": count("error"), "warnings": count("warning"),
+              "new_errors": count("error", True), "new_warnings": count("warning", True),
+              "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
+              "violations": head}
+    if waivers is not None:
+        result["waived"] = len(head) - len(live)
+    return result
 
 
-def project_checks(p, settings, objs):
+def project_checks(p, settings, objs, waivers=None):
     out = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
@@ -915,10 +1000,10 @@ def project_checks(p, settings, objs):
         return load_violations(f"{out}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
-        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
-        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
+        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
+        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc"), waivers),
         run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
-                  side("base", "drc.json", "parity") if sch("base") else None),
+                  side("base", "drc.json", "parity") if sch("base") else None, waivers),
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
@@ -991,7 +1076,7 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings):
+def build_project(p, blobs, settings, waivers=None):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -1039,7 +1124,7 @@ def build_project(p, blobs, settings):
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
             **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] else {})}
 
@@ -1100,7 +1185,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    opted_out = lambda k, v: (k in ("3d", "parts", "threads") and not v["enabled"]) or (k == "github" and not v["check_runs"])
+    opted_out = lambda k, v: (k in ("3d", "parts", "threads", "waivers") and not v["enabled"]) or (k == "github" and not v["check_runs"])
     report_settings = {k: v for k, v in settings.items() if not opted_out(k, v)}
     data = {
         "version": 1,
@@ -1110,7 +1195,8 @@ def cmd_report(args):
         "settings": report_settings,
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
-    data["projects"] = [build_project(p, blobs, settings) for p in det["projects"]]
+    waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
+    data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
     assign_ids(data["projects"])
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data

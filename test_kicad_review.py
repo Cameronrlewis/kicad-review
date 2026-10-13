@@ -997,6 +997,7 @@ try:
                 p = data["projects"][0]
                 assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
                 assert ("3d" in data["settings"]) == models_enabled
+                assert "waivers" not in data["settings"] and "waivers" not in data
                 if parts_enabled:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
                     assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
@@ -1297,3 +1298,151 @@ with _t.TemporaryDirectory() as d:
     assert len({waiver_key(v) for v in vs}) == 2, [waiver_key(v) for v in vs]
     assert [waiver_key(v) for v in vs] == [waiver_key(v) for v in load_violations(f"{d}/drc.json", "drc")]
 print("ok unconnected duplicates get distinct keys")
+
+# Waivers: read from the target ref with git, head copy only proposes; invalid entries skipped; expiry by date.
+import datetime, subprocess
+from kicad_review import load_waivers, run_check, DEFAULT_SETTINGS
+WFILE = '''[[waiver]]
+check = "drc"
+match = "%s"
+reason = "intended"
+by = "ann"
+date = 2026-10-01
+until = 2026-12-31
+
+[[waiver]]
+check = "drc"
+match = "w-000000000000"
+reason = "old"
+by = "ann"
+date = 2026-01-01
+until = 2026-02-01
+
+[[waiver]]
+check = "bom"
+match = "w-111111111111"
+reason = "nope"
+by = "ann"
+date = 2026-10-01
+permanent = true
+
+[[waiver]]
+check = "drc"
+match = "w-222222222222"
+reason = ""
+by = "ann"
+date = 2026-10-01
+permanent = true
+''' % k
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        subprocess.run(["git", "init", "-q", "repo"], check=True)
+        open("repo/kicad-review-waivers.toml", "w").write(WFILE)
+        subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+        subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "w"], check=True)
+        ref = subprocess.run(["git", "-C", "repo", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        os.makedirs("head")
+        open("head/kicad-review-waivers.toml", "w").write(WFILE + '\n[[waiver]]\ncheck = "erc"\nmatch = "w-333333333333"\nreason = "new"\nby = "bo"\ndate = 2026-10-12\npermanent = true\n')
+        w = load_waivers(ref, today=datetime.date(2026, 10, 12))
+        assert set(w["active"]) == {("drc", k)}, w["active"]
+        assert [e["match"] for e in w["expired"]] == ["w-000000000000"]
+        assert [e["match"] for e in w["proposed"]] == ["w-333333333333"]
+        assert len(w["invalid"]) == 2 and any("bom" in m for m in w["invalid"]) and any("reason" in m for m in w["invalid"]), w["invalid"]
+        assert load_waivers(ref, today=datetime.date(2027, 1, 1))["active"] == {}  # the day after until
+        assert load_waivers(None)["active"] == {}  # no target ref: nothing applies
+    finally:
+        os.chdir(_cwd)
+print("ok waivers come from the target ref, not the merge base")
+print("ok expired waivers do not apply")
+print("ok invalid waiver entries are skipped, not fatal")
+
+# Applying: the waived error stops failing the check but stays listed.
+settings = json.loads(json.dumps(DEFAULT_SETTINGS)); settings["waivers"] = {"enabled": True}
+active = {"active": {("drc", k): {"check": "drc", "match": k, "reason": "intended", "by": "ann", "until": "2026-12-31", "permanent": False, "ref": None}},
+          "expired": [], "proposed": [], "invalid": []}
+c = run_check("drc", settings, [dict(v1)], [], waivers=active)
+assert c["status"] == "pass" and c["errors"] == 0 and c["new_errors"] == 0 and c["waived"] == 1, c
+assert c["violations"][0]["waived"] == {"reason": "intended", "by": "ann", "until": "2026-12-31", "ref": None}
+assert c["violations"][0]["waiver_key"] == k
+assert run_check("drc", settings, [dict(v1)], [], waivers=None)["status"] == "fail"
+assert "waiver_key" not in run_check("drc", settings, [dict(v1)], [])["violations"][0]
+print("ok waived findings stop failing")
+
+# Invalid TOML shapes and field types must warn, never crash or apply.
+from kicad_review import parse_waivers
+valid = WFILE.split("\n[[waiver]]", 1)[0]
+for bad_text in ("waiver = [1]", "[waiver]\ncheck = 'drc'", "waiver = 'wrong'", "[[waiver]",
+                 valid.replace("until = 2026-12-31", "until = 2026-12-31T00:00:00"),
+                 valid.replace("date = 2026-10-01", "date = 2026-10-01T00:00:00"),
+                 valid.replace('check = "drc"', 'check = ["drc"]'),
+                 valid.replace('match = "' + k + '"', "match = 1"),
+                 valid.replace('reason = "intended"', "reason = false"),
+                 valid.replace('by = "ann"', "by = 1"),
+                 valid + "\npermanent = 'true'", valid + "\nref = 1",
+                 valid.replace("until = 2026-12-31", "until = '2026-12-31'\npermanent = true")):
+    entries, invalid = parse_waivers(bad_text, "fixture")
+    assert entries == [] and invalid, (bad_text, entries, invalid)
+print("ok invalid waiver shapes and types are rejected")
+
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        subprocess.run(["git", "init", "-q", "repo"], check=True)
+        path = pathlib.Path("repo/kicad-review-waivers.toml")
+        path.write_text(valid)
+        subprocess.run(["git", "-C", "repo", "add", "."], check=True)
+        subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "valid"], check=True)
+        sha = subprocess.check_output(["git", "-C", "repo", "rev-parse", "HEAD"], text=True).strip()
+        subprocess.run(["git", "-C", "repo", "update-ref", "refs/remotes/origin/main", sha], check=True)
+        assert set(load_waivers("origin/main", today=datetime.date(2026, 12, 31))["active"]) == {("drc", k)}
+        for bad_text in ("waiver = [1]", "[waiver]\ncheck = 'drc'",
+                         valid.replace("until = 2026-12-31", "until = 2026-12-31T00:00:00")):
+            path.write_text(bad_text)
+            subprocess.run(["git", "-C", "repo", "add", "."], check=True)
+            subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "invalid"], check=True)
+            sha = subprocess.check_output(["git", "-C", "repo", "rev-parse", "HEAD"], text=True).strip()
+            subprocess.run(["git", "-C", "repo", "update-ref", "refs/remotes/origin/main", sha], check=True)
+            with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+                result = load_waivers("origin/main")
+            assert not result["active"] and result["invalid"]
+            assert "::warning::" in warnings.getvalue() and sha[:7] in warnings.getvalue()
+    finally:
+        os.chdir(_cwd)
+print("ok live target ref and invalid target files")
+
+warning = {**v1, "severity": "warning"}
+warning_key = waiver_key(warning)
+all_active = copy.deepcopy(active)
+all_active["active"][("drc", warning_key)] = {**active["active"][("drc", k)], "match": warning_key}
+settings["fail_on"] = "all"
+c = run_check("drc", settings, [dict(v1), warning], [dict(v1)], all_active)
+assert c["status"] == "pass" and c["waived"] == 2 and c["warnings"] == c["new_warnings"] == c["errors"] == c["new_errors"] == c["fixed"] == 0
+plain = run_check("drc", settings, [dict(v1)], [])
+assert "waived" not in plain and "waiver_key" not in plain["violations"][0]
+print("ok waiver counters and opted-out violation fields")
+
+# Report wiring reads no waiver file when off; live target ref wins over local fallback.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        pathlib.Path("review").mkdir()
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "local-base", "head": "h", "reason": "fixture", "projects": [project]}))
+        for enabled, target in ((False, "origin/main"), (True, "origin/release"), (True, "")):
+            settings = copy.deepcopy(DEFAULT_SETTINGS)
+            settings["waivers"]["enabled"] = enabled
+            with patch.dict(os.environ, {"WAIVERS_REF": target}), patch("kicad_review.load_settings", return_value=settings), \
+                 patch("kicad_review.load_waivers", return_value=active) as loader, \
+                 patch("kicad_review.build_project", return_value={"checks": [], "changes": []}) as builder:
+                kicad_review.cmd_report(None)
+            if enabled:
+                loader.assert_called_once_with(target or "local-base")
+            else:
+                loader.assert_not_called()
+            assert builder.call_args.args[3] == (active if enabled else None)
+    finally:
+        os.chdir(_cwd)
+print("ok waiver report opt-in and target-ref wiring")
