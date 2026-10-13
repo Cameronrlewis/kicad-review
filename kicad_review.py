@@ -696,8 +696,32 @@ def release_project(pro_path, tag, settings, out_dir, label):
 
 
 def fab_violation(type_, severity, description, items=()):
+    # The key ignores items, so a finding that only regroups (one part's BOM line moved) is neither new nor fixed.
     return {"type": type_, "severity": severity, "description": description, "items": list(items), "uuids": [],
-            "pos": None, "box": None, "where": {"board": True}}
+            "pos": None, "box": None, "where": {"board": True}, "key": ("release", type_, description)}
+
+
+def bom_refs_expand(designators):
+    """'C1,C3-C5' -> {'C1', 'C3', 'C4', 'C5'}: fab BOMs write runs of references as ranges."""
+    out = set()
+    for part in (designators or "").split(","):
+        part = part.strip()
+        m = re.fullmatch(r"([A-Za-z_]+)(\d+)-\1?(\d+)", part)
+        if m and int(m.group(3)) >= int(m.group(2)) and int(m.group(3)) - int(m.group(2)) < 10000:
+            out |= {f"{m.group(1)}{n}" for n in range(int(m.group(2)), int(m.group(3)) + 1)}
+        elif part:
+            out.add(part)
+    return out
+
+
+def smd_pad_sides(pcb_text):
+    """Board sides ('F', 'B') with at least one SMD pad: only those need paste."""
+    sides = set()
+    for m in re.finditer(r'\(footprint\s+"[^"]*"\s*\(layer\s+"([FB])\.Cu"\)', pcb_text):
+        end = pcb_text.find("(footprint ", m.end())
+        if re.search(r'\(pad\s+"[^"]*"\s+smd\b', pcb_text[m.end():end if end != -1 else None]):
+            sides.add(m.group(1))
+    return sides
 
 
 def has_draw(text):
@@ -719,14 +743,15 @@ def release_findings(fab_dir, label, preset, pcb_path, board_objs):
     fps = [o for o in board_objs.values() if o["kind"] == "footprint"]
     attrs = lambda o: (o["props"].get("attributes") or "").split()
     smd = [o for o in fps if "smd" in attrs(o) and "dnp" not in attrs(o)]
+    # Pads come from the board file, so pcb_objects (and every report's change list) needs no new prop.
+    pcb_text = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
+    paste_sides = smd_pad_sides(pcb_text) | {o["props"]["layer"][0] for o in smd if "smd" in (o["props"].get("pads_kind") or "").split()}
     for side in ("F", "B"):
         if any(o["props"].get("layer") == f"{side}.Cu" for o in smd):
-            for kind in ("Mask", "Paste"):
+            for kind in ("Mask", "Paste") if side in paste_sides else ("Mask",):
                 t = find_layer(f"{side}.{kind}")
                 if t is None or not has_draw(t):
                     out.append(fab_violation("missing_layer", "error", f"{side}.{kind} is missing or empty but {side} side has SMD parts"))
-    # Plated holes come from the board file, so pcb_objects (and every report's change list) needs no new prop.
-    pcb_text = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
     holes = any(o["kind"] == "via" for o in board_objs.values()) or re.search(r'\(pad\s+"[^"]*"\s+thru_hole\b', pcb_text) is not None \
         or any("thru_hole" in (o["props"].get("pads_kind") or "") for o in fps)
     if holes and not any(n.lower().endswith(".drl") for n in files):
@@ -742,7 +767,7 @@ def release_findings(fab_dir, label, preset, pcb_path, board_objs):
         with open(bom, newline="", encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
         part_col = PRESETS[preset]["bom"][-1][1] if preset == "jlcpcb" else "Mfg Part #"
-        bom_refs = {r.strip() for row in rows for r in row.get("Designator", "").split(",") if r.strip()}
+        bom_refs = set().union(*(bom_refs_expand(row.get("Designator")) for row in rows))
         missing_pn = [row["Designator"] for row in rows if not (row.get(part_col) or "").strip()]
         if missing_pn:
             out.append(fab_violation("bom_missing_part_number", "warning", f"BOM lines without {part_col}", missing_pn))

@@ -1142,3 +1142,22 @@ with tempfile.TemporaryDirectory() as d:
         kr.release_project = saved; os.chdir(_cwd)
 assert sums == f"{hashlib.sha256(b'zip').hexdigest()}  B-v1-gerbers.zip\n", sums
 print("ok release SHA256SUMS")
+
+# Live-test fixes: paste needs real SMD pads; BOM designator ranges expand; release findings keep a stable identity.
+from kicad_review import bom_refs_expand
+assert bom_refs_expand("C1,C3-C5, R10") == {"C1", "C3", "C4", "C5", "R10"}
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if "Paste" not in k and "B_Mask" not in k}, ["A1"], [("A1", "C5")])
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
+    open(p, "a").write('(footprint "Sensor:TO39" (layer "B.Cu") (attr smd) (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6) (layers "*.Cu" "*.Mask")))\n')
+    v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "A1", "props": {"layer": "B.Cu", "attributes": "smd"}}})
+    assert not any("Paste" in x["description"] for x in v), v
+with tempfile.TemporaryDirectory() as d:
+    fab(d, full, ["C3", "C4"], [("C1,C3-C5", "C1")])
+    assert [x["type"] for x in release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)] == []
+    fab(d, full, ["R1"], [("R1", ""), ("R2", "")])
+    a = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    fab(d, full, ["R1"], [("R1,R2", "")])
+    b = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    assert [x["key"] for x in a] == [x["key"] for x in b], (a, b)
+print("ok release findings: smd pads, ranges, stable keys")
