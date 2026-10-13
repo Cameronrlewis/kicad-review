@@ -48,6 +48,8 @@ To make checks block merging, require the status check **`review / review`** in 
 | `fail_on` | `"new"` | `"new"`: a required check fails only on errors the change introduced. `"all"`: any error fails it. |
 | `checks.erc`, `checks.drc`, `checks.parity` | `"required"` | `required`, `informational` or `off` |
 | `checks.bom` | `"informational"` | as above |
+| `checks.interfaces` | `"off"` | as above; design-review rules on the schematic netlist |
+| `interfaces.<rule>` | built-in names | net or pin-function names for a rule (`uart_tx`, `uart_rx`, `i2c_sda`, `i2c_scl`, `can_h`, `can_l`, `spi`, `esd_parts`) |
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
@@ -57,6 +59,18 @@ To make checks block merging, require the status check **`review / review`** in 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
+
+## Interface checks (optional)
+
+With `checks.interfaces` set to `informational` or `required` (default `off`), each review exports the schematic netlist and applies these rules:
+- UART TX wired to TX;
+- I2C pull-ups missing or doubled;
+- CAN without a 120 Ω termination;
+- USB-C CC pins floating (no 5.1 kΩ to GND and no PD controller);
+- connector signal pins without an ESD or TVS part on the same net;
+- signals joining parts powered from different rails.
+
+Each finding names the nets and pins it is based on and states its assumption. A coverage line under the checks says what was detected, what could not be checked, and how many connector signal pins are protected. Names are matched by whole tokens of the net name (last path element) and pin functions. Extend them under `[interfaces]`, for example `i2c_sda = ["SDA", "TOUCH_SDA"]`.
 
 ## Parts (optional)
 

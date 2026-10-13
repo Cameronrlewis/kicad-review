@@ -401,7 +401,7 @@ function renderChecks() {
   const p = proj(), state = S.checks;
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
   const order = ["erc", "drc", "parity", "bom"];
-  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields" };
+  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields", interfaces: "Interfaces" };
   const byName = new Map(p.checks.map(c => [c.name, c]));
   const names = [...order, ...p.checks.map(c => c.name).filter(n => !order.includes(n))];
   const configured = names.map(name => ({ name, check: byName.get(name), setting: D.settings?.checks?.[name] }));
@@ -447,7 +447,8 @@ function renderChecks() {
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
     <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
-  </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
+  </div>${ran.filter(c => c.coverage).map(c => { const cv = c.coverage, det = Object.entries(cv.detected);
+  return `<p class="check-coverage">${esc(c.title)}: ${det.length ? `detected ${esc(det.map(([k, n]) => `${k} ${n}`).join(", "))}` : "nothing detected"}${cv.skipped.length ? ` · not checked: ${esc(cv.skipped.map(s => `${s.interface}: ${s.reason}`).join("; "))}` : ""}${cv.protected[1] ? ` · ${cv.protected[0]} of ${cv.protected[1]} connector signal pins protected` : ""}</p>`; }).join("")}<div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
 const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"]);
