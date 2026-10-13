@@ -552,6 +552,25 @@ for changed, summary, existing in (("false", "skipped", "99"), ("false", "skippe
     assert not os.path.exists(f"{t}/{'posted.md' if existing else 'patched.md'}")
 print("ok WF-S2: unchanged comment and detect failure")
 
+# History survives both non-report paths without changing their headings.
+for changed, summary, heading in (("", "failure", "KiCad review failed"), ("false", "skipped", "No KiCad changes")):
+    t = tempfile.mkdtemp()
+    previous = "<!-- kicad-review-log -->\nold log\n<!-- /kicad-review-log -->\n"
+    write(t, {"review/previous-log.md": previous})
+    r = subprocess.run(["bash", "-e", "-c", step], cwd=t, capture_output=True, text=True,
+                       env={**env, "GH_TEST_DIR": t, "CHANGED": changed, "SUMMARY": summary, "GH_TEST_ID": "99"})
+    assert r.returncode == 0, r.stderr
+    body = open(f"{t}/patched.md", encoding="utf-8").read()
+    assert heading in body and body.endswith(previous) and body.startswith("<!-- kicad-review -->"), body
+print("ok failure and no-change keep the review log")
+assert wf.index("- name: Fetch previous review log") < wf.index("- name: Job summary")
+fetch_log = wf[wf.index("- name: Fetch previous review log"):wf.index("- name: Job summary")]
+assert "vars.KICAD_REVIEW_HISTORY == 'true'" in fetch_log
+assert "github.event.pull_request.head.repo.full_name == github.repository" in fetch_log
+assert "comments?per_page=100" in fetch_log
+assert "HISTORY: ${{ vars.KICAD_REVIEW_HISTORY }}" in wf
+print("ok history fetch opt-in and fork guard")
+
 # Reports expose an artifact filename containing the compared revisions and result.
 import re
 def report_output(base, head):
