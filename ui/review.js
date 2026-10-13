@@ -9,12 +9,17 @@ const validThread = t => t && typeof t.id === "string" && typeof t.resolved === 
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
   S.threads = list.filter(validThread).slice(0, 500);   // ponytail: 500 threads drawn at most
+  if (S.wantThreads) S.t = "threads";
+  S.wantThreads = false;
   if (S.v) { renderPanel(); draw(); }
 }
-addEventListener("message", e => {
-  if (!THREADS_ON || e.source !== parent) return;
-  if (Array.isArray(e.data?.kicadReviewThreads)) acceptThreads(e.data.kicadReviewThreads);
-});
+function handleParentMessage(e, on = THREADS_ON) {
+  if (!on || e.source !== parent) return false;
+  if (!Array.isArray(e.data?.kicadReviewThreads)) return false;
+  acceptThreads(e.data.kicadReviewThreads);
+  return true;
+}
+addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
   const r = vp.getBoundingClientRect();
   const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
@@ -25,10 +30,10 @@ const shownThreads = () => (S.threads || []).filter(t => (S.threadFilter.status 
   && (!S.threadFilter.severity || t.anchor.severity === S.threadFilter.severity) && t.anchor.project === proj().dir);
 function openThread(id) {
   const t = (S.threads || []).find(x => x.id === id); if (!t) return;
-  const r = resolveAnchor(t.anchor);
+  const r = resolveAnchor(t.anchor), drawable = !r.detached && currentView(r.view);
   S.thread = id;
-  const show = () => { if (!r.detached) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
-  if (!r.detached && r.view !== S.v) { S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(show); }
+  const show = () => { if (drawable) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
+  if (drawable && r.view !== S.v) { S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(() => { show(); saveHash(); }); }
   show();
 }
 const proj = () => D.projects[S.p];
@@ -119,7 +124,7 @@ function firstChangedView(p) {
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
-function select(view) { S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); saveHash(); }
+function select(view) { S.placing = false; document.body.classList.remove("placing"); S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -137,7 +142,7 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "parts" && p.parts) out.t = st.t;
+  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts) out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -597,6 +602,7 @@ function renderThreads() {
       <span class="thread-kind">${label(t)}</span> <span class="ref">${esc(t.anchor.ref || "point")}</span> <span class="muted">${esc(t.anchor.file)}</span>
       ${first ? `<span class="thread-text">${esc(first.author)}: ${esc(String(first.body).slice(0, 200))}</span>` : ""}
       ${t.comments.length > 1 ? `<span class="muted">${t.comments.length - 1} repl${t.comments.length === 2 ? "y" : "ies"}</span>` : ""}
+      ${!r.detached && !currentView(r.view) ? '<span class="thread-note">its drawing did not change in this review</span>' : ""}
       ${(r.notes || []).map(n => `<span class="thread-note">${esc(n)}</span>`).join("")}</button>`;
   };
   const shown = shownThreads(), placed = shown.filter(t => !resolveAnchor(t.anchor).detached), detached = shown.filter(t => resolveAnchor(t.anchor).detached);
@@ -607,10 +613,10 @@ function renderThreads() {
     ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
 }
 function renderPanel() {
-  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter", "data-thread-status"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter", "data-thread-status", "data-thread"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
-  if (S.t === "threads" && !S.threads) S.t = "changes";
+  if (S.t === "threads" && !S.threads) { S.wantThreads = true; S.t = "changes"; }
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   $("#panel").innerHTML = `<div role="tablist">
@@ -672,7 +678,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
   else if (e.key === "c" && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
   else if (e.key === "f") fit();
-  else if (e.key === "Escape") { S.s = null; markSelected(); draw(); saveHash(); }
+  else if (e.key === "Escape") { S.placing = false; document.body.classList.remove("placing"); S.s = null; markSelected(); draw(); saveHash(); }
 });
 function positionLink() {
   const where = S.v === "board" ? `${proj().name} board` : `${proj().name} sheet ${proj().sheets.find(s => `sheet:${s.path}` === S.v)?.name ?? ""}`;

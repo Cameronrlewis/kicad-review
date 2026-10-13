@@ -828,7 +828,7 @@ export const CHECKS = [
     S.t = "threads"; renderPanel(); await goTo(row.id);
     const tab = document.querySelector('#panel [data-tab="threads"]'), cards = document.querySelectorAll("#panel .thread-card");
     const pins = document.querySelectorAll("#stage .pin");
-    return !!tab && tab.textContent.includes("1") && cards.length === 1 && cards[0].textContent.includes("Blocking") && !document.querySelector("#panel img")
+    return !!tab && /^Threads 1$/.test(tab.textContent.trim()) && cards.length === 1 && cards[0].textContent.includes("Blocking") && !document.querySelector("#panel img")
       && pins.length >= 1 && [...pins].every(p => p.classList.contains("pin-blocking") && p.getAttribute("aria-label").includes("Q1")) || JSON.stringify({tab: !!tab, cards: cards.length, pins: pins.length});`],
   ["Threads resolved filter and detached group", "", `
     const P = proj(); P.objects = [];
@@ -843,7 +843,11 @@ export const CHECKS = [
     S.threads = null; renderPanel();
     window.dispatchEvent(new MessageEvent("message", { source: window, data: { kicadReviewThreads: [] } }));
     await new Promise(r => setTimeout(r, 50));
-    return S.threads === null && !document.querySelector('#panel [data-tab="threads"]') || "accepted";`],
+    if (S.threads !== null || document.querySelector('#panel [data-tab="threads"]')) return "accepted offline";
+    const ignored = handleParentMessage({ source: {}, data: { kicadReviewThreads: [] } }, true);
+    if (ignored !== false || S.threads !== null) return "accepted non-parent";
+    const accepted = handleParentMessage({ source: parent, data: { kicadReviewThreads: [] } }, true);
+    return accepted === true && Array.isArray(S.threads) && S.threads.length === 0 || "rejected parent";`],
   ["Threads j and k step through thread cards", "", `
     const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
     await goTo(row.id);
@@ -858,4 +862,34 @@ export const CHECKS = [
     const afterJ = S.thread;
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k" }));
     return afterJ === ids[1] && S.thread === ids[0] || JSON.stringify({ ids, afterJ, afterK: S.thread });`],
+  ["Threads placement resets on Escape and view selection", "", `
+    S.placing = true; document.body.classList.add("placing");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    const escapeCleared = !S.placing && !document.body.classList.contains("placing");
+    S.placing = true; document.body.classList.add("placing");
+    select(firstChangedView(proj()));
+    return escapeCleared && !S.placing && !document.body.classList.contains("placing") || "placement stayed active";`],
+  ["Threads opening a blank drawing keeps the current view", "", `
+    const P = proj(), view = S.v;
+    acceptThreads([{ id: "blank-T", resolved: false, anchor: { v: 1, project: P.dir, file: "missing.kicad_sch", sheet: "/missing/", layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; renderPanel(); await openThread("blank-T");
+    return S.v === view && S.thread === "blank-T" && document.querySelector("#panel .thread-card")?.textContent.includes("its drawing did not change in this review") || JSON.stringify({view, current: S.v, thread: S.thread, text: document.querySelector("#panel .thread-card")?.textContent});`],
+  ["Threads severity select and cards retain focus", "", `
+    const P = proj();
+    acceptThreads([{ id: 'focus-"T', resolved: false, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; renderPanel();
+    const select = document.querySelector("#panel select.thread-severity");
+    select.focus(); select.value = "comment"; select.dispatchEvent(new Event("change")); renderPanel();
+    const severityFocused = document.activeElement === document.querySelector("#panel select.thread-severity");
+    document.querySelector("#panel .thread-card").focus(); renderPanel();
+    return severityFocused && document.activeElement === document.querySelector("#panel .thread-card") || JSON.stringify({severityFocused, active: document.activeElement.className});`],
+  ["Threads saved tab opens when thread data arrives", "", `
+    S.t = "threads"; S.threads = null; renderPanel();
+    const waiting = S.t === "changes" && S.wantThreads === true;
+    acceptThreads([]);
+    return waiting && S.t === "threads" && !S.wantThreads || JSON.stringify({waiting, tab: S.t, want: S.wantThreads});`],
+  ["Threads hash tab survives reload before data arrives", "t=threads", `
+    const waiting = S.t === "changes" && S.wantThreads === true;
+    acceptThreads([]);
+    return waiting && S.t === "threads" && !S.wantThreads || JSON.stringify({waiting, tab: S.t, want: S.wantThreads});`],
 ];
