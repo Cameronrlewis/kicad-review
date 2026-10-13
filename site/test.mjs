@@ -1702,7 +1702,6 @@ test('readiness route joins the PR, reviews and threads as the user', async () =
   } finally { restore(); }
 });
 
-
 test('readiness ignores pending reviews and dismissed decisions, independent of input order', () => {
   const review = (login, state, hour) => ({ user: { login }, state, commit_id: 'head', submitted_at: `2026-10-12T${hour}:00:00Z` });
   assert.deepEqual(latestDecisions([review('ann', 'DISMISSED', '12'), review('bo', 'PENDING', '13'),
@@ -1713,6 +1712,7 @@ test('readiness ignores pending reviews and dismissed decisions, independent of 
 test('readiness treats GraphQL errors, missing data and unreadable threads as unknown', async () => {
   const sealed = await signedIn({ t: 'access-secret' });
   for (const payload of [{ errors: [{ type: 'FORBIDDEN' }] }, { data: { repository: null } }, {},
+    { data: { repository: { pullRequest: { reviewThreads: { totalCount: 101, nodes: [] } } } } },
     { data: { repository: { pullRequest: { reviewThreads: { nodes: [null] } } } } }, 'bad JSON', 'http error', 'network error']) {
     const restore = mockFetch(async (url, options = {}) => {
       assert.equal(options.headers.Authorization, 'Bearer access-secret');
@@ -1764,6 +1764,24 @@ test('readiness retains refreshed cookies on success and GitHub failures', async
       const body = await response.json();
       if (status === 200) { assert.equal(body.blocking, 0); assert.equal(body.open, 0); }
       else assert.ok(body.error);
+    } finally { restore(); }
+  }
+});
+
+test('readiness rejects missing heads and preserves pull and review error semantics', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const [failure, status, expected] of [['head', 200, 502], ['pull', 404, 404], ['reviews', 404, 404],
+    ['pull', 422, 502], ['reviews', 422, 502]]) {
+    const restore = mockFetch(async url => {
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.endsWith('/pulls/7')) return new Response(JSON.stringify(failure === 'head' ? {} : { head: { sha: 'head' } }), { status: failure === 'pull' ? status : 200 });
+      if (url.includes('/reviews?')) return new Response('[]', { status: failure === 'reviews' ? status : 200 });
+      return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, nodes: [] } } } } }));
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, expected);
+      assert.deepEqual(await response.json(), { error: expected === 404 ? 'Pull request not found.' : 'GitHub did not answer. Try again.' });
     } finally { restore(); }
   }
 });

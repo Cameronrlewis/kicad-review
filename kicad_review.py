@@ -1309,6 +1309,9 @@ def cmd_summary(args):
                     review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
                 if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
                     print("::warning::review/threads.json has no review threads; thread counts left out")
+                elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
+                    # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
+                    print("::warning::review/threads.json is incomplete; thread counts left out")
                 else:
                     threads = thread_counts(raw)
             except ValueError:

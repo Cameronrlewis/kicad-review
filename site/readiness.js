@@ -24,15 +24,18 @@ export async function readinessRoute(request, env, { owner, repo, number }, { ac
       gh(`${root}/pulls/${number}/reviews?per_page=100`, token), // ponytail: first 100 reviews; paginate if reviews exceed this ceiling.
       gh('/graphql', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: LIST_QUERY, variables: { owner, name: repo, number } }) }).catch(() => null),
     ]);
-    const denied = refused(pull) || refused(reviews);
+    const denied = (pull.status === 403 && refused(pull)) || (reviews.status === 403 && refused(reviews));
     if (denied) return denied;
+    if (pull.status === 404 || reviews.status === 404) return json({ error: 'Pull request not found.' }, 404);
     if (!pull.ok || !reviews.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
     const pr = await pull.json(), head = pr.head?.sha || null;
+    if (!head) return json({ error: 'GitHub did not answer. Try again.' }, 502);
     const body = threads?.ok ? await threads.json().catch(() => null) : null;
-    const nodes = body?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+    const reviewThreads = body?.data?.repository?.pullRequest?.reviewThreads;
+    const nodes = reviewThreads?.nodes;
     // Missing data and GraphQL errors are unreadable, never an empty successful list.
     let list = null;
-    if (body && !body.errors?.length && Array.isArray(nodes)) {
+    if (body && !body.errors?.length && Array.isArray(nodes) && !(reviewThreads.totalCount > nodes.length)) {
       try { list = parseThreads(body).filter((t) => !t.resolved); } catch { /* unreadable */ }
     }
     return json({

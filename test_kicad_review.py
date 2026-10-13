@@ -1228,6 +1228,7 @@ with tempfile.TemporaryDirectory() as d:
             (True, True, _json.dumps({"errors": [{"type": "FORBIDDEN"}]}), "blocking threads could not be read"),
             (True, True, _json.dumps({"data": {"repository": {"pullRequest": {}}}}), "blocking threads could not be read"),
             (True, True, _json.dumps([]), "blocking threads could not be read"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {"totalCount": 101, "nodes": []}}}}}), "blocking threads could not be read"),
             (True, True, _json.dumps(gql), "1 blocking thread open"),
             (True, True, _json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}), ""),
             (False, True, None, "blocking threads could not be read"),
