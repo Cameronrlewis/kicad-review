@@ -1540,7 +1540,7 @@ test('serialized thread client has no bundler name helpers and notice is in revi
 
 test('thread client contains load failures, clears notice, and guards vanished threads', async () => {
   const listeners = {}, notice = { textContent: '' }, sent = [];
-  const node = () => ({ textContent: '', value: '', replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const node = () => ({ textContent: '', value: '', replaceChildren() {}, append() {}, querySelectorAll() { return []; }, addEventListener(type, fn) { this[type] = fn; } });
   const dialog = () => {
     const nodes = {};
     return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } };
@@ -1602,7 +1602,7 @@ test('report readiness announces the gate only with framed enabled threads', () 
 test('thread changes rerun only an announced blocking gate and expose rerun failures', async () => {
   for (const gate of [undefined, false, true]) for (const severity of ['comment', 'blocking']) {
     const listeners = {}, calls = [], notice = { textContent: '' };
-    const node = () => ({ textContent: '', replaceChildren() {}, append() {}, reset() {}, addEventListener(type, fn) { this[type] = fn; } });
+    const node = () => ({ textContent: '', buttons: [{ disabled: false }, { disabled: false }], querySelectorAll() { return this.buttons; }, replaceChildren() {}, append() {}, reset() {}, addEventListener(type, fn) { this[type] = fn; } });
     const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
     const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage() {} } };
     const thread = { id: 'thread', resolved: false, anchor: { severity }, comments: [{ id: 'comment' }] };
@@ -1624,11 +1624,19 @@ test('thread changes rerun only an announced blocking gate and expose rerun fail
     message({ kicadReviewReady: true, threads: true, blockMerge: gate });
     await new Promise(resolve => setImmediate(resolve));
     message({ kicadReviewOpenThread: 'thread' });
-    const submit = (dialog, act) => dialog.querySelector('form').submit({ preventDefault() {}, target: { reset() {} }, submitter: { dataset: { act } } });
+    const submit = async (dialog, act) => {
+      const form = dialog.querySelector('form');
+      const event = { preventDefault() {}, target: { reset() {} }, submitter: { dataset: { act } } };
+      const first = form.submit(event);
+      if (!mutationFails) assert.ok(form.buttons.every(button => button.disabled));
+      await Promise.all([first, form.submit(event)]);
+      assert.ok(form.buttons.every(button => !button.disabled));
+    };
     const expected = gate === true && severity === 'blocking' ? 1 : 0;
     for (const resolved of [false, true]) {
       thread.resolved = resolved; calls.length = 0;
       await submit(view, 'resolve');
+      assert.equal(calls.length, 1 + expected);
       assert.equal(calls[0].url, `/threads/thread/${resolved ? 'unresolve' : 'resolve'}`);
       assert.equal(calls.filter(c => c.url === '/rerun').length, expected);
     }
@@ -1636,6 +1644,7 @@ test('thread changes rerun only an announced blocking gate and expose rerun fail
     assert.equal(calls.length, 1); assert.equal(calls[0].url, '/threads/comment/reply');
     message({ kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } });
     calls.length = 0; await submit(composer);
+    assert.equal(calls.length, 1 + expected);
     assert.equal(calls.filter(c => c.url === '/rerun').length, expected);
     for (const call of calls.filter(c => c.url === '/rerun')) {
       assert.equal(call.options.method, 'POST'); assert.equal(call.options.headers['Content-Type'], 'application/json'); assert.equal(call.options.body, '{}');

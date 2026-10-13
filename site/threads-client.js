@@ -11,6 +11,11 @@ export function threadsClient(config) {
   const accept = (event) => event.source === iframe.contentWindow && !!event.data && typeof event.data === 'object';
   const send = (data) => iframe.contentWindow?.postMessage(data, '*');
   const status = (el, text) => { el.querySelector('[role=status]').textContent = text; };
+  const busy = new Set();
+  const setBusy = (dialog, on) => {
+    if (on) busy.add(dialog); else busy.delete(dialog);
+    for (const button of dialog.querySelector('form').querySelectorAll('button')) button.disabled = on;
+  };
   const post = async (path, body) => {
     const response = await fetch(config.threads + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
@@ -60,24 +65,30 @@ export function threadsClient(config) {
   });
   composer.querySelector('form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const form = new FormData(event.target);
+    if (busy.has(composer)) return;
+    setBusy(composer, true);
     try {
+      const form = new FormData(event.target);
       await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: config.link + location.hash });
       composer.close(); await load();
       await rerun(form.get('severity'), composer, 'Created');
     } catch (error) { status(composer, error.message); }
+    finally { setBusy(composer, false); }
   });
   view.querySelector('form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (busy.has(view)) return;
     const t = threads.find((x) => x.id === current);
     if (!t) return status(view, 'This thread no longer exists.');
-    const text = String(new FormData(event.target).get('text') || '');
+    setBusy(view, true);
     try {
+      const text = String(new FormData(event.target).get('text') || '');
       if (event.submitter?.dataset.act === 'resolve') await post(`/${encodeURIComponent(t.id)}/${t.resolved ? 'unresolve' : 'resolve'}`, {});
       else await post(`/${encodeURIComponent(t.comments[0].id)}/reply`, { text });
       event.target.reset(); await load();
       if (event.submitter?.dataset.act === 'resolve') await rerun(t.anchor.severity, view, t.resolved ? 'Reopened' : 'Resolved');
     } catch (error) { status(view, error.message); }
+    finally { setBusy(view, false); }
   });
   for (const dialog of [composer, view]) dialog.querySelector('[data-act=close]').addEventListener('click', () => dialog.close());
 }
