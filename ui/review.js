@@ -494,17 +494,20 @@ function card(r) {
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
     <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${body}</button>`;
 }
-function changeFor(o) { return proj().changes.find(r => r.kind === o.kind && r.ref === o.ref) || (o.side === "base" ? { action: "removed" } : o.added ? { action: "added" } : null); }
 function inventoryHtml() {
-  if (!proj().objects) return '<p class="muted">The part list needs inventory.enabled = true in kicad-review.toml.</p>';
-  const q = S.filter.q.toLowerCase(), objs = proj().objects.map((o, i) => ({ o, i }))
-    .filter(({ o }) => !q || [o.ref, o.value, o.footprint].some(v => String(v ?? "").toLowerCase().includes(q)));
+  // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
+  const changes = new Map();
+  for (const r of proj().changes) changes.set(`${r.kind}\0${r.ref}\0${r.action === "removed"}`, r);
+  const changeFor = o => changes.get(`${o.kind}\0${o.ref}\0${o.side === "base"}`) || (o.side === "base" ? { action: "removed" } : o.added ? { action: "added" } : null);
+  const place = o => o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet);
+  const q = S.filter.q.toLowerCase(), objs = (proj().objects || []).map((o, i) => ({ o, i }))
+    .filter(({ o }) => !q || [o.ref, o.value, o.footprint, place(o)].some(v => String(v ?? "").toLowerCase().includes(q)));
   return (objs.slice(0, 1500).map(({ o, i }) => {
     const ch = changeFor(o), view = objView(o), drawn = !!currentView(view);
     return `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
       ${ch ? `<span class="badge ${esc(ch.action)}">${GLYPH[ch.action] ?? ""} ${esc(ch.action)}</span>` : ""}
       <div class="prop"><span>value</span><span class="new wide">${esc(o.value ?? "—")}</span></div><div class="prop"><span>footprint</span><span class="new wide">${esc(o.footprint ?? "—")}</span></div>
-      <div class="more muted">${esc(o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet))}${drawn ? "" : " · drawing unchanged: no render"}</div></button>`;
+      <div class="more muted">${esc(place(o))}${drawn ? "" : " · drawing unchanged: no render"}</div></button>`;
   }).join("") || '<p class="muted">No parts match.</p>') + (objs.length > 1500 ? `<p class="muted">showing 1500 of ${objs.length}; narrow the search to see the rest</p>` : "");
 }
 function goToObject(i) {

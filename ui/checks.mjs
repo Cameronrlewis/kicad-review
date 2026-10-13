@@ -720,6 +720,14 @@ export const CHECKS = [
     D.projects[1].objects = [{ uuid: "b", kind: "symbol", ref: "PB1", side: "head", pos: [0, 0], box: null, sheet: "/" }];
     S.filter.all = true; openProject(1);
     return document.querySelector("#panel .cards").textContent.includes("PB1") && !document.querySelector("#panel .cards").textContent.includes("PA1") || "wrong project";`],
+  ["Inventory badges follow side and search covers layer", "", `
+    const P = proj(); P.changes = [{ kind: "footprint", ref: "Q1", action: "added", where: { board: true } }, { kind: "footprint", ref: "Q1", action: "removed", where: { board: true } }];
+    P.objects = [{ uuid: "b", kind: "footprint", ref: "Q1", side: "base", pos: [0, 0, 0], box: null, layer: "F.Cu" }, { uuid: "h", kind: "footprint", ref: "Q1", side: "head", pos: [0, 0, 0], box: null, layer: "B.Cu" }];
+    S.t = "changes"; S.filter.all = true; S.filter.q = ""; renderPanel();
+    const rows = [...document.querySelectorAll("#panel .inv-row")].map(r => r.textContent);
+    const q = document.querySelector("#panel .q"); q.value = "b.cu"; q.dispatchEvent(new Event("input"));
+    const n = document.querySelectorAll("#panel .inv-row").length;
+    return rows[0].includes("removed") && rows[1].includes("added") && n === 1 || JSON.stringify({ rows, n });`],
   ["Parts fixture sorts problems and greys stale stock", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
   document.querySelector('[data-tab=parts]').click();
