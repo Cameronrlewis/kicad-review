@@ -66,7 +66,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 const permissionHint = "Threads need the app's Pull requests permission. Ask the repository owner to accept it.";
 
 function refused(response) {
-  if (response.status === 403 && response.headers.get('x-ratelimit-remaining') === '0') return json({ error: 'GitHub rate limit reached. Try again later.' }, 429);
+  if (response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after'))) return json({ error: 'GitHub rate limit reached. Try again later.' }, 429);
   if (response.status === 403) return json({ error: permissionHint }, 403);
   if (response.status === 422) return json({ error: 'GitHub refused this thread. The file may not be part of this pull request.' }, 422);
   return null;
@@ -97,7 +97,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     let body = {};
     if (request.method === 'POST') { try { body = await request.json(); } catch { return json({ error: 'Send JSON' }, 400); } }
     if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'Send a JSON object.' }, 400);
-    const text = typeof body?.text === 'string' ? body.text.trim() : '';
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (request.method === 'GET') {
       if (rest !== '') return json({ error: 'Not found' }, 404);
       const data = await graphql(LIST_QUERY, { owner, name: repo, number });

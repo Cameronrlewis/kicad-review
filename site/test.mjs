@@ -1469,3 +1469,15 @@ test('thread routes reject non-object JSON and distinguish rate limiting', async
     assert.match((await response.json()).error, /rate limit/);
   } finally { restore(); }
 });
+
+
+test('thread routes distinguish GitHub secondary rate limits from permission failures', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async url => url.endsWith('/repo') ? repoOk()
+    : new Response('{}', { status: 403, headers: { 'retry-after': '60', 'x-ratelimit-remaining': '100' } }));
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/11/reply', { text: 'x' }, undefined, sealed);
+    assert.equal(response.status, 429);
+    assert.deepEqual(await response.json(), { error: 'GitHub rate limit reached. Try again later.' });
+  } finally { restore(); }
+});
