@@ -49,7 +49,7 @@ To make checks block merging, require the status check **`review / review`** in 
 | `checks.erc`, `checks.drc`, `checks.parity` | `"required"` | `required`, `informational` or `off` |
 | `checks.bom` | `"informational"` | as above |
 | `checks.interfaces` | `"off"` | as above; design-review rules on the schematic netlist |
-| `interfaces.<rule>` | built-in names | net or pin-function names for a rule (`uart_tx`, `uart_rx`, `i2c_sda`, `i2c_scl`, `can_h`, `can_l`, `spi`, `esd_parts`) |
+| `interfaces.<rule>` | built-in names | net or pin-function names for a rule (`uart_tx`, `i2c_sda`, `i2c_scl`, `can_h`, `can_l`, `spi`, `esd_parts`) |
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
@@ -70,7 +70,7 @@ With `checks.interfaces` set to `informational` or `required` (default `off`), e
 - connector signal pins without an ESD or TVS part on the same net;
 - signals joining parts powered from different rails.
 
-Each finding names the nets and pins it is based on and states its assumption. A coverage line under the checks says what was detected, what could not be checked, and how many connector signal pins are protected. Names are matched by whole tokens of the net name (last path element) and pin functions. Extend them under `[interfaces]`, for example `i2c_sda = ["SDA", "TOUCH_SDA"]`.
+Each finding names the nets and pins it is based on and states its assumption. A coverage line under the checks says what was detected, what could not be checked, and how many connector signal pins are protected. Pin-function names must contain the role token (e.g. `USART1_TX`, `SDA`). Symbols with only port names (`PA9`) or fused names (`U0TXD`) are not matched; add patterns under `[interfaces]`. Names are matched by whole tokens of the net name (last path element) and pin functions. Extend them under `[interfaces]`, for example `i2c_sda = ["SDA", "TOUCH_SDA"]`.
 
 ## Parts (optional)
 

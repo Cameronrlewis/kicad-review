@@ -1113,3 +1113,81 @@ assert DEFAULT_SETTINGS["checks"]["interfaces"] == "off" and interface_check({"d
 _src = open("kicad_review.py", encoding="utf-8").read()
 assert 'report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}' in _src and 'report_settings.pop("interfaces", None)' in _src
 print("ok interfaces settings stay out of opted-out reports")
+
+# Final-review regressions run together so every pre-fix failure is visible.
+import unittest
+class FinalReviewTests(unittest.TestCase):
+    def findings(self, c, n):
+        return interface_findings(*parse_netlist(netlist(c, n)), INTERFACE_PATTERNS, W)
+
+    def test_uart_transceivers_and_pin_types(self):
+        for value in ("TJA1050 CAN", "RS485", "RS-485", "LIN", "transceiver"):
+            with self.subTest(value=value):
+                vs, _ = self.findings({"U1": ("MCU", "", "MCU:M"), "U2": (value, "", "If:T")},
+                    {"TX": [("U1", "1", "CAN1_TX", "output"), ("U2", "1", "TXD", "output")]})
+                self.assertEqual(vs, [])
+        for pin_type in ("input", "passive"):
+            with self.subTest(pin_type=pin_type):
+                vs, _ = self.findings({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "TXD", pin_type)]})
+                self.assertEqual(vs, [])
+        vs, _ = self.findings({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "TXD", "output"), ("U3", "1", "CAN_H", "input")]})
+        self.assertEqual(vs, [])
+
+    def test_i2c_series(self):
+        for resistance, pullup, errors in (("33R", True, 0), ("4.7k", False, 2), ("1k", True, 1)):
+            with self.subTest(resistance=resistance, pullup=pullup):
+                c = {"R1": (resistance, "", "Device:R"), "R2": ("4k7", "", "Device:R")}
+                n = {"SDA": [("R1", "1", "", "passive")], "IC_SDA": [("R1", "2", "", "passive"), ("U1", "1", "SDA", "bidirectional")]}
+                if pullup:
+                    n["SDA"].append(("R2", "1", "", "passive"))
+                    n["+3V3"] = [("R2", "2", "", "passive")]
+                vs, _ = self.findings(c, n)
+                self.assertEqual(sum(v["type"] == "i2c_no_pullup" for v in vs), errors)
+
+    def test_jumper(self):
+        vs, cov = self.findings({"JP1": ("USB_C", "USB_C", "Connector:USB_C")},
+            {"CC1": [("JP1", "1", "CC1", "passive"), ("U1", "1", "", "input")]})
+        self.assertEqual(vs, [])
+        self.assertEqual(cov["protected"], [0, 0])
+        self.assertNotIn("USB-C", cov["detected"])
+
+    def test_patterns_extend(self):
+        settings = json.loads(json.dumps(DEFAULT_SETTINGS))
+        settings["checks"]["interfaces"] = "required"
+        settings["interfaces"] = {"uart_tx": ["SEND"]}
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(f"{d}/head")
+            with open(f"{d}/head/netlist.net", "w") as f:
+                f.write(netlist({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "SEND", "output")]}))
+            result = interface_check({}, settings, {}, d)
+        self.assertIn(("uart_tx_to_tx", "error"), types(result["violations"]))
+
+    def test_ohms(self):
+        for value, expected in (("1m", .001), ("1M", 1e6), ("2.2k 0402", 2200), ("1" * 33, None), ("100n", None)):
+            with self.subTest(value=value):
+                self.assertEqual(ohms(value), expected)
+
+    def test_arrays_ignored(self):
+        vs, _ = self.findings({"RN1": ("4k7", "", "Device:R")}, {"SDA": [("U1", "1", "SDA", "bidirectional"), ("RN1", "1", "", "passive")], "+3V3": [("RN1", "2", "", "passive")]})
+        self.assertIn(("i2c_no_pullup", "error"), types(vs))
+
+    def test_cc_tvs(self):
+        vs, _ = self.findings({"J1": ("USB_C", "USB_C", "Connector:USB_C"), "D1": ("TVS", "", "Diode:ESD")},
+            {"CC1": [("J1", "1", "CC1", "passive"), ("D1", "1", "", "passive")]})
+        self.assertIn(("usb_cc_floating", "error"), types(vs))
+
+    def test_rails(self):
+        for name in ("P3V3", "P5V", "3V3A_SENSOR", "3V3_A"):
+            with self.subTest(name=name):
+                self.assertTrue(is_power(name, []))
+
+    def test_unused_rx_removed(self):
+        self.assertNotIn("uart_rx", INTERFACE_PATTERNS)
+
+    def test_coverage_units(self):
+        _, cov = self.findings({}, {"SDA": [("U1", "1", "SDA", "bidirectional")], "SCK": []})
+        self.assertEqual(cov["detected"], {"I2C nets": 1, "SPI nets": 1})
+        self.assertNotIn("SPI nets", cov["checked"])
+
+_result = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(FinalReviewTests))
+assert _result.wasSuccessful(), "final-review regressions failed"

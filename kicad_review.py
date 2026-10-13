@@ -601,6 +601,14 @@ DEFAULT_SETTINGS = {
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces"}
 
 
+INTERFACE_PATTERNS = {
+    "uart_tx": ["TX", "TXD", "UART_TX", "USART_TX"],
+    "i2c_sda": ["SDA", "I2C_SDA"], "i2c_scl": ["SCL", "I2C_SCL"], "can_h": ["CANH", "CAN_H"], "can_l": ["CANL", "CAN_L"],
+    "spi": ["MOSI", "MISO", "SCK", "SCLK", "SDI", "SDO"],
+    "esd_parts": ["ESD", "TVS", "USBLC", "PESD", "PRTR", "SRV05", "TPD", "SP05", "SMAJ", "SMBJ"],
+}
+
+
 def load_settings(roots=("base", "head")):
     """Repository settings from kicad-review.toml. The base revision's copy wins, so a change cannot relax its own checks."""
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))
@@ -880,16 +888,9 @@ def project_checks(p, settings, objs):
     return result + ([ic] if ic else [])
 
 
-
 # ---- Interface checks: design-review rules on the schematic netlist. ----
-INTERFACE_PATTERNS = {
-    "uart_tx": ["TX", "TXD", "UART_TX", "USART_TX"], "uart_rx": ["RX", "RXD", "UART_RX", "USART_RX"],
-    "i2c_sda": ["SDA", "I2C_SDA"], "i2c_scl": ["SCL", "I2C_SCL"], "can_h": ["CANH", "CAN_H"], "can_l": ["CANL", "CAN_L"],
-    "spi": ["MOSI", "MISO", "SCK", "SCLK", "SDI", "SDO"],
-    "esd_parts": ["ESD", "TVS", "USBLC", "PESD", "PRTR", "SRV05", "TPD", "SP05", "SMAJ", "SMBJ"],
-}
 GROUND = re.compile(r"^[ADP]?GND\w*$|^VSS\w*$|^EARTH$", re.I)
-RAIL = re.compile(r"^\+|^V(CC|DD|BUS|IN|BAT|SYS)|^\d+V\d*$|^\d+\.\d+V$|^\d+V\d+$|_\d+V\d*$", re.I)
+RAIL = re.compile(r"^\+|^V(CC|DD|BUS|IN|BAT|SYS)|^P\d+V\d*|^\d+V\d*(?:[A-Z_].*)?$|^\d+\.\d+V$|_\d+V\d*$", re.I)
 
 
 def parse_netlist(text):
@@ -905,11 +906,13 @@ def parse_netlist(text):
 
 
 def ohms(value):
-    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([rkm]?)(\d*)\s*(?:ohms?|Ω)?\s*(?:\d+(?:\.\d+)?\s*%)?\s*", value or "", re.I)
+    if not value or len(value) > 32:
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([rRkKmM]?)(\d*)(?=\s|Ω|$|[oO][hH][mM])", value)
     if not m:
         return None
     whole, unit, frac = m.groups()
-    return float(f"{whole}.{frac}" if frac else whole) * {"": 1, "r": 1, "k": 1e3, "m": 1e6}[unit.lower()]
+    return float(f"{whole}.{frac}" if frac else whole) * {"": 1, "r": 1, "R": 1, "k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e6}[unit]
 
 
 short = lambda net: re.sub(r"^NET-\((.*)\)$", r"\1", (net or "").rstrip("/").split("/")[-1].upper())  # Net-(U1-SDA) -> U1-SDA
@@ -922,11 +925,10 @@ def matches(name, patterns):
     return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
 
 
-
 def interface_check(p, settings, objs, out_dir):
     if settings["checks"].get("interfaces", "off") == "off":
         return None
-    patterns = {**INTERFACE_PATTERNS, **settings["interfaces"]}
+    patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
     def side(s):
         path = f"{out_dir}/{s}/netlist.net"
         if not os.path.exists(path):
@@ -948,8 +950,10 @@ def interface_findings(comps, nets, patterns, where_of):
     """Design-review rules on one revision's netlist. Every finding carries its nets and pins as evidence."""
     out, detected, skipped = [], {}, []
     pin_net = {(n["ref"], n["pin"]): name for name, nodes in nets.items() for n in nodes}
-    is_res = lambda ref: ref.startswith("R") and ohms(comps.get(ref, {}).get("value")) is not None
+    # ponytail: resistor arrays are ignored; add per-element topology if array support is needed.
+    is_res = lambda ref: re.match(r"R\d", ref) and ohms(comps.get(ref, {}).get("value")) is not None
     other = lambda ref, pin: next((name for (r, p), name in pin_net.items() if r == ref and p != pin), None)
+    esd = lambda r: re.search("|".join(map(re.escape, patterns["esd_parts"])), f"{comps.get(r, {}).get('lib', '')} {comps.get(r, {}).get('value', '')} {comps.get(r, {}).get('description', '')}", re.I)
     node_txt = lambda n: f"{n['ref']} pin {n['pin']}" + (f" ({n['function']})" if n["function"] else "")
 
     def add(type_, severity, description, ref, items):
@@ -958,7 +962,10 @@ def interface_findings(comps, nets, patterns, where_of):
                     "pos": pos, "box": None, "where": where})
 
     for name, nodes in nets.items():
-        tx = [n for n in nodes if matches(n["function"], patterns["uart_tx"])]
+        if any(matches(n["function"], patterns["can_h"] + patterns["can_l"]) or
+               re.search(r"CAN|RS485|RS-485|LIN|transceiver", " ".join(comps.get(n["ref"], {}).get(k, "") for k in ("lib", "value", "description")), re.I) for n in nodes):
+            continue
+        tx = [n for n in nodes if n["type"] in ("output", "bidirectional") and matches(n["function"], patterns["uart_tx"])]
         if tx: detected["UART"] = detected.get("UART", 0) + 1
         if len({n["ref"] for n in tx}) > 1:
             add("uart_tx_to_tx", "error", f"Two transmit pins drive {name}. Assumes pin functions name UART directions.", tx[0]["ref"], [node_txt(n) for n in tx])
@@ -966,8 +973,9 @@ def interface_findings(comps, nets, patterns, where_of):
         for name, nodes in nets.items():
             if not matches(short(name), patterns[key]) and not any(matches(n["function"], patterns[key]) for n in nodes):
                 continue
-            detected["I2C"] = detected.get("I2C", 0) + 1
-            ups = [n for n in nodes if is_res(n["ref"]) and (o := other(n["ref"], n["pin"])) and is_power(o, nets.get(o, [])) and not is_ground(o)]
+            detected["I2C nets"] = detected.get("I2C nets", 0) + 1
+            nearby = {name} | {o for n in nodes if is_res(n["ref"]) and ohms(comps[n["ref"]]["value"]) < 1000 and (o := other(n["ref"], n["pin"])) and not is_power(o, nets.get(o, []))}
+            ups = [n for bus in nearby for n in nets.get(bus, []) if is_res(n["ref"]) and (o := other(n["ref"], n["pin"])) and is_power(o, nets.get(o, [])) and not is_ground(o)]
             ic = next((n["ref"] for n in nodes if not is_res(n["ref"])), nodes[0]["ref"] if nodes else "")
             if not ups:
                 add("i2c_no_pullup", "error", f"{name} has no pull-up resistor to a supply. Assumes the pull-up is on this board.", ic, [node_txt(n) for n in nodes])
@@ -983,7 +991,7 @@ def interface_findings(comps, nets, patterns, where_of):
             ref = next((n["ref"] for n in nets[can_h[0]] if not is_res(n["ref"])), nets[can_h[0]][0]["ref"])
             add("can_no_termination", "warning", f"No 120 Ω resistor between {can_h[0]} and {can_l[0]}. Fine if this node is not at a bus end.", ref, [can_h[0], can_l[0]])
     for ref, c in comps.items():
-        if not (ref.startswith("J") and re.search(r"USB.?C|TYPE.?C", f"{c['lib']} {c['value']} {c['footprint']}", re.I)):
+        if not (re.match(r"J\d", ref) and re.search(r"USB.?C|TYPE.?C", f"{c['lib']} {c['value']} {c['footprint']}", re.I)):
             continue
         detected["USB-C"] = detected.get("USB-C", 0) + 1
         for (r, pin), name in pin_net.items():
@@ -991,13 +999,12 @@ def interface_findings(comps, nets, patterns, where_of):
             if r != ref or not re.fullmatch(r"CC\d?", node["function"].upper()):
                 continue
             pulled = any(is_res(n["ref"]) and 4850 <= ohms(comps[n["ref"]]["value"]) <= 5360 and is_ground(other(n["ref"], n["pin"]) or "") for n in nets[name])
-            driven = any(n["ref"] != ref and not is_res(n["ref"]) for n in nets[name])
+            driven = any(n["ref"] != ref and not is_res(n["ref"]) and not esd(n["ref"]) for n in nets[name])
             if not pulled and not driven:
                 add("usb_cc_floating", "error", f"{node['function']} of {ref} floats: needs 5.1 kΩ to GND or a PD controller.", ref, [node_txt(node)])
     # ponytail: same-net only; follow series resistors one hop if teams protect through them
     total = prot = 0
-    esd = lambda r: re.search("|".join(map(re.escape, patterns["esd_parts"])), f"{comps.get(r, {}).get('lib', '')} {comps.get(r, {}).get('value', '')} {comps.get(r, {}).get('description', '')}", re.I)
-    for ref in sorted((r for r in comps if r.startswith("J")), key=natural):
+    for ref in sorted((r for r in comps if re.match(r"J\d", r)), key=natural):
         bare = []
         for (r, pin), name in sorted(pin_net.items(), key=lambda e: natural(e[0][1])):
             if r != ref or is_power(name, nets[name]) or len(nets[name]) < 2:
@@ -1024,9 +1031,9 @@ def interface_findings(comps, nets, patterns, where_of):
                 add("voltage_domain", "warning", f"{name} joins {a} ({', '.join(sorted(rails[a]))}) and {b} ({', '.join(sorted(rails[b]))}). Check levels.", a, [name])
                 break
     if any(matches(short(n), patterns["spi"]) for n in nets):
-        detected["SPI"] = sum(1 for n in nets if matches(short(n), patterns["spi"]))
+        detected["SPI nets"] = sum(1 for n in nets if matches(short(n), patterns["spi"]))
         skipped.append({"interface": "SPI", "reason": "no SPI rule yet"})
-    checked = [k for k in detected if k != "SPI"] + (["connector protection"] if total else [])
+    checked = [k for k in detected if k != "SPI nets"] + (["connector protection"] if total else [])
     return out, {"detected": detected, "checked": checked, "skipped": skipped, "protected": [prot, total]}
 
 
