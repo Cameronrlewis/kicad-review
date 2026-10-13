@@ -892,4 +892,17 @@ export const CHECKS = [
     const waiting = S.t === "changes" && S.wantThreads === true;
     acceptThreads([]);
     return waiting && S.t === "threads" && !S.wantThreads || JSON.stringify({waiting, tab: S.t, want: S.wantThreads});`],
+  ["Threads tab click cancels deferred tab selection", "", `
+    S.t = "threads"; S.threads = null; renderPanel();
+    document.querySelector('#panel [data-tab="checks"]').click();
+    acceptThreads([]);
+    return S.t === "checks" && !S.wantThreads || JSON.stringify({tab: S.t, want: S.wantThreads});`],
+  ["Threads opening another drawable view clears placement", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row || !currentView("board")) return "skip";
+    const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
+    acceptThreads([{ id: "placing-T", resolved: false, anchor: { v: 1, project: P.dir, file: viewFile(P, "board"), sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x, y, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.v = "sheet:/missing/"; S.t = "threads"; renderPanel();
+    S.placing = true; document.body.classList.add("placing");
+    await openThread("placing-T");
+    return S.v === "board" && !S.placing && !document.body.classList.contains("placing") || JSON.stringify({view: S.v, placing: S.placing, crosshair: document.body.classList.contains("placing")});`],
 ];

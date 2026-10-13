@@ -5,7 +5,7 @@ const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 const THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
-const validThread = t => t && typeof t.id === "string" && typeof t.resolved === "boolean" && t.anchor && typeof t.anchor === "object"
+const validThread = t => t && t.id === String(t.id) && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
   S.threads = list.filter(validThread).slice(0, 500);   // ponytail: 500 threads drawn at most
@@ -33,7 +33,7 @@ function openThread(id) {
   const r = resolveAnchor(t.anchor), drawable = !r.detached && currentView(r.view);
   S.thread = id;
   const show = () => { if (drawable) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
-  if (drawable && r.view !== S.v) { S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(() => { show(); saveHash(); }); }
+  if (drawable && r.view !== S.v) { S.placing = false; document.body.classList.remove("placing"); S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(() => { show(); saveHash(); }); }
   show();
 }
 const proj = () => D.projects[S.p];
@@ -630,7 +630,7 @@ function renderPanel() {
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
     <div class="cards">${cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
-  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.t = t.dataset.tab; renderPanel(); saveHash(); };
+  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
