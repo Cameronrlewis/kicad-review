@@ -150,3 +150,5 @@ body.placing #stage { cursor: crosshair; }
 .thread-text, .thread-note { display: block; margin-top: var(--space-1); }
 .thread-note { font-size: 12px; color: var(--muted); }
 .thread-hint { padding: 0 var(--space-2); font-size: 12px; }
+.inv-toggle { padding-top: 0; }
+.inv-row[aria-disabled="true"] { opacity: .7; cursor: default; }

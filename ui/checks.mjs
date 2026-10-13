@@ -692,6 +692,34 @@ export const CHECKS = [
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
+  ["Inventory lists every part, searchable, with change badges", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head") && r.kind === "footprint"); if (!row) return "skip";
+    const b = rowBox(row, "head");
+    P.objects = [{ uuid: "u1", kind: "footprint", ref: row.ref, value: "1k", footprint: "R_0402", side: "head", pos: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0], box: b, layer: "F.Cu" },
+                 { uuid: "u2", kind: "footprint", ref: "ZZ9", value: '<b>"x"</b>', footprint: "SOT23", side: "head", pos: [1, 1, 0], box: null, layer: "B.Cu" }];
+    S.t = "changes"; S.filter.all = true; renderPanel();
+    const rows = document.querySelectorAll("#panel .inv-row"), first = [...rows].find(r => r.textContent.includes(row.ref));
+    const q = document.querySelector("#panel .q"); q.value = "zz9"; q.dispatchEvent(new Event("input"));
+    const after = document.querySelectorAll("#panel .inv-row");
+    return rows.length === 2 && first.textContent.includes(row.action) && after.length === 1 && after[0].textContent.includes('<b>"x"</b>') && !document.querySelector("#panel .inv-row b") || JSON.stringify({n: rows.length, after: after.length});`],
+  ["Inventory removed part is listed and zooms", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    const b = rowBox(row, "head");
+    P.objects = [{ uuid: "u3", kind: "footprint", ref: "GONE1", value: "x", footprint: "y", side: "base", pos: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0], box: b, layer: "F.Cu" }];
+    S.filter.all = true; S.filter.q = ""; renderPanel();
+    const r = document.querySelector("#panel .inv-row"); if (!r.textContent.includes("removed")) return "no removed badge";
+    await goToObject(0);
+    return S.v === "board" && Math.abs(S.x - (b[0] + b[2]) / 2) < 0.01 || JSON.stringify({v: S.v, x: S.x});`],
+  ["Inventory caps long lists", "", `
+    const P = proj(); P.objects = Array.from({ length: 1600 }, (_, i) => ({ uuid: "u" + i, kind: "footprint", ref: "R" + i, value: "1k", footprint: "f", side: "head", pos: [i, 0, 0], box: null, layer: "F.Cu" }));
+    S.filter.all = true; S.filter.q = ""; renderPanel();
+    return document.querySelectorAll("#panel .inv-row").length === 1500 && document.querySelector("#panel .cards").textContent.includes("showing 1500 of 1600") || "no cap";`],
+  ["Inventory follows project", "", `
+    if (D.projects.length < 2) return "skip";
+    D.projects[0].objects = [{ uuid: "a", kind: "symbol", ref: "PA1", side: "head", pos: [0, 0], box: null, sheet: "/" }];
+    D.projects[1].objects = [{ uuid: "b", kind: "symbol", ref: "PB1", side: "head", pos: [0, 0], box: null, sheet: "/" }];
+    S.filter.all = true; openProject(1);
+    return document.querySelector("#panel .cards").textContent.includes("PB1") && !document.querySelector("#panel .cards").textContent.includes("PA1") || "wrong project";`],
   ["Parts fixture sorts problems and greys stale stock", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
   document.querySelector('[data-tab=parts]').click();

@@ -54,6 +54,7 @@ To make checks block merging, require the status check **`review / review`** in 
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 | `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
+| `inventory.enabled` | `false` | add an "All parts" list to the report's Changes tab: every symbol and footprint, searchable, click to zoom |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
