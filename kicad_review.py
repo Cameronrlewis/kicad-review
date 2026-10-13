@@ -872,6 +872,48 @@ def project_checks(p, settings, objs):
         for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
 
 
+
+# ---- Interface checks: design-review rules on the schematic netlist. ----
+INTERFACE_PATTERNS = {
+    "uart_tx": ["TX", "TXD", "UART_TX", "USART_TX"], "uart_rx": ["RX", "RXD", "UART_RX", "USART_RX"],
+    "i2c_sda": ["SDA", "I2C_SDA"], "i2c_scl": ["SCL", "I2C_SCL"], "can_h": ["CANH", "CAN_H"], "can_l": ["CANL", "CAN_L"],
+    "spi": ["MOSI", "MISO", "SCK", "SCLK", "SDI", "SDO"],
+    "esd_parts": ["ESD", "TVS", "USBLC", "PESD", "PRTR", "SRV05", "TPD", "SP05", "SMAJ", "SMBJ"],
+}
+GROUND = re.compile(r"^[ADP]?GND\w*$|^VSS\w*$|^EARTH$", re.I)
+RAIL = re.compile(r"^\+|^V(CC|DD|BUS|IN|BAT|SYS)|^\d+V\d*$|^\d+\.\d+V$|^\d+V\d+$|_\d+V\d*$", re.I)
+
+
+def parse_netlist(text):
+    root = parse_sexpr(text)
+    comps = {}
+    for c in findall(find(root, "components") or [], "comp"):
+        ls = find(c, "libsource")
+        comps[val(c, "ref")] = {"value": val(c, "value", ""), "footprint": val(c, "footprint", ""),
+                                "lib": f"{val(ls, 'lib', '')}:{val(ls, 'part', '')}", "description": val(ls, "description", "")}
+    nets = {val(n, "name"): [{"ref": val(x, "ref"), "pin": val(x, "pin"), "function": val(x, "pinfunction", ""), "type": val(x, "pintype", "")}
+                             for x in findall(n, "node")] for n in findall(find(root, "nets") or [], "net")}
+    return comps, nets
+
+
+def ohms(value):
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([rkm]?)(\d*)\s*(?:ohms?|Ω)?\s*(?:\d+(?:\.\d+)?\s*%)?\s*", value or "", re.I)
+    if not m:
+        return None
+    whole, unit, frac = m.groups()
+    return float(f"{whole}.{frac}" if frac else whole) * {"": 1, "r": 1, "k": 1e3, "m": 1e6}[unit.lower()]
+
+
+short = lambda net: re.sub(r"^NET-\((.*)\)$", r"\1", (net or "").rstrip("/").split("/")[-1].upper())  # Net-(U1-SDA) -> U1-SDA
+is_ground = lambda net: bool(GROUND.match(short(net)))
+is_power = lambda net, nodes: is_ground(net) or bool(RAIL.search(short(net))) or any(n["type"] == "power_out" for n in nodes)
+
+
+def matches(name, patterns):
+    tokens = re.split(r"[^A-Z0-9]+", (name or "").upper())
+    return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
+
+
 def page_svg(out_dir, name, page):
     """The SVG kicad-cli wrote for a page: <project>-<sheet>-<subsheet>....svg, <project>.svg for the root."""
     path = f"{out_dir}/sch/{page['stem']}.svg"

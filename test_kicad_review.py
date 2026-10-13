@@ -1035,3 +1035,24 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+
+# Interface checks: netlist parsing and helpers.
+from kicad_review import parse_netlist, ohms, short, is_ground, is_power, matches
+def netlist(comps, nets):
+    c = "".join(f'(comp (ref "{r}") (value "{v}") (footprint "{fp}") (libsource (lib "{lib.split(":")[0]}") (part "{lib.split(":")[1]}") (description "")))'
+                for r, (v, fp, lib) in comps.items())
+    n = "".join(f'(net (code "{i}") (name "{name}") ' + "".join(f'(node (ref "{r}") (pin "{p}") (pinfunction "{f}") (pintype "{t}"))' for r, p, f, t in nodes) + ")"
+                for i, (name, nodes) in enumerate(nets.items(), 1))
+    return f'(export (version "E") (components {c}) (nets {n}))'
+comps, nets = parse_netlist(netlist({"R1": ("4k7", "R_0402", "Device:R")}, {"/MCU/SDA": [("R1", "1", "", "passive"), ("U1", "5", "PB7/I2C1_SDA", "bidirectional")]}))
+assert comps["R1"] == {"value": "4k7", "footprint": "R_0402", "lib": "Device:R", "description": ""}
+assert nets["/MCU/SDA"][1] == {"ref": "U1", "pin": "5", "function": "PB7/I2C1_SDA", "type": "bidirectional"}
+for v, want in (("4k7", 4700), ("4.7k", 4700), ("4K7 1%", 4700), ("120R", 120), ("120", 120), ("5k1", 5100), ("1M", 1e6), ("10k Ω", 10000)):
+    assert ohms(v) == want, (v, ohms(v))
+assert ohms("DNP") is None and ohms("100n") is None
+print("ok resistor values parse")
+assert short("/MCU/SDA") == "SDA" and short("Net-(U1-SDA)") == "U1-SDA"
+assert matches("SDA", ["SDA"]) and matches("I2C1_SDA", ["SDA"]) and not matches("SDAX", ["SDA"]) and matches("PB7/I2C1_SDA", ["SDA"])
+assert all(is_power(n, []) for n in ("+3V3", "VDD_3V3", "3.3V", "VBUS", "+5V", "GND")) and is_ground("AGND") and not is_power("/SDA", [])
+assert is_power("/RAIL", [{"type": "power_out"}])
+print("ok power nets are recognised")
