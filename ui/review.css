@@ -138,5 +138,5 @@ body.shot { grid-template-rows: 1fr; }
 .bom-coverage, .field-changes { width: calc(100% - 2 * var(--space-2)); margin: var(--space-2); border-collapse: collapse; font-size: 13px; }
 .bom-coverage caption, .field-changes caption { text-align: left; font-weight: 600; padding-bottom: var(--space-1); }
 .bom-coverage th, .bom-coverage td, .field-changes th, .field-changes td { text-align: left; padding: 2px var(--space-1); border-bottom: 1px solid var(--line); }
-.bom-coverage tr.short th::before { content: "⚠ "; }
 .dnp-mismatch { margin: var(--space-2); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

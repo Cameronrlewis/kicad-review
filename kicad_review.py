@@ -895,7 +895,7 @@ def mark_new_problems(base_lines, head_lines):
     """A head problem is new when any of its references did not have it in base, even if the line itself did not change."""
     before = {r: set(l["problems"]) for l in base_lines for r in l["refs"]}
     for l in head_lines:
-        l["new_problems"] = [p for p in l["problems"] if any(p not in before.get(r, set()) for r in l["refs"])]
+        l["new_problems"] = [p for p in l["problems"] if any(p not in before.get(r, set()) for r in l.get("problem_refs", {}).get(p, l["refs"]))]
 
 
 def dnp_mismatches(objs):

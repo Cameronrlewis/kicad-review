@@ -1116,3 +1116,14 @@ mark_new_problems([], L)
 pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": L, "changes": [], "supplier": None}}]})
 assert "- R1 placeholder value" in pm and "- R2 one MPN on several footprints" in pm and "R3 placeholder" not in pm and "R1, R2, R3 placeholder" not in pm, pm
 print("ok grouped line problems name their references")
+
+# A problem the named references already had in base is not new, even when another reference joins the line.
+bl = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1")})
+hl = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1"), "2": symp("R2", Value="TBD", Footprint="0402", LCSC="C1")})
+mark_new_problems(bl, hl)
+assert "placeholder" in hl[0]["new_problems"] and hl[0]["problem_refs"]["placeholder"] == ["R1", "R2"], hl
+bl = parts_lines({"1": symp("R1", Value="10k", Footprint="0402", LCSC="C1", MPN="TBD")})
+hl = parts_lines({"1": symp("R1", Value="10k", Footprint="0402", LCSC="C1", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0402", LCSC="C1")})
+mark_new_problems(bl, hl)
+assert "placeholder" not in hl[0]["new_problems"], hl
+print("ok old problem not new when a reference joins")

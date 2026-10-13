@@ -466,7 +466,7 @@ function coverageHtml(parts) {
   const c = parts.coverage; if (!c) return "";
   const rows = Object.keys(c.head).map(f => {
     const [n, t] = c.head[f], d = c.base?.[f] ? n - c.base[f][0] : 0, pct = t ? Math.round(100 * n / t) : 100;
-    return `<tr${n < t ? ' class="short"' : ""}><th scope="row">${esc(f)}</th><td>${n} / ${t}</td><td>${pct}%</td><td>${d ? (d > 0 ? "+" : "") + d : ""}</td></tr>`;
+    return `<tr${n < t ? ' class="short"' : ""}><th scope="row">${n < t ? '<span aria-hidden="true">⚠ </span><span class="sr-only">incomplete: </span>' : ""}${esc(f)}</th><td>${n} / ${t}</td><td>${pct}%</td><td>${d ? (d > 0 ? "+" : "") + d : ""}</td></tr>`;
   }).join("");
   return `<table class="bom-coverage"><caption>BOM coverage (this revision; change from base)</caption><thead><tr><th>Field</th><th>Parts</th><th>%</th><th>Δ</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
