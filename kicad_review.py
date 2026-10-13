@@ -994,6 +994,7 @@ def interface_findings(comps, nets, patterns, where_of):
             driven = any(n["ref"] != ref and not is_res(n["ref"]) for n in nets[name])
             if not pulled and not driven:
                 add("usb_cc_floating", "error", f"{node['function']} of {ref} floats: needs 5.1 kΩ to GND or a PD controller.", ref, [node_txt(node)])
+    # ponytail: same-net only; follow series resistors one hop if teams protect through them
     total = prot = 0
     esd = lambda r: re.search("|".join(map(re.escape, patterns["esd_parts"])), f"{comps.get(r, {}).get('lib', '')} {comps.get(r, {}).get('value', '')} {comps.get(r, {}).get('description', '')}", re.I)
     for ref in sorted((r for r in comps if r.startswith("J")), key=natural):
