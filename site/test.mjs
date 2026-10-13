@@ -1492,9 +1492,11 @@ test('review page for a pull request carries the thread composer and config', ()
   assert.match(html, /"link":"\/r\/Cameronrlewis\/repo\/a\/123"/);
 });
 
-test('review page without a pull request has no composer', () => {
+test('review page without a pull request offers issues but no thread route', () => {
   const html = reviewPage({ user: 'u', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: null });
-  assert.doesNotMatch(html, /thread-composer|threads-client|kicadReviewPin/);
+  assert.match(html, /"threads":null/);
+  assert.match(html, /"issues":"\/r\/Cameronrlewis\/repo\/issues"/);
+  assert.doesNotMatch(html, /\/pull\/null\/threads/);
 });
 
 test('wrapper accepts report messages only from its own iframe', () => {
@@ -1506,7 +1508,7 @@ test('wrapper accepts report messages only from its own iframe', () => {
 });
 
 
-test('artifact wrapper discovers PR number and omits thread UI for push runs', async () => {
+test('artifact wrapper discovers PR number and disables thread requests for push runs', async () => {
   const sealed = await signedIn();
   for (const event of ['pull_request', 'push']) {
     const restore = mockFetch(async (url) => {
@@ -1525,7 +1527,7 @@ test('artifact wrapper discovers PR number and omits thread UI for push runs', a
       if (event === 'pull_request') {
         assert.match(html, /<dialog id="thread-composer"/);
         assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
-      } else assert.doesNotMatch(html, /thread-composer|kicadReviewPin/);
+      } else { assert.match(html, /"threads":null/); assert.match(html, /"issues":"\/r\/Cameronrlewis\/repo\/issues"/); }
     } finally { restore(); }
   }
 });
@@ -1762,4 +1764,20 @@ test('issue access failures and malformed requests remain JSON with session cook
   assert.equal(bad.status, 400); assert.match(bad.headers.get('Set-Cookie'), /refreshed/); assert.equal((await bad.json()).error, 'Send JSON');
   const missing = await issuesRoute(new Request('https://site.example/r/o/r/issues/unknown'), {}, { owner: 'o', repo: 'r', rest: '/unknown' }, { access: issueAccess, gh: async () => { throw Error('must not call GitHub'); } });
   assert.equal(missing.status, 404); assert.match(missing.headers.get('Set-Cookie'), /refreshed/);
+});
+
+
+test('issue client for a non-PR review never loads threads even when the report enables them', async () => {
+  const listeners = {}, calls = [], sent = [];
+  const form = { addEventListener() {} }, button = { addEventListener() {} }, notice = {};
+  const dialog = { querySelector(s) { return s === 'form' ? form : button; } };
+  const iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
+  runInNewContext(`(${threadsClient.toString()})({ threads: null, issues: '/issues', pull: null, link: '/r/o/r/a/1' })`, {
+    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': dialog, 'thread-view': dialog, 'thread-notice': notice }[id]; } },
+    addEventListener(type, fn) { listeners[type] = fn; }, fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ issues: [] }) }; },
+  });
+  listeners.message({ source: iframe.contentWindow, data: { kicadReviewReady: true, threads: true, issues: false } });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
+  listeners.message({ source: iframe.contentWindow, data: { kicadReviewReady: true, threads: true, issues: true } });
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(calls, ['/issues']); assert.equal(sent[0].kicadReviewIssues.length, 0); assert.equal(notice.hidden, true);
 });

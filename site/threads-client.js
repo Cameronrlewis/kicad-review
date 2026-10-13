@@ -48,7 +48,7 @@ export function threadsClient(config) {
         else send({ kicadReviewIssues: (await response.json()).issues });
       } catch { errors.push('Issues could not be loaded.'); send({ kicadReviewIssues: [] }); }
     }
-    notice.textContent = errors.join(' ');
+    notice.textContent = errors.join(' '); notice.hidden = !notice.textContent;
   };
   const compose = (anchor, mode) => {
     pending = anchor; issueMode = mode;
@@ -65,7 +65,7 @@ export function threadsClient(config) {
   addEventListener('message', (event) => {
     if (!accept(event)) return;
     if (event.data.kicadReviewReady === true) {
-      threadsOn = event.data.threads === true;
+      threadsOn = event.data.threads === true && !!config.threads;
       issuesOn = event.data.issues === true && !!config.issues;
       if (threadsOn || issuesOn) load();
     }
@@ -89,7 +89,7 @@ export function threadsClient(config) {
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(result.error || 'GitHub did not create the issue.');
         composer.close(); issueMode = null; await load();
-        if (result.warning) notice.textContent = result.warning;
+        if (result.warning) { notice.textContent = result.warning; notice.hidden = false; }
         return;
       }
       if (!threadsOn) throw new Error('Threads are turned off for this review.');
