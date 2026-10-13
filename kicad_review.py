@@ -779,6 +779,15 @@ def cmd_release(args):
     for label, pro in labels.items():
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
+    os.makedirs("release", exist_ok=True)
+    sums = []
+    for f in sorted(os.listdir("release")):
+        if f != "SHA256SUMS":
+            with open(f"release/{f}", "rb") as fh:
+                sums.append(f"{hashlib.sha256(fh.read()).hexdigest()}  {f}")
+    with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
+        fh.write("\n".join(sums) + "\n")
+    print("release/SHA256SUMS")
 
 
 def violation(v, scale, where):
@@ -921,14 +930,14 @@ def run_check(name, settings, head, base):
 
 
 def project_checks(p, settings, objs):
-    out = f"review/{project_id(p['dir'])}"
+    out_dir = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
-        if os.path.exists(src) and not os.path.exists(f"{out}/{s}/{f}"):  # never drop a check because its output is missing
+        if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
-        return load_violations(f"{out}/{s}/{f}", k)
+        return load_violations(f"{out_dir}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
@@ -938,10 +947,22 @@ def project_checks(p, settings, objs):
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
-    return [c for c in checks if c] + [
+    out = [c for c in checks if c] + [
         {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
          "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
         for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
+    if settings["checks"].get("release", "off") != "off":
+        pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
+        preset = settings["fabrication"]["preset"]
+        if not os.path.exists(pcb("head")):
+            out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
+                        "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
+        else:
+            side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) else None
+            c = run_check("release", settings, side("head"), side("base"))
+            c["package"] = package_summary(f"{out_dir}/head/fab")
+            out.append(c)
+    return out
 
 
 def page_svg(out_dir, name, page):

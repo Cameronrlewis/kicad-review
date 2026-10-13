@@ -1113,3 +1113,32 @@ with tempfile.TemporaryDirectory() as d:
     v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "J1", "props": {"layer": "F.Cu", "attributes": "through_hole"}}})
     assert [x["type"] for x in v] == ["missing_drill"], v
 print("ok plated pads in the board file require a drill file")
+
+from kicad_review import project_checks
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    settings = json.loads(json.dumps(DEFAULT_SETTINGS)); settings["checks"].update(erc="off", drc="off", parity="off", bom="off", release="informational")
+    os.makedirs("head/p")   # a project folder with no board (and no schematic, so the other checks read nothing)
+    c = project_checks({"dir": "p", "name": "b"}, settings, {"base": {}, "head": {}})
+    os.chdir(_cwd)
+assert [(x["name"], x["status"], x.get("reason")) for x in c] == [("release", "not_run", "no board")], c
+print("ok no board is not run")
+
+# Tagged releases also publish SHA256SUMS for every release asset.
+import hashlib
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    os.makedirs("repo/B"); open("repo/B/B.kicad_pro", "w").write("{}")
+    def fake(pro, tag, s, out, label):
+        os.makedirs(out, exist_ok=True); open(f"{out}/{label}-{tag}-gerbers.zip", "wb").write(b"zip"); return [f"{out}/{label}-{tag}-gerbers.zip"]
+    saved = kr.release_project; kr.release_project = fake
+    try:
+        with patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_release(type("A", (), {"tag": "v1"}))
+        sums = open("release/SHA256SUMS").read()
+    finally:
+        kr.release_project = saved; os.chdir(_cwd)
+assert sums == f"{hashlib.sha256(b'zip').hexdigest()}  B-v1-gerbers.zip\n", sums
+print("ok release SHA256SUMS")
