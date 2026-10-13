@@ -75,6 +75,8 @@ Supplier stock/price is not yet available; a JLCPCB Components API lookup at wor
 
 The small Cloudflare Worker review site lets people sign in with GitHub and open reviews only in repositories they can already read. See [the site setup guide](site/README.md) to create the GitHub App, run it locally, and deploy it manually.
 
+Optional [read-only share links](site/README.md#share-links-optional) let writers share one expiring review with guests; they are off until the owner enables the required App permission and worker secrets.
+
 ## When the workflow repository moves (for example to ParadigmEngineering)
 
 The owner name appears in exactly one place per KiCad repository: the `uses:` line of its `.github/workflows/kicad-review.yml`.

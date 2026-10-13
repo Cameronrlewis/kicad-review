@@ -1,5 +1,5 @@
-import { createShare } from './share.js';
-import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
+import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
+import { escapeHtml, sharedPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -164,7 +164,7 @@ export function gh(path, token, init = {}) {
   });
 }
 
-function allowedOwners(env) {
+export function allowedOwners(env) {
   return env.ALLOWED_OWNERS.split(',').map((name) => name.trim().toLowerCase());
 }
 
@@ -189,11 +189,11 @@ export async function access(request, env, owner, repo) {
   }
 }
 
-const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
+export const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
   + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
-const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+export const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
-async function artifactReport(request, env, owner, repo, id, active, raw) {
+async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
     const metadataResponse = await gh(base, active.token);
@@ -207,9 +207,10 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
     }
     if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     if (!raw) {
+      const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id,
-      }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id, share: sharing,
+      }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': sharing ? `${frameCsp}; connect-src 'self'` : frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
     const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
@@ -541,6 +542,10 @@ export default {
       if (request.method === 'GET' && url.pathname === '/callback') return await callback(request, env);
       if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
+      const shareView = url.pathname.match(/^\/s\/([^/]+)(\/raw)?$/);
+      if (request.method === 'GET' && shareView) return await serveShare(request, env, shareView[1], Boolean(shareView[2]), { gh, response, reportCsp, frameCsp, sharedPage, allowedOwners });
+      const revoke = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/share\/revoke$/);
+      if (request.method === 'POST' && revoke) return await revokeShares(request, env, { owner: revoke[1], repo: revoke[2] }, { access, gh, response, sessionResponse });
       const shareCreate = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/share$/);
       if (request.method === 'POST' && shareCreate) return await createShare(request, env, { owner: shareCreate[1], repo: shareCreate[2], id: shareCreate[3] }, { access, gh, response, sessionResponse });
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw)?$/);
@@ -548,7 +553,7 @@ export default {
         const [, owner, repo, id, raw] = artifactRoute;
         if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
         const allowed = await access(request, env, owner, repo);
-        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, Boolean(raw));
+        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, Boolean(raw), Boolean(allowed.repo.permissions?.push));
       }
       const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
       if (request.method === 'POST' && compareRoute) {

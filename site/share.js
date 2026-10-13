@@ -56,12 +56,13 @@ export async function shareGeneration(gh, token, owner, repo) {
   if (result.status === 404) return 0;
   if (!result.ok) throw new Error('Share state unavailable');
   const { value } = await result.json();
-  if (!/^(0|[1-9]\d{0,15})$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Invalid share state');
+  if (typeof value !== 'string' || !/^(0|[1-9]\d{0,15})$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Invalid share state');
   return Number(value);
 }
 const reportName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 function validArtifact(artifact, now = Date.now()) {
-  return artifact && !artifact.expired && reportName.test(artifact.name || '') && Number.isFinite(Date.parse(artifact.expires_at)) && Date.parse(artifact.expires_at) > now;
+  return artifact && artifact.expired === false && typeof artifact.name === 'string' && reportName.test(artifact.name)
+    && typeof artifact.expires_at === 'string' && Number.isFinite(Date.parse(artifact.expires_at)) && Date.parse(artifact.expires_at) > now;
 }
 function json(deps, body, status = 200, active) {
   return deps.sessionResponse(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
@@ -107,5 +108,65 @@ export async function createShare(request, env, { owner, repo, id }, deps) {
     if (exp <= Date.now()) return fail('Review expired.', 410);
     const link = await signShare({ o: owner, r: repo, a: artifactId, exp, g }, env);
     return json(deps, { url: `${new URL(request.url).origin}/s/${link}`, expires: exp }, 201, allowed.s);
+  } catch { return fail('Share links unavailable. Try again later.', 502); }
+}
+
+
+function guestResponse(deps, body, init = {}) {
+  const result = deps.response(body, init);
+  result.headers.set('X-Robots-Tag', 'noindex, nofollow');
+  result.headers.set('Referrer-Policy', 'no-referrer');
+  return result;
+}
+function downloadUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && (url.hostname.endsWith('.blob.core.windows.net') || url.hostname.endsWith('.actions.githubusercontent.com')) ? url.href : null;
+  } catch { return null; }
+}
+export async function serveShare(request, env, token, raw, deps) {
+  const missing = () => guestResponse(deps, 'Not found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  if (!shareEnabled(env)) return missing();
+  try {
+    const c = await verifyShare(token, env);
+    if (!c || !deps.allowedOwners(env).includes(c.o.toLowerCase())) return missing();
+    if (raw && request.headers.get('Sec-Fetch-Dest') !== 'iframe') return guestResponse(deps, null, { status: 302, headers: { Location: `/s/${token}` } });
+    const inst = await installationToken(env, c.o, c.r, { actions: 'read', variables: 'read' });
+    if (!inst || await shareGeneration(deps.gh, inst, c.o, c.r) !== c.g) return missing();
+    const base = `/repos/${encodeURIComponent(c.o)}/${encodeURIComponent(c.r)}/actions/artifacts/${c.a}`;
+    const meta = await deps.gh(base, inst, { redirect: 'error' });
+    const artifact = meta.ok ? await meta.json() : null;
+    if (!validArtifact(artifact)) return missing();
+    if (!raw) return guestResponse(deps, deps.sharedPage({ token, name: artifact.name }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': deps.frameCsp } });
+    const zip = await deps.gh(`${base}/zip`, inst, { redirect: 'manual' });
+    const location = zip.status === 302 ? downloadUrl(zip.headers.get('Location')) : null;
+    const blob = location ? await fetch(location, { redirect: 'error', referrerPolicy: 'no-referrer' }) : null;
+    if (!blob?.ok || !blob.body) return missing();
+    return guestResponse(deps, blob.body, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': deps.reportCsp, 'X-Frame-Options': 'SAMEORIGIN' } });
+  } catch { return missing(); }
+}
+export async function revokeShares(request, env, { owner, repo }, deps) {
+  if (!shareEnabled(env)) return json(deps, { error: 'Share links are not set up.' }, 404);
+  const allowed = await shareAccess(request, env, owner, repo, deps);
+  if (allowed instanceof Response) return allowed;
+  const fail = (error, status) => json(deps, { error }, status, allowed.s);
+  try {
+    const invalid = postError(request);
+    if (invalid) return fail(...invalid);
+    if (!allowed.repo.permissions?.push) return fail('Only writers can revoke share links.', 403);
+    const body = await request.json().catch(() => null);
+    if (!body || Array.isArray(body) || typeof body !== 'object') return fail('Send a JSON object.', 400);
+    const inst = await installationToken(env, owner, repo, { variables: 'write' });
+    if (!inst) return fail('App permissions unavailable.', 502);
+    const previous = await shareGeneration(deps.gh, inst, owner, repo);
+    // ponytail: one opaque generation per repo; a deny-list is needed for single-link revocation.
+    let next;
+    do { const bytes = crypto.getRandomValues(new Uint32Array(2)); next = (bytes[0] & 0x1fffff) * 4294967296 + bytes[1]; } while (!next || next === previous);
+    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/variables`;
+    const init = { method: 'PATCH', redirect: 'error', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: String(next) }) };
+    let saved = await deps.gh(`${root}/KICAD_REVIEW_SHARE_GEN`, inst, init);
+    if (saved.status === 404) saved = await deps.gh(root, inst, { ...init, method: 'POST', body: JSON.stringify({ name: 'KICAD_REVIEW_SHARE_GEN', value: String(next) }) });
+    return saved.ok ? json(deps, { generation: next }, 200, allowed.s) : fail('GitHub did not revoke the links.', 502);
   } catch { return fail('Share links unavailable. Try again later.', 502); }
 }

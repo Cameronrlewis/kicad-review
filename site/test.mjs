@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal } from './worker.js';
@@ -1283,4 +1284,239 @@ test('new authenticated share exits retain refreshed cookie including upstream f
       assert.equal((await open(cookie, env)).t, 'access-secret');
     } finally { restore(); }
   }
+});
+
+
+const shareBlob = 'https://productionresultssa0.blob.core.windows.net/review';
+function guestFetch({ generation = '2', genStatus = 200, metadata = shareMeta(), location = shareBlob, unexpected } = {}) {
+  return mockFetch(async (url, options = {}) => {
+    assert.doesNotMatch(url, /\/s\//, 'share capability must not be forwarded upstream');
+    if (url.endsWith('/installation')) return shareJson({ id: 7 });
+    if (url.endsWith('/access_tokens')) {
+      assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', variables: 'read' } });
+      return shareJson({ token: 'installation-secret' }, 201);
+    }
+    if (url.endsWith('/KICAD_REVIEW_SHARE_GEN')) return shareJson({ value: generation }, genStatus);
+    if (url.endsWith('/actions/artifacts/123')) return shareJson(metadata);
+    if (url.endsWith('/actions/artifacts/123/zip')) return new Response(null, { status: 302, headers: { Location: location } });
+    if (url === shareBlob) { assert.equal(options.headers, undefined); assert.equal(options.redirect, 'error'); return new Response('<html>report</html>'); }
+    if (unexpected) { unexpected(url); return new Response('<html>unsafe report</html>'); }
+    throw new Error(`Unexpected guest URL: ${url}`);
+  });
+}
+async function guestToken(patch = {}) {
+  const { signShare } = await import('./share.js');
+  return signShare({ o: 'Cameronrlewis', r: 'repo', a: 123, exp: Date.now() + 3600_000, g: 2, ...patch }, appEnv);
+}
+function guestSecurity(response) {
+  assert.equal(response.headers.get('X-Robots-Tag'), 'noindex, nofollow');
+  assert.equal(response.headers.get('Referrer-Policy'), 'no-referrer');
+  assert.equal(response.headers.get('Cache-Control'), 'private, no-store');
+  assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff');
+  assert.equal(response.headers.get('Set-Cookie'), null);
+}
+test('guest report streams only signed artifact sandboxed without exposing GitHub credentials or navigation', async () => {
+  const token = await guestToken(); const restore = guestFetch();
+  try {
+    const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
+    assert.equal(raw.status, 200); assert.equal(await raw.text(), '<html>report</html>'); guestSecurity(raw);
+    assert.equal(raw.headers.get('Content-Security-Policy'), reportCsp);
+    const response = await worker.fetch(request(`/s/${token}`), appEnv); const html = await response.text();
+    assert.equal(response.status, 200); guestSecurity(response);
+    assert.match(html, /Read-only shared review/); assert.ok(html.includes(`src="/s/${token}/raw"`));
+    assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.match(html, /referrerpolicy="no-referrer"/);
+    assert.doesNotMatch(html, /Sign out|All reviews|href="\/"|thread-composer|installation-secret|user-token|PRIVATE KEY/);
+    assert.equal(response.headers.get('Content-Security-Policy'), "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+  } finally { restore(); }
+});
+test('revoked, expired, non-allowlisted and changed-owner guest links refuse access', async () => {
+  const token = await guestToken();
+  for (const settings of [{ generation: '3' }, { generation: 'garbage' }, { genStatus: 403 }, { genStatus: 500 }, { metadata: { ...shareMeta(), expired: true } }, { metadata: shareMeta('bad') }, { metadata: { ...shareMeta(), name: 'other.html' } }]) {
+    const restore = guestFetch(settings);
+    try { const response = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv); assert.equal(response.status, 404); guestSecurity(response); }
+    finally { restore(); }
+  }
+  let calls = 0; const restore = mockFetch(async () => { calls++; throw new Error('must not fetch'); });
+  try {
+    for (const [t, config] of [[await guestToken({ exp: Date.now() - 1 }), appEnv], [await guestToken({ o: 'Other' }), appEnv], [token, { ...appEnv, ALLOWED_OWNERS: 'Other' }], [token + 'x', appEnv]]) {
+      assert.equal((await worker.fetch(request(`/s/${t}`), config)).status, 404);
+    }
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+test('guest raw document or unspecified navigation redirects to wrapper; token grants no other routes', async () => {
+  const token = await guestToken(); let calls = 0; const restore = mockFetch(async () => { calls++; throw new Error('must not fetch'); });
+  try {
+    for (const headers of [{ 'Sec-Fetch-Dest': 'document' }, {}]) {
+      const response = await worker.fetch(request(`/s/${token}/raw`, { headers }), appEnv);
+      assert.equal(response.status, 302); assert.equal(response.headers.get('Location'), `/s/${token}`); guestSecurity(response);
+    }
+    assert.equal((await worker.fetch(request(`/s/${token}/a/124`), appEnv)).status, 404);
+    const existing = await worker.fetch(request(`/r/Cameronrlewis/repo/a/124?share=${token}`), appEnv);
+    assert.equal(existing.status, 302); assert.match(existing.headers.get('Location'), /^\/login/);
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+test('guest refuses insecure or unrelated artifact download URLs and fails closed on network errors', async () => {
+  const token = await guestToken();
+  for (const location of ['http://productionresultssa0.blob.core.windows.net/review', 'https://evil.example/x', 'https://user:secret@productionresultssa0.blob.core.windows.net/x', 'https://productionresultssa0.blob.core.windows.net.evil.example/x', 'https://productionresultssa0.blob.core.windows.net:444/x']) {
+    let followed = 0;
+    const restore = guestFetch({ location, unexpected: () => { followed++; } });
+    try {
+      assert.equal((await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv)).status, 404);
+      assert.equal(followed, 0, 'unsafe storage URL must not be fetched, even if it would serve HTML');
+    }
+    finally { restore(); }
+  }
+  const restore = mockFetch(async () => { throw new Error('upstream unavailable'); });
+  try { const response = await worker.fetch(request(`/s/${token}`), appEnv); assert.equal(response.status, 404); guestSecurity(response); }
+  finally { restore(); }
+});
+test('revoke is writer-only, validates POST and persists a fresh repository-scoped generation', async () => {
+  let generation = '2'; let patches = 0; const minted = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
+    if (url.endsWith('/repo')) return shareJson({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true } });
+    if (url.endsWith('/installation')) return shareJson({ id: 7 });
+    if (url.endsWith('/access_tokens')) { minted.push(JSON.parse(options.body)); return shareJson({ token: 'installation-secret' }, 201); }
+    assert.ok(url.endsWith('/actions/variables/KICAD_REVIEW_SHARE_GEN'));
+    if (options.method === 'PATCH') { patches++; generation = JSON.parse(options.body).value; return new Response(null, { status: 204 }); }
+    return shareJson({ value: generation });
+  });
+  try {
+    for (const [headers, status] of [[{ Origin: 'https://evil.example' }, 403], [{ 'Content-Type': 'text/plain' }, 415]]) {
+      const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke', {}, headers, await signedIn({ e: Date.now() - 1 })), appEnv);
+      assert.equal(response.status, status); assert.ok((await response.json()).error); assert.ok(cookieValue(response, 's'));
+    }
+    assert.equal(patches, 0);
+    const old = generation;
+    for (let i = 0; i < 2; i++) {
+      const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke', {}, {}, await signedIn({ e: Date.now() - 1 })), appEnv);
+      assert.equal(response.status, 200); checkSecurity(response); assert.ok(cookieValue(response, 's'));
+      const result = await response.json(); assert.equal(String(result.generation), generation); assert.notEqual(generation, old);
+    }
+    assert.equal(patches, 2);
+    for (const body of minted) assert.deepEqual(body, { repositories: ['repo'], permissions: { variables: 'write' } });
+  } finally { restore(); }
+  const restoreReader = shareCreationFetch({ push: false });
+  try { const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke'), appEnv); assert.equal(response.status, 403); assert.ok((await response.json()).error); }
+  finally { restoreReader(); }
+});
+test('missing share secrets keep existing review HTML byte-identical and guest routes inactive', async () => {
+  const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
+  const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>');
+  // Fixed digest of pre-feature HTML with styles normalized, not a moving HEAD fixture.
+  assert.equal(createHash('sha256').update(current).digest('hex'), 'c8520051cef46a0258ea3ec7700808e04b3b85fcd98b3a8185f103cac18da306');
+  const restore = shareCreationFetch();
+  try {
+    const cookie = await signedIn();
+    for (const key of ['SHARE_KEY', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY']) {
+      const config = { ...appEnv, [key]: '' };
+      const response = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${cookie}` } }), config);
+      assert.equal(await response.text(), reviewPage(props));
+      assert.equal((await worker.fetch(request(`/s/${await guestToken()}`), config)).status, 404);
+      assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share'), config)).status, 404);
+      assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke'), config)).status, 404);
+    }
+  } finally { restore(); }
+});
+
+
+test('share dialog executes create and revoke JSON POSTs, rejects unsafe URLs and renders errors as text', async () => {
+  const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: 123, name: 'kicad-review.html', share: true };
+  const html = reviewPage(props);
+  assert.match(html, /aria-labelledby="share-title"/);
+  assert.match(html, /min="1" max="30" step="1" value="7"/);
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+  const elements = Object.fromEntries(['share-dialog', 'share-status', 'share-result', 'share-open', 'share-form', 'share-days', 'share-revoke'].map(id => [id, { textContent: '', value: id === 'share-days' ? '7' : '' }]));
+  let opened = false; elements['share-dialog'].showModal = () => { opened = true; };
+  let link = 'https://site.example/s/body.signature'; const posts = [];
+  runInNewContext(scripts[1], { document: { getElementById: id => elements[id] }, location: { origin: 'https://site.example' }, URL, confirm: () => true,
+    fetch: async (url, options) => { posts.push([url, options]); return shareJson(url.endsWith('/revoke') ? { generation: 9 } : { url: link, expires: Date.now() + 1000 }); } });
+  elements['share-open'].onclick(); assert.equal(opened, true);
+  await elements['share-form'].onsubmit({ preventDefault() {} });
+  assert.equal(elements['share-result'].value, link);
+  assert.equal(posts[0][0], '/r/Cameronrlewis/repo/a/123/share');
+  assert.equal(posts[0][1].headers['Content-Type'], 'application/json'); assert.equal(posts[0][1].body, '{"days":7}');
+  await elements['share-revoke'].onclick(); assert.equal(posts[1][0], '/r/Cameronrlewis/repo/share/revoke'); assert.equal(posts[1][1].body, '{}');
+  assert.equal(elements['share-result'].value, ''); assert.match(elements['share-status'].textContent, /revoked/);
+  for (const bad of ['javascript:alert(1)', 'https://evil.example/s/body.signature', 'https://site.example/s/body.signature?leak=1']) {
+    link = bad; await elements['share-form'].onsubmit({ preventDefault() {} }); assert.equal(elements['share-result'].value, ''); assert.equal(elements['share-status'].textContent, 'Invalid share link.');
+  }
+  assert.doesNotMatch(scripts[1], /innerHTML|__name/);
+});
+test('revoke initializes missing state, old generation-zero links stay revoked and failed writes retain cookie', async () => {
+  let generation = null;
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
+    if (url.endsWith('/repo')) return shareJson({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true } });
+    if (url.endsWith('/installation')) return shareJson({ id: 7 });
+    if (url.endsWith('/access_tokens')) return shareJson({ token: 'installation-secret' }, 201);
+    if (url.endsWith('/actions/variables') && options.method === 'POST') { const body = JSON.parse(options.body); assert.equal(body.name, 'KICAD_REVIEW_SHARE_GEN'); generation = body.value; return new Response(null, { status: 201 }); }
+    assert.ok(url.endsWith('/KICAD_REVIEW_SHARE_GEN'));
+    if (options.method === 'PATCH') return new Response(null, { status: generation === null ? 404 : 500 });
+    return generation === null ? new Response(null, { status: 404 }) : shareJson({ value: generation });
+  });
+  try {
+    const old = await guestToken({ g: 0 });
+    const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke'), appEnv); assert.equal(response.status, 200); assert.ok(Number(generation) > 0);
+    assert.equal((await worker.fetch(request(`/s/${old}`), appEnv)).status, 404);
+    const failed = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke', {}, {}, await signedIn({ e: Date.now() - 1 })), appEnv);
+    assert.equal(failed.status, 502); assert.ok((await failed.json()).error); assert.ok(cookieValue(failed, 's'));
+  } finally { restore(); }
+});
+
+
+test('share default and maximum lifetime are seven and thirty days; only writers see controls', async () => {
+  const long = new Date(Date.now() + 90 * 86400_000).toISOString();
+  const restore = shareCreationFetch({ metadata: shareMeta(long) });
+  try {
+    for (const [body, days] of [[{}, 7], [{ days: 30 }, 30]]) {
+      const before = Date.now();
+      const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share', body), appEnv);
+      assert.equal(response.status, 201); const { expires } = await response.json();
+      assert.ok(expires >= before + days * 86400_000 && expires <= Date.now() + days * 86400_000);
+    }
+    const page = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${await signedIn()}` } }), appEnv);
+    assert.match(await page.text(), /id="share-open"/);
+    assert.match(page.headers.get('Content-Security-Policy'), /connect-src 'self'/);
+  } finally { restore(); }
+  const reader = shareCreationFetch({ push: false });
+  try { const page = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${await signedIn()}` } }), appEnv); assert.doesNotMatch(await page.text(), /share-open|share-dialog/); }
+  finally { reader(); }
+});
+test('missing App permissions cannot mint a capability or serve a guest, and exceptions retain refreshed cookies', async () => {
+  const token = await guestToken();
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://github.com/login/oauth/access_token') return tokenResponse();
+    if (url.endsWith('/repo')) return shareJson({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true } });
+    if (url.endsWith('/actions/artifacts/123')) return shareJson(shareMeta());
+    if (url.endsWith('/installation')) return shareJson({ id: 7 });
+    if (url.endsWith('/access_tokens')) return shareJson({ message: 'No permissions' }, 422);
+    throw new Error('must not read artifacts with failed installation token');
+  });
+  try {
+    for (const path of ['/r/Cameronrlewis/repo/a/123/share', '/r/Cameronrlewis/repo/share/revoke']) {
+      for (const config of [appEnv, { ...appEnv, GITHUB_APP_PRIVATE_KEY: 'bad pem' }]) {
+        const response = await worker.fetch(await sharePost(path, {}, {}, await signedIn({ e: Date.now() - 1 })), config);
+        assert.equal(response.status, 502); assert.ok((await response.json()).error); assert.ok(cookieValue(response, 's'));
+      }
+    }
+    assert.equal((await worker.fetch(request(`/s/${token}`), appEnv)).status, 404);
+  } finally { restore(); }
+});
+
+
+test('malformed guest capabilities fail privately without touching a signed-in session', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls++; throw new Error('guest must not refresh OAuth or contact GitHub'); });
+  try {
+    const cookie = await signedIn({ e: Date.now() - 1 });
+    for (const config of [env, appEnv]) {
+      const response = await worker.fetch(request('/s/garbage/raw', { headers: { Cookie: `s=${cookie}`, 'Sec-Fetch-Dest': 'iframe' } }), config);
+      assert.equal(response.status, 404); guestSecurity(response); assert.equal(await response.text(), 'Not found');
+    }
+    assert.equal(calls, 0);
+  } finally { restore(); }
 });

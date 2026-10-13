@@ -2,7 +2,7 @@
 
 ## What it is
 
-People sign in with GitHub and see reviews only for repositories they can already read. Every request is checked as that person. Nothing is stored; reports are read from workflow artifacts kept 90 days. Report pages run in a sandbox, so their content cannot act as the signed-in person.
+By default, people sign in with GitHub and see reviews only for repositories they can already read. Every signed-in request is checked as that person. Nothing is stored; reports are read from workflow artifacts kept 90 days. Report pages run in a sandbox, so their content cannot act as the signed-in person. Optional share links below grant guests read-only access to one report without signing in.
 
 ## What a user approves at sign-in
 
@@ -50,6 +50,25 @@ npx wrangler deploy
 ```
 
 Then set the Actions variable `KICAD_REVIEW_SITE` to the site URL in each KiCad repository, or for the organisation, so that comments link to it.
+
+## Share links (optional)
+
+Share links are off unless all three worker secrets below are set. Existing sign-in and repository access checks are unchanged. Enabling them requires the owner's approval; this guide does not configure permissions, create keys or deploy anything.
+
+- Grant the GitHub App **Variables: read and write**, and accept the permission update on its installations. Actions read is already required.
+- `GITHUB_APP_ID`: the App's numeric ID (not its OAuth client ID).
+- `GITHUB_APP_PRIVATE_KEY`: an App private key in PKCS#8 PEM. Convert a privately generated key with `openssl pkcs8 -topk8 -nocrypt -in app.pem -out app.pkcs8.pem`.
+- `SHARE_KEY`: 32 random bytes in base64 (for example, generate privately with `openssl rand -base64 32`).
+
+An owner can configure these with `npx wrangler secret put <name>`, or use a git-ignored `site/.dev.vars` for local testing. Never put values in source control, chat, logs or command arguments. Cloudflare account admins can replace worker secrets but cannot read them back through Wrangler.
+
+**Private-key warning:** a leaked App private key lets an attacker act as the App on every installation, within its permissions. Rotate it in GitHub App settings if exposure is suspected. Keep this feature off if guest access is unnecessary.
+
+Writers see **Share…** on a review page. Links grant read-only access to that one report artifact, not the repository, history or comments. Choose 1–30 days (default 7); expiry is never later than the report's own expiry. Anyone holding the URL can read it without signing in: treat the URL as a bearer credential. Removing an owner from `ALLOWED_OWNERS` also disables its links. Guests receive the same report sandbox, no navigation, `noindex, nofollow`, `no-referrer` and private/no-store headers. GitHub user tokens, installation tokens and App JWTs never appear in pages or links.
+
+**Revoke all links for this repository** replaces the repository Actions variable `KICAD_REVIEW_SHARE_GEN` with a fresh opaque numeric generation. Every previous generation stops working; individual-link revocation is not supported. Keep the variable after revocation. Deleting or resetting it to a previous value can restore old links; if cleanup is necessary, first rotate/remove `SHARE_KEY` or wait until every old link has expired. State read/write errors fail closed rather than claiming revocation succeeded.
+
+Installation tokens are minted per request, never stored or sent to guests. Guest tokens have only Actions read and Variables read, scoped to the single repository. Revocation uses a separate repository-scoped Variables-write token. A wrapper view uses four GitHub calls; its report frame uses six, including the artifact storage download. No database, KV or token cache is added.
 
 ## Settings
 
