@@ -1247,3 +1247,20 @@ test('threads: review links encode spaces and parentheses', () => {
 test('threads: marker-only text has no missing-header slice bug', () => {
   assert.equal(threadText('x <!-- kicad-review-anchor eyJhIjoxfQ -->'), 'x');
 });
+
+test('threads: anchor suffix whitespace agrees with Python', () => {
+  const body = threadBody({ anchor, text: 'mine', link: 'https://s/r' });
+  assert.deepEqual(parseAnchor(`${body}\n  \t`), anchor);
+  assert.equal(threadText(`${body}\n  \t`), 'mine');
+  for (const suffix of ['﻿', '\x85', '\x1c', '\x1d', '\x1e', '\x1f']) {
+    assert.equal(parseAnchor(body + suffix), null, JSON.stringify(suffix));
+    assert.equal(threadText(body + suffix), body + suffix);
+  }
+});
+
+test('threads: review links preserve existing percent escapes', () => {
+  const body = threadBody({ anchor, text: 'mine', link: 'https://s/r#a%20b' });
+  assert.ok(body.includes('[open in review](https://s/r#a%20b)'));
+  const unsafe = threadBody({ anchor, text: 'mine', link: 'https://s/r<`>' });
+  assert.ok(unsafe.includes('[open in review](https://s/r%3C%60%3E)'));
+});

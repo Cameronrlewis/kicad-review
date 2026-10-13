@@ -1,5 +1,5 @@
 // Review-site threads: GitHub pull-request review comments that carry a KiCad anchor.
-const MARKER = /<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->\s*$/;
+const MARKER = /<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->[ \t\r\n]*$/;
 const KEYS = ['v', 'project', 'file', 'sheet', 'layer', 'target', 'uuid', 'kind', 'ref', 'x', 'y', 'side', 'commit', 'severity'];
 
 const toB64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -33,7 +33,7 @@ const mdText = (value) => String(value).replace(/[\r\n]/g, ' ').replace(/[\\`*_[
 
 export function threadBody({ anchor, text, link }) {
   const where = [`📍 ${mdText(anchor.ref || 'point')}`, `\`${anchor.file.replaceAll('`', "'")}\``, anchor.layer && mdText(anchor.layer),
-    `(${anchor.x.toFixed(2)}, ${anchor.y.toFixed(2)}) mm`, `[open in review](${encodeURI(link).replace(/\(/g, '%28').replace(/\)/g, '%29')})`].filter(Boolean).join(' · ');
+    `(${anchor.x.toFixed(2)}, ${anchor.y.toFixed(2)}) mm`, `[open in review](${link.replace(/[ ()<>`]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'))})`].filter(Boolean).join(' · ');
   return `${anchor.severity === 'blocking' ? '**Blocking** · ' : ''}${where}\n\n${text}\n\n<!-- kicad-review-anchor ${encodeAnchor(anchor)} -->`;
 }
 
