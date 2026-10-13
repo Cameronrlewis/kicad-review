@@ -17,6 +17,7 @@ on:
         description: Head revision (commit, branch or tag)
         required: true
 permissions:
+  # issues: read        # only with [issues] enabled = true
   contents: write       # release assets and the kicad-review-assets screenshot branch
   pull-requests: write  # the review comment
 jobs:

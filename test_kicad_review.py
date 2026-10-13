@@ -1160,3 +1160,15 @@ with tempfile.TemporaryDirectory() as t:
         os.chdir(_cwd)
 print("ok threads cmd_summary")
 
+
+# Issues: match only open anchored issues, keep the disabled summary identical.
+from kicad_review import touched_issues
+enc_issue = lambda n, ref, project="": {"number": n, "body": enc({"v": 1, "project": project, "ref": ref, "severity": "comment"})}
+idata = {**d2, "projects": [{"name": "A", "dir": "", "status": "modified", "checks": [], "changes": [{"ref": "R16", "kind": "footprint", "action": "modified", "changes": [], "props": {}}]}]}
+issues = [enc_issue(12, "R16"), enc_issue(15, "C3"), {"number": 20, "body": "plain issue"}, enc_issue(21, "R16", "other"), {**enc_issue(22, "R16"), "pull_request": {}}, {**enc_issue(23, "R16"), "state": "closed"}, enc_issue(12, "R16"), {**enc_issue(24, "R16"), "body": 5}, enc_issue("unsafe", "R16")]
+assert touched_issues(issues, idata) == [12]
+assert touched_issues({"message": "denied"}, idata) == []
+assert "Touches parts named in #12, #15." in comment_markdown(idata, [], "", issues=[12, 15])
+assert comment_markdown(idata, [], "") == comment_markdown(idata, [], "", issues=None) == comment_markdown(idata, [], "", issues=[])
+assert DEFAULT_SETTINGS["issues"] == {"enabled": False}
+print("ok touched issues and disabled summary byte identity")

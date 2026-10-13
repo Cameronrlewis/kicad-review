@@ -124,6 +124,17 @@ jobs:
             -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{body}}}}}}}' \
             > review/threads.json || { rm -f review/threads.json; echo "::warning::Could not read review threads"; }
 
+      # Optional; opted-in callers must grant issues: read. Existing v1 callers are unchanged.
+      - name: Collect anchored issues
+        if: steps.report.outputs.issues == 'true' && github.event.pull_request.number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # ponytail: first 100 open issues; paginate if a repository ever anchors more.
+          gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" > review/issues.json \
+            || { rm -f review/issues.json; echo "::warning::Could not read issues. Add 'issues: read' to the caller's permissions."; }
+
       - name: Copy named report
         if: steps.detect.outputs.changed == 'true'
         env:
