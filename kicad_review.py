@@ -585,6 +585,35 @@ def natural(s):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s or "")]
 
 
+def object_index(base, head):
+    """Every symbol and footprint of head, then the base-only ones: what a thread can be pinned to.
+    uuid is the KiCad UUID (schematic keys are sheet path + UUID); sheet or layer says which drawing it is on."""
+    def entry(key, o, side):
+        e = {"uuid": key.rsplit("/", 1)[-1], "kind": o["kind"], "ref": o["ref"], "value": o["props"].get("Value"),
+             "side": side, "pos": o.get("pos"), "box": o.get("box")}
+        if o["where"].get("sheet") is not None:
+            e["sheet"] = o["where"]["sheet"]
+        else:
+            e["layer"] = o["props"].get("layer")
+        return e
+    keep = lambda objs: {k: o for k, o in objs.items() if o["kind"] in ("symbol", "footprint")}
+    b, h = keep(base), keep(head)
+    by_match = {o["match"]: k for k, o in b.items() if o.get("match")}
+    out, used = [], set()
+    for k, o in h.items():
+        bk = k if k in b else by_match.get(o.get("match"))
+        e = entry(k, o, "head")
+        if bk is None or bk in used:
+            e["added"] = True
+        else:
+            used.add(bk)
+            if b[bk].get("pos") != o.get("pos"):
+                e["pos_before"] = b[bk].get("pos")
+        out.append(e)
+    out += [entry(k, o, "base") for k, o in b.items() if k not in used]
+    return out
+
+
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
@@ -594,6 +623,7 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "threads": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -612,7 +642,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -628,6 +658,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    if not isinstance(settings["threads"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
     return settings
 
 
@@ -984,7 +1016,8 @@ def build_project(p, blobs, settings):
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
-            **({"parts": parts} if parts else {})}
+            **({"parts": parts} if parts else {}),
+            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] else {})}
 
 
 def assign_ids(projects):
@@ -1043,7 +1076,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "threads") and not v["enabled"])}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),

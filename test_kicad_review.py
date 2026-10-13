@@ -1035,3 +1035,41 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+# Threads: object index for anchoring. Head objects first; base-only objects keep their base position.
+from kicad_review import object_index, load_settings
+sym = lambda ref, x: {"kind": "symbol", "ref": ref, "match": ("symbol", ref, "1"), "where": {"sheet": "/sub-uuid/"},
+                      "pos": [x, 1, 0], "props": {"Value": "10k"}}
+fpo = lambda ref, x: {"kind": "footprint", "ref": ref, "match": ("footprint", ref), "where": {"board": True},
+                      "pos": [x, 2, 90], "box": [x - 1, 1, x + 1, 3], "props": {"Value": "1k", "layer": "F.Cu"}}
+wire = {"kind": "wire", "ref": "", "where": {"sheet": "/"}, "pos": [0, 0], "props": {}}
+base = {"/sub-uuid/s1": sym("R1", 1), "f1": fpo("R1", 1), "f2": fpo("R2", 2), "/w": wire}
+head = {"/sub-uuid/s1": sym("R1", 1), "f1": fpo("R1", 5), "new-f3": fpo("R3", 3), "/w": wire}
+idx = object_index(base, head)
+by = {(e["side"], e["kind"], e["ref"]): e for e in idx}
+assert set(by) == {("head", "symbol", "R1"), ("head", "footprint", "R1"), ("head", "footprint", "R3"), ("base", "footprint", "R2")}, by.keys()
+assert by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "side": "head",
+                                      "pos": [1, 1, 0], "box": None, "sheet": "/sub-uuid/"}, by["head", "symbol", "R1"]
+assert by["head", "footprint", "R1"]["pos_before"] == [1, 2, 90] and by["head", "footprint", "R1"]["layer"] == "F.Cu"
+assert by["head", "footprint", "R3"]["added"] is True and "pos_before" not in by["head", "footprint", "R3"]
+assert by["base", "footprint", "R2"]["uuid"] == "f2" and "sheet" not in by["base", "footprint", "R2"]
+assert [e["side"] for e in idx] == ["head", "head", "head", "base"]
+# Regenerated UUID: matched by reference, so not reported as added.
+assert "added" not in object_index({"/sub-uuid/s1": sym("R1", 1)}, {"/sub-uuid/other": sym("R1", 1)})[0]
+print("ok threads object index")
+
+import os, tempfile
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d); os.makedirs("base")
+    with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = "yes"\n')
+    try:
+        load_settings(); raise AssertionError("threads.enabled must be validated")
+    except SystemExit as e:
+        assert "threads.enabled must be true or false" in str(e)
+    with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = true\n')
+    assert load_settings()["threads"] == {"enabled": True}
+    os.chdir(_cwd)
+from kicad_review import DEFAULT_SETTINGS
+assert DEFAULT_SETTINGS["threads"] == {"enabled": False}
+print("ok threads settings")
+
