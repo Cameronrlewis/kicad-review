@@ -1372,14 +1372,14 @@ test('reply and resolve call the right GitHub endpoints', async () => {
   } finally { restore(); }
 });
 
-test('thread routes explain a missing Pull requests permission', async () => {
+test('thread routes explain a missing Pull requests and Contents permissions', async () => {
   const sealed = await signedIn({ t: 'access-secret' });
   const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? repoOk()
     : new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), { status: 403 }));
   try {
     const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/11/reply', { text: 'x' }, undefined, sealed);
     assert.equal(response.status, 403);
-    assert.match((await response.json()).error, /Pull requests permission/);
+    assert.match((await response.json()).error, /Pull requests and Contents permissions \(read and write\)/);
   } finally { restore(); }
 });
 
@@ -1431,7 +1431,7 @@ test('thread GraphQL errors never become successful lists or mutations', async (
         const body = await response.json();
         assert.equal(body.ok, undefined);
         assert.ok(body.error);
-        if (type === 'FORBIDDEN') assert.match(body.error, /Pull requests permission/);
+        if (type === 'FORBIDDEN') assert.match(body.error, /Pull requests and Contents permissions \(read and write\)/);
       }
     } finally { restore(); }
   }
@@ -1554,6 +1554,19 @@ test('thread client contains load failures, clears notice, and guards vanished t
     FormData: class { get() { return 'text'; } }, location: { hash: '' },
   });
   const message = data => listeners.message({ source: iframe.contentWindow, data });
+  const pin = { kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } };
+  listeners.message({ source: {}, data: pin }); assert.equal(composer.open, false);
+  for (let i = 0; i < 2; i++) {
+    composer.querySelector('[name=severity]').value = 'blocking';
+    composer.querySelector('textarea').value = 'old draft';
+    composer.querySelector('[role=status]').textContent = 'old error';
+    message(pin);
+    assert.equal(composer.open, true);
+    assert.equal(composer.querySelector('[name=severity]').value, 'comment');
+    assert.equal(composer.querySelector('textarea').value, '');
+    assert.equal(composer.querySelector('[role=status]').textContent, '');
+    composer.close();
+  }
   const ready = () => message({ kicadReviewReady: true, threads: true });
   const settle = () => new Promise(resolve => setImmediate(resolve));
   ready(); await settle(); assert.equal(notice.textContent, 'Threads could not be loaded.');

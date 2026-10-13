@@ -80,7 +80,7 @@ Every later review places the thread on the same part by its KiCad UUID, or by i
 
 When thread collection succeeds, the pull request comment shows "Threads: N open (M blocking), K resolved". The counts cover only threads started from the review site, among the pull request's first 100 review threads. The offline report file shows no threads.
 
-Threads are off by default. The site exposes them only on review pages for `pull_request` runs. The GitHub App needs Pull requests read and write permission; a 403 response shows a hint to ask the repository owner to accept that permission. A rate-limit response shows "GitHub rate limit reached. Try again later." (429).
+Threads are off by default. The site exposes them only on review pages for `pull_request` runs. The GitHub App needs Pull requests and Contents permissions (read and write); GitHub requires Contents write to resolve review threads. A 403 response shows a hint to ask the repository owner to accept those permissions. A rate-limit response shows "GitHub rate limit reached. Try again later." (429).
 
 When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts.
 

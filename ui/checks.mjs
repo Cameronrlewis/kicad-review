@@ -744,6 +744,22 @@ export const CHECKS = [
     && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
     && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
 `],
+  ["Threads arrival preserves the drawing during the first right-click", "v=board", `
+    const vp = document.querySelector("#stage .vp"), world = vp.querySelector(".world");
+    const rect = vp.getBoundingClientRect(), event = new MouseEvent("contextmenu", {bubbles:true, cancelable:true, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2});
+    const saved = parent.postMessage, sent = [];
+    parent.postMessage = data => sent.push(data);
+    try {
+      vp.dispatchEvent(new PointerEvent("pointerdown", {button:2, bubbles:true}));
+      acceptThreads([]);
+      await new Promise(r => setTimeout(r, 100));
+      if (!vp.isConnected || vp.querySelector(".world") !== world) return "thread arrival replaced right-click target";
+      // The harness is offline; exercise the enabled proposal without changing that contract.
+      vp.addEventListener("contextmenu", e => { e.preventDefault(); proposePin(vp, e); }, {once:true});
+      vp.dispatchEvent(event);
+      return event.defaultPrevented && sent.length === 1 && !!sent[0].kicadReviewPin?.file || JSON.stringify(sent);
+    } finally { parent.postMessage = saved; }
+  `],
   ["Threads anchorAt pins an object and falls back to a point", "", `
     const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
     await goTo(row.id); const b = rowBox(row, "head"), cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;

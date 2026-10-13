@@ -63,7 +63,7 @@ export const RESOLVE_MUTATION = 'mutation($id:ID!){resolveReviewThread(input:{th
 export const UNRESOLVE_MUTATION = 'mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}';
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
-const permissionHint = "Threads need the app's Pull requests permission. Ask the repository owner to accept it.";
+const permissionHint = "Threads need the app's Pull requests and Contents permissions (read and write). Ask the repository owner to accept them.";
 
 function refused(response) {
   if (response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after'))) return json({ error: 'GitHub rate limit reached. Try again later.' }, 429);

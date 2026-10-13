@@ -11,7 +11,7 @@ function acceptThreads(list) {
   S.threads = list.filter(t => { try { return validThread(t); } catch { return false; } }).slice(0, 500);   // ponytail: 500 threads drawn at most
   if (S.wantThreads) S.t = "threads";
   S.wantThreads = false;
-  if (S.v) { renderPanel(); draw(); }
+  if (S.v) { renderPanel(); drawPins(); }
 }
 function handleParentMessage(e, on = THREADS_ON) {
   if (!on || e.source !== parent) return false;
@@ -386,6 +386,11 @@ function afterDraw(view) {
       w.appendChild(m);
     }
   }
+  drawPins();
+}
+function drawPins() {
+  // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
+  for (const pin of document.querySelectorAll("#stage .pin")) pin.remove();
   for (const w of document.querySelectorAll("#stage .world")) {
     const side = w.querySelector(".stack.head") ? "head" : "base";
     for (const t of shownThreads()) {

@@ -42,6 +42,7 @@ export function threadsClient(config) {
     if (event.data.kicadReviewPin && typeof event.data.kicadReviewPin === 'object') {
       pending = event.data.kicadReviewPin;
       composer.querySelector('.thread-target').textContent = `${pending.ref || 'Point'} · ${pending.file} · (${Number(pending.x).toFixed(2)}, ${Number(pending.y).toFixed(2)}) mm`;
+      composer.querySelector('[name=severity]').value = 'comment';
       composer.querySelector('textarea').value = ''; status(composer, ''); composer.showModal();
     }
     if (typeof event.data.kicadReviewOpenThread === 'string') show(event.data.kicadReviewOpenThread);
