@@ -28,12 +28,14 @@ export function threadsClient(config) {
     view.querySelector('[data-act=resolve]').textContent = t.resolved ? 'Reopen' : 'Resolve';
     status(view, ''); if (!view.open) view.showModal();
   };
-  const load = async () => {
+  const notice = document.getElementById('thread-notice');
+  const load = () => (async () => {
     const response = await fetch(config.threads);
-    if (!response.ok) { document.getElementById('thread-notice').textContent = (await response.json().catch(() => ({}))).error || 'Threads could not be loaded.'; return; }
+    if (!response.ok) { notice.textContent = (await response.json().catch(() => ({}))).error || 'Threads could not be loaded.'; return; }
     threads = (await response.json()).threads; send({ kicadReviewThreads: threads });
+    notice.textContent = '';
     if (current && view.open) show(current);
-  };
+  })().catch(() => { notice.textContent = 'Threads could not be loaded.'; });
   addEventListener('message', (event) => {
     if (!accept(event)) return;
     if (event.data.kicadReviewReady === true && event.data.threads === true) load();
@@ -54,7 +56,9 @@ export function threadsClient(config) {
   });
   view.querySelector('form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const t = threads.find((x) => x.id === current), text = String(new FormData(event.target).get('text') || '');
+    const t = threads.find((x) => x.id === current);
+    if (!t) return status(view, 'This thread no longer exists.');
+    const text = String(new FormData(event.target).get('text') || '');
     try {
       if (event.submitter?.dataset.act === 'resolve') await post(`/${encodeURIComponent(t.id)}/${t.resolved ? 'unresolve' : 'resolve'}`, {});
       else await post(`/${encodeURIComponent(t.comments[0].id)}/reply`, { text });

@@ -1529,3 +1529,45 @@ test('artifact wrapper discovers PR number and omits thread UI for push runs', a
     } finally { restore(); }
   }
 });
+
+
+test('serialized thread client has no bundler name helpers and notice is in review bar', () => {
+  assert.doesNotMatch(threadsClient.toString(), /__name/);
+  assert.match(readFileSync('site/wrangler.toml', 'utf8'), /^keep_names = false$/m);
+  const html = reviewPage({ owner: 'Cameronrlewis', repo: 'repo', id: '123', pull: 7 });
+  assert.match(html, /class="review-bar">[^]*?id="thread-notice"[^]*?<\/div><div class="review-stage">/);
+});
+
+test('thread client contains load failures, clears notice, and guards vanished threads', async () => {
+  const listeners = {}, notice = { textContent: '' }, sent = [];
+  const node = () => ({ textContent: '', value: '', replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const dialog = () => {
+    const nodes = {};
+    return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } };
+  };
+  const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
+  let response = () => Promise.reject(new Error('offline')), posts = 0;
+  runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', link: '/review' })`, {
+    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+    addEventListener(type, fn) { listeners[type] = fn; },
+    fetch: async (url, options) => { if (options) { posts++; return { ok: true }; } return response(); },
+    FormData: class { get() { return 'text'; } }, location: { hash: '' },
+  });
+  const message = data => listeners.message({ source: iframe.contentWindow, data });
+  const ready = () => message({ kicadReviewReady: true, threads: true });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  ready(); await settle(); assert.equal(notice.textContent, 'Threads could not be loaded.');
+  const thread = { id: 'thread', anchor: { ref: 'R1' }, comments: [{ id: 1, body: 'body' }] };
+  response = async () => ({ ok: true, json: async () => ({ threads: [thread] }) });
+  ready(); await settle(); assert.equal(notice.textContent, ''); assert.equal(sent.length, 1);
+  message({ kicadReviewOpenThread: 'thread' }); assert.equal(view.open, true);
+  response = async () => ({ ok: true, json: async () => ({ threads: [] }) });
+  ready(); await settle();
+  await view.querySelector('form').submit({ preventDefault() {}, target: {} });
+  assert.equal(view.querySelector('[role=status]').textContent, 'This thread no longer exists.'); assert.equal(posts, 0);
+  response = () => Promise.reject(new Error('offline'));
+  composer.showModal();
+  await composer.querySelector('form').submit({ preventDefault() {}, target: {} });
+  assert.equal(composer.open, false); assert.equal(notice.textContent, 'Threads could not be loaded.');
+  assert.equal(composer.querySelector('[role=status]').textContent, ''); assert.equal(posts, 1);
+});

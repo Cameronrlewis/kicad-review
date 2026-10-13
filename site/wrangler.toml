@@ -1,6 +1,8 @@
 name = "kicad-review-site"
 main = "worker.js"
 compatibility_date = "2026-10-07"
+# threadsClient is sent via .toString(); name helpers would not exist in the browser.
+keep_names = false
 
 [[rules]]
 type = "Text"
