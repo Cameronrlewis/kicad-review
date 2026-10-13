@@ -6,6 +6,7 @@ Standard library only. Subcommands are called from the reusable workflow.
 import argparse
 import base64
 import csv
+import datetime
 import gzip
 import hashlib
 import json
@@ -1072,6 +1073,7 @@ def cmd_report(args):
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
         fh.write(f"name={name}\n")
+        fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
@@ -1351,6 +1353,38 @@ def print_html(data, images, pr_title, pr_author, threads, now):
     return "\n".join(out) + "</body></html>"
 
 
+def cmd_pdf(args):
+    with open("review/data.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not data.get("settings", {}).get("pdf", {}).get("enabled", False):
+        return
+    shots = json.load(open("review/images/shots.json", encoding="utf-8")) if os.path.exists("review/images/shots.json") else []
+    images = [{**s, "path": f"review/images/{s['file']}"} for s in shots]
+    threads = None
+    page = print_html(data, images, os.environ.get("PR_TITLE", ""), os.environ.get("PR_AUTHOR", ""), threads,
+                      datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    with open("review/print.html", "w", encoding="utf-8") as fh:
+        fh.write(page)
+    name = os.environ.get("PDF_NAME", "")
+    if not re.fullmatch(r"kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.pdf", name):
+        print("::warning::PDF report failed: invalid PDF_NAME")
+        return
+    out = os.path.abspath(f"review/{name}")
+    try:
+        if os.path.exists(out):
+            os.remove(out)
+        result = subprocess.run([args.chrome, "--headless=new", "--no-sandbox", "--no-pdf-header-footer", f"--print-to-pdf={out}",
+                                 f"file://{os.path.abspath('review/print.html')}"], capture_output=True, text=True, timeout=120)
+        if result.returncode or not os.path.exists(out) or os.path.getsize(out) == 0:
+            raise OSError("Chrome did not produce a PDF")
+    except (OSError, subprocess.TimeoutExpired):
+        if os.path.exists(out):
+            os.remove(out)
+        print("::warning::PDF report failed: Chrome unavailable, failed or timed out")
+        return
+    print(f"{out}: {os.path.getsize(out) / 1e6:.2f} MB")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(required=True)
@@ -1364,6 +1398,9 @@ def main():
     p = sub.add_parser("shots", help="before/after screenshots of changed drawings for the comment")
     p.add_argument("--chrome", default="google-chrome")
     p.set_defaults(func=cmd_shots)
+    p = sub.add_parser("pdf", help="printable PDF of the review (needs Chrome)")
+    p.add_argument("--chrome", default="google-chrome")
+    p.set_defaults(func=cmd_pdf)
     p = sub.add_parser("summary", help="markdown for the pull request comment and job summary")
     p.add_argument("--image-base", default="")
     p.add_argument("--artifact-url", default="")

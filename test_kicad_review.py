@@ -1052,3 +1052,70 @@ assert html.count("<tr class=\"change\">") == 200 and "50 more changes are in th
 print("ok long change lists are capped")
 assert "pictures unavailable" in print_html(pdata, [], "", "", None, "now")
 print("ok missing screenshots are explained")
+
+from kicad_review import cmd_pdf
+import types as _types, kicad_review as kr
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d); os.makedirs("review/images")
+    json.dump({**pdata, "settings": {"pdf": {"enabled": True}}, "links": d2["links"], "reason": "x"}, open("review/data.json", "w"))
+    seen = []
+    saved = kr.subprocess.run
+    kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
+    try:
+        os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
+        cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+    finally:
+        kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
+    assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
+    os.chdir(_cwd)
+print("ok chrome failure does not fail the review")
+
+# Disabled PDF is byte-identical to settings predating PDF, including summaries.
+with tempfile.TemporaryDirectory() as d:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        os.makedirs("review")
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "test", "projects": []}))
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        before = copy.deepcopy(settings)
+        before.pop("pdf")
+        outputs = []
+        for current in (before, settings):
+            with patch("kicad_review.load_settings", return_value=current):
+                kr.cmd_report(None)
+            outputs.append(tuple(pathlib.Path("review/" + name).read_bytes() for name in ("kicad-review.html", "data.json")))
+        assert outputs[0] == outputs[1]
+        assert not os.path.exists("review/print.html")
+        with patch("kicad_review.subprocess.run", side_effect=AssertionError("Chrome must not run")):
+            cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        assert not os.path.exists("review/print.html")
+    finally:
+        os.chdir(old_cwd)
+print("ok PDF disabled report byte identity and no files")
+
+for invalid in ("enabled = 1", "enabled = 'yes'"):
+    with tempfile.TemporaryDirectory() as d:
+        pathlib.Path(d, "kicad-review.toml").write_text("[pdf]\n" + invalid)
+        try:
+            load_settings((d,))
+            raise AssertionError("invalid PDF setting accepted")
+        except SystemExit as error:
+            assert "pdf.enabled must be true or false" in str(error)
+print("ok PDF settings validate booleans")
+
+with tempfile.TemporaryDirectory() as d:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        os.makedirs("review")
+        pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
+        with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
+            for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
+                with patch("kicad_review.subprocess.run", side_effect=failure):
+                    cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+                assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
+    finally:
+        os.chdir(old_cwd)
+print("ok PDF timeout and launch failure are nonfatal")
