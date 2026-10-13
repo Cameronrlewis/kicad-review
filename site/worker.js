@@ -1,7 +1,6 @@
-import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
+import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 import { threadsRoute } from './threads.js';
 import { historyRoute } from './history.js';
-import { historyPage } from './pages.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -570,7 +569,7 @@ export default {
         return run(request, env, owner, repo, id, url);
       }
       const historyMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/history$/);
-      if (request.method === 'GET' && historyMatch) return await historyRoute(request, env, { owner: historyMatch[1], repo: historyMatch[2], number: Number(historyMatch[3]) }, { access, gh, historyPage, sessionResponse, errorPage });
+      if (request.method === 'GET' && historyMatch) return await historyRoute(request, env, { owner: historyMatch[1], repo: historyMatch[2], number: Number(historyMatch[3]) }, { access, gh, historyPage, sessionResponse, errorPage, artifactName });
       const threadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/threads(\/.*)?$/);
       if (threadRoute && ['GET', 'POST'].includes(request.method)) {
         const [, owner, repo, number, rest = ''] = threadRoute;

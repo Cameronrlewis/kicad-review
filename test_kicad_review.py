@@ -1216,6 +1216,13 @@ capped_checks = {**large, "projects": [{**p, "name": "x" * 20000} for p in large
 capped_body = comment_markdown(capped_checks, [], "", log=large_log)
 assert len(capped_body) <= 65536 and extract_log(capped_body) == [large_row] * 50
 print("ok history counts inside comment size budget")
+huge_row = row[:-2] + "x" * 70000 + " |"
+huge_log = "\n" + merge_log([huge_row] * 49, row)
+assert len(huge_log) <= 30000 and extract_log(huge_log) == [row]
+assert len(comment_markdown(large, [], "", log=huge_log)) < 65536
+raw_huge_log = block.replace(row, huge_row)
+assert len(comment_markdown(large, [], "", log=raw_huge_log)) < 65536
+print("ok oversized history drops oldest rows within comment budget")
 
 # Off means identical comment, job summary, and stdout, even with an old log on disk.
 _cwd = os.getcwd()

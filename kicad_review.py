@@ -1234,6 +1234,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
     body, checks = "\n".join(out), checks_markdown(data)
+    if len(log) > 30000:
+        log = "\n" + merge_log(extract_log(log), "")
     if log and len(checks) + len(log) > 59000:
         checks = checks[:max(0, 58900 - len(log))].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
@@ -1423,6 +1425,9 @@ def extract_log(text) -> list[str]:
 def merge_log(previous_rows, row, keep=50) -> str:
     rows = [line for line in [*previous_rows, row] if LOG_ROW.fullmatch(line)]
     rows = rows[-keep:] if keep > 0 else []
+    # Keep whole newest rows; leave ample room for checks and the comment body.
+    while sum(len(line) + 1 for line in rows) > 29500:
+        rows.pop(0)
     return "\n".join([LOG_START, "<details><summary>Review log</summary>", "", *LOG_HEAD, *rows, "", "</details>", LOG_END, ""])
 
 
