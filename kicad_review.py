@@ -1329,7 +1329,7 @@ def parts_markdown(data):
     return "\n".join(out)
 
 
-ANCHOR = re.compile(r"<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->")
+ANCHOR = re.compile(r"<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->\s*$")
 
 
 def thread_anchor(body):

@@ -1103,7 +1103,11 @@ assert thread_anchor("<!-- kicad-review-anchor !!!notbase64 -->") is None
 assert thread_anchor("<!-- kicad-review-anchor abc -->") is None
 assert thread_anchor(enc([1])) is None
 assert thread_anchor("<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(b'{"v":2}').decode().rstrip("=") + " -->") is None
-print("ok threads anchor decode failures")
+a_other = {**a_block, "ref": "R99"}
+assert thread_anchor("mine " + enc(a_other) + "\n\nstill mine\n\n" + enc(a_block)) == a_block
+assert thread_anchor(enc(a_block) + "\ntext after marker") is None
+assert thread_anchor(enc(a_block) + "\n \t") == a_block
+print("ok threads anchor decode failures and trailing-only markers")
 gql = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
     {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "blocking"})}]}},
     {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "comment"})}]}},

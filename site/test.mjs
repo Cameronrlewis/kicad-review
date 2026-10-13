@@ -1208,3 +1208,42 @@ test('threads: GraphQL threads keep only anchored ones, with plain text', () => 
     { id: 12, author: 'ghost', body: 'agreed', createdAt: '2026-10-12T11:00:00Z', url: 'https://github.com/x#2' }] }]);
   assert.deepEqual(parseThreads({ errors: [{}] }), []);
 });
+
+test('threads: only the trailing anchor marker counts', () => {
+  const other = { ...anchor, ref: 'R99' };
+  const spoof = `<!-- kicad-review-anchor ${encodeAnchor(other)} -->`;
+  const text = `mine ${spoof}\n\nstill mine`;
+  const body = threadBody({ anchor, text, link: 'https://s/r' });
+  assert.deepEqual(parseAnchor(body), anchor);
+  assert.equal(threadText(body), text);
+  assert.equal(parseAnchor(`${spoof}\ntext after marker`), null);
+  assert.equal(threadText(`${spoof}\ntext after marker`), `${spoof}\ntext after marker`);
+  assert.deepEqual(parseAnchor(`${body}\n \t`), anchor);
+});
+
+test('threads: anchor strings reject newlines and file markup', () => {
+  for (const key of ['project', 'file', 'sheet', 'layer', 'uuid', 'kind', 'ref', 'commit']) {
+    for (const newline of ['\r', '\n']) {
+      const value = key === 'file' ? `a${newline}b.kicad_pcb` : `${anchor[key] || 'x'}${newline}`;
+      assert.equal(validAnchor({ ...anchor, [key]: value }), false, `${key} ${JSON.stringify(value)}`);
+    }
+  }
+  for (const bad of [{ ref: 'R1\n\n# hi' }, { layer: 'F.Cu\r' }, { file: 'a/<!-- x -->.kicad_pcb' },
+    { file: 'a`b.kicad_pcb' }]) assert.equal(validAnchor({ ...anchor, ...bad }), false, JSON.stringify(bad));
+  assert.equal(threadText(threadBody({ anchor, text: 'mine', link: 'https://s/r' })), 'mine');
+});
+
+test('threads: readable anchor fields replace newlines defensively', () => {
+  const body = threadBody({ anchor: { ...anchor, ref: 'R1\n\n# hi', layer: 'F.Cu\r' }, text: 'mine', link: 'https://s/r' });
+  assert.equal(body.split('\n\n')[1], 'mine');
+  assert.match(body.split('\n\n')[0], /R1  \\# hi/);
+});
+
+test('threads: review links encode spaces and parentheses', () => {
+  const body = threadBody({ anchor, text: 'mine', link: 'https://s/r(a) b' });
+  assert.ok(body.includes('[open in review](https://s/r%28a%29%20b)'));
+});
+
+test('threads: marker-only text has no missing-header slice bug', () => {
+  assert.equal(threadText('x <!-- kicad-review-anchor eyJhIjoxfQ -->'), 'x');
+});

@@ -1,5 +1,5 @@
 // Review-site threads: GitHub pull-request review comments that carry a KiCad anchor.
-const MARKER = /<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->/;
+const MARKER = /<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->\s*$/;
 const KEYS = ['v', 'project', 'file', 'sheet', 'layer', 'target', 'uuid', 'kind', 'ref', 'x', 'y', 'side', 'commit', 'severity'];
 
 const toB64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -18,9 +18,10 @@ export function parseAnchor(body) {
 
 const str = (value, max) => value === null || (typeof value === 'string' && value.length <= max);
 export function validAnchor(a) {
-  return !!a && typeof a === 'object' && Object.keys(a).every((k) => KEYS.includes(k)) && a.v === 1
+  return !!a && typeof a === 'object' && Object.keys(a).every((k) => KEYS.includes(k))
+    && Object.values(a).every((value) => typeof value !== 'string' || !/[\r\n]/.test(value)) && a.v === 1
     && typeof a.project === 'string' && a.project.length <= 500
-    && typeof a.file === 'string' && /^[^\0]{1,500}\.kicad_(sch|pcb)$/.test(a.file) && !a.file.split('/').includes('..') && !a.file.startsWith('/')
+    && typeof a.file === 'string' && /^[^\0\r\n<>`]{1,500}\.kicad_(sch|pcb)$/.test(a.file) && !a.file.split('/').includes('..') && !a.file.startsWith('/')
     && str(a.sheet, 2000) && str(a.layer, 100) && ['object', 'point'].includes(a.target)
     && str(a.uuid, 100) && str(a.kind, 50) && str(a.ref, 200)
     && Number.isFinite(a.x) && Number.isFinite(a.y) && ['head', 'base'].includes(a.side)
@@ -28,18 +29,21 @@ export function validAnchor(a) {
     && (a.target === 'point' || typeof a.uuid === 'string');
 }
 
-const mdText = (value) => String(value).replace(/[\\`*_[\]()<>#|!~]/g, '\\$&').replace(/@/g, '@\u200b');
+const mdText = (value) => String(value).replace(/[\r\n]/g, ' ').replace(/[\\`*_[\]()<>#|!~]/g, '\\$&').replace(/@/g, '@\u200b');
 
 export function threadBody({ anchor, text, link }) {
   const where = [`📍 ${mdText(anchor.ref || 'point')}`, `\`${anchor.file.replaceAll('`', "'")}\``, anchor.layer && mdText(anchor.layer),
-    `(${anchor.x.toFixed(2)}, ${anchor.y.toFixed(2)}) mm`, `[open in review](${link})`].filter(Boolean).join(' · ');
+    `(${anchor.x.toFixed(2)}, ${anchor.y.toFixed(2)}) mm`, `[open in review](${encodeURI(link).replace(/\(/g, '%28').replace(/\)/g, '%29')})`].filter(Boolean).join(' · ');
   return `${anchor.severity === 'blocking' ? '**Blocking** · ' : ''}${where}\n\n${text}\n\n<!-- kicad-review-anchor ${encodeAnchor(anchor)} -->`;
 }
 
 export function threadText(body) {
   const text = String(body || '');
-  if (!MARKER.test(text)) return text;
-  return text.slice(text.indexOf('\n\n') + 2).replace(/\n\n<!-- kicad-review-anchor [A-Za-z0-9_-]+ -->\s*$/, '');
+  const match = MARKER.exec(text);
+  if (!match) return text;
+  const content = text.slice(0, match.index);
+  const separator = content.indexOf('\n\n');
+  return separator === -1 ? content.trimEnd() : content.slice(separator + 2).replace(/\n\n$/, '');
 }
 
 export function parseThreads(graphql) {
