@@ -501,6 +501,7 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
   const sealed = await signedIn(); const seen = [];
   const restore = mockFetch(async (url) => {
     seen.push(url);
+    if (url.includes('/actions/runs/')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
       name: 'kicad-review-deadbee-cafebad-fail.html', expired: false,
@@ -524,13 +525,17 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.deepEqual(seen, [
       'https://api.github.com/repos/Cameronrlewis/repo',
       'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/44',
+      'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/123',
     ]);
   } finally { restore(); }
 });
 
 test('framed artifact page uses legacy review crumbs', async () => {
   const sealed = await signedIn();
-  const restore = mockFetch(async (url) => url.endsWith('/repo') ? accessibleRepo() : new Response(JSON.stringify({ name: 'kicad-review.html', expired: false })));
+  const restore = mockFetch(async (url) => {
+    if (url.includes('/actions/runs/')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
+    return url.endsWith('/repo') ? accessibleRepo() : new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+  });
   try {
     const body = await (await call('/r/Cameronrlewis/repo/a/45', { headers: { Cookie: `s=${sealed}` } })).text();
     assert.match(body, /<span>Review<\/span>/);
@@ -1268,4 +1273,139 @@ test('threads: review links preserve existing percent escapes', () => {
 test('threads: review links encode backslash and line breaks', () => {
   const body = threadBody({ anchor, text: 'mine', link: 'https://s/a\\b\r\nc' });
   assert.ok(body.includes('[open in review](https://s/a%5Cb%0D%0Ac)'));
+});
+
+const threadsJson = (path, body, origin = 'https://site.example', cookie) => call(path, { method: 'POST', headers: {
+  ...(origin ? { Origin: origin } : {}), 'Content-Type': 'application/json', ...(cookie ? { Cookie: `s=${cookie}` } : {}) }, body: JSON.stringify(body) });
+const repoOk = () => new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
+
+test('thread POSTs reject foreign Origin and non-JSON before GitHub', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls += 1; throw new Error('unexpected fetch'); });
+  try {
+    for (const origin of [null, 'null', 'https://evil.example']) {
+      const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads', { anchor, text: 'x', link: '/r/Cameronrlewis/repo/a/1' }, origin);
+      assert.equal(response.status, 403);
+    }
+    const plain = await call('/r/Cameronrlewis/repo/pull/7/threads', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'text/plain' }, body: '{}' });
+    assert.equal(plain.status, 415);
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
+test('thread list reads GraphQL as the user after the access check', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const seen = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    seen.push(url);
+    assert.equal(options.headers.Authorization, 'Bearer access-secret');
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    assert.equal(url, 'https://api.github.com/graphql');
+    assert.deepEqual(JSON.parse(options.body).variables, { owner: 'Cameronrlewis', name: 'repo', number: 7 });
+    return new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { nodes: [] } } } } }));
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { threads: [], head: 'b'.repeat(40) });
+    assert.equal(seen.length, 2);
+  } finally { restore(); }
+});
+
+test('creating a thread posts a file-level review comment on the PR head', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  let posted;
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/pulls/7') return new Response(JSON.stringify({ head: { sha: 'c'.repeat(40) } }));
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/pulls/7/comments');
+    posted = JSON.parse(options.body);
+    return new Response('{}', { status: 201 });
+  });
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads', { anchor, text: 'Move it', link: '/r/Cameronrlewis/repo/a/123#p=0&v=board' }, undefined, sealed);
+    assert.equal(response.status, 201);
+    assert.equal(posted.commit_id, 'c'.repeat(40));
+    assert.equal(posted.path, anchor.file);
+    assert.equal(posted.subject_type, 'file');
+    assert.match(posted.body, /\[open in review\]\(https:\/\/site\.example\/r\/Cameronrlewis\/repo\/a\/123#p=0&v=board\)/);
+    assert.deepEqual(parseAnchor(posted.body), anchor);
+  } finally { restore(); }
+});
+
+test('creating a thread rejects bad anchors, empty text and foreign links without posting', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  let posts = 0;
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    if (options.method === 'POST') posts += 1;
+    return new Response(JSON.stringify({ head: { sha: 'c'.repeat(40) } }));
+  });
+  try {
+    for (const body of [{ anchor: { ...anchor, file: '../x' }, text: 'a', link: '/r/Cameronrlewis/repo/a/1' },
+      { anchor, text: '   ', link: '/r/Cameronrlewis/repo/a/1' }, { anchor, text: 'x'.repeat(10001), link: '/r/Cameronrlewis/repo/a/1' },
+      { anchor, text: 'a', link: 'https://evil.example/' }]) {
+      const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads', body, undefined, sealed);
+      assert.equal(response.status, 400, JSON.stringify(body).slice(0, 80));
+    }
+    assert.equal(posts, 0);
+  } finally { restore(); }
+});
+
+test('reply and resolve call the right GitHub endpoints', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const calls = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    calls.push([url, JSON.parse(options.body || '{}')]);
+    return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }), { status: url.endsWith('/replies') ? 201 : 200 });
+  });
+  try {
+    assert.equal((await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/11/reply', { text: 'done' }, undefined, sealed)).status, 201);
+    assert.equal((await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/PRRT_kwDO1/resolve', {}, undefined, sealed)).status, 200);
+    assert.equal((await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/bad%20id/resolve', {}, undefined, sealed)).status, 404);
+    assert.deepEqual(calls[0], ['https://api.github.com/repos/Cameronrlewis/repo/pulls/7/comments/11/replies', { body: 'done' }]);
+    assert.equal(calls[1][0], 'https://api.github.com/graphql');
+    assert.match(calls[1][1].query, /resolveReviewThread/);
+    assert.deepEqual(calls[1][1].variables, { id: 'PRRT_kwDO1' });
+    assert.equal(calls.length, 2);
+  } finally { restore(); }
+});
+
+test('thread routes explain a missing Pull requests permission', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? repoOk()
+    : new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), { status: 403 }));
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/11/reply', { text: 'x' }, undefined, sealed);
+    assert.equal(response.status, 403);
+    assert.match((await response.json()).error, /Pull requests permission/);
+  } finally { restore(); }
+});
+
+
+test('artifact PR discovery passes only pull-request run numbers to the wrapper', async () => {
+  const source = readFileSync('site/worker.js', 'utf8');
+  const fn = source.slice(source.indexOf('async function artifactReport('), source.indexOf('const artifactName ='));
+  for (const [runData, expected] of [
+    [{ event: 'pull_request', pull_requests: [{ number: 7 }] }, 7],
+    [{ event: 'push', pull_requests: [{ number: 7 }] }, null],
+    [{ event: 'pull_request', pull_requests: [] }, null],
+    [{ event: 'pull_request', pull_requests: [{ number: '7' }] }, null],
+    [null, null],
+  ]) {
+    const seen = [];
+    const result = await runInNewContext(`(async()=>{${fn}; return artifactReport({}, {}, 'owner', 'repo', 42, { token: 'user-token', login: 'octocat' }, false);})()`, {
+      frameCsp, reviewPage: value => value, sessionResponse: value => value,
+      gh: async (path, token) => {
+        seen.push([path, token]);
+        return path.endsWith('/artifacts/42')
+          ? new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 123 } }))
+          : new Response(JSON.stringify(runData), { status: runData ? 200 : 403 });
+      },
+    });
+    assert.equal(result.pull, expected);
+    assert.equal(result.workflowRunId, 123);
+    assert.deepEqual(seen, [['/repos/owner/repo/actions/artifacts/42', 'user-token'], ['/repos/owner/repo/actions/runs/123', 'user-token']]);
+  }
 });

@@ -61,3 +61,58 @@ export function parseThreads(graphql) {
 export const LIST_QUERY = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewThreads(first:100){nodes{id isResolved resolvedBy{login} comments(first:50){nodes{databaseId body author{login} createdAt url}}}}}}}';
 export const RESOLVE_MUTATION = 'mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}';
 export const UNRESOLVE_MUTATION = 'mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}';
+
+const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+const permissionHint = "Threads need the app's Pull requests permission. Ask the repository owner to accept it.";
+
+function refused(response) {
+  if (response.status === 403) return json({ error: permissionHint }, 403);
+  if (response.status === 422) return json({ error: 'GitHub refused this thread. The file may not be part of this pull request.' }, 422);
+  return null;
+}
+
+export async function threadsRoute(request, env, { owner, repo, number, rest }, { access, gh }) {
+  const url = new URL(request.url);
+  if (request.method === 'POST') {
+    if (request.headers.get('Origin') !== url.origin) return json({ error: 'Forbidden' }, 403);
+    if (!String(request.headers.get('Content-Type') || '').startsWith('application/json')) return json({ error: 'Send JSON' }, 415);
+  }
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  const token = allowed.s.token, root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const graphql = (query, variables) => gh('/graphql', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }) });
+  let body = {};
+  if (request.method === 'POST') { try { body = await request.json(); } catch { return json({ error: 'Send JSON' }, 400); } }
+  const text = typeof body?.text === 'string' ? body.text.trim() : '';
+  if (request.method === 'GET') {
+    if (rest !== '') return json({ error: 'Not found' }, 404);
+    const response = await graphql(LIST_QUERY, { owner, name: repo, number });
+    const denied = refused(response); if (denied) return denied;
+    if (!response.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+    const data = await response.json();
+    return json({ threads: parseThreads(data), head: data?.data?.repository?.pullRequest?.headRefOid || null });
+  }
+  if (rest === '') {
+    const prefix = `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/a/`;
+    if (!validAnchor(body.anchor) || !text || text.length > 10000 || typeof body.link !== 'string' || !body.link.startsWith(prefix) || body.link.length > 2000) return json({ error: 'That thread is not valid.' }, 400);
+    const pull = await gh(`${root}/pulls/${number}`, token);
+    const denied = refused(pull); if (denied) return denied;
+    if (!pull.ok) return json({ error: 'Pull request not found.' }, 404);
+    const head = (await pull.json()).head?.sha;
+    const created = await gh(`${root}/pulls/${number}/comments`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: threadBody({ anchor: body.anchor, text, link: url.origin + body.link }), commit_id: head, path: body.anchor.file, subject_type: 'file' }) });
+    return refused(created) || (created.ok ? json({ ok: true }, 201) : json({ error: 'GitHub did not create the thread.' }, 502));
+  }
+  const reply = /^\/(\d{1,20})\/reply$/.exec(rest);
+  if (reply) {
+    if (!text || text.length > 10000) return json({ error: 'Write a reply first.' }, 400);
+    const created = await gh(`${root}/pulls/${number}/comments/${reply[1]}/replies`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: text }) });
+    return refused(created) || (created.ok ? json({ ok: true }, 201) : json({ error: 'GitHub did not add the reply.' }, 502));
+  }
+  const resolve = /^\/([A-Za-z0-9_=-]{1,100})\/(resolve|unresolve)$/.exec(rest);
+  if (resolve) {
+    const response = await graphql(resolve[2] === 'resolve' ? RESOLVE_MUTATION : UNRESOLVE_MUTATION, { id: resolve[1] });
+    return refused(response) || (response.ok ? json({ ok: true }) : json({ error: 'GitHub did not change the thread.' }, 502));
+  }
+  return json({ error: 'Not found' }, 404);
+}

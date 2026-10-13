@@ -1,4 +1,5 @@
 import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
+import { threadsRoute } from './threads.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -206,8 +207,15 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
     }
     if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     if (!raw) {
+      let pull = null;
+      const runId = metadata.workflow_run?.id;
+      if (/^\d+$/.test(String(runId))) {
+        const runResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`, active.token);
+        const runData = runResponse.ok ? await runResponse.json() : null;
+        if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
+      }
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id,
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pull,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -556,6 +564,12 @@ export default {
         const [, owner, repo, id] = runRoute;
         if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
         return run(request, env, owner, repo, id, url);
+      }
+      const threadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/threads(\/.*)?$/);
+      if (threadRoute && ['GET', 'POST'].includes(request.method)) {
+        const [, owner, repo, number, rest = ''] = threadRoute;
+        const result = await threadsRoute(request, env, { owner, repo, number: Number(number), rest }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
       if (request.method === 'GET' && commitsRoute) {
