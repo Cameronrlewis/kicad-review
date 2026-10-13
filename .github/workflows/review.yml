@@ -120,7 +120,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           # ponytail: first 100 threads only; paginate if a PR ever has more.
-          gh api graphql -F owner="${GITHUB_REPOSITORY%/*}" -F name="${GITHUB_REPOSITORY#*/}" -F number="$PR" \
+          gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR" \
             -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{body}}}}}}}' \
             > review/threads.json || { rm -f review/threads.json; echo "::warning::Could not read review threads"; }
 

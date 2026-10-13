@@ -1037,38 +1037,57 @@ print("ok parts comment budget")
 
 # Threads: object index for anchoring. Head objects first; base-only objects keep their base position.
 from kicad_review import object_index, load_settings
-sym = lambda ref, x: {"kind": "symbol", "ref": ref, "match": ("symbol", ref, "1"), "where": {"sheet": "/sub-uuid/"},
+t1_sym = lambda ref, x: {"kind": "symbol", "ref": ref, "match": ("symbol", ref, "1"), "where": {"sheet": "/sub-uuid/"},
                       "pos": [x, 1, 0], "props": {"Value": "10k"}}
-fpo = lambda ref, x: {"kind": "footprint", "ref": ref, "match": ("footprint", ref), "where": {"board": True},
+t1_fpo = lambda ref, x: {"kind": "footprint", "ref": ref, "match": ("footprint", ref), "where": {"board": True},
                       "pos": [x, 2, 90], "box": [x - 1, 1, x + 1, 3], "props": {"Value": "1k", "layer": "F.Cu"}}
-wire = {"kind": "wire", "ref": "", "where": {"sheet": "/"}, "pos": [0, 0], "props": {}}
-base = {"/sub-uuid/s1": sym("R1", 1), "f1": fpo("R1", 1), "f2": fpo("R2", 2), "/w": wire}
-head = {"/sub-uuid/s1": sym("R1", 1), "f1": fpo("R1", 5), "new-f3": fpo("R3", 3), "/w": wire}
-idx = object_index(base, head)
-by = {(e["side"], e["kind"], e["ref"]): e for e in idx}
-assert set(by) == {("head", "symbol", "R1"), ("head", "footprint", "R1"), ("head", "footprint", "R3"), ("base", "footprint", "R2")}, by.keys()
-assert by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "side": "head",
-                                      "pos": [1, 1, 0], "box": None, "sheet": "/sub-uuid/"}, by["head", "symbol", "R1"]
-assert by["head", "footprint", "R1"]["pos_before"] == [1, 2, 90] and by["head", "footprint", "R1"]["layer"] == "F.Cu"
-assert by["head", "footprint", "R3"]["added"] is True and "pos_before" not in by["head", "footprint", "R3"]
-assert by["base", "footprint", "R2"]["uuid"] == "f2" and "sheet" not in by["base", "footprint", "R2"]
-assert [e["side"] for e in idx] == ["head", "head", "head", "base"]
+t1_wire = {"kind": "wire", "ref": "", "where": {"sheet": "/"}, "pos": [0, 0], "props": {}}
+t1_base = {"/sub-uuid/s1": t1_sym("R1", 1), "f1": t1_fpo("R1", 1), "f2": t1_fpo("R2", 2), "/w": t1_wire}
+t1_head = {"/sub-uuid/s1": t1_sym("R1", 1), "f1": t1_fpo("R1", 5), "new-f3": t1_fpo("R3", 3), "/w": t1_wire}
+t1_idx = object_index(t1_base, t1_head)
+t1_by = {(e["side"], e["kind"], e["ref"]): e for e in t1_idx}
+assert set(t1_by) == {("head", "symbol", "R1"), ("head", "footprint", "R1"), ("head", "footprint", "R3"), ("base", "footprint", "R2")}, t1_by.keys()
+assert t1_by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "side": "head",
+                                      "pos": [1, 1, 0], "box": None, "sheet": "/sub-uuid/"}, t1_by["head", "symbol", "R1"]
+assert t1_by["head", "footprint", "R1"]["pos_before"] == [1, 2, 90] and t1_by["head", "footprint", "R1"]["layer"] == "F.Cu"
+assert t1_by["head", "footprint", "R3"]["added"] is True and "pos_before" not in t1_by["head", "footprint", "R3"]
+assert t1_by["base", "footprint", "R2"]["uuid"] == "f2" and "sheet" not in t1_by["base", "footprint", "R2"]
+assert [e["side"] for e in t1_idx] == ["head", "head", "head", "base"]
 # Regenerated UUID: matched by reference, so not reported as added.
-assert "added" not in object_index({"/sub-uuid/s1": sym("R1", 1)}, {"/sub-uuid/other": sym("R1", 1)})[0]
+assert "added" not in object_index({"/sub-uuid/s1": t1_sym("R1", 1)}, {"/sub-uuid/other": t1_sym("R1", 1)})[0]
 print("ok threads object index")
+
+# Exact UUID matches take priority over reference matches in either head order.
+for t1_head in ({"X": t1_sym("R2", 5), "Y": t1_sym("R1", 1)},
+                {"Y": t1_sym("R1", 1), "X": t1_sym("R2", 5)}):
+    t1_idx = object_index({"X": t1_sym("R1", 1)}, t1_head)
+    t1_by = {e["uuid"]: e for e in t1_idx}
+    assert len(t1_idx) == 2 and all(e["side"] == "head" for e in t1_idx), t1_idx
+    assert "added" not in t1_by["X"] and t1_by["X"]["pos_before"] == [1, 1, 0], t1_idx
+    assert t1_by["Y"]["added"] is True and "pos_before" not in t1_by["Y"], t1_idx
+print("ok threads object index exact-key priority")
+
+# Duplicate unannotated references pair one-to-one in base order.
+t1_idx = object_index({"a": t1_sym("R?", 1), "b": t1_sym("R?", 2)},
+                      {"c": t1_sym("R?", 3), "d": t1_sym("R?", 4)})
+assert len(t1_idx) == 2 and all(e["side"] == "head" and "added" not in e for e in t1_idx), t1_idx
+assert [(e["uuid"], e["pos_before"]) for e in t1_idx] == [("c", [1, 1, 0]), ("d", [2, 1, 0])], t1_idx
+print("ok threads object index duplicate matches")
 
 import os, tempfile
 _cwd = os.getcwd()
 with tempfile.TemporaryDirectory() as d:
-    os.chdir(d); os.makedirs("base")
-    with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = "yes"\n')
     try:
-        load_settings(); raise AssertionError("threads.enabled must be validated")
-    except SystemExit as e:
-        assert "threads.enabled must be true or false" in str(e)
-    with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = true\n')
-    assert load_settings()["threads"] == {"enabled": True}
-    os.chdir(_cwd)
+        os.chdir(d); os.makedirs("base")
+        with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = "yes"\n')
+        try:
+            load_settings(); raise AssertionError("threads.enabled must be validated")
+        except SystemExit as e:
+            assert "threads.enabled must be true or false" in str(e)
+        with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = true\n')
+        assert load_settings()["threads"] == {"enabled": True}
+    finally:
+        os.chdir(_cwd)
 from kicad_review import DEFAULT_SETTINGS
 assert DEFAULT_SETTINGS["threads"] == {"enabled": False}
 print("ok threads settings")
@@ -1081,6 +1100,9 @@ a_block = {"v": 1, "severity": "blocking", "target": "object", "ref": "R1--> x"}
 assert thread_anchor("📍 R1\n\ntext\n\n" + enc(a_block)) == a_block
 assert thread_anchor("no anchor") is None and thread_anchor(None) is None
 assert thread_anchor("<!-- kicad-review-anchor !!!notbase64 -->") is None
+assert thread_anchor("<!-- kicad-review-anchor abc -->") is None
+assert thread_anchor(enc([1])) is None
+print("ok threads anchor decode failures")
 assert thread_anchor("<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(b'{"v":2}').decode().rstrip("=") + " -->") is None
 gql = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
     {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "blocking"})}]}},
@@ -1095,4 +1117,36 @@ body = comment_markdown(tdata, [], "", threads={"open": 2, "blocking": 1, "resol
 assert "Threads: 2 open (1 blocking), 1 resolved" in body, body
 assert "Threads:" not in comment_markdown(tdata, [], "")
 print("ok threads summary")
+
+# Threads: cmd_summary reads counts only when opted in and warns on malformed JSON.
+from types import SimpleNamespace
+from kicad_review import cmd_summary
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        os.makedirs("review")
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": os.devnull, "GITHUB_OUTPUT": os.devnull}):
+            for settings, contents, expected in (
+                ({"threads": {"enabled": True}}, _json.dumps(gql), "Threads: 2 open (1 blocking), 1 resolved"),
+                ({"threads": {"enabled": True}}, "not json", None),
+                ({}, _json.dumps(gql), None),
+            ):
+                with open("review/data.json", "w", encoding="utf-8") as fh:
+                    _json.dump({**tdata, "settings": settings}, fh)
+                with open("review/threads.json", "w", encoding="utf-8") as fh:
+                    fh.write(contents)
+                with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+                with open("review/comment.md", encoding="utf-8") as fh:
+                    comment = fh.read()
+                if expected:
+                    assert expected in comment, comment
+                else:
+                    assert "Threads:" not in comment, comment
+                if contents == "not json":
+                    assert "::warning::review/threads.json is not JSON" in stdout.getvalue(), stdout.getvalue()
+    finally:
+        os.chdir(_cwd)
+print("ok threads cmd_summary")
 

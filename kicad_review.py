@@ -598,12 +598,17 @@ def object_index(base, head):
         return e
     keep = lambda objs: {k: o for k, o in objs.items() if o["kind"] in ("symbol", "footprint")}
     b, h = keep(base), keep(head)
-    by_match = {o["match"]: k for k, o in b.items() if o.get("match")}
-    out, used = [], set()
+    used = set(b) & set(h)  # Reserve exact keys before any reference fallback.
+    by_match = {}
+    for k, o in b.items():
+        if k not in used and o.get("match"):
+            by_match.setdefault(o["match"], []).append(k)
+    out = []
     for k, o in h.items():
-        bk = k if k in b else by_match.get(o.get("match"))
+        matches = by_match.get(o.get("match"), [])
+        bk = k if k in b else (matches.pop(0) if matches else None)
         e = entry(k, o, "head")
-        if bk is None or bk in used:
+        if bk is None:
             e["added"] = True
         else:
             used.add(bk)
@@ -1204,8 +1209,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
     if threads is not None:
-        out.append(f"Threads: {threads['open']} open ({threads['blocking']} blocking), {threads['resolved']} resolved"
-                   + (f" — [discuss in the review]({site.rstrip('/')}/r/{data['repo']}/a/{artifact_id})" if site and artifact_id and data.get("repo") else "") + ".")
+        out.append(f"Threads: {threads['open']} open ({threads['blocking']} blocking), {threads['resolved']} resolved.")
     if artifact_id and data.get("repo"):
         out += ["", "<details><summary>From a terminal</summary>", "",
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
