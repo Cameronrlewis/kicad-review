@@ -4,7 +4,7 @@ const D = window.REVIEW_DATA;
 const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
-const THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
+let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
