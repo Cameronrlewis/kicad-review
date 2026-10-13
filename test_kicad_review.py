@@ -1073,3 +1073,26 @@ from kicad_review import DEFAULT_SETTINGS
 assert DEFAULT_SETTINGS["threads"] == {"enabled": False}
 print("ok threads settings")
 
+# Threads: anchors in comment bodies and the summary line.
+import base64 as _b64, json as _json
+from kicad_review import thread_anchor, thread_counts, comment_markdown
+enc = lambda a: "<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(_json.dumps(a).encode()).decode().rstrip("=") + " -->"
+a_block = {"v": 1, "severity": "blocking", "target": "object", "ref": "R1--> x"}
+assert thread_anchor("📍 R1\n\ntext\n\n" + enc(a_block)) == a_block
+assert thread_anchor("no anchor") is None and thread_anchor(None) is None
+assert thread_anchor("<!-- kicad-review-anchor !!!notbase64 -->") is None
+assert thread_anchor("<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(b'{"v":2}').decode().rstrip("=") + " -->") is None
+gql = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+    {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "blocking"})}]}},
+    {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "comment"})}]}},
+    {"isResolved": True, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "blocking"})}]}},
+    {"isResolved": False, "comments": {"nodes": [{"body": "an ordinary code review comment"}]}},
+    {"isResolved": False, "comments": {"nodes": []}}]}}}}}
+assert thread_counts(gql) == {"open": 2, "blocking": 1, "resolved": 1}, thread_counts(gql)
+assert thread_counts({"errors": [{"message": "x"}]}) == {"open": 0, "blocking": 0, "resolved": 0}
+tdata = {**d2, "projects": [{"name": "T", "dir": "", "status": "modified", "changes": [], "checks": []}]}
+body = comment_markdown(tdata, [], "", threads={"open": 2, "blocking": 1, "resolved": 1})
+assert "Threads: 2 open (1 blocking), 1 resolved" in body, body
+assert "Threads:" not in comment_markdown(tdata, [], "")
+print("ok threads summary")
+

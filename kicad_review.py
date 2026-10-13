@@ -1102,6 +1102,7 @@ def cmd_report(args):
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
         fh.write(f"name={name}\n")
+        fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
@@ -1192,7 +1193,7 @@ def changes_markdown(p, limit=60):
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site=""):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -1202,6 +1203,9 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id})**")
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
+    if threads is not None:
+        out.append(f"Threads: {threads['open']} open ({threads['blocking']} blocking), {threads['resolved']} resolved"
+                   + (f" — [discuss in the review]({site.rstrip('/')}/r/{data['repo']}/a/{artifact_id})" if site and artifact_id and data.get("repo") else "") + ".")
     if artifact_id and data.get("repo"):
         out += ["", "<details><summary>From a terminal</summary>", "",
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
@@ -1235,7 +1239,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
-            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads)
         body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
@@ -1283,7 +1287,14 @@ def cmd_summary(args):
         with open(f"review/images/shots.json", encoding="utf-8") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
     site = os.environ.get("SITE", "").rstrip("/")
-    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site)
+    threads = None
+    if data["settings"].get("threads", {}).get("enabled") and os.path.exists("review/threads.json"):
+        with open("review/threads.json", encoding="utf-8") as fh:
+            try:
+                threads = thread_counts(json.load(fh))
+            except ValueError:
+                print("::warning::review/threads.json is not JSON; thread counts left out")
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
@@ -1312,6 +1323,39 @@ def parts_markdown(data):
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
     return "\n".join(out)
+
+
+ANCHOR = re.compile(r"<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->")
+
+
+def thread_anchor(body):
+    """The anchor a review-site thread carries in its first comment, or None for any other comment."""
+    m = ANCHOR.search(body or "")
+    if not m:
+        return None
+    try:
+        a = json.loads(base64.urlsafe_b64decode(m.group(1) + "=" * (-len(m.group(1)) % 4)))
+    except ValueError:  # bad base64, bad UTF-8 and bad JSON all subclass ValueError
+        return None
+    return a if isinstance(a, dict) and a.get("v") == 1 else None
+
+
+def thread_counts(response):
+    """Open, blocking-and-open, and resolved review-site threads in a reviewThreads GraphQL response."""
+    c = {"open": 0, "blocking": 0, "resolved": 0}
+    nodes = (((((response or {}).get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+             .get("reviewThreads") or {}).get("nodes") or []
+    for n in nodes:
+        first = ((n.get("comments") or {}).get("nodes") or [{}])[0]
+        a = thread_anchor(first.get("body"))
+        if not a:
+            continue
+        if n.get("isResolved"):
+            c["resolved"] += 1
+        else:
+            c["open"] += 1
+            c["blocking"] += a.get("severity") == "blocking"
+    return c
 
 
 def checks_markdown(data):
