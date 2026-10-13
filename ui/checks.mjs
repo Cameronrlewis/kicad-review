@@ -844,4 +844,18 @@ export const CHECKS = [
     window.dispatchEvent(new MessageEvent("message", { source: window, data: { kicadReviewThreads: [] } }));
     await new Promise(r => setTimeout(r, 50));
     return S.threads === null && !document.querySelector('#panel [data-tab="threads"]') || "accepted";`],
+  ["Threads j and k step through thread cards", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    await goTo(row.id);
+    const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
+    P.objects = [0, 1].map(i => ({ uuid: "step-u-" + i, kind: "footprint", ref: "Q" + (i + 1), side: "head", pos: [x + i * 10, y, 0], box: [x + i * 10 - 1, y - 1, x + i * 10 + 1, y + 1], layer: "F.Cu" }));
+    acceptThreads(P.objects.map((o, i) => ({ id: "step-T" + i, resolved: false, anchor: { v: 1, project: P.dir, file: viewFile(P, "board"), sheet: null, layer: o.layer, target: "object", uuid: o.uuid, kind: o.kind, ref: o.ref, x: o.pos[0], y: o.pos[1], side: "head", commit: D.head, severity: "comment" }, comments: [] })));
+    S.t = "threads"; renderPanel(); await draw();
+    const ids = [...document.querySelectorAll("#panel .thread-card[data-thread]")].map(e => e.dataset.thread);
+    if (ids.length !== 2) return "expected two cards";
+    openThread(ids[0]);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "j" }));
+    const afterJ = S.thread;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "k" }));
+    return afterJ === ids[1] && S.thread === ids[0] || JSON.stringify({ ids, afterJ, afterK: S.thread });`],
 ];
