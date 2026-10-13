@@ -1035,3 +1035,33 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+
+# BOM readiness: per-field coverage over BOM parts; placeholders count as missing; multi-unit parts count once.
+from kicad_review import bom_coverage, bom_parts, present, DEFAULT_SETTINGS
+symp = lambda ref, **p: {"kind": "symbol", "ref": ref, "where": {"sheet": "/"}, "pos": [0, 0], "props": {"in_bom": "yes", **p}}
+objs = {"a": symp("U1", Value="STM32", Footprint="QFN", LCSC="C123", MPN="STM32G0", Manufacturer="ST", Datasheet="https://x/ds.pdf"),
+        "b": symp("U1 unit 2", Value="STM32", Footprint="QFN"),
+        "c": symp("R1", Value="10k", Footprint="0402", LCSC="C25744", MPN="TBD"),
+        "d": symp("J1", Value="USB-C", Footprint="USB", Datasheet="~"),
+        "e": symp("R2", Value="1k", Footprint="0402", dnp="yes"),
+        "f": symp("TP1", Value="TP", Footprint="TP", in_bom="no")}
+assert set(bom_parts(objs)) == {"U1", "R1", "J1"}
+assert not present("TBD") and not present("~") and not present("  ") and present("10k")
+s = json.loads(json.dumps(DEFAULT_SETTINGS))
+cov = bom_coverage(objs, s)
+assert cov["Value"] == [3, 3] and cov["MPN"] == [1, 3] and cov["LCSC"] == [2, 3] and cov["Manufacturer"] == [1, 3]
+assert cov["Datasheet (critical)"] == [1, 2]   # U1 has one, J1 has "~"
+assert cov["Order ready"] == [2, 3]            # jlcpcb preset: Value, Footprint, LCSC
+s["fabrication"]["preset"] = "pcbway"
+assert bom_coverage(objs, s)["Order ready"] == [1, 3]   # pcbway: MPN; R1's "TBD" is a placeholder
+s["bom"]["order_ready_fields"] = ["Value"]
+assert bom_coverage(objs, s)["Order ready"] == [3, 3]
+print("ok placeholders count as missing")
+print("ok multi-unit symbol counts once")
+
+# BOM readiness settings stay out of opted-out reports.
+src = open("kicad_review.py", encoding="utf-8").read()
+assert 'report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}' in src
+s = json.loads(json.dumps(DEFAULT_SETTINGS))
+assert s["parts"]["enabled"] is False and set(s["bom"]) == {"required_fields", "critical_prefixes", "order_ready_fields"}
+print("ok bom readiness settings opt-in")

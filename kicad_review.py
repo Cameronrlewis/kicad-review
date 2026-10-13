@@ -590,7 +590,8 @@ def natural(s):
 DEFAULT_SETTINGS = {
     "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
-    "bom": {"required_fields": ["Value", "Footprint"]},
+    "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
+            "order_ready_fields": []},  # empty: the fabrication preset's fields
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
@@ -617,6 +618,12 @@ def load_settings(roots=("base", "head")):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
         sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
+    for key in ("critical_prefixes", "order_ready_fields"):
+        if not isinstance(settings["bom"][key], list) or not all(isinstance(f, str) for f in settings["bom"][key]):
+            sys.exit(f"{SETTINGS_FILE}: bom.{key} must be a list of strings")
+    bad = [f for f in settings["bom"]["order_ready_fields"] if f not in COVERAGE_FIELDS]
+    if bad:
+        sys.exit(f"{SETTINGS_FILE}: bom.order_ready_fields: unknown {', '.join(bad)}; use {', '.join(COVERAGE_FIELDS)}")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
             sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
@@ -761,12 +768,49 @@ def bom_violations(objs, fields):
 
 LCSC_FIELDS = ("lcsc", "lcsc part", "lcsc part #", "lcsc part number", "jlcpcb part #")
 MPN_FIELDS = ("mpn", "manufacturer_part_number", "manufacturer part number", "mfr. part #", "mfg part #")
+MANUFACTURER_FIELDS = ("manufacturer", "mfr", "mfr.", "manufacturer_name", "manufacturer name")
+PLACEHOLDERS = {"tbd", "?", "x", "todo", "na", "n/a", "-", "~", ""}
 
 
 def field(props, names):
     v = next((props[k] for k in props if k.strip().lower() in names), "")
     v = (v or "").strip()
     return None if v in ("", "~") else v
+
+
+def present(v):
+    return (v or "").strip().lower() not in PLACEHOLDERS
+
+
+COVERAGE_FIELDS = {
+    "Value": lambda p: p.get("Value"), "Footprint": lambda p: p.get("Footprint"),
+    "LCSC": lambda p: field(p, LCSC_FIELDS), "MPN": lambda p: field(p, MPN_FIELDS),
+    "Manufacturer": lambda p: field(p, MANUFACTURER_FIELDS), "Datasheet": lambda p: field(p, ("datasheet",)),
+}
+
+
+def bom_parts(objs):
+    """BOM symbols, one entry per reference (units of one part count once); DNP, excluded and unannotated parts left out."""
+    out = {}
+    for o in objs.values():
+        p = o["props"]
+        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+            continue
+        out.setdefault(o["ref"].split(" unit ")[0], p)
+    return out
+
+
+def bom_coverage(objs, settings):
+    """Covered and total parts per BOM field; critical-part datasheets; parts with every order-ready field."""
+    parts = bom_parts(objs)
+    has = lambda p, f: present(COVERAGE_FIELDS[f](p))
+    cov = {f: [sum(has(p, f) for p in parts.values()), len(parts)] for f in COVERAGE_FIELDS}
+    prefixes = set(settings["bom"]["critical_prefixes"])
+    critical = [p for r, p in parts.items() if (m := re.match(r"[A-Za-z]+", r)) and m.group(0) in prefixes]
+    cov["Datasheet (critical)"] = [sum(has(p, "Datasheet") for p in critical), len(critical)]
+    order = settings["bom"]["order_ready_fields"] or (["Value", "Footprint", "LCSC"] if settings["fabrication"]["preset"] == "jlcpcb" else ["Value", "Footprint", "MPN"])
+    cov["Order ready"] = [sum(all(has(p, f) for f in order) for p in parts.values()), len(parts)]
+    return cov
 
 
 def parts_lines(objs):
@@ -1044,6 +1088,8 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    if not settings["parts"]["enabled"]:
+        report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
