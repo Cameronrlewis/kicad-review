@@ -25,7 +25,7 @@ test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: s
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
+    env: { ...process.env, CHECK_PORT: process.env.CHECK_PORT || '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
   assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL loads sample -> Runtime.evaluate timed out/);
 });
 
@@ -1584,3 +1584,106 @@ test('thread client contains load failures, clears notice, and guards vanished t
   assert.equal(composer.open, false); assert.equal(notice.textContent, 'Threads could not be loaded.');
   assert.equal(composer.querySelector('[role=status]').textContent, ''); assert.equal(posts, 1);
 });
+
+import { parseIssues } from './issues.js';
+
+test('issues: only anchored, non-PR issues are listed', () => {
+  const body = threadBody({ anchor, text: 'move it', link: 'https://s/r' });
+  assert.deepEqual(parseIssues([{ number: 3, title: 'J1 placement', html_url: 'https://github.com/o/r/issues/3', body },
+    { number: 4, title: 'x', html_url: 'u', body: 'plain' }, { number: 5, title: 'pr', html_url: 'u', body, pull_request: {} }]),
+    [{ number: 3, title: 'J1 placement', url: 'https://github.com/o/r/issues/3', anchor, state: 'open' }]);
+});
+
+test('creating an issue posts the anchored body and replies in its thread', async () => {
+  const sealed = await signedIn();
+  const calls = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    calls.push([url, JSON.parse(options.body || '{}')]);
+    if (url.endsWith('/issues')) return new Response(JSON.stringify({ number: 41, html_url: 'https://github.com/Cameronrlewis/repo/issues/41' }), { status: 201 });
+    return new Response('{}', { status: 201 });
+  });
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/issues', { anchor, title: 'Move R16 on rev C', text: 'Not this PR', link: '/r/Cameronrlewis/repo/a/1#v=board', pull: 7, threadCommentId: 11 }, undefined, sealed);
+    assert.equal(response.status, 201);
+    assert.deepEqual(await response.json(), { number: 41, url: 'https://github.com/Cameronrlewis/repo/issues/41' });
+    assert.equal(calls[0][0], 'https://api.github.com/repos/Cameronrlewis/repo/issues');
+    assert.equal(calls[0][1].title, 'Move R16 on rev C');
+    assert.deepEqual(parseAnchor(calls[0][1].body), anchor);
+    assert.deepEqual(calls[1], ['https://api.github.com/repos/Cameronrlewis/repo/pulls/7/comments/11/replies', { body: 'Tracked in #41.' }]);
+  } finally { restore(); }
+});
+
+test('issues disabled is explained', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? repoOk()
+    : new Response(JSON.stringify({ message: 'Issues are disabled for this repo' }), { status: 410 }));
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/issues', { anchor, title: 't', text: 'x', link: '/r/Cameronrlewis/repo/a/1' }, undefined, sealed);
+    assert.equal(response.status, 410);
+    assert.match((await response.json()).error, /Issues are turned off/);
+  } finally { restore(); }
+});
+
+import { issuesRoute } from './issues.js';
+const issueRequest = body => new Request('https://site.example/r/o/r/issues', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const issueInput = { anchor, title: 'Move it', text: 'later', link: '/r/o/r/a/1', pull: 7, threadCommentId: 11 };
+const issueAccess = async () => ({ s: { token: 'user-token', setCookie: 's=refreshed; Secure' } });
+
+test('issue routes reject unsafe input before posting and retain refreshed cookies', async () => {
+  let calls = 0;
+  for (const body of [null, [], 5, { ...issueInput, title: [] }, { ...issueInput, text: {} }, { ...issueInput, link: '/r/o/r/a/1/../../evil' }, { ...issueInput, link: 'https://evil.example' }, { ...issueInput, pull: -1 }, { ...issueInput, threadCommentId: 1.5 }, { ...issueInput, anchor: { ...anchor, x: null } }]) {
+    const response = await issuesRoute(issueRequest(body), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => { calls++; throw Error('unexpected'); } });
+    assert.equal(response.status, 400);
+    assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+    assert.ok((await response.json()).error);
+  }
+  assert.equal(calls, 0);
+});
+
+test('issue route exits explain permissions, rate limits and upstream failures with cookies', async () => {
+  for (const [status, headers, expected, message] of [[403, {}, 403, /Issues permission.*read and write/], [403, { 'x-ratelimit-remaining': '0' }, 429, /rate limit/], [403, { 'retry-after': '60' }, 429, /rate limit/], [410, {}, 410, /turned off/], [500, {}, 502, /GitHub/]]) {
+    for (const request of [new Request('https://site.example/r/o/r/issues'), issueRequest(issueInput)]) {
+      const response = await issuesRoute(request, {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => new Response('{}', { status, headers }) });
+      assert.equal(response.status, expected);
+      assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+      assert.match((await response.json()).error, message);
+    }
+  }
+  const network = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => { throw Error('secret'); } });
+  assert.equal(network.status, 502);
+  assert.match(network.headers.get('Set-Cookie'), /refreshed/);
+  assert.doesNotMatch(await network.text(), /secret/);
+});
+
+test('issue reply failure reports successful creation rather than inviting duplicate issues', async () => {
+  let calls = 0;
+  const response = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => ++calls === 1
+    ? new Response(JSON.stringify({ number: 41, html_url: 'https://github.com/o/r/issues/41' }), { status: 201 }) : new Response('{}', { status: 403 }) });
+  assert.equal(response.status, 201);
+  assert.match((await response.json()).warning, /was created.*do not create it again/);
+  assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+});
+
+test('issue parser ignores closed, malformed and unsafe issue URLs', () => {
+  const body = threadBody({ anchor, text: 'x', link: 'https://site.example/r' });
+  assert.deepEqual(parseIssues([null, { number: 1, html_url: 'javascript:alert(1)', body }, { number: 2, html_url: 'https://github.com/o/r/issues/2', body, state: 'closed' }, { number: -1, html_url: 'https://github.com/o/r/issues/1', body }]), []);
+  assert.deepEqual(parseIssues({ message: 'no' }), []);
+});
+
+test('issue routes authenticate before issue API calls and use worker security headers', async () => {
+  const unauthenticated = await call('/r/Cameronrlewis/repo/issues');
+  assert.equal(unauthenticated.status, 401);
+  assert.equal((await unauthenticated.json()).error, 'Sign in again.');
+  assert.ok(unauthenticated.headers.get('Content-Security-Policy'));
+  let calls = 0;
+  const restore = mockFetch(async () => { calls++; throw Error('unexpected'); });
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/issues', issueInput, 'https://evil.example');
+    assert.equal(response.status, 403);
+    assert.equal(calls, 0);
+    const badType = await call('/r/Cameronrlewis/repo/issues', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/jsonp' }, body: '{}' });
+    assert.equal(badType.status, 415);
+  } finally { restore(); }
+});
+

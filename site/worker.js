@@ -1,5 +1,6 @@
 import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 import { threadsRoute } from './threads.js';
+import { issuesRoute } from './issues.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -571,6 +572,12 @@ export default {
       if (threadRoute && ['GET', 'POST'].includes(request.method)) {
         const [, owner, repo, number, rest = ''] = threadRoute;
         const result = await threadsRoute(request, env, { owner, repo, number: Number(number), rest }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
+      }
+      const issueRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/issues(\/.*)?$/);
+      if (issueRoute && ['GET', 'POST'].includes(request.method)) {
+        const [, owner, repo, rest = ''] = issueRoute;
+        const result = await issuesRoute(request, env, { owner, repo, rest }, { access, gh });
         return response(result.body, { status: result.status, headers: result.headers });
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
