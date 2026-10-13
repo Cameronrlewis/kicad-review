@@ -1584,3 +1584,76 @@ test('thread client contains load failures, clears notice, and guards vanished t
   assert.equal(composer.open, false); assert.equal(notice.textContent, 'Threads could not be loaded.');
   assert.equal(composer.querySelector('[role=status]').textContent, ''); assert.equal(posts, 1);
 });
+
+test('report readiness announces the gate only with framed enabled threads', () => {
+  const source = readFileSync('ui/review.js', 'utf8');
+  const declarations = source.slice(source.indexOf('let THREADS_ON'), source.indexOf('const validThread'));
+  for (const framed of [false, true]) for (const enabled of [false, true]) for (const block_merge of [false, true]) {
+    const window = {}, parent = framed ? {} : window;
+    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, D: { settings: { threads: { enabled, block_merge } } } });
+    assert.equal(message.kicadReviewReady, true);
+    assert.equal(message.threads, framed && enabled);
+    assert.equal(message.blockMerge, framed && enabled && block_merge);
+  }
+  const html = reviewPage({ owner: 'owner', repo: 'repo', id: '123', pull: 7 });
+  assert.match(html, /"rerun":"\/r\/owner\/repo\/pull\/7\/rerun"/);
+});
+
+test('thread changes rerun only an announced blocking gate and expose rerun failures', async () => {
+  for (const gate of [undefined, false, true]) for (const severity of ['comment', 'blocking']) {
+    const listeners = {}, calls = [], notice = { textContent: '' };
+    const node = () => ({ textContent: '', replaceChildren() {}, append() {}, reset() {}, addEventListener(type, fn) { this[type] = fn; } });
+    const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
+    const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage() {} } };
+    const thread = { id: 'thread', resolved: false, anchor: { severity }, comments: [{ id: 'comment' }] };
+    let failure = null, mutationFails = false;
+    runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', rerun: '/rerun', link: '/review' })`, {
+      document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+      addEventListener(type, fn) { listeners[type] = fn; },
+      fetch: async (url, options) => {
+        if (options) calls.push({ url, options });
+        if (url === '/rerun' && failure === 'offline') throw new Error('offline');
+        if (url === '/rerun' && failure) return { ok: false, json: async () => ({ error: failure }) };
+        if (options && url !== '/rerun' && mutationFails) return { ok: false, json: async () => ({ error: 'mutation refused' }) };
+        return { ok: true, json: async () => ({ threads: [thread] }) };
+      },
+      FormData: class { get(key) { return key === 'severity' ? severity : 'text'; } }, location: { hash: '' },
+    });
+    const message = data => listeners.message({ source: iframe.contentWindow, data });
+    listeners.message({ source: {}, data: { kicadReviewReady: true, threads: true, blockMerge: true } });
+    message({ kicadReviewReady: true, threads: true, blockMerge: gate });
+    await new Promise(resolve => setImmediate(resolve));
+    message({ kicadReviewOpenThread: 'thread' });
+    const submit = (dialog, act) => dialog.querySelector('form').submit({ preventDefault() {}, target: { reset() {} }, submitter: { dataset: { act } } });
+    const expected = gate === true && severity === 'blocking' ? 1 : 0;
+    for (const resolved of [false, true]) {
+      thread.resolved = resolved; calls.length = 0;
+      await submit(view, 'resolve');
+      assert.equal(calls[0].url, `/threads/thread/${resolved ? 'unresolve' : 'resolve'}`);
+      assert.equal(calls.filter(c => c.url === '/rerun').length, expected);
+    }
+    calls.length = 0; await submit(view, 'reply');
+    assert.equal(calls.length, 1); assert.equal(calls[0].url, '/threads/comment/reply');
+    message({ kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } });
+    calls.length = 0; await submit(composer);
+    assert.equal(calls.filter(c => c.url === '/rerun').length, expected);
+    for (const call of calls.filter(c => c.url === '/rerun')) {
+      assert.equal(call.options.method, 'POST'); assert.equal(call.options.headers['Content-Type'], 'application/json'); assert.equal(call.options.body, '{}');
+    }
+    if (expected) {
+      thread.resolved = false;
+      for (failure of ['write access required', 'offline']) {
+        await submit(view, 'resolve');
+        assert.match(view.querySelector('[role=status]').textContent, /Resolved\. The review was not re-run:/);
+        assert.match(view.querySelector('[role=status]').textContent, new RegExp(failure));
+        message({ kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } });
+        await submit(composer);
+        assert.match(notice.textContent, /Created\. The review was not re-run:/);
+        assert.equal(composer.open, false);
+      }
+    }
+    mutationFails = true; calls.length = 0; await submit(view, 'resolve');
+    assert.equal(calls.filter(c => c.url === '/rerun').length, 0);
+    assert.equal(view.querySelector('[role=status]').textContent, 'mutation refused');
+  }
+});

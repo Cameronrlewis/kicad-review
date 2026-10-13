@@ -133,7 +133,7 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = 
     <dialog id="thread-view" class="thread-dialog"><form method="dialog"><h2></h2><ol class="thread-comments"></ol>
       <label>Reply<textarea name="text" rows="3" maxlength="10000"></textarea></label>
       <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
-    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: `${path}/pull/${pull}/threads`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>` : '';
+    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: `${path}/pull/${pull}/threads`, rerun: `${path}/pull/${pull}/rerun`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>` : '';
   return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}${notice}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${threads}` });
 }
 

@@ -5,6 +5,7 @@ const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
+const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
@@ -766,7 +767,7 @@ function start() {
       const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
       document.title = "ready";
     }
-  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage({ kicadReviewReady: true, threads: THREADS_ON }, "*"); });   // cmd_shots must never wait out its budget
+  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage(readyMessage(), "*"); });   // cmd_shots must never wait out its budget
 }
 start();
 window.addEventListener("hashchange", () => applyState(decodeState(location.hash)));

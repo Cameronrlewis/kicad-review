@@ -1266,3 +1266,7 @@ from kicad_review import md
 assert md("a" * 999 + "*… (full list in Checks)") in "\n".join(readiness_markdown(escaped))
 assert "- ✕ **Blocking threads:** could not be read" in readiness_markdown(ok, threads_required=True)
 print("ok readiness unreadable threads and escape boundary")
+
+# Readiness: the gate passes with threads enabled but none blocking.
+assert "✓ **Blocking threads:** none open" in "\n".join(readiness_markdown(ok, threads={"open": 0, "blocking": 0, "resolved": 0}))
+print("ok gate passes with no blocking threads")

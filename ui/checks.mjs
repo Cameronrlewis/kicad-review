@@ -744,6 +744,8 @@ export const CHECKS = [
     && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
     && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
 `],
+  ["Readiness ready message blockMerge is false when unframed", "", `
+    return !THREADS_ON && typeof readyMessage === "function" && readyMessage().blockMerge === false && readyMessage().kicadReviewReady === true || "ready message";`],
   ["Threads arrival preserves the drawing during the first right-click", "v=board", `
     const vp = document.querySelector("#stage .vp"), world = vp.querySelector(".world");
     const rect = vp.getBoundingClientRect(), event = new MouseEvent("contextmenu", {bubbles:true, cancelable:true, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2});

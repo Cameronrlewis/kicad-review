@@ -7,13 +7,24 @@ export function acceptFromReport(event, iframe) {
 export function threadsClient(config) {
   const iframe = document.getElementById('review-report');
   const composer = document.getElementById('thread-composer'), view = document.getElementById('thread-view');
-  let threads = [], pending = null, current = null;
+  let threads = [], pending = null, current = null, blockMerge = false;
   const accept = (event) => event.source === iframe.contentWindow && !!event.data && typeof event.data === 'object';
   const send = (data) => iframe.contentWindow?.postMessage(data, '*');
   const status = (el, text) => { el.querySelector('[role=status]').textContent = text; };
   const post = async (path, body) => {
     const response = await fetch(config.threads + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
+  };
+  const rerun = async (severity, el, action) => {
+    if (!blockMerge || severity !== 'blocking') return;
+    try {
+      const response = await fetch(config.rerun, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
+    } catch (error) {
+      const text = `${action}. The review was not re-run: ${error.message}`;
+      if (el === composer) notice.textContent = text;
+      else status(el, text);
+    }
   };
   const show = (id) => {
     const t = threads.find((x) => x.id === id); if (!t) return;
@@ -38,7 +49,7 @@ export function threadsClient(config) {
   })().catch(() => { notice.textContent = 'Threads could not be loaded.'; });
   addEventListener('message', (event) => {
     if (!accept(event)) return;
-    if (event.data.kicadReviewReady === true && event.data.threads === true) load();
+    if (event.data.kicadReviewReady === true) { blockMerge = event.data.blockMerge === true; if (event.data.threads === true) load(); }
     if (event.data.kicadReviewPin && typeof event.data.kicadReviewPin === 'object') {
       pending = event.data.kicadReviewPin;
       composer.querySelector('.thread-target').textContent = `${pending.ref || 'Point'} · ${pending.file} · (${Number(pending.x).toFixed(2)}, ${Number(pending.y).toFixed(2)}) mm`;
@@ -53,6 +64,7 @@ export function threadsClient(config) {
     try {
       await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: config.link + location.hash });
       composer.close(); await load();
+      await rerun(form.get('severity'), composer, 'Created');
     } catch (error) { status(composer, error.message); }
   });
   view.querySelector('form').addEventListener('submit', async (event) => {
@@ -64,6 +76,7 @@ export function threadsClient(config) {
       if (event.submitter?.dataset.act === 'resolve') await post(`/${encodeURIComponent(t.id)}/${t.resolved ? 'unresolve' : 'resolve'}`, {});
       else await post(`/${encodeURIComponent(t.comments[0].id)}/reply`, { text });
       event.target.reset(); await load();
+      if (event.submitter?.dataset.act === 'resolve') await rerun(t.anchor.severity, view, t.resolved ? 'Reopened' : 'Resolved');
     } catch (error) { status(view, error.message); }
   });
   for (const dialog of [composer, view]) dialog.querySelector('[data-act=close]').addEventListener('click', () => dialog.close());
