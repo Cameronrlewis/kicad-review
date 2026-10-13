@@ -1035,3 +1035,29 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+
+# Release readiness: setting and export in render.
+from kicad_review import CHECK_NAMES, DEFAULT_SETTINGS, cmd_render
+import kicad_review as kr
+assert CHECK_NAMES["release"] == "Release package" and DEFAULT_SETTINGS["checks"]["release"] == "off"
+calls = []
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+    for s in ("base", "head"): open(f"{s}/p/b.kicad_pro", "w").write("{}")
+    json.dump({"projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+    saved = (kr.render_side, kr.release_project)
+    kr.render_side = lambda *a: None
+    kr.release_project = lambda pro, tag, s, out, label: calls.append((pro, tag, out, label)) or []
+    try:
+        cmd_render(None); assert calls == []            # off by default
+        open("base/kicad-review.toml", "w").write('[checks]\nrelease = "informational"\n')
+        cmd_render(None)
+    finally:
+        kr.render_side, kr.release_project = saved
+    os.chdir(_cwd)
+assert calls == [("base/p/b.kicad_pro", "review", "review/p/base/fab", "b"), ("head/p/b.kicad_pro", "review", "review/p/head/fab", "b")], calls
+print("ok release export in render")
+assert 'report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "release"}' in open("kicad_review.py", encoding="utf-8").read()
+print("ok release setting stays out of opted-out reports")

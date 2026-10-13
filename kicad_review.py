@@ -228,6 +228,11 @@ def cmd_render(args):
             render_side(posixpath.join(side, p["dir"]), p["name"], out)
             if export_3d:
                 export_glb(p, side, out)
+            if settings["checks"].get("release", "off") != "off":
+                pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+                if os.path.exists(pro):
+                    os.makedirs(f"{out}/fab", exist_ok=True)
+                    release_project(pro, "review", settings, f"{out}/fab", p["name"])
             print(f"{p['name']}: rendered {side}")
 
 
@@ -588,14 +593,14 @@ def natural(s):
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off"},
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"]},
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "release": "Release package"}
 
 
 def load_settings(roots=("base", "head")):
@@ -619,7 +624,7 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
-            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
+            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of {', '.join(CHECK_NAMES)} = required/informational/off")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if settings["fail_on"] not in ("new", "all"):
@@ -1044,6 +1049,8 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
+        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "release"}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
