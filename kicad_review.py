@@ -620,6 +620,74 @@ def object_index(base, head):
     return out
 
 
+# ---- Library review: project-local symbol and footprint libraries. ----
+def _strip(node):
+    """Node without uuid/tstamp children, so regenerated ids do not count as edits."""
+    return [c if not isinstance(c, list) else _strip(c) for c in node if not (isinstance(c, list) and c and c[0] in ("uuid", "tstamp"))]
+
+
+def library_items(proj_dir):
+    """Symbols of *.kicad_sym and footprints of *.pretty/*.kicad_mod under the project folder.
+    ponytail: nickname = file stem, KiCad's default; read the lib tables if a team renames nicknames. Libraries outside the folder are not reviewed."""
+    items = {}
+    for root, dirs, files in os.walk(proj_dir):
+        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and not os.path.islink(posixpath.join(root, x)))
+        rel = posixpath.relpath(root, proj_dir)
+        for f in sorted(files):
+            path = posixpath.join(root, f)
+            if os.path.islink(path):
+                continue
+            if f.endswith(".kicad_sym") and not is_junk(path):
+                lib = f[: -len(".kicad_sym")]
+                for s in findall(parse_sexpr(open(path, encoding="utf-8").read()), "symbol"):
+                    pins = {}
+                    for unit in [s] + findall(s, "symbol"):
+                        for p in findall(unit, "pin"):
+                            number = val(p, "number")
+                            if number is not None:
+                                pins[number] = {"type": p[1], "name": val(p, "name"), "geometry": repr([find(p, "at"), find(p, "length")])}
+                    items[(lib, s[1], "symbol")] = {"pins": pins, "hash": hashlib.sha1(repr(_strip(s)).encode()).hexdigest(), "file": posixpath.normpath(posixpath.join(rel, f))}
+            elif f.endswith(".kicad_mod") and root.endswith(".pretty") and not is_junk(path):
+                fp = parse_sexpr(open(path, encoding="utf-8").read())
+                pads = {}
+                for p in findall(fp, "pad"):
+                    a, sz = at(p), find(p, "size")
+                    summary = f"{p[2]} {p[3]} {fmt_at(a[:2]) if a else '?'} {num(sz[1]) if sz else '?'}×{num(sz[2]) if sz and len(sz) > 2 else '?'}"
+                    pads[p[1]] = pads[p[1]] + '; ' + summary if p[1] in pads else summary
+                items[(posixpath.basename(root)[: -len(".pretty")], fp[1], "footprint")] = {
+                    "pins": pads, "hash": hashlib.sha1(repr(_strip(fp)).encode()).hexdigest(), "file": posixpath.normpath(posixpath.join(rel, f))}
+    return items
+
+
+def library_changes(base_dir, head_dir):
+    b = library_items(base_dir) if os.path.isdir(base_dir) else {}
+    h = library_items(head_dir) if os.path.isdir(head_dir) else {}
+    out = []
+    for key in sorted(set(b) | set(h), key=lambda k: (k[2], k[0], natural(k[1]))):
+        x, y = b.get(key), h.get(key)
+        if x and y and x["hash"] == y["hash"]:
+            continue
+        diff = []
+        if x or y:
+            before, after = (x or {"pins": {}})["pins"], (y or {"pins": {}})["pins"]
+            for pin in sorted(set(before) | set(after), key=natural):
+                p, q = before.get(pin), after.get(pin)
+                if p == q:
+                    continue
+                if p is None or q is None:
+                    diff.append({"pin": pin, "change": "added" if p is None else "removed", "before": p if isinstance(p, str) else (p and f"{p['name']} ({p['type']})"),
+                                 "after": q if isinstance(q, str) else (q and f"{q['name']} ({q['type']})")})
+                elif isinstance(p, dict):
+                    for field_ in ("type", "name", "geometry"):
+                        if p[field_] != q[field_]:
+                            diff.append({"pin": pin, "change": field_, "before": p[field_], "after": q[field_]})
+                else:
+                    diff.append({"pin": pin, "change": "geometry", "before": p, "after": q})
+        out.append({"lib": key[0], "item": key[1], "kind": key[2], "status": "added" if not x else "removed" if not y else "modified",
+                    "file": (y or x)["file"], "pins_diff": diff})
+    return out
+
+
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {

@@ -1170,3 +1170,43 @@ idx = object_index({}, {"/s1": s1, "f1": f1})
 assert [e["footprint"] for e in idx] == ["Resistor_SMD:R_0402", "Resistor_SMD:R_0402"], idx
 assert DEFAULT_SETTINGS["inventory"] == {"enabled": False}
 print("ok inventory footprint field")
+
+# Libraries: changed symbols and footprints with pin/pad diffs.
+from kicad_review import library_items, library_changes
+SYM = lambda pins, extra="": ('(kicad_symbol_lib (version 20231120) (symbol "LDO" (property "Reference" "U") ' + extra
+    + '(symbol "LDO_1_1" ' + "".join(f'(pin {t} line (at 0 {i} 0) (length 2.54) (name "{n}" (effects)) (number "{num}" (effects)))' for i, (num, n, t) in enumerate(pins) if num != "4")
+    + ') (symbol "LDO_2_1" ' + "".join(f'(pin {t} line (at 5 {i} 0) (length 2.54) (name "{n}" (effects)) (number "{num}" (effects)))' for i, (num, n, t) in enumerate(pins) if num == "4") + ')))')
+FP = lambda pads, model="a.step": ('(footprint "SOT23" (layer "F.Cu") (uuid "11111111-0000-0000-0000-000000000000") '
+    + "".join(f'(pad "{n}" smd rect (at {x} 0) (size 0.6 1) (layers "F.Cu") (uuid "{n}{n}"))' for n, x in pads) + f'(model "{model}"))')
+def lib_tree(root, sym, fp, extra_fp=None):
+    os.makedirs(f"{root}/Parts.pretty", exist_ok=True)
+    open(f"{root}/Parts.kicad_sym", "w").write(sym)
+    open(f"{root}/Parts.pretty/SOT23.kicad_mod", "w").write(fp)
+    if extra_fp: open(f"{root}/Parts.pretty/{extra_fp[0]}.kicad_mod", "w").write(extra_fp[1].replace('"SOT23"', f'"{extra_fp[0]}"'))
+with tempfile.TemporaryDirectory() as d:
+    lib_tree(f"{d}/b", SYM([("1", "IN", "power_in"), ("2", "GND", "power_in"), ("3", "OUT", "power_out"), ("4", "EN", "input")]), FP([("1", 0), ("2", 1), ("3", 2)]))
+    lib_tree(f"{d}/h", SYM([("1", "IN", "power_in"), ("2", "GND", "power_in"), ("3", "OUT", "power_out"), ("4", "EN", "passive")]), FP([("1", 0), ("2", 1)], model="b.step"),
+             extra_fp=("SOT23-5", FP([("1", 0)])))
+    items = library_items(f"{d}/b")
+    assert set(items) == {("Parts", "LDO", "symbol"), ("Parts", "SOT23", "footprint")} and set(items["Parts", "LDO", "symbol"]["pins"]) == {"1", "2", "3", "4"}
+    ch = {(c["kind"], c["item"]): c for c in library_changes(f"{d}/b", f"{d}/h")}
+    assert ch["symbol", "LDO"]["status"] == "modified" and ch["symbol", "LDO"]["pins_diff"] == [{"pin": "4", "change": "type", "before": "input", "after": "passive"}], ch["symbol", "LDO"]
+    print("ok multi-unit symbol pins are compared together")
+    assert ch["footprint", "SOT23"]["pins_diff"] == [{"pin": "3", "change": "removed", "before": "smd rect (2, 0) 0.6×1", "after": None}]
+    assert ch["footprint", "SOT23-5"]["status"] == "added"
+    print("ok renamed item is removed plus added")
+with tempfile.TemporaryDirectory() as d:
+    lib_tree(f"{d}/b", SYM([("1", "A", "passive")]), FP([("1", 0)], model="a.step")); lib_tree(f"{d}/h", SYM([("1", "A", "passive")]), FP([("1", 0)], model="b.step"))
+    ch = library_changes(f"{d}/b", f"{d}/h")
+    assert [(c["item"], c["status"], c["pins_diff"]) for c in ch] == [("SOT23", "modified", [])], ch
+print("ok non-pad edits are modified without warnings")
+
+with tempfile.TemporaryDirectory() as d:
+    lib_tree(f"{d}/b", SYM([("1", "A", "passive")]), FP([("1", 0), ("1", 1)]))
+    lib_tree(f"{d}/h", SYM([("1", "A", "passive")]).replace('(length 2.54)', '(length 3)'), FP([("1", 0), ("1", 2)]))
+    changed = library_changes(f"{d}/b", f"{d}/h")
+    assert all(c["pins_diff"][0]["change"] == "geometry" for c in changed)
+    os.remove(f"{d}/h/Parts.pretty/SOT23.kicad_mod")
+    pathlib.Path(f"{d}/h/Parts.pretty/Renamed.kicad_mod").write_text(FP([("1", 0)]).replace('"SOT23"', '"Renamed"'))
+    assert {(c["item"], c["status"]) for c in library_changes(f"{d}/b", f"{d}/h") if c["kind"] == "footprint"} == {("SOT23", "removed"), ("Renamed", "added")}
+print("ok library geometry and true rename")
