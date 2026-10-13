@@ -88,7 +88,7 @@ When thread collection succeeds, the pull request comment shows "Threads: N open
 
 Threads are off by default. The site exposes them only on review pages for `pull_request` runs. The GitHub App needs Pull requests and Contents permissions (read and write); GitHub requires Contents write to resolve review threads. A 403 response shows a hint to ask the repository owner to accept those permissions. A rate-limit response shows "GitHub rate limit reached. Try again later." (429).
 
-When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts unless `threads.block_merge` is enabled, in which case the gate fails closed. Each blocking-thread create, resolve or reopen re-runs the whole review (about 2–3 Actions minutes); Anyone with write access can trigger a re-run, so only writers can spend Actions minutes this way. GitHub requires a run no older than 30 days.
+When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts unless `threads.block_merge` is enabled, in which case the gate fails closed. Each blocking-thread create, resolve or reopen re-runs the whole review (about 2–3 Actions minutes); anyone with write access can trigger a re-run, so only writers can spend Actions minutes this way. GitHub requires a run no older than 30 days.
 
 ## Review site (optional)
 
