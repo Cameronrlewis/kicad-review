@@ -58,7 +58,7 @@ export function threadsClient(config) {
     composer.querySelector('fieldset').hidden = !!mode;
     composer.querySelector('button:not([type=button])').textContent = mode ? 'Create issue' : 'Create thread';
     composer.querySelector('.thread-target').textContent = `${anchor.ref || 'Point'} · ${anchor.file} · (${Number(anchor.x).toFixed(2)}, ${Number(anchor.y).toFixed(2)}) mm`;
-    composer.querySelector('[name=severity]').value = 'comment';
+    Object.assign(composer.querySelector('[name=severity]'), { value: 'comment', checked: true });
     composer.querySelector('textarea').value = ''; composer.querySelector('textarea').required = !mode;
     status(composer, ''); composer.showModal();
   };

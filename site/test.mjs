@@ -33,7 +33,7 @@ test('3D runner reports and bounds one whole check', { skip: spawnSync(chrome, [
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, CHECK_PORT: '9396', CHECK_TIMEOUT: '2000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
+    env: { ...process.env, CHECK_PORT: process.env.CHECK_PORT || '9396', CHECK_TIMEOUT: '2000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
   assert.equal(r.status, 1);
   assert.deepEqual(r.stdout.trim().split('\n'), ['RUN loads sample', 'FAIL loads sample -> timed out']);
 });
@@ -1561,11 +1561,13 @@ test('thread client contains load failures, clears notice, and guards vanished t
   listeners.message({ source: {}, data: pin }); assert.equal(composer.open, false);
   for (let i = 0; i < 2; i++) {
     composer.querySelector('[name=severity]').value = 'blocking';
+    composer.querySelector('[name=severity]').checked = false;
     composer.querySelector('textarea').value = 'old draft';
     composer.querySelector('[role=status]').textContent = 'old error';
     message(pin);
     assert.equal(composer.open, true);
     assert.equal(composer.querySelector('[name=severity]').value, 'comment');
+    assert.equal(composer.querySelector('[name=severity]').checked, true);
     assert.equal(composer.querySelector('textarea').value, '');
     assert.equal(composer.querySelector('[role=status]').textContent, '');
     composer.close();
