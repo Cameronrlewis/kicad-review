@@ -5,6 +5,7 @@ Standard library only. Subcommands are called from the reusable workflow.
 """
 import argparse
 import datetime
+import http.client
 import time
 import urllib.error
 import urllib.parse
@@ -788,6 +789,10 @@ class DigiKeyStop(DigiKeyError):
     """Rate limit or suspension: no further calls this run."""
 
 
+class DigiKeyAuth(DigiKeyError):
+    """A search token expired or was rejected (401)."""
+
+
 def digikey_placeholder(value):
     return value.lower() in ("", "~", "tbd", "?", "x", "todo", "na", "n/a", "-")
 
@@ -807,10 +812,12 @@ def _digikey_open(req, urlopen):
     except urllib.error.HTTPError as e:
         if e.code in (429, 403):
             raise DigiKeyStop("rate limit reached" if e.code == 429 else "access refused (403; possibly a 10-minute suspension)")
+        if e.code == 401:
+            raise DigiKeyAuth("HTTP 401")
         if e.code == 404:
             return {"ExactMatches": [], "Products": [], "ProductsCount": 0}
         raise DigiKeyError(f"HTTP {e.code}")
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
         raise DigiKeyError(type(e).__name__)
 
 
@@ -833,10 +840,22 @@ def digikey_search(token, client_id, mpn, locale, urlopen=urllib.request.urlopen
     return _digikey_open(req, urlopen)
 
 
+def digikey_product_url(value):
+    try:
+        url = urllib.parse.urlsplit(value or "")
+        host = r"www\.digikey\.(com|ca|co\.uk|de|fr|it|es|nl|be|at|ch|se|dk|fi|no|ie|pl|cz|com\.au|co\.nz|jp|cn|com\.mx|com\.br|in|sg|hk|tw|kr)"
+        if url.scheme == "https" and url.username is None and url.password is None and url.port is None and re.fullmatch(host, url.hostname or ""):
+            return value
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
 def digikey_pick(resp, mpn, manufacturer):
-    exact = [p for p in resp.get("ExactMatches") or [] if (p.get("ManufacturerProductNumber") or "").upper() == mpn.upper()]
+    exact = [p for p in resp.get("ExactMatches") or [] if str(p.get("ManufacturerProductNumber") or "").upper() == mpn.upper()]
+    manufacturer = str(manufacturer or "").strip().lower()
     if manufacturer and len(exact) > 1:
-        exact = [p for p in exact if (p.get("Manufacturer") or {}).get("Name", "").lower().startswith(manufacturer.lower())] or exact
+        exact = [p for p in exact if str((p.get("Manufacturer") or {}).get("Name") or "").lower().startswith(manufacturer)] or exact
     if not exact:
         return {"status": "not_found", "mpn": mpn}
     if len(exact) > 1:
@@ -848,7 +867,7 @@ def digikey_pick(resp, mpn, manufacturer):
             "quantity": p.get("QuantityAvailable"), "unit_price": p.get("UnitPrice"),
             "breaks": [[b.get("BreakQuantity"), round(b["UnitPrice"], 12) if isinstance(b.get("UnitPrice"), (int, float)) else None] for b in var.get("StandardPricing") or []][:6],
             "dk_part": var.get("DigiKeyProductNumber"), "product_status": (p.get("ProductStatus") or {}).get("Status"),
-            "url": p.get("ProductUrl") if str(p.get("ProductUrl") or "").startswith("https://www.digikey.") else None}
+            "url": digikey_product_url(p.get("ProductUrl"))}
 
 
 def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, sleep=time.sleep,
@@ -856,6 +875,8 @@ def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, slee
     cfg = settings["digikey"]
     sup = {"name": "DigiKey", "fetched_at": now(), "currency": cfg["currency"], "calls": 0, "looked_up": 0, "error": None, "skipped": None}
     results, stop = {}, None
+    failures, consecutive, last_error, refreshed = 0, 0, None, False
+    locale = {"site": cfg["site"], "currency": cfg["currency"]}
     try:
         sup["calls"] += 1
         token = digikey_token(creds[0], creds[1], urlopen)
@@ -868,17 +889,42 @@ def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, slee
         if i:
             sleep(0.6)  # stays under DigiKey's 120/min burst limit
         try:
-            sup["calls"] += 1
-            results[k] = digikey_pick(digikey_search(token, creds[0], wanted[k]["mpn"], {"site": cfg["site"], "currency": cfg["currency"]}, urlopen),
-                                      wanted[k]["mpn"], wanted[k]["manufacturer"])
+            try:
+                sup["calls"] += 1
+                response = digikey_search(token, creds[0], wanted[k]["mpn"], locale, urlopen)
+            except DigiKeyAuth as e:
+                if refreshed:
+                    raise DigiKeyStop(str(e))
+                refreshed = True
+                sleep(0.6)
+                try:
+                    sup["calls"] += 1
+                    token = digikey_token(creds[0], creds[1], urlopen)
+                except DigiKeyError as refresh_error:
+                    raise DigiKeyStop(f"sign-in failed: {refresh_error}")
+                sleep(0.6)
+                try:
+                    sup["calls"] += 1
+                    response = digikey_search(token, creds[0], wanted[k]["mpn"], locale, urlopen)
+                except DigiKeyAuth as retry_error:
+                    raise DigiKeyStop(str(retry_error))
+            try:
+                results[k] = digikey_pick(response, wanted[k]["mpn"], wanted[k]["manufacturer"])
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError):
+                raise DigiKeyError("invalid response")
             sup["looked_up"] += 1
+            consecutive = 0
         except DigiKeyStop as e:
             stop = str(e)
             results[k] = {"status": "unavailable", "mpn": wanted[k]["mpn"]}
         except DigiKeyError as e:
-            stop = str(e)
-            results[k] = {"status": "unavailable", "mpn": wanted[k]["mpn"], "error": str(e)}
-    sup["error"] = stop
+            failures += 1
+            consecutive += 1
+            last_error = str(e)
+            results[k] = {"status": "unavailable", "mpn": wanted[k]["mpn"]}
+            if consecutive >= 3:
+                stop = f"3 consecutive lookups failed (last: {last_error})"
+    sup["error"] = stop or (f"{failures} lookups failed (last: {last_error})" if failures else None)
     return {"supplier": sup, "results": results}
 
 

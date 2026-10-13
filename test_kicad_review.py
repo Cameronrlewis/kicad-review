@@ -1105,7 +1105,7 @@ with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_revie
     assert load_settings()["digikey"] == {"enabled": True, "site": "CA", "currency": "CAD", "max_lookups": 900}
 
 # Error paths use only injected transports; a failed run never leaks response bodies.
-for code in (403, 500, 401):
+for code in (403,):
     calls.clear()
     def fail(req, timeout=None):
         calls.append(req.full_url)
@@ -1136,3 +1136,98 @@ pauses = []
 digikey_lookup({"A": {"mpn": "A", "manufacturer": None}, "B": {"mpn": "B", "manufacturer": None}}, ("id", "secret"), s, urlopen=fake, sleep=pauses.append)
 assert pauses == [0.6]
 print("ok DigiKey token errors, 404, statuses, and pacing")
+
+# Task 2 review regressions. Each transport is local; no real HTTP requests.
+import unittest
+import inspect
+import http.client
+
+class DigiKeyReviewTests(unittest.TestCase):
+    def run_lookup(self, events):
+        calls, pauses = [], []
+        queue = iter(events)
+        def transport(req, timeout=None):
+            calls.append(req.full_url)
+            self.assertEqual(timeout, 15)
+            if req.full_url.endswith("/oauth2/token"):
+                return resp({"access_token": "T"})
+            event = next(queue)
+            if isinstance(event, int):
+                raise urllib.error.HTTPError(req.full_url, event, "secret", {}, _io.BytesIO(b"secret"))
+            if isinstance(event, Exception):
+                raise event
+            mpn = json.loads(req.data)["Keywords"]
+            return resp(event if event is not None else {"ExactMatches": [prod(mpn, "MPS", 10, 1.5)]})
+        wanted = {key: {"mpn": key, "manufacturer": None} for key in "ABCDE"}
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings["parts"]["enabled"] = settings["digikey"]["enabled"] = True
+        return digikey_lookup(wanted, ("id", "secret"), settings, urlopen=transport, sleep=pauses.append), calls, pauses
+
+    def test_1_product_urls(self):
+        for url in ("https://www.digikey.evil.com/x", "https://www.digikey.com@evil.com/x",
+                    "https://www.digikey.com:443/x", "https://user@www.digikey.com/x", "http://www.digikey.com/x"):
+            p = prod("A", "MPS", 10, 1.5); p["ProductUrl"] = url
+            self.assertIsNone(digikey_pick({"ExactMatches": [p]}, "A", None)["url"], url)
+        p["ProductUrl"] = "https://www.digikey.ca/en/products/x"
+        self.assertEqual(digikey_pick({"ExactMatches": [p]}, "A", None)["url"], p["ProductUrl"])
+
+    def test_2_malformed_responses(self):
+        out, calls, _ = self.run_lookup([http.client.IncompleteRead(b"secret"), None, None, None, None])
+        self.assertEqual(out["results"]["A"]["status"], "unavailable")
+        self.assertEqual(out["results"]["B"]["status"], "ok")
+        p = prod("CR2032", "MPS", 10, 1.5); p["Manufacturer"]["Name"] = None
+        other = prod("CR2032", "Renata", 20, 2)
+        self.assertEqual(digikey_pick({"ExactMatches": [p, other]}, "CR2032", "Renata")["quantity"], 20)
+        p["ManufacturerProductNumber"] = 123
+        self.assertEqual(digikey_pick({"ExactMatches": [p]}, "123", None)["status"], "ok")
+        out, _, _ = self.run_lookup([{"ExactMatches": [None]}, None, None, None, None])
+        self.assertEqual(out["results"]["A"], {"status": "unavailable", "mpn": "A"})
+        self.assertEqual(out["supplier"]["error"], "1 lookups failed (last: invalid response)")
+
+    def test_3_transient_and_consecutive_errors(self):
+        out, calls, _ = self.run_lookup([None, 500, None, None, None])
+        self.assertEqual(out["results"]["C"]["status"], "ok")
+        self.assertEqual(out["supplier"]["error"], "1 lookups failed (last: HTTP 500)")
+        self.assertEqual(len(calls), 6)
+        out, calls, _ = self.run_lookup([500, 500, 500])
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(p["status"] == "unavailable" for p in out["results"].values()))
+        out, calls, _ = self.run_lookup([500, None, 500, None, 500])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(out["supplier"]["error"], "3 lookups failed (last: HTTP 500)")
+
+    def test_4_token_refresh(self):
+        out, calls, pauses = self.run_lookup([401, None, None, None, None, None])
+        self.assertEqual(out["results"]["A"]["status"], "ok")
+        self.assertEqual(sum(u.endswith("/oauth2/token") for u in calls), 2)
+        self.assertEqual(out["supplier"]["calls"], 8)
+        self.assertEqual(out["supplier"]["looked_up"], 5)
+        self.assertIsNone(out["supplier"]["error"])
+        self.assertTrue(all(t >= 0.6 for t in pauses))
+        out, calls, _ = self.run_lookup([401, 401])
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(out["supplier"]["error"], "HTTP 401")
+        out, calls, _ = self.run_lookup([401, None, 401])
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(all("error" not in p for p in out["results"].values()))
+
+    def test_5_no_line_errors(self):
+        out, _, _ = self.run_lookup([500, None, None, None, None])
+        self.assertEqual(out["results"]["A"], {"status": "unavailable", "mpn": "A"})
+        self.assertNotIn("secret", json.dumps(out))
+
+    def test_6_no_redundant_urlerror(self):
+        self.assertNotIn("urllib.error.URLError", inspect.getsource(kicad_review._digikey_open))
+
+    def test_7_manufacturer_whitespace(self):
+        products = [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)]
+        self.assertEqual(digikey_pick({"ExactMatches": products}, "CR2032", "  RENATA  ")["quantity"], 7)
+
+    def test_8_unmatched_manufacturer(self):
+        products = [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)]
+        result = digikey_pick({"ExactMatches": products}, "CR2032", "Unknown")
+        self.assertEqual(result, {"status": "ambiguous", "mpn": "CR2032", "matches": 2})
+        self.assertNotIn("unit_price", result)
+
+review_result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DigiKeyReviewTests))
+assert review_result.wasSuccessful(), "DigiKey review regressions failed"
