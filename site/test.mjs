@@ -1175,3 +1175,36 @@ test('expired artifacts offer regeneration only when their name records revision
     } finally { restore(); }
   }
 });
+
+import { encodeAnchor, parseAnchor, validAnchor, threadBody, threadText, parseThreads } from './threads.js';
+
+const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
+  target: 'object', uuid: '0a1b2c3d-0000-4000-8000-000000000001', kind: 'footprint', ref: 'R16', x: 12.3, y: 45.6,
+  side: 'head', commit: 'a'.repeat(40), severity: 'blocking' };
+
+test('threads: anchor survives --> and markdown in text, and is validated', () => {
+  const tricky = { ...anchor, ref: 'R1-->*[x](y)' };
+  const body = threadBody({ anchor: tricky, text: 'Too close --> to the edge', link: 'https://site.example/r/o/r/a/1#p=0' });
+  assert.deepEqual(parseAnchor(body), tricky);
+  assert.match(body, /^\*\*Blocking\*\* · 📍 R1--\\>\\\*\\\[x\\\]\\\(y\\\) · `Thermal_Camera\/Thermal_Camera\.kicad_pcb` · F\.Cu · \(12\.30, 45\.60\) mm · \[open in review\]\(https:\/\/site\.example\/r\/o\/r\/a\/1#p=0\)/);
+  assert.equal(threadText(body), 'Too close --> to the edge');
+  assert.equal(parseAnchor('plain comment'), null);
+  assert.equal(parseAnchor('<!-- kicad-review-anchor %%% -->'), null);
+  assert.equal(encodeAnchor({ a: 1 }), 'eyJhIjoxfQ');
+  assert.ok(validAnchor(anchor));
+  for (const bad of [null, { ...anchor, v: 2 }, { ...anchor, file: '../x.kicad_pcb' }, { ...anchor, file: 'x.txt' },
+    { ...anchor, x: Infinity }, { ...anchor, severity: 'urgent' }, { ...anchor, target: 'area' }, { ...anchor, ref: 'x'.repeat(201) },
+    { ...anchor, commit: 'nothex' }, { ...anchor, extra: 1 }]) assert.equal(validAnchor(bad), false, JSON.stringify(bad));
+});
+
+test('threads: GraphQL threads keep only anchored ones, with plain text', () => {
+  const graphql = { data: { repository: { pullRequest: { reviewThreads: { nodes: [
+    { id: 'PRRT_1', isResolved: true, resolvedBy: { login: 'bob' }, comments: { nodes: [
+      { databaseId: 11, body: threadBody({ anchor, text: 'first', link: 'https://s/r' }), author: { login: 'alice' }, createdAt: '2026-10-12T10:00:00Z', url: 'https://github.com/x#1' },
+      { databaseId: 12, body: 'agreed', author: null, createdAt: '2026-10-12T11:00:00Z', url: 'https://github.com/x#2' }] } },
+    { id: 'PRRT_2', isResolved: false, resolvedBy: null, comments: { nodes: [{ databaseId: 13, body: 'code review comment', author: { login: 'c' } }] } }] } } } } };
+  assert.deepEqual(parseThreads(graphql), [{ id: 'PRRT_1', resolved: true, resolvedBy: 'bob', anchor, comments: [
+    { id: 11, author: 'alice', body: 'first', createdAt: '2026-10-12T10:00:00Z', url: 'https://github.com/x#1' },
+    { id: 12, author: 'ghost', body: 'agreed', createdAt: '2026-10-12T11:00:00Z', url: 'https://github.com/x#2' }] }]);
+  assert.deepEqual(parseThreads({ errors: [{}] }), []);
+});
