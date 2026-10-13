@@ -1114,6 +1114,8 @@ assert twice.count("<!-- kicad-review-release -->") == 1
 assert "## What's Changed\n* x" in twice and "hand-written footer" in twice and "3 warnings" in twice and "2 warnings" not in twice
 assert merge_notes(twice, sec.replace("2 warnings", "3 warnings")) == twice
 assert "Open the review" not in release_notes(rdata, "javascript:alert(1)", "77")
+assert "Open the review" not in release_notes(rdata, "https://site.example:bad", "77")
+assert "Open the review" not in release_notes(rdata, "https://@site.example", "77")
 assert "Open the review" not in release_notes(rdata, "https://site.example/x)\n# injected", "77")
 assert "Open the review" not in release_notes(rdata, "https://site.example", "x")
 evil = copy.deepcopy(rdata)

@@ -1330,7 +1330,8 @@ def release_notes(data, site, artifact_id):
     site = site.rstrip("/")
     try:
         url = urlsplit(site)
-        valid_site = url.scheme in ("https", "http") and url.hostname and not url.username and not url.password and not url.query and not url.fragment
+        valid_site = url.scheme in ("https", "http") and url.hostname and url.username is None and url.password is None and not url.query and not url.fragment
+        url.port  # Access validates malformed or out-of-range ports.
     except ValueError:
         valid_site = False
     if valid_site and not re.search(r'[\s\\()\[\]<>"\x00-\x1f\x7f]', site) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", data.get("repo", "")) and re.fullmatch(r"\d{1,20}", str(artifact_id)):
