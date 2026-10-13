@@ -1096,3 +1096,51 @@ with tempfile.TemporaryDirectory() as t:
     finally:
         os.chdir(here)
 
+# Release section preserves manual notes, is idempotent, and escapes untrusted data.
+from kicad_review import release_notes, merge_notes, cmd_release_notes
+rdata = {**d2, "repo": "o/r", "reason": "release v1.1 vs v1.0", "projects": [{"name": "Cam", "dir": "", "status": "modified", "changes": [], "checks": [
+    {"name": "drc", "title": "DRC", "level": "required", "status": "pass", "errors": 0, "new_errors": 0, "warnings": 2, "new_warnings": 0, "fixed": 0, "violations": []}]}]}
+sec = release_notes(rdata, "https://site.example", "77")
+assert sec.startswith("<!-- kicad-review-release -->") and sec.rstrip().endswith("<!-- /kicad-review-release -->")
+assert "release v1.1 vs v1.0" in sec and "**Cam**: no reviewable changes" in sec and "DRC ✅ pass (0 errors, 2 warnings)" in sec
+assert "[Open the review](https://site.example/r/o/r/a/77)" in sec
+once = merge_notes("## What's Changed\n* x\n", sec)
+twice = merge_notes(once + "\nhand-written footer\n", sec.replace("2 warnings", "3 warnings"))
+assert twice.count("<!-- kicad-review-release -->") == 1
+assert "## What's Changed\n* x" in twice and "hand-written footer" in twice and "3 warnings" in twice and "2 warnings" not in twice
+assert merge_notes(twice, sec.replace("2 warnings", "3 warnings")) == twice
+assert "Open the review" not in release_notes(rdata, "javascript:alert(1)", "77")
+assert "Open the review" not in release_notes(rdata, "https://site.example/x)\n# injected", "77")
+assert "Open the review" not in release_notes(rdata, "https://site.example", "x")
+evil = copy.deepcopy(rdata)
+evil["reason"] = "release <b>\n# injected"
+evil["projects"][0]["name"] = "Cam\n# injected"
+evil["projects"][0]["checks"][0]["title"] = "DRC\n<script>"
+escaped = release_notes(evil, "", "")
+assert "\n# injected" not in escaped and "<script>" not in escaped and "<b>" not in escaped
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        write(t, {"review/data.json": json.dumps(rdata), "existing.md": "manual body"})
+        with patch.dict(os.environ, {"SITE": "https://site.example"}):
+            cmd_release_notes(type("A", (), {"existing": "existing.md", "artifact_id": "77"}))
+        assert pathlib.Path("review/release-notes.md").read_text() == merge_notes("manual body", sec)
+    finally:
+        os.chdir(here)
+print("ok notes section is replaced, not added twice")
+
+wf = pathlib.Path(".github/workflows/review.yml").read_text()
+detect_step = wf[wf.index("- name: Find changed KiCad projects"):wf.index("- name: Check out both")]
+assert "refs/tags" not in detect_step.splitlines()[2]
+assert "TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}" in detect_step
+fail_step = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
+assert "!startsWith(github.ref, 'refs/tags/')" in fail_step
+fab_step = wf[wf.index("- name: Fabrication outputs"):wf.index("- name: Attach to")]
+attach_step = wf[wf.index("- name: Attach to"):wf.index("- name: Write release notes")]
+assert "always()" in fab_step and "!cancelled()" in fab_step and "id: fabrication" in fab_step
+assert "always()" in attach_step and "steps.fabrication.outcome == 'success'" in attach_step
+notes_step = wf[wf.index("- name: Write release notes"):]
+assert "continue-on-error: true" in notes_step and "steps.report.outcome == 'success'" in notes_step
+assert '--existing review/release-body.md --artifact-id "$ARTIFACT_ID"' in notes_step
+print("ok tag workflow wiring")
+

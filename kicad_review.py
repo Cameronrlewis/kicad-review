@@ -20,6 +20,7 @@ import tempfile
 import tomllib
 import zipfile
 from collections import Counter
+from urllib.parse import urlsplit
 
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
@@ -1319,6 +1320,48 @@ def checks_markdown(data):
     return checks
 
 
+NOTES_START, NOTES_END = "<!-- kicad-review-release -->", "<!-- /kicad-review-release -->"
+
+
+def release_notes(data, site, artifact_id):
+    """A marked review section; repository and KiCad text stays literal markdown."""
+    literal = lambda value: md(" ".join(str(value).splitlines()))
+    out = [NOTES_START, "## KiCad review", "", f"{literal(data['reason'])}."]
+    site = site.rstrip("/")
+    try:
+        url = urlsplit(site)
+        valid_site = url.scheme in ("https", "http") and url.hostname and not url.username and not url.password and not url.query and not url.fragment
+    except ValueError:
+        valid_site = False
+    if valid_site and not re.search(r'[\s\\()\[\]<>"\x00-\x1f\x7f]', site) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", data.get("repo", "")) and re.fullmatch(r"\d{1,20}", str(artifact_id)):
+        out.append(f"[Open the review]({site}/r/{data['repo']}/a/{artifact_id})")
+    for p in data["projects"]:
+        out += ["", f"**{literal(p['name'])}**: {' '.join(summary_sentence(p).splitlines())}.", ""]
+        out += [f"- {literal(c['title'])} {STATUS_ICON[c['status']]} {literal(c['status'].replace('_', ' '))} ({literal(plural(c['errors'], 'error'))}, {literal(plural(c['warnings'], 'warning'))})" for c in p["checks"]]
+    return "\n".join(out + ["", NOTES_END, ""])
+
+
+def merge_notes(existing, section):
+    """Replace only the marked section, preserving surrounding manual notes."""
+    existing = existing or ""
+    start = existing.find(NOTES_START)
+    end = existing.find(NOTES_END, start + len(NOTES_START)) if start >= 0 else -1
+    if end >= 0:
+        return existing[:start] + section.rstrip("\n") + existing[end + len(NOTES_END):]
+    return existing.rstrip("\n") + ("\n\n" if existing.strip() else "") + section
+
+
+def cmd_release_notes(args):
+    with open("review/data.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    existing = ""
+    if args.existing and os.path.exists(args.existing):
+        with open(args.existing, encoding="utf-8") as fh:
+            existing = fh.read()
+    with open("review/release-notes.md", "w", encoding="utf-8") as fh:
+        fh.write(merge_notes(existing, release_notes(data, os.environ.get("SITE", ""), args.artifact_id)))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(required=True)
@@ -1329,6 +1372,10 @@ def main():
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
     p.add_argument("--tag", required=True)
     p.set_defaults(func=cmd_release)
+    p = sub.add_parser("release-notes", help="merge the KiCad review section into a release body")
+    p.add_argument("--existing", default="")
+    p.add_argument("--artifact-id", default="")
+    p.set_defaults(func=cmd_release_notes)
     p = sub.add_parser("shots", help="before/after screenshots of changed drawings for the comment")
     p.add_argument("--chrome", default="google-chrome")
     p.set_defaults(func=cmd_shots)
