@@ -1271,3 +1271,27 @@ print("ok readiness unreadable threads and escape boundary")
 # Readiness: the gate passes with threads enabled but none blocking.
 assert "✓ **Blocking threads:** none open" in "\n".join(readiness_markdown(ok, threads={"open": 0, "blocking": 0, "resolved": 0}))
 print("ok gate passes with no blocking threads")
+
+# Waivers: a stable key per violation, from the same identity used to call a violation "new".
+from kicad_review import waiver_key, load_violations
+v1 = {"type": "clearance", "severity": "error", "description": "Clearance violation (0.15 mm < 0.2 mm)", "items": ["Pad 1 of J1", "Track"],
+      "uuids": ["u-b", "u-a"], "pos": [10.0, 5.0], "box": None, "where": {"board": True}}
+k = waiver_key(v1)
+assert re.fullmatch(r"w-[0-9a-f]{12}", k), k
+assert waiver_key({**v1, "description": "Clearance violation (0.11 mm < 0.2 mm)", "pos": [11, 6]}) == k  # same UUIDs: same finding
+assert waiver_key({**v1, "uuids": ["u-c"]}) != k
+assert waiver_key({**v1, "severity": "warning"}) != k
+no_uuid = {**v1, "uuids": []}
+assert waiver_key(no_uuid) == waiver_key({**no_uuid, "description": "Clearance violation (0.1 mm < 0.2 mm)"})  # numbers normalised
+assert waiver_key(no_uuid) != waiver_key({**no_uuid, "pos": [30.0, 5.0]})
+print("ok waiver keys")
+
+import json as _j, tempfile as _t, os as _o
+with _t.TemporaryDirectory() as d:
+    unc = lambda: {"type": "unconnected_items", "severity": "error", "description": "Missing connection",
+                   "items": [{"description": "Pad 1 [GND] of R1", "pos": {"x": 1, "y": 1}}, {"description": "Pad 2 [GND] of R2", "pos": {"x": 2, "y": 2}}]}
+    with open(f"{d}/drc.json", "w") as fh:
+        _j.dump({"violations": [], "unconnected_items": [unc(), unc()]}, fh)
+    vs = load_violations(f"{d}/drc.json", "drc")
+    assert len({waiver_key(v) for v in vs}) == 2, [waiver_key(v) for v in vs]
+print("ok unconnected duplicates get distinct keys")

@@ -872,6 +872,19 @@ def vkeys(v):
     return {k + sig for k in keys}
 
 
+def waiver_key(v):
+    """One stable identity per violation for kicad-review-waivers.toml: the strongest of the identities vkeys matches on."""
+    sig = (v["severity"], tuple(sorted(v["where"].items())))
+    if v.get("key"):
+        ident = v["key"]
+    elif v["uuids"]:
+        ident = ("u", v["type"], tuple(v["uuids"]))
+    else:
+        ident = ("p", v["type"], re.sub(r"[\d.]+", "#", v["description"]), tuple(v["items"]),
+                 tuple(tuple(round(c, 1) for c in p) for p in ([v["pos"]] if v["pos"] else [])))
+    return "w-" + hashlib.sha1(repr(ident + sig).encode()).hexdigest()[:12]
+
+
 def run_check(name, settings, head, base):
     level = settings["checks"].get(name, "off")
     if level == "off" or head is None:
