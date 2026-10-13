@@ -435,7 +435,7 @@ test('review route shows the repository after a pull-access check and refreshes 
 });
 
 const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
-const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 test('artifact frame and raw route redirect unsigned users without GitHub calls', async () => {
   let calls = 0;
@@ -1480,4 +1480,52 @@ test('thread routes distinguish GitHub secondary rate limits from permission fai
     assert.equal(response.status, 429);
     assert.deepEqual(await response.json(), { error: 'GitHub rate limit reached. Try again later.' });
   } finally { restore(); }
+});
+
+import { acceptFromReport, threadsClient } from './threads-client.js';
+
+test('review page for a pull request carries the thread composer and config', () => {
+  const html = reviewPage({ user: 'u', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: 7 });
+  assert.match(html, /<dialog id="thread-composer"/);
+  assert.match(html, /<dialog id="thread-view"/);
+  assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
+  assert.match(html, /"link":"\/r\/Cameronrlewis\/repo\/a\/123"/);
+});
+
+test('review page without a pull request has no composer', () => {
+  const html = reviewPage({ user: 'u', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: null });
+  assert.doesNotMatch(html, /thread-composer|threads-client|kicadReviewPin/);
+});
+
+test('wrapper accepts report messages only from its own iframe', () => {
+  const frame = { contentWindow: {} };
+  assert.equal(acceptFromReport({ source: frame.contentWindow, data: { kicadReviewPin: {} } }, frame), true);
+  assert.equal(acceptFromReport({ source: {}, data: { kicadReviewPin: {} } }, frame), false);
+  assert.equal(acceptFromReport({ source: frame.contentWindow, data: 'x' }, frame), false);
+  assert.equal(typeof threadsClient, 'function');
+});
+
+
+test('artifact wrapper discovers PR number and omits thread UI for push runs', async () => {
+  const sealed = await signedIn();
+  for (const event of ['pull_request', 'push']) {
+    const restore = mockFetch(async (url) => {
+      if (url.endsWith('/repo')) return accessibleRepo();
+      if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
+        name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 123 },
+      }));
+      if (url.endsWith('/actions/runs/123')) return new Response(JSON.stringify({ event, pull_requests: [{ number: 7 }] }));
+      throw new Error(`unexpected ${url}`);
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('Content-Security-Policy'), frameCsp);
+      const html = await response.text();
+      if (event === 'pull_request') {
+        assert.match(html, /<dialog id="thread-composer"/);
+        assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
+      } else assert.doesNotMatch(html, /thread-composer|kicadReviewPin/);
+    } finally { restore(); }
+  }
 });
