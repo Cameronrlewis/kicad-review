@@ -838,11 +838,20 @@ def parts_lines(objs):
             l["problems"].append("missing_lcsc")
         if not l["mpn"] and not l["lcsc"]:
             l["problems"].append("missing_mpn")
+        if any((v or "").strip().lower() in PLACEHOLDERS - {"", "~"} for v in (l["value"], l["mpn"], l["lcsc"])):
+            l["problems"].append("placeholder")
         if l["lcsc"]:
             by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
     for l in lines.values():
         if l["lcsc"] and len(by_lcsc[l["lcsc"]]) > 1:
             l["problems"].append("lcsc_conflict")
+    by_mpn = {}
+    for l in lines.values():
+        if l["mpn"] and present(l["mpn"]):
+            by_mpn.setdefault(l["mpn"].upper(), set()).add(l["footprint"])
+    for l in lines.values():
+        if l["mpn"] and len(by_mpn.get(l["mpn"].upper(), ())) > 1:
+            l["problems"].append("mpn_footprint_conflict")
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
@@ -873,6 +882,20 @@ def field_changes(base, head):
                 rows.setdefault((f, x, y), {"refs": [], "field": f, "before": x, "after": y})["refs"].append(ref)
     order = list(COVERAGE_FIELDS)
     return sorted(rows.values(), key=lambda r: (natural(r["refs"][0]), order.index(r["field"])))
+
+
+def mark_new_problems(base_lines, head_lines):
+    """A head problem is new when any of its references did not have it in base, even if the line itself did not change."""
+    before = {r: set(l["problems"]) for l in base_lines for r in l["refs"]}
+    for l in head_lines:
+        l["new_problems"] = [p for p in l["problems"] if any(p not in before.get(r, set()) for r in l["refs"])]
+
+
+def dnp_mismatches(objs):
+    """References fitted on one of schematic and board and DNP on the other."""
+    sym = {o["ref"].split(" unit ")[0]: o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
+    fp = {o["ref"]: "dnp" in (o["props"].get("attributes") or "").split() for o in objs.values() if o["kind"] == "footprint"}
+    return sorted((r for r in sym.keys() & fp.keys() if sym[r] != fp[r]), key=natural)
 
 
 def vkeys(v):
@@ -1031,8 +1054,12 @@ def build_project(p, blobs, settings):
     parts = None
     if settings["parts"]["enabled"]:
         lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
+        mark_new_problems(lines["base"], lines["head"])
+        has_base = any(o["kind"] == "symbol" for o in objs["base"].values())
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
-                 "supplier": None}  # JLCPCB lookup not built yet: no approved API access
+                 "supplier": None,  # JLCPCB lookup not built yet: no approved API access
+                 "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
+                 "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -1319,8 +1346,9 @@ def cmd_summary(args):
 
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
+                "placeholder": "placeholder value", "mpn_footprint_conflict": "one MPN on several footprints",
                 "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
-BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
 def parts_markdown(data):
@@ -1329,8 +1357,11 @@ def parts_markdown(data):
         parts = p.get("parts")
         if not parts:
             continue
-        introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
-                      for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
+        if any("new_problems" in l for l in parts["lines"]):
+            introduced = [(l["refs"], pr) for l in parts["lines"] for pr in l.get("new_problems", []) if pr in BLOCKING]
+        else:
+            introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
+                          for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
         s = parts["supplier"]
         head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
         when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
@@ -1338,6 +1369,15 @@ def parts_markdown(data):
         bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
+        cov = parts.get("coverage")
+        if cov:
+            def item(f, label):
+                c, t = cov["head"][f]
+                d = c - cov["base"][f][0] if cov.get("base") else 0
+                return f"{label} {c}/{t}" + (f" ({'+' if d > 0 else ''}{d})" if d else "")
+            out += ["", "BOM coverage: " + ", ".join(item(f, l) for f, l in (("Order ready", "order ready"), ("MPN", "MPN"), ("LCSC", "LCSC"), ("Datasheet (critical)", "datasheet on critical parts"))) + "."]
+        if parts.get("dnp_mismatch"):
+            out.append(f"DNP differs between schematic and board: {md(', '.join(parts['dnp_mismatch']))}.")
     return "\n".join(out)
 
 

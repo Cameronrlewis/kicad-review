@@ -896,7 +896,7 @@ print("ok TS-S1 CI browser matrix")
 print("ok")
 
 # Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
-from kicad_review import parts_lines
+from kicad_review import parts_lines, mark_new_problems
 sym = lambda ref, v, lcsc=None, ds="~", mpn=None: {"kind": "symbol", "ref": ref, "props": {
     "Value": v, "Footprint": "R_0805", "Datasheet": ds, **({"LCSC": lcsc} if lcsc is not None else {}),
     **({"MPN": mpn} if mpn else {})}}
@@ -989,7 +989,9 @@ try:
                 assert ("3d" in data["settings"]) == models_enabled
                 if parts_enabled:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
-                    assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    mark_new_problems(lines["base"], lines["head"])
+                    assert {k: p["parts"][k] for k in ("lines", "changes", "supplier")} == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    assert set(p["parts"]) == {"lines", "changes", "supplier", "coverage", "field_changes", "dnp_mismatch"}
                     assert p["parts"]["changes"][0]["action"] == "swapped"
                 html = pathlib.Path("review/kicad-review.html").read_text()
                 payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
@@ -998,7 +1000,9 @@ try:
                 assert embedded == data
         settings["parts"]["enabled"] = True
         with patch("kicad_review.project_objects", return_value={}):
-            assert build_project(project, {}, settings)["parts"] == {"lines": [], "changes": [], "supplier": None}
+            empty = build_project(project, {}, settings)["parts"]
+            assert {k: empty[k] for k in ("lines", "changes", "supplier", "field_changes", "dnp_mismatch")} == {"lines": [], "changes": [], "supplier": None, "field_changes": [], "dnp_mismatch": []}
+            assert empty["coverage"]["base"] is None and all(v == [0, 0] for v in empty["coverage"]["head"].values())
 finally:
     os.chdir(here)
 print("ok parts report data")
@@ -1078,3 +1082,24 @@ assert field_changes(b, h) == [
 h["2"] = symp("R2", Value="10k", Footprint="0402", MPN="ERJ-2RKF1002")
 assert field_changes(b, h)[0]["refs"] == ["R1", "R2"]
 print("ok MPN-only edit shows per reference")
+
+from kicad_review import parts_lines, mark_new_problems, dnp_mismatches, parts_markdown
+L = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1"), "2": symp("U2", Value="LDO", Footprint="SOT23", LCSC="C9", MPN="AP2112"),
+                 "3": symp("U3", Value="LDO", Footprint="SOT89", LCSC="C10", MPN="AP2112")})
+probs = {l["refs"][0]: l["problems"] for l in L}
+assert "placeholder" in probs["R1"] and "mpn_footprint_conflict" in probs["U2"] and "mpn_footprint_conflict" in probs["U3"], probs
+base_lines = parts_lines({"1": symp("R5", Value="1k", Footprint="0402", LCSC="C7"), "2": symp("R6", Value="2k", Footprint="0402", LCSC="C8")})
+head_lines = parts_lines({"1": symp("R5", Value="1k", Footprint="0402", LCSC="C7"), "2": symp("R6", Value="2k", Footprint="0402", LCSC="C7")})
+mark_new_problems(base_lines, head_lines)
+r5 = next(l for l in head_lines if "R5" in l["refs"])
+assert r5["new_problems"] == ["lcsc_conflict"], r5   # R5's line did not change, but its LCSC number now conflicts
+print("ok problem on unchanged line is new")
+fp = lambda ref, attrs: {"kind": "footprint", "ref": ref, "where": {"board": True}, "pos": [0, 0], "props": {"attributes": attrs, **({"dnp": "yes"} if "dnp" in (attrs or "") else {})}}
+mis = dnp_mismatches({"s1": symp("R1", dnp="no"), "s2": symp("R2", dnp="yes"), "s3": symp("R3"), "f1": fp("R1", "smd dnp"), "f2": fp("R2", "smd dnp"), "f3": fp("R3", "smd")})
+assert mis == ["R1"], mis
+print("ok DNP mismatch symbol vs footprint")
+pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": head_lines, "changes": [], "supplier": None, "dnp_mismatch": ["R1"],
+      "coverage": {"base": {"MPN": [1, 4], "Order ready": [2, 4], "LCSC": [4, 4], "Datasheet (critical)": [0, 0]},
+                   "head": {"MPN": [3, 4], "Order ready": [2, 4], "LCSC": [4, 4], "Datasheet (critical)": [0, 0]}}}}]})
+assert "R5 one LCSC number on several values" in pm and "BOM coverage: order ready 2/4, MPN 3/4 (+2), LCSC 4/4" in pm and "DNP differs between schematic and board: R1" in pm, pm
+print("ok bom readiness comment")
