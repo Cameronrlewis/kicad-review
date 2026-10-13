@@ -1513,12 +1513,15 @@ def waiver_lines(data):
     if not w:
         return []
     waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+    if not waived and not any(w.values()):
+        return []
+    one = lambda s: md(" ".join(str(s).split()))
     out = ["", f"{plural(waived, 'finding')} waived by kicad-review-waivers.toml (reasons in the report)."]
-    say = lambda e: f"{md(e['check'])} {md(e['match'])} ({md(e['reason'])}, by {md(e['by'])})"
+    say = lambda e: f"{one(e['check'])} {one(e['match'])} ({one(e['reason'])}, by {one(e['by'])})"
     out += [f"- Waiver not matched in this review: {say(e)} (if its finding is gone, remove it)." for e in w["stale"]]
-    out += [f"- Expired waiver: {say(e)} ended {md(e['until'])}." for e in w["expired"]]
+    out += [f"- Expired waiver: {say(e)} ended {one(e['until'])}." for e in w["expired"]]
     out += [f"- Proposed in this change (applies after it merges): {say(e)}." for e in w["proposed"]]
-    out += [f"- Ignored: {md(m)}" for m in w["invalid"]]
+    out += [f"- Ignored: {one(m)}" for m in w["invalid"]]
     return out
 
 

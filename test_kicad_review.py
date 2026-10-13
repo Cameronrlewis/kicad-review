@@ -1443,6 +1443,7 @@ with tempfile.TemporaryDirectory() as d:
                 loader.assert_called_once_with(target or "local-base")
             else:
                 loader.assert_not_called()
+                assert "waivers" not in json.loads(pathlib.Path("review/data.json").read_text())
             assert builder.call_args.args[3] == (active if enabled else None)
     finally:
         os.chdir(_cwd)
@@ -1498,7 +1499,18 @@ for field in ("check", "match", "reason", "by", "until"):
     escaped["waivers"]["expired"][0][field] = unsafe
     rendered = "\n".join(waiver_lines(escaped))
     assert md(unsafe) in rendered and unsafe not in rendered, (field, rendered)
+empty = {"projects": [], "waivers": {"stale": [], "expired": [], "proposed": [], "invalid": []}}
+assert waiver_lines(empty) == [] and "waived" not in checks_markdown(empty)
+for field in ("check", "match", "reason", "by", "until"):
+    multiline = copy.deepcopy(wd)
+    multiline["waivers"]["expired"][0][field] = "a\nb\r\n\t c"
+    lines = waiver_lines(multiline)
+    assert any("a b c" in line for line in lines)
+    assert all("\n" not in line and "\r" not in line and "\t" not in line for line in lines)
+multiline["waivers"]["invalid"] = ["a\nb"]
+assert "- Ignored: a b" in waiver_lines(multiline)
 print("ok stale waivers are listed and waived errors stay out of new errors")
+print("ok waiver text stays on one line and empty waiver summaries are omitted")
 
 # Exercise stale classification in cmd_report, including repeated keys across projects.
 _cwd = os.getcwd()
