@@ -1061,3 +1061,55 @@ assert calls == [("base/p/b.kicad_pro", "review", "review/p/base/fab", "b"), ("h
 print("ok release export in render")
 assert 'report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "release"}' in open("kicad_review.py", encoding="utf-8").read()
 print("ok release setting stays out of opted-out reports")
+
+from kicad_review import release_findings, package_summary
+import zipfile as zf
+def fab(d, files, pos_rows, bom_rows, preset="jlcpcb"):
+    os.makedirs(d, exist_ok=True)
+    with zf.ZipFile(f"{d}/b-review-{preset}-gerbers.zip", "w") as z:
+        for name, body in files.items(): z.writestr(name, body)
+    with open(f"{d}/b-review-{preset}-positions.csv", "w") as fh:
+        fh.write("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n" + "".join(f"{r},x,y,0,0,0,Top\n" for r in pos_rows))
+    part = "LCSC Part #" if preset == "jlcpcb" else "Mfg Part #"
+    with open(f"{d}/b-review-{preset}-bom.csv", "w") as fh:
+        fh.write(f"Comment,Designator,Footprint,{part}\n" + "".join(f'x,"{refs}",y,{pn}\n' for refs, pn in bom_rows))
+def pcb(d, layers):
+    open(f"{d}/b.kicad_pcb", "w").write("(kicad_pcb\n  (layers\n" + "".join(f'    (0 "{l}" signal)\n' for l in layers) + "  )\n)\n")
+    return f"{d}/b.kicad_pcb"
+fpd = lambda ref, side, attrs, pads="smd": {"kind": "footprint", "ref": ref, "props": {"layer": side, "attributes": attrs, "pads_kind": pads}}
+G = "%FSLAX46Y46*%\nD10*\nX0Y0D03*\nM02*\n"
+with tempfile.TemporaryDirectory() as d:
+    full = {"b-F_Cu.gtl": G, "b-B_Cu.gbl": G, "b-F_Mask.gts": G, "b-F_Paste.gtp": G, "b-B_Mask.gbs": G, "b-F_Silkscreen.gto": G, "b-Edge_Cuts.gm1": G, "b-PTH.drl": "M48\n"}
+    objs = {"1": fpd("R1", "F.Cu", "smd"), "2": {"kind": "via", "ref": "GND", "props": {}}}
+    fab(d, full, ["R1"], [("R1", "C1")])
+    assert release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "F.Mask", "Edge.Cuts"]), objs) == []
+    s = package_summary(d)
+    assert s["sha256"] and len(s["files"]) == 3 and all(f["bytes"] > 0 for f in s["files"]), s
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if k != "b-PTH.drl"}, ["R1"], [("R1", "C1")])
+    v = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    assert [x["type"] for x in v] == ["missing_drill"] and v[0]["severity"] == "error" and v[0]["where"] == {"board": True}, v
+print("ok vias require a drill file")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, full, ["R1"], [("R1", "C1")])
+    v = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    assert sorted(x["description"] for x in v) == ["No Gerber for copper layer In1.Cu", "No Gerber for copper layer In2.Cu"], v
+print("ok inner copper layers are required")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if "Paste" not in k}, [], [("J1", "C9")])
+    tht = {"1": fpd("J1", "F.Cu", "through_hole", "thru_hole")}
+    assert release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), tht) == []
+print("ok THT-only board needs no paste or position")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, ["R1", "R2"], [("R1", "")], preset="pcbway")
+    v = release_findings(d, "b", "pcbway", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    types = sorted(x["type"] for x in v)
+    assert types == ["bom_missing_part_number", "missing_drill", "position_not_in_bom"], types
+print("ok pcbway drill detected")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
+    open(p, "a").write('(footprint "J" (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6)))\n')
+    v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "J1", "props": {"layer": "F.Cu", "attributes": "through_hole"}}})
+    assert [x["type"] for x in v] == ["missing_drill"], v
+print("ok plated pads in the board file require a drill file")

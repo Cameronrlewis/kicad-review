@@ -695,6 +695,73 @@ def release_project(pro_path, tag, settings, out_dir, label):
     return made
 
 
+def fab_violation(type_, severity, description, items=()):
+    return {"type": type_, "severity": severity, "description": description, "items": list(items), "uuids": [],
+            "pos": None, "box": None, "where": {"board": True}}
+
+
+def has_draw(text):
+    return re.search(r"D0?[13]\*", text) is not None  # any draw (D01) or flash (D03): the layer is not empty
+
+
+def release_findings(fab_dir, label, preset, pcb_path, board_objs):
+    """What would stop a fab from building this board from the package kicad-review generates."""
+    stem = f"{fab_dir}/{label}-review-{preset}"
+    if not os.path.exists(f"{stem}-gerbers.zip"):
+        return [fab_violation("missing_package", "error", "No fabrication package was produced")]
+    with zipfile.ZipFile(f"{stem}-gerbers.zip") as z:
+        files = {n: z.read(n).decode("latin-1") for n in z.namelist()}
+    find_layer = lambda layer: next((t for n, t in files.items() if f"-{layer.replace('.', '_')}." in n), None)
+    out = []
+    for layer in [l for l in board_layers(pcb_path) if l.endswith(".Cu")] + ["Edge.Cuts"]:
+        if find_layer(layer) is None:
+            out.append(fab_violation("missing_layer", "error", f"No Gerber for {'copper layer ' if layer.endswith('.Cu') else ''}{layer}"))
+    fps = [o for o in board_objs.values() if o["kind"] == "footprint"]
+    attrs = lambda o: (o["props"].get("attributes") or "").split()
+    smd = [o for o in fps if "smd" in attrs(o) and "dnp" not in attrs(o)]
+    for side in ("F", "B"):
+        if any(o["props"].get("layer") == f"{side}.Cu" for o in smd):
+            for kind in ("Mask", "Paste"):
+                t = find_layer(f"{side}.{kind}")
+                if t is None or not has_draw(t):
+                    out.append(fab_violation("missing_layer", "error", f"{side}.{kind} is missing or empty but {side} side has SMD parts"))
+    # Plated holes come from the board file, so pcb_objects (and every report's change list) needs no new prop.
+    pcb_text = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
+    holes = any(o["kind"] == "via" for o in board_objs.values()) or re.search(r'\(pad\s+"[^"]*"\s+thru_hole\b', pcb_text) is not None \
+        or any("thru_hole" in (o["props"].get("pads_kind") or "") for o in fps)
+    if holes and not any(n.lower().endswith(".drl") for n in files):
+        out.append(fab_violation("missing_drill", "error", "The board has holes but the package has no drill file"))
+    pos, bom = f"{stem}-positions.csv", f"{stem}-bom.csv"
+    pos_refs = set()
+    if os.path.exists(pos):
+        with open(pos, newline="", encoding="utf-8") as fh:
+            pos_refs = {r["Designator"] for r in csv.DictReader(fh)}
+    if smd and not pos_refs:
+        out.append(fab_violation("missing_positions", "error", "SMD parts are fitted but the position file is empty"))
+    if os.path.exists(bom):
+        with open(bom, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        part_col = PRESETS[preset]["bom"][-1][1] if preset == "jlcpcb" else "Mfg Part #"
+        bom_refs = {r.strip() for row in rows for r in row.get("Designator", "").split(",") if r.strip()}
+        missing_pn = [row["Designator"] for row in rows if not (row.get(part_col) or "").strip()]
+        if missing_pn:
+            out.append(fab_violation("bom_missing_part_number", "warning", f"BOM lines without {part_col}", missing_pn))
+        extra = sorted(pos_refs - bom_refs, key=natural)
+        if extra:
+            out.append(fab_violation("position_not_in_bom", "warning", "Parts placed by the position file but missing from the BOM", extra))
+    return out
+
+
+def package_summary(fab_dir):
+    files = sorted(f for f in os.listdir(fab_dir) if "-review-" in f) if os.path.isdir(fab_dir) else []
+    zip_ = next((f for f in files if f.endswith("-gerbers.zip")), None)
+    sha = None
+    if zip_:
+        with open(f"{fab_dir}/{zip_}", "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+    return {"files": [{"path": f, "bytes": os.path.getsize(f"{fab_dir}/{f}")} for f in files], "sha256": sha}
+
+
 def cmd_release(args):
     settings = load_settings(("repo",))
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
