@@ -1474,3 +1474,59 @@ with tempfile.TemporaryDirectory() as d:
     finally:
         os.chdir(_cwd)
 print("ok waiver ref options, missing refs, symlinks and size limit")
+
+# Comment summaries distinguish waived findings from new errors and escape waiver text.
+from kicad_review import waiver_lines, checks_markdown, md
+entry = {"check": "erc", "match": "w-444444444444", "reason": "gone", "by": "bo"}
+wd = {"projects": [{"name": "A", "checks": [{**c, "violations": [{**v1, "new": True, "waived": {"reason": "intended"}}], "waived": 1}]}],
+      "waivers": {"stale": [entry], "expired": [{**entry, "until": "2026-02-01"}],
+                  "proposed": [entry], "invalid": ["waiver 3: reason must not be empty"]}}
+text = "\n".join(waiver_lines(wd))
+assert "1 finding waived" in text
+assert "Waiver not matched in this review: erc w-444444444444 (gone, by bo) (if its finding is gone, remove it)." in text
+assert "Expired waiver: erc w-444444444444 (gone, by bo) ended 2026-02-01." in text
+assert "Proposed in this change (applies after it merges): erc w-444444444444 (gone, by bo)." in text
+assert "waiver 3: reason must not be empty" in text
+assert "New errors" not in checks_markdown(wd) and "1 finding waived" in checks_markdown(wd)
+unwaived = copy.deepcopy(wd)
+unwaived["projects"][0]["checks"][0]["violations"].append({**v1, "new": True, "description": "real new error"})
+assert "real new error" in checks_markdown(unwaived)
+assert waiver_lines(d2) == [] and "waived" not in checks_markdown(d2)
+unsafe = "[link](x) *bold* <img> @ann | `code`"
+for field in ("check", "match", "reason", "by", "until"):
+    escaped = copy.deepcopy(wd)
+    escaped["waivers"]["expired"][0][field] = unsafe
+    rendered = "\n".join(waiver_lines(escaped))
+    assert md(unsafe) in rendered and unsafe not in rendered, (field, rendered)
+print("ok stale waivers are listed and waived errors stay out of new errors")
+
+# Exercise stale classification in cmd_report, including repeated keys across projects.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        pathlib.Path("review").mkdir()
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [project, project]}))
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings["waivers"]["enabled"] = True
+        loaded = {"active": {("drc", k): {**entry, "check": "drc", "match": k}, ("erc", entry["match"]): entry},
+                  "expired": wd["waivers"]["expired"], "proposed": [entry], "invalid": ["bad entry"]}
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.load_waivers", return_value=loaded), \
+             patch("kicad_review.build_project", side_effect=lambda *args: {"checks": [{"name": "drc", "violations": [{"waiver_key": k, "waived": {"reason": "intended"}}], "status": "pass"}], "changes": []}), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            kicad_review.cmd_report(None)
+        data = json.loads(pathlib.Path("review/data.json").read_text())
+        assert data["waivers"] == {"stale": [entry], "expired": loaded["expired"], "proposed": [entry], "invalid": ["bad entry"]}
+        payload = pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
+        assert json.loads(payload)["waivers"] == data["waivers"]
+    finally:
+        os.chdir(_cwd)
+print("ok report stale classification and embedded waiver data")
+
+# Checkout's full-history fetch populates all remote branches even for detached PR heads.
+wf = pathlib.Path(".github/workflows/review.yml").read_text()
+checkout = wf.split("- name: Check out project history", 1)[1].split("- name: Check out review tools", 1)[0]
+assert "fetch-depth: 0" in checkout and "path: repo" in checkout
+assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in checkout, "SHA checkout must not reset a live origin branch to the event's old commit"
+assert "WAIVERS_REF: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}" in wf
+print("ok workflow live waiver target and full-history project checkout")

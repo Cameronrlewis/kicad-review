@@ -1206,6 +1206,11 @@ def cmd_report(args):
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
     data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
     assign_ids(data["projects"])
+    if waivers is not None:
+        used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
+                for v in c["violations"] if v.get("waived")}
+        data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
+                           "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
@@ -1502,6 +1507,21 @@ def thread_counts(response):
     return c
 
 
+def waiver_lines(data):
+    """Comment summaries for covered findings and waivers that need attention."""
+    w = data.get("waivers")
+    if not w:
+        return []
+    waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+    out = ["", f"{plural(waived, 'finding')} waived by kicad-review-waivers.toml (reasons in the report)."]
+    say = lambda e: f"{md(e['check'])} {md(e['match'])} ({md(e['reason'])}, by {md(e['by'])})"
+    out += [f"- Waiver not matched in this review: {say(e)} (if its finding is gone, remove it)." for e in w["stale"]]
+    out += [f"- Expired waiver: {say(e)} ended {md(e['until'])}." for e in w["expired"]]
+    out += [f"- Proposed in this change (applies after it merges): {say(e)}." for e in w["proposed"]]
+    out += [f"- Ignored: {md(m)}" for m in w["invalid"]]
+    return out
+
+
 def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
@@ -1509,13 +1529,13 @@ def checks_markdown(data):
             lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
-            if v["new"] and v["severity"] == "error"]
+            if v["new"] and v["severity"] == "error" and not v.get("waived")]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
         lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
-    checks = "\n".join(lines) + "\n"
+    checks = "\n".join(lines + waiver_lines(data)) + "\n"
     if len(checks) > 50000:  # leave room for the comment body and closing details tags
         checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
