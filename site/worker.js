@@ -209,11 +209,13 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
     if (!raw) {
       let pull = null;
       const runId = metadata.workflow_run?.id;
-      if (/^\d+$/.test(String(runId))) {
-        const runResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`, active.token);
-        const runData = runResponse.ok ? await runResponse.json() : null;
-        if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
-      }
+      try {
+        if (/^\d+$/.test(String(runId))) {
+          const runResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`, active.token);
+          const runData = runResponse.ok ? await runResponse.json() : null;
+          if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
+        }
+      } catch { /* PR discovery must not prevent opening the report. */ }
       return sessionResponse(reviewPage({
         user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pull,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);

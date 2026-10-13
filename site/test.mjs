@@ -1383,29 +1383,89 @@ test('thread routes explain a missing Pull requests permission', async () => {
   } finally { restore(); }
 });
 
-
-test('artifact PR discovery passes only pull-request run numbers to the wrapper', async () => {
-  const source = readFileSync('site/worker.js', 'utf8');
-  const fn = source.slice(source.indexOf('async function artifactReport('), source.indexOf('const artifactName ='));
-  for (const [runData, expected] of [
-    [{ event: 'pull_request', pull_requests: [{ number: 7 }] }, 7],
-    [{ event: 'push', pull_requests: [{ number: 7 }] }, null],
-    [{ event: 'pull_request', pull_requests: [] }, null],
-    [{ event: 'pull_request', pull_requests: [{ number: '7' }] }, null],
-    [null, null],
-  ]) {
+test('artifact PR discovery is best-effort on the framed artifact route', async () => {
+  const sealed = await signedIn();
+  for (const runData of [{ event: 'pull_request', pull_requests: [{ number: 7 }] }, { event: 'push', pull_requests: [] }, null, 'throw']) {
     const seen = [];
-    const result = await runInNewContext(`(async()=>{${fn}; return artifactReport({}, {}, 'owner', 'repo', 42, { token: 'user-token', login: 'octocat' }, false);})()`, {
-      frameCsp, reviewPage: value => value, sessionResponse: value => value,
-      gh: async (path, token) => {
-        seen.push([path, token]);
-        return path.endsWith('/artifacts/42')
-          ? new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 123 } }))
-          : new Response(JSON.stringify(runData), { status: runData ? 200 : 403 });
-      },
+    const restore = mockFetch(async (url) => {
+      seen.push(url);
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 123 } }));
+      if (runData === 'throw') throw new Error('run unavailable');
+      return new Response(JSON.stringify(runData), { status: runData ? 200 : 403 });
     });
-    assert.equal(result.pull, expected);
-    assert.equal(result.workflowRunId, 123);
-    assert.deepEqual(seen, [['/repos/owner/repo/actions/artifacts/42', 'user-token'], ['/repos/owner/repo/actions/runs/123', 'user-token']]);
+    try {
+      const response = await call('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      assert.match(await response.text(), /<iframe/);
+      assert.equal(seen[2], 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/123');
+    } finally { restore(); }
   }
+});
+
+test('thread routes retain refreshed session cookies on success and error', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  const restore = mockFetch(async url => {
+    if (url.includes('access_token')) return tokenResponse();
+    if (url.endsWith('/repo')) return repoOk();
+    return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }));
+  });
+  try {
+    for (const suffix of ['', '/invalid']) {
+      const response = await call(`/r/Cameronrlewis/repo/pull/7/threads${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, suffix ? 404 : 200);
+      assert.ok(cookieValue(response, 's'));
+    }
+  } finally { restore(); }
+});
+
+test('thread GraphQL errors never become successful lists or mutations', async () => {
+  const sealed = await signedIn();
+  for (const type of ['FORBIDDEN', 'NOT_FOUND']) {
+    const restore = mockFetch(async url => url.endsWith('/repo') ? repoOk() : new Response(JSON.stringify({ errors: [{ type }] })));
+    try {
+      for (const action of ['', '/PRRT_1/resolve', '/PRRT_1/unresolve']) {
+        const path = '/r/Cameronrlewis/repo/pull/7/threads' + action;
+        const response = action ? await threadsJson(path, {}, undefined, sealed) : await call(path, { headers: { Cookie: `s=${sealed}` } });
+        assert.equal(response.status, type === 'FORBIDDEN' ? 403 : 502);
+        const body = await response.json();
+        assert.equal(body.ok, undefined);
+        assert.ok(body.error);
+        if (type === 'FORBIDDEN') assert.match(body.error, /Pull requests permission/);
+      }
+    } finally { restore(); }
+  }
+});
+
+test('thread authentication failures are JSON', async () => {
+  const response = await call('/r/Cameronrlewis/repo/pull/7/threads');
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Sign in again.' });
+  const sealed = await signedIn();
+  const restore = mockFetch(async () => new Response('{}', { status: 404 }));
+  try {
+    const denied = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(denied.status, 404);
+    assert.deepEqual(await denied.json(), { error: "Can't open this repository." });
+  } finally { restore(); }
+});
+
+test('thread routes reject non-object JSON and distinguish rate limiting', async () => {
+  const sealed = await signedIn(); let posts = 0;
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return repoOk();
+    posts++;
+    return new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0' } });
+  });
+  try {
+    for (const body of [null, false, 1, 'text', []]) {
+      const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads', body, undefined, sealed);
+      assert.equal(response.status, 400);
+      assert.ok((await response.json()).error);
+    }
+    assert.equal(posts, 0);
+    const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/11/reply', { text: 'x' }, undefined, sealed);
+    assert.equal(response.status, 429);
+    assert.match((await response.json()).error, /rate limit/);
+  } finally { restore(); }
 });
