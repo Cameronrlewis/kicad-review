@@ -1210,3 +1210,76 @@ with tempfile.TemporaryDirectory() as d:
     pathlib.Path(f"{d}/h/Parts.pretty/Renamed.kicad_mod").write_text(FP([("1", 0)]).replace('"SOT23"', '"Renamed"'))
     assert {(c["item"], c["status"]) for c in library_changes(f"{d}/b", f"{d}/h") if c["kind"] == "footprint"} == {("SOT23", "removed"), ("Renamed", "added")}
 print("ok library geometry and true rename")
+
+from kicad_review import library_report, lib_slug
+objs_idx = [{"uuid": "a", "kind": "footprint", "ref": "U1", "side": "head", "lib": "Parts:SOT23"}, {"uuid": "b", "kind": "footprint", "ref": "U3", "side": "head", "lib": "Parts:SOT23"},
+            {"uuid": "c", "kind": "symbol", "ref": "U1", "side": "head", "lib": "Parts:LDO"}]
+changes = [{"lib": "Parts", "item": "SOT23", "kind": "footprint", "status": "modified", "file": "Parts.pretty/SOT23.kicad_mod",
+            "pins_diff": [{"pin": "3", "change": "removed", "before": "smd rect (2, 0) 0.6×1", "after": None}]},
+           {"lib": "Parts", "item": "LDO", "kind": "symbol", "status": "modified", "file": "Parts.kicad_sym",
+            "pins_diff": [{"pin": "4", "change": "type", "before": "input", "after": "passive"}]}]
+with tempfile.TemporaryDirectory() as d:
+    os.makedirs(f"{d}/head/lib"); os.makedirs(f"{d}/base/lib")
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><path d="M0 0L1 1"/></svg>'
+    for s in ("base", "head"): open(f"{d}/{s}/lib/{lib_slug(changes[0])}.svg", "w").write(svg)
+    blobs = {}
+    rep = library_report(changes, objs_idx, d, blobs)
+assert rep[0]["used_by"] == ["U1", "U3"] and rep[0]["warnings"] == ["⚠ pad 3 removed while U1, U3 use SOT23"] and rep[0]["svg"]["head"] in blobs and rep[0]["size"] == [10.0, 5.0], rep[0]
+print("ok removed pad in use warns")
+assert rep[1]["warnings"] == ["⚠ pin 4 type input → passive on LDO, used by U1"] and rep[1]["svg"] == {"base": None, "head": None} and rep[1]["note"] == "no drawing", rep[1]
+print("ok missing library drawing is listed")
+
+assert lib_slug({"kind": "symbol", "lib": "a/b", "item": "X"}) != lib_slug({"kind": "symbol", "lib": "a_b", "item": "X"})
+assert "lib" not in object_index(t1_base, t1_head)[0]
+with tempfile.TemporaryDirectory() as d:
+    pathlib.Path(d, "kicad-review.toml").write_text('[libraries]\nenabled = true\n')
+    assert load_settings((d,))["libraries"] == {"enabled": True}
+    pathlib.Path(d, "kicad-review.toml").write_text('[libraries]\nenabled = "yes"\n')
+    try:
+        load_settings((d,))
+        assert False
+    except SystemExit as e:
+        assert "libraries.enabled" in str(e)
+print("ok library settings and safe slugs")
+
+here = os.getcwd()
+try:
+    with tempfile.TemporaryDirectory() as d:
+        os.chdir(d)
+        lib_tree("base", SYM([("1", "IN", "input")]), FP([("1", 0), ("2", 1)]))
+        lib_tree("head", SYM([("1", "IN", "passive")]), FP([("1", 0)]))
+        os.makedirs("review")
+        project = {"name": "X", "dir": "", "status": "modified"}
+        pathlib.Path("review/detect.json").write_text(json.dumps({"projects": [project], "base": "b", "head": "h", "reason": "changed"}))
+        settings = json.loads(json.dumps(DEFAULT_SETTINGS))
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side"), patch("kicad_review.library_changes", side_effect=AssertionError("off parsed libraries")), patch("kicad_review.subprocess.run", side_effect=AssertionError("off exported libraries")):
+            kicad_review.cmd_render(None)
+        settings["libraries"]["enabled"] = True
+        calls = []
+        def library_export(args, **kwargs):
+            calls.append(args)
+            pathlib.Path(args[args.index("-o")+1], "item.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><path d="M0 0L1 1"/></svg>')
+            return SimpleNamespace(returncode=0)
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side"), patch("kicad_review.subprocess.run", side_effect=library_export):
+            kicad_review.cmd_render(None)
+        assert len(calls) == 4 and all(a[:3] in (["kicad-cli", "sym", "export"], ["kicad-cli", "fp", "export"]) for a in calls)
+        objects = {"f1": {**t1_fpo("U1", 1), "props": {"footprint": "Parts:SOT23"}}}
+        with patch("kicad_review.project_objects", return_value=objects):
+            blobs = {}; report = build_project(project, blobs, settings)
+            assert len(report["libraries"]) == 2 and report["objects"][0]["lib"] == "Parts:SOT23"
+            assert report["libraries"][0]["used_by"] == ["U1"] and report["libraries"][0]["warnings"]
+            settings["libraries"]["enabled"] = False
+            settings["inventory"]["enabled"] = True
+            with patch("kicad_review.library_changes", side_effect=AssertionError("off parsed libraries")):
+                off = build_project(project, {}, settings)
+                assert "libraries" not in off and "lib" not in off["objects"][0]
+                with patch("kicad_review.object_index", return_value=object_index(objects, objects)):
+                    legacy = build_project(project, {}, settings)
+                assert json.dumps(off, sort_keys=True) == json.dumps(legacy, sort_keys=True)
+                assert comment_markdown({**d2, "projects": [off]}, [], "") == comment_markdown({**d2, "projects": [legacy]}, [], "")
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.build_project", return_value=off):
+            kicad_review.cmd_report(None)
+            assert "libraries" not in json.loads(pathlib.Path("review/data.json").read_text())["settings"]
+finally:
+    os.chdir(here)
+print("ok library exports, objects emission and off byte identity")
