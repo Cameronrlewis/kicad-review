@@ -1171,7 +1171,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
                + (f"[Workflow run]({data['links']['run']})" if data["links"].get("run") else ""))
     if site and artifact_id and data.get("repo"):
         site = site.rstrip("/")
-        out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id})**")
+        pdf_hint = "?pdf=1" if data.get("settings", {}).get("pdf", {}).get("enabled", False) else ""
+        out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id}{pdf_hint})**")
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
     if artifact_id and data.get("repo"):

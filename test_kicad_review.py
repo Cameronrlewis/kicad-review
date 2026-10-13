@@ -581,6 +581,14 @@ site_url = "https://kicad-review.example.workers.dev/r/o/r/a/5"
 assert site_default == site_empty, "empty site changes the existing comment"
 assert site_body.count(site_url) == 1 and f"**[Open the review]({site_url})**" in site_body, site_body
 assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in site_body
+pdf_link_args = ([], "https://github.com/o/r/actions/runs/9/artifacts/5", "5")
+pdf_off_data = {**d, "settings": {**d.get("settings", {}), "pdf": {"enabled": False}}}
+pdf_on_data = {**d, "settings": {**d.get("settings", {}), "pdf": {"enabled": True}}}
+assert comment_markdown(pdf_off_data, *pdf_link_args, site="https://kicad-review.example.workers.dev/") == site_body
+pdf_site_body = comment_markdown(pdf_on_data, *pdf_link_args, site="https://kicad-review.example.workers.dev/")
+assert pdf_site_body == site_body.replace(f"({site_url})", f"({site_url}?pdf=1)")
+assert comment_markdown(pdf_on_data, *pdf_link_args) == site_default
+print("ok PDF site comment link opt-in and off byte identity")
 print("ok")
 
 # The site deploy workflow is manual, least-privileged, pin-only, and does not contain credentials.
