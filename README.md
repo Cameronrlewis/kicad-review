@@ -17,7 +17,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 
 **On demand**: *Actions → KiCad review → Run workflow*, then type any two commits, branches or tags.
 
-**On a `v*` tag**, Gerbers and drill files (one zip), a BOM and a position file per project are attached to the GitHub release, in JLCPCB or PCBWay format.
+**On a `v*` tag**, Gerbers and drill files (one zip), a BOM and a position file per project are attached to the GitHub release, in JLCPCB or PCBWay format. Set `[release] review = true` to also review changes since the previous `v*` tag and merge a "KiCad review" section into the release notes. The first release shows everything as added. Re-runs replace that section and keep surrounding notes. Required check failures appear in the notes and never block fabrication attachments; review errors do not prevent the fabrication steps from running. Tag review is off by default, including for existing `v1` callers.
 
 **The interactive report** is one self-contained HTML file in the run's artifacts. Download it and open it in any browser. It works offline. It offers:
 
@@ -53,8 +53,9 @@ To make checks block merging, require the status check **`review / review`** in 
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
+| `release.review` | `false` | on a `v*` tag, review changes since the previous `v*` tag and add a "KiCad review" section to the release notes |
 
-For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
+For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used. The workflow reads `release.review` from the tagged revision to decide whether to start its review; check settings still follow the base-first rule.
 
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
@@ -74,6 +75,8 @@ Supplier stock/price is not yet available; a JLCPCB Components API lookup at wor
 ## Review site (optional)
 
 The small Cloudflare Worker review site lets people sign in with GitHub and open reviews only in repositories they can already read. See [the site setup guide](site/README.md) to create the GitHub App, run it locally, and deploy it manually.
+
+The review list can group pull-request reviews by GitHub milestone. Choose **Milestones** to see open and merged PR counts, review verdicts, and a link to each milestone. This view reads the latest 100 PRs live and needs the App's **Pull requests: read** permission; without it, the page shows permission guidance. Reviews join to the newest PR with the same head branch, so reused or same-named fork branches can be ambiguous. Manual comparisons and unmatched reviews appear under **No milestone**. No milestone data is stored.
 
 ## When the workflow repository moves (for example to ParadigmEngineering)
 

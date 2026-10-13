@@ -23,3 +23,7 @@ enabled = false            # export changed boards as GLB and report footprints 
 # Parts: datasheet links, LCSC/MPN and part-number problems per component in the Parts tab and PR comment.
 [parts]
 enabled = false
+
+# Tag-to-tag review and a marked section in GitHub release notes; fabrication remains independent.
+[release]
+review = false

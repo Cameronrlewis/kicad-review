@@ -1052,6 +1052,7 @@ with tempfile.TemporaryDirectory() as t:
         pathlib.Path("P.kicad_pro").write_text("3")
         g("commit", "-qam", "three"); g("tag", "-am", "release", "v1.1")
         head = g("rev-parse", "HEAD")
+        g("branch", "v1.1", first)  # A same-named branch must not shadow the pushed tag.
         assert previous_tag("v1.1") == previous_tag("test-1") == "v1.0"
         assert resolve_revisions({"EVENT": "push", "TAG": "v1.1", "AFTER": head}) == (first, head, "release v1.1 vs v1.0")
         assert resolve_revisions({"EVENT": "push", "TAG": "v1.0", "AFTER": first}) == (None, first, "release v1.0 (first release)")
@@ -1090,7 +1091,10 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.load_settings", return_value=current):
                 kicad_review.cmd_report(None)
             data = json.loads(pathlib.Path("review/data.json").read_text())
-            results.append((pathlib.Path("review/data.json").read_bytes(), pathlib.Path("review/kicad-review.html").read_bytes(), comment_markdown(data, [], "")))
+            pathlib.Path("summary.md").write_text("")
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": "summary.md"}), patch("sys.stdout", new=io.StringIO()):
+                kicad_review.cmd_summary(type("A", (), {"image_base": "", "artifact_url": "", "artifact_id": ""}))
+            results.append((pathlib.Path("review/data.json").read_bytes(), pathlib.Path("review/kicad-review.html").read_bytes(), pathlib.Path("review/comment.md").read_bytes(), pathlib.Path("summary.md").read_bytes()))
         assert results[0] == results[1] == results[2]
         print("ok release settings preserve report and summary bytes")
     finally:
