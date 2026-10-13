@@ -1065,3 +1065,16 @@ assert 'report_settings["bom"] = {"required_fields": settings["bom"]["required_f
 s = json.loads(json.dumps(DEFAULT_SETTINGS))
 assert s["parts"]["enabled"] is False and set(s["bom"]) == {"required_fields", "critical_prefixes", "order_ready_fields"}
 print("ok bom readiness settings opt-in")
+
+from kicad_review import field_changes
+b = {"1": symp("R1", Value="10k", Footprint="0402", MPN="RC0402-10K"), "2": symp("R2", Value="10k", Footprint="0402", MPN="RC0402-10K"),
+     "3": symp("U1", Value="LDO", Footprint="SOT23", Datasheet="https://a")}
+h = {"1": symp("R1", Value="10k", Footprint="0402", MPN="ERJ-2RKF1002"), "2": symp("R2", Value="10k", Footprint="0402", MPN="RC0402-10K"),
+     "3": symp("U1", Value="LDO", Footprint="SOT23", Datasheet="https://b", Manufacturer="TI"), "4": symp("C1", Value="1u", Footprint="0402")}
+assert field_changes(b, h) == [
+    {"refs": ["R1"], "field": "MPN", "before": "RC0402-10K", "after": "ERJ-2RKF1002"},
+    {"refs": ["U1"], "field": "Manufacturer", "before": None, "after": "TI"},
+    {"refs": ["U1"], "field": "Datasheet", "before": "https://a", "after": "https://b"}], field_changes(b, h)
+h["2"] = symp("R2", Value="10k", Footprint="0402", MPN="ERJ-2RKF1002")
+assert field_changes(b, h)[0]["refs"] == ["R1", "R2"]
+print("ok MPN-only edit shows per reference")

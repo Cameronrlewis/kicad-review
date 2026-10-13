@@ -861,6 +861,20 @@ def diff_parts(base, head):
     return list(rows.values())
 
 
+def field_changes(base, head):
+    """BOM field edits per reference, grouped when several references changed the same way."""
+    b, h = bom_parts(base), bom_parts(head)
+    norm = lambda v: v.strip() if present(v) else None
+    rows = {}
+    for ref in sorted(set(b) & set(h), key=natural):
+        for f, get in COVERAGE_FIELDS.items():
+            x, y = norm(get(b[ref])), norm(get(h[ref]))
+            if x != y:
+                rows.setdefault((f, x, y), {"refs": [], "field": f, "before": x, "after": y})["refs"].append(ref)
+    order = list(COVERAGE_FIELDS)
+    return sorted(rows.values(), key=lambda r: (natural(r["refs"][0]), order.index(r["field"])))
+
+
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
     sig = (v["severity"], tuple(sorted(v["where"].items())))
