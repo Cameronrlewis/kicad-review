@@ -1,3 +1,4 @@
+import { createShare } from './share.js';
 import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 
 const text = new TextEncoder();
@@ -114,7 +115,7 @@ export async function session(request, env) {
   };
 }
 
-function response(body, init = {}) {
+export function response(body, init = {}) {
   const headers = new Headers(init.headers);
   for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
   if (!headers.has('Content-Security-Policy')) headers.set('Content-Security-Policy', "frame-ancestors 'none'");
@@ -131,7 +132,7 @@ function sessionRedirect(location, status, active) {
   return redirect(location, active?.setCookie ? [active.setCookie] : [], status);
 }
 
-function sessionResponse(body, init, active) {
+export function sessionResponse(body, init, active) {
   const headers = new Headers(init?.headers);
   if (active?.setCookie) headers.set('Set-Cookie', active.setCookie);
   return response(body, { ...init, headers });
@@ -151,7 +152,7 @@ function errorPage(status, title, message, links = [], active, init = {}, detail
   return sessionResponse(messagePage({ title, message, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
-function gh(path, token, init = {}) {
+export function gh(path, token, init = {}) {
   return fetch(`https://api.github.com${path}`, {
     ...init,
     headers: {
@@ -540,6 +541,8 @@ export default {
       if (request.method === 'GET' && url.pathname === '/callback') return await callback(request, env);
       if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
+      const shareCreate = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/share$/);
+      if (request.method === 'POST' && shareCreate) return await createShare(request, env, { owner: shareCreate[1], repo: shareCreate[2], id: shareCreate[3] }, { access, gh, response, sessionResponse });
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw)?$/);
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id, raw] = artifactRoute;

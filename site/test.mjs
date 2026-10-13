@@ -1199,3 +1199,88 @@ test('share tokens are unguessable, strictly validated, expiring and bound to on
   assert.equal(await verifyShare(token, { SHARE_KEY: 'tiny' }), null);
   assert.equal(await verifyShare(token, shareEnv, claims.exp), null);
 });
+
+const { privateKey, publicKey: sharePublicKey } = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+const appEnv = { ...shareEnv, GITHUB_APP_ID: '42', GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${Buffer.from(await crypto.subtle.exportKey('pkcs8', privateKey)).toString('base64')}\n-----END PRIVATE KEY-----` };
+const sharePost = async (path, body = {}, headers = {}, cookie) => request(path, { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json', Cookie: `s=${cookie ?? await signedIn()}`, ...headers }, body: JSON.stringify(body) });
+const shareMeta = (expires = new Date(Date.now() + 2 * 86400_000).toISOString()) => ({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, expires_at: expires });
+const shareJson = (data, status = 200) => new Response(JSON.stringify(data), { status });
+function shareCreationFetch({ push = true, metadata = shareMeta(), generation = '3', genStatus = 200, refreshed = false } = {}) {
+  return mockFetch(async (url, options = {}) => {
+    if (url === 'https://github.com/login/oauth/access_token' && refreshed) return tokenResponse();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return shareJson({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push } });
+    if (url.endsWith('/actions/artifacts/123')) return shareJson(metadata);
+    if (url.endsWith('/installation')) return shareJson({ id: 7 });
+    if (url.endsWith('/access_tokens')) {
+      assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', variables: 'read' } });
+      return shareJson({ token: 'installation-secret' }, 201);
+    }
+    if (url.endsWith('/KICAD_REVIEW_SHARE_GEN')) return shareJson({ value: generation }, genStatus);
+    throw new Error(`Unexpected share API path: ${url}`);
+  });
+}
+test('app JWT is RS256 with verified signature and short lifetime; feature needs all secrets', async () => {
+  const { appJwt, shareEnabled } = await import('./share.js');
+  const token = await appJwt(appEnv, 1_700_000_000_000);
+  const [h, p, sig] = token.split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(h, 'base64url')), { alg: 'RS256', typ: 'JWT' });
+  assert.deepEqual(JSON.parse(Buffer.from(p, 'base64url')), { iss: '42', iat: 1_699_999_940, exp: 1_700_000_540 });
+  assert.equal(await crypto.subtle.verify('RSASSA-PKCS1-v1_5', sharePublicKey, Buffer.from(sig, 'base64url'), new TextEncoder().encode(`${h}.${p}`)), true);
+  assert.equal(shareEnabled(appEnv), true);
+  for (const key of ['SHARE_KEY', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY']) assert.equal(shareEnabled({ ...appEnv, [key]: '' }), false);
+});
+test('writers create one-review links scoped read-only and expiry never outlives artifact', async () => {
+  const restore = shareCreationFetch();
+  try {
+    const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share', { days: 30 }), appEnv);
+    assert.equal(response.status, 201); checkSecurity(response);
+    const { url, expires } = await response.json();
+    const { verifyShare } = await import('./share.js');
+    const claims = await verifyShare(url.split('/s/')[1], appEnv);
+    assert.equal(expires, claims.exp); assert.ok(expires <= Date.now() + 2 * 86400_000);
+    assert.deepEqual({ ...claims, exp: 0 }, { o: 'Cameronrlewis', r: 'repo', a: 123, exp: 0, g: 3 });
+    assert.doesNotMatch(url, /installation-secret|user-token|PRIVATE KEY/);
+  } finally { restore(); }
+});
+test('share POST auth, owner, origin, JSON and writer checks deny without privileged calls', async () => {
+  let calls = 0;
+  const restore = mockFetch(async url => { calls++; assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo'); return shareJson({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: false } }); });
+  try {
+    const denied = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share'), appEnv);
+    assert.equal(denied.status, 403); assert.ok((await denied.json()).error);
+    const before = calls;
+    for (const [path, cookie] of [['/r/Other/repo/a/123/share', await signedIn()], ['/r/Cameronrlewis/repo/a/123/share', '']]) {
+      const response = await worker.fetch(await sharePost(path, {}, {}, cookie), appEnv);
+      assert.ok([401, 404].includes(response.status)); assert.ok((await response.json()).error);
+    }
+    assert.equal(calls, before);
+  } finally { restore(); }
+  const restoreWriter = shareCreationFetch();
+  try {
+    for (const [headers, status] of [[{ Origin: 'https://evil.example' }, 403], [{ 'Content-Type': 'text/plain' }, 415], [{ 'Content-Type': 'application/jsonp' }, 415]]) {
+      const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share', {}, headers), appEnv);
+      assert.equal(response.status, status); assert.ok((await response.json()).error); checkSecurity(response);
+    }
+    for (const days of [0, 31, 1.5, '7', null]) {
+      const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share', { days }), appEnv);
+      assert.equal(response.status, 400);
+    }
+  } finally { restoreWriter(); }
+});
+test('create fails closed on invalid artifact expiry, unrelated report and generation errors', async () => {
+  for (const settings of [{ metadata: shareMeta('bad') }, { metadata: shareMeta(new Date(Date.now() - 1).toISOString()) }, { metadata: { ...shareMeta(), name: 'unrelated.html' } }, { generation: '3junk' }, { generation: '-1' }, { genStatus: 403 }, { genStatus: 500 }]) {
+    const restore = shareCreationFetch(settings);
+    try { const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share'), appEnv); assert.ok(response.status >= 400); assert.ok((await response.json()).error); }
+    finally { restore(); }
+  }
+});
+test('new authenticated share exits retain refreshed cookie including upstream failure', async () => {
+  for (const settings of [{}, { push: false }, { genStatus: 500 }, { metadata: shareMeta('bad') }]) {
+    const restore = shareCreationFetch({ ...settings, refreshed: true });
+    try {
+      const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share', {}, {}, await signedIn({ e: Date.now() - 1 })), appEnv);
+      const cookie = cookieValue(response, 's'); assert.ok(cookie);
+      assert.equal((await open(cookie, env)).t, 'access-secret');
+    } finally { restore(); }
+  }
+});
