@@ -1542,3 +1542,10 @@ assert "fetch-depth: 0" in checkout and "path: repo" in checkout
 assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in checkout, "SHA checkout must not reset a live origin branch to the event's old commit"
 assert "WAIVERS_REF: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}" in wf
 print("ok workflow live waiver target and full-history project checkout")
+
+# Readiness keeps waived findings visible without treating them as blockers.
+assert "- ↷ **Waived findings:** 1 (not blocking)" in readiness_markdown(wd)
+assert not any("Waived" in line for line in readiness_markdown(d2))
+assert "- ↷ **Waived findings:** 0 (not blocking)" in readiness_markdown(empty)
+assert readiness_markdown(wd)[-2].startswith("- ↷ **Waived findings:**")
+print("ok waived row in readiness")

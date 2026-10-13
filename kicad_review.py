@@ -1580,6 +1580,9 @@ def readiness_markdown(data, threads=None, threads_required=False):
         lines.append(f"- ✕ **Blocking threads:** {threads['blocking']} open" if threads["blocking"] else "- ✓ **Blocking threads:** none open")
     elif threads_required:
         lines.append("- ✕ **Blocking threads:** could not be read")
+    if data.get("waivers") is not None:
+        waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+        lines.append(f"- ↷ **Waived findings:** {waived} (not blocking)")
     lines.append("- ↗ **Approvals:** see the pull request's reviewers (the review site shows them per commit).")
     return lines
 
