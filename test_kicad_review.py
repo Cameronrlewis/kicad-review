@@ -1208,7 +1208,9 @@ with tempfile.TemporaryDirectory() as d:
     assert all(c["pins_diff"][0]["change"] == "geometry" for c in changed)
     os.remove(f"{d}/h/Parts.pretty/SOT23.kicad_mod")
     pathlib.Path(f"{d}/h/Parts.pretty/Renamed.kicad_mod").write_text(FP([("1", 0)]).replace('"SOT23"', '"Renamed"'))
-    assert {(c["item"], c["status"]) for c in library_changes(f"{d}/b", f"{d}/h") if c["kind"] == "footprint"} == {("SOT23", "removed"), ("Renamed", "added")}
+    renamed = [c for c in library_changes(f"{d}/b", f"{d}/h") if c["kind"] == "footprint"]
+    assert {(c["item"], c["status"]) for c in renamed} == {("SOT23", "removed"), ("Renamed", "added")}
+    assert next(c for c in renamed if c["status"] == "removed")["pins_diff"][0]["change"] == "removed"
 print("ok library geometry and true rename")
 
 from kicad_review import library_report, lib_slug
@@ -1276,6 +1278,9 @@ try:
                 with patch("kicad_review.object_index", return_value=object_index(objects, objects)):
                     legacy = build_project(project, {}, settings)
                 assert json.dumps(off, sort_keys=True) == json.dumps(legacy, sort_keys=True)
+                # Golden JSON bytes from the pre-libraries parent, with inventory enabled.
+                import hashlib
+                assert hashlib.sha256(json.dumps(off, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
                 assert comment_markdown({**d2, "projects": [off]}, [], "") == comment_markdown({**d2, "projects": [legacy]}, [], "")
         with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.build_project", return_value=off):
             kicad_review.cmd_report(None)

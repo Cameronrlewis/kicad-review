@@ -152,3 +152,9 @@ body.placing #stage { cursor: crosshair; }
 .thread-hint { padding: 0 var(--space-2); font-size: 12px; }
 .inv-toggle { padding-top: 0; }
 .inv-row[aria-disabled="true"] { opacity: .7; cursor: default; }
+
+.lib-info { margin: 0 var(--space-2) var(--space-2); }
+.lib-warn { font-weight: 600; }
+.lib-info table { width: 100%; border-collapse: collapse; font-size: 12px; overflow-wrap: anywhere; }
+.lib-info th, .lib-info td { text-align: left; padding: var(--space-1); border-bottom: 1px solid var(--line); }
+.lib-info caption { text-align: left; font-weight: 600; }

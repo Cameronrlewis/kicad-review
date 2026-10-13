@@ -55,6 +55,7 @@ To make checks block merging, require the status check **`review / review`** in 
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 | `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
 | `inventory.enabled` | `false` | add an "All parts" list to the report's Changes tab: every symbol and footprint, searchable, click to zoom |
+| `libraries.enabled` | `false` | Review local symbol and footprint libraries: drawings, pin/pad changes, used-by references, and warnings |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
@@ -167,3 +168,5 @@ and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `
 and an export runs, `board.model3d` has base/head GLB blob ids (or `null`), `board.model3d_failed` marks
 failed exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
 footprint`). Positions and boxes are drawing millimetres.
+
+Library review (`[libraries] enabled = true`) covers only library files inside the project folder. Nicknames come from the file name (`Parts.kicad_sym` or `Parts.pretty` means `Parts`); renamed library-table nicknames and external libraries are not resolved. All symbol units contribute pins; the drawing shows unit 1. Pad removals or renumbering and symbol electrical-type changes warn when placed parts use the item.
