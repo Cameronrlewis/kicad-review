@@ -5,10 +5,10 @@ const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 const THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
-const validThread = t => t && t.id === String(t.id) && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
+const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
-  S.threads = list.filter(validThread).slice(0, 500);   // ponytail: 500 threads drawn at most
+  S.threads = list.filter(t => { try { return validThread(t); } catch { return false; } }).slice(0, 500);   // ponytail: 500 threads drawn at most
   if (S.wantThreads) S.t = "threads";
   S.wantThreads = false;
   if (S.v) { renderPanel(); draw(); }

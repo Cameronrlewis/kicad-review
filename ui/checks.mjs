@@ -905,4 +905,15 @@ export const CHECKS = [
     S.placing = true; document.body.classList.add("placing");
     await openThread("placing-T");
     return S.v === "board" && !S.placing && !document.body.classList.contains("placing") || JSON.stringify({view: S.v, placing: S.placing, crosshair: document.body.classList.contains("placing")});`],
+  ["Threads invalid ids cannot drop valid threads or run conversions", "", `
+    const anchor = { v: 1, project: proj().dir, file: "f.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" };
+    const thread = id => ({ id, resolved: false, anchor, comments: [] });
+    acceptThreads([thread({ toString: 1 }), thread("ok1")]);
+    if (S.threads.length !== 1 || S.threads[0].id !== "ok1") return "bad id dropped valid thread";
+    let converted = false;
+    const objectId = { toString() { converted = true; return "x"; } };
+    if (![1, null, new String("x"), objectId].every(id => !validThread(thread(id))) || !validThread(thread("x")) || converted) return "incorrect id validation";
+    const throwing = { get id() { throw new Error("bad thread"); } };
+    acceptThreads([throwing, thread("ok1")]);
+    return S.threads.length === 1 && S.threads[0].id === "ok1" || "validation error dropped valid thread";`],
 ];
