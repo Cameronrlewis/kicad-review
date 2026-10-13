@@ -983,7 +983,14 @@ try:
                 settings["3d"]["enabled"] = models_enabled
                 with patch("kicad_review.load_settings", return_value=settings):
                     kicad_review.cmd_report(None)
+                opted_out = {name: pathlib.Path(f"review/{name}").read_bytes() for name in ("data.json", "kicad-review.html")}
+                legacy_settings = copy.deepcopy(settings)
+                del legacy_settings["digikey"]
+                with patch("kicad_review.load_settings", return_value=legacy_settings):
+                    kicad_review.cmd_report(None)
+                assert all(pathlib.Path(f"review/{name}").read_bytes() == content for name, content in opted_out.items()), "DigiKey opt-out must be byte-identical"
                 data = json.loads(pathlib.Path("review/data.json").read_text())
+                assert "digikey" not in data["settings"]
                 p = data["projects"][0]
                 assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
                 assert ("3d" in data["settings"]) == models_enabled
@@ -1035,3 +1042,97 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+
+# DigiKey client: only the MPN is sent; each MPN once; 429 stops the run; ambiguous MPNs show no price.
+import io as _io, urllib.error
+from kicad_review import mpn_for_lookup, digikey_lookup, digikey_pick, DEFAULT_SETTINGS
+assert mpn_for_lookup(" mp3302dj-lf-z ") == "mp3302dj-lf-z" and mpn_for_lookup("TBD") is None and mpn_for_lookup("<script>") is None
+calls = []
+def resp(obj, status=200, headers=None):
+    r = _io.BytesIO(json.dumps(obj).encode()); r.status = status; r.headers = headers or {}; return r
+prod = lambda mpn, mfr, qty, price: {"ManufacturerProductNumber": mpn, "Manufacturer": {"Name": mfr}, "QuantityAvailable": qty, "UnitPrice": price,
+    "ProductStatus": {"Status": "Active"}, "Discontinued": False, "EndOfLife": False, "ProductUrl": "https://www.digikey.com/x",
+    "ProductVariations": [{"DigiKeyProductNumber": "DK-1", "StandardPricing": [{"BreakQuantity": 1, "UnitPrice": price}, {"BreakQuantity": 10, "UnitPrice": price * 0.8}]}]}
+def fake(req, timeout=None):
+    body = req.data.decode() if req.data else ""
+    calls.append((req.full_url, body))
+    if req.full_url.endswith("/oauth2/token"):
+        return resp({"access_token": "T", "expires_in": 599})
+    kw = json.loads(body)["Keywords"]
+    if kw == "LIMIT":
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {"Retry-After": "60"}, _io.BytesIO(b"{}"))
+    if kw == "CR2032":
+        return resp({"ExactMatches": [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)], "Products": [], "ProductsCount": 2})
+    if kw == "NOPE":
+        return resp({"ExactMatches": [], "Products": [], "ProductsCount": 0})
+    return resp({"ExactMatches": [prod(kw, "MPS", 1234, 1.5)], "Products": [], "ProductsCount": 1, "SearchLocaleUsed": {"Currency": "USD"}})
+s = json.loads(json.dumps(DEFAULT_SETTINGS)); s["parts"]["enabled"] = True; s["digikey"]["enabled"] = True
+wanted = {"MP3302DJ-LF-Z": {"mpn": "MP3302DJ-LF-Z", "manufacturer": None}, "CR2032": {"mpn": "CR2032", "manufacturer": None},
+          "NOPE": {"mpn": "NOPE", "manufacturer": None}}
+out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fake, sleep=lambda t: None, now=lambda: "2026-10-13T12:00:00Z")
+assert sum(u.endswith("/oauth2/token") for u, _ in calls) == 1 and len(calls) == 4, calls
+assert all(json.loads(b) == {"Keywords": json.loads(b)["Keywords"], "Limit": 10, "Offset": 0} for u, b in calls[1:]), calls
+r = out["results"]
+assert r["MP3302DJ-LF-Z"]["status"] == "ok" and r["MP3302DJ-LF-Z"]["quantity"] == 1234 and r["MP3302DJ-LF-Z"]["breaks"][1] == [10, 1.2]
+assert r["CR2032"]["status"] == "ambiguous" and r["CR2032"].get("unit_price") is None and r["CR2032"]["matches"] == 2
+assert r["NOPE"]["status"] == "not_found"
+assert out["supplier"]["calls"] == 4 and out["supplier"]["fetched_at"] == "2026-10-13T12:00:00Z" and out["supplier"]["error"] is None
+print("ok each MPN fetched once")
+print("ok ambiguous MPN")
+assert digikey_pick({"ExactMatches": [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)]}, "CR2032", "renata")["quantity"] == 7
+calls.clear()
+wanted = {"A": {"mpn": "A", "manufacturer": None}, "LIMIT": {"mpn": "LIMIT", "manufacturer": None}, "Z": {"mpn": "Z", "manufacturer": None}}
+out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fake, sleep=lambda t: None, now=lambda: "2026-10-13T12:00:00Z")
+assert out["results"]["A"]["status"] == "ok" and out["results"]["LIMIT"]["status"] == "unavailable" and out["results"]["Z"]["status"] == "unavailable"
+assert len(calls) == 3 and "rate limit" in out["supplier"]["error"], (calls, out["supplier"])
+print("ok rate limit stops the run")
+
+# DigiKey settings validate even when disabled; booleans are not lookup counts.
+for value in ("", "~", "TBD", "?", "X", "todo", "NA", "n/a", "-"):
+    assert mpn_for_lookup(value) is None
+assert mpn_for_lookup(" A   B ") == "A B"
+for text in ('[digikey]\nenabled = "yes"', '[digikey]\nenabled = true', '[digikey]\nsite = "us"',
+             '[digikey]\ncurrency = "US"', '[digikey]\nmax_lookups = true', '[digikey]\nmax_lookups = 0',
+             '[digikey]\nmax_lookups = 901', 'digikey = false'):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        try:
+            load_settings()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(text)
+with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(b'[parts]\nenabled = true\n[digikey]\nenabled = true\nsite = "CA"\ncurrency = "CAD"\nmax_lookups = 900'), create=True):
+    assert load_settings()["digikey"] == {"enabled": True, "site": "CA", "currency": "CAD", "max_lookups": 900}
+
+# Error paths use only injected transports; a failed run never leaks response bodies.
+for code in (403, 500, 401):
+    calls.clear()
+    def fail(req, timeout=None):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/oauth2/token"):
+            return resp({"access_token": "T"})
+        raise urllib.error.HTTPError(req.full_url, code, "secret response", {}, _io.BytesIO(b"secret"))
+    out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fail, sleep=lambda t: None)
+    assert len(calls) == 2 and all(v["status"] == "unavailable" for v in out["results"].values())
+    assert out["supplier"]["error"] and "secret" not in json.dumps(out)
+calls.clear()
+s["digikey"]["max_lookups"] = 1
+out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fake, sleep=lambda t: None)
+assert len(calls) == 2 and out["results"]["Z"]["status"] == "run_limit"
+print("ok DigiKey validation, failure handling, and run limit")
+
+from kicad_review import digikey_search, DigiKeyError
+for data in ({}, [], "invalid"):
+    out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=lambda req, timeout=None: resp(data), sleep=lambda t: None)
+    assert out["supplier"]["calls"] == 1 and out["supplier"]["error"].startswith("sign-in failed:")
+def missing(req, timeout=None):
+    raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, _io.BytesIO(b"{}"))
+assert digikey_pick(digikey_search("T", "id", "NOPE", {"site": "US", "currency": "USD"}, urlopen=missing), "NOPE", None)["status"] == "not_found"
+assert digikey_pick({"ExactMatches": [prod("A", "MPS", 0, 1.5)]}, "A", None)["status"] == "out_of_stock"
+p = prod("A", "MPS", 5, 1.5); p["EndOfLife"] = True
+assert digikey_pick({"ExactMatches": [p]}, "A", None)["status"] == "discontinued"
+s["digikey"]["max_lookups"] = 100
+pauses = []
+digikey_lookup({"A": {"mpn": "A", "manufacturer": None}, "B": {"mpn": "B", "manufacturer": None}}, ("id", "secret"), s, urlopen=fake, sleep=pauses.append)
+assert pauses == [0.6]
+print("ok DigiKey token errors, 404, statuses, and pacing")

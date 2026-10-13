@@ -4,6 +4,11 @@
 Standard library only. Subcommands are called from the reusable workflow.
 """
 import argparse
+import datetime
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import base64
 import csv
 import gzip
@@ -594,6 +599,7 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "digikey": {"enabled": False, "site": "US", "currency": "USD", "max_lookups": 100},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -612,7 +618,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "digikey"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -628,6 +634,16 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    cfg = settings["digikey"]
+    if not isinstance(cfg["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: digikey.enabled must be true or false")
+    if cfg["enabled"] and not settings["parts"]["enabled"]:
+        sys.exit(f"{SETTINGS_FILE}: digikey.enabled requires parts.enabled")
+    for key, pattern in (("site", r"[A-Z]{2}"), ("currency", r"[A-Z]{3}")):
+        if not isinstance(cfg[key], str) or not re.fullmatch(pattern, cfg[key]):
+            sys.exit(f"{SETTINGS_FILE}: digikey.{key} must match {pattern}")
+    if type(cfg["max_lookups"]) is not int or not 1 <= cfg["max_lookups"] <= 900:
+        sys.exit(f"{SETTINGS_FILE}: digikey.max_lookups must be an integer from 1 to 900")
     return settings
 
 
@@ -757,6 +773,113 @@ def bom_violations(objs, fields):
                         "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
                         "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
     return out
+
+
+# ---- DigiKey lookup. Only MPNs leave the runner; results live only in this run's report. ----
+DIGIKEY = "https://api.digikey.com"
+MPN_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/+#,()-]{0,79}$")
+
+
+class DigiKeyError(Exception):
+    pass
+
+
+class DigiKeyStop(DigiKeyError):
+    """Rate limit or suspension: no further calls this run."""
+
+
+def digikey_placeholder(value):
+    return value.lower() in ("", "~", "tbd", "?", "x", "todo", "na", "n/a", "-")
+
+
+def mpn_for_lookup(mpn):
+    v = " ".join((mpn or "").split())
+    return v if not digikey_placeholder(v) and MPN_OK.fullmatch(v) else None
+
+
+def _digikey_open(req, urlopen):
+    try:
+        with urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                raise DigiKeyError("invalid response")
+            return data
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 403):
+            raise DigiKeyStop("rate limit reached" if e.code == 429 else "access refused (403; possibly a 10-minute suspension)")
+        if e.code == 404:
+            return {"ExactMatches": [], "Products": [], "ProductsCount": 0}
+        raise DigiKeyError(f"HTTP {e.code}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise DigiKeyError(type(e).__name__)
+
+
+def digikey_token(client_id, secret, urlopen=urllib.request.urlopen):
+    body = urllib.parse.urlencode({"client_id": client_id, "client_secret": secret, "grant_type": "client_credentials"}).encode()
+    req = urllib.request.Request(f"{DIGIKEY}/v1/oauth2/token", data=body, method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    tok = _digikey_open(req, urlopen).get("access_token")
+    if not tok:
+        raise DigiKeyError("no access token")
+    return tok
+
+
+def digikey_search(token, client_id, mpn, locale, urlopen=urllib.request.urlopen):
+    req = urllib.request.Request(f"{DIGIKEY}/products/v4/search/keyword", method="POST",
+                                 data=json.dumps({"Keywords": mpn, "Limit": 10, "Offset": 0}).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}",
+                                          "X-DIGIKEY-Client-Id": client_id, "X-DIGIKEY-Locale-Site": locale["site"],
+                                          "X-DIGIKEY-Locale-Currency": locale["currency"], "X-DIGIKEY-Locale-Language": "en"})
+    return _digikey_open(req, urlopen)
+
+
+def digikey_pick(resp, mpn, manufacturer):
+    exact = [p for p in resp.get("ExactMatches") or [] if (p.get("ManufacturerProductNumber") or "").upper() == mpn.upper()]
+    if manufacturer and len(exact) > 1:
+        exact = [p for p in exact if (p.get("Manufacturer") or {}).get("Name", "").lower().startswith(manufacturer.lower())] or exact
+    if not exact:
+        return {"status": "not_found", "mpn": mpn}
+    if len(exact) > 1:
+        return {"status": "ambiguous", "mpn": mpn, "matches": len(exact)}
+    p = exact[0]
+    var = (p.get("ProductVariations") or [{}])[0]
+    status = "discontinued" if p.get("Discontinued") or p.get("EndOfLife") else "out_of_stock" if not p.get("QuantityAvailable") else "ok"
+    return {"status": status, "mpn": mpn, "manufacturer": (p.get("Manufacturer") or {}).get("Name"),
+            "quantity": p.get("QuantityAvailable"), "unit_price": p.get("UnitPrice"),
+            "breaks": [[b.get("BreakQuantity"), round(b["UnitPrice"], 12) if isinstance(b.get("UnitPrice"), (int, float)) else None] for b in var.get("StandardPricing") or []][:6],
+            "dk_part": var.get("DigiKeyProductNumber"), "product_status": (p.get("ProductStatus") or {}).get("Status"),
+            "url": p.get("ProductUrl") if str(p.get("ProductUrl") or "").startswith("https://www.digikey.") else None}
+
+
+def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, sleep=time.sleep,
+                   now=lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")):
+    cfg = settings["digikey"]
+    sup = {"name": "DigiKey", "fetched_at": now(), "currency": cfg["currency"], "calls": 0, "looked_up": 0, "error": None, "skipped": None}
+    results, stop = {}, None
+    try:
+        sup["calls"] += 1
+        token = digikey_token(creds[0], creds[1], urlopen)
+    except DigiKeyError as e:
+        stop = f"sign-in failed: {e}"
+    for i, k in enumerate(sorted(wanted)):
+        if stop or i >= cfg["max_lookups"]:
+            results[k] = {"status": "unavailable" if stop else "run_limit", "mpn": wanted[k]["mpn"]}
+            continue
+        if i:
+            sleep(0.6)  # stays under DigiKey's 120/min burst limit
+        try:
+            sup["calls"] += 1
+            results[k] = digikey_pick(digikey_search(token, creds[0], wanted[k]["mpn"], {"site": cfg["site"], "currency": cfg["currency"]}, urlopen),
+                                      wanted[k]["mpn"], wanted[k]["manufacturer"])
+            sup["looked_up"] += 1
+        except DigiKeyStop as e:
+            stop = str(e)
+            results[k] = {"status": "unavailable", "mpn": wanted[k]["mpn"]}
+        except DigiKeyError as e:
+            stop = str(e)
+            results[k] = {"status": "unavailable", "mpn": wanted[k]["mpn"], "error": str(e)}
+    sup["error"] = stop
+    return {"supplier": sup, "results": results}
 
 
 LCSC_FIELDS = ("lcsc", "lcsc part", "lcsc part #", "lcsc part number", "jlcpcb part #")
@@ -1043,7 +1166,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "digikey") and not v["enabled"])}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
