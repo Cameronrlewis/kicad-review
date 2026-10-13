@@ -203,8 +203,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD: ${{ steps.detect.outputs.head }}
         run: |
+          [ -f review/check-runs.json ] || { echo "::warning::review/check-runs.json missing; no check runs published."; exit 0; }
           jq -c '.[]' review/check-runs.json | while read -r run; do
-            echo "$run" | jq --arg sha "$HEAD" '. + {head_sha: $sha, status: "completed"}' \
+            printf '%s\n' "$run" | jq --arg sha "$HEAD" '. + {head_sha: $sha, status: "completed"}' \
               | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input - > /dev/null \
               || { echo "::warning::Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml."; exit 0; }
           done
