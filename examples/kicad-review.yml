@@ -19,6 +19,7 @@ on:
 permissions:
   contents: write       # release assets and the kicad-review-assets screenshot branch
   pull-requests: write  # the review comment
+  # checks: write       # only with [github] check_runs = true in kicad-review.toml
 jobs:
   review:
     uses: Cameronrlewis/kicad-review/.github/workflows/review.yml@v1

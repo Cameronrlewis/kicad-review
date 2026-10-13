@@ -552,6 +552,16 @@ for changed, summary, existing in (("false", "skipped", "99"), ("false", "skippe
     assert not os.path.exists(f"{t}/{'posted.md' if existing else 'patched.md'}")
 print("ok WF-S2: unchanged comment and detect failure")
 
+# Readiness gates required checks and blocking threads; optional publishing never fails the job.
+fail = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
+assert "if: steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != ''" in fail
+assert "THREADS: ${{ steps.summary.outputs.threads_failed }}" in fail
+publish = wf[wf.index("- name: Publish check runs"):wf.index("- name: Pull request comment")]
+assert "if: ${{ !cancelled() && steps.summary.outputs.check_runs == 'true' }}" in publish
+assert "HEAD: ${{ steps.detect.outputs.head }}" in publish
+assert "review/check-runs.json" in publish and "continue-on-error: true" in publish and "exit 0; }" in publish
+print("ok readiness workflow gate and optional check runs")
+
 # Reports expose an artifact filename containing the compared revisions and result.
 import re
 def report_output(base, head):
