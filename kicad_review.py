@@ -53,8 +53,18 @@ def is_kicad_file(path):
     return (name.endswith(KICAD_SUFFIXES) or name in KICAD_NAMES) and not is_junk(path)
 
 
+def previous_tag(tag):
+    """The nearest v* tag before this one, or None for the first release."""
+    return git("describe", "--tags", "--abbrev=0", "--match", "v*", f"{tag}^", check=False) or None
+
+
 def resolve_revisions(env):
     """Return (base, head, reason) for the triggering event. base may be None (nothing to compare with)."""
+    if env.get("TAG"):
+        tag = env["TAG"]
+        prev = previous_tag(tag)
+        head = commit(tag) or env["AFTER"]
+        return (commit(prev) if prev else None), head, f"release {tag} vs {prev}" if prev else f"release {tag} (first release)"
     event = env["EVENT"]
     if event == "pull_request":
         head = env["PR_HEAD"]
@@ -128,6 +138,11 @@ def detect(base, head):
 
 def cmd_detect(args):
     env = dict(os.environ)
+    if env.get("TAG") and not load_settings(("",))["release"]["review"]:
+        with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+            fh.write("base=\nhead=\nchanged=false\n")
+        print("Tag review is off ([release] review = false); only fabrication outputs are made.")
+        return
     base, head, reason = resolve_revisions(env)
     projects = detect(base, head)
     ids = [project_id(p["dir"]) for p in projects]
@@ -594,6 +609,7 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "release": {"review": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -602,7 +618,7 @@ def load_settings(roots=("base", "head")):
     """Repository settings from kicad-review.toml. The base revision's copy wins, so a change cannot relax its own checks."""
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))
     for side in roots:
-        path = f"{side}/{SETTINGS_FILE}"
+        path = f"{side}/{SETTINGS_FILE}" if side else SETTINGS_FILE
         if os.path.exists(path):
             with open(path, "rb") as fh:
                 user = tomllib.load(fh)
@@ -612,7 +628,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -628,6 +644,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    if not isinstance(settings["release"]["review"], bool):
+        sys.exit(f"{SETTINGS_FILE}: release.review must be true or false")
     return settings
 
 
@@ -1043,7 +1061,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items() if k != "release" and not (k in ("3d", "parts") and not v["enabled"])}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),

@@ -1035,3 +1035,64 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+# Tag review resolves lightweight/annotated tags, ignoring non-v predecessors.
+from kicad_review import previous_tag, resolve_revisions
+here = os.getcwd()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        def g(*args):
+            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True, capture_output=True, text=True).stdout.strip()
+        g("init", "-q")
+        pathlib.Path("P.kicad_pro").write_text("1")
+        g("add", "."); g("commit", "-qm", "one"); g("tag", "v1.0")
+        first = g("rev-parse", "HEAD")
+        pathlib.Path("P.kicad_pro").write_text("2")
+        g("commit", "-qam", "two"); g("tag", "test-1")
+        pathlib.Path("P.kicad_pro").write_text("3")
+        g("commit", "-qam", "three"); g("tag", "-am", "release", "v1.1")
+        head = g("rev-parse", "HEAD")
+        assert previous_tag("v1.1") == previous_tag("test-1") == "v1.0"
+        assert resolve_revisions({"EVENT": "push", "TAG": "v1.1", "AFTER": head}) == (first, head, "release v1.1 vs v1.0")
+        assert resolve_revisions({"EVENT": "push", "TAG": "v1.0", "AFTER": first}) == (None, first, "release v1.0 (first release)")
+        print("ok previous tag is the last v-tag")
+        print("ok first tag has no base")
+        assert DEFAULT_SETTINGS["release"] == {"review": False}
+        output = pathlib.Path("outputs")
+        with patch.dict(os.environ, {"TAG": "v1.1", "GITHUB_OUTPUT": str(output)}, clear=True), patch("kicad_review.resolve_revisions", side_effect=AssertionError("off must skip detection")):
+            kicad_review.cmd_detect(None)
+        assert output.read_text() == "base=\nhead=\nchanged=false\n"
+        pathlib.Path("kicad-review.toml").write_text("[release]\nreview = true\n")
+        assert load_settings(("",))["release"]["review"] is True
+        for invalid in ('"true"', '1', '[]'):
+            pathlib.Path("kicad-review.toml").write_text("[release]\nreview = " + invalid + "\n")
+            try:
+                load_settings(("",))
+                raise AssertionError("invalid release.review accepted")
+            except SystemExit as exc:
+                assert str(exc) == "kicad-review.toml: release.review must be true or false"
+        print("ok tag detection opt-in and settings")
+    finally:
+        os.chdir(here)
+
+# Workflow-only release settings cannot change existing report/comment/summary bytes.
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        write(t, {"review/detect.json": json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "fixture", "projects": []})})
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings.pop("release")
+        results = []
+        for option in (None, False, True):
+            current = copy.deepcopy(settings)
+            if option is not None:
+                current["release"] = {"review": option}
+            with patch("kicad_review.load_settings", return_value=current):
+                kicad_review.cmd_report(None)
+            data = json.loads(pathlib.Path("review/data.json").read_text())
+            results.append((pathlib.Path("review/data.json").read_bytes(), pathlib.Path("review/kicad-review.html").read_bytes(), comment_markdown(data, [], "")))
+        assert results[0] == results[1] == results[2]
+        print("ok release settings preserve report and summary bytes")
+    finally:
+        os.chdir(here)
+
