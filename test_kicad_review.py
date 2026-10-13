@@ -1278,6 +1278,7 @@ v1 = {"type": "clearance", "severity": "error", "description": "Clearance violat
       "uuids": ["u-b", "u-a"], "pos": [10.0, 5.0], "box": None, "where": {"board": True}}
 k = waiver_key(v1)
 assert re.fullmatch(r"w-[0-9a-f]{12}", k), k
+assert waiver_key({**v1, "uuids": ["u-a", "u-b"]}) == k
 assert waiver_key({**v1, "description": "Clearance violation (0.11 mm < 0.2 mm)", "pos": [11, 6]}) == k  # same UUIDs: same finding
 assert waiver_key({**v1, "uuids": ["u-c"]}) != k
 assert waiver_key({**v1, "severity": "warning"}) != k
@@ -1294,4 +1295,5 @@ with _t.TemporaryDirectory() as d:
         _j.dump({"violations": [], "unconnected_items": [unc(), unc()]}, fh)
     vs = load_violations(f"{d}/drc.json", "drc")
     assert len({waiver_key(v) for v in vs}) == 2, [waiver_key(v) for v in vs]
+    assert [waiver_key(v) for v in vs] == [waiver_key(v) for v in load_violations(f"{d}/drc.json", "drc")]
 print("ok unconnected duplicates get distinct keys")

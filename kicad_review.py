@@ -878,7 +878,7 @@ def waiver_key(v):
     if v.get("key"):
         ident = v["key"]
     elif v["uuids"]:
-        ident = ("u", v["type"], tuple(v["uuids"]))
+        ident = ("u", v["type"], tuple(sorted(v["uuids"])))
     else:
         ident = ("p", v["type"], re.sub(r"[\d.]+", "#", v["description"]), tuple(v["items"]),
                  tuple(tuple(round(c, 1) for c in p) for p in ([v["pos"]] if v["pos"] else [])))
