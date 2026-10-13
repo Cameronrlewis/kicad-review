@@ -1035,3 +1035,20 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+
+# PDF: a static print page.
+from kicad_review import print_html
+pdata = {**d2, "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "projects": [{"name": "A&B", "dir": "", "status": "modified", "checks": [
+    {"name": "drc", "title": "DRC", "level": "required", "status": "fail", "errors": 1, "new_errors": 1, "warnings": 0, "new_warnings": 0, "fixed": 0,
+     "violations": [{"new": True, "severity": "error", "description": "Clearance <1mm>", "items": ["J1"], "where": {"board": True}}]}],
+    "changes": [{"action": "modified", "kind": "footprint", "ref": f"R{i}", "changes": [["Value", "1k", "2k"]]} for i in range(250)], "sheets": [], "board": {"changed": False}}]}
+with tempfile.TemporaryDirectory() as d:
+    png = f"{d}/p0-board.png"; open(png, "wb").write(b"\x89PNG\r\n\x1a\nfake")
+    html = print_html(pdata, [{"project": 0, "title": "A&B: board", "path": png}], "<script>x</script> & y", "ann", {"open": 1, "blocking": 0, "resolved": 2}, "2026-10-12 10:00 UTC")
+assert "<script" not in html.replace("&lt;script&gt;", "") and "&lt;script&gt;x&lt;/script&gt; &amp; y" in html and "A&amp;B" in html
+assert "data:image/png;base64," in html and "Clearance &lt;1mm&gt;" in html and "aaaaaaa → bbbbbbb" in html and "Threads: 1 open (0 blocking), 2 resolved" in html
+print("ok print page escapes everything")
+assert html.count("<tr class=\"change\">") == 200 and "50 more changes are in the interactive report" in html
+print("ok long change lists are capped")
+assert "pictures unavailable" in print_html(pdata, [], "", "", None, "now")
+print("ok missing screenshots are explained")

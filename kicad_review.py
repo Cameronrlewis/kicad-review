@@ -594,6 +594,7 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "pdf": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -612,7 +613,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "pdf"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -628,6 +629,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    if not isinstance(settings["pdf"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: pdf.enabled must be true or false")
     return settings
 
 
@@ -1043,7 +1046,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "pdf") and not v["enabled"])}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -1299,6 +1302,53 @@ def checks_markdown(data):
         checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
     return checks
+
+
+import html as htmllib
+
+PRINT_CSS = """@page { size: A4 landscape; margin: 14mm 12mm;
+  @top-left { content: string(revs); font: 9px sans-serif; color: #555; }
+  @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 9px sans-serif; color: #555; } }
+body { font: 11px/1.4 system-ui, sans-serif; color: #111; } h1 { font-size: 22px; } h2 { font-size: 16px; break-before: page; } .revs { string-set: revs content(); }
+table { border-collapse: collapse; width: 100%; margin: 6px 0; } th, td { border: 1px solid #bbb; padding: 2px 4px; text-align: left; vertical-align: top; }
+img { max-width: 100%; max-height: 150mm; display: block; margin: 4px 0; } .fail { font-weight: 700; } figure { break-inside: avoid; margin: 0 0 8px; }"""
+
+
+def print_html(data, images, pr_title, pr_author, threads, now):
+    """A static, script-free page for Chrome to print: cover, then per project its summary, pictures, changes and new errors."""
+    e = lambda v: htmllib.escape(str(v if v is not None else "—"))
+    plain = lambda s: htmllib.unescape(re.sub(r"\\(.)", r"\1", s)).replace("​", "")
+    bold = lambda s: re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", e(plain(s)))
+    failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    short = lambda s: (s or "none")[:7]
+    # Chromium supports literal @page margin content, but not running strings.
+    header = f"{data['repo']} · {short(data['base'])} → {short(data['head'])}"
+    css_header = '"' + ''.join(f"\\{ord(c):x} " for c in header) + '"'
+    css = PRINT_CSS.replace("string(revs)", css_header)
+    out = [f"<!doctype html><html><head><meta charset='utf-8'><title>KiCad review {e(short(data['base']))} → {e(short(data['head']))}</title><style>{css}</style></head><body>",
+           f"<p class='revs'>{e(data['repo'])} · {e(short(data['base']))} → {e(short(data['head']))}</p>",
+           f"<h1>KiCad review</h1><table><tr><th>Repository</th><td>{e(data['repo'])}</td></tr><tr><th>Revisions</th><td>{e(short(data['base']))} → {e(short(data['head']))} ({e(data['reason'])})</td></tr>"
+           + (f"<tr><th>Pull request</th><td>{e(pr_title)} by {e(pr_author)}</td></tr>" if pr_title else "")
+           + f"<tr><th>Made</th><td>{e(now)}</td></tr><tr><th>Verdict</th><td class='{'fail' if failed else ''}'>{'✕ failing: ' + e(', '.join(failed)) if failed else '✓ required checks passing'}</td></tr>"
+           + (f"<tr><th>Threads</th><td>Threads: {e(threads['open'])} open ({e(threads['blocking'])} blocking), {e(threads['resolved'])} resolved</td></tr>" if threads else "") + "</table>"]
+    for i, p in enumerate(data["projects"]):
+        out.append(f"<h2>{e(p['name'])}</h2><p>{bold(summary_sentence(p))}.</p>")
+        out.append("<table><tr><th>Check</th><th>Result</th><th>Errors (new)</th><th>Warnings (new)</th><th>Fixed</th></tr>" + "".join(
+            f"<tr><td>{e(c['title'])} ({e(c['level'])})</td><td>{e(c['status'].replace('_', ' '))}</td><td>{e(c['errors'])} ({e(c['new_errors'])})</td><td>{e(c['warnings'])} ({e(c['new_warnings'])})</td><td>{e(c['fixed'])}</td></tr>" for c in p["checks"]) + "</table>")
+        pics = [s for s in images if s["project"] == i and os.path.exists(s["path"])]
+        out += [f"<figure><figcaption>{e(s['title'])}: before and after</figcaption><img src='data:image/png;base64,{base64.b64encode(open(s['path'], 'rb').read()).decode()}'></figure>" for s in pics] \
+            or ["<p><i>Before/after pictures unavailable for this run (pictures unavailable).</i></p>"]
+        rows = p["changes"][:200]
+        out.append("<table><tr><th>Change</th><th>Object</th><th>Ref</th><th>Details</th></tr>" + "".join(
+            f"<tr class=\"change\"><td>{e(r['action'])}</td><td>{e(r['kind'])}</td><td>{e(r.get('ref'))}</td><td>"
+            + ("<br>".join(f"{e(k)}: {e(a)} → {e(b)}" for k, a, b in r.get("changes", [])[:6]) or ", ".join(f"{e(k)}: {e(v)}" for k, v in list((r.get('props') or {}).items())[:4]))
+            + "</td></tr>" for r in rows) + "</table>")
+        if len(p["changes"]) > 200:
+            out.append(f"<p>{len(p['changes']) - 200} more changes are in the interactive report.</p>")
+        news = [(c["title"], v) for c in p["checks"] for v in c["violations"] if v.get("new") and v["severity"] == "error"]
+        if news:
+            out.append("<h3>New errors</h3><ul>" + "".join(f"<li><b>{e(t)}</b>: {e(v['description'])}" + (f" ({e('; '.join(v['items'][:2]))})" if v["items"] else "") + "</li>" for t, v in news) + "</ul>")
+    return "\n".join(out) + "</body></html>"
 
 
 def main():
