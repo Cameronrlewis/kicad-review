@@ -1161,3 +1161,30 @@ with tempfile.TemporaryDirectory() as d:
     b = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
     assert [x["key"] for x in a] == [x["key"] for x in b], (a, b)
 print("ok release findings: smd pads, ranges, stable keys")
+
+# Final-review fixes: NPTH-only drill, locked footprints, renamed inner layers, missing Designator, empty SHA256SUMS.
+from kicad_review import smd_pad_sides
+assert smd_pad_sides('(footprint "R" locked (layer "B.Cu") (pad "1" smd rect))') == {"B"}
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]); open(p, "a").write('(footprint "H" (pad "" np_thru_hole circle (at 0 0) (size 3 3) (drill 3)))\n')
+    assert [x["type"] for x in release_findings(d, "b", "jlcpcb", p, {})] == ["missing_drill"]
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {**full, "b-GND_PLANE.g2": G}, ["R1"], [("R1", "C1")])
+    p = f"{d}/b.kicad_pcb"
+    open(p, "w").write('(kicad_pcb\n  (layers\n    (0 "F.Cu" signal)\n    (1 "In1.Cu" signal "GND_PLANE")\n    (2 "B.Cu" signal)\n    (25 "Edge.Cuts" user)\n  )\n)\n')
+    assert not any("In1.Cu" in x["description"] for x in release_findings(d, "b", "jlcpcb", p, objs))
+with tempfile.TemporaryDirectory() as d:
+    fab(d, full, ["R1"], [("R1", "C1")])
+    with open(f"{d}/b-review-jlcpcb-bom.csv", "w") as fh: fh.write("Comment,Footprint,LCSC Part #\nx,y,\n")
+    release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)   # no Designator column: no KeyError
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d); os.makedirs("repo")
+    try:
+        with patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_release(type("A", (), {"tag": "v1"}))
+        assert not os.path.exists("release/SHA256SUMS")
+    finally:
+        os.chdir(_cwd)
+print("ok release final-review fixes")

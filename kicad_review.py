@@ -717,7 +717,7 @@ def bom_refs_expand(designators):
 def smd_pad_sides(pcb_text):
     """Board sides ('F', 'B') with at least one SMD pad: only those need paste."""
     sides = set()
-    for m in re.finditer(r'\(footprint\s+"[^"]*"\s*\(layer\s+"([FB])\.Cu"\)', pcb_text):
+    for m in re.finditer(r'\(footprint\s+"[^"]*"\s*(?:(?:locked|placed)\s+)*\(layer\s+"([FB])\.Cu"\)', pcb_text):
         end = pcb_text.find("(footprint ", m.end())
         if re.search(r'\(pad\s+"[^"]*"\s+smd\b', pcb_text[m.end():end if end != -1 else None]):
             sides.add(m.group(1))
@@ -735,7 +735,11 @@ def release_findings(fab_dir, label, preset, pcb_path, board_objs):
         return [fab_violation("missing_package", "error", "No fabrication package was produced")]
     with zipfile.ZipFile(f"{stem}-gerbers.zip") as z:
         files = {n: z.read(n).decode("latin-1") for n in z.namelist()}
-    find_layer = lambda layer: next((t for n, t in files.items() if f"-{layer.replace('.', '_')}." in n), None)
+    # KiCad names a Gerber after the layer's user name when it has one (e.g. In1.Cu renamed "GND_PLANE").
+    pcb_head = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
+    alias = {c: u for c, u in re.findall(r'\(\d+\s+"([^"]+)"\s+\w+\s+"([^"]+)"\)', pcb_head)}
+    names = lambda layer: {layer.replace(".", "_"), alias.get(layer, layer).replace(".", "_").replace(" ", "_")}
+    find_layer = lambda layer: next((t for n, t in files.items() if any(f"-{x}." in n for x in names(layer))), None)
     out = []
     for layer in [l for l in board_layers(pcb_path) if l.endswith(".Cu")] + ["Edge.Cuts"]:
         if find_layer(layer) is None:
@@ -752,7 +756,7 @@ def release_findings(fab_dir, label, preset, pcb_path, board_objs):
                 t = find_layer(f"{side}.{kind}")
                 if t is None or not has_draw(t):
                     out.append(fab_violation("missing_layer", "error", f"{side}.{kind} is missing or empty but {side} side has SMD parts"))
-    holes = any(o["kind"] == "via" for o in board_objs.values()) or re.search(r'\(pad\s+"[^"]*"\s+thru_hole\b', pcb_text) is not None \
+    holes = any(o["kind"] == "via" for o in board_objs.values()) or re.search(r'\(pad\s+"[^"]*"\s+(?:np_)?thru_hole\b', pcb_text) is not None \
         or any("thru_hole" in (o["props"].get("pads_kind") or "") for o in fps)
     if holes and not any(n.lower().endswith(".drl") for n in files):
         out.append(fab_violation("missing_drill", "error", "The board has holes but the package has no drill file"))
@@ -768,7 +772,7 @@ def release_findings(fab_dir, label, preset, pcb_path, board_objs):
             rows = list(csv.DictReader(fh))
         part_col = PRESETS[preset]["bom"][-1][1] if preset == "jlcpcb" else "Mfg Part #"
         bom_refs = set().union(*(bom_refs_expand(row.get("Designator")) for row in rows))
-        missing_pn = [row["Designator"] for row in rows if not (row.get(part_col) or "").strip()]
+        missing_pn = [row.get("Designator", "") for row in rows if not (row.get(part_col) or "").strip()]
         if missing_pn:
             out.append(fab_violation("bom_missing_part_number", "warning", f"BOM lines without {part_col}", missing_pn))
         extra = sorted(pos_refs - bom_refs, key=natural)
@@ -810,9 +814,10 @@ def cmd_release(args):
         if f != "SHA256SUMS":
             with open(f"release/{f}", "rb") as fh:
                 sums.append(f"{hashlib.sha256(fh.read()).hexdigest()}  {f}")
-    with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
-        fh.write("\n".join(sums) + "\n")
-    print("release/SHA256SUMS")
+    if sums:
+        with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
+            fh.write("\n".join(sums) + "\n")
+        print("release/SHA256SUMS")
 
 
 def violation(v, scale, where):
