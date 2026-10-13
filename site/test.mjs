@@ -1818,24 +1818,26 @@ test('rerun validates callers before access, and selects only this PR head run',
 });
 
 test('rerun retains refreshed cookie across errors and success', async () => {
-  for (const kind of ['success', 'missing', 'forbidden', 'network', 'wrong-pr', 'no-head']) {
+  for (const kind of ['success', 'fork', 'same-repo-empty', 'missing', 'forbidden', 'forbidden-access', 'forbidden-old', 'network', 'wrong-pr', 'no-head']) {
     let posts = 0;
     const response = await rerunRoute(new Request('https://site.example/r/o/r/pull/7/rerun', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json' } }), {}, { owner: 'o', repo: 'r', number: 7 }, {
       access: async () => ({ s: { token: 't', setCookie: 's=refreshed' } }),
       gh: async (path, token, options) => {
         if (kind === 'network') throw new Error('offline');
         if (path.includes('/pulls/')) return new Response(JSON.stringify(kind === 'no-head' ? {} : { head: { sha: 'head' } }));
-        if (path.includes('/workflows/')) return new Response(JSON.stringify({ workflow_runs: kind === 'missing' ? [] : [{ id: 9, head_sha: 'head', event: 'pull_request', repository: { full_name: 'o/r' }, pull_requests: [{ number: kind === 'wrong-pr' ? 8 : 7 }] }] }));
+        if (path.includes('/workflows/')) return new Response(JSON.stringify({ workflow_runs: kind === 'missing' ? [] : [{ id: 9, head_sha: 'head', event: 'pull_request', repository: { full_name: 'o/r' }, head_repository: { full_name: kind === 'fork' ? 'fork/r' : 'o/r' }, pull_requests: ['fork', 'same-repo-empty'].includes(kind) ? [] : [{ number: kind === 'wrong-pr' ? 8 : 7 }] }] }));
         posts++; assert.equal(options.method, 'POST');
-        return kind === 'forbidden' ? new Response(JSON.stringify({ message: 'Run is not completed' }), { status: 403 }) : new Response(null, { status: 201 });
+        return kind.startsWith('forbidden') ? new Response(JSON.stringify({ message: kind === 'forbidden-access' ? 'Resource not accessible by integration' : kind === 'forbidden-old' ? 'Run is older than 30 days' : 'Run is not completed' }), { status: 403 }) : new Response(null, { status: 201 });
       },
     });
     assert.equal(response.headers.get('Set-Cookie'), 's=refreshed');
     const body = await response.json();
-    if (kind === 'success') assert.equal(response.status, 201);
+    if (['success', 'fork'].includes(kind)) assert.equal(response.status, 201);
     else assert.ok(body.error);
     if (kind === 'forbidden') assert.equal(body.error, 'Run is not completed');
-    if (['missing', 'wrong-pr', 'no-head'].includes(kind)) assert.equal(posts, 0);
+    if (kind === 'forbidden-access') assert.equal(body.error, 'Re-running needs write access to this repository.');
+    if (kind === 'forbidden-old') assert.equal(body.error, 'Run is older than 30 days');
+    if (['missing', 'wrong-pr', 'same-repo-empty', 'no-head'].includes(kind)) assert.equal(posts, 0);
   }
 });
 
@@ -1861,7 +1863,7 @@ test('readiness client handles fresh, stale, unreadable, requested and failed re
   assert.match(await render(data), /latest commit/);
   assert.match(await render(data), /none open/);
   const stale = await render({ ...data, head: 'c'.repeat(40), decisions: [{ login: 'u', state: 'APPROVED', stale: true }] });
-  assert.match(stale, /out of date/); assert.match(stale, /older commit, stale/);
+  assert.match(stale, /✕ stale — This review/); assert.doesNotMatch(stale, /blocking — This review/); assert.match(stale, /out of date/); assert.match(stale, /older commit, stale/);
   const unreadable = await render({ ...data, blocking: null, open: null });
   assert.match(unreadable, /could not be read/); assert.doesNotMatch(unreadable, /none open/);
   assert.match(await render(data, null), /freshness unknown/);

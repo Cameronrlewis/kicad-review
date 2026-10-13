@@ -70,14 +70,14 @@ export async function rerunRoute(request, env, { owner, repo, number }, { access
     if (body.total_count > 100) return json({ error: 'Too many review runs to identify the latest safely.' }, 502);
     const candidates = (body.workflow_runs || []).filter((r) => Number.isSafeInteger(r.id) && r.id > 0 && r.head_sha === head && r.event === 'pull_request'
       && r.repository?.full_name?.toLowerCase() === `${owner}/${repo}`.toLowerCase()
-      && r.pull_requests?.some((pr) => pr.number === number));
+      && (r.pull_requests?.length ? r.pull_requests.some((pr) => pr.number === number) : r.head_repository?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase()));
     const run = candidates.sort((a, b) => b.id - a.id)[0];
     if (!run) return json({ error: 'No review run for the current head yet.' }, 404);
     const rerun = await gh(`${root}/actions/runs/${run.id}/rerun`, token, { method: 'POST' });
     if (rerun.status === 403) {
       if (rerun.headers.get('x-ratelimit-remaining') === '0' || rerun.headers.has('retry-after')) return refused(rerun);
       const message = (await rerun.json().catch(() => ({}))).message;
-      return json({ error: message || 'Re-running needs write access to the repository.' }, 403);
+      return json({ error: /not completed|older than/i.test(message || '') ? message : 'Re-running needs write access to this repository.' }, 403);
     }
     return rerun.ok ? json({ ok: true, run: run.id }, 201) : json({ error: 'GitHub did not re-run the review.' }, 502);
   })().catch(() => json({ error: 'GitHub did not answer. Try again.' }, 502));

@@ -1,10 +1,10 @@
 // Each state has words and a symbol, never colour alone.
 export function readinessClient(config) {
   const panel = document.getElementById('readiness');
-  const row = (ok, label, text) => {
+  const row = (ok, label, text, word = 'blocking') => {
     const li = document.createElement('li');
     li.className = ok === null ? 'wait' : ok ? 'ok' : 'bad';
-    li.textContent = `${ok === null ? '… waiting' : ok ? '✓ ready' : '✕ blocking'} — ${label}: ${text}`;
+    li.textContent = `${ok === null ? '… waiting' : ok ? '✓ ready' : `✕ ${word}`} — ${label}: ${text}`;
     return li;
   };
   const failed = (text) => { const list = document.createElement('ul'); list.append(row(null, 'Readiness', text)); panel.replaceChildren(list); };
@@ -13,7 +13,7 @@ export function readinessClient(config) {
     if (!response.ok) { failed(response.status === 401 ? 'Sign in again.' : data.error || 'could not be loaded'); return; }
     const list = document.createElement('ul');
     const fresh = config.reviewHead && data.head ? data.head.startsWith(config.reviewHead) : null;
-    list.append(row(fresh, 'This review', fresh === null ? 'freshness unknown' : fresh ? 'is for the latest commit' : `is out of date: the pull request is now at ${String(data.head).slice(0, 7)}`));
+    list.append(row(fresh, 'This review', fresh === null ? 'freshness unknown' : fresh ? 'is for the latest commit' : `is out of date: the pull request is now at ${String(data.head).slice(0, 7)}`, 'stale'));
     const approved = data.decisions.filter((d) => d.state === 'APPROVED'), changes = data.decisions.filter((d) => d.state === 'CHANGES_REQUESTED');
     const describe = (d) => `${d.login}${d.stale ? ' (on an older commit, stale)' : ''}`;
     list.append(row(changes.length ? false : approved.some((d) => !d.stale) ? true : null, 'GitHub approval',
