@@ -36,10 +36,14 @@ Every KiCad project in the repository (each folder with a `.kicad_pro`) is revie
 2. Optional: copy [`examples/kicad-review.toml`](examples/kicad-review.toml) to `kicad-review.toml` at the repository root and change what differs: which checks are required, which BOM fields every part must have, and which fabrication preset to use. Without the file the defaults in that example apply.
 3. If the repository belongs to an organisation, open *Organisation settings → Actions → General* and check two things:
    - **Policies** must allow reusable workflows from `Cameronrlewis/kicad-review`, either by allowing all actions or by adding it to the allow list.
-   - **Workflow permissions** can stay read-only by default, because the caller file asks for exactly `contents: write` and `pull-requests: write`.
+   - **Workflow permissions** can stay read-only by default, because the caller file asks for `contents: write` and `pull-requests: write` (also `checks: write` when `github.check_runs` is enabled).
 4. Open a pull request that touches a `.kicad_sch` or `.kicad_pcb` file. The comment appears in about two minutes.
 
 To make checks block merging, require the status check **`review / review`** in a branch protection rule or ruleset. **This is not available for private repositories on GitHub Free**: the API answers "Upgrade to GitHub Pro or make this repository public". On Free, a failing required check still marks the run and the pull request with a red ✗, but it cannot block the merge. Enforcement needs GitHub Team for the organisation, or a public repository.
+
+With `[github] check_runs = true` you can require individual checks instead: `kicad-review / ERC`, `kicad-review / DRC`, `kicad-review / Schematic/board parity`, `kicad-review / BOM fields`, and `kicad-review / Threads` when `threads.block_merge` is on. Add `checks: write` to the caller's permissions. `review / review` stays as before.
+
+The site's re-run feature expects the caller workflow to be named `kicad-review.yml`.
 
 ## Settings (`kicad-review.toml`)
 
@@ -54,6 +58,8 @@ To make checks block merging, require the status check **`review / review`** in 
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 | `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
+| `github.check_runs` | `false` | also publish one GitHub check run per check (`kicad-review / ERC`, `… / DRC`, …); the caller needs `checks: write` |
+| `threads.block_merge` | `false` | fail the review while any blocking thread is open; needs `threads.enabled`; creating, resolving or reopening a blocking thread in the review site re-runs the review |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
@@ -82,7 +88,7 @@ When thread collection succeeds, the pull request comment shows "Threads: N open
 
 Threads are off by default. The site exposes them only on review pages for `pull_request` runs. The GitHub App needs Pull requests and Contents permissions (read and write); GitHub requires Contents write to resolve review threads. A 403 response shows a hint to ask the repository owner to accept those permissions. A rate-limit response shows "GitHub rate limit reached. Try again later." (429).
 
-When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts.
+When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts unless `threads.block_merge` is enabled, in which case the gate fails closed. Each blocking-thread create, resolve or reopen re-runs the whole review (about 2–3 Actions minutes); GitHub requires write access and a run no older than 30 days.
 
 ## Review site (optional)
 

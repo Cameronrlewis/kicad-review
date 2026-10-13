@@ -1,6 +1,6 @@
 import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 import { threadsRoute } from './threads.js';
-import { readinessRoute } from './readiness.js';
+import { readinessRoute, rerunRoute } from './readiness.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -571,6 +571,11 @@ export default {
       const readyRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/readiness$/);
       if (request.method === 'GET' && readyRoute) {
         const result = await readinessRoute(request, env, { owner: readyRoute[1], repo: readyRoute[2], number: Number(readyRoute[3]) }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
+      }
+      const rerunMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/rerun$/);
+      if (request.method === 'POST' && rerunMatch) {
+        const result = await rerunRoute(request, env, { owner: rerunMatch[1], repo: rerunMatch[2], number: Number(rerunMatch[3]) }, { access, gh });
         return response(result.body, { status: result.status, headers: result.headers });
       }
       const threadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/threads(\/.*)?$/);

@@ -1785,3 +1785,87 @@ test('readiness rejects missing heads and preserves pull and review error semant
     } finally { restore(); }
   }
 });
+
+import { readinessClient } from './readiness-client.js';
+import { rerunRoute } from './readiness.js';
+
+test('rerun validates callers before access, and selects only this PR head run', async () => {
+  const sealed = await signedIn();
+  const calls = [];
+  const head = 'b'.repeat(40);
+  const valid = { id: 555, head_sha: head, event: 'pull_request', repository: { full_name: 'Cameronrlewis/repo' }, pull_requests: [{ number: 7 }] };
+  const restore = mockFetch(async (url, options = {}) => {
+    calls.push([url, options.method || 'GET']);
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/pulls/7')) return new Response(JSON.stringify({ head: { sha: head } }));
+    if (url.includes('/workflows/kicad-review.yml/runs?')) {
+      assert.match(url, /head_sha=bbbb/); assert.match(url, /event=pull_request/);
+      return new Response(JSON.stringify({ total_count: 3, workflow_runs: [{ ...valid, id: 999, pull_requests: [{ number: 8 }] }, { ...valid, id: 888, repository: { full_name: 'other/repo' } }, valid] }));
+    }
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/555/rerun');
+    return new Response(null, { status: 201 });
+  });
+  try {
+    const path = '/r/Cameronrlewis/repo/pull/7/rerun';
+    assert.equal((await threadsJson(path, {}, 'https://evil.example', sealed)).status, 403);
+    assert.equal((await call(path, { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'text/plain', Cookie: `s=${sealed}` } })).status, 415);
+    assert.equal(calls.length, 0);
+    const response = await threadsJson(path, { run: 999 }, undefined, sealed);
+    assert.equal(response.status, 201);
+    assert.deepEqual(await response.json(), { ok: true, run: 555 });
+    assert.equal(calls.at(-1)[1], 'POST');
+  } finally { restore(); }
+});
+
+test('rerun retains refreshed cookie across errors and success', async () => {
+  for (const kind of ['success', 'missing', 'forbidden', 'network', 'wrong-pr', 'no-head']) {
+    let posts = 0;
+    const response = await rerunRoute(new Request('https://site.example/r/o/r/pull/7/rerun', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json' } }), {}, { owner: 'o', repo: 'r', number: 7 }, {
+      access: async () => ({ s: { token: 't', setCookie: 's=refreshed' } }),
+      gh: async (path, token, options) => {
+        if (kind === 'network') throw new Error('offline');
+        if (path.includes('/pulls/')) return new Response(JSON.stringify(kind === 'no-head' ? {} : { head: { sha: 'head' } }));
+        if (path.includes('/workflows/')) return new Response(JSON.stringify({ workflow_runs: kind === 'missing' ? [] : [{ id: 9, head_sha: 'head', event: 'pull_request', repository: { full_name: 'o/r' }, pull_requests: [{ number: kind === 'wrong-pr' ? 8 : 7 }] }] }));
+        posts++; assert.equal(options.method, 'POST');
+        return kind === 'forbidden' ? new Response(JSON.stringify({ message: 'Run is not completed' }), { status: 403 }) : new Response(null, { status: 201 });
+      },
+    });
+    assert.equal(response.headers.get('Set-Cookie'), 's=refreshed');
+    const body = await response.json();
+    if (kind === 'success') assert.equal(response.status, 201);
+    else assert.ok(body.error);
+    if (kind === 'forbidden') assert.equal(body.error, 'Run is not completed');
+    if (['missing', 'wrong-pr', 'no-head'].includes(kind)) assert.equal(posts, 0);
+  }
+});
+
+test('PR review page includes serialized readiness before thread notice', () => {
+  const args = { user: 'u', owner: 'o', repo: 'r', id: '1', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: 7 };
+  const html = reviewPage(args);
+  assert.match(html, /<section id="readiness" class="readiness" aria-live="polite">/);
+  assert.match(html, /"readiness":"\/r\/o\/r\/pull\/7\/readiness"/);
+  assert.match(html, /"reviewHead":"bbbbbbb"/);
+  assert.match(reviewPage({ ...args, name: 'unknown' }), /"reviewHead":null/);
+  assert.doesNotMatch(reviewPage({ ...args, pull: null }), /id="readiness"/);
+  assert.doesNotMatch(readinessClient.toString(), /__name/);
+});
+
+test('readiness client handles fresh, stale, unreadable, requested and failed responses', async () => {
+  const node = () => ({ children: [], append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; } });
+  const render = async (body, reviewHead = 'bbbbbbb', status = 200, reject = false) => {
+    const panel = node();
+    await runInNewContext(`(${readinessClient.toString()})(config)`, { config: { readiness: '/ready', reviewHead }, document: { getElementById: () => panel, createElement: node }, fetch: async () => { if (reject) throw new Error('offline'); return new Response(JSON.stringify(body), { status }); } });
+    return panel.children[0].children.map(n => n.textContent).join('\n');
+  };
+  const data = { head: 'b'.repeat(40), decisions: [], requested: [], blocking: 0, open: 0 };
+  assert.match(await render(data), /latest commit/);
+  assert.match(await render(data), /none open/);
+  const stale = await render({ ...data, head: 'c'.repeat(40), decisions: [{ login: 'u', state: 'APPROVED', stale: true }] });
+  assert.match(stale, /out of date/); assert.match(stale, /older commit, stale/);
+  const unreadable = await render({ ...data, blocking: null, open: null });
+  assert.match(unreadable, /could not be read/); assert.doesNotMatch(unreadable, /none open/);
+  assert.match(await render(data, null), /freshness unknown/);
+  assert.match(await render({ ...data, requested: ['reviewer'] }), /waiting for reviewer/);
+  assert.match(await render({ error: 'denied' }, null, 401), /Sign in again/);
+  assert.match(await render({}, null, 200, true), /could not be loaded/);
+});
