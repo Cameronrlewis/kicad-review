@@ -1022,7 +1022,7 @@ for action, before, after in (("value", line, line), ("removed", line, None)):
     p["parts"]["changes"] = [{"action": action, "refs": ["R1"], "before": before, "after": after}]
     assert "introduced" not in parts_markdown({"projects": [p]})
 p["parts"]["supplier"] = {"fetched_at": "2026-10-08T14:02:00Z", "error": None}
-assert "JLCPCB data as of 2026-10-08T14:02:00Z." in parts_markdown({"projects": [p]})
+assert "DigiKey data as of 2026-10-08 14:02 UTC" in parts_markdown({"projects": [p]})
 assert "#### Parts: X" in comment_markdown({**d2, "projects": [{**p, "dir": "", "status": "modified", "changes": [], "checks": []}]}, [], "")
 conflict = {"refs": ["R2"], "value": "1k", "lcsc": "C1", "problems": ["lcsc_conflict"]}
 m = parts_markdown({"projects": [{"name": "C", "parts": {"lines": [conflict], "supplier": None,
@@ -1314,3 +1314,35 @@ class DigiKeyIntegrationTests(unittest.TestCase):
 
 integration_result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DigiKeyIntegrationTests))
 assert integration_result.wasSuccessful(), "DigiKey integration regressions failed"
+
+# Disabled report assets must remain byte-identical even after the supplier UI changes.
+import hashlib
+assert hashlib.sha256(inline_page('window.REVIEW_DATA = {"version":1};').encode()).hexdigest() == "78ce543361f773b9e8569fe4565b0a8d1a80e371cb4d2a6fc5fe8665cbdc07ae", "DigiKey opt-out changed embedded assets"
+
+supplier_lines = [{"refs": ["U1"], "problems": [], "supplier": {"status": "ok", "quantity": 1234, "unit_price": 1.5}},
+                  {"refs": ["U2"], "problems": [], "supplier": {"status": "out_of_stock", "quantity": 0, "unit_price": 7.25}},
+                  {"refs": ["U3"], "problems": [], "supplier": {"status": "not_found"}}]
+supplier_parts = {"lines": supplier_lines, "changes": [], "supplier": {"name": "DigiKey", "fetched_at": "2026-10-13T12:00:00Z", "looked_up": 2, "not_looked_up": {"no_mpn": 54, "invalid_mpn": 1, "run_limit": 2}, "error": None, "skipped": None}}
+supplier_data = {"projects": [{"name": "P", "parts": supplier_parts}]}
+text = parts_markdown(supplier_data)
+assert "DigiKey data as of 2026-10-13 12:00 UTC (stock and price from DigiKey)." in text
+assert "2 looked up: 1 in stock, 1 out of stock, 1 not found at DigiKey." in text
+assert "54 parts not looked up: no MPN." in text
+assert "1 part not looked up: invalid MPN." in text and "2 parts not looked up: run limit." in text
+assert "1234" not in text and "1.5" not in text and "7.25" not in text and "$" not in text
+supplier_parts["supplier"]["skipped"] = "no credentials (forked pull request or secrets not set)"
+assert "DigiKey lookup skipped: no credentials (forked pull request or secrets not set)." in parts_markdown(supplier_data)
+supplier_parts["supplier"]["skipped"] = None
+supplier_parts["supplier"]["error"] = "HTTP 500\n<script>"
+assert "DigiKey lookup unavailable: HTTP 500 &lt;script&gt;." in parts_markdown(supplier_data)
+print("ok DigiKey comment counts, skipped lookup, and not looked up counts")
+
+assert '"LCSC", "DigiKey", "PCBWay"' in inline_page('window.REVIEW_DATA = {"version":1};', digikey=True)
+assert 'https://www.digikey.evil.com/x' not in text
+# No lookup leaves comment and job-summary content unchanged.
+assert parts_markdown({"projects": [{"name": "P", "parts": {"lines": [], "changes": [], "supplier": None}}]}) == "#### Parts: P\n\nSupplier lookup not run (not available). 0 lines, 0 with a problem.\n"
+print("ok DigiKey disabled comment and enabled asset selection")
+
+project_counts = [{"parts": {"lines": [{"mpn": "A"}, {"mpn": "a"}, {"mpn": "B"}]}}, {"parts": {"lines": [{"mpn": "C"}]}}]
+kicad_review.merge_supplier(project_counts, {"supplier": {"looked_up": 3}, "results": {"A": {"status": "ok"}, "B": {"status": "unavailable"}, "C": {"status": "not_found"}}})
+assert [p["parts"]["supplier"]["looked_up"] for p in project_counts] == [1, 1], "Supplier lookup count must belong to the project"

@@ -1143,7 +1143,7 @@ def build_project(p, blobs, settings):
     if settings["parts"]["enabled"]:
         lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
-                 "supplier": None}  # JLCPCB lookup not built yet: no approved API access
+                 "supplier": None}  # Filled only when DigiKey lookup is enabled.
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -1189,18 +1189,22 @@ def review_links(env, det):
 UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
 
 
-def inline_page(data_js):
+def inline_page(data_js, digikey=False):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
     read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
     has_3d = '"model3d"' in data_js
     page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
+    script = read("review.js")
+    if not digikey and "const PARTS_PROBLEMS =" in script:
+        # Preserve opted-out reports byte-for-byte, including their embedded assets.
+        script = re.sub(r"const PARTS_PROBLEMS =.*?(?=function renderPanel\(\))", lambda _: read("parts-legacy.js"), script, flags=re.S)
     prefix = ""
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
-    page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
+    page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{script}</script>")
     if re.search(r'''(?:href|src)=(["'])(?:tokens\.css|review\.css|sample/review-data\.js|review\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
@@ -1259,6 +1263,7 @@ def merge_supplier(projects, lookup):
         if parts is None:
             continue
         counts = {"no_mpn": 0, "invalid_mpn": 0, "run_limit": 0}
+        looked_up = set()
         for line in parts["lines"]:
             raw = line["mpn"] or ""
             mpn = mpn_for_lookup(raw)
@@ -1270,9 +1275,11 @@ def merge_supplier(projects, lookup):
                 line["supplier"] = result
                 if result["status"] == "run_limit":
                     counts["run_limit"] += 1
+                elif result["status"] != "unavailable":
+                    looked_up.add(mpn.upper())
             elif not lookup["supplier"].get("skipped"):
                 line["supplier"] = {"status": "unavailable", "mpn": mpn}
-        parts["supplier"] = {**lookup["supplier"], "not_looked_up": counts}
+        parts["supplier"] = {**lookup["supplier"], "looked_up": len(looked_up), "not_looked_up": counts}
 
 
 def cmd_report(args):
@@ -1305,7 +1312,7 @@ def cmd_report(args):
     assign_ids(data["projects"])
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
-    html = inline_page(f"window.REVIEW_DATA = {payload};")
+    html = inline_page(f"window.REVIEW_DATA = {payload};", digikey=settings.get("digikey", {}).get("enabled", False))
     with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
@@ -1508,7 +1515,7 @@ def cmd_summary(args):
 
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
-                "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
+                "out_of_stock": "out of stock", "not_found": "not found at DigiKey", "ambiguous": "several DigiKey matches", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
 BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
@@ -1522,10 +1529,31 @@ def parts_markdown(data):
                       for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
         s = parts["supplier"]
         head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
-        when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
-               f"Supplier lookup not run ({md((s or {}).get('error') or 'not available')})."
+        literal = lambda value: md(" ".join(str(value).split()))
+        if s and s.get("skipped"):
+            reason = s["skipped"]
+            safe_reason = reason if reason in ("no credentials (forked pull request or secrets not set)", "no valid MPNs") else literal(reason)
+            when = f"DigiKey lookup skipped: {safe_reason}."
+        elif s and s.get("fetched_at"):
+            stamp = str(s["fetched_at"]).replace("T", " ")[:16]
+            when = f"DigiKey data as of {literal(stamp)} UTC (stock and price from DigiKey)."
+        else:
+            when = f"Supplier lookup not run ({literal((s or {}).get('error') or 'not available')})."
         bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
+        if s:
+            if not s.get("skipped"):
+                statuses = [(l.get("supplier") or {}).get("status") for l in parts["lines"]]
+                summary = [("ok", "in stock"), ("out_of_stock", "out of stock"), ("not_found", "not found at DigiKey"),
+                           ("ambiguous", "several DigiKey matches"), ("discontinued", "discontinued"), ("unavailable", "unavailable")]
+                counts = [f"{statuses.count(status)} {label}" for status, label in summary if status in statuses]
+                out.append(f"{s.get('looked_up', 0)} looked up" + (": " + ", ".join(counts) if counts else "") + ".")
+            if s.get("error"):
+                out.append(f"DigiKey lookup unavailable: {literal(s['error'])}.")
+            for key, reason in (("no_mpn", "no MPN"), ("invalid_mpn", "invalid MPN"), ("run_limit", "run limit")):
+                count = (s.get("not_looked_up") or {}).get(key, 0)
+                if count:
+                    out.append(f"{plural(count, 'part')} not looked up: {reason}.")
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
     return "\n".join(out)
 
