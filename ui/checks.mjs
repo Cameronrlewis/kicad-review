@@ -773,6 +773,49 @@ export const CHECKS = [
     const P = proj(), row = P.changes.find(r => r.where?.board && r.box); if (!row) return "skip";
     const x = (row.box[0] + row.box[2]) / 2, y = (row.box[1] + row.box[3]) / 2;
     const pt = { v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x, y, side: "head", severity: "comment" };
-    const old = resolveAnchor({ ...pt, commit: "0ld1234" }), same = resolveAnchor({ ...pt, commit: D.head });
-    return old.notes.includes("this area changed since 0ld1234") && !same.notes.some(n => n.startsWith("this area")) || JSON.stringify({old, same});`],
+    const old = resolveAnchor({ ...pt, commit: "0ld1234" }), same = resolveAnchor({ ...pt, commit: D.head }), base = resolveAnchor({ ...pt, commit: D.base });
+    P.changes = [{ where: { board: true }, pos: [50, 50, 0], pos_before: [5, 5, 0] }];
+    const before = resolveAnchor({ ...pt, x: 5, y: 5, commit: "0ld1234" }), after = resolveAnchor({ ...pt, x: 50, y: 50, commit: "0ld1234" });
+    P.changes = [{ where: { sheet: "/other/" }, pos_before: [5, 5, 0] }];
+    const otherView = resolveAnchor({ ...pt, x: 5, y: 5, commit: "0ld1234" });
+    return old.notes.includes("this area changed since 0ld1234") && !same.notes.some(n => n.startsWith("this area"))
+      && !base.notes.some(n => n.startsWith("this area")) && before.notes.includes("this area changed since 0ld1234")
+      && after.notes.includes("this area changed since 0ld1234") && !otherView.notes.some(n => n.startsWith("this area")) || JSON.stringify({old, same, base, before, after, otherView});`],
+  ["Threads anchorAt rejects a missing sheet file", "", `
+    S.v = "sheet:/nope/";
+    const a = anchorAt(1, 1, "head");
+    return a === null || JSON.stringify(a);`],
+  ["Threads resolveAnchor prioritizes UUID before reference", "", `
+    const P = proj();
+    P.objects = [
+      { uuid: "u-a", kind: "footprint", ref: "R9", side: "head", pos: [1, 1, 0], layer: "F.Cu" },
+      { uuid: "u-b", kind: "footprint", ref: "R9", side: "head", pos: [20, 1, 0], layer: "F.Cu" }
+    ];
+    const a = { v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", kind: "footprint", ref: "R9", x: 20, y: 1, side: "head", commit: D.head, severity: "comment" };
+    const uuid = resolveAnchor({ ...a, uuid: "u-b" }), ref = resolveAnchor({ ...a, uuid: "unknown" });
+    return uuid.pos[0] === 20 && ref.pos[0] === 1 || JSON.stringify({uuid, ref});`],
+  ["Threads anchorAt base uses previous position and excludes additions", "", `
+    if (D.base == null) return "skip";
+    const P = proj(); S.v = "board";
+    P.objects = [
+      { uuid: "moved", kind: "footprint", ref: "R1", side: "head", pos: [50, 50, 0], pos_before: [5, 5, 0], box: [49, 49, 51, 51], layer: "F.Cu" },
+      { uuid: "added", kind: "footprint", ref: "R2", side: "head", pos: [20, 20, 0], box: [19, 19, 21, 21], layer: "F.Cu", added: true }
+    ];
+    const moved = anchorAt(5, 5, "base"), added = anchorAt(20, 20, "base"), headPosition = anchorAt(50, 50, "base");
+    return moved.target === "object" && moved.uuid === "moved" && moved.x === 5 && moved.y === 5 && moved.side === "base" && moved.commit === D.base
+      && added.target === "point" && added.uuid === null && added.side === "base" && added.commit === D.base
+      && headPosition.target === "point" || JSON.stringify({moved, added, headPosition});`],
+  ["Threads resolveAnchor reference prefers the same sheet then any", "", `
+    const P = proj();
+    const objects = [
+      { uuid: "u-a", kind: "symbol", ref: "R1", side: "head", pos: [1, 1, 0], sheet: "/a/" },
+      { uuid: "u-b", kind: "symbol", ref: "R1", side: "head", pos: [20, 1, 0], sheet: "/b/" }
+    ];
+    const a = { v: 1, project: P.dir, file: "b.kicad_sch", sheet: "/b/", layer: null, target: "object", uuid: "unknown", kind: "symbol", ref: "R1", x: 20, y: 1, side: "head", commit: D.head, severity: "comment" };
+    P.objects = objects;
+    const head = resolveAnchor(a), any = resolveAnchor({ ...a, sheet: "/missing/" });
+    P.objects = objects.map(o => ({ ...o, side: "base" }));
+    const base = resolveAnchor(a), baseAny = resolveAnchor({ ...a, sheet: "/missing/" }), baseUuid = resolveAnchor({ ...a, uuid: "u-b" });
+    return head.view === "sheet:/b/" && head.pos[0] === 20 && any.view === "sheet:/a/"
+      && base.view === "sheet:/b/" && base.side === "base" && baseAny.view === "sheet:/a/" && baseUuid.pos[0] === 20 || JSON.stringify({head, any, base, baseAny, baseUuid});`],
 ];
