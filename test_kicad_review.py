@@ -1103,3 +1103,16 @@ pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": head_lines, "
                    "head": {"MPN": [3, 4], "Order ready": [2, 4], "LCSC": [4, 4], "Datasheet (critical)": [0, 0]}}}}]})
 assert "R5 one LCSC number on several values" in pm and "BOM coverage: order ready 2/4, MPN 3/4 (+2), LCSC 4/4" in pm and "DNP differs between schematic and board: R1" in pm, pm
 print("ok bom readiness comment")
+
+# Grouped lines: every reference's MPN and values are checked, and the comment names only the offending references.
+L = parts_lines({"1": symp("R1", Value="10k", Footprint="0805", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0805", MPN="AP2112"),
+                 "3": symp("R3", Value="10k", Footprint="0805"), "4": symp("U1", Value="LDO", Footprint="SOT23", MPN="AP2112")})
+r = next(l for l in L if "R1" in l["refs"])
+assert "placeholder" in r["problems"] and "mpn_footprint_conflict" in r["problems"], r
+assert r["problem_refs"] == {"placeholder": ["R1"], "mpn_footprint_conflict": ["R2"]}, r
+u = next(l for l in L if "U1" in l["refs"])
+assert u["problem_refs"] == {"mpn_footprint_conflict": ["U1"]}, u
+mark_new_problems([], L)
+pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": L, "changes": [], "supplier": None}}]})
+assert "- R1 placeholder value" in pm and "- R2 one MPN on several footprints" in pm and "R3 placeholder" not in pm and "R1, R2, R3 placeholder" not in pm, pm
+print("ok grouped line problems name their references")

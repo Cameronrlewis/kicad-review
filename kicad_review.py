@@ -828,6 +828,8 @@ def parts_lines(objs):
             "refs": [], "problems": []})
         if o["ref"] not in line["refs"]:
             line["refs"].append(o["ref"])
+            # Per-reference values: a grouped line can hide one reference's MPN or placeholder behind another's.
+            line.setdefault("_each", []).append((o["ref"], field(p, MPN_FIELDS), (p.get("Value", ""), field(p, MPN_FIELDS), lcsc)))
     by_lcsc = {}
     for l in lines.values():
         l["refs"].sort(key=natural)
@@ -838,8 +840,10 @@ def parts_lines(objs):
             l["problems"].append("missing_lcsc")
         if not l["mpn"] and not l["lcsc"]:
             l["problems"].append("missing_mpn")
-        if any((v or "").strip().lower() in PLACEHOLDERS - {"", "~"} for v in (l["value"], l["mpn"], l["lcsc"])):
+        bad = [r for r, _, vals in l["_each"] if any((v or "").strip().lower() in PLACEHOLDERS - {"", "~"} for v in vals)]
+        if bad:
             l["problems"].append("placeholder")
+            l.setdefault("problem_refs", {})["placeholder"] = bad
         if l["lcsc"]:
             by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
     for l in lines.values():
@@ -847,11 +851,14 @@ def parts_lines(objs):
             l["problems"].append("lcsc_conflict")
     by_mpn = {}
     for l in lines.values():
-        if l["mpn"] and present(l["mpn"]):
-            by_mpn.setdefault(l["mpn"].upper(), set()).add(l["footprint"])
+        for _, mpn, _ in l["_each"]:
+            if mpn and present(mpn):
+                by_mpn.setdefault(mpn.upper(), set()).add(l["footprint"])
     for l in lines.values():
-        if l["mpn"] and len(by_mpn.get(l["mpn"].upper(), ())) > 1:
+        hit = [r for r, mpn, _ in l.pop("_each") if mpn and len(by_mpn.get(mpn.upper(), ())) > 1]
+        if hit:
             l["problems"].append("mpn_footprint_conflict")
+            l.setdefault("problem_refs", {})["mpn_footprint_conflict"] = hit
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
@@ -1358,7 +1365,7 @@ def parts_markdown(data):
         if not parts:
             continue
         if any("new_problems" in l for l in parts["lines"]):
-            introduced = [(l["refs"], pr) for l in parts["lines"] for pr in l.get("new_problems", []) if pr in BLOCKING]
+            introduced = [(l.get("problem_refs", {}).get(pr, l["refs"]), pr) for l in parts["lines"] for pr in l.get("new_problems", []) if pr in BLOCKING]
         else:
             introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
                           for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
