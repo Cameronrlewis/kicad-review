@@ -65,11 +65,22 @@ export const UNRESOLVE_MUTATION = 'mutation($id:ID!){unresolveReviewThread(input
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 const permissionHint = "Threads need the app's Pull requests and Contents permissions (read and write). Ask the repository owner to accept them.";
 
-function refused(response) {
+export function refused(response) {
   if (response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after'))) return json({ error: 'GitHub rate limit reached. Try again later.' }, 429);
   if (response.status === 403) return json({ error: permissionHint }, 403);
   if (response.status === 422) return json({ error: 'GitHub refused this thread. The file may not be part of this pull request.' }, 422);
   return null;
+}
+
+export function accessFailure(allowed) {
+  const result = json({ error: allowed.status === 302 ? 'Sign in again.' : "Can't open this repository." }, allowed.status === 302 ? 401 : allowed.status);
+  if (allowed.headers.has('Set-Cookie')) result.headers.set('Set-Cookie', allowed.headers.get('Set-Cookie'));
+  return result;
+}
+
+export function sessionResponse(result, allowed) {
+  if (allowed.s.setCookie) result.headers.set('Set-Cookie', allowed.s.setCookie);
+  return result;
 }
 
 export async function threadsRoute(request, env, { owner, repo, number, rest }, { access, gh }) {
@@ -79,11 +90,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     if (!String(request.headers.get('Content-Type') || '').startsWith('application/json')) return json({ error: 'Send JSON' }, 415);
   }
   const allowed = await access(request, env, owner, repo);
-  if (allowed instanceof Response) {
-    const result = json({ error: allowed.status === 302 ? 'Sign in again.' : "Can't open this repository." }, allowed.status === 302 ? 401 : allowed.status);
-    if (allowed.headers.has('Set-Cookie')) result.headers.set('Set-Cookie', allowed.headers.get('Set-Cookie'));
-    return result;
-  }
+  if (allowed instanceof Response) return accessFailure(allowed);
   const result = await (async () => {
     const token = allowed.s.token, root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
     const graphql = async (query, variables) => {
@@ -128,6 +135,5 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     }
     return json({ error: 'Not found' }, 404);
   })().catch(() => json({ error: 'GitHub did not answer. Try again.' }, 502));
-  if (allowed.s.setCookie) result.headers.set('Set-Cookie', allowed.s.setCookie);
-  return result;
+  return sessionResponse(result, allowed);
 }

@@ -1666,3 +1666,104 @@ test('thread changes rerun only an announced blocking gate and expose rerun fail
     assert.equal(view.querySelector('[role=status]').textContent, 'mutation refused');
   }
 });
+
+import { latestDecisions } from './readiness.js';
+
+test('readiness keeps each reviewer\'s latest decision', () => {
+  const head = 'h'.repeat(40);
+  const reviews = [
+    { user: { login: 'ann' }, state: 'APPROVED', commit_id: head, submitted_at: '2026-10-12T10:00:00Z' },
+    { user: { login: 'ann' }, state: 'CHANGES_REQUESTED', commit_id: head, submitted_at: '2026-10-12T11:00:00Z' },
+    { user: { login: 'ann' }, state: 'COMMENTED', commit_id: head, submitted_at: '2026-10-12T12:00:00Z' },
+    { user: { login: 'bo' }, state: 'APPROVED', commit_id: head, submitted_at: '2026-10-12T09:00:00Z' }];
+  assert.deepEqual(latestDecisions(reviews, head), [{ login: 'ann', state: 'CHANGES_REQUESTED', stale: false }, { login: 'bo', state: 'APPROVED', stale: false }]);
+});
+
+test('readiness marks approvals on older commits stale', () => {
+  assert.deepEqual(latestDecisions([{ user: { login: 'cy' }, state: 'APPROVED', commit_id: 'o'.repeat(40), submitted_at: '2026-10-12T10:00:00Z' }], 'n'.repeat(40)),
+    [{ login: 'cy', state: 'APPROVED', stale: true }]);
+});
+
+test('readiness route joins the PR, reviews and threads as the user', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const restore = mockFetch(async (url, options = {}) => {
+    assert.equal(options.headers.Authorization, 'Bearer access-secret');
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/pulls/7') return new Response(JSON.stringify({ head: { sha: 'n'.repeat(40) }, requested_reviewers: [{ login: 'dee' }] }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/pulls/7/reviews?per_page=100') return new Response(JSON.stringify([{ user: { login: 'cy' }, state: 'APPROVED', commit_id: 'o'.repeat(40), submitted_at: '2026-10-12T10:00:00Z' }]));
+    assert.equal(url, 'https://api.github.com/graphql');
+    return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [
+      { id: 'T', isResolved: false, comments: { nodes: [{ databaseId: 1, body: threadBody({ anchor, text: 'x', link: 'https://s/r' }) }] } }] } } } } }));
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { head: 'n'.repeat(40), decisions: [{ login: 'cy', state: 'APPROVED', stale: true }], requested: ['dee'], blocking: 1, open: 1 });
+  } finally { restore(); }
+});
+
+
+test('readiness ignores pending reviews and dismissed decisions, independent of input order', () => {
+  const review = (login, state, hour) => ({ user: { login }, state, commit_id: 'head', submitted_at: `2026-10-12T${hour}:00:00Z` });
+  assert.deepEqual(latestDecisions([review('ann', 'DISMISSED', '12'), review('bo', 'PENDING', '13'),
+    review('ann', 'APPROVED', '10'), review('bo', 'APPROVED', '11')], 'head'),
+    [{ login: 'bo', state: 'APPROVED', stale: false }]);
+});
+
+test('readiness treats GraphQL errors, missing data and unreadable threads as unknown', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const payload of [{ errors: [{ type: 'FORBIDDEN' }] }, { data: { repository: null } }, {},
+    { data: { repository: { pullRequest: { reviewThreads: { nodes: [null] } } } } }, 'bad JSON', 'http error', 'network error']) {
+    const restore = mockFetch(async (url, options = {}) => {
+      assert.equal(options.headers.Authorization, 'Bearer access-secret');
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.endsWith('/pulls/7')) return new Response(JSON.stringify({ head: { sha: 'head' } }));
+      if (url.includes('/reviews?')) return new Response('[]');
+      if (payload === 'network error') throw new Error('offline');
+      return new Response(payload === 'bad JSON' ? '{' : JSON.stringify(payload), { status: payload === 'http error' ? 403 : 200 });
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.blocking, null);
+      assert.equal(body.open, null);
+    } finally { restore(); }
+  }
+});
+
+test('readiness access failures are JSON and retain access cookies', async () => {
+  const response = await call('/r/Cameronrlewis/repo/pull/7/readiness');
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Sign in again.' });
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  const restore = mockFetch(async url => url.includes('access_token') ? tokenResponse() : new Response('{}', { status: 404 }));
+  try {
+    const denied = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(denied.status, 404);
+    assert.deepEqual(await denied.json(), { error: "Can't open this repository." });
+    assert.ok(cookieValue(denied, 's'));
+  } finally { restore(); }
+});
+
+test('readiness retains refreshed cookies on success and GitHub failures', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  for (const status of [200, 403, 429, 502]) {
+    const restore = mockFetch(async url => {
+      if (url.includes('access_token')) return tokenResponse();
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.endsWith('/pulls/7')) return new Response(JSON.stringify({ head: { sha: 'head' } }),
+        { status: status === 429 ? 403 : status, headers: status === 429 ? { 'retry-after': '60' } : {} });
+      if (url.includes('/reviews?')) return new Response('[]');
+      return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }));
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, status);
+      assert.ok(cookieValue(response, 's'));
+      const body = await response.json();
+      if (status === 200) { assert.equal(body.blocking, 0); assert.equal(body.open, 0); }
+      else assert.ok(body.error);
+    } finally { restore(); }
+  }
+});

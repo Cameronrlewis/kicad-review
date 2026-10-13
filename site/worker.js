@@ -1,5 +1,6 @@
 import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 import { threadsRoute } from './threads.js';
+import { readinessRoute } from './readiness.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -566,6 +567,11 @@ export default {
         const [, owner, repo, id] = runRoute;
         if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
         return run(request, env, owner, repo, id, url);
+      }
+      const readyRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/readiness$/);
+      if (request.method === 'GET' && readyRoute) {
+        const result = await readinessRoute(request, env, { owner: readyRoute[1], repo: readyRoute[2], number: Number(readyRoute[3]) }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
       }
       const threadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/threads(\/.*)?$/);
       if (threadRoute && ['GET', 'POST'].includes(request.method)) {
