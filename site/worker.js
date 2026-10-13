@@ -192,6 +192,42 @@ const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-san
   + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
 const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
+function pdfError(active, status = 404) {
+  return sessionResponse(JSON.stringify({ error: 'PDF unavailable' }), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
+}
+
+async function pdfArtifact(owner, repo, id, token, metadata) {
+  try {
+    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
+    if (!metadata) {
+      const result = await gh(`${root}/artifacts/${id}`, token);
+      if (!result.ok) return null;
+      metadata = await result.json();
+    }
+    if (metadata.expired || !/^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/.test(metadata.name)) return null;
+    const runId = metadata.workflow_run?.id;
+    if (!/^\d{1,20}$/.test(String(runId))) return null;
+    const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100`, token);
+    if (!list.ok) return null;
+    const name = metadata.name.slice(0, -5) + '.pdf';
+    return ((await list.json()).artifacts || []).find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id))) || null;
+  } catch { return null; }
+}
+
+async function pdfDownload(owner, repo, id, active) {
+  try {
+    const artifact = await pdfArtifact(owner, repo, id, active.token);
+    if (!artifact) return pdfError(active);
+    const download = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifact.id}/zip`, active.token, { redirect: 'manual' });
+    if (download.status !== 302) return pdfError(active);
+    const location = new URL(download.headers.get('Location'));
+    if (location.protocol !== 'https:' || location.username || location.password) return pdfError(active);
+    const blob = await fetch(location.href, { redirect: 'error' });
+    if (!blob.ok || !blob.body) return pdfError(active);
+    return sessionResponse(blob.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${artifact.name}"` } }, active);
+  } catch { return pdfError(active); }
+}
+
 async function artifactReport(request, env, owner, repo, id, active, raw) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
@@ -207,7 +243,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
     if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     if (!raw) {
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id,
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id, pdf: Boolean(await pdfArtifact(owner, repo, id, active.token, metadata)),
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -540,12 +576,23 @@ export default {
       if (request.method === 'GET' && url.pathname === '/callback') return await callback(request, env);
       if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
-      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw)?$/);
+      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id, raw] = artifactRoute;
-        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+        if (!/^\d{1,20}$/.test(id)) {
+          if (raw === '/pdf') return pdfError(await session(request, env));
+          return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+        }
         const allowed = await access(request, env, owner, repo);
-        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, Boolean(raw));
+        if (raw === '/pdf') {
+          if (allowed instanceof Response) {
+            const headers = new Headers(allowed.headers);
+            headers.set('Content-Type', 'application/json; charset=utf-8');
+            return response(JSON.stringify({ error: 'PDF unavailable' }), { status: allowed.status >= 400 ? allowed.status : 401, headers });
+          }
+          return pdfDownload(owner, repo, id, allowed.s);
+        }
+        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, raw === '/raw');
       }
       const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
       if (request.method === 'POST' && compareRoute) {

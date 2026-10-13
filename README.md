@@ -53,6 +53,7 @@ To make checks block merging, require the status check **`review / review`** in 
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
+| `pdf.enabled` | `false` | also make a printable PDF (cover, summaries, pictures, changes, new errors) as a separate artifact; download it from the review site |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 

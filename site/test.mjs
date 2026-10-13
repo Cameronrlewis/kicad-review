@@ -506,6 +506,7 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
       name: 'kicad-review-deadbee-cafebad-fail.html', expired: false,
       workflow_run: { id: 123 },
     }));
+    if (url.endsWith('/runs/123/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -524,6 +525,7 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.deepEqual(seen, [
       'https://api.github.com/repos/Cameronrlewis/repo',
       'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/44',
+      'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/123/artifacts?per_page=100',
     ]);
   } finally { restore(); }
 });
@@ -1172,6 +1174,94 @@ test('expired artifacts offer regeneration only when their name records revision
         assert.match(body, /name="base" value="deadbee"/);
         assert.match(body, /name="head" value="cafebad"/);
       }
+    } finally { restore(); }
+  }
+});
+
+test('pdf route streams the run\'s PDF as a download', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return accessibleRepo();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123') return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9/artifacts?per_page=100') return new Response(JSON.stringify({ artifacts: [{ id: 124, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.pdf', expired: false }] }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/124/zip') return new Response(null, { status: 302, headers: { Location: 'https://blob.example/p' } });
+    assert.equal(url, 'https://blob.example/p'); return new Response('%PDF-1.7');
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/123/pdf', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200); assert.equal(response.headers.get('Content-Type'), 'application/pdf');
+    assert.equal(response.headers.get('Content-Disposition'), 'attachment; filename="kicad-review-aaaaaaa-bbbbbbb-pass.pdf"');
+    assert.equal(await response.text(), '%PDF-1.7');
+  } finally { restore(); }
+});
+
+test('no pdf artifact is a 404', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? accessibleRepo()
+    : url.endsWith('/artifacts/123') ? new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 } }))
+      : new Response(JSON.stringify({ artifacts: [{ id: 123, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' }] })));
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/pdf', { headers: { Cookie: `s=${sealed}` } })).status, 404); } finally { restore(); }
+});
+
+test('PDF link is absent by default and present only for a matching PDF', () => {
+  const input = { user: 'octocat', owner: 'owner', repo: 'repo', id: 42, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
+  assert.equal(reviewPage(input), reviewPage({ ...input, pdf: false }));
+  assert.doesNotMatch(reviewPage(input), /Download PDF/);
+  assert.match(reviewPage({ ...input, pdf: true }), /href="\/r\/owner\/repo\/a\/42\/pdf"[^>]*>Download PDF/);
+});
+
+test('PDF route checks access before artifact calls and returns JSON', async () => {
+  const sealed = await signedIn(); let artifactCalls = 0;
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/repo')) return new Response('denied', { status: 403 });
+    artifactCalls++; throw new Error('must not fetch artifacts');
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/123/pdf', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 404);
+    assert.match(response.headers.get('Content-Type'), /application\/json/);
+    assert.deepEqual(await response.json(), { error: 'PDF unavailable' });
+    assert.equal(artifactCalls, 0);
+    assert.ok(response.headers.get('X-Content-Type-Options'));
+  } finally { restore(); }
+});
+
+test('PDF route rejects wrong siblings, expired PDFs and unsafe download URLs', async () => {
+  const sealed = await signedIn();
+  for (const variant of ['wrong', 'expired', 'unsafe', 'missing', 'error']) {
+    let blobs = 0;
+    const restore = mockFetch(async (url) => {
+      if (url.endsWith('/repo')) return accessibleRepo();
+      if (url.endsWith('/artifacts/123')) return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 } }));
+      if (url.includes('/runs/9/artifacts')) {
+        if (variant === 'error') throw new Error('network error');
+        return new Response(JSON.stringify({ artifacts: variant === 'missing' ? [] : [{ id: 124, name: variant === 'wrong' ? 'other.pdf' : 'kicad-review-aaaaaaa-bbbbbbb-pass.pdf', expired: variant === 'expired' }] }));
+      }
+      if (url.endsWith('/artifacts/124/zip')) return new Response(null, { status: 302, headers: { Location: 'http://blob.example/pdf' } });
+      blobs++; throw new Error('unsafe blob fetch');
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/a/123/pdf', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 404, variant);
+      assert.match(response.headers.get('Content-Type'), /application\/json/);
+      assert.equal(blobs, 0);
+    } finally { restore(); }
+  }
+});
+
+test('PDF errors retain refreshed cookies, including malformed IDs', async () => {
+  for (const id of ['123', 'bad']) {
+    const sealed = await signedIn({ e: Date.now() - 1 });
+    const restore = mockFetch(async (url) => {
+      if (url.includes('access_token')) return tokenResponse();
+      if (url.endsWith('/repo')) return accessibleRepo();
+      return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 }, artifacts: [] }));
+    });
+    try {
+      const response = await call(`/r/Cameronrlewis/repo/a/${id}/pdf`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 404);
+      assert.match(response.headers.get('Content-Type'), /application\/json/);
+      assert.match(response.headers.get('Set-Cookie'), /^s=/);
     } finally { restore(); }
   }
 });
