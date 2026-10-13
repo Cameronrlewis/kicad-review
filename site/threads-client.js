@@ -19,12 +19,20 @@ export function threadsClient(config) {
   const post = async (path, body) => {
     const response = await fetch(config.threads + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
+    document.dispatchEvent(new CustomEvent('kicad-review-threads-changed'));
   };
   const rerun = async (severity, el, action) => {
     if (!blockMerge || severity !== 'blocking') return;
     try {
       const response = await fetch(config.rerun, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
+      const data = await response.json();
+      if (!Number.isSafeInteger(data.run) || data.run <= 0) throw new Error('GitHub did not return a run.');
+      const link = document.createElement('a');
+      link.href = config.run + data.run;
+      link.textContent = 'Open the new review when it finishes.';
+      notice.textContent = 'The review is re-running. ';
+      notice.append(link);
     } catch (error) {
       const text = `${action}. The review was not re-run: ${error.message}`;
       if (el === composer) notice.textContent = text;

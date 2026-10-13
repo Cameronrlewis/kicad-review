@@ -515,7 +515,7 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.equal(response.headers.get('Content-Security-Policy'), frameCsp);
     const body = await response.text();
     assert.match(body, /Review deadbee → cafebad/);
-    assert.match(body, /✕ failing/);
+    assert.match(body, /✕ checks failing/);
     assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/123/);
     assert.match(body, /<iframe[^>]+src="\/r\/Cameronrlewis\/repo\/a\/44\/raw"/);
     assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
@@ -895,13 +895,13 @@ test('running review refreshes safely and shows a GitHub run link only', async (
   } finally { restoreUnsafe(); }
 });
 
-test('completed review redirects to its review artifact', async () => {
+test('completed rerun redirects to newest non-expired review artifact even after a failed gate', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
     assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12/artifacts');
-    return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-pass.html' }] }));
+    return new Response(JSON.stringify({ artifacts: [{ id: 55, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-11' }, { id: 57, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-13', expired: true }, { id: 56, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12' }] }));
   });
   try {
     const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
@@ -1514,7 +1514,7 @@ test('artifact wrapper discovers PR number and omits thread UI for push runs', a
       if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
         name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 123 },
       }));
-      if (url.endsWith('/actions/runs/123')) return new Response(JSON.stringify({ event, pull_requests: [{ number: 7 }] }));
+      if (url.endsWith('/actions/runs/123')) return new Response(JSON.stringify({ event, status: 'completed', conclusion: 'failure', pull_requests: [{ number: 7 }] }));
       throw new Error(`unexpected ${url}`);
     });
     try {
@@ -1522,6 +1522,8 @@ test('artifact wrapper discovers PR number and omits thread UI for push runs', a
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('Content-Security-Policy'), frameCsp);
       const html = await response.text();
+      assert.match(html, /✕ run failure/);
+      assert.doesNotMatch(html, /✓ checks passing/);
       if (event === 'pull_request') {
         assert.match(html, /<dialog id="thread-composer"/);
         assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
@@ -1548,7 +1550,8 @@ test('thread client contains load failures, clears notice, and guards vanished t
   const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
   let response = () => Promise.reject(new Error('offline')), posts = 0;
   runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', link: '/review' })`, {
-    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+    CustomEvent: class { constructor(type) { this.type = type; } },
+    document: { dispatchEvent(event) { assert.equal(event.type, 'kicad-review-threads-changed'); }, getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
     addEventListener(type, fn) { listeners[type] = fn; },
     fetch: async (url, options) => { if (options) { posts++; return { ok: true }; } return response(); },
     FormData: class { get() { return 'text'; } }, location: { hash: '' },
@@ -1601,21 +1604,23 @@ test('report readiness announces the gate only with framed enabled threads', () 
 
 test('thread changes rerun only an announced blocking gate and expose rerun failures', async () => {
   for (const gate of [undefined, false, true]) for (const severity of ['comment', 'blocking']) {
-    const listeners = {}, calls = [], notice = { textContent: '' };
+    const listeners = {}, calls = [], notice = { textContent: '', append(link) { this.link = link; } };
+    let changes = 0;
     const node = () => ({ textContent: '', buttons: [{ disabled: false }, { disabled: false }], querySelectorAll() { return this.buttons; }, replaceChildren() {}, append() {}, reset() {}, addEventListener(type, fn) { this[type] = fn; } });
     const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
     const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage() {} } };
     const thread = { id: 'thread', resolved: false, anchor: { severity }, comments: [{ id: 'comment' }] };
     let failure = null, mutationFails = false;
-    runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', rerun: '/rerun', link: '/review' })`, {
-      document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+    runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', rerun: '/rerun', run: '/run/', link: '/review' })`, {
+      CustomEvent: class { constructor(type) { this.type = type; } },
+    document: { dispatchEvent(event) { changes++; assert.equal(event.type, 'kicad-review-threads-changed'); }, getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
       addEventListener(type, fn) { listeners[type] = fn; },
       fetch: async (url, options) => {
         if (options) calls.push({ url, options });
         if (url === '/rerun' && failure === 'offline') throw new Error('offline');
         if (url === '/rerun' && failure) return { ok: false, json: async () => ({ error: failure }) };
         if (options && url !== '/rerun' && mutationFails) return { ok: false, json: async () => ({ error: 'mutation refused' }) };
-        return { ok: true, json: async () => ({ threads: [thread] }) };
+        return { ok: true, json: async () => ({ threads: [thread], run: 555 }) };
       },
       FormData: class { get(key) { return key === 'severity' ? severity : 'text'; } }, location: { hash: '' },
     });
@@ -1646,6 +1651,8 @@ test('thread changes rerun only an announced blocking gate and expose rerun fail
     calls.length = 0; await submit(composer);
     assert.equal(calls.length, 1 + expected);
     assert.equal(calls.filter(c => c.url === '/rerun').length, expected);
+    assert.equal(changes, 4);
+    if (expected) { assert.match(notice.textContent, /The review is re-running/); assert.equal(notice.link.href, '/run/555'); }
     for (const call of calls.filter(c => c.url === '/rerun')) {
       assert.equal(call.options.method, 'POST'); assert.equal(call.options.headers['Content-Type'], 'application/json'); assert.equal(call.options.body, '{}');
     }
@@ -1856,7 +1863,7 @@ test('readiness client handles fresh, stale, unreadable, requested and failed re
   const node = () => ({ children: [], append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; } });
   const render = async (body, reviewHead = 'bbbbbbb', status = 200, reject = false) => {
     const panel = node();
-    await runInNewContext(`(${readinessClient.toString()})(config)`, { config: { readiness: '/ready', reviewHead }, document: { getElementById: () => panel, createElement: node }, fetch: async () => { if (reject) throw new Error('offline'); return new Response(JSON.stringify(body), { status }); } });
+    await runInNewContext(`(${readinessClient.toString()})(config)`, { config: { readiness: '/ready', reviewHead }, document: { addEventListener() {}, getElementById: () => panel, createElement: node }, fetch: async () => { if (reject) throw new Error('offline'); return new Response(JSON.stringify(body), { status }); } });
     return panel.children[0].children.map(n => n.textContent).join('\n');
   };
   const data = { head: 'b'.repeat(40), decisions: [], requested: [], blocking: 0, open: 0 };
@@ -1870,4 +1877,43 @@ test('readiness client handles fresh, stale, unreadable, requested and failed re
   assert.match(await render({ ...data, requested: ['reviewer'] }), /waiting for reviewer/);
   assert.match(await render({ error: 'denied' }, null, 401), /Sign in again/);
   assert.match(await render({}, null, 200, true), /could not be loaded/);
+});
+
+test('review badge uses workflow conclusion, not artifact checks', () => {
+  const args = { owner: 'o', repo: 'r', id: 1, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
+  assert.match(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'failure' }), /✕ run failure/);
+  assert.doesNotMatch(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'failure' }), /✓ (?:checks )?passing/);
+  assert.match(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'success' }), /✓ run passing/);
+  assert.match(reviewPage({ ...args, runStatus: 'in_progress' }), /… run in_progress/);
+  assert.match(reviewPage(args), /✓ checks passing/);
+});
+
+test('readiness reloads on thread mutations and ignores older responses', async () => {
+  const panel = { replaceChildren(list) { this.list = list; } }, listeners = {}, pending = [];
+  const node = () => ({ children: [], append(...items) { this.children.push(...items); } });
+  const initial = runInNewContext(`(${readinessClient.toString()})({ readiness: '/ready', reviewHead: 'bbbbbbb' })`, {
+    document: { getElementById: () => panel, createElement: node, addEventListener(type, fn) { listeners[type] = fn; } },
+    fetch: () => new Promise(resolve => pending.push(resolve)),
+  });
+  const data = { head: 'b'.repeat(40), decisions: [], requested: [], blocking: 0, open: 0 };
+  pending.shift()(new Response(JSON.stringify(data))); await initial;
+  assert.match(panel.list.children[2].textContent, /none open/);
+  const older = listeners['kicad-review-threads-changed']();
+  const newer = listeners['kicad-review-threads-changed']();
+  pending.pop()(new Response(JSON.stringify({ ...data, blocking: 1, open: 1 }))); await newer;
+  pending.pop()(new Response(JSON.stringify(data))); await older;
+  assert.match(panel.list.children[2].textContent, /1 open/);
+  const resolved = listeners['kicad-review-threads-changed']();
+  pending.pop()(new Response(JSON.stringify(data))); await resolved;
+  assert.match(panel.list.children[2].textContent, /none open/);
+});
+
+test('missing artifact points readers to the updated PR comment', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async url => url.endsWith('/repo') ? accessibleRepo() : new Response('{}', { status: 404 }));
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/42', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 404);
+    assert.match(await response.text(), /Open the review from the pull request comment/);
+  } finally { restore(); }
 });
