@@ -172,12 +172,14 @@ def board_layers(pcb_path):
     return names
 
 
-def render_side(src_dir, name, out):
+def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
         kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
+        if netlist:
+            kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
     if os.path.exists(pcb):
         # Drill marks off: with them every layer, even an empty one, is full of holes.
         # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
@@ -225,7 +227,7 @@ def cmd_render(args):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
-            render_side(posixpath.join(side, p["dir"]), p["name"], out)
+            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
             if export_3d:
                 export_glb(p, side, out)
             print(f"{p['name']}: rendered {side}")
@@ -588,14 +590,15 @@ def natural(s):
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "interfaces": "off"},
+    "interfaces": {},  # pattern overrides for the interfaces check
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"]},
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces"}
 
 
 def load_settings(roots=("base", "head")):
@@ -612,14 +615,17 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "interfaces"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
         sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
-            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
+            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of {', '.join(CHECK_NAMES)} = required/informational/off")
+    for k, v in settings["interfaces"].items():
+        if k not in INTERFACE_PATTERNS or not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
+            sys.exit(f"{SETTINGS_FILE}: interfaces.{k} must be one of {', '.join(INTERFACE_PATTERNS)} with a list of names")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if settings["fail_on"] not in ("new", "all"):
@@ -866,10 +872,12 @@ def project_checks(p, settings, objs):
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
-    return [c for c in checks if c] + [
+    result = [c for c in checks if c] + [
         {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
          "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
         for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
+    ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}")
+    return result + ([ic] if ic else [])
 
 
 
@@ -913,6 +921,27 @@ def matches(name, patterns):
     tokens = re.split(r"[^A-Z0-9]+", (name or "").upper())
     return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
 
+
+
+def interface_check(p, settings, objs, out_dir):
+    if settings["checks"].get("interfaces", "off") == "off":
+        return None
+    patterns = {**INTERFACE_PATTERNS, **settings["interfaces"]}
+    def side(s):
+        path = f"{out_dir}/{s}/netlist.net"
+        if not os.path.exists(path):
+            return None, None
+        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
+        where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
+        with open(path, encoding="utf-8") as fh:
+            return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
+    (head, coverage), (base, _) = side("head"), side("base")
+    if head is None:
+        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"], "status": "not_run",
+                "reason": "no schematic", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+    c = run_check("interfaces", settings, head, base)
+    c["coverage"] = coverage
+    return c
 
 
 def interface_findings(comps, nets, patterns, where_of):
@@ -1172,6 +1201,9 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
+        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}
+        report_settings.pop("interfaces", None)
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),

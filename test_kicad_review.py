@@ -1096,3 +1096,20 @@ c, n = parse_netlist(netlist({"U1": ("MCU", "", "MCU:M"), "U2": ("SENSOR", "", "
     {"+3V3": [("U1", "1", "VDD", "power_in")], "+5V": [("U2", "1", "VCC", "power_in")], "/INT": [("U1", "2", "PA2", "input"), ("U2", "4", "INT", "output")]}))
 vs = interface_findings(c, n, INTERFACE_PATTERNS, W)[0]
 assert types(vs) == [("voltage_domain", "warning")] and "+3V3" in vs[0]["description"] and "+5V" in vs[0]["description"], vs
+
+from kicad_review import interface_check
+settings = json.loads(json.dumps(DEFAULT_SETTINGS)); settings["checks"]["interfaces"] = "required"
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    for s in ("base", "head"):
+        os.makedirs(f"review/p/{s}")
+        open(f"review/p/{s}/netlist.net", "w").write(netlist({"R1": ("10k", "", "Device:R")}, {"GND": [("R1", "1", "", "passive")]}))
+    c = interface_check({"dir": "p", "name": "b"}, settings, {"base": {}, "head": {}}, "review/p")
+    os.chdir(_cwd)
+assert c["name"] == "interfaces" and c["status"] == "pass" and c["coverage"]["detected"] == {} and c["coverage"]["protected"] == [0, 0], c
+print("ok no interfaces is reported, not hidden")
+assert DEFAULT_SETTINGS["checks"]["interfaces"] == "off" and interface_check({"dir": "p", "name": "b"}, json.loads(json.dumps(DEFAULT_SETTINGS)), {}, "x") is None
+_src = open("kicad_review.py", encoding="utf-8").read()
+assert 'report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}' in _src and 'report_settings.pop("interfaces", None)' in _src
+print("ok interfaces settings stay out of opted-out reports")
