@@ -3,11 +3,11 @@
 name: KiCad review
 on:
   pull_request:
-    paths: ['**.kicad_*', '**-lib-table', 'kicad-review.toml']
+    paths: ['**.kicad_*', '**-lib-table', 'kicad-review.toml', 'kicad-review-waivers.toml']
   push:
     branches: ['**']
     tags: ['v*']
-    paths: ['**.kicad_*', '**-lib-table', 'kicad-review.toml']
+    paths: ['**.kicad_*', '**-lib-table', 'kicad-review.toml', 'kicad-review-waivers.toml']
   workflow_dispatch:
     inputs:
       base:
