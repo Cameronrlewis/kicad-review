@@ -1056,3 +1056,43 @@ assert matches("SDA", ["SDA"]) and matches("I2C1_SDA", ["SDA"]) and not matches(
 assert all(is_power(n, []) for n in ("+3V3", "VDD_3V3", "3.3V", "VBUS", "+5V", "GND")) and is_ground("AGND") and not is_power("/SDA", [])
 assert is_power("/RAIL", [{"type": "power_out"}])
 print("ok power nets are recognised")
+
+from kicad_review import interface_findings, INTERFACE_PATTERNS
+W = lambda ref: ({"sheet": "/"}, [1.0, 2.0])
+types = lambda vs: sorted((v["type"], v["severity"]) for v in vs)
+# UART TX to TX
+c, n = parse_netlist(netlist({"U1": ("MCU", "", "MCU:M"), "U2": ("GPS", "", "GPS:G")},
+    {"/TX": [("U1", "1", "USART1_TX", "output"), ("U2", "3", "TXD", "output")]}))
+vs, cov = interface_findings(c, n, INTERFACE_PATTERNS, W)
+assert types(vs) == [("uart_tx_to_tx", "error")] and "U1 pin 1 (USART1_TX)" in vs[0]["items"] and vs[0]["where"] == {"sheet": "/"}, vs
+# I2C: none, then two pull-ups
+i2c = lambda pullups: netlist({"U1": ("MCU", "", "MCU:M"), **{f"R{i}": ("4k7", "", "Device:R") for i in range(1, pullups + 1)}},
+    {"/MCU/SDA": [("U1", "5", "SDA", "bidirectional")] + [(f"R{i}", "1", "", "passive") for i in range(1, pullups + 1)],
+     "/MCU/SCL": [("U1", "6", "SCL", "bidirectional")], "+3V3": [(f"R{i}", "2", "", "passive") for i in range(1, pullups + 1)]})
+assert types(interface_findings(*parse_netlist(i2c(0)), INTERFACE_PATTERNS, W)[0]) == [("i2c_no_pullup", "error"), ("i2c_no_pullup", "error")]
+vs = interface_findings(*parse_netlist(i2c(2)), INTERFACE_PATTERNS, W)[0]
+assert ("i2c_multiple_pullups", "warning") in types(vs) and any("2350" in v["description"] for v in vs), vs
+print("ok hierarchical net names match")
+# CAN termination
+can = lambda r: netlist({"U3": ("TCAN", "", "If:T"), **({"R9": (r, "", "Device:R")} if r else {})},
+    {"/CANH": [("U3", "7", "CANH", "bidirectional")] + ([("R9", "1", "", "passive")] if r else []), "/CANL": [("U3", "6", "CANL", "bidirectional")] + ([("R9", "2", "", "passive")] if r else [])})
+assert types(interface_findings(*parse_netlist(can(None)), INTERFACE_PATTERNS, W)[0]) == [("can_no_termination", "warning")]
+assert interface_findings(*parse_netlist(can("120R")), INTERFACE_PATTERNS, W)[0] == []
+# USB-C CC: floating, resistor, controller
+usb = lambda cc_nodes: netlist({"J1": ("USB_C_Receptacle", "USB_C", "Connector:USB_C_Receptacle"), "R1": ("5.1k", "", "Device:R"), "U9": ("TPS65987", "", "PD:T")},
+    {"/CC1": [("J1", "A5", "CC1", "bidirectional")] + cc_nodes, "GND": [("R1", "2", "", "passive"), ("J1", "A1", "GND", "power_in")]})
+assert types(interface_findings(*parse_netlist(usb([])), INTERFACE_PATTERNS, W)[0]) == [("usb_cc_floating", "error")]
+cc_errors = lambda nodes: [v for v in interface_findings(*parse_netlist(usb(nodes)), INTERFACE_PATTERNS, W)[0] if v["type"] == "usb_cc_floating"]
+assert cc_errors([("R1", "1", "", "passive")]) == [] and cc_errors([("U9", "4", "CC1", "bidirectional")]) == []
+print("ok CC to a controller is fine")
+# Connector ESD: J2 pin 2 unprotected, pin 3 protected by a TVS on the same net
+c, n = parse_netlist(netlist({"J2": ("Conn_01x03", "", "Connector:Conn"), "D1": ("PESD5V0", "", "Diode:ESD"), "U1": ("MCU", "", "MCU:M")},
+    {"GND": [("J2", "1", "", "passive")], "/SIG_A": [("J2", "2", "", "passive"), ("U1", "8", "PA0", "input")],
+     "/SIG_B": [("J2", "3", "", "passive"), ("U1", "9", "PA1", "input"), ("D1", "1", "", "passive")]}))
+vs, cov = interface_findings(c, n, INTERFACE_PATTERNS, W)
+assert types(vs) == [("connector_no_esd", "warning")] and vs[0]["items"] == ["J2 pin 2 on /SIG_A"] and cov["protected"] == [1, 2], (vs, cov)
+# Voltage domains
+c, n = parse_netlist(netlist({"U1": ("MCU", "", "MCU:M"), "U2": ("SENSOR", "", "S:S")},
+    {"+3V3": [("U1", "1", "VDD", "power_in")], "+5V": [("U2", "1", "VCC", "power_in")], "/INT": [("U1", "2", "PA2", "input"), ("U2", "4", "INT", "output")]}))
+vs = interface_findings(c, n, INTERFACE_PATTERNS, W)[0]
+assert types(vs) == [("voltage_domain", "warning")] and "+3V3" in vs[0]["description"] and "+5V" in vs[0]["description"], vs

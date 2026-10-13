@@ -914,6 +914,92 @@ def matches(name, patterns):
     return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
 
 
+
+def interface_findings(comps, nets, patterns, where_of):
+    """Design-review rules on one revision's netlist. Every finding carries its nets and pins as evidence."""
+    out, detected, skipped = [], {}, []
+    pin_net = {(n["ref"], n["pin"]): name for name, nodes in nets.items() for n in nodes}
+    is_res = lambda ref: ref.startswith("R") and ohms(comps.get(ref, {}).get("value")) is not None
+    other = lambda ref, pin: next((name for (r, p), name in pin_net.items() if r == ref and p != pin), None)
+    node_txt = lambda n: f"{n['ref']} pin {n['pin']}" + (f" ({n['function']})" if n["function"] else "")
+
+    def add(type_, severity, description, ref, items):
+        where, pos = where_of(ref)
+        out.append({"type": type_, "severity": severity, "description": description, "items": items, "uuids": [],
+                    "pos": pos, "box": None, "where": where})
+
+    for name, nodes in nets.items():
+        tx = [n for n in nodes if matches(n["function"], patterns["uart_tx"])]
+        if tx: detected["UART"] = detected.get("UART", 0) + 1
+        if len({n["ref"] for n in tx}) > 1:
+            add("uart_tx_to_tx", "error", f"Two transmit pins drive {name}. Assumes pin functions name UART directions.", tx[0]["ref"], [node_txt(n) for n in tx])
+    for key in ("i2c_sda", "i2c_scl"):
+        for name, nodes in nets.items():
+            if not matches(short(name), patterns[key]) and not any(matches(n["function"], patterns[key]) for n in nodes):
+                continue
+            detected["I2C"] = detected.get("I2C", 0) + 1
+            ups = [n for n in nodes if is_res(n["ref"]) and (o := other(n["ref"], n["pin"])) and is_power(o, nets.get(o, [])) and not is_ground(o)]
+            ic = next((n["ref"] for n in nodes if not is_res(n["ref"])), nodes[0]["ref"] if nodes else "")
+            if not ups:
+                add("i2c_no_pullup", "error", f"{name} has no pull-up resistor to a supply. Assumes the pull-up is on this board.", ic, [node_txt(n) for n in nodes])
+            elif len(ups) > 1:
+                par = 1 / sum(1 / ohms(comps[n["ref"]]["value"]) for n in ups)
+                add("i2c_multiple_pullups", "warning", f"{name} has {len(ups)} pull-ups in parallel ({round(par)} Ω).", ups[0]["ref"], [node_txt(n) for n in ups])
+    can_h = [name for name, nodes in nets.items() if matches(short(name), patterns["can_h"]) or any(matches(n["function"], patterns["can_h"]) for n in nodes)]
+    can_l = [name for name, nodes in nets.items() if matches(short(name), patterns["can_l"]) or any(matches(n["function"], patterns["can_l"]) for n in nodes)]
+    if can_h and can_l:
+        detected["CAN"] = len(can_h)
+        terminated = any(is_res(n["ref"]) and 114 <= ohms(comps[n["ref"]]["value"]) <= 126 and other(n["ref"], n["pin"]) in can_l for h in can_h for n in nets[h])
+        if not terminated:
+            ref = next((n["ref"] for n in nets[can_h[0]] if not is_res(n["ref"])), nets[can_h[0]][0]["ref"])
+            add("can_no_termination", "warning", f"No 120 Ω resistor between {can_h[0]} and {can_l[0]}. Fine if this node is not at a bus end.", ref, [can_h[0], can_l[0]])
+    for ref, c in comps.items():
+        if not (ref.startswith("J") and re.search(r"USB.?C|TYPE.?C", f"{c['lib']} {c['value']} {c['footprint']}", re.I)):
+            continue
+        detected["USB-C"] = detected.get("USB-C", 0) + 1
+        for (r, pin), name in pin_net.items():
+            node = next(n for n in nets[name] if n["ref"] == r and n["pin"] == pin)
+            if r != ref or not re.fullmatch(r"CC\d?", node["function"].upper()):
+                continue
+            pulled = any(is_res(n["ref"]) and 4850 <= ohms(comps[n["ref"]]["value"]) <= 5360 and is_ground(other(n["ref"], n["pin"]) or "") for n in nets[name])
+            driven = any(n["ref"] != ref and not is_res(n["ref"]) for n in nets[name])
+            if not pulled and not driven:
+                add("usb_cc_floating", "error", f"{node['function']} of {ref} floats: needs 5.1 kΩ to GND or a PD controller.", ref, [node_txt(node)])
+    total = prot = 0
+    esd = lambda r: re.search("|".join(map(re.escape, patterns["esd_parts"])), f"{comps.get(r, {}).get('lib', '')} {comps.get(r, {}).get('value', '')} {comps.get(r, {}).get('description', '')}", re.I)
+    for ref in sorted((r for r in comps if r.startswith("J")), key=natural):
+        bare = []
+        for (r, pin), name in sorted(pin_net.items(), key=lambda e: natural(e[0][1])):
+            if r != ref or is_power(name, nets[name]) or len(nets[name]) < 2:
+                continue
+            total += 1
+            if any(esd(n["ref"]) for n in nets[name] if n["ref"] != ref):
+                prot += 1
+            else:
+                bare.append(f"{ref} pin {pin} on {name}")
+        if bare:
+            add("connector_no_esd", "warning", f"{ref} signal pins without an ESD or TVS part on the same net. Assumes protection is not elsewhere on the cable.", ref, bare)
+    rails = {}
+    for name, nodes in nets.items():
+        if is_power(name, nodes) and not is_ground(name):
+            for n in nodes:
+                if n["type"] == "power_in" and n["ref"].startswith("U"):
+                    rails.setdefault(n["ref"], set()).add(name)
+    for name, nodes in nets.items():
+        if is_power(name, nodes):
+            continue
+        ics = sorted({n["ref"] for n in nodes if n["ref"] in rails}, key=natural)
+        for a, b in ((x, y) for i, x in enumerate(ics) for y in ics[i + 1:]):
+            if rails[a].isdisjoint(rails[b]):
+                add("voltage_domain", "warning", f"{name} joins {a} ({', '.join(sorted(rails[a]))}) and {b} ({', '.join(sorted(rails[b]))}). Check levels.", a, [name])
+                break
+    if any(matches(short(n), patterns["spi"]) for n in nets):
+        detected["SPI"] = sum(1 for n in nets if matches(short(n), patterns["spi"]))
+        skipped.append({"interface": "SPI", "reason": "no SPI rule yet"})
+    checked = [k for k in detected if k != "SPI"] + (["connector protection"] if total else [])
+    return out, {"detected": detected, "checked": checked, "skipped": skipped, "protected": [prot, total]}
+
+
 def page_svg(out_dir, name, page):
     """The SVG kicad-cli wrote for a page: <project>-<sheet>-<subsheet>....svg, <project>.svg for the root."""
     path = f"{out_dir}/sch/{page['stem']}.svg"
