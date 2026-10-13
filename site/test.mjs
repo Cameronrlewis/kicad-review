@@ -506,7 +506,6 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
       name: 'kicad-review-deadbee-cafebad-fail.html', expired: false,
       workflow_run: { id: 123 },
     }));
-    if (url.endsWith('/runs/123/artifacts?per_page=100')) return new Response(JSON.stringify({ artifacts: [] }));
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -525,7 +524,6 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.deepEqual(seen, [
       'https://api.github.com/repos/Cameronrlewis/repo',
       'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/44',
-      'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/123/artifacts?per_page=100',
     ]);
   } finally { restore(); }
 });
@@ -1262,6 +1260,50 @@ test('PDF errors retain refreshed cookies, including malformed IDs', async () =>
       assert.equal(response.status, 404);
       assert.match(response.headers.get('Content-Type'), /application\/json/);
       assert.match(response.headers.get('Set-Cookie'), /^s=/);
+    } finally { restore(); }
+  }
+});
+
+
+test('review page avoids PDF discovery calls and uses listing hint when present', async () => {
+  const sealed = await signedIn();
+  for (const suffix of ['', '?pdf=1']) {
+    const seen = [];
+    const restore = mockFetch(async (url) => {
+      seen.push(url);
+      if (url.endsWith('/repo')) return accessibleRepo();
+      assert.ok(url.endsWith('/artifacts/123'));
+      return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 } }));
+    });
+    try {
+      const response = await call(`/r/Cameronrlewis/repo/a/123${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      assert.equal((await response.text()).includes('Download PDF'), Boolean(suffix));
+      assert.equal(seen.length, 2);
+    } finally { restore(); }
+  }
+});
+
+test('review list discovers matching PDFs without any additional GitHub call', async () => {
+  const sealed = await signedIn();
+  for (const enabled of [false, true]) {
+    let calls = 0;
+    const restore = mockFetch(async (url) => {
+      calls++;
+      if (url.endsWith('/repo')) return accessibleRepo();
+      assert.ok(url.endsWith('/actions/artifacts?per_page=100'));
+      return new Response(JSON.stringify({ artifacts: [
+        { id: 123, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 } },
+        ...(enabled ? [{ id: 124, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.pdf', workflow_run: { id: 9 } }] : []),
+        { id: 125, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.pdf', workflow_run: { id: 10 } },
+      ] }));
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      assert.equal(body.includes('/a/123?pdf=1'), enabled);
+      assert.equal(calls, 2);
     } finally { restore(); }
   }
 });

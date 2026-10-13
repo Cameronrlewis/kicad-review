@@ -196,6 +196,12 @@ function pdfError(active, status = 404) {
   return sessionResponse(JSON.stringify({ error: 'PDF unavailable' }), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
 }
 
+function matchingPdf(artifacts, metadata) {
+  const name = String(metadata.name || '').replace(/\.html$/, '.pdf');
+  return artifacts.find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id))
+    && a.workflow_run?.id === metadata.workflow_run?.id);
+}
+
 async function pdfArtifact(owner, repo, id, token, metadata) {
   try {
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
@@ -243,7 +249,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
     if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     if (!raw) {
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id, pdf: Boolean(await pdfArtifact(owner, repo, id, active.token, metadata)),
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: metadata.workflow_run?.id, pdf: new URL(request.url).searchParams.get('pdf') === '1',
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -328,13 +334,14 @@ async function reviewList(request, env, owner, repo, url) {
   if (allowed instanceof Response) return allowed;
   try {
     const artifactResponse = await artifactList(owner, repo, allowed.s.token);
-    const list = artifactResponse.ok ? reviews((await artifactResponse.json()).artifacts) : [];
+    const artifacts = artifactResponse.ok ? (await artifactResponse.json()).artifacts || [] : [];
+    const list = reviews(artifacts);
     const items = list.map((item) => {
       const event = item.workflow_run?.event;
       const branchTip = String(item.workflow_run?.head_sha || '').slice(0, 7);
       const manual = item.revisionsRecorded && item.base !== 'none' && branchTip && item.head !== branchTip;
       return {
-        id: item.id, createdAt: item.created_at, date: date(item.created_at),
+        id: item.id, pdf: Boolean(matchingPdf(artifacts, item)), createdAt: item.created_at, date: date(item.created_at),
         branch: item.workflow_run?.head_branch || 'Unknown branch',
         label: manual ? 'manual' : ({ push: 'branch push', pull_request: 'pull request' }[event] || ''),
         manual, base: item.base, head: item.head,
@@ -376,7 +383,8 @@ async function commitsData(owner, repo, token, branch, tag = '') {
   const commitsResponse = await gh(`${root}/commits?sha=${encodeURIComponent(sha || branch)}&per_page=50`, token);
   if (!commitsResponse.ok) return null;
   const commitList = await commitsResponse.json();
-  const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
+  const artifacts = artifactsResponse.ok ? (await artifactsResponse.json()).artifacts || [] : [];
+  const reviewList = reviews(artifacts);
   const byHead = new Map(reviewList.filter((item) => item.head !== '?').map((item) => [String(item.head).slice(0, 7), item]));
   return {
     branch, tags: tags.map((item) => ({ name: String(item.name || '') })).filter((item) => item.name),
@@ -384,7 +392,8 @@ async function commitsData(owner, repo, token, branch, tag = '') {
     commits: commitList.map((commit) => {
       const sha = String(commit.sha || ''); const fullMessage = String(commit.commit?.message || '');
       const exactDate = date(commit.commit?.author?.date);
-      return { sha, fullMessage, message: fullMessage.split('\n', 1)[0], author: commit.author?.login || commit.commit?.author?.name || '?', date: relativeDate(commit.commit?.author?.date), exactDate, review: byHead.get(sha.slice(0, 7))?.id };
+      const review = byHead.get(sha.slice(0, 7));
+      return { sha, fullMessage, message: fullMessage.split('\n', 1)[0], author: commit.author?.login || commit.commit?.author?.name || '?', date: relativeDate(commit.commit?.author?.date), exactDate, review: review?.id, pdf: review ? Boolean(matchingPdf(artifacts, review)) : false };
     }),
   };
 }
@@ -497,8 +506,9 @@ async function run(request, env, owner, repo, id, url) {
   try {
     const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
     if (artifactsResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
-    const artifact = reviews((await artifactsResponse.json()).artifacts)[0];
-    if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}`, 302, allowed.s);
+    const artifacts = (await artifactsResponse.json()).artifacts || [];
+    const artifact = reviews(artifacts)[0];
+    if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}${matchingPdf(artifacts, artifact) ? '?pdf=1' : ''}`, 302, allowed.s);
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }

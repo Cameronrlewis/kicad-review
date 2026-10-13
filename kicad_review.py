@@ -1316,7 +1316,7 @@ table { border-collapse: collapse; width: 100%; margin: 6px 0; } th, td { border
 img { max-width: 100%; max-height: 150mm; display: block; margin: 4px 0; } .fail { font-weight: 700; } figure { break-inside: avoid; margin: 0 0 8px; }"""
 
 
-def print_html(data, images, pr_title, pr_author, threads, now):
+def print_html(data, images, pr_title, pr_author, now):
     """A static, script-free page for Chrome to print: cover, then per project its summary, pictures, changes and new errors."""
     e = lambda v: htmllib.escape(str(v if v is not None else "—"))
     plain = lambda s: htmllib.unescape(re.sub(r"\\(.)", r"\1", s)).replace("​", "")
@@ -1327,19 +1327,19 @@ def print_html(data, images, pr_title, pr_author, threads, now):
     header = f"{data['repo']} · {short(data['base'])} → {short(data['head'])}"
     css_header = '"' + ''.join(f"\\{ord(c):x} " for c in header) + '"'
     css = PRINT_CSS.replace("string(revs)", css_header)
-    out = [f"<!doctype html><html><head><meta charset='utf-8'><title>KiCad review {e(short(data['base']))} → {e(short(data['head']))}</title><style>{css}</style></head><body>",
-           f"<p class='revs'>{e(data['repo'])} · {e(short(data['base']))} → {e(short(data['head']))}</p>",
+    out = [f"<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><title>KiCad review {e(short(data['base']))} → {e(short(data['head']))}</title><style>{css}</style></head><body>",
+           f"<p class='revs'>{e(header)}</p>",
            f"<h1>KiCad review</h1><table><tr><th>Repository</th><td>{e(data['repo'])}</td></tr><tr><th>Revisions</th><td>{e(short(data['base']))} → {e(short(data['head']))} ({e(data['reason'])})</td></tr>"
            + (f"<tr><th>Pull request</th><td>{e(pr_title)} by {e(pr_author)}</td></tr>" if pr_title else "")
            + f"<tr><th>Made</th><td>{e(now)}</td></tr><tr><th>Verdict</th><td class='{'fail' if failed else ''}'>{'✕ failing: ' + e(', '.join(failed)) if failed else '✓ required checks passing'}</td></tr>"
-           + (f"<tr><th>Threads</th><td>Threads: {e(threads['open'])} open ({e(threads['blocking'])} blocking), {e(threads['resolved'])} resolved</td></tr>" if threads else "") + "</table>"]
+           + "</table>"]
     for i, p in enumerate(data["projects"]):
         out.append(f"<h2>{e(p['name'])}</h2><p>{bold(summary_sentence(p))}.</p>")
         out.append("<table><tr><th>Check</th><th>Result</th><th>Errors (new)</th><th>Warnings (new)</th><th>Fixed</th></tr>" + "".join(
             f"<tr><td>{e(c['title'])} ({e(c['level'])})</td><td>{e(c['status'].replace('_', ' '))}</td><td>{e(c['errors'])} ({e(c['new_errors'])})</td><td>{e(c['warnings'])} ({e(c['new_warnings'])})</td><td>{e(c['fixed'])}</td></tr>" for c in p["checks"]) + "</table>")
         pics = [s for s in images if s["project"] == i and os.path.exists(s["path"])]
         out += [f"<figure><figcaption>{e(s['title'])}: before and after</figcaption><img src='data:image/png;base64,{base64.b64encode(open(s['path'], 'rb').read()).decode()}'></figure>" for s in pics] \
-            or ["<p><i>Before/after pictures unavailable for this run (pictures unavailable).</i></p>"]
+            or ["<p><i>Before/after pictures unavailable for this run.</i></p>"]
         rows = p["changes"][:200]
         out.append("<table><tr><th>Change</th><th>Object</th><th>Ref</th><th>Details</th></tr>" + "".join(
             f"<tr class=\"change\"><td>{e(r['action'])}</td><td>{e(r['kind'])}</td><td>{e(r.get('ref'))}</td><td>"
@@ -1360,8 +1360,7 @@ def cmd_pdf(args):
         return
     shots = json.load(open("review/images/shots.json", encoding="utf-8")) if os.path.exists("review/images/shots.json") else []
     images = [{**s, "path": f"review/images/{s['file']}"} for s in shots]
-    threads = None
-    page = print_html(data, images, os.environ.get("PR_TITLE", ""), os.environ.get("PR_AUTHOR", ""), threads,
+    page = print_html(data, images, os.environ.get("PR_TITLE", ""), os.environ.get("PR_AUTHOR", ""),
                       datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     with open("review/print.html", "w", encoding="utf-8") as fh:
         fh.write(page)
