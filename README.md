@@ -53,6 +53,7 @@ To make checks block merging, require the status check **`review / review`** in 
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
+| `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
@@ -70,6 +71,18 @@ Recognised field names (case-insensitive):
 - Manufacturer part number: `mpn`, `manufacturer_part_number`, `manufacturer part number`, `mfr. part #`, `mfg part #`.
 
 Supplier stock/price is not yet available; a JLCPCB Components API lookup at workflow time is planned and needs approved API access. Today nothing is sent to any supplier, and no supplier API secret is needed. PCBWay publishes no parts API.
+
+## Threads (optional)
+
+With `[threads] enabled = true` and the review site, a reviewer starts a thread on a part or point of a changed sheet or board. Right-click the drawing, or press `c` and click. Each thread is a pull-request review comment on the `.kicad_sch` or `.kicad_pcb` file. Its first line names the part and position and links back to the exact view, so it reads well on GitHub too. Replies, @mentions, notifications and resolving all work on GitHub as for any review comment.
+
+Every later review places the thread on the same part by its KiCad UUID, or by its reference if the UUID changed, and says when the part moved or was removed. Threads exist only on pull requests. GitHub marks the comments "outdated" after each push because the file changed; the review site ignores that and re-anchors.
+
+The pull request comment shows "Threads: N open (M blocking), K resolved". The offline report file shows no threads.
+
+Threads are off by default. The site exposes them only on review pages for `pull_request` runs. The GitHub App needs Pull requests read and write permission; a 403 response shows a hint to ask the repository owner to accept that permission. A rate-limit response shows "GitHub rate limit reached. Try again later." (429).
+
+When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts.
 
 ## Review site (optional)
 
