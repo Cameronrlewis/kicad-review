@@ -1264,3 +1264,8 @@ test('threads: review links preserve existing percent escapes', () => {
   const unsafe = threadBody({ anchor, text: 'mine', link: 'https://s/r<`>' });
   assert.ok(unsafe.includes('[open in review](https://s/r%3C%60%3E)'));
 });
+
+test('threads: review links encode backslash and line breaks', () => {
+  const body = threadBody({ anchor, text: 'mine', link: 'https://s/a\\b\r\nc' });
+  assert.ok(body.includes('[open in review](https://s/a%5Cb%0D%0Ac)'));
+});
