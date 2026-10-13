@@ -1,6 +1,6 @@
 # kicad-review
 
-A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone changes a KiCad project it shows what changed on the actual schematic and board, not in the S-expression text. Everything runs inside GitHub Actions and appears inside GitHub. There is no server, no web app and no secret beyond the token GitHub gives every run, and access is whatever the repository already allows.
+A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone changes a KiCad project it shows what changed on the actual schematic and board, not in the S-expression text. Everything runs inside GitHub Actions and appears inside GitHub. By default no secret is needed beyond the token GitHub gives every run, and access is whatever the repository already allows. Optional DigiKey stock and price lookup needs two supplier credentials; the optional companion review site is configured separately.
 
 ## What you get
 
@@ -53,6 +53,10 @@ To make checks block merging, require the status check **`review / review`** in 
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
+| `digikey.enabled` | `false` | look up stock and price by MPN; requires `parts.enabled = true` and the credentials below |
+| `digikey.site` | `"US"` | DigiKey locale site, two uppercase letters (for example `CA`) |
+| `digikey.currency` | `"USD"` | price currency, three uppercase letters (for example `CAD`) |
+| `digikey.max_lookups` | `100` | maximum distinct MPNs per run, integer 1–900; excess lines show "not looked up: run limit" |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
@@ -69,7 +73,37 @@ Recognised field names (case-insensitive):
 - LCSC: `lcsc`, `lcsc part`, `lcsc part #`, `lcsc part number`, `jlcpcb part #`.
 - Manufacturer part number: `mpn`, `manufacturer_part_number`, `manufacturer part number`, `mfr. part #`, `mfg part #`.
 
-Supplier stock/price is not yet available; a JLCPCB Components API lookup at workflow time is planned and needs approved API access. Today nothing is sent to any supplier, and no supplier API secret is needed. PCBWay publishes no parts API.
+### DigiKey stock and price (optional)
+
+**Keep it off in public repositories: DigiKey's terms forbid passing its data to third parties.** The lookup is off by default. Use it only for permitted internal purchasing use in a private repository; the report artifact is visible to repository readers. See [DigiKey's API User Agreement](https://developer.digikey.com/api-user-agreement) for permitted display and attribution.
+
+1. Sign in at [developer.digikey.com](https://developer.digikey.com/). Create or join an Organization, then open **Organizations → Operations → Production Apps → Create Production App**. If the form requires a callback URL, use `https://localhost`; this client-credentials flow never uses it.
+2. Subscribe the app to **Product Information V4**. Copy its Client ID and Client Secret into repository Actions secrets named `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`. Each repository uses its own credentials; never commit or paste them into a workflow's `run:` script.
+3. Add `secrets: inherit` to the caller's `review:` job, as in [`examples/kicad-review.yml`](examples/kicad-review.yml). Existing callers without secrets remain supported. Credentials are passed as environment variables only to the separate lookup step, not to the render, report or comment steps.
+4. Enable both features in the repository-root `kicad-review.toml`:
+
+   ```toml
+   [parts]
+   enabled = true
+
+   [digikey]
+   enabled = true
+   site = "US"
+   currency = "USD"
+   max_lookups = 100
+   ```
+
+   The base revision's settings still win: enabling it only on a pull request's head does not enable that run when the base already has a settings file.
+
+The runner sends **MPNs only** from the design, never references, values, footprints or manufacturer fields. It trims and collapses whitespace, rejects placeholders and invalid MPNs, and deduplicates case-insensitively. Normally it makes one token call plus one search per distinct MPN, capped by `max_lookups`. Calls are paced 0.6 seconds apart; DigiKey's Product Information limits are **120 per minute** and **1000 per day**, shared by every run using the same app. One rejected/expired token (401) permits one token refresh and one retry, adding at most two calls. A second 401, 429 or 403 stops the run. Other failures affect only that line; three consecutive failures stop further lookups. The step has a five-minute timeout, so large caps may time out before finishing (900 searches alone need about nine minutes).
+
+Only exact MPN matches are used. If several manufacturers share an MPN, the symbol's `Manufacturer` field is stripped and matched as a **case-insensitive prefix** against DigiKey's manufacturer names. This is not an alias or fuzzy-name lookup: abbreviations may fail to match, and a short prefix can still match several manufacturers. Conflicting manufacturer fields across lines sharing one MPN disable that hint. If no manufacturer matches, or several still match, the result stays **ambiguous**, with no stock or price.
+
+The Parts tab shows stock, quantity-1 unit price in the selected currency, product status, the fetch time and **Stock and price from DigiKey** attribution, with a link to the DigiKey product page. Data older than 24 hours is greyed and never shown as in stock. Missing/invalid MPNs and the run cap are counted separately; counts refer to distinct displayed BOM lines, not physical component quantities. The PR comment and job summary contain **counts only**, never stock quantities or prices.
+
+Fork pull requests and repositories without credentials show **DigiKey lookup skipped: no credentials (forked pull request or secrets not set)** and make no API call. Lookup failures show **unavailable** and never fail the review; successful lines remain visible after a partial failure. With DigiKey off there is no call, and report/comment output stays unchanged.
+
+Results are kept **only in the run's report**, not in a persistent supplier database, Actions cache, repository branch or site store. Temporary lookup JSON is used only within that run; the report artifact keeps its normal retention period. PCBWay publishes no parts API.
 
 ## Review site (optional)
 

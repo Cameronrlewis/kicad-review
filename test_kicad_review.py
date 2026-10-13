@@ -1346,3 +1346,15 @@ print("ok DigiKey disabled comment and enabled asset selection")
 project_counts = [{"parts": {"lines": [{"mpn": "A"}, {"mpn": "a"}, {"mpn": "B"}]}}, {"parts": {"lines": [{"mpn": "C"}]}}]
 kicad_review.merge_supplier(project_counts, {"supplier": {"looked_up": 3}, "results": {"A": {"status": "ok"}, "B": {"status": "unavailable"}, "C": {"status": "not_found"}}})
 assert [p["parts"]["supplier"]["looked_up"] for p in project_counts] == [1, 1], "Supplier lookup count must belong to the project"
+
+# Setup docs cover opt-in, credentials, terms and the conservative manufacturer rule.
+readme = pathlib.Path(kicad_review.__file__).with_name("README.md").read_text()
+for wording in ("### DigiKey stock and price (optional)", "DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "secrets: inherit", "MPNs only",
+                "120 per minute", "1000 per day", "case-insensitive prefix", "Keep it off in public repositories", "only in the run's report",
+                "digikey.enabled", "digikey.site", "digikey.currency", "digikey.max_lookups"):
+    assert wording in readme, wording
+assert "JLCPCB Components API lookup" not in readme
+example = pathlib.Path(kicad_review.__file__).parent.joinpath("examples/kicad-review.toml").read_text()
+for wording in ('# [digikey]', '# enabled = false', '# site = "US"', '# currency = "USD"', '# max_lookups = 100'):
+    assert wording in example, wording
+print("ok DigiKey setup, limits, terms and manufacturer docs")
