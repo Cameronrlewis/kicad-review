@@ -5,6 +5,8 @@ const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
+let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
+S.issues = null;
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
@@ -13,11 +15,36 @@ function acceptThreads(list) {
   S.wantThreads = false;
   if (S.v) { renderPanel(); drawPins(); }
 }
-function handleParentMessage(e, on = THREADS_ON) {
-  if (!on || e.source !== parent) return false;
-  if (!Array.isArray(e.data?.kicadReviewThreads)) return false;
-  acceptThreads(e.data.kicadReviewThreads);
-  return true;
+function validIssue(i) {
+  if (!i || !Number.isSafeInteger(i.number) || i.number <= 0 || i.state !== "open"
+    || i.title === Object(i.title) || !(Object(i.title) instanceof String)
+    || i.url === Object(i.url) || !(Object(i.url) instanceof String)
+    || !i.anchor || i.anchor.v !== 1 || !Number.isFinite(i.anchor.x) || !Number.isFinite(i.anchor.y)
+    || !["point", "object"].includes(i.anchor.target)) return false;
+  try {
+    const u = new URL(i.url);
+    return u.origin === "https://github.com" && !u.username && !u.password && !u.search && !u.hash
+      && new RegExp("^/[^/]+/[^/]+/issues/" + i.number + "$").test(u.pathname);
+  } catch { return false; }
+}
+function acceptIssues(list) {
+  S.issues = list.filter(i => { try { return validIssue(i); } catch { return false; } }).slice(0, 100);
+  if (S.wantThreads) S.t = "threads";
+  S.wantThreads = false;
+  if (S.v) { renderPanel(); drawPins(); }
+}
+function findingAnchor(v) {
+  const view = viewOf(v), P = proj(), file = view && viewFile(P, view);
+  if (!file || !Array.isArray(v.pos) || !Number.isFinite(v.pos[0]) || !Number.isFinite(v.pos[1])) return null;
+  return { v: 1, project: P.dir, file, sheet: view === "board" ? null : view.slice(6), layer: null, target: "point",
+    uuid: null, kind: null, ref: null, x: round3(v.pos[0]), y: round3(v.pos[1]), side: "head", commit: D.head, severity: "comment" };
+}
+function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON) {
+  if (e.source !== parent) return false;
+  let accepted = false;
+  if (on && Array.isArray(e.data?.kicadReviewThreads)) { acceptThreads(e.data.kicadReviewThreads); accepted = true; }
+  if (issuesOn && Array.isArray(e.data?.kicadReviewIssues)) { acceptIssues(e.data.kicadReviewIssues); accepted = true; }
+  return accepted;
 }
 addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
@@ -393,18 +420,18 @@ function drawPins() {
   for (const pin of document.querySelectorAll("#stage .pin")) pin.remove();
   for (const w of document.querySelectorAll("#stage .world")) {
     const side = w.querySelector(".stack.head") ? "head" : "base";
-    for (const t of shownThreads()) {
+    for (const t of [...shownThreads(), ...(S.issues || []).filter(i => i.anchor.project === proj().dir).map(i => ({ ...i, id: `issue-${i.number}`, issue: true }))]) {
       const r = resolveAnchor(t.anchor);
       if (r.detached || r.view !== S.v) continue;
       if (!(r.side === side || (r.side === "head" && side === "base" && !r.added))) continue;
       const p = side === "base" && r.pos_before ? r.pos_before : r.pos;
-      const kind = t.resolved ? "resolved" : t.anchor.severity === "blocking" ? "blocking" : "comment";
+      const kind = t.issue ? "issue" : t.resolved ? "resolved" : t.anchor.severity === "blocking" ? "blocking" : "comment";
       const pin = document.createElement("button");
       pin.className = `pin pin-${kind}`; pin.dataset.thread = t.id;
-      pin.textContent = { resolved: "✓", blocking: "!", comment: "…" }[kind];
-      pin.setAttribute("aria-label", `${kind === "resolved" ? "Resolved" : kind === "blocking" ? "Blocking" : "Comment"} thread on ${t.anchor.ref || "a point"}`);
+      pin.textContent = t.issue ? `#${t.number}` : { resolved: "✓", blocking: "!", comment: "…" }[kind];
+      pin.setAttribute("aria-label", t.issue ? `Issue #${t.number} on ${t.anchor.ref || "a point"}` : `${kind === "resolved" ? "Resolved" : kind === "blocking" ? "Blocking" : "Comment"} thread on ${t.anchor.ref || "a point"}`);
       Object.assign(pin.style, { left: `${p[0] * PX}px`, top: `${p[1] * PX}px` });
-      pin.onclick = ev => { ev.stopPropagation(); openThread(t.id); };
+      pin.onclick = ev => { ev.stopPropagation(); if (t.issue) window.open(t.url, "_blank", "noopener"); else openThread(t.id); };
       pin.onpointerdown = ev => ev.stopPropagation();
       w.appendChild(pin);
     }
@@ -544,7 +571,7 @@ function renderChecks() {
     return `<details class="check-group" ${newCount ? "open" : ""}><summary><span class="rule">${esc(g.type)}</span><span class="group-description">${esc(vs[0].description)}</span><span class="group-count">${vs.length}</span>${newCount ? `<b class="new-tag">NEW ${newCount}</b>` : ""}<span class="sev">${errors ? "✕ error" : "! warning"}</span></summary>${vs.slice(0, 200).map(v => {
       const at = v.pos && currentView(viewOf(v));
       return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'} aria-selected="${S.s === v.id}">
-        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>`;
+        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${ISSUES_ON && findingAnchor(v) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
   return `<div class="checks-summary">${summary}</div><div class="filters checks-filters">
@@ -610,25 +637,27 @@ function renderThreads() {
       ${!r.detached && !currentView(r.view) ? '<span class="thread-note">its drawing did not change in this review</span>' : ""}
       ${(r.notes || []).map(n => `<span class="thread-note">${esc(n)}</span>`).join("")}</button>`;
   };
+  const issues = (S.issues || []).filter(i => i.anchor.project === proj().dir);
   const shown = shownThreads(), placed = shown.filter(t => !resolveAnchor(t.anchor).detached), detached = shown.filter(t => resolveAnchor(t.anchor).detached);
-  return `<div class="filters checks-filters">${["open", "resolved", "all"].map(st => `<button class="check-chip" data-thread-status="${st}" aria-pressed="${f.status === st}">${st[0].toUpperCase() + st.slice(1)} ${count(st)}</button>`).join("")}
+  const discussions = `<div class="filters checks-filters">${["open", "resolved", "all"].map(st => `<button class="check-chip" data-thread-status="${st}" aria-pressed="${f.status === st}">${st[0].toUpperCase() + st.slice(1)} ${count(st)}</button>`).join("")}
       <select class="thread-severity"><option value="">All kinds</option><option value="comment" ${f.severity === "comment" ? "selected" : ""}>Comment</option><option value="blocking" ${f.severity === "blocking" ? "selected" : ""}>Blocking</option></select></div>
     <p class="muted thread-hint">Right-click the drawing, or press c and click, to start a thread.</p>
     <div class="cards">${placed.map(cardFor).join("") || '<p class="muted">No threads match.</p>'}</div>
     ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
+  return (S.threads ? discussions : "") + (issues.length ? `<details class="issues-group" open><summary>Issues (${issues.length})</summary>${issues.map(i => `<a class="thread-card" data-issue="${i.number}" href="${esc(i.url)}" target="_blank" rel="noopener">#${i.number} ${esc(i.title)} <span class="muted">${esc(i.anchor.ref || "point")}</span></a>`).join("")}</details>` : "");
 }
 function renderPanel() {
-  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter", "data-thread-status", "data-thread"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
-  if (S.t === "threads" && !S.threads) { S.wantThreads = true; S.t = "changes"; }
+  if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   $("#panel").innerHTML = `<div role="tablist">
       <button role="tab" data-tab="changes" aria-selected="${S.t === "changes"}">Changes ${p.changes.length}</button>
       <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button>
       ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}</button>` : ""}
-      ${S.threads ? `<button role="tab" data-tab="threads" aria-selected="${S.t === "threads"}">Threads ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}</button>` : ""}</div>` +
+      ${S.threads || S.issues ? `<button role="tab" data-tab="threads" aria-selected="${S.t === "threads"}">Threads ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}</button>` : ""}</div>` +
     (S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     <div class="filters">${["added", "removed", "modified"].map(a =>
@@ -646,6 +675,10 @@ function renderPanel() {
   const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
   bindCards();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
+  for (const b of document.querySelectorAll("#panel [data-issue-for]")) b.onclick = () => {
+    const v = allViolations().find(x => x.id === b.dataset.issueFor), a = v && findingAnchor(v);
+    if (ISSUES_ON && a) parent.postMessage({ kicadReviewIssueFor: { ...a, title: `${v.check}: ${v.description}`.slice(0, 200) } }, "*");
+  };
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
   for (const b of document.querySelectorAll("#panel [data-thread-status]")) b.onclick = () => { S.threadFilter.status = b.dataset.threadStatus; renderPanel(); draw(); };
   const ts = $("#panel select.thread-severity"); if (ts) ts.onchange = () => { S.threadFilter.severity = ts.value; renderPanel(); draw(); };
@@ -766,7 +799,7 @@ function start() {
       const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
       document.title = "ready";
     }
-  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage({ kicadReviewReady: true, threads: THREADS_ON }, "*"); });   // cmd_shots must never wait out its budget
+  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON }, "*"); });   // cmd_shots must never wait out its budget
 }
 start();
 window.addEventListener("hashchange", () => applyState(decodeState(location.hash)));

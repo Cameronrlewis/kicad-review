@@ -116,6 +116,12 @@ Private repositories get 2,000 Actions minutes and 500 MB of artifact storage pe
 
 So roughly 900 reviews a month fit in the free minutes, shared by every private repository of the owner.
 
+## Issues (optional)
+
+Set `[issues] enabled = true` in `kicad-review.toml` to track located findings with **Track as issue**, or a discussion with **Create issue**. The review site creates a normal GitHub issue as the signed-in person, with the same KiCad anchor and a link back to the review and PR. A thread gets a “Tracked in #N.” reply. Open anchored issues appear as `#N` pins and in the Threads tab's **Issues** group on later reviews; removed objects pin to the base drawing. Pins open GitHub in a new tab.
+
+This is off by default, independent of `[threads] enabled`. The site's GitHub App needs **Issues: read and write**; the owner must add it and each installation must accept it. Opted-in workflow callers must add `issues: read` to `permissions`. The workflow reads the first 100 open repository issues once per PR run and adds “Touches parts named in #12, #15.” when their anchored references changed. Without permission it warns and skips that line; the site explains a 403. Existing `v1` callers need no changes. Offline reports make no issue requests and offer no issue actions.
+
 ## How it works
 
 `review.yml` runs one job on `ubuntu-24.04`.

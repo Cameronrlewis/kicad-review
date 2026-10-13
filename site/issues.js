@@ -6,7 +6,7 @@ const positive = n => Number.isSafeInteger(n) && n > 0;
 const issueURL = (url, number, owner, repo) => {
   try {
     const u = new URL(url);
-    return u.origin === 'https://github.com' && !u.username && !u.password && !u.search && !u.hash
+    return u.origin === 'https://github.com' && !u.username && !u.password && !u.search && !u.hash && u.pathname.endsWith(`/issues/${number}`)
       && (owner ? u.pathname.toLowerCase() === `/${owner}/${repo}/issues/${number}`.toLowerCase() : /^\/[^/]+\/[^/]+\/issues\/\d+$/.test(u.pathname));
   } catch { return false; }
 };

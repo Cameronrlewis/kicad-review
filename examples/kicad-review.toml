@@ -28,3 +28,8 @@ enabled = false
 # Pin discussion threads to parts and points in the review site. Threads are pull-request review comments.
 # Needs the review site and its GitHub App's Pull requests permission. Off by default.
 enabled = false
+
+[issues]
+# Track findings and threads as anchored GitHub issues; show open issues on later reviews.
+# App: Issues read/write; opted-in workflow caller: issues: read. Independent of threads.
+enabled = false

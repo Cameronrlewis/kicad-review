@@ -1540,7 +1540,7 @@ test('serialized thread client has no bundler name helpers and notice is in revi
 
 test('thread client contains load failures, clears notice, and guards vanished threads', async () => {
   const listeners = {}, notice = { textContent: '' }, sent = [];
-  const node = () => ({ textContent: '', value: '', replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const node = () => ({ textContent: '', value: '', closest() { return this; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
   const dialog = () => {
     const nodes = {};
     return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } };
@@ -1554,6 +1554,7 @@ test('thread client contains load failures, clears notice, and guards vanished t
     FormData: class { get() { return 'text'; } }, location: { hash: '' },
   });
   const message = data => listeners.message({ source: iframe.contentWindow, data });
+  message({ kicadReviewReady: true, threads: true });
   const pin = { kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } };
   listeners.message({ source: {}, data: pin }); assert.equal(composer.open, false);
   for (let i = 0; i < 2; i++) {
@@ -1687,3 +1688,78 @@ test('issue routes authenticate before issue API calls and use worker security h
   } finally { restore(); }
 });
 
+
+test('threads client loads issues and sends them to the report', () => {
+  const source = threadsClient.toString();
+  assert.match(source, /send\(\{ kicadReviewIssues: /);
+  assert.match(source, /kicadReviewIssueFor/);
+});
+
+
+test('issue client is gated, loads independently, resets composer and strips finding title', async () => {
+  const listeners = {}, sent = [], calls = [], notice = { textContent: '' };
+  const node = () => ({ textContent: '', value: '', hidden: false, disabled: false, required: false, closest() { return this; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
+  const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
+  let denied = false, threadsAllowed = false, values = { title: 'Fix R16', text: 'later' };
+  runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', issues: '/issues', pull: 7, link: '/r/o/r/a/1' })`, {
+    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+    addEventListener(type, fn) { listeners[type] = fn; },
+    fetch: async (url, options) => {
+      calls.push([url, options]);
+      if (options) return { ok: true, json: async () => ({ number: 41, warning: 'Issue created; reply failed.' }) };
+      if (url === '/threads') return threadsAllowed ? { ok: true, json: async () => ({ threads: [{ id: 'T41', anchor, comments: [{ id: 11, author: 'alice', body: 'Move on rev C' }] }] }) } : { ok: false, json: async () => ({ error: 'Threads denied' }) };
+      return denied ? { ok: false, json: async () => ({ error: "Issues need the app's Issues permission." }) } : { ok: true, json: async () => ({ issues: [{ number: 1 }] }) };
+    },
+    FormData: class { get(name) { return values[name]; } }, location: { hash: '#v=board' },
+  });
+  const message = (data, source = iframe.contentWindow) => listeners.message({ source, data });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  message({ kicadReviewReady: true, threads: false, issues: false }); await settle(); assert.equal(calls.length, 0);
+  message({ kicadReviewIssueFor: { ...anchor, title: 'forged' } }, {}); assert.equal(composer.open, false);
+  message({ kicadReviewReady: true, threads: true, issues: false }); await settle(); assert.equal(calls.length, 1); assert.equal(calls[0][0], '/threads');
+  calls.length = 0;
+  message({ kicadReviewReady: true, threads: true, issues: true }); await settle();
+  assert.deepEqual(calls.map(c => c[0]), ['/threads', '/issues']);
+  assert.equal(sent.at(-1).kicadReviewIssues[0].number, 1); assert.equal(notice.textContent, 'Threads denied');
+  composer.querySelector('textarea').value = 'stale thread draft';
+  message({ kicadReviewIssueFor: { ...anchor, title: 'Fix R16' } });
+  assert.equal(composer.open, true); assert.equal(composer.querySelector('h2').textContent, 'New issue');
+  assert.equal(composer.querySelector('textarea').value, ''); assert.equal(composer.querySelector('textarea').required, false);
+  const form = composer.querySelector('form'); form.querySelector = () => node();
+  await form.submit({ preventDefault() {}, target: form });
+  const posted = JSON.parse(calls.find(c => c[1])[1].body);
+  assert.equal(posted.anchor.title, undefined); assert.equal(posted.anchor.severity, 'comment'); assert.equal(posted.title, 'Fix R16');
+  assert.equal(posted.link, '/r/o/r/a/1#v=board'); assert.equal(posted.pull, 7);
+  assert.equal(composer.open, false); assert.equal(notice.textContent, 'Issue created; reply failed.');
+  message({ kicadReviewPin: anchor });
+  assert.equal(composer.querySelector('h2').textContent, 'New thread'); assert.equal(composer.querySelector('[name=title]').hidden, true);
+  assert.equal(composer.querySelector('textarea').value, ''); assert.equal(composer.querySelector('textarea').required, true);
+  denied = true;
+  message({ kicadReviewReady: true, threads: false, issues: true }); await settle();
+  assert.match(notice.textContent, /Issues permission/); assert.equal(sent.at(-1).kicadReviewIssues.length, 0);
+  denied = false; threadsAllowed = true;
+  message({ kicadReviewReady: true, threads: true, issues: true }); await settle();
+  message({ kicadReviewOpenThread: 'T41' }); assert.equal(view.open, true);
+  composer.querySelector('textarea').value = 'old finding draft';
+  await view.querySelector('form').submit({ preventDefault() {}, target: {}, submitter: { dataset: { act: 'issue' } } });
+  assert.equal(view.open, false); assert.equal(composer.open, true);
+  assert.equal(composer.querySelector('[name=title]').value, 'R16: Move on rev C');
+  assert.equal(composer.querySelector('textarea').value, '');
+  await form.submit({ preventDefault() {}, target: form });
+  const threadIssue = JSON.parse(calls.filter(c => c[1]).at(-1)[1].body);
+  assert.equal(threadIssue.threadCommentId, 11); assert.equal(threadIssue.pull, 7);
+  assert.equal(threadIssue.anchor.uuid, anchor.uuid); assert.equal(threadIssue.anchor.severity, 'comment');
+});
+
+
+test('issue access failures and malformed requests remain JSON with session cookies', async () => {
+  const denied = await issuesRoute(new Request('https://site.example/r/o/r/issues'), {}, { owner: 'o', repo: 'r', rest: '' }, {
+    access: async () => new Response(null, { status: 302, headers: { 'Set-Cookie': 's=refreshed; Secure' } }), gh: async () => { throw Error('must not call GitHub'); } });
+  assert.equal(denied.status, 401); assert.match(denied.headers.get('Set-Cookie'), /refreshed/); assert.equal((await denied.json()).error, 'Sign in again.');
+  const request = new Request('https://site.example/r/o/r/issues', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json' }, body: '{' });
+  const bad = await issuesRoute(request, {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => { throw Error('must not call GitHub'); } });
+  assert.equal(bad.status, 400); assert.match(bad.headers.get('Set-Cookie'), /refreshed/); assert.equal((await bad.json()).error, 'Send JSON');
+  const missing = await issuesRoute(new Request('https://site.example/r/o/r/issues/unknown'), {}, { owner: 'o', repo: 'r', rest: '/unknown' }, { access: issueAccess, gh: async () => { throw Error('must not call GitHub'); } });
+  assert.equal(missing.status, 404); assert.match(missing.headers.get('Set-Cookie'), /refreshed/);
+});

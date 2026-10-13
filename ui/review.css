@@ -150,3 +150,6 @@ body.placing #stage { cursor: crosshair; }
 .thread-text, .thread-note { display: block; margin-top: var(--space-1); }
 .thread-note { font-size: 12px; color: var(--muted); }
 .thread-hint { padding: 0 var(--space-2); font-size: 12px; }
+
+.pin-issue { border-radius: 4px; border-style: double; border-width: 3px; width: auto; min-width: 28px; padding: 0 4px; }
+.track-issue { margin: 0 0 6px 12px; }
