@@ -1348,8 +1348,20 @@ with tempfile.TemporaryDirectory() as d, patch("sys.stdout", new_callable=io.Str
         w = load_waivers(ref, today=datetime.date(2026, 10, 12))
         assert set(w["active"]) == {("drc", k)}, w["active"]
         assert [e["match"] for e in w["expired"]] == ["w-000000000000"]
-        assert [e["match"] for e in w["proposed"]] == ["w-333333333333"]
-        assert len(w["invalid"]) == 2 and any("bom" in m for m in w["invalid"]) and any("reason" in m for m in w["invalid"]), w["invalid"]
+        assert [e["match"] for e in w["proposed"]] == ["w-000000000000", "w-333333333333"]
+        assert len(w["invalid"]) == 4, w["invalid"]  # changed head retains all invalid entries
+        head_file = pathlib.Path("head/kicad-review-waivers.toml")
+        head_file.write_text(WFILE)
+        assert len(load_waivers(ref, today=datetime.date(2026, 10, 12))["invalid"]) == 2  # identical files report once
+        head_file.write_text(WFILE + "\n")
+        assert len(load_waivers(ref, today=datetime.date(2026, 10, 12))["invalid"]) == 4  # even whitespace makes the text distinct
+        head_file.write_text(WFILE.replace("until = 2026-02-01", "until = 2026-12-31"))
+        renewed = load_waivers(ref, today=datetime.date(2026, 10, 12))
+        assert [e["match"] for e in renewed["proposed"]] == ["w-000000000000"], renewed
+        assert renewed["proposed"][0]["until"] == "2026-12-31"
+        head_file.write_text(WFILE.replace("w-222222222222", "w-444444444444"))
+        invalid = load_waivers(ref, today=datetime.date(2026, 10, 12))["invalid"]
+        assert len([m for m in invalid if "reason must not be empty" in m]) == 2, invalid
         assert load_waivers(ref, today=datetime.date(2027, 1, 1))["active"] == {}  # the day after until
         assert load_waivers(None)["active"] == {}  # no target ref: nothing applies
     finally:

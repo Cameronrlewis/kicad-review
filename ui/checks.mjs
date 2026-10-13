@@ -950,6 +950,7 @@ export const CHECKS = [
     const pre = document.querySelector("#panel .waiver-snippet")?.textContent || "";
     const button = document.activeElement;
     return button.matches('[data-waive]') && button.getAttribute('aria-label') === 'Waive ' + (v.items.join(' · ') || v.description)
+      && document.querySelector("#panel .waiver-help").textContent.includes("on the pull request's target branch")
       && document.getElementById(button.getAttribute('aria-controls'))?.textContent === pre && pre.includes('check = "' + c.name + '"') && pre.includes('match = "w-0123456789ab"') && pre.includes("until = ") && pre.includes("[[waiver]]") || pre;`],
   ["Waivers show no waive button without keys", "p=1&t=checks", `
     proj().checks.forEach(c => c.violations.forEach(v => { delete v.waiver_key; delete v.waived; })); S.checks.scope = "all"; renderPanel();

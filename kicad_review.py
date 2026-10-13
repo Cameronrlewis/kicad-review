@@ -937,15 +937,14 @@ def load_waivers(ref, head_path=f"head/{WAIVERS_FILE}", today=None):
         out["invalid"].append(f"{WAIVERS_FILE}: cannot resolve {ref}")
     label = resolved[:7] if resolved else ref
     try:
-        text = git("-C", "repo", "show", f"{resolved}:{WAIVERS_FILE}", check=False) if resolved else None
+        result = subprocess.run(["git", "-C", "repo", "show", f"{resolved}:{WAIVERS_FILE}"], capture_output=True) if resolved else None
+        text = result.stdout.decode("utf-8") if result and result.returncode == 0 else None
     except UnicodeError as e:
         text = None
         out["invalid"].append(f"{WAIVERS_FILE} at {label}: cannot read ({e})")
-    applied = set()
     if text:
         entries, out["invalid"] = parse_waivers(text, f"{WAIVERS_FILE} at {label}")
         for e in entries:
-            applied.add((e["check"], e["match"]))
             if e["until"] and datetime.date.fromisoformat(e["until"]) < today:
                 out["expired"].append(e)
             else:
@@ -959,11 +958,14 @@ def load_waivers(ref, head_path=f"head/{WAIVERS_FILE}", today=None):
             if len(content) > 1024 * 1024:
                 entries, invalid = [], [f"{WAIVERS_FILE} in this change: exceeds 1 MiB"]
             else:
-                entries, invalid = parse_waivers(content.decode("utf-8"), f"{WAIVERS_FILE} in this change")
+                head_text = content.decode("utf-8")
+                entries, invalid = parse_waivers(head_text, f"{WAIVERS_FILE} in this change")
+                if head_text == text:
+                    invalid = []
         except (OSError, UnicodeError) as e:
             entries, invalid = [], [f"{WAIVERS_FILE} in this change: cannot read ({e})"]
-        out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in applied]
-        out["invalid"] += [m for m in invalid if text is None or m.split(": ", 1)[1] not in " ".join(out["invalid"])]
+        out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in out["active"]]
+        out["invalid"] += invalid
     for m in out["invalid"]:
         print(f"::warning::{m}")
     return out
