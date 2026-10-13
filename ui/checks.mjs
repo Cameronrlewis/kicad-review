@@ -933,4 +933,36 @@ export const CHECKS = [
     const throwing = { get id() { throw new Error("bad thread"); } };
     acceptThreads([throwing, thread("ok1")]);
     return S.threads.length === 1 && S.threads[0].id === "ok1" || "validation error dropped valid thread";`],
+  ["Waivers hide waived findings behind a chip and tag them", "p=1&t=checks", `
+    const P = proj(), c = (P.checks || []).find(c => c.violations.length); if (!c) return "skip";
+    const v = c.violations[0]; v.waiver_key = "w-abcdefabcdef"; v.waived = { reason: "intended <b>x</b>", by: "ann", until: "2026-12-31", ref: null };
+    c.waived = 1; S.checks.scope = "all"; renderPanel();
+    const hidden = !document.querySelector('#panel .viol[data-id="' + v.id + '"]'), chip = document.querySelector('#panel [data-check-waived]');
+    chip.focus(); chip.click();
+    const focused = document.activeElement.matches("[data-check-waived]"), summary = document.querySelector("#panel .check-counts").textContent;
+    const shown = document.querySelector('#panel .viol[data-id="' + v.id + '"]');
+    return focused && summary.includes("1 waived") && hidden && chip.textContent.includes("Waived 1") && !!shown && shown.textContent.includes("WAIVED") && shown.textContent.includes("intended <b>x</b>")
+      && !document.querySelector("#panel .viol b") || JSON.stringify({hidden, chip: chip?.textContent, shown: shown?.textContent});`],
+  ["Waivers offer a copyable TOML entry for an unwaived finding", "p=1&t=checks", `
+    const P = proj(), c = (P.checks || []).find(c => ["erc", "drc", "parity"].includes(c.name) && c.violations.length); if (!c) return "skip";
+    const v = c.violations.find(x => !x.waived); v.waiver_key = "w-0123456789ab"; S.checks.scope = "all"; renderPanel();
+    const b = document.querySelector('#panel [data-waive="' + v.id + '"]'); b.closest('details').open = true; b.focus(); b.click();
+    const pre = document.querySelector("#panel .waiver-snippet")?.textContent || "";
+    return document.activeElement.matches('[data-waive]') && pre.includes('check = "' + c.name + '"') && pre.includes('match = "w-0123456789ab"') && pre.includes("until = ") && pre.includes("[[waiver]]") || pre;`],
+  ["Waivers show no waive button without keys", "p=1&t=checks", `
+    proj().checks.forEach(c => c.violations.forEach(v => { delete v.waiver_key; delete v.waived; })); S.checks.scope = "all"; renderPanel();
+    return !document.querySelector("#panel [data-waive]") && !document.querySelector("#panel [data-check-waived]") || "shown";`],
+
+  ["Waivers show-all reveals an only-waived change", "p=1&t=checks", `
+    const c = (proj().checks || []).find(c => c.violations.length); if (!c) return "skip";
+    proj().checks.forEach(c => c.violations.forEach(v => { v.new = true; v.waived = { reason: "intentional", by: "ann" }; }));
+    S.checks.scope = null; renderPanel();
+    const scope = document.querySelector('[data-check-scope="all"]').getAttribute("aria-pressed");
+    document.querySelector("#panel .show-all").click();
+    return scope === "true" && S.checks.waived && !!document.querySelector("#panel .viol .waived-reason") || "not revealed";`],
+  ["Waivers snippets preserve quoted keys and remove comment controls", "p=1&t=checks", `
+    const key = 'w-"\\\\b\\\\f\\n\\r\\t' + String.fromCharCode(0, 8, 12, 31, 127);
+    const text = waiverSnippet({waiver_key:key, description:'x\\r\\n' + String.fromCharCode(0, 127) + '<b>x</b>'}, 'erc');
+    const match = text.split("\\n").find(l => l.startsWith("match = ")).slice(8);
+    return JSON.parse(match) === key && !/[\\u0000-\\u0008\\u000b-\\u001f\\u007f]/.test(text) && text.includes('# x  ') || text;`],
 ];
