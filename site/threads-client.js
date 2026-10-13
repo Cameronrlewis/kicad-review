@@ -26,8 +26,8 @@ export function threadsClient(config) {
     try {
       const response = await fetch(config.rerun, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
-      const data = await response.json();
-      if (!Number.isSafeInteger(data.run) || data.run <= 0) throw new Error('GitHub did not return a run.');
+      const data = await response.json().catch(() => ({}));
+      if (!Number.isSafeInteger(data.run) || data.run <= 0) { notice.textContent = 'The review is re-running.'; return; }
       const link = document.createElement('a');
       link.href = config.run + data.run;
       link.textContent = 'Open the new review when it finishes.';

@@ -1884,7 +1884,7 @@ test('review badge uses workflow conclusion, not artifact checks', () => {
   assert.match(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'failure' }), /✕ run failure/);
   assert.doesNotMatch(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'failure' }), /✓ (?:checks )?passing/);
   assert.match(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'success' }), /✓ run passing/);
-  assert.match(reviewPage({ ...args, runStatus: 'in_progress' }), /… run in_progress/);
+  assert.match(reviewPage({ ...args, runStatus: 'in_progress' }), /… run in progress/);
   assert.match(reviewPage(args), /✓ checks passing/);
 });
 

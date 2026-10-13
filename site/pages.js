@@ -121,8 +121,8 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = 
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
-  const result = runStatus === 'completed' && runConclusion ? (runConclusion === 'success' ? '<span class="status status-pass">✓ run passing</span>' : `<span class="status status-fail">✕ run ${e(runConclusion)}</span>`)
-    : runStatus ? `<span class="status">… run ${e(runStatus)}</span>`
+  const result = runStatus === 'completed' && runConclusion ? (runConclusion === 'success' ? '<span class="status status-pass">✓ run passing</span>' : `<span class="status status-fail">✕ run ${e(runConclusion.replace(/_/g, ' '))}</span>`)
+    : runStatus ? `<span class="status">… run ${e(runStatus.replace(/_/g, ' '))}</span>`
     : match ? (match[3] === 'pass' ? '<span class="status status-pass">✓ checks passing</span>' : '<span class="status status-fail">✕ checks failing</span>') : '';
   const raw = `${path}/a/${encodeURIComponent(id)}/raw`;
   const run = /^\d+$/.test(String(workflowRunId)) ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(workflowRunId)}` : '';
