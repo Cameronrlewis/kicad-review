@@ -3,6 +3,34 @@
 const D = window.REVIEW_DATA;
 const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
+S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
+const THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
+const validThread = t => t && typeof t.id === "string" && typeof t.resolved === "boolean" && t.anchor && typeof t.anchor === "object"
+  && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
+function acceptThreads(list) {
+  S.threads = list.filter(validThread).slice(0, 500);   // ponytail: 500 threads drawn at most
+  if (S.v) { renderPanel(); draw(); }
+}
+addEventListener("message", e => {
+  if (!THREADS_ON || e.source !== parent) return;
+  if (Array.isArray(e.data?.kicadReviewThreads)) acceptThreads(e.data.kicadReviewThreads);
+});
+function proposePin(vp, e) {
+  const r = vp.getBoundingClientRect();
+  const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
+  const anchor = anchorAt(x, y, vp.querySelector(".stack.head") ? "head" : "base");
+  if (anchor && anchor.file) parent.postMessage({ kicadReviewPin: anchor }, "*");
+}
+const shownThreads = () => (S.threads || []).filter(t => (S.threadFilter.status === "all" || (S.threadFilter.status === "resolved") === t.resolved)
+  && (!S.threadFilter.severity || t.anchor.severity === S.threadFilter.severity) && t.anchor.project === proj().dir);
+function openThread(id) {
+  const t = (S.threads || []).find(x => x.id === id); if (!t) return;
+  const r = resolveAnchor(t.anchor);
+  S.thread = id;
+  const show = () => { if (!r.detached) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
+  if (!r.detached && r.view !== S.v) { S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(show); }
+  show();
+}
 const proj = () => D.projects[S.p];
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const GLYPH = { added: "＋", removed: "−", modified: "≡" };
@@ -237,6 +265,7 @@ function attachPanZoom(vp) {
     vp.addEventListener("pointerup", ev => { vp.removeEventListener("pointermove", mv);
       if (moved < 4) pickAt(vp, ev); }, { once: true });
   });
+  vp.addEventListener("contextmenu", e => { if (!THREADS_ON || !placed()) return; e.preventDefault(); proposePin(vp, e); });
 }
 function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
   const v = currentView();
@@ -352,8 +381,27 @@ function afterDraw(view) {
       w.appendChild(m);
     }
   }
+  for (const w of document.querySelectorAll("#stage .world")) {
+    const side = w.querySelector(".stack.head") ? "head" : "base";
+    for (const t of shownThreads()) {
+      const r = resolveAnchor(t.anchor);
+      if (r.detached || r.view !== S.v) continue;
+      if (!(r.side === side || (r.side === "head" && side === "base" && !r.added))) continue;
+      const p = side === "base" && r.pos_before ? r.pos_before : r.pos;
+      const kind = t.resolved ? "resolved" : t.anchor.severity === "blocking" ? "blocking" : "comment";
+      const pin = document.createElement("button");
+      pin.className = `pin pin-${kind}`; pin.dataset.thread = t.id;
+      pin.textContent = { resolved: "✓", blocking: "!", comment: "…" }[kind];
+      pin.setAttribute("aria-label", `${kind === "resolved" ? "Resolved" : kind === "blocking" ? "Blocking" : "Comment"} thread on ${t.anchor.ref || "a point"}`);
+      Object.assign(pin.style, { left: `${p[0] * PX}px`, top: `${p[1] * PX}px` });
+      pin.onclick = ev => { ev.stopPropagation(); openThread(t.id); };
+      pin.onpointerdown = ev => ev.stopPropagation();
+      w.appendChild(pin);
+    }
+  }
 }
 function pickAt(vp, e) {
+  if (S.placing) { S.placing = false; document.body.classList.remove("placing"); proposePin(vp, e); return; }
   const r = vp.getBoundingClientRect();
   const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
   const rows = proj().changes.filter(c => onView(c, S.v));
@@ -539,17 +587,38 @@ function renderParts() {
       return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${l.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${esc(stock)}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
 }
+function renderThreads() {
+  const f = S.threadFilter, all = (S.threads || []).filter(t => t.anchor.project === proj().dir);
+  const count = st => all.filter(t => st === "all" || (st === "resolved") === t.resolved).length;
+  const label = t => t.resolved ? "✓ Resolved" : t.anchor.severity === "blocking" ? "! Blocking" : "… Comment";
+  const cardFor = t => {
+    const r = resolveAnchor(t.anchor), first = t.comments[0];
+    return `<button class="thread-card${t.anchor.severity === "blocking" && !t.resolved ? " blocking" : ""}" data-thread="${esc(t.id)}" aria-selected="${S.thread === t.id}">
+      <span class="thread-kind">${label(t)}</span> <span class="ref">${esc(t.anchor.ref || "point")}</span> <span class="muted">${esc(t.anchor.file)}</span>
+      ${first ? `<span class="thread-text">${esc(first.author)}: ${esc(String(first.body).slice(0, 200))}</span>` : ""}
+      ${t.comments.length > 1 ? `<span class="muted">${t.comments.length - 1} repl${t.comments.length === 2 ? "y" : "ies"}</span>` : ""}
+      ${(r.notes || []).map(n => `<span class="thread-note">${esc(n)}</span>`).join("")}</button>`;
+  };
+  const shown = shownThreads(), placed = shown.filter(t => !resolveAnchor(t.anchor).detached), detached = shown.filter(t => resolveAnchor(t.anchor).detached);
+  return `<div class="filters checks-filters">${["open", "resolved", "all"].map(st => `<button class="check-chip" data-thread-status="${st}" aria-pressed="${f.status === st}">${st[0].toUpperCase() + st.slice(1)} ${count(st)}</button>`).join("")}
+      <select class="thread-severity"><option value="">All kinds</option><option value="comment" ${f.severity === "comment" ? "selected" : ""}>Comment</option><option value="blocking" ${f.severity === "blocking" ? "selected" : ""}>Blocking</option></select></div>
+    <p class="muted thread-hint">Right-click the drawing, or press c and click, to start a thread.</p>
+    <div class="cards">${placed.map(cardFor).join("") || '<p class="muted">No threads match.</p>'}</div>
+    ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
+}
 function renderPanel() {
-  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter", "data-thread-status"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
+  if (S.t === "threads" && !S.threads) S.t = "changes";
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   $("#panel").innerHTML = `<div role="tablist">
       <button role="tab" data-tab="changes" aria-selected="${S.t === "changes"}">Changes ${p.changes.length}</button>
       <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button>
-      ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}</button>` : ""}</div>` +
-    (S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
+      ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}</button>` : ""}
+      ${S.threads ? `<button role="tab" data-tab="threads" aria-selected="${S.t === "threads"}">Threads ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}</button>` : ""}</div>` +
+    (S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     <div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
@@ -567,6 +636,9 @@ function renderPanel() {
   bindCards();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
+  for (const b of document.querySelectorAll("#panel [data-thread-status]")) b.onclick = () => { S.threadFilter.status = b.dataset.threadStatus; renderPanel(); draw(); };
+  const ts = $("#panel select.thread-severity"); if (ts) ts.onchange = () => { S.threadFilter.severity = ts.value; renderPanel(); draw(); };
+  for (const b of document.querySelectorAll("#panel .thread-card[data-thread]")) b.onclick = () => openThread(b.dataset.thread);
   if (focus) ($(`#panel ${focus}`) || (focus === ".show-all" ? $('#panel [data-check-scope="all"]') : null))?.focus();
 }
 
@@ -584,9 +656,11 @@ function encodeState(s = S) {
 let hashTimer;
 function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); }, 200); }
 function step(dir) {
-  const ids = [...document.querySelectorAll(S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : "#panel .card[data-id]")].map(e => e.dataset.id);
+  const sel = S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : S.t === "threads" ? "#panel .thread-card[data-thread]" : "#panel .card[data-id]";
+  const ids = [...document.querySelectorAll(sel)].map(e => e.dataset.id || e.dataset.thread);
   if (!ids.length) return;
   const i = ids.indexOf(S.s), next = ids[i < 0 ? (dir > 0 ? 0 : ids.length - 1) : (i + dir + ids.length) % ids.length];
+  if (S.t === "threads") { openThread(next); document.querySelector(`#panel [data-thread="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }); return; }
   goTo(next); document.querySelector(`#panel [data-id="${next}"]`)?.scrollIntoView({ block: "nearest" });
 }
 document.addEventListener("keydown", e => {
@@ -596,6 +670,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
   else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
   else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
+  else if (e.key === "c" && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
   else if (e.key === "f") fit();
   else if (e.key === "Escape") { S.s = null; markSelected(); draw(); saveHash(); }
 });
@@ -680,7 +755,7 @@ function start() {
       const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
       document.title = "ready";
     }
-  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage({ kicadReviewReady: true }, "*"); });   // cmd_shots must never wait out its budget
+  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage({ kicadReviewReady: true, threads: THREADS_ON }, "*"); });   // cmd_shots must never wait out its budget
 }
 start();
 window.addEventListener("hashchange", () => applyState(decodeState(location.hash)));

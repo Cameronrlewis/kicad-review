@@ -818,4 +818,30 @@ export const CHECKS = [
     const base = resolveAnchor(a), baseAny = resolveAnchor({ ...a, sheet: "/missing/" }), baseUuid = resolveAnchor({ ...a, uuid: "u-b" });
     return head.view === "sheet:/b/" && head.pos[0] === 20 && any.view === "sheet:/a/"
       && base.view === "sheet:/b/" && base.side === "base" && baseAny.view === "sheet:/a/" && baseUuid.pos[0] === 20 || JSON.stringify({head, any, base, baseAny, baseUuid});`],
+  ["Threads tab and pins appear only with thread data", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    if (document.querySelector('#panel [data-tab="threads"]')) return "tab shown offline";
+    const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
+    P.objects = [{ uuid: "u-5", kind: "footprint", ref: "Q1", side: "head", pos: [x, y, 0], box: b, layer: "F.Cu" }];
+    acceptThreads([{ id: "T1", resolved: false, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", uuid: "u-5", kind: "footprint", ref: "Q1", x, y, side: "head", commit: D.head, severity: "blocking" }, comments: [{ author: "alice", body: "<img src=x onerror=alert(1)> too close", createdAt: "2026-10-12T10:00:00Z" }] },
+                   { id: "T2", resolved: true, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x, y, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; renderPanel(); await goTo(row.id);
+    const tab = document.querySelector('#panel [data-tab="threads"]'), cards = document.querySelectorAll("#panel .thread-card");
+    const pins = document.querySelectorAll("#stage .pin");
+    return !!tab && tab.textContent.includes("1") && cards.length === 1 && cards[0].textContent.includes("Blocking") && !document.querySelector("#panel img")
+      && pins.length >= 1 && [...pins].every(p => p.classList.contains("pin-blocking") && p.getAttribute("aria-label").includes("Q1")) || JSON.stringify({tab: !!tab, cards: cards.length, pins: pins.length});`],
+  ["Threads resolved filter and detached group", "", `
+    const P = proj(); P.objects = [];
+    acceptThreads([{ id: "T3", resolved: true, anchor: { v: 1, project: P.dir, file: "f", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] },
+                   { id: "T4", resolved: false, anchor: { v: 1, project: P.dir, file: "f", sheet: null, layer: null, target: "object", uuid: "zz", kind: "footprint", ref: "U99", x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; S.threadFilter.status = "resolved"; renderPanel();
+    const resolved = document.querySelectorAll("#panel .thread-card").length;
+    S.threadFilter.status = "open"; renderPanel();
+    const detached = document.querySelector("#panel .threads-detached")?.textContent || "";
+    return resolved === 1 && detached.includes("U99") || JSON.stringify({resolved, detached});`],
+  ["Threads messages from a non-parent window are ignored", "", `
+    S.threads = null; renderPanel();
+    window.dispatchEvent(new MessageEvent("message", { source: window, data: { kicadReviewThreads: [] } }));
+    await new Promise(r => setTimeout(r, 50));
+    return S.threads === null && !document.querySelector('#panel [data-tab="threads"]') || "accepted";`],
 ];
