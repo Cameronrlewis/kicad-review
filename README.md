@@ -59,6 +59,8 @@ For pull requests the base revision's settings file wins, so a change cannot rel
 
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
+Review history is off by default. Set the Actions variable `KICAD_REVIEW_HISTORY` to exactly `true` to keep the newest 50 review runs in the PR comment. The log records errors (new errors), not warnings. Failed or cancelled runs add no row; the previous log is carried over.
+
 ## Parts (optional)
 
 Set `enabled = true` under `[parts]` in `kicad-review.toml` (default: `false`). The Parts tab and pull request comment section list each distinct part's value, footprint, references, LCSC number and manufacturer part number, with a datasheet link from the symbol's `Datasheet` field (http/https only). They flag missing or malformed LCSC numbers and one LCSC number used on several values, and show which parts the change added, removed, swapped to another LCSC number, or gave a new value or footprint.

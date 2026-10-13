@@ -1160,3 +1160,72 @@ with tempfile.TemporaryDirectory() as t:
         os.chdir(_cwd)
 print("ok threads cmd_summary")
 
+# History: strict rows, newest last, and damaged blocks start fresh.
+from kicad_review import log_row, merge_log, extract_log, LOG_START, LOG_END, CHECK_NAMES, MARKER
+ck2 = lambda name, title, e, ne: {"name": name, "title": title, "level": "required", "status": "fail" if ne else "pass", "errors": e,
+                               "new_errors": ne, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+ld = {**d2, "head": "abc1234def", "settings": {}, "links": {**d2["links"], "run": "https://github.com/o/r/actions/runs/123"},
+      "projects": [{"name": "A", "dir": "", "status": "modified", "changes": [], "checks": [ck2("erc", "ERC", 0, 0), ck2("drc", "DRC", 2, 1)]}]}
+row = log_row(ld, "2026-10-12 10:04")
+assert row == "| [2026-10-12 10:04](https://github.com/o/r/actions/runs/123) | `abc1234` | ❌ fail | ERC 0 (0) · DRC 2 (1) |", row
+block = merge_log([], row)
+assert block.startswith(LOG_START) and block.rstrip().endswith(LOG_END) and extract_log(block) == [row]
+rows = [row.replace("runs/123", f"runs/{i}") for i in range(60)]
+merged = extract_log(merge_log(rows, row))
+assert len(merged) == 50 and merged[-1] == row and merged[0] == rows[11]
+assert extract_log(merge_log(rows, row, keep=0)) == []
+print("ok log keeps the newest 50")
+assert extract_log("no markers") == [] and extract_log(LOG_START + "\n| broken") == []
+assert extract_log(LOG_END + "\n" + LOG_START + "\n" + row) == []
+assert extract_log(merge_log(["| junk | | | |", row.replace("`abc1234`", "`bad`")], row)) == [row]
+assert log_row({**ld, "links": {}}, "2026-10-12 10:04") == ""
+assert log_row(ld, "bad timestamp") == ""
+pipe_data = {**ld, "projects": [ld["projects"][0], {**ld["projects"][0], "name": "B|C\nD"}]}
+pipe_row = log_row(pipe_data, "2026-10-12 10:04")
+assert "B\\|C D" in pipe_row and extract_log(merge_log([], pipe_row)) == [pipe_row]
+print("ok broken log starts fresh and strict row contract")
+
+# A real four-project/four-check log survives body truncation within GitHub's limit.
+large = {**ld, "projects": [{**ld["projects"][0], "name": f"Project {i}",
+         "checks": [ck2(n, title, 2, 1) for n, title in CHECK_NAMES.items()]} for i in range(4)], "reason": "x" * 60000}
+large_row = log_row(large, "2026-10-12 10:04")
+large_log = "\n" + merge_log([large_row] * 49, large_row)
+large_body = comment_markdown(large, [], "", log=large_log)
+assert len(large_body) <= 65536 and extract_log(large_body) == [large_row] * 50
+assert large_body.index("### Checks") < large_body.index(LOG_START)
+capped_checks = {**large, "projects": [{**p, "name": "x" * 20000} for p in large["projects"]]}
+capped_body = comment_markdown(capped_checks, [], "", log=large_log)
+assert len(capped_body) <= 65536 and extract_log(capped_body) == [large_row] * 50
+print("ok history counts inside comment size budget")
+
+# Off means identical comment, job summary, and stdout, even with an old log on disk.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        os.makedirs("review")
+        pathlib.Path("review/data.json").write_text(_json.dumps(ld), encoding="utf-8")
+        pathlib.Path("review/previous-log.md").write_text(block, encoding="utf-8")
+        expected = comment_markdown(ld, [], "")
+        # SHA-256 measured from comment_markdown at the pre-feature HEAD 7e3bd03.
+        import hashlib
+        assert hashlib.sha256(expected.encode()).hexdigest() == "655854a0ccd87046e300a5c6bbb4a2d83c59857b064b7043f029044b37582d43"
+        with patch.dict(os.environ, {"SITE": "", "GITHUB_STEP_SUMMARY": "summary.md"}):
+            for gate in (None, "false", "TRUE", "true"):
+                os.environ.pop("HISTORY", None)
+                if gate is not None:
+                    os.environ["HISTORY"] = gate
+                pathlib.Path("summary.md").write_bytes(b"")
+                with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+                comment = pathlib.Path("review/comment.md").read_bytes()
+                if gate == "true":
+                    assert len(extract_log(comment.decode())) == 2
+                else:
+                    assert comment == expected.encode()
+                    assert pathlib.Path("summary.md").read_bytes() == expected.replace(MARKER, "").encode()
+                    assert stdout.getvalue() == expected + "\n"
+    finally:
+        os.chdir(_cwd)
+print("ok history opt-out byte identity and opt-in summary")
+
