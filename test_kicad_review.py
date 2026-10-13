@@ -1335,7 +1335,7 @@ date = 2026-10-01
 permanent = true
 ''' % k
 _cwd = os.getcwd()
-with tempfile.TemporaryDirectory() as d:
+with tempfile.TemporaryDirectory() as d, patch("sys.stdout", new_callable=io.StringIO):
     try:
         os.chdir(d)
         subprocess.run(["git", "init", "-q", "repo"], check=True)
@@ -1436,7 +1436,8 @@ with tempfile.TemporaryDirectory() as d:
             settings["waivers"]["enabled"] = enabled
             with patch.dict(os.environ, {"WAIVERS_REF": target}), patch("kicad_review.load_settings", return_value=settings), \
                  patch("kicad_review.load_waivers", return_value=active) as loader, \
-                 patch("kicad_review.build_project", return_value={"checks": [], "changes": []}) as builder:
+                 patch("kicad_review.build_project", return_value={"checks": [], "changes": []}) as builder, \
+                 patch("sys.stdout", new_callable=io.StringIO):
                 kicad_review.cmd_report(None)
             if enabled:
                 loader.assert_called_once_with(target or "local-base")
@@ -1446,3 +1447,30 @@ with tempfile.TemporaryDirectory() as d:
     finally:
         os.chdir(_cwd)
 print("ok waiver report opt-in and target-ref wiring")
+
+# Untrusted refs cannot become git options; unsafe or huge head files are never parsed.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        subprocess.run(["git", "init", "-q", "repo"], check=True)
+        for ref in ("--output=x", "missing-target"):
+            with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+                result = load_waivers(ref)
+            assert not result["active"] and result["invalid"] == [f"kicad-review-waivers.toml: cannot resolve {ref}"]
+            assert "::warning::" in warnings.getvalue()
+            assert not pathlib.Path("x").exists() and not pathlib.Path("repo/x").exists()
+        pathlib.Path("head").mkdir()
+        head_file = pathlib.Path("head/kicad-review-waivers.toml")
+        head_file.symlink_to("/dev/zero")
+        with patch("sys.stdout", new_callable=io.StringIO), patch("builtins.open", side_effect=AssertionError("symlink must not be opened")):
+            result = load_waivers(None)
+        assert not result["proposed"] and any("symlink" in m for m in result["invalid"])
+        head_file.unlink()
+        head_file.write_bytes(b" " * (1024 * 1024 + 1))
+        with patch("sys.stdout", new_callable=io.StringIO):
+            result = load_waivers(None)
+        assert not result["proposed"] and any("exceeds 1 MiB" in m for m in result["invalid"])
+    finally:
+        os.chdir(_cwd)
+print("ok waiver ref options, missing refs, symlinks and size limit")

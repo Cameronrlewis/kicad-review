@@ -932,13 +932,15 @@ def load_waivers(ref, head_path=f"head/{WAIVERS_FILE}", today=None):
     The head copy's extra entries are only proposals."""
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
     out = {"active": {}, "expired": [], "proposed": [], "invalid": []}
+    resolved = git("-C", "repo", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}", check=False) if ref else None
+    if ref and not resolved:
+        out["invalid"].append(f"{WAIVERS_FILE}: cannot resolve {ref}")
+    label = resolved[:7] if resolved else ref
     try:
-        text = git("-C", "repo", "show", f"{ref}:{WAIVERS_FILE}", check=False) if ref else None
+        text = git("-C", "repo", "show", f"{resolved}:{WAIVERS_FILE}", check=False) if resolved else None
     except UnicodeError as e:
         text = None
-        out["invalid"].append(f"{WAIVERS_FILE} at {ref}: cannot read ({e})")
-    resolved = git("-C", "repo", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False) if ref else None
-    label = resolved.strip()[:7] if resolved else ref
+        out["invalid"].append(f"{WAIVERS_FILE} at {label}: cannot read ({e})")
     applied = set()
     if text:
         entries, out["invalid"] = parse_waivers(text, f"{WAIVERS_FILE} at {label}")
@@ -948,10 +950,16 @@ def load_waivers(ref, head_path=f"head/{WAIVERS_FILE}", today=None):
                 out["expired"].append(e)
             else:
                 out["active"][(e["check"], e["match"])] = e
-    if os.path.exists(head_path):
+    if os.path.islink(head_path) or (os.path.exists(head_path) and not os.path.isfile(head_path)):
+        out["invalid"].append(f"{WAIVERS_FILE} in this change: must be a regular file, not a symlink")
+    elif os.path.isfile(head_path):
         try:
-            with open(head_path, encoding="utf-8") as fh:
-                entries, invalid = parse_waivers(fh.read(), f"{WAIVERS_FILE} in this change")
+            with open(head_path, "rb") as fh:
+                content = fh.read(1024 * 1024 + 1)
+            if len(content) > 1024 * 1024:
+                entries, invalid = [], [f"{WAIVERS_FILE} in this change: exceeds 1 MiB"]
+            else:
+                entries, invalid = parse_waivers(content.decode("utf-8"), f"{WAIVERS_FILE} in this change")
         except (OSError, UnicodeError) as e:
             entries, invalid = [], [f"{WAIVERS_FILE} in this change: cannot read ({e})"]
         out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in applied]
