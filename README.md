@@ -49,6 +49,8 @@ To make checks block merging, require the status check **`review / review`** in 
 | `checks.erc`, `checks.drc`, `checks.parity` | `"required"` | `required`, `informational` or `off` |
 | `checks.bom` | `"informational"` | as above |
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
+| `bom.critical_prefixes` | `["U", "J", "Q", "D", "Y", "X", "K", "F"]` | reference prefixes whose datasheet coverage is shown separately |
+| `bom.order_ready_fields` | preset's fields | fields every part needs to count as order-ready (JLCPCB: Value, Footprint, LCSC; PCBWay: Value, Footprint, MPN) |
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
@@ -62,7 +64,7 @@ Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL
 
 Set `enabled = true` under `[parts]` in `kicad-review.toml` (default: `false`). The Parts tab and pull request comment section list each distinct part's value, footprint, references, LCSC number and manufacturer part number, with a datasheet link from the symbol's `Datasheet` field (http/https only). They flag missing or malformed LCSC numbers and one LCSC number used on several values, and show which parts the change added, removed, swapped to another LCSC number, or gave a new value or footprint.
 
-Add an `LCSC` field to each symbol for its JLCPCB part (for example `C17414`), and `Manufacturer_Part_Number` for the PCBWay BOM. Optionally add `"LCSC"` to `bom.required_fields` to require it.
+Add an `LCSC` field to each symbol for its JLCPCB part (for example `C17414`), and `Manufacturer_Part_Number` for the PCBWay BOM. Optionally add `"LCSC"` to `bom.required_fields` to require it. It also shows BOM coverage per field (with the change from base), field-by-field edits per reference, placeholder values such as `TBD`, one MPN used on several footprints, and parts that are DNP on only one of schematic and board.
 
 Recognised field names (case-insensitive):
 

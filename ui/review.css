@@ -135,3 +135,8 @@ body.shot #hdr, body.shot #nav, body.shot #panel, body.shot #modes, body.shot #z
 body.shot #app { grid-template-columns: 1fr; }
 body.shot { grid-template-rows: 1fr; }
 #zoombar .copyfield { width: 22em; max-width: 30vw; font-family: var(--font-mono); }
+.bom-coverage, .field-changes { width: calc(100% - 2 * var(--space-2)); margin: var(--space-2); border-collapse: collapse; font-size: 13px; }
+.bom-coverage caption, .field-changes caption { text-align: left; font-weight: 600; padding-bottom: var(--space-1); }
+.bom-coverage th, .bom-coverage td, .field-changes th, .field-changes td { text-align: left; padding: 2px var(--space-1); border-bottom: 1px solid var(--line); }
+.bom-coverage tr.short th::before { content: "⚠ "; }
+.dnp-mismatch { margin: var(--space-2); }
