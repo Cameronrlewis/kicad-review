@@ -25,7 +25,7 @@ test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: s
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, CHECK_PORT: '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
+    env: { ...process.env, CHECK_PORT: process.env.CHECK_PORT || '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
   assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL loads sample -> Runtime.evaluate timed out/);
 });
 
@@ -33,7 +33,7 @@ test('3D runner reports and bounds one whole check', { skip: spawnSync(chrome, [
   const page = join(mkdtempSync(join(tmpdir(), 'check-')), 'never-ready.html');
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
-    env: { ...process.env, CHECK_PORT: '9396', CHECK_TIMEOUT: '2000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
+    env: { ...process.env, CHECK_PORT: process.env.CHECK_PORT || '9396', CHECK_TIMEOUT: '2000', CHECK_WALL_TIMEOUT: '500', CHROME: chrome } });
   assert.equal(r.status, 1);
   assert.deepEqual(r.stdout.trim().split('\n'), ['RUN loads sample', 'FAIL loads sample -> timed out']);
 });
@@ -1174,4 +1174,28 @@ test('expired artifacts offer regeneration only when their name records revision
       }
     } finally { restore(); }
   }
+});
+
+
+// Guest credentials are signed capabilities, never GitHub credentials.
+const shareEnv = { ...env, SHARE_KEY: Buffer.alloc(32, 9).toString('base64') };
+test('share tokens are unguessable, strictly validated, expiring and bound to one review', async () => {
+  const { signShare, verifyShare } = await import('./share.js');
+  const claims = { o: 'Cameronrlewis', r: 'repo', a: 123, exp: Date.now() + 3600_000, g: 2 };
+  const token = await signShare(claims, shareEnv);
+  assert.deepEqual(await verifyShare(token, shareEnv), claims);
+  const [body, sig] = token.split('.');
+  assert.equal(Buffer.from(sig, 'base64url').length, 32);
+  for (const patch of [{ a: 124 }, { o: 'Other' }, { r: 'elsewhere' }, { exp: claims.exp + 1 }, { g: 3 }]) {
+    const forged = Buffer.from(JSON.stringify({ ...claims, ...patch })).toString('base64url');
+    assert.equal(await verifyShare(`${forged}.${sig}`, shareEnv), null);
+  }
+  assert.equal(await verifyShare(`${body}.${Buffer.alloc(32).toString('base64url')}`, shareEnv), null);
+  for (const patch of [{ exp: Date.now() - 1 }, { exp: Date.now() + 31 * 86400_000 }, { o: '../x' }, { a: 0 }, { a: 1.5 }, { g: -1 }, { g: 1.5 }, { r: null }]) {
+    assert.equal(await verifyShare(await signShare({ ...claims, ...patch }, shareEnv), shareEnv), null);
+  }
+  for (const invalid of ['garbage', token + '.', token + '.extra', 'x'.repeat(3000)]) assert.equal(await verifyShare(invalid, shareEnv), null);
+  assert.equal(await verifyShare(token, { SHARE_KEY: Buffer.alloc(32, 8).toString('base64') }), null);
+  assert.equal(await verifyShare(token, { SHARE_KEY: 'tiny' }), null);
+  assert.equal(await verifyShare(token, shareEnv, claims.exp), null);
 });
