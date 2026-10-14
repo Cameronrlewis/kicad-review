@@ -4,6 +4,92 @@ import { runInNewContext } from 'node:vm';
 import worker, { open, seal } from './worker.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
+import { historyEvents, HISTORY_QUERY } from './history.js';
+import { historyPage } from './pages.js';
+
+const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
+test('history ignores unrelated artifacts from the same run', () => {
+  const artifacts = [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 } }, { id: 901, name: 'build.zip', workflow_run: { id: 77 } }];
+  const checks = historyEvents(historyFixture(),artifacts, '/r/o/r', historyArtifactName).filter(e => e.kind === 'checks');
+  assert.equal(checks[0].href, '/r/o/r/a/900');
+  assert.equal(historyEvents(historyFixture(),artifacts.slice(1), '/r/o/r', historyArtifactName).find(e => e.kind === 'checks').href, null);
+});
+
+const historyFixture = () => ({ data: { repository: { pullRequest: { title: 'Move R16',
+  commits: { nodes: [{ commit: { oid: 'a'.repeat(40), messageHeadline: 'Move R16', committedDate: '2026-10-12T09:00:00Z', author: { name: 'Cam' } } }] },
+  reviews: { nodes: [{ author: null, state: 'APPROVED', submittedAt: '2026-10-12T11:00:00Z', commit: { oid: 'a'.repeat(40) } }] },
+  reviewThreads: { nodes: [{ isResolved: true, resolvedBy: { login: 'bo' }, comments: { nodes: [{ author: { login: 'ann' }, createdAt: '2026-10-12T10:00:00Z', body: threadBody({ anchor, text: 'check', link: 'https://s/r' }) }] } }] },
+  comments: { nodes: [{ author: { login: 'github-actions' }, body: '<!-- kicad-review -->\n<!-- kicad-review-log -->\n| [2026-10-12 10:04](https://github.com/o/r/actions/runs/77) | `aaaaaaa` | ✅ pass | A\\|B: ERC 0 (0) |\n| [2026-09-01 08:00](https://github.com/o/r/actions/runs/5) | `bbbbbbb` | ❌ fail | ERC 1 (1) |\n<!-- /kicad-review-log -->' }] }
+} } } });
+
+test('history joins sources newest first, parses escaped pipes and links active reports', () => {
+  const events = historyEvents(historyFixture(),[{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: false }], '/r/o/r', historyArtifactName);
+  assert.deepEqual(events.map(e => e.kind), ['review', 'checks', 'thread', 'commit', 'checks']);
+  assert.equal(events[0].who, 'ghost');
+  assert.equal(events[1].href, '/r/o/r/a/900');
+  assert.match(events[1].text, /A\|B/);
+  assert.equal(events[2].text, 'Blocking thread on R16 (resolved by bo)');
+  assert.equal(events[4].href, null);
+  assert.match(HISTORY_QUERY, /comments\(first:100\)/);
+});
+
+test('history trusts only bot-authored marked logs and drops expired links', () => {
+  const gq = historyFixture();
+  const bot = gq.data.repository.pullRequest.comments.nodes[0];
+  gq.data.repository.pullRequest.comments.nodes.unshift({ ...bot, author: { login: 'attacker' } });
+  const events = historyEvents(gq,[{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: true }], '/r/o/r', historyArtifactName);
+  assert.equal(events.filter(e => e.kind === 'checks').length, 2);
+  assert.ok(events.filter(e => e.kind === 'checks').every(e => e.href === null));
+  bot.author.login = 'attacker';
+  assert.equal(historyEvents(gq).filter(e => e.kind === 'checks').length, 0);
+});
+
+test('history page escapes text, validates links and defaults unknown filters to all', () => {
+  const html = historyPage({ user: 'u', owner: 'o', repo: 'r', pull: 7, title: '<b>t</b>', filter: 'unknown',
+    events: [{ time: '2026-10-12T11:00:00Z', kind: 'review', text: 'Approved <script>', who: 'ghost', href: 'javascript:alert(1)' }] });
+  assert.match(html, /&lt;b&gt;t&lt;\/b&gt;/); assert.match(html, /Approved &lt;script&gt;/);
+  assert.match(html, /class="filter-chip" href="\?f=all" aria-current="page"/);
+  assert.doesNotMatch(html, /javascript:|Waivers/);
+});
+
+test('history route preserves refreshed cookies and security headers on every outcome', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  for (const [outcome, status] of [['ok', 200], ['throw', 502], ['forbidden', 403], ['rate', 429], ['graphql', 502], ['http', 502]]) {
+    const seen = [];
+    const restore = mockFetch(async url => {
+      seen.push(url);
+      if (url.includes('access_token')) return tokenResponse();
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.includes('/actions/artifacts')) throw new Error('artifact failure degrades');
+      if (outcome === 'throw') throw new Error('network failure');
+      if (outcome === 'rate') return new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0' } });
+      if (outcome === 'http') return new Response('{}', { status: 500 });
+      if (outcome === 'forbidden' || outcome === 'graphql') return new Response(JSON.stringify({ errors: [{ type: outcome === 'forbidden' ? 'FORBIDDEN' : 'NOT_FOUND' }] }));
+      return new Response(JSON.stringify(historyFixture()));
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/history', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, status, outcome);
+      assert.ok(cookieValue(response, 's'), outcome);
+      assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff');
+      const body = await response.text();
+      if (status === 403) assert.match(body, /Pull requests and Contents permissions/);
+      if (status === 429) assert.match(body, /rate limit/);
+      if (status === 200) assert.match(body, /Move R16/);
+      assert.ok(!seen.some(url => url.includes('waivers')));
+    } finally { restore(); }
+  }
+});
+
+test('history checks access before timeline calls', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls++; return new Response('{}', { status: 404 }); });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/history');
+    assert.equal(response.status, 302); assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
 import { CHECKS } from '../ui/checks.mjs';
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1486,6 +1572,7 @@ import { threadsClient } from './threads-client.js';
 
 test('review page for a pull request carries the thread composer and config', () => {
   const html = reviewPage({ user: 'u', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: 7 });
+  assert.match(html, /href="\/r\/Cameronrlewis\/repo\/pull\/7\/history">History<\/a>/);
   assert.match(html, /<dialog id="thread-composer"/);
   assert.match(html, /<dialog id="thread-view"/);
   assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
@@ -1494,7 +1581,7 @@ test('review page for a pull request carries the thread composer and config', ()
 
 test('review page without a pull request has no composer', () => {
   const html = reviewPage({ user: 'u', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: null });
-  assert.doesNotMatch(html, /thread-composer|threads-client|kicadReviewPin/);
+  assert.doesNotMatch(html, /thread-composer|threads-client|kicadReviewPin|>History<\/a>/);
 });
 
 test('wrapper accepts report messages only from its own iframe', () => {

@@ -1863,7 +1863,7 @@ def changes_markdown(p, limit=60):
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, log=""):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -1899,6 +1899,12 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
             out += ["", f"Changed: {other}. Full list in the report."]
     body = "\n".join(out)
     checks = "\n".join(readiness_markdown(data, threads, threads_required=data.get("settings", {}).get("threads", {}).get("block_merge", False))) + checks_markdown(data)
+    if len(log) > 30000:
+        log = "\n" + merge_log(extract_log(log), "")
+    if log and len(checks) + len(log) > 59000:
+        checks = checks[:max(0, 58900 - len(log))].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
+        checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
+    checks += log
     parts = parts_markdown(data)
     if parts:
         # Reserve room for the body truncation notice and closing details tags.
@@ -1909,7 +1915,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
-            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads)
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads, log)
         body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
@@ -1974,7 +1980,15 @@ def cmd_summary(args):
                     threads = thread_counts(raw)
             except ValueError:
                 print("::warning::review/threads.json is not JSON; thread counts left out")
-    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads)
+    log = ""
+    if os.environ.get("HISTORY") == "true":
+        previous = ""
+        if os.path.exists("review/previous-log.md"):
+            with open("review/previous-log.md", encoding="utf-8") as fh:
+                previous = fh.read()
+        when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        log = "\n" + merge_log(extract_log(previous), log_row(data, when))
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads, log=log)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
     settings = data["settings"]
@@ -2105,6 +2119,39 @@ def checks_markdown(data):
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
     return checks
 
+
+LOG_START, LOG_END = "<!-- kicad-review-log -->", "<!-- /kicad-review-log -->"
+LOG_HEAD = ["| Run (UTC) | Commit | Result | Checks |", "|---|---|---|---|"]
+LOG_ROW = re.compile(r"^\| \[\d{4}-\d\d-\d\d \d\d:\d\d\]\(https://[^)]*/actions/runs/\d+\) \| `[0-9a-f]{7}` \| (✅ pass|❌ fail) \| .* \|$")
+
+
+def log_row(data, when: str) -> str:
+    """One strict review-log row; local runs without a run URL have no row."""
+    failed = any(c["status"] == "fail" for p in data["projects"] for c in p["checks"])
+    per = [("" if len(data["projects"]) == 1 else f"{md(p['name'])}: ")
+           + " · ".join(f"{md(c['title'])} {c['errors']} ({c['new_errors']})" for c in p["checks"])
+           for p in data["projects"]]
+    row = f"| [{when}]({data['links'].get('run', '')}) | `{(data['head'] or '')[:7]}` | {'❌ fail' if failed else '✅ pass'} | {' ; '.join(per) or '—'} |"
+    row = row.replace("\n", " ").replace("\r", " ")
+    return row if LOG_ROW.fullmatch(row) else ""
+
+
+def extract_log(text) -> list[str]:
+    """Validated rows of a log block, or [] for missing or broken markers."""
+    text = text or ""
+    start, end = text.find(LOG_START), text.find(LOG_END)
+    if start < 0 or end < start:
+        return []
+    return [line for line in text[start + len(LOG_START):end].splitlines() if LOG_ROW.fullmatch(line)]
+
+
+def merge_log(previous_rows, row, keep=50) -> str:
+    rows = [line for line in [*previous_rows, row] if LOG_ROW.fullmatch(line)]
+    rows = rows[-keep:] if keep > 0 else []
+    # Keep whole newest rows; leave ample room for checks and the comment body.
+    while sum(len(line) + 1 for line in rows) > 29500:
+        rows.pop(0)
+    return "\n".join([LOG_START, "<details><summary>Review log</summary>", "", *LOG_HEAD, *rows, "", "</details>", LOG_END, ""])
 
 CHECK_RESULTS = [("fail", "failure", "failing"), ("warn", "neutral", "warnings"),
                  ("pass", "success", "passing"), ("not_run", "skipped", "not run")]

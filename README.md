@@ -75,6 +75,8 @@ For pull requests the base revision's settings file wins, so a change cannot rel
 
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
+Review history is off by default. Set the Actions variable `KICAD_REVIEW_HISTORY` to exactly `true` to keep the newest 50 review runs in the PR comment. The log records errors (new errors), not warnings. Failed or cancelled runs add no row; the previous log is carried over.
+
 ## Interface checks (optional)
 
 With `checks.interfaces` set to `informational` or `required` (default `off`), each review exports the schematic netlist and applies these rules:
@@ -129,6 +131,12 @@ Waiver keys have limits. Several unconnected items on one net are keyed by occur
 ## Review site (optional)
 
 The small Cloudflare Worker review site lets people sign in with GitHub and open reviews only in repositories they can already read. See [the site setup guide](site/README.md) to create the GitHub App, run it locally, and deploy it manually.
+
+Pull-request reviews have a **History** page: commits, approvals and change requests, review threads, and logged check results, newest first. Checks, Reviews, Threads and Commits filters narrow the timeline. Thread resolution is shown at creation time because GitHub supplies no resolution time. Waiver history is deferred until the waivers feature lands.
+
+The check log is **off by default**. Alongside `KICAD_REVIEW_SITE`, set the calling repository's Actions variable `KICAD_REVIEW_HISTORY=true` to keep the newest 50 check-result rows in the existing bot comment. This adds a comments fetch on same-repository PR runs; forks do not fetch it. With the variable unset, comments and job summaries stay unchanged. History still shows commits, reviews and threads without the log.
+
+Logged results outlive the 90-day reports; links disappear when their artifacts expire or are unavailable. Rows record errors (total and new), not warnings. Failed or cancelled runs add no row; failure and no-change comments carry the previous log. The log is editable by anyone who can edit the bot comment, not immutable. History trusts only the GitHub Actions bot's marked comment and reads the first 100 comments/threads and last 100 commits/reviews.
 
 ## When the workflow repository moves (for example to ParadigmEngineering)
 

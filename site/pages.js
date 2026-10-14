@@ -10,6 +10,22 @@ const e = escapeHtml;
 const repoPath = (owner, repo) => `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 const link = (href, label, className = '') => `<a${className ? ` class="${className}"` : ''} href="${e(href)}">${e(label)}</a>`;
 
+const HISTORY_KINDS = [['all', 'All'], ['checks', 'Checks'], ['review', 'Reviews'], ['thread', 'Threads'], ['commit', 'Commits']];
+export function historyPage({ user, owner, repo, pull, title, events, filter }) {
+  if (['reviews', 'threads', 'commits'].includes(filter)) filter = filter.slice(0, -1);
+  if (!HISTORY_KINDS.some(([kind]) => kind === filter)) filter = 'all';
+  const path = repoPath(owner, repo);
+  const shown = filter === 'all' ? events : events.filter(ev => ev.kind === filter);
+  const rows = shown.map(ev => {
+    const safe = String(ev.href || '').startsWith(`${path}/a/`) && /^\d+$/.test(String(ev.href).slice(`${path}/a/`.length));
+    return `<li class="hist"><time datetime="${e(ev.time)}">${e(String(ev.time).replace('T', ' ').slice(0, 16))} UTC</time> <span class="hist-kind">${e(ev.kind)}</span> ${safe ? link(ev.href, ev.text) : e(ev.text)} <span class="muted">${e(ev.who)}</span></li>`;
+  }).join('');
+  return frame({ title: `History #${pull}`, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: `#${pull} history` }],
+    body: `<main class="page"><div class="page-head"><div><h1>${e(title)}</h1><p class="lead">Everything that happened in this pull request's review, newest first.</p></div></div>
+      <nav class="filter-row" aria-label="History filters">${HISTORY_KINDS.map(([kind, label]) => `<a class="filter-chip" href="?f=${kind}"${filter === kind ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav>
+      <ol class="history">${rows || '<li class="muted">Nothing yet.</li>'}</ol></main>` });
+}
+
 export function frame({ title, user, crumbs = [], body, meta = '' }) {
   const trail = crumbs.map((crumb, index) => `<span>${index < crumbs.length - 1 && crumb.href ? link(crumb.href, crumb.label) : e(crumb.label)}</span>`).join('');
   const account = user ? `<div class="account"><span>Signed in as ${e(user)}</span><form method="post" action="/logout"><button class="btn btn-ghost">Sign out</button></form></div>` : '';
@@ -138,7 +154,7 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = 
       <label>Reply<textarea name="text" rows="3" maxlength="10000"></textarea></label>
       <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
     <script>(${threadsClient.toString()})(${JSON.stringify({ threads: `${path}/pull/${pull}/threads`, rerun: `${path}/pull/${pull}/rerun`, run: `${path}/run/`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>` : '';
-  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}${readiness}${notice}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${threads}` });
+  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}${readiness}${Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : ''}${notice}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${threads}` });
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;

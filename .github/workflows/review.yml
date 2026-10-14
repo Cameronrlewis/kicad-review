@@ -187,6 +187,21 @@ jobs:
           done
           exit 1
 
+      # The opt-in review log lives in the bot's existing PR comment.
+      - name: Fetch previous review log
+        if: ${{ !cancelled() && github.event.pull_request.number && github.event.pull_request.head.repo.full_name == github.repository && vars.KICAD_REVIEW_HISTORY == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p review
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
+            -q '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- kicad-review -->"))) | .body' \
+            | python3 -c 'import sys; t = sys.stdin.read(); s, e = "<!-- kicad-review-log -->", "<!-- /kicad-review-log -->"; print(t[t.index(s):t.index(e) + len(e)] if s in t and e in t and t.index(s) < t.index(e) else "", end="")' \
+            > review/previous-log.md
+          [ -s review/previous-log.md ] || rm -f review/previous-log.md
+
       - name: Job summary
         id: summary
         if: steps.detect.outputs.changed == 'true'
@@ -195,6 +210,7 @@ jobs:
           ARTIFACT: ${{ steps.upload.outputs.artifact-url }}
           ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           SITE: ${{ vars.KICAD_REVIEW_SITE }}
+          HISTORY: ${{ vars.KICAD_REVIEW_HISTORY }}
         run: python3 tools/kicad_review.py summary --image-base "$IMAGES" --artifact-url "$ARTIFACT" --artifact-id "$ARTIFACT_ID" > /dev/null
 
       # Optional: one check run per check, so branch protection can require ERC, DRC... separately.
@@ -227,9 +243,11 @@ jobs:
           mkdir -p review
           if [ "$CHANGED" = false ]; then
             printf '<!-- kicad-review -->\n### No KiCad changes in this commit\n' > review/comment.md
+            if [ -f review/previous-log.md ]; then printf '\n' >> review/comment.md; cat review/previous-log.md >> review/comment.md; fi
           elif [ "$SUMMARY" != success ]; then
             # The failure body prevents earlier results from looking current.
             printf '<!-- kicad-review -->\n### KiCad review failed — see [run](%s)\n\nNo review for `%s`. Results from earlier commits were removed so they are not mistaken for this one.\n' "$RUN_URL" "${SHA:0:7}" > review/comment.md
+            if [ -f review/previous-log.md ]; then printf '\n' >> review/comment.md; cat review/previous-log.md >> review/comment.md; fi
           fi
           [ -n "$PR" ] || exit 0
           # One comment per pull request, edited in place on every run.
