@@ -701,6 +701,52 @@ export const CHECKS = [
   ["Reports without an interfaces check show no Interfaces row", "t=checks", `
     if (!proj().checks || proj().checks.some(c => c.name === "interfaces")) return "skip";
     return ![...document.querySelectorAll("#panel .check-title")].some(e => e.textContent === "Interfaces") || "interfaces row shown";`],
+  ["BOM coverage and field changes render in the Parts tab", "", `
+    const P = proj(); P.parts = P.parts || { lines: [], changes: [], supplier: null };
+    P.parts.coverage = { base: { Value: [4, 4], Footprint: [4, 4], LCSC: [3, 4], MPN: [1, 4], Manufacturer: [0, 4], Datasheet: [2, 4], "Datasheet (critical)": [1, 2], "Order ready": [3, 4] },
+                         head: { Value: [5, 5], Footprint: [5, 5], LCSC: [4, 5], MPN: [3, 5], Manufacturer: [0, 5], Datasheet: [2, 5], "Datasheet (critical)": [1, 3], "Order ready": [4, 5] } };
+    P.parts.field_changes = [{ refs: ["R1", "R2"], field: "MPN", before: null, after: "<i>ERJ</i>" }];
+    P.parts.dnp_mismatch = ["C9"];
+    S.t = "parts"; renderPanel();
+    const cov = document.querySelector("#panel .bom-coverage")?.textContent || "", fc = document.querySelector("#panel .field-changes")?.textContent || "";
+    return cov.includes("incomplete: Manufacturer") && cov.includes("MPN") && cov.includes("3 / 5") && cov.includes("+2") && cov.includes("Order ready") && fc.includes("R1, R2") && fc.includes("<i>ERJ</i>")
+      && !document.querySelector("#panel .field-changes i") && document.querySelector("#panel .dnp-mismatch")?.textContent.includes("C9") || JSON.stringify({cov, fc});`],
+  ["Inventory lists every part, searchable, with change badges", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head") && r.kind === "footprint"); if (!row) return "skip";
+    const b = rowBox(row, "head");
+    P.objects = [{ uuid: "u1", kind: "footprint", ref: row.ref, value: "1k", footprint: "R_0402", side: "head", pos: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0], box: b, layer: "F.Cu" },
+                 { uuid: "u2", kind: "footprint", ref: "ZZ9", value: '<b>"x"</b>', footprint: "SOT23", side: "head", pos: [1, 1, 0], box: null, layer: "B.Cu" }];
+    S.t = "changes"; S.filter.all = true; renderPanel();
+    const rows = document.querySelectorAll("#panel .inv-row"), first = [...rows].find(r => r.textContent.includes(row.ref));
+    const q = document.querySelector("#panel .q"); q.value = "zz9"; q.dispatchEvent(new Event("input"));
+    const after = document.querySelectorAll("#panel .inv-row");
+    return rows.length === 2 && first.textContent.includes(row.action) && after.length === 1 && after[0].textContent.includes('<b>"x"</b>') && !document.querySelector("#panel .inv-row b") || JSON.stringify({n: rows.length, after: after.length});`],
+  ["Inventory removed part is listed and zooms", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    const b = rowBox(row, "head");
+    P.objects = [{ uuid: "u3", kind: "footprint", ref: "GONE1", value: "x", footprint: "y", side: "base", pos: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0], box: b, layer: "F.Cu" }];
+    S.filter.all = true; S.filter.q = ""; renderPanel();
+    const r = document.querySelector("#panel .inv-row"); if (!r.textContent.includes("removed")) return "no removed badge";
+    await goToObject(0);
+    return S.v === "board" && Math.abs(S.x - (b[0] + b[2]) / 2) < 0.01 || JSON.stringify({v: S.v, x: S.x});`],
+  ["Inventory caps long lists", "", `
+    const P = proj(); P.objects = Array.from({ length: 1600 }, (_, i) => ({ uuid: "u" + i, kind: "footprint", ref: "R" + i, value: "1k", footprint: "f", side: "head", pos: [i, 0, 0], box: null, layer: "F.Cu" }));
+    S.filter.all = true; S.filter.q = ""; renderPanel();
+    return document.querySelectorAll("#panel .inv-row").length === 1500 && document.querySelector("#panel .cards").textContent.includes("showing 1500 of 1600") || "no cap";`],
+  ["Inventory follows project", "", `
+    if (D.projects.length < 2) return "skip";
+    D.projects[0].objects = [{ uuid: "a", kind: "symbol", ref: "PA1", side: "head", pos: [0, 0], box: null, sheet: "/" }];
+    D.projects[1].objects = [{ uuid: "b", kind: "symbol", ref: "PB1", side: "head", pos: [0, 0], box: null, sheet: "/" }];
+    S.filter.all = true; openProject(1);
+    return document.querySelector("#panel .cards").textContent.includes("PB1") && !document.querySelector("#panel .cards").textContent.includes("PA1") || "wrong project";`],
+  ["Inventory badges follow side and search covers layer", "", `
+    const P = proj(); P.changes = [{ kind: "footprint", ref: "Q1", action: "added", where: { board: true } }, { kind: "footprint", ref: "Q1", action: "removed", where: { board: true } }];
+    P.objects = [{ uuid: "b", kind: "footprint", ref: "Q1", side: "base", pos: [0, 0, 0], box: null, layer: "F.Cu" }, { uuid: "h", kind: "footprint", ref: "Q1", side: "head", pos: [0, 0, 0], box: null, layer: "B.Cu" }];
+    S.t = "changes"; S.filter.all = true; S.filter.q = ""; renderPanel();
+    const rows = [...document.querySelectorAll("#panel .inv-row")].map(r => r.textContent);
+    const q = document.querySelector("#panel .q"); q.value = "b.cu"; q.dispatchEvent(new Event("input"));
+    const n = document.querySelectorAll("#panel .inv-row").length;
+    return rows[0].includes("removed") && rows[1].includes("added") && n === 1 || JSON.stringify({ rows, n });`],
   ["Parts fixture sorts problems and greys stale stock", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
   document.querySelector('[data-tab=parts]').click();
@@ -753,4 +799,228 @@ export const CHECKS = [
     && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
     && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
 `],
+  ["Readiness ready message blockMerge is false when unframed", "", `
+    return !THREADS_ON && typeof readyMessage === "function" && readyMessage().blockMerge === false && readyMessage().kicadReviewReady === true || "ready message";`],
+  ["Threads arrival preserves the drawing during the first right-click", "v=board", `
+    const vp = document.querySelector("#stage .vp"), world = vp.querySelector(".world");
+    const rect = vp.getBoundingClientRect(), event = new MouseEvent("contextmenu", {bubbles:true, cancelable:true, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2});
+    const saved = parent.postMessage, enabled = THREADS_ON, sent = [];
+    parent.postMessage = data => sent.push(data);
+    THREADS_ON = true;
+    try {
+      vp.dispatchEvent(new PointerEvent("pointerdown", {button:2, bubbles:true}));
+      acceptThreads([]);
+      await new Promise(r => setTimeout(r, 100));
+      if (!vp.isConnected || vp.querySelector(".world") !== world) return "thread arrival replaced right-click target";
+      vp.dispatchEvent(event);
+      return event.defaultPrevented && sent.length === 1 && !!sent[0].kicadReviewPin?.file || JSON.stringify(sent);
+    } finally { parent.postMessage = saved; THREADS_ON = enabled; }
+  `],
+  ["Threads anchorAt pins an object and falls back to a point", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    await goTo(row.id); const b = rowBox(row, "head"), cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+    P.objects = [{ uuid: "u-1", kind: "footprint", ref: "RX1", value: "1k", side: "head", pos: [cx, cy, 0], box: b, layer: "F.Cu" }];
+    const a = anchorAt(cx, cy, "head"), pt = anchorAt(b[2] + 500, b[3] + 500, "head");
+    return a.target === "object" && a.uuid === "u-1" && a.ref === "RX1" && a.file.endsWith(P.name + ".kicad_pcb") && a.commit === D.head
+      && a.v === 1 && a.severity === "comment" && pt.target === "point" && pt.uuid === null && pt.x === round3(b[2] + 500) || JSON.stringify({a, pt});`],
+  ["Threads anchorAt uses the sub-sheet file", "", `
+    const P = proj(), sheet = P.sheets.find(s => s.status !== "unchanged" && s.svg); if (!sheet) return "skip";
+    S.v = "sheet:" + sheet.path; S.x = S.y = S.z = null; renderNav(); await draw();
+    const a = anchorAt(1, 1, "head");
+    return a.sheet === sheet.path && a.file === (P.dir ? P.dir + "/" : "") + sheet.file || JSON.stringify(a);`],
+  ["Threads resolveAnchor follows UUID, then reference, and flags moves", "", `
+    const P = proj(); P.objects = [{ uuid: "u-2", kind: "footprint", ref: "R9", side: "head", pos: [10, 10, 0], box: [9, 9, 11, 11], layer: "F.Cu", pos_before: [5, 5, 0] }];
+    const base = { v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", kind: "footprint", side: "head", commit: "0ld1234", severity: "comment" };
+    const byUuid = resolveAnchor({ ...base, uuid: "u-2", ref: "R9", x: 10, y: 10 });
+    const byRef = resolveAnchor({ ...base, uuid: "gone", ref: "R9", x: 3, y: 3 });
+    return byUuid.view === "board" && byUuid.side === "head" && byUuid.pos[0] === 10 && !byUuid.notes.some(n => n.startsWith("moved"))
+      && byRef.pos[0] === 10 && byRef.notes.some(n => n.startsWith("moved since 0ld1234"))
+      && byUuid.notes.includes("pinned on 0ld1234, viewing " + D.head.slice(0, 7)) || JSON.stringify({byUuid, byRef});`],
+  ["Threads resolveAnchor removed object pins base", "", `
+    const P = proj(); P.objects = [{ uuid: "u-3", kind: "footprint", ref: "C4", side: "base", pos: [7, 7, 0], box: [6, 6, 8, 8], layer: "F.Cu" }];
+    const r = resolveAnchor({ v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", uuid: "u-3", kind: "footprint", ref: "C4", x: 7, y: 7, side: "head", commit: D.head, severity: "comment" });
+    const gone = resolveAnchor({ v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: null, target: "object", uuid: "nope", kind: "footprint", ref: "C99", x: 1, y: 1, side: "head", commit: D.head, severity: "comment" });
+    return r.side === "base" && r.notes.includes("C4 was removed in this change") && typeof gone.detached === "string" || JSON.stringify({r, gone});`],
+  ["Threads resolveAnchor point flags a changed area", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && r.box); if (!row) return "skip";
+    const x = (row.box[0] + row.box[2]) / 2, y = (row.box[1] + row.box[3]) / 2;
+    const pt = { v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x, y, side: "head", severity: "comment" };
+    const old = resolveAnchor({ ...pt, commit: "0ld1234" }), same = resolveAnchor({ ...pt, commit: D.head }), base = resolveAnchor({ ...pt, commit: D.base });
+    P.changes = [{ where: { board: true }, pos: [50, 50, 0], pos_before: [5, 5, 0] }];
+    const before = resolveAnchor({ ...pt, x: 5, y: 5, commit: "0ld1234" }), after = resolveAnchor({ ...pt, x: 50, y: 50, commit: "0ld1234" });
+    P.changes = [{ where: { sheet: "/other/" }, pos_before: [5, 5, 0] }];
+    const otherView = resolveAnchor({ ...pt, x: 5, y: 5, commit: "0ld1234" });
+    return old.notes.includes("this area changed since 0ld1234") && !same.notes.some(n => n.startsWith("this area"))
+      && !base.notes.some(n => n.startsWith("this area")) && before.notes.includes("this area changed since 0ld1234")
+      && after.notes.includes("this area changed since 0ld1234") && !otherView.notes.some(n => n.startsWith("this area")) || JSON.stringify({old, same, base, before, after, otherView});`],
+  ["Threads anchorAt rejects a missing sheet file", "", `
+    S.v = "sheet:/nope/";
+    const a = anchorAt(1, 1, "head");
+    return a === null || JSON.stringify(a);`],
+  ["Threads resolveAnchor prioritizes UUID before reference", "", `
+    const P = proj();
+    P.objects = [
+      { uuid: "u-a", kind: "footprint", ref: "R9", side: "head", pos: [1, 1, 0], layer: "F.Cu" },
+      { uuid: "u-b", kind: "footprint", ref: "R9", side: "head", pos: [20, 1, 0], layer: "F.Cu" }
+    ];
+    const a = { v: 1, project: P.dir, file: "x.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", kind: "footprint", ref: "R9", x: 20, y: 1, side: "head", commit: D.head, severity: "comment" };
+    const uuid = resolveAnchor({ ...a, uuid: "u-b" }), ref = resolveAnchor({ ...a, uuid: "unknown" });
+    return uuid.pos[0] === 20 && ref.pos[0] === 1 || JSON.stringify({uuid, ref});`],
+  ["Threads anchorAt base uses previous position and excludes additions", "", `
+    if (D.base == null) return "skip";
+    const P = proj(); S.v = "board";
+    P.objects = [
+      { uuid: "moved", kind: "footprint", ref: "R1", side: "head", pos: [50, 50, 0], pos_before: [5, 5, 0], box: [49, 49, 51, 51], layer: "F.Cu" },
+      { uuid: "added", kind: "footprint", ref: "R2", side: "head", pos: [20, 20, 0], box: [19, 19, 21, 21], layer: "F.Cu", added: true }
+    ];
+    const moved = anchorAt(5, 5, "base"), added = anchorAt(20, 20, "base"), headPosition = anchorAt(50, 50, "base");
+    return moved.target === "object" && moved.uuid === "moved" && moved.x === 5 && moved.y === 5 && moved.side === "base" && moved.commit === D.base
+      && added.target === "point" && added.uuid === null && added.side === "base" && added.commit === D.base
+      && headPosition.target === "point" || JSON.stringify({moved, added, headPosition});`],
+  ["Threads resolveAnchor reference prefers the same sheet then any", "", `
+    const P = proj();
+    const objects = [
+      { uuid: "u-a", kind: "symbol", ref: "R1", side: "head", pos: [1, 1, 0], sheet: "/a/" },
+      { uuid: "u-b", kind: "symbol", ref: "R1", side: "head", pos: [20, 1, 0], sheet: "/b/" }
+    ];
+    const a = { v: 1, project: P.dir, file: "b.kicad_sch", sheet: "/b/", layer: null, target: "object", uuid: "unknown", kind: "symbol", ref: "R1", x: 20, y: 1, side: "head", commit: D.head, severity: "comment" };
+    P.objects = objects;
+    const head = resolveAnchor(a), any = resolveAnchor({ ...a, sheet: "/missing/" });
+    P.objects = objects.map(o => ({ ...o, side: "base" }));
+    const base = resolveAnchor(a), baseAny = resolveAnchor({ ...a, sheet: "/missing/" }), baseUuid = resolveAnchor({ ...a, uuid: "u-b" });
+    return head.view === "sheet:/b/" && head.pos[0] === 20 && any.view === "sheet:/a/"
+      && base.view === "sheet:/b/" && base.side === "base" && baseAny.view === "sheet:/a/" && baseUuid.pos[0] === 20 || JSON.stringify({head, any, base, baseAny, baseUuid});`],
+  ["Threads tab and pins appear only with thread data", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    if (document.querySelector('#panel [data-tab="threads"]')) return "tab shown offline";
+    const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
+    P.objects = [{ uuid: "u-5", kind: "footprint", ref: "Q1", side: "head", pos: [x, y, 0], box: b, layer: "F.Cu" }];
+    acceptThreads([{ id: "T1", resolved: false, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", uuid: "u-5", kind: "footprint", ref: "Q1", x, y, side: "head", commit: D.head, severity: "blocking" }, comments: [{ author: "alice", body: "<img src=x onerror=alert(1)> too close", createdAt: "2026-10-12T10:00:00Z" }] },
+                   { id: "T2", resolved: true, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x, y, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; renderPanel(); await goTo(row.id);
+    const tab = document.querySelector('#panel [data-tab="threads"]'), cards = document.querySelectorAll("#panel .thread-card");
+    const pins = document.querySelectorAll("#stage .pin");
+    return !!tab && /^Threads 1$/.test(tab.textContent.trim()) && cards.length === 1 && cards[0].textContent.includes("Blocking") && !document.querySelector("#panel img")
+      && pins.length >= 1 && [...pins].every(p => p.classList.contains("pin-blocking") && p.getAttribute("aria-label").includes("Q1")) || JSON.stringify({tab: !!tab, cards: cards.length, pins: pins.length});`],
+  ["Threads resolved filter and detached group", "", `
+    const P = proj(); P.objects = [];
+    acceptThreads([{ id: "T3", resolved: true, anchor: { v: 1, project: P.dir, file: "f", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] },
+                   { id: "T4", resolved: false, anchor: { v: 1, project: P.dir, file: "f", sheet: null, layer: null, target: "object", uuid: "zz", kind: "footprint", ref: "U99", x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; S.threadFilter.status = "resolved"; renderPanel();
+    const resolved = document.querySelectorAll("#panel .thread-card").length;
+    S.threadFilter.status = "open"; renderPanel();
+    const detached = document.querySelector("#panel .threads-detached")?.textContent || "";
+    return resolved === 1 && detached.includes("U99") || JSON.stringify({resolved, detached});`],
+  ["Threads messages from a non-parent window are ignored", "", `
+    S.threads = null; renderPanel();
+    window.dispatchEvent(new MessageEvent("message", { source: window, data: { kicadReviewThreads: [] } }));
+    await new Promise(r => setTimeout(r, 50));
+    if (S.threads !== null || document.querySelector('#panel [data-tab="threads"]')) return "accepted offline";
+    const ignored = handleParentMessage({ source: {}, data: { kicadReviewThreads: [] } }, true);
+    if (ignored !== false || S.threads !== null) return "accepted non-parent";
+    const accepted = handleParentMessage({ source: parent, data: { kicadReviewThreads: [] } }, true);
+    return accepted === true && Array.isArray(S.threads) && S.threads.length === 0 || "rejected parent";`],
+  ["Threads j and k step through thread cards", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    await goTo(row.id);
+    const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
+    P.objects = [0, 1].map(i => ({ uuid: "step-u-" + i, kind: "footprint", ref: "Q" + (i + 1), side: "head", pos: [x + i * 10, y, 0], box: [x + i * 10 - 1, y - 1, x + i * 10 + 1, y + 1], layer: "F.Cu" }));
+    acceptThreads(P.objects.map((o, i) => ({ id: "step-T" + i, resolved: false, anchor: { v: 1, project: P.dir, file: viewFile(P, "board"), sheet: null, layer: o.layer, target: "object", uuid: o.uuid, kind: o.kind, ref: o.ref, x: o.pos[0], y: o.pos[1], side: "head", commit: D.head, severity: "comment" }, comments: [] })));
+    S.t = "threads"; renderPanel(); await draw();
+    const ids = [...document.querySelectorAll("#panel .thread-card[data-thread]")].map(e => e.dataset.thread);
+    if (ids.length !== 2) return "expected two cards";
+    openThread(ids[0]);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "j" }));
+    const afterJ = S.thread;
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "k" }));
+    return afterJ === ids[1] && S.thread === ids[0] || JSON.stringify({ ids, afterJ, afterK: S.thread });`],
+  ["Threads placement resets on Escape and view selection", "", `
+    S.placing = true; document.body.classList.add("placing");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    const escapeCleared = !S.placing && !document.body.classList.contains("placing");
+    S.placing = true; document.body.classList.add("placing");
+    select(firstChangedView(proj()));
+    return escapeCleared && !S.placing && !document.body.classList.contains("placing") || "placement stayed active";`],
+  ["Threads opening a blank drawing keeps the current view", "", `
+    const P = proj(), view = S.v;
+    acceptThreads([{ id: "blank-T", resolved: false, anchor: { v: 1, project: P.dir, file: "missing.kicad_sch", sheet: "/missing/", layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; renderPanel(); await openThread("blank-T");
+    return S.v === view && S.thread === "blank-T" && document.querySelector("#panel .thread-card")?.textContent.includes("its drawing did not change in this review") || JSON.stringify({view, current: S.v, thread: S.thread, text: document.querySelector("#panel .thread-card")?.textContent});`],
+  ["Threads severity select and cards retain focus", "", `
+    const P = proj();
+    acceptThreads([{ id: 'focus-"T', resolved: false, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.t = "threads"; renderPanel();
+    const select = document.querySelector("#panel select.thread-severity");
+    select.focus(); select.value = "comment"; select.dispatchEvent(new Event("change")); renderPanel();
+    const severityFocused = document.activeElement === document.querySelector("#panel select.thread-severity");
+    document.querySelector("#panel .thread-card").focus(); renderPanel();
+    return severityFocused && document.activeElement === document.querySelector("#panel .thread-card") || JSON.stringify({severityFocused, active: document.activeElement.className});`],
+  ["Threads saved tab opens when thread data arrives", "", `
+    S.t = "threads"; S.threads = null; renderPanel();
+    const waiting = S.t === "changes" && S.wantThreads === true;
+    acceptThreads([]);
+    return waiting && S.t === "threads" && !S.wantThreads || JSON.stringify({waiting, tab: S.t, want: S.wantThreads});`],
+  ["Threads hash tab survives reload before data arrives", "t=threads", `
+    const waiting = S.t === "changes" && S.wantThreads === true;
+    acceptThreads([]);
+    return waiting && S.t === "threads" && !S.wantThreads || JSON.stringify({waiting, tab: S.t, want: S.wantThreads});`],
+  ["Threads tab click cancels deferred tab selection", "", `
+    S.t = "threads"; S.threads = null; renderPanel();
+    document.querySelector('#panel [data-tab="checks"]').click();
+    acceptThreads([]);
+    return S.t === "checks" && !S.wantThreads || JSON.stringify({tab: S.t, want: S.wantThreads});`],
+  ["Threads opening another drawable view clears placement", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row || !currentView("board")) return "skip";
+    const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
+    acceptThreads([{ id: "placing-T", resolved: false, anchor: { v: 1, project: P.dir, file: viewFile(P, "board"), sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x, y, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
+    S.v = "sheet:/missing/"; S.t = "threads"; renderPanel();
+    S.placing = true; document.body.classList.add("placing");
+    await openThread("placing-T");
+    return S.v === "board" && !S.placing && !document.body.classList.contains("placing") || JSON.stringify({view: S.v, placing: S.placing, crosshair: document.body.classList.contains("placing")});`],
+  ["Threads invalid ids cannot drop valid threads or run conversions", "", `
+    const anchor = { v: 1, project: proj().dir, file: "f.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" };
+    const thread = id => ({ id, resolved: false, anchor, comments: [] });
+    acceptThreads([thread({ toString: 1 }), thread("ok1")]);
+    if (S.threads.length !== 1 || S.threads[0].id !== "ok1") return "bad id dropped valid thread";
+    let converted = false;
+    const objectId = { toString() { converted = true; return "x"; } };
+    if (![1, null, new String("x"), objectId].every(id => !validThread(thread(id))) || !validThread(thread("x")) || converted) return "incorrect id validation";
+    const throwing = { get id() { throw new Error("bad thread"); } };
+    acceptThreads([throwing, thread("ok1")]);
+    return S.threads.length === 1 && S.threads[0].id === "ok1" || "validation error dropped valid thread";`],
+  ["Waivers hide waived findings behind a chip and tag them", "p=1&t=checks", `
+    const P = proj(), c = (P.checks || []).find(c => c.violations.length); if (!c) return "skip";
+    const v = c.violations[0]; v.waiver_key = "w-abcdefabcdef"; v.waived = { reason: "intended <b>x</b>", by: "ann", until: "2026-12-31", ref: null };
+    c.waived = 1; S.checks.scope = "all"; renderPanel();
+    const hidden = !document.querySelector('#panel .viol[data-id="' + v.id + '"]'), chip = document.querySelector('#panel [data-check-waived]');
+    chip.focus(); chip.click();
+    const focused = document.activeElement.matches("[data-check-waived]"), summary = document.querySelector("#panel .check-counts").textContent;
+    const shown = document.querySelector('#panel .viol[data-id="' + v.id + '"]');
+    return focused && summary.includes("1 waived") && hidden && chip.textContent.includes("Waived 1") && !!shown && shown.textContent.includes("WAIVED") && shown.textContent.includes("intended <b>x</b>")
+      && !document.querySelector("#panel .viol b") || JSON.stringify({hidden, chip: chip?.textContent, shown: shown?.textContent});`],
+  ["Waivers offer a copyable TOML entry for an unwaived finding", "p=1&t=checks", `
+    const P = proj(), c = (P.checks || []).find(c => ["erc", "drc", "parity"].includes(c.name) && c.violations.length); if (!c) return "skip";
+    const v = c.violations.find(x => !x.waived); v.waiver_key = "w-0123456789ab"; S.checks.scope = "all"; renderPanel();
+    const b = document.querySelector('#panel [data-waive="' + v.id + '"]'); b.closest('details').open = true; b.focus(); b.click();
+    const pre = document.querySelector("#panel .waiver-snippet")?.textContent || "";
+    const button = document.activeElement;
+    return button.matches('[data-waive]') && button.getAttribute('aria-label') === 'Waive ' + (v.items.join(' · ') || v.description)
+      && document.querySelector("#panel .waiver-help").textContent.includes("on the pull request's target branch")
+      && document.getElementById(button.getAttribute('aria-controls'))?.textContent === pre && pre.includes('check = "' + c.name + '"') && pre.includes('match = "w-0123456789ab"') && pre.includes("until = ") && pre.includes("[[waiver]]") || pre;`],
+  ["Waivers show no waive button without keys", "p=1&t=checks", `
+    proj().checks.forEach(c => c.violations.forEach(v => { delete v.waiver_key; delete v.waived; })); S.checks.scope = "all"; renderPanel();
+    return !document.querySelector("#panel [data-waive]") && !document.querySelector("#panel [data-check-waived]") || "shown";`],
+
+  ["Waivers show-all reveals an only-waived change", "p=1&t=checks", `
+    const c = (proj().checks || []).find(c => c.violations.length); if (!c) return "skip";
+    proj().checks.forEach(c => c.violations.forEach(v => { v.new = true; v.waived = { reason: "intentional", by: "ann" }; }));
+    S.checks.scope = null; renderPanel();
+    const scope = document.querySelector('[data-check-scope="all"]').getAttribute("aria-pressed");
+    document.querySelector("#panel .show-all").click();
+    return scope === "true" && S.checks.waived && !!document.querySelector("#panel .viol .waived-reason") || "not revealed";`],
+  ["Waivers snippets preserve quoted keys and remove comment controls", "p=1&t=checks", `
+    const key = 'w-"\\\\b\\\\f\\n\\r\\t' + String.fromCharCode(0, 8, 12, 31, 127);
+    const text = waiverSnippet({waiver_key:key, description:'x\\r\\n' + String.fromCharCode(0, 127) + '<b>x</b>'}, 'erc');
+    const match = text.split("\\n").find(l => l.startsWith("match = ")).slice(8);
+    return JSON.parse(match) === key && !/[\\u0000-\\u0008\\u000b-\\u001f\\u007f]/.test(text) && text.includes('# x  ') || text;`],
 ];
