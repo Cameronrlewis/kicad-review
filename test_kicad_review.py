@@ -552,6 +552,16 @@ for changed, summary, existing in (("false", "skipped", "99"), ("false", "skippe
     assert not os.path.exists(f"{t}/{'posted.md' if existing else 'patched.md'}")
 print("ok WF-S2: unchanged comment and detect failure")
 
+# Readiness gates required checks and blocking threads; optional publishing never fails the job.
+fail = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
+assert "if: steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != ''" in fail
+assert "THREADS: ${{ steps.summary.outputs.threads_failed }}" in fail
+publish = wf[wf.index("- name: Publish check runs"):wf.index("- name: Pull request comment")]
+assert "if: ${{ !cancelled() && steps.summary.outputs.check_runs == 'true' }}" in publish
+assert "HEAD: ${{ steps.detect.outputs.head }}" in publish
+assert "review/check-runs.json" in publish and "continue-on-error: true" in publish and "exit 0; }" in publish
+print("ok readiness workflow gate and optional check runs")
+
 # Reports expose an artifact filename containing the compared revisions and result.
 import re
 def report_output(base, head):
@@ -1085,11 +1095,11 @@ with tempfile.TemporaryDirectory() as d:
         except SystemExit as e:
             assert "threads.enabled must be true or false" in str(e)
         with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = true\n')
-        assert load_settings()["threads"] == {"enabled": True}
+        assert load_settings()["threads"] == {"enabled": True, "block_merge": False}
     finally:
         os.chdir(_cwd)
 from kicad_review import DEFAULT_SETTINGS
-assert DEFAULT_SETTINGS["threads"] == {"enabled": False}
+assert DEFAULT_SETTINGS["threads"] == {"enabled": False, "block_merge": False}
 print("ok threads settings")
 
 # Threads: anchors in comment bodies and the summary line.
@@ -1160,3 +1170,104 @@ with tempfile.TemporaryDirectory() as t:
         os.chdir(_cwd)
 print("ok threads cmd_summary")
 
+
+# Readiness: one check run per check across projects, worst result wins; comment block.
+from kicad_review import check_runs, readiness_markdown, DEFAULT_SETTINGS
+ck = lambda name, title, status, e=0, ne=0: {"name": name, "title": title, "level": "required", "status": status,
+                                             "errors": e, "new_errors": ne, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+rd = {**d2, "projects": [
+    {"name": "A", "dir": "a", "status": "modified", "changes": [], "checks": [ck("erc", "ERC", "pass"), ck("drc", "DRC", "fail", 2, 1)]},
+    {"name": "B", "dir": "b", "status": "modified", "changes": [], "checks": [ck("erc", "ERC", "warn", 1, 0),
+        {**ck("parity", "Schematic/board parity", "not_run"), "reason": "no schematic"}]}]}
+runs = {r["name"]: r for r in check_runs(rd)}
+assert set(runs) == {"kicad-review / ERC", "kicad-review / DRC", "kicad-review / Schematic/board parity"}, runs.keys()
+assert runs["kicad-review / ERC"]["conclusion"] == "neutral" and runs["kicad-review / DRC"]["conclusion"] == "failure"
+assert runs["kicad-review / Schematic/board parity"]["conclusion"] == "skipped"
+assert "| B | ⚠️ warn | 1 (0) |" in runs["kicad-review / ERC"]["output"]["summary"], runs["kicad-review / ERC"]["output"]["summary"]
+assert runs["kicad-review / DRC"]["output"]["title"] == "1 new error"
+block = "\n".join(readiness_markdown(rd, threads={"open": 3, "blocking": 2, "resolved": 0}))
+assert "#### Ready to merge?" in block and "✕ **Required checks:** failing (A DRC)" in block, block
+assert "✕ **Blocking threads:** 2 open" in block and "**Approvals:** see the pull request's reviewers" in block
+ok = {**d2, "projects": [{"name": "A", "dir": "", "status": "modified", "changes": [], "checks": [ck("erc", "ERC", "pass")]}]}
+assert "✓ **Required checks:** passing" in "\n".join(readiness_markdown(ok)) and "Blocking threads" not in "\n".join(readiness_markdown(ok))
+assert "✓ **Blocking threads:** none open" in "\n".join(readiness_markdown(ok, threads={"open": 1, "blocking": 0, "resolved": 0}))
+assert DEFAULT_SETTINGS["github"] == {"check_runs": False} and DEFAULT_SETTINGS["threads"] == {"enabled": False, "block_merge": False}
+assert "#### Ready to merge?" in comment_markdown(ok, [], "")
+print("ok readiness payloads")
+
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d); os.makedirs("base")
+        for text, error in (('[threads]\nblock_merge = true\n', "threads.block_merge needs threads.enabled = true"),
+                            ('[github]\ncheck_runs = 1\n', "github.check_runs must be true or false")):
+            with open("base/kicad-review.toml", "w") as fh: fh.write(text)
+            try:
+                load_settings(); raise AssertionError(error)
+            except SystemExit as e:
+                assert error in str(e), str(e)
+    finally:
+        os.chdir(_cwd)
+print("ok readiness settings")
+
+# Readiness stays visible after the project body is truncated.
+large = {**ok, "projects": [{**ok["projects"][0], "name": "A" * 300} for _ in range(300)]}
+body = comment_markdown(large, [], "")
+assert "… truncated" in body and "#### Ready to merge?" in body and len(body) < 65536
+assert "↗ **Approvals:**" in body
+print("ok readiness comment truncation")
+
+# The opted-in gate fails closed without readable thread counts.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d); os.makedirs("review")
+        for check_runs, gate, contents, failed in (
+            (True, True, None, "blocking threads could not be read"),
+            (True, True, "not json", "blocking threads could not be read"),
+            (True, True, _json.dumps({"errors": [{"type": "FORBIDDEN"}]}), "blocking threads could not be read"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {}}}}), "blocking threads could not be read"),
+            (True, True, _json.dumps([]), "blocking threads could not be read"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {"totalCount": 101, "nodes": []}}}}}), "blocking threads could not be read"),
+            (True, True, _json.dumps(gql), "1 blocking thread open"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}), ""),
+            (False, True, None, "blocking threads could not be read"),
+            (True, False, None, ""),
+        ):
+            if os.path.exists("review/threads.json"):
+                os.remove("review/threads.json")
+            if os.path.exists("review/check-runs.json"):
+                os.remove("review/check-runs.json")
+            if contents is not None:
+                with open("review/threads.json", "w") as fh: fh.write(contents)
+            with open("review/data.json", "w") as fh:
+                _json.dump({**ok, "settings": {"threads": {"enabled": True, "block_merge": gate}, "github": {"check_runs": check_runs}}}, fh)
+            with open("outputs", "w") as fh: pass
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": "outputs", "GITHUB_STEP_SUMMARY": os.devnull}), patch("sys.stdout", new_callable=io.StringIO):
+                cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+            with open("review/comment.md") as fh: comment = fh.read()
+            assert ("- ✕ **Blocking threads:** could not be read" in comment) == (failed == "blocking threads could not be read"), comment
+            with open("outputs") as fh: outputs = fh.read()
+            assert outputs == f"check_runs={'true' if check_runs else 'false'}\nthreads_failed={failed}\n", outputs
+            assert os.path.exists("review/check-runs.json") == check_runs
+            if check_runs:
+                with open("review/check-runs.json") as fh: runs = _json.load(fh)
+                thread_runs = [r for r in runs if r["name"] == "kicad-review / Threads"]
+                assert len(thread_runs) == int(gate)
+                if gate:
+                    assert thread_runs[0]["conclusion"] == ("failure" if failed else "success")
+                    assert thread_runs[0]["output"]["title"] == (failed or "no blocking threads open")
+    finally:
+        os.chdir(_cwd)
+print("ok readiness summary gate")
+
+# Cap raw names before Markdown escaping, including an escape at the boundary.
+escaped = {**ok, "projects": [{**ok["projects"][0], "name": "a" * 999 + "*", "checks": [ck("erc", "ERC", "fail")]}]}
+from kicad_review import md
+assert md("a" * 999 + "*… (full list in Checks)") in "\n".join(readiness_markdown(escaped))
+assert "- ✕ **Blocking threads:** could not be read" in readiness_markdown(ok, threads_required=True)
+print("ok readiness unreadable threads and escape boundary")
+
+# Readiness: the gate passes with threads enabled but none blocking.
+assert "✓ **Blocking threads:** none open" in "\n".join(readiness_markdown(ok, threads={"open": 0, "blocking": 0, "resolved": 0}))
+print("ok gate passes with no blocking threads")

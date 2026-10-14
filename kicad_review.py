@@ -628,7 +628,8 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
-    "threads": {"enabled": False},
+    "threads": {"enabled": False, "block_merge": False},
+    "github": {"check_runs": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -647,7 +648,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -665,6 +666,11 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
+    for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
+        if not isinstance(value, bool):
+            sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
+    if settings["threads"]["block_merge"] and not settings["threads"]["enabled"]:
+        sys.exit(f"{SETTINGS_FILE}: threads.block_merge needs threads.enabled = true")
     return settings
 
 
@@ -1081,7 +1087,8 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "threads") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items()
+                       if not ((k in ("3d", "parts", "threads") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -1232,7 +1239,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
             out += ["</details>"]
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
-    body, checks = "\n".join(out), checks_markdown(data)
+    body = "\n".join(out)
+    checks = "\n".join(readiness_markdown(data, threads, threads_required=data.get("settings", {}).get("threads", {}).get("block_merge", False))) + checks_markdown(data)
     parts = parts_markdown(data)
     if parts:
         # Reserve room for the body truncation notice and closing details tags.
@@ -1295,12 +1303,39 @@ def cmd_summary(args):
     if data["settings"].get("threads", {}).get("enabled") and os.path.exists("review/threads.json"):
         with open("review/threads.json", encoding="utf-8") as fh:
             try:
-                threads = thread_counts(json.load(fh))
+                raw = json.load(fh)
+                review_threads = raw
+                for key in ("data", "repository", "pullRequest", "reviewThreads"):
+                    review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
+                if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
+                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
+                    # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
+                    print("::warning::review/threads.json is incomplete; thread counts left out")
+                else:
+                    threads = thread_counts(raw)
             except ValueError:
                 print("::warning::review/threads.json is not JSON; thread counts left out")
     body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
+    settings = data["settings"]
+    block_merge = settings.get("threads", {}).get("block_merge")
+    publish_checks = settings.get("github", {}).get("check_runs")
+    threads_failed = ""
+    if block_merge:
+        threads_failed = "blocking threads could not be read" if threads is None else (plural(threads["blocking"], "blocking thread") + " open" if threads["blocking"] else "")
+    if publish_checks:
+        runs = check_runs(data)
+        if block_merge:
+            runs.append({"name": "kicad-review / Threads", "conclusion": "failure" if threads_failed else "success",
+                         "output": {"title": threads_failed or "no blocking threads open",
+                                    "summary": "Resolve blocking threads in the review site or on GitHub."}})
+        with open("review/check-runs.json", "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+    with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+        fh.write(f"check_runs={'true' if publish_checks else 'false'}\n")
+        fh.write(f"threads_failed={threads_failed}\n")
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
@@ -1380,6 +1415,49 @@ def checks_markdown(data):
         checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
     return checks
+
+
+CHECK_RESULTS = [("fail", "failure", "failing"), ("warn", "neutral", "warnings"),
+                 ("pass", "success", "passing"), ("not_run", "skipped", "not run")]
+
+
+def check_runs(data):
+    """One GitHub check run per check name across all projects; the worst project result is the run's conclusion."""
+    runs = {}
+    for p in data["projects"]:
+        for c in p["checks"]:
+            r = runs.setdefault(c["name"], {"name": f"kicad-review / {c['title']}", "rows": [], "conclusions": [], "new": 0})
+            rank = next((i for i, result in enumerate(CHECK_RESULTS) if result[0] == c["status"]), None)
+            if rank is None:
+                raise KeyError(c["status"])
+            r["conclusions"].append(rank)
+            r["new"] += c["new_errors"]
+            r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
+    out = []
+    for r in runs.values():
+        _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]
+        if r["new"]:
+            title = plural(r["new"], "new error")
+        summary = "\n".join(["| Project | Result | Errors (new) | Warnings (new) |", "|---|---|---|---|", *r["rows"]])
+        out.append({"name": r["name"], "conclusion": conclusion, "output": {"title": title, "summary": summary}})
+    return out
+
+
+def readiness_markdown(data, threads=None, threads_required=False):
+    """The 'Ready to merge?' block: required checks, blocking threads, and where approvals live."""
+    failing = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    failures = ", ".join(failing)
+    if len(failures) > 1000:
+        failures = failures[:1000] + "… (full list in Checks)"
+    failures = md(failures)
+    lines = ["", "#### Ready to merge?", "",
+             f"- ✕ **Required checks:** failing ({failures})" if failing else "- ✓ **Required checks:** passing"]
+    if threads is not None:
+        lines.append(f"- ✕ **Blocking threads:** {threads['blocking']} open" if threads["blocking"] else "- ✓ **Blocking threads:** none open")
+    elif threads_required:
+        lines.append("- ✕ **Blocking threads:** could not be read")
+    lines.append("- ↗ **Approvals:** see the pull request's reviewers (the review site shows them per commit).")
+    return lines
 
 
 def main():
