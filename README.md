@@ -4,7 +4,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 
 [![Watch the 2½-minute explainer video](docs/explainer-poster.png)](docs/explainer.mp4)
 
-*A 2½-minute tour of every feature on a real board: [watch the explainer video](docs/explainer.mp4).*
+*A 2½-minute tour of every feature on a real control board: [watch the explainer video](docs/explainer.mp4).*
 
 ## What you get
 
