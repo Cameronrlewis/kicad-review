@@ -1610,7 +1610,7 @@ print("ok broken log starts fresh and strict row contract")
 
 # A real four-project/four-check log survives body truncation within GitHub's limit.
 large = {**ld, "projects": [{**ld["projects"][0], "name": f"Project {i}",
-         "checks": [ck2(n, title, 2, 1) for n, title in CHECK_NAMES.items()]} for i in range(4)], "reason": "x" * 60000}
+         "checks": [ck2(n, title, 2, 1) for n, title in list(CHECK_NAMES.items())[:4]]} for i in range(4)], "reason": "x" * 60000}
 large_row = log_row(large, "2026-10-12 10:04")
 large_log = "\n" + merge_log([large_row] * 49, large_row)
 large_body = comment_markdown(large, [], "", log=large_log)
