@@ -28,6 +28,10 @@ enabled = false            # export changed boards as GLB and report footprints 
 [parts]
 enabled = false
 
+# Tag-to-tag review and a marked section in GitHub release notes; fabrication remains independent.
+[release]
+review = false
+
 # Optional stock and price by MPN. Requires parts.enabled and caller secrets: inherit.
 # Set DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET as repository Actions secrets.
 # Keep it off in public repositories; DigiKey data is for permitted internal use only.

@@ -57,19 +57,29 @@ export function homePage({ user, repositories }) {
   return frame({ title: 'Repositories', user, crumbs: [{ label: 'Repositories' }], body: `<main class="page"><div class="page-head"><div><h1>Repositories</h1><p class="lead">Repositories you can open. Each one needs the KiCad review GitHub App installed.</p></div></div>${body}</main>` });
 }
 
-export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'all', started }) {
+export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'all', started, view = 'list', groups = null }) {
   const path = repoPath(owner, repo);
   const chips = [['all', 'All'], ['passing', 'Passing'], ['failing', 'Failing'], ['older', 'Older']]
-    .map(([value, label]) => `<a class="filter-chip" href="${path}?filter=${value}"${filter === value ? ' aria-current="page"' : ''}>${label} ${counts[value] || 0}</a>`).join('');
-  const cards = items.map((item) => {
+    .map(([value, label]) => `<a class="filter-chip" href="${path}?filter=${value}${view === 'milestones' ? '&amp;view=milestones' : ''}"${filter === value ? ' aria-current="page"' : ''}>${label} ${counts[value] || 0}</a>`).join('')
+    + ` <a class="filter-chip" href="${path}?view=milestones&amp;filter=${e(filter)}"${view === 'milestones' ? ' aria-current="page"' : ''}>Milestones</a>`
+    + (view === 'milestones' ? ` <a class="filter-chip" href="${path}?filter=${e(filter)}">List</a>` : '');
+  const card = (item) => {
     const branch = item.manual ? 'Manual comparison' : item.branch;
     const label = item.label ? `<span class="muted">${e(item.label)}</span>` : '';
     const revision = item.legacy
       ? '<p class="muted">Revisions not recorded (older report)</p>'
       : `<div class="revpath"><span class="muted">BASE</span><code>${e(item.base)}</code><span class="muted">↓</span><span class="muted">HEAD</span><code>${e(item.head)}</code></div>`;
-    return `<article class="review-card"><div><h2>${e(branch)}</h2>${label}<p class="muted">${e(relativeTime(item.createdAt))} · ${e(item.date)}</p></div><div><p class="revision-label muted">Revision path</p>${revision}</div><div class="review-result">${status(item.result)}${link(`${path}/a/${encodeURIComponent(item.id)}${item.pdf ? '?pdf=1' : ''}`, 'Open review →', 'btn')}</div></article>`;
-  }).join('');
-  const content = cards ? `<section class="review-list">${cards}</section>` : `<section class="card empty"><h2>No reviews yet</h2><p>Reviews appear after a push or pull request that changes KiCad files, or after a comparison started here.</p>${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</section>`;
+    return `<article class="review-card"><div><h2>${e(branch)}</h2>${label}${item.pull ? `<p class="muted">PR #${e(item.pull.number)} (${e(item.pull.merged ? 'merged' : item.pull.state)})</p>` : ''}<p class="muted">${e(relativeTime(item.createdAt))} · ${e(item.date)}</p></div><div><p class="revision-label muted">Revision path</p>${revision}</div><div class="review-result">${status(item.result)}${link(`${path}/a/${encodeURIComponent(item.id)}${item.pdf ? '?pdf=1' : ''}`, 'Open review →', 'btn')}</div></article>`;
+  };
+  const cards = items.map(card).join('');
+  let content = cards ? `<section class="review-list">${cards}</section>` : `<section class="card empty"><h2>No reviews yet</h2><p>Reviews appear after a push or pull request that changes KiCad files, or after a comparison started here.</p>${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</section>`;
+  if (view === 'milestones') {
+    if (groups === null) content = `<p class="notice notice-info">${e("Milestones need the app's Pull requests permission.")}</p>`;
+    else if (groups.length) content = groups.map(group => {
+      const safeUrl = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/milestone\/\d+$/.test(group.url || '');
+      return `<section><h2>${safeUrl ? link(group.url, group.title) : e(group.title)}</h2><p class="muted">${e(group.open)} open · ${e(group.merged)} merged</p><div class="review-list">${group.items.map(card).join('')}</div></section>`;
+    }).join('');
+  }
   return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
 }
 

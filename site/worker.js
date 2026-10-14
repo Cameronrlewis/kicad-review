@@ -343,6 +343,27 @@ async function home(request, env) {
   }, active);
 }
 
+export function milestoneGroups(items, pulls) {
+  // ponytail: artifacts identify branches, not PR numbers; newest PR wins on branch reuse.
+  const byBranch = new Map([...pulls].sort((a, b) => a.number - b.number).map(p => [p.head?.ref, p]));
+  const groups = new Map();
+  for (const item of items) {
+    const pr = item.manual ? null : byBranch.get(item.branch);
+    const milestone = pr?.milestone;
+    const key = milestone ? (milestone.id ?? milestone.html_url ?? milestone.title) : null;
+    if (!groups.has(key)) groups.set(key, { title: milestone?.title || 'No milestone', url: milestone?.html_url || null, open: 0, merged: 0, items: [], prs: new Set(), noMilestone: !milestone });
+    const group = groups.get(key);
+    group.items.push({ ...item, pull: pr ? { number: pr.number, state: pr.state, merged: Boolean(pr.merged_at) } : null });
+    if (pr && !group.prs.has(pr.number)) {
+      group.prs.add(pr.number);
+      if (pr.merged_at) group.merged += 1;
+      else if (pr.state === 'open') group.open += 1;
+    }
+  }
+  return [...groups.values()].sort((a, b) => a.noMilestone - b.noMilestone || a.title.localeCompare(b.title))
+    .map(({ prs, noMilestone, ...group }) => group);
+}
+
 async function reviewList(request, env, owner, repo, url) {
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
@@ -373,9 +394,18 @@ async function reviewList(request, env, owner, repo, url) {
     const filtered = filter === 'passing' ? items.filter((item) => item.result === 'pass')
       : filter === 'failing' ? items.filter((item) => item.result === 'fail')
         : filter === 'older' ? items.filter((item) => item.legacy) : items;
+    const view = url?.searchParams.get('view') === 'milestones' ? 'milestones' : 'list';
+    let groups = null;
+    if (view === 'milestones') {
+      try {
+        // ponytail: latest 100 PRs, matching the artifact list's bounded history.
+        const pullsResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?state=all&sort=created&direction=desc&per_page=100`, allowed.s.token);
+        if (pullsResponse.ok) groups = milestoneGroups(filtered, await pullsResponse.json());
+      } catch { /* Keep the page available with permission guidance. */ }
+    }
     return sessionResponse(reviewsPage({
       user: allowed.s.login, owner, repo, started: url?.searchParams.get('started') === '1',
-      items: filtered, counts, filter,
+      items: filtered, counts, filter, view, groups,
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);

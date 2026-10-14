@@ -2,7 +2,7 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import worker, { open, seal } from './worker.js';
+import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
@@ -1278,6 +1278,95 @@ test('expired artifacts offer regeneration only when their name records revision
 });
 
 
+test('reviews group by milestone, deduplicate PR counts, and retain reviews without a milestone', () => {
+  const items = [{ id: 1, branch: 'power' }, { id: 2, branch: 'usb' }, { id: 3, branch: 'main' }, { id: 4, branch: 'power' }];
+  const milestone = { id: 1, title: 'Rev B', html_url: 'https://github.com/o/r/milestone/1' };
+  const pulls = [{ number: 5, head: { ref: 'power' }, state: 'open', merged_at: null, milestone },
+    { number: 6, head: { ref: 'usb' }, state: 'closed', merged_at: '2026-10-01', milestone }];
+  const groups = milestoneGroups(items, pulls);
+  assert.deepEqual(groups.map(g => [g.title, g.open, g.merged, g.items.map(i => i.id)]), [['Rev B', 1, 1, [1, 2, 4]], ['No milestone', 0, 0, [3]]]);
+  assert.equal(groups[0].url, milestone.html_url);
+  assert.deepEqual(groups[0].items[1].pull, { number: 6, state: 'closed', merged: true });
+  assert.equal(groups[1].items[0].pull, null);
+  assert.equal(items[0].pull, undefined);
+  assert.deepEqual(milestoneGroups([], []), []);
+  const reused = milestoneGroups([{ branch: 'power' }], [pulls[0], { ...pulls[0], number: 9, milestone: null }]);
+  assert.equal(reused[0].items[0].pull.number, 9);
+  assert.equal(reused[0].title, 'No milestone');
+  assert.equal(milestoneGroups([{ branch: 'power', manual: true }], pulls)[0].items[0].pull, null);
+  const sameTitles = milestoneGroups(items, [pulls[0], { ...pulls[1], milestone: { ...milestone, id: 2 } }]);
+  assert.equal(sameTitles.length, 3, 'distinct milestones may share a title');
+  const closed = milestoneGroups([{ branch: 'usb' }], [{ ...pulls[1], merged_at: null, milestone: null }]);
+  assert.equal(closed[0].open + closed[0].merged, 0, 'closed but unmerged PRs are not counted');
+});
+
+test('milestone page escapes text, rejects unsafe links, and distinguishes empty from permission failure', () => {
+  const base = { user: 'octocat', owner: 'o', repo: 'r', items: [], view: 'milestones' };
+  const page = reviewsPage({ ...base, groups: [{ title: '<script>', url: 'javascript:alert(1)', open: 1, merged: 2, items: [] }] });
+  assert.match(page, /&lt;script&gt;/);
+  assert.doesNotMatch(page, /javascript:/);
+  assert.match(page, /1 open · 2 merged/);
+  assert.doesNotMatch(reviewsPage({ ...base, groups: [] }), /Milestones need/);
+  assert.match(reviewsPage({ ...base, groups: null }), /Milestones need the app&#39;s Pull requests permission/);
+});
+
+test('milestone route reads PRs only on opt-in, after access, preserving refreshed cookies', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1000 });
+  let pullsCalls = 0;
+  let denied = false;
+  const artifact = { id: 77, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', created_at: '2026-10-01T00:00:00Z', workflow_run: { head_branch: 'power', event: 'pull_request', head_sha: 'bbbbbbb' } };
+  const restore = mockFetch(async (url, options) => {
+    if (url.includes('access_token')) return tokenResponse();
+    assert.equal(options.headers.Authorization, 'Bearer access-secret');
+    if (url.endsWith('/repo')) return denied ? new Response('denied', { status: 403 }) : accessibleRepo();
+    if (url.includes('/actions/artifacts')) return new Response(JSON.stringify({ artifacts: [artifact] }));
+    if (url.includes('/pulls?')) {
+      pullsCalls++;
+      return new Response(JSON.stringify([{ number: 5, head: { ref: 'power' }, state: 'open', milestone: { id: 1, title: 'Rev B', html_url: 'https://github.com/Cameronrlewis/repo/milestone/1' } }]));
+    }
+    throw new Error('unexpected fetch');
+  });
+  try {
+    let response = await call('/r/Cameronrlewis/repo', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.ok(cookieValue(response, 's'));
+    assert.equal(pullsCalls, 0);
+    response = await call('/r/Cameronrlewis/repo?view=milestones', { headers: { Cookie: `s=${sealed}` } });
+    const body = await response.text();
+    assert.equal(response.status, 200);
+    assert.ok(cookieValue(response, 's'));
+    assert.equal(pullsCalls, 1);
+    assert.match(body, /Rev B/);
+    assert.match(body, /PR #5 \(open\)/);
+    assert.match(body, /\/a\/77/);
+    denied = true;
+    response = await call('/r/Cameronrlewis/repo?view=milestones', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 404);
+    assert.ok(cookieValue(response, 's'));
+    assert.equal(pullsCalls, 1);
+  } finally { restore(); }
+});
+
+test('both view chip hrefs escape the filter at interpolation', () => {
+  const source = readFileSync('site/pages.js', 'utf8');
+  assert.equal(source.split('${e(filter)}').length - 1, 2);
+  const page = reviewsPage({ user: 'octocat', owner: 'o', repo: 'r', items: [], view: 'milestones', groups: [], filter: '\" onclick=\"evil&' });
+  assert.doesNotMatch(page, /href="[^"]*" onclick=/);
+  assert.doesNotMatch(page, /&amp;quot;/, 'do not double escape the helper output');
+  assert.match(page, /filter=&quot; onclick=&quot;evil&amp;/);
+});
+
+test('milestone permission or network failure keeps the review list accessible', async () => {
+  const sealed = await signedIn();
+  for (const fail of [() => new Response('denied', { status: 403 }), () => { throw new Error('network'); }]) {
+    const restore = mockFetch(async url => url.endsWith('/repo') ? accessibleRepo() : url.includes('/pulls?') ? fail() : new Response(JSON.stringify({ artifacts: [] })));
+    try {
+      const response = await call('/r/Cameronrlewis/repo?view=milestones', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      assert.match(await response.text(), /Milestones need the app&#39;s Pull requests permission/);
+    } finally { restore(); }
+  }
+});
 // Guest credentials are signed capabilities, never GitHub credentials.
 const shareEnv = { ...env, SHARE_KEY: Buffer.alloc(32, 9).toString('base64') };
 test('share tokens are unguessable, strictly validated, expiring and bound to one review', async () => {
