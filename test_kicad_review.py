@@ -1248,8 +1248,8 @@ here = os.getcwd()
 try:
     with tempfile.TemporaryDirectory() as d:
         os.chdir(d)
-        lib_tree("base", SYM([("1", "IN", "input")]), FP([("1", 0), ("2", 1)]))
-        lib_tree("head", SYM([("1", "IN", "passive")]), FP([("1", 0)]))
+        lib_tree("base", SYM([("1", "IN", "input")]).replace('"LDO"', '"--output"'), FP([("1", 0), ("2", 1)]))
+        lib_tree("head", SYM([("1", "IN", "passive")]).replace('"LDO"', '"--output"'), FP([("1", 0)]))
         os.makedirs("review")
         project = {"name": "X", "dir": "", "status": "modified"}
         pathlib.Path("review/detect.json").write_text(json.dumps({"projects": [project], "base": "b", "head": "h", "reason": "changed"}))
@@ -1262,12 +1262,17 @@ try:
             calls.append(args)
             pathlib.Path(args[args.index("-o")+1], "item.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><path d="M0 0L1 1"/></svg>')
             return SimpleNamespace(returncode=0)
-        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side"), patch("kicad_review.subprocess.run", side_effect=library_export):
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side"), patch("kicad_review.subprocess.run", side_effect=library_export), patch("kicad_review.library_items", wraps=library_items) as parsed:
             kicad_review.cmd_render(None)
+            assert parsed.call_count == 2
         assert len(calls) == 4 and all(a[:3] in (["kicad-cli", "sym", "export"], ["kicad-cli", "fp", "export"]) for a in calls)
+        assert any("--symbol=--output" in a for a in calls) and any("--footprint=SOT23" in a for a in calls)
         objects = {"f1": {**t1_fpo("U1", 1), "props": {"footprint": "Parts:SOT23"}}}
         with patch("kicad_review.project_objects", return_value=objects):
-            blobs = {}; report = build_project(project, blobs, settings)
+            blobs = {}
+            with patch("kicad_review.object_index", wraps=object_index) as indexed:
+                report = build_project(project, blobs, settings)
+                assert indexed.call_count == 1
             assert len(report["libraries"]) == 2 and report["objects"][0]["lib"] == "Parts:SOT23"
             assert report["libraries"][0]["used_by"] == ["U1"] and report["libraries"][0]["warnings"]
             settings["libraries"]["enabled"] = False
@@ -1288,3 +1293,19 @@ try:
 finally:
     os.chdir(here)
 print("ok library exports, objects emission and off byte identity")
+
+# Final review: precomputed item maps avoid parsing; absent/invalid SVGs cannot produce drawable views.
+from kicad_review import svg_size
+with patch("kicad_review.library_items", side_effect=AssertionError("parsed precomputed items")):
+    assert library_changes("missing-base", "missing-head", items={"base": {}, "head": {}}) == []
+assert svg_size('<svg viewBox="-2e1 -3.5 1e2 5E+1"/>') == [100.0, 50.0]
+with tempfile.TemporaryDirectory() as d:
+    os.makedirs(f"{d}/head/lib"); os.makedirs(f"{d}/base/lib")
+    path = pathlib.Path(f"{d}/head/lib/{lib_slug(changes[0])}.svg")
+    for svg in ('<svg viewBox="0 0 10 5"/>', '<svg><path d="M0 0L1 1"/></svg>', '<svg viewBox="0 0 nan 5"><path d="M0 0L1 1"/></svg>'):
+        path.write_text(svg)
+        report = library_report(changes[:1], objs_idx, d, {})[0]
+        assert report["note"] == "no drawing" and report["svg"] == {"base": None, "head": None} and "size" not in report
+    path.write_text('<svg viewBox="-2e1 -3.5 1e2 5E+1"><path d="M0 0L1 1"/></svg>')
+    assert library_report(changes[:1], objs_idx, d, {})[0]["size"] == [100.0, 50.0]
+print("ok library final-review parsing, argv and drawing validation")

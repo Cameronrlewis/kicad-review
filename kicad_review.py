@@ -232,7 +232,7 @@ def cmd_render(args):
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
             items = {side: library_items(root) for side, root in roots.items()}
-            for c in library_changes(roots["base"], roots["head"]):
+            for c in library_changes(roots["base"], roots["head"], items=items):
                 for side in ("base", "head"):
                     source = items[side].get((c["lib"], c["item"], c["kind"]))
                     if source is None:
@@ -241,8 +241,8 @@ def cmd_render(args):
                     dest = f"review/{project_id(p['dir'])}/{side}/lib"
                     os.makedirs(dest, exist_ok=True)
                     with tempfile.TemporaryDirectory() as tmp:
-                        args = (["sym", "export", "svg", "--symbol", c["item"], "-o", tmp, lib] if c["kind"] == "symbol"
-                                else ["fp", "export", "svg", "--footprint", c["item"], "-o", tmp, posixpath.dirname(lib)])
+                        args = (["sym", "export", "svg", f"--symbol={c['item']}", "-o", tmp, lib] if c["kind"] == "symbol"
+                                else ["fp", "export", "svg", f"--footprint={c['item']}", "-o", tmp, posixpath.dirname(lib)])
                         try:
                             r = subprocess.run(["kicad-cli", *args], capture_output=True, text=True)
                             made = sorted(pathlib.Path(tmp).glob("*.svg"), key=lambda path: natural(path.name))
@@ -252,7 +252,6 @@ def cmd_render(args):
                             pathlib.Path(f"{dest}/{lib_slug(c)}.svg").write_bytes(made[0].read_bytes())
                         except OSError:
                             print(f"::warning::No drawing for library item {c['lib']}:{c['item']} ({side})")
-
 
 
 TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
@@ -685,30 +684,30 @@ def library_items(proj_dir):
     return items
 
 
-def library_changes(base_dir, head_dir):
-    b = library_items(base_dir) if os.path.isdir(base_dir) else {}
-    h = library_items(head_dir) if os.path.isdir(head_dir) else {}
+def library_changes(base_dir, head_dir, *, items=None):
+    b, h = ((items["base"], items["head"]) if items is not None else
+            (library_items(base_dir) if os.path.isdir(base_dir) else {},
+             library_items(head_dir) if os.path.isdir(head_dir) else {}))
     out = []
     for key in sorted(set(b) | set(h), key=lambda k: (k[2], k[0], natural(k[1]))):
         x, y = b.get(key), h.get(key)
         if x and y and x["hash"] == y["hash"]:
             continue
         diff = []
-        if x or y:
-            before, after = (x or {"pins": {}})["pins"], (y or {"pins": {}})["pins"]
-            for pin in sorted(set(before) | set(after), key=natural):
-                p, q = before.get(pin), after.get(pin)
-                if p == q:
-                    continue
-                if p is None or q is None:
-                    diff.append({"pin": pin, "change": "added" if p is None else "removed", "before": p if isinstance(p, str) else (p and f"{p['name']} ({p['type']})"),
-                                 "after": q if isinstance(q, str) else (q and f"{q['name']} ({q['type']})")})
-                elif isinstance(p, dict):
-                    for field_ in ("type", "name", "geometry"):
-                        if p[field_] != q[field_]:
-                            diff.append({"pin": pin, "change": field_, "before": p[field_], "after": q[field_]})
-                else:
-                    diff.append({"pin": pin, "change": "geometry", "before": p, "after": q})
+        before, after = (x or {"pins": {}})["pins"], (y or {"pins": {}})["pins"]
+        for pin in sorted(set(before) | set(after), key=natural):
+            p, q = before.get(pin), after.get(pin)
+            if p == q:
+                continue
+            if p is None or q is None:
+                diff.append({"pin": pin, "change": "added" if p is None else "removed", "before": p if isinstance(p, str) else (p and f"{p['name']} ({p['type']})"),
+                             "after": q if isinstance(q, str) else (q and f"{q['name']} ({q['type']})")})
+            elif isinstance(p, dict):
+                for field_ in ("type", "name", "geometry"):
+                    if p[field_] != q[field_]:
+                        diff.append({"pin": pin, "change": field_, "before": p[field_], "after": q[field_]})
+            else:
+                diff.append({"pin": pin, "change": "geometry", "before": p, "after": q})
         out.append({"lib": key[0], "item": key[1], "kind": key[2], "status": "added" if not x else "removed" if not y else "modified",
                     "file": (y or x)["file"], "pins_diff": diff})
     return out
@@ -725,11 +724,20 @@ def library_report(changes, objects, out_dir, blobs):
     for c in changes:
         key = f"{c['lib']}:{c['item']}"
         users = sorted({o["ref"].split(" unit ")[0] for o in objects if o.get("lib") == key and o["kind"] == c["kind"] and o["side"] == "head"}, key=natural)
-        svg = {s: svg_body(f"{out_dir}/{s}/lib/{lib_slug(c)}.svg") for s in ("base", "head")}
+        svg, sizes = {}, {}
+        for side in ("base", "head"):
+            text = svg_body(f"{out_dir}/{side}/lib/{lib_slug(c)}.svg")
+            svg[side] = None
+            if text and has_drawing(text):
+                try:
+                    sizes[side] = svg_size(text)
+                    svg[side] = text
+                except ValueError:
+                    pass  # A malformed export stays listed without a drawing.
         entry = {**c, "used_by": users, "svg": {s: add_blob(blobs, t) for s, t in svg.items()}, "warnings": []}
-        drawn = svg["head"] or svg["base"]
+        drawn = "head" if svg["head"] else "base" if svg["base"] else None
         if drawn:
-            entry["size"] = svg_size(drawn)
+            entry["size"] = sizes[drawn]
         else:
             entry["note"] = "no drawing"
         for d in c["pins_diff"] if users else []:
@@ -1055,8 +1063,11 @@ def svg_body(path):
 
 
 def svg_size(text):
-    w, h = re.search(r'viewBox="[\d.]+ [\d.]+ ([\d.]+) ([\d.]+)"', text).groups()
-    return [float(w), float(h)]
+    match = re.search(r"viewBox\s*=\s*[\"']([^\"']+)[\"']", text)
+    values = [float(v) for v in re.split(r"[\s,]+", match[1].strip())] if match else []
+    if len(values) != 4 or not all(math.isfinite(v) for v in values) or min(values[2:]) <= 0:
+        raise ValueError("SVG needs a finite viewBox with positive width and height")
+    return values[2:]
 
 
 def has_drawing(text):
@@ -1148,15 +1159,17 @@ def build_project(p, blobs, settings):
             board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
+    index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
+        settings[name]["enabled"] for name in ("threads", "inventory", "libraries")) else None
     libraries = None
     if settings["libraries"]["enabled"]:
         libraries = library_report(library_changes(posixpath.join("base", p["dir"]), posixpath.join("head", p["dir"])),
-                                   object_index(objs["base"], objs["head"], libraries=True), out, blobs) or None
+                                   index, out, blobs) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
-            **({"objects": object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"])} if settings["threads"]["enabled"] or settings["inventory"]["enabled"] or settings["libraries"]["enabled"] else {})}
+            **({"objects": index} if index is not None else {})}
 
 
 def assign_ids(projects):
@@ -1301,7 +1314,6 @@ def summary_sentence(p):
     for c in p.get("libraries", []):
         parts.append(f"{c['kind']} {md(c['item'])} {c['status']}" + (f" (used by {md(', '.join(c['used_by'][:3]))}{', …' if len(c['used_by']) > 3 else ''})" if c["used_by"] else "")
                      + (f" — **{len(c['warnings'])} warning{'s' if len(c['warnings']) > 1 else ''}**" if c["warnings"] else ""))
-
     for c in p["checks"]:
         if c["new_errors"] and c["name"] == "bom":
             parts.append(f"**{plural(c['new_errors'], 'part')} newly missing BOM fields**")
