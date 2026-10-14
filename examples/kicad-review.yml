@@ -24,3 +24,4 @@ permissions:
 jobs:
   review:
     uses: Cameronrlewis/kicad-review/.github/workflows/review.yml@v1
+    secrets: inherit   # only needed for optional DigiKey lookup; passes DIGIKEY_CLIENT_ID/SECRET

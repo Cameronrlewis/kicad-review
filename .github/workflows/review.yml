@@ -1,6 +1,11 @@
 name: KiCad review
 on:
   workflow_call:
+    secrets:
+      DIGIKEY_CLIENT_ID:
+        required: false
+      DIGIKEY_CLIENT_SECRET:
+        required: false
 
 env:
   # Official KiCad image, pinned by digest so a new upload under the same tag cannot change results.
@@ -105,6 +110,16 @@ jobs:
             rm -rf "$tmp"
           done
 
+      # Optional lookup; missing secrets (including fork PRs) are recorded as skipped.
+      - name: Look up parts at DigiKey
+        if: steps.detect.outputs.changed == 'true'
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}
+          DIGIKEY_CLIENT_SECRET: ${{ secrets.DIGIKEY_CLIENT_SECRET }}
+        run: python3 tools/kicad_review.py lookup
+
       - name: Build comparison report and checks
         id: report
         if: steps.detect.outputs.changed == 'true'
@@ -157,6 +172,23 @@ jobs:
         if: steps.detect.outputs.changed == 'true'
         continue-on-error: true
         run: python3 tools/kicad_review.py shots
+
+      - name: Build PDF report
+        if: steps.report.outputs.pdf == 'true'
+        continue-on-error: true
+        env:
+          PDF_NAME: ${{ steps.report.outputs.pdf_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: python3 tools/kicad_review.py pdf
+
+      - name: Upload PDF report
+        if: steps.report.outputs.pdf == 'true' && hashFiles(format('review/{0}', steps.report.outputs.pdf_name)) != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: false
+          path: review/${{ steps.report.outputs.pdf_name }}
+          retention-days: 90
 
       # Private repositories cannot show artifact images in a comment, so the screenshots go to a separate
       # kicad-review-assets branch (one commit, rewritten each run) and are linked from github.com/<repo>/raw/...,

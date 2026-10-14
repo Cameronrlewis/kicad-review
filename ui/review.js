@@ -627,13 +627,21 @@ const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "pl
 // One rule for every count, filter, sort and ⚠: a problem blocks ordering the part.
 const blocking = l => l.problems.some(p => PARTS_BLOCKING.has(p));
 const partsProblemCount = parts => parts.lines.filter(blocking).length;
-const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
+const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at DigiKey", ambiguous: "several DigiKey matches", discontinued: "discontinued", unavailable: "lookup unavailable" };
 function partsAge(s) {
+  if (s?.skipped) return {text: `DigiKey lookup skipped: ${esc(s.skipped)}`, stale:true};
   if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
   const h = (Date.now() - Date.parse(s.fetched_at)) / 36e5;
-  if (!Number.isFinite(h)) return { text: `JLCPCB data age unavailable: invalid timestamp ${esc(s.fetched_at)}`, stale: true };
-  return { text: `JLCPCB data as of ${esc(s.fetched_at.replace("T", " ").slice(0, 16))} UTC (${h < 48 ? Math.round(h) + " h" : Math.round(h / 24) + " days"} old)`,
-           stale: h > 24, warn: h > 6 };
+  if (!Number.isFinite(h)) return { text: `DigiKey data age unavailable: invalid timestamp ${esc(s.fetched_at)}`, stale: true };
+  return { text: `DigiKey data as of ${esc(s.fetched_at.replace("T", " ").slice(0, 16))} UTC (${h < 48 ? Math.round(h) + " h" : Math.round(h / 24) + " days"} old)`, stale: h > 24 || h < 0, warn: h > 6 };
+}
+function digiKeyUrl(value) {
+  try {
+    const u = new URL(value), host = /^www\.digikey\.(com|ca|co\.uk|de|fr|it|es|nl|be|at|ch|se|dk|fi|no|ie|pl|cz|com\.au|co\.nz|jp|cn|com\.mx|com\.br|in|sg|hk|tw|kr)$/;
+    // URL normalizes an explicit default port away; reject it in the original authority too.
+    if (u.protocol === "https:" && !u.username && !u.password && !u.port && host.test(u.hostname) && !String(value).split('/')[2].includes(':')) return u.href;
+  } catch {}
+  return null;
 }
 function coverageHtml(parts) {
   const c = parts.coverage; if (!c) return "";
@@ -657,9 +665,15 @@ function renderParts() {
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
   const shown = rows.filter(r => (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => Number(blocking(b.line)) - Number(blocking(a.line)));
-  return `${coverageHtml(parts)}<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
+  const counts = parts.supplier?.not_looked_up || {};
+  const notLookedUp = [["no_mpn", "no MPN"], ["invalid_mpn", "invalid MPN"], ["run_limit", "run limit"]]
+    .filter(([key]) => counts[key] > 0).map(([key, reason]) => `${esc(counts[key])} part${counts[key] === 1 ? "" : "s"} not looked up: ${reason}`).join(". ");
+  return `${coverageHtml(parts)}${parts.supplier ? `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>` : ""}
+    ${parts.supplier?.fetched_at ? '<p class="parts-attribution parts-age">Stock and price from DigiKey</p>' : ""}
+    ${parts.supplier?.error ? `<p class="parts-lookup-error parts-age">DigiKey lookup unavailable: ${esc(parts.supplier.error)}</p>` : ""}
+    ${notLookedUp ? `<p class="parts-not-looked-up parts-age">${notLookedUp}.</p>` : ""}
     <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
-    <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "JLCPCB", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
+    <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "DigiKey", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
       // A change row names only the refs it moved; the line's other refs did not change.
       const moved = [...new Set(cs.flatMap(r => r.refs))], refs = f.changed ? moved : l.refs;
       const changeText = field => {
@@ -667,16 +681,23 @@ function renderParts() {
         const who = moved.length && moved.length < l.refs.length ? ` (${moved.join(", ")})` : "";
         return esc(old.length ? `${old.join(", ")} → ${l[field] || "—"}${who}` : l[field] || "—");
       };
-      const problems = l.problems.map(p => PARTS_PROBLEMS[p] || p);
+      const problems = l.problems.map(p => PARTS_PROBLEMS[p] || p), supplier = parts.supplier ? l.supplier : null;
       let stock = "—";
-      if (parts.supplier?.error || parts.supplier && l.status === "unavailable") {
-        stock = `unavailable${l.error || parts.supplier.error ? `: ${l.error || parts.supplier.error}` : ""}`;
-      } else if (parts.supplier && parts.supplier.fetched_at) {
-        stock = l.status === "ok" ? `${age.stale ? "" : "✔ "}${l.stock ?? "—"}${l.price != null ? ` $${l.price}` : ""}${l.category === "basic" ? " B" : l.category === "extended" ? ` Ext${l.fee != null ? ` (fee $${l.fee})` : ""}` : ""}${age.stale ? " (stale)" : ""}`
-          : `${PARTS_PROBLEMS[l.status] || l.status || "—"}${l.stock != null ? ` (${l.stock})` : ""}${l.error ? `: ${l.error}` : ""}`;
-      }
+      if (parts.supplier?.skipped) stock = "not looked up";
+      else if (supplier) {
+        stock = supplier.status === "ok" ? `${age.stale ? "" : "✔ "}${supplier.quantity ?? "—"}${age.stale ? " (stale)" : " in stock"}`
+          : ({out_of_stock:"out of stock", not_found:"not found", ambiguous:"several matches", discontinued:"discontinued", unavailable:"unavailable", run_limit:"not looked up: run limit", no_mpn:"not looked up: no MPN", invalid_mpn:"not looked up: invalid MPN"})[supplier.status] || "unavailable";
+        const price = supplier.breaks?.find(b => b[0] === 1)?.[1] ?? supplier.unit_price;
+        if (["ok", "out_of_stock", "discontinued"].includes(supplier.status) && Number.isFinite(price)) {
+          try { stock += ` ${new Intl.NumberFormat("en-US", {style:"currency", currency:parts.supplier.currency || "USD"}).format(price)}`; }
+          catch { stock += ` ${price.toFixed(2)} ${parts.supplier.currency || "USD"}`; }
+        }
+      } else if (parts.supplier) stock = "not looked up: invalid MPN";
+      const product = !parts.supplier?.skipped && supplier ? digiKeyUrl(supplier.url) : null;
+      const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
+      const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${l.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${esc(stock)}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {

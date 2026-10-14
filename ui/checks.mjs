@@ -798,7 +798,7 @@ export const CHECKS = [
   const rows = [...document.querySelectorAll('#panel .parts-row')];
   if (rows.length !== REVIEW_DATA.projects[0].parts.lines.length || !rows[0].classList.contains('problem')) return 'rows';
   if (!document.querySelector('.parts-age.stale') || rows.some(r => !r.querySelector('.parts-stock.stale') || r.querySelector('.parts-stock').textContent.includes('✔'))
-    || !rows.some(r => r.querySelector('.parts-stock').textContent.endsWith('(stale)'))) return 'stale';
+    || !rows.some(r => r.querySelector('.parts-stock').textContent.includes('(stale)'))) return 'stale';
   if (document.querySelector('.parts-table img') || [...document.querySelectorAll('.parts-table a')].some(a => !/^https?:/.test(a.href) || a.rel !== 'noopener noreferrer' || a.target !== '_blank')) return 'escaping';
   document.querySelector('[data-parts-filter=problems]').click();
   if (document.querySelectorAll('.parts-row').length !== 2 || document.querySelector('.parts-table').textContent.includes('U5')) return 'problems filter';
@@ -812,13 +812,13 @@ export const CHECKS = [
   if (!line.classList.contains('changed') || line.children[1].textContent !== 'R6, R7' || line.querySelector('strong').textContent !== 'R7'
     || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 2) return 'changed marking';
   REVIEW_DATA.projects[0].parts.supplier = null; renderPanel();
-  if (!document.querySelector('.parts-age').textContent.includes('Supplier lookup not run') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
+  if (document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
   if (valid({t:'parts'}).t !== 'parts') return 'hash';
   const parts = REVIEW_DATA.projects[0].parts;
   if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 5 · 2 ⚠') return 'blocking count';
   parts.supplier = {error:'503'}; renderPanel();
   const unavailable = document.querySelector('.parts-row.unavailable .parts-stock').textContent;
-  if (!unavailable.includes('unavailable') || !unavailable.includes('503') || document.querySelector('.parts-table img')) return 'failed lookup';
+  if (!unavailable.includes('unavailable') || !document.querySelector('.parts-lookup-error')?.textContent.includes('503') || document.querySelector('.parts-table img')) return 'failed lookup';
   parts.supplier = {fetched_at:'invalid <timestamp>'}; renderPanel();
   if (!document.querySelector('.parts-age.stale') || document.querySelector('.parts-age').textContent.includes('NaN')
       || [...document.querySelectorAll('.parts-stock')].some(c => !c.classList.contains('stale') || c.textContent.includes('✔'))) return 'invalid timestamp';
@@ -835,6 +835,38 @@ export const CHECKS = [
   delete REVIEW_DATA.projects[0].parts; renderPanel();
   return !document.querySelector('[data-tab=parts]') && S.t === 'changes';
 `],
+  ["DigiKey column shows stock, price, time and attribution", "", `
+    const p = REVIEW_DATA.projects[0], old = p.parts;
+    const line = (ref, supplier, mpn = ref) => ({refs:[ref], key:ref, value:ref, footprint:'F', lcsc:'C1', mpn, datasheet:null, problems:[], supplier});
+    p.parts = {lines:[line('U1',{status:'ok',quantity:1234,unit_price:9,breaks:[[1,1.5]],product_status:'Active <img src=x>',url:'https://www.digikey.ca/en/products/x'}),
+      line('U2',{status:'out_of_stock',quantity:0,unit_price:2}), line('U3',{status:'ambiguous',matches:2,unit_price:99}),
+      line('R1',null,null)],changes:[],supplier:{name:'DigiKey',currency:'USD',fetched_at:new Date().toISOString(),error:null,skipped:null,not_looked_up:{no_mpn:54,invalid_mpn:1,run_limit:2}}};
+    S.t='parts'; S.partsFilter={problems:false,changed:false}; renderPanel();
+    const cells = () => [...document.querySelectorAll('.parts-stock')];
+    if (![...document.querySelectorAll('.parts-table th')].some(x=>x.textContent==='DigiKey')) return 'header';
+    if (!cells()[0].textContent.includes('✔ 1234') || !cells()[0].textContent.includes('$1.50') || !cells()[0].querySelector('a')?.href.startsWith('https://www.digikey.ca/')) return 'stock or price';
+    if (!cells()[0].textContent.includes('Active <img src=x>') || cells()[0].querySelector('img')) return 'product status escaping';
+    if (cells()[0].querySelector('a').rel!=='noopener noreferrer' || !document.querySelector('.parts-age').textContent.includes('DigiKey data as of') || !document.querySelector('.parts-attribution').textContent.includes('Stock and price from DigiKey')) return 'attribution';
+    if (!document.querySelector('.parts-not-looked-up').textContent.includes('54 parts not looked up: no MPN') || document.querySelector('#panel').textContent.includes('JLCPCB')) return 'coverage';
+    if (!cells()[2].textContent.includes('several matches') || cells()[2].textContent.includes('99')) return 'ambiguous';
+    p.parts.supplier.error='1 lookups failed (last: HTTP 500)'; renderPanel();
+    if (!cells()[0].textContent.includes('✔ 1234') || !document.querySelector('.parts-lookup-error')) return 'partial failure blanks successful data';
+    p.parts.lines[0].supplier.url='https://www.digikey.com@evil.com/x'; renderPanel();
+    if (cells()[0].querySelector('a')) return 'unsafe link';
+    p.parts.lines[0].supplier.url='https://www.digikey.evil.com/x'; renderPanel();
+    if (cells()[0].querySelector('a')) return 'unsafe host';
+    p.parts.supplier.fetched_at=new Date(Date.now()-25*36e5).toISOString(); renderPanel();
+    if (cells().some(x=>x.textContent.includes('✔') || x.textContent.includes('in stock')) || !cells()[0].textContent.includes('(stale)')) return 'stale';
+    p.parts.supplier.fetched_at=new Date().toISOString(); p.parts.supplier.currency='CAD'; renderPanel();
+    if (!cells()[0].textContent.includes('CA$1.50')) return 'currency';
+    p.parts.supplier.skipped='no credentials (forked pull request or secrets not set)'; renderPanel();
+    if (!document.querySelector('.parts-age').textContent.includes('DigiKey lookup skipped: no credentials') || cells().some(x=>x.textContent.includes('✔'))) return 'skipped';
+    p.parts.supplier.skipped=null; p.parts.lines[0].supplier={status:'unavailable',mpn:'<img src=x onerror=alert(1)>'}; renderPanel();
+    if (!cells()[0].textContent.includes('unavailable') || document.querySelector('.parts-table img')) return 'unavailable';
+    p.parts.supplier=null; renderPanel();
+    if (cells().some(x=>x.textContent!=='—') || document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error')) return 'disabled supplier UI';
+    p.parts=old; return true;
+  `],
   ["Parts report matches head BOM line count", "t=parts", `
   const parts = REVIEW_DATA.projects[S.p].parts;
   if (!parts || REVIEW_DATA.repo === 'example/parts') return 'skip';
@@ -842,7 +874,7 @@ export const CHECKS = [
   return document.querySelector('[data-tab=parts]').textContent === 'Parts ' + parts.lines.length + (partsProblemCount(parts) ? ' · ' + partsProblemCount(parts) + ' ⚠' : '')
     && document.querySelectorAll('.parts-row').length === parts.lines.length
     && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
-    && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
+    && !document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error');
 `],
   ["Readiness ready message blockMerge is false when unframed", "", `
     return !THREADS_ON && typeof readyMessage === "function" && readyMessage().blockMerge === false && readyMessage().kicadReviewReady === true || "ready message";`],

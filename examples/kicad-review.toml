@@ -28,6 +28,15 @@ enabled = false            # export changed boards as GLB and report footprints 
 [parts]
 enabled = false
 
+# Optional stock and price by MPN. Requires parts.enabled and caller secrets: inherit.
+# Set DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET as repository Actions secrets.
+# Keep it off in public repositories; DigiKey data is for permitted internal use only.
+# [digikey]
+# enabled = false
+# site = "US"
+# currency = "USD"
+# max_lookups = 100
+
 # [interfaces]           # extra net or pin-function names per rule
 # i2c_sda = ["SDA", "TOUCH_SDA"]
 [threads]
@@ -46,6 +55,10 @@ enabled = false
 
 [inventory]
 # "All parts" list in the report. Adds about 100 bytes per part to the report.
+enabled = false
+
+# Optional printable review; requires Chrome in the workflow.
+[pdf]
 enabled = false
 
 [libraries]

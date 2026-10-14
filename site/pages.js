@@ -26,10 +26,10 @@ export function historyPage({ user, owner, repo, pull, title, events, filter }) 
       <ol class="history">${rows || '<li class="muted">Nothing yet.</li>'}</ol></main>` });
 }
 
-export function frame({ title, user, crumbs = [], body, meta = '' }) {
+export function frame({ title, user, crumbs = [], body, meta = '', navigation = true }) {
   const trail = crumbs.map((crumb, index) => `<span>${index < crumbs.length - 1 && crumb.href ? link(crumb.href, crumb.label) : e(crumb.label)}</span>`).join('');
   const account = user ? `<div class="account"><span>Signed in as ${e(user)}</span><form method="post" action="/logout"><button class="btn btn-ghost">Sign out</button></form></div>` : '';
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title>${meta}<style>${tokens}\n${site}</style></head><body><header class="top"><a class="product" href="/">KiCad review</a>${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}${account}</header>${body}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title>${meta}<style>${tokens}\n${site}</style></head><body><header class="top">${navigation ? '<a class="product" href="/">KiCad review</a>' : '<span class="product">KiCad review</span>'}${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}${account}</header>${body}</body></html>`;
 }
 
 export function signedOutPage({ sessionEnded = false } = {}) {
@@ -67,7 +67,7 @@ export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'a
     const revision = item.legacy
       ? '<p class="muted">Revisions not recorded (older report)</p>'
       : `<div class="revpath"><span class="muted">BASE</span><code>${e(item.base)}</code><span class="muted">↓</span><span class="muted">HEAD</span><code>${e(item.head)}</code></div>`;
-    return `<article class="review-card"><div><h2>${e(branch)}</h2>${label}<p class="muted">${e(relativeTime(item.createdAt))} · ${e(item.date)}</p></div><div><p class="revision-label muted">Revision path</p>${revision}</div><div class="review-result">${status(item.result)}${link(`${path}/a/${encodeURIComponent(item.id)}`, 'Open review →', 'btn')}</div></article>`;
+    return `<article class="review-card"><div><h2>${e(branch)}</h2>${label}<p class="muted">${e(relativeTime(item.createdAt))} · ${e(item.date)}</p></div><div><p class="revision-label muted">Revision path</p>${revision}</div><div class="review-result">${status(item.result)}${link(`${path}/a/${encodeURIComponent(item.id)}${item.pdf ? '?pdf=1' : ''}`, 'Open review →', 'btn')}</div></article>`;
   }).join('');
   const content = cards ? `<section class="review-list">${cards}</section>` : `<section class="card empty"><h2>No reviews yet</h2><p>Reviews appear after a push or pull request that changes KiCad files, or after a comparison started here.</p>${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</section>`;
   return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
@@ -80,7 +80,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   const chosen = (sha) => commits.find((commit) => commit.sha === sha);
   const selection = (label, commit) => `<section class="compare-slot"><strong>${label}</strong>${commit ? `<div><code>${e(commit.sha.slice(0, 7))}</code> ${e(commit.message)}</div><small class="muted">${e(commit.author)} · ${e(commit.date)}</small>` : '<div class="muted">not chosen</div>'}</section>`;
   const baseCommit = chosen(base); const headCommit = chosen(head);
-  const rows = commits.map((commit) => `<tr><td><label><input type="radio" name="base" value="${e(commit.sha)}" aria-label="Base ${e(commit.sha)}"${commit.sha === base ? ' checked' : ''}> <span class="sr-only">Base</span></label></td><td><label><input type="radio" name="head" value="${e(commit.sha)}" aria-label="Head ${e(commit.sha)}"${commit.sha === head ? ' checked' : ''}> <span class="sr-only">Head</span></label></td><td><code>${e(commit.sha.slice(0, 7))}</code></td><td title="${e(commit.fullMessage || commit.message)}">${e(commit.message)}</td><td>${e(commit.author)}</td><td title="${e(commit.exactDate || commit.date)}">${e(commit.date)}</td><td>${commit.review ? link(`${path}/a/${encodeURIComponent(commit.review)}`, 'Reviewed') : ''}</td></tr>`).join('');
+  const rows = commits.map((commit) => `<tr><td><label><input type="radio" name="base" value="${e(commit.sha)}" aria-label="Base ${e(commit.sha)}"${commit.sha === base ? ' checked' : ''}> <span class="sr-only">Base</span></label></td><td><label><input type="radio" name="head" value="${e(commit.sha)}" aria-label="Head ${e(commit.sha)}"${commit.sha === head ? ' checked' : ''}> <span class="sr-only">Head</span></label></td><td><code>${e(commit.sha.slice(0, 7))}</code></td><td title="${e(commit.fullMessage || commit.message)}">${e(commit.message)}</td><td>${e(commit.author)}</td><td title="${e(commit.exactDate || commit.date)}">${e(commit.date)}</td><td>${commit.review ? link(`${path}/a/${encodeURIComponent(commit.review)}${commit.pdf ? '?pdf=1' : ''}`, 'Reviewed') : ''}</td></tr>`).join('');
   const alert = notice ? `<div class="notice notice-${e(notice.kind)}" role="status">${e(notice.message)}${files.length ? `<ul class="changed-files mono">${files.map((file) => `<li>${e(file)}</li>`).join('')}</ul>` : ''}</div>` : '';
   const swapForm = swap ? `<form method="post" action="${path}/compare" class="swap-start"><input type="hidden" name="base" value="${e(head)}"><input type="hidden" name="head" value="${e(base)}"><button class="btn btn-primary">Swap and start</button></form>` : '';
   const script = `<script>(() => {
@@ -133,7 +133,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" type="submit">Start review</button><div class="muted" role="status"></div></div></div><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select><button class="btn" form="source-picker">Show</button></div><table class="table"><thead><tr><th>Base</th><th>Head</th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></form><form id="source-picker" method="get"></form>${script}</main>` });
 }
 
-export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = null, runStatus = null, runConclusion = null }) {
+export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false }) {
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
@@ -143,7 +143,8 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = 
   const raw = `${path}/a/${encodeURIComponent(id)}/raw`;
   const run = /^\d+$/.test(String(workflowRunId)) ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(workflowRunId)}` : '';
   const runLink = run ? link(run, 'Open the run on GitHub ↗') : '';
-  const script = `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); iframe.addEventListener('load', () => { fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) loading.hidden = true; if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
+  const script = reportFrameScript(raw);
+  const sharing = share ? shareControls(`${path}/a/${encodeURIComponent(id)}/share`, `${path}/share/revoke`) : '';
   const readiness = Number.isInteger(pull) ? `<section id="readiness" class="readiness" aria-live="polite"><p class="muted">Checking merge readiness…</p></section><script>(${readinessClient.toString()})(${JSON.stringify({ readiness: `${path}/pull/${pull}/readiness`, reviewHead: match ? match[2] : null }).replace(/</g, '\\u003c')});</script>` : '';
   const notice = '<p id="thread-notice" class="muted" role="status" hidden></p>';
   const threads = `<dialog id="thread-composer" class="thread-dialog"><form method="dialog"><h2>New thread</h2><label hidden>Title<input name="title" maxlength="256"></label><p class="thread-target mono"></p>
@@ -154,7 +155,7 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = 
       <label>Reply<textarea name="text" rows="3" maxlength="10000"></textarea></label>
       <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button class="btn" data-act="issue" hidden>Create issue</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
     <script>(${threadsClient.toString()})(${JSON.stringify({ threads: Number.isInteger(pull) ? `${path}/pull/${pull}/threads` : null, issues: `${path}/issues`, pull, rerun: Number.isInteger(pull) ? `${path}/pull/${pull}/rerun` : null, run: `${path}/run/`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>`;
-  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}${readiness}${Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : ''}${notice}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${threads}` });
+  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}${pdf ? link(`${path}/a/${encodeURIComponent(id)}/pdf`, 'Download PDF') : ''}${readiness}${Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : ''}${notice}${share ? '<button class="btn" id="share-open" type="button">Share…</button>' : ''}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${threads}${sharing}` });
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;
@@ -259,4 +260,44 @@ function status(value) {
   if (value === 'new') return '<span class="status status-new">New</span>';
   if (value === 'error') return '<span class="status status-error">⚠ Error</span>';
   return '<span class="status status-notrun">— not recorded</span>';
+}
+
+function reportFrameScript(raw) {
+  return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); iframe.addEventListener('load', () => { fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) loading.hidden = true; if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
+}
+
+export function sharedPage({ token, name }) {
+  const raw = `/s/${encodeURIComponent(token)}/raw`;
+  const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name || '');
+  const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
+  return frame({ title: 'Shared review', navigation: false, body: `<main class="review-page"><div class="review-bar"><span class="mono">${e(revision)}</span><span>Read-only shared review</span></div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="no-referrer" title="KiCad review report"></iframe></div></main>${reportFrameScript(raw)}` });
+}
+function shareControls(create, revoke) {
+  return `<dialog id="share-dialog" aria-labelledby="share-title"><h2 id="share-title">Share this review</h2><p>Anyone with the link can read this review until it expires.</p><form id="share-form"><label>Days (1–30) <input id="share-days" type="number" min="1" max="30" step="1" value="7" required></label><button class="btn btn-primary" type="submit">Create link</button></form><p><label>Read-only link <input id="share-result" readonly></label></p><p id="share-status" role="status" aria-live="polite"></p><button class="btn" id="share-revoke" type="button">Revoke all links for this repository</button><form method="dialog"><button class="btn">Close</button></form></dialog><script>(() => {
+    const dialog = document.getElementById('share-dialog');
+    const status = document.getElementById('share-status');
+    const result = document.getElementById('share-result');
+    document.getElementById('share-open').onclick = () => dialog.showModal();
+    async function post(url, body) {
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not update share links.');
+      return data;
+    }
+    document.getElementById('share-form').onsubmit = async event => {
+      event.preventDefault(); result.value = ''; status.textContent = 'Creating link…';
+      try {
+        const data = await post(${JSON.stringify(create)}, { days: Number(document.getElementById('share-days').value) });
+        const url = new URL(data.url);
+        if (url.origin !== location.origin || !new RegExp('^/s/[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+$').test(url.pathname) || url.search || url.hash || url.username || url.password) throw new Error('Invalid share link.');
+        result.value = url.href; status.textContent = 'Expires ' + new Date(data.expires).toLocaleString();
+      } catch (error) { status.textContent = error.message; }
+    };
+    document.getElementById('share-revoke').onclick = async () => {
+      if (!confirm('Revoke every share link for this repository?')) return;
+      status.textContent = 'Revoking links…';
+      try { await post(${JSON.stringify(revoke)}, {}); result.value = ''; status.textContent = 'All share links for this repository were revoked.'; }
+      catch (error) { status.textContent = error.message; }
+    };
+  })();</script>`;
 }
