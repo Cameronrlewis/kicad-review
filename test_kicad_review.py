@@ -1067,6 +1067,157 @@ assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
 
+# Release readiness: setting and export in render.
+from kicad_review import CHECK_NAMES, cmd_render
+import kicad_review as kr
+assert CHECK_NAMES["release"] == "Release package" and DEFAULT_SETTINGS["checks"]["release"] == "off"
+calls = []
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+    for s in ("base", "head"): open(f"{s}/p/b.kicad_pro", "w").write("{}")
+    json.dump({"projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+    saved = (kr.render_side, kr.release_project)
+    kr.render_side = lambda *a: None
+    kr.release_project = lambda pro, tag, s, out, label: calls.append((pro, tag, out, label)) or []
+    try:
+        cmd_render(None); assert calls == []            # off by default
+        open("base/kicad-review.toml", "w").write('[checks]\nrelease = "informational"\n')
+        cmd_render(None)
+    finally:
+        kr.render_side, kr.release_project = saved
+    os.chdir(_cwd)
+assert calls == [("base/p/b.kicad_pro", "review", "review/p/base/fab", "b"), ("head/p/b.kicad_pro", "review", "review/p/head/fab", "b")], calls
+print("ok release export in render")
+assert 'report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "release"}' in open("kicad_review.py", encoding="utf-8").read()
+print("ok release setting stays out of opted-out reports")
+
+from kicad_review import release_findings, package_summary
+import zipfile as zf
+def fab(d, files, pos_rows, bom_rows, preset="jlcpcb"):
+    os.makedirs(d, exist_ok=True)
+    with zf.ZipFile(f"{d}/b-review-{preset}-gerbers.zip", "w") as z:
+        for name, body in files.items(): z.writestr(name, body)
+    with open(f"{d}/b-review-{preset}-positions.csv", "w") as fh:
+        fh.write("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n" + "".join(f"{r},x,y,0,0,0,Top\n" for r in pos_rows))
+    part = "LCSC Part #" if preset == "jlcpcb" else "Mfg Part #"
+    with open(f"{d}/b-review-{preset}-bom.csv", "w") as fh:
+        fh.write(f"Comment,Designator,Footprint,{part}\n" + "".join(f'x,"{refs}",y,{pn}\n' for refs, pn in bom_rows))
+def pcb(d, layers):
+    open(f"{d}/b.kicad_pcb", "w").write("(kicad_pcb\n  (layers\n" + "".join(f'    (0 "{l}" signal)\n' for l in layers) + "  )\n)\n")
+    return f"{d}/b.kicad_pcb"
+fpd = lambda ref, side, attrs, pads="smd": {"kind": "footprint", "ref": ref, "props": {"layer": side, "attributes": attrs, "pads_kind": pads}}
+G = "%FSLAX46Y46*%\nD10*\nX0Y0D03*\nM02*\n"
+with tempfile.TemporaryDirectory() as d:
+    full = {"b-F_Cu.gtl": G, "b-B_Cu.gbl": G, "b-F_Mask.gts": G, "b-F_Paste.gtp": G, "b-B_Mask.gbs": G, "b-F_Silkscreen.gto": G, "b-Edge_Cuts.gm1": G, "b-PTH.drl": "M48\n"}
+    objs = {"1": fpd("R1", "F.Cu", "smd"), "2": {"kind": "via", "ref": "GND", "props": {}}}
+    fab(d, full, ["R1"], [("R1", "C1")])
+    assert release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "F.Mask", "Edge.Cuts"]), objs) == []
+    s = package_summary(d)
+    assert s["sha256"] and len(s["files"]) == 3 and all(f["bytes"] > 0 for f in s["files"]), s
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if k != "b-PTH.drl"}, ["R1"], [("R1", "C1")])
+    v = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    assert [x["type"] for x in v] == ["missing_drill"] and v[0]["severity"] == "error" and v[0]["where"] == {"board": True}, v
+print("ok vias require a drill file")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, full, ["R1"], [("R1", "C1")])
+    v = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    assert sorted(x["description"] for x in v) == ["No Gerber for copper layer In1.Cu", "No Gerber for copper layer In2.Cu"], v
+print("ok inner copper layers are required")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if "Paste" not in k}, [], [("J1", "C9")])
+    tht = {"1": fpd("J1", "F.Cu", "through_hole", "thru_hole")}
+    assert release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), tht) == []
+print("ok THT-only board needs no paste or position")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, ["R1", "R2"], [("R1", "")], preset="pcbway")
+    v = release_findings(d, "b", "pcbway", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    types = sorted(x["type"] for x in v)
+    assert types == ["bom_missing_part_number", "missing_drill", "position_not_in_bom"], types
+print("ok pcbway drill detected")
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
+    open(p, "a").write('(footprint "J" (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6)))\n')
+    v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "J1", "props": {"layer": "F.Cu", "attributes": "through_hole"}}})
+    assert [x["type"] for x in v] == ["missing_drill"], v
+print("ok plated pads in the board file require a drill file")
+
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    settings = json.loads(json.dumps(DEFAULT_SETTINGS)); settings["checks"].update(erc="off", drc="off", parity="off", bom="off", release="informational")
+    os.makedirs("head/p")   # a project folder with no board (and no schematic, so the other checks read nothing)
+    c = project_checks({"dir": "p", "name": "b"}, settings, {"base": {}, "head": {}})
+    os.chdir(_cwd)
+assert [(x["name"], x["status"], x.get("reason")) for x in c] == [("release", "not_run", "no board")], c
+print("ok no board is not run")
+
+# Tagged releases also publish SHA256SUMS for every release asset.
+import hashlib
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    os.makedirs("repo/B"); open("repo/B/B.kicad_pro", "w").write("{}")
+    def fake(pro, tag, s, out, label):
+        os.makedirs(out, exist_ok=True); open(f"{out}/{label}-{tag}-gerbers.zip", "wb").write(b"zip"); return [f"{out}/{label}-{tag}-gerbers.zip"]
+    saved = kr.release_project; kr.release_project = fake
+    try:
+        with patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_release(type("A", (), {"tag": "v1"}))
+        sums = open("release/SHA256SUMS").read()
+    finally:
+        kr.release_project = saved; os.chdir(_cwd)
+assert sums == f"{hashlib.sha256(b'zip').hexdigest()}  B-v1-gerbers.zip\n", sums
+print("ok release SHA256SUMS")
+
+# Live-test fixes: paste needs real SMD pads; BOM designator ranges expand; release findings keep a stable identity.
+from kicad_review import bom_refs_expand
+assert bom_refs_expand("C1,C3-C5, R10") == {"C1", "C3", "C4", "C5", "R10"}
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if "Paste" not in k and "B_Mask" not in k}, ["A1"], [("A1", "C5")])
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
+    open(p, "a").write('(footprint "Sensor:TO39" (layer "B.Cu") (attr smd) (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6) (layers "*.Cu" "*.Mask")))\n')
+    v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "A1", "props": {"layer": "B.Cu", "attributes": "smd"}}})
+    assert not any("Paste" in x["description"] for x in v), v
+with tempfile.TemporaryDirectory() as d:
+    fab(d, full, ["C3", "C4"], [("C1,C3-C5", "C1")])
+    assert [x["type"] for x in release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)] == []
+    fab(d, full, ["R1"], [("R1", ""), ("R2", "")])
+    a = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    fab(d, full, ["R1"], [("R1,R2", "")])
+    b = release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)
+    assert [x["key"] for x in a] == [x["key"] for x in b], (a, b)
+print("ok release findings: smd pads, ranges, stable keys")
+
+# Final-review fixes: NPTH-only drill, locked footprints, renamed inner layers, missing Designator, empty SHA256SUMS.
+from kicad_review import smd_pad_sides
+assert smd_pad_sides('(footprint "R" locked (layer "B.Cu") (pad "1" smd rect))') == {"B"}
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]); open(p, "a").write('(footprint "H" (pad "" np_thru_hole circle (at 0 0) (size 3 3) (drill 3)))\n')
+    assert [x["type"] for x in release_findings(d, "b", "jlcpcb", p, {})] == ["missing_drill"]
+with tempfile.TemporaryDirectory() as d:
+    fab(d, {**full, "b-GND_PLANE.g2": G}, ["R1"], [("R1", "C1")])
+    p = f"{d}/b.kicad_pcb"
+    open(p, "w").write('(kicad_pcb\n  (layers\n    (0 "F.Cu" signal)\n    (1 "In1.Cu" signal "GND_PLANE")\n    (2 "B.Cu" signal)\n    (25 "Edge.Cuts" user)\n  )\n)\n')
+    assert not any("In1.Cu" in x["description"] for x in release_findings(d, "b", "jlcpcb", p, objs))
+with tempfile.TemporaryDirectory() as d:
+    fab(d, full, ["R1"], [("R1", "C1")])
+    with open(f"{d}/b-review-jlcpcb-bom.csv", "w") as fh: fh.write("Comment,Footprint,LCSC Part #\nx,y,\n")
+    release_findings(d, "b", "jlcpcb", pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]), objs)   # no Designator column: no KeyError
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d); os.makedirs("repo")
+    try:
+        with patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_release(type("A", (), {"tag": "v1"}))
+        assert not os.path.exists("release/SHA256SUMS")
+    finally:
+        os.chdir(_cwd)
+print("ok release final-review fixes")
 # BOM readiness: per-field coverage over BOM parts; placeholders count as missing; multi-unit parts count once.
 from kicad_review import bom_coverage, bom_parts, present
 symp = lambda ref, **p: {"kind": "symbol", "ref": ref, "where": {"sheet": "/"}, "pos": [0, 0], "props": {"in_bom": "yes", **p}}
@@ -1361,6 +1512,209 @@ idx = object_index({}, {"/s1": s1, "f1": f1})
 assert [e["footprint"] for e in idx] == ["Resistor_SMD:R_0402", "Resistor_SMD:R_0402"], idx
 assert DEFAULT_SETTINGS["inventory"] == {"enabled": False}
 print("ok inventory footprint field")
+
+# Libraries: changed symbols and footprints with pin/pad diffs.
+from kicad_review import library_items, library_changes
+SYM = lambda pins, extra="": ('(kicad_symbol_lib (version 20231120) (symbol "LDO" (property "Reference" "U") ' + extra
+    + '(symbol "LDO_1_1" ' + "".join(f'(pin {t} line (at 0 {i} 0) (length 2.54) (name "{n}" (effects)) (number "{num}" (effects)))' for i, (num, n, t) in enumerate(pins) if num != "4")
+    + ') (symbol "LDO_2_1" ' + "".join(f'(pin {t} line (at 5 {i} 0) (length 2.54) (name "{n}" (effects)) (number "{num}" (effects)))' for i, (num, n, t) in enumerate(pins) if num == "4") + ')))')
+FP = lambda pads, model="a.step": ('(footprint "SOT23" (layer "F.Cu") (uuid "11111111-0000-0000-0000-000000000000") '
+    + "".join(f'(pad "{n}" smd rect (at {x} 0) (size 0.6 1) (layers "F.Cu") (uuid "{n}{n}"))' for n, x in pads) + f'(model "{model}"))')
+def lib_tree(root, sym, fp, extra_fp=None):
+    os.makedirs(f"{root}/Parts.pretty", exist_ok=True)
+    open(f"{root}/Parts.kicad_sym", "w").write(sym)
+    open(f"{root}/Parts.pretty/SOT23.kicad_mod", "w").write(fp)
+    if extra_fp: open(f"{root}/Parts.pretty/{extra_fp[0]}.kicad_mod", "w").write(extra_fp[1].replace('"SOT23"', f'"{extra_fp[0]}"'))
+with tempfile.TemporaryDirectory() as d:
+    lib_tree(f"{d}/b", SYM([("1", "IN", "power_in"), ("2", "GND", "power_in"), ("3", "OUT", "power_out"), ("4", "EN", "input")]), FP([("1", 0), ("2", 1), ("3", 2)]))
+    lib_tree(f"{d}/h", SYM([("1", "IN", "power_in"), ("2", "GND", "power_in"), ("3", "OUT", "power_out"), ("4", "EN", "passive")]), FP([("1", 0), ("2", 1)], model="b.step"),
+             extra_fp=("SOT23-5", FP([("1", 0)])))
+    items = library_items(f"{d}/b")
+    assert set(items) == {("Parts", "LDO", "symbol"), ("Parts", "SOT23", "footprint")} and set(items["Parts", "LDO", "symbol"]["pins"]) == {"1", "2", "3", "4"}
+    ch = {(c["kind"], c["item"]): c for c in library_changes(library_items(f"{d}/b"), library_items(f"{d}/h"))}
+    assert ch["symbol", "LDO"]["status"] == "modified" and ch["symbol", "LDO"]["pins_diff"] == [{"pin": "4", "change": "type", "before": "input", "after": "passive"}], ch["symbol", "LDO"]
+    print("ok multi-unit symbol pins are compared together")
+    assert ch["footprint", "SOT23"]["pins_diff"] == [{"pin": "3", "change": "removed", "before": "smd rect (2, 0) 0.6×1", "after": None}]
+    assert ch["footprint", "SOT23-5"]["status"] == "added"
+    print("ok renamed item is removed plus added")
+with tempfile.TemporaryDirectory() as d:
+    lib_tree(f"{d}/b", SYM([("1", "A", "passive")]), FP([("1", 0)], model="a.step")); lib_tree(f"{d}/h", SYM([("1", "A", "passive")]), FP([("1", 0)], model="b.step"))
+    ch = library_changes(library_items(f"{d}/b"), library_items(f"{d}/h"))
+    assert [(c["item"], c["status"], c["pins_diff"]) for c in ch] == [("SOT23", "modified", [])], ch
+print("ok non-pad edits are modified without warnings")
+
+with tempfile.TemporaryDirectory() as d:
+    lib_tree(f"{d}/b", SYM([("1", "A", "passive")]), FP([("1", 0), ("1", 1)]))
+    lib_tree(f"{d}/h", SYM([("1", "A", "passive")]).replace('(length 2.54)', '(length 3)'), FP([("1", 0), ("1", 2)]))
+    changed = library_changes(library_items(f"{d}/b"), library_items(f"{d}/h"))
+    assert all(c["pins_diff"][0]["change"] == "geometry" for c in changed)
+    os.remove(f"{d}/h/Parts.pretty/SOT23.kicad_mod")
+    pathlib.Path(f"{d}/h/Parts.pretty/Renamed.kicad_mod").write_text(FP([("1", 0)]).replace('"SOT23"', '"Renamed"'))
+    renamed = [c for c in library_changes(library_items(f"{d}/b"), library_items(f"{d}/h")) if c["kind"] == "footprint"]
+    assert {(c["item"], c["status"]) for c in renamed} == {("SOT23", "removed"), ("Renamed", "added")}
+    assert next(c for c in renamed if c["status"] == "removed")["pins_diff"][0]["change"] == "removed"
+print("ok library geometry and true rename")
+
+from kicad_review import library_report, lib_slug
+objs_idx = [{"uuid": "a", "kind": "footprint", "ref": "U1", "side": "head", "lib": "Parts:SOT23"}, {"uuid": "b", "kind": "footprint", "ref": "U3", "side": "head", "lib": "Parts:SOT23"},
+            {"uuid": "c", "kind": "symbol", "ref": "U1", "side": "head", "lib": "Parts:LDO"}]
+changes = [{"lib": "Parts", "item": "SOT23", "kind": "footprint", "status": "modified", "file": "Parts.pretty/SOT23.kicad_mod",
+            "pins_diff": [{"pin": "3", "change": "removed", "before": "smd rect (2, 0) 0.6×1", "after": None}]},
+           {"lib": "Parts", "item": "LDO", "kind": "symbol", "status": "modified", "file": "Parts.kicad_sym",
+            "pins_diff": [{"pin": "4", "change": "type", "before": "input", "after": "passive"}]}]
+with tempfile.TemporaryDirectory() as d:
+    os.makedirs(f"{d}/head/lib"); os.makedirs(f"{d}/base/lib")
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><path d="M0 0L1 1"/></svg>'
+    for s in ("base", "head"): open(f"{d}/{s}/lib/{lib_slug(changes[0])}.svg", "w").write(svg)
+    blobs = {}
+    rep = library_report(changes, objs_idx, d, blobs)
+assert rep[0]["used_by"] == ["U1", "U3"] and rep[0]["warnings"] == ["⚠ pad 3 removed while U1, U3 use SOT23"] and rep[0]["svg"]["head"] in blobs and rep[0]["size"] == [10.0, 5.0], rep[0]
+print("ok removed pad in use warns")
+assert rep[1]["warnings"] == ["⚠ pin 4 type input → passive on LDO, used by U1"] and rep[1]["svg"] == {"base": None, "head": None} and rep[1]["note"] == "no drawing", rep[1]
+print("ok missing library drawing is listed")
+
+assert lib_slug({"kind": "symbol", "lib": "a/b", "item": "X"}) != lib_slug({"kind": "symbol", "lib": "a_b", "item": "X"})
+assert "lib" not in object_index(t1_base, t1_head)[0]
+with tempfile.TemporaryDirectory() as d:
+    pathlib.Path(d, "kicad-review.toml").write_text('[libraries]\nenabled = true\n')
+    assert load_settings((d,))["libraries"] == {"enabled": True}
+    pathlib.Path(d, "kicad-review.toml").write_text('[libraries]\nenabled = "yes"\n')
+    try:
+        load_settings((d,))
+        assert False
+    except SystemExit as e:
+        assert "libraries.enabled" in str(e)
+print("ok library settings and safe slugs")
+
+here = os.getcwd()
+try:
+    with tempfile.TemporaryDirectory() as d:
+        os.chdir(d)
+        lib_tree("base", SYM([("1", "IN", "input")]).replace('"LDO"', '"--output"'), FP([("1", 0), ("2", 1)]))
+        lib_tree("head", SYM([("1", "IN", "passive")]).replace('"LDO"', '"--output"'), FP([("1", 0)]))
+        os.makedirs("review")
+        project = {"name": "X", "dir": "", "status": "modified"}
+        pathlib.Path("review/detect.json").write_text(json.dumps({"projects": [project], "base": "b", "head": "h", "reason": "changed"}))
+        settings = json.loads(json.dumps(DEFAULT_SETTINGS))
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side"), patch("kicad_review.library_changes", side_effect=AssertionError("off parsed libraries")), patch("kicad_review.subprocess.run", side_effect=AssertionError("off exported libraries")):
+            kicad_review.cmd_render(None)
+        settings["libraries"]["enabled"] = True
+        calls = []
+        def library_export(args, **kwargs):
+            calls.append(args)
+            pathlib.Path(args[args.index("-o")+1], "item.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 5"><path d="M0 0L1 1"/></svg>')
+            return SimpleNamespace(returncode=0)
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side"), patch("kicad_review.subprocess.run", side_effect=library_export), patch("kicad_review.library_items", wraps=library_items) as parsed:
+            kicad_review.cmd_render(None)
+            assert parsed.call_count == 2
+        assert len(calls) == 4 and all(a[:3] in (["kicad-cli", "sym", "export"], ["kicad-cli", "fp", "export"]) for a in calls)
+        assert any("--symbol=--output" in a for a in calls) and any("--footprint=SOT23" in a for a in calls)
+        objects = {"f1": {**t1_fpo("U1", 1), "props": {"footprint": "Parts:SOT23"}}}
+        with patch("kicad_review.project_objects", return_value=objects):
+            blobs = {}
+            with patch("kicad_review.object_index", wraps=object_index) as indexed:
+                report = build_project(project, blobs, settings)
+                assert indexed.call_count == 1
+            assert len(report["libraries"]) == 2 and report["objects"][0]["lib"] == "Parts:SOT23"
+            assert report["libraries"][0]["used_by"] == ["U1"] and report["libraries"][0]["warnings"]
+            settings["libraries"]["enabled"] = False
+            settings["inventory"]["enabled"] = True
+            with patch("kicad_review.library_changes", side_effect=AssertionError("off parsed libraries")):
+                off = build_project(project, {}, settings)
+                assert "libraries" not in off and "lib" not in off["objects"][0]
+                with patch("kicad_review.object_index", return_value=object_index(objects, objects)):
+                    legacy = build_project(project, {}, settings)
+                assert json.dumps(off, sort_keys=True) == json.dumps(legacy, sort_keys=True)
+                # Golden JSON bytes from the pre-libraries parent, with inventory enabled.
+                import hashlib
+                assert hashlib.sha256(json.dumps(off, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
+                assert comment_markdown({**d2, "projects": [off]}, [], "") == comment_markdown({**d2, "projects": [legacy]}, [], "")
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.build_project", return_value=off):
+            kicad_review.cmd_report(None)
+            assert "libraries" not in json.loads(pathlib.Path("review/data.json").read_text())["settings"]
+finally:
+    os.chdir(here)
+print("ok library exports, objects emission and off byte identity")
+
+# Final review: precomputed item maps avoid parsing; absent/invalid SVGs cannot produce drawable views.
+from kicad_review import svg_size
+with patch("kicad_review.library_items", side_effect=AssertionError("parsed precomputed items")):
+    assert library_changes({}, {}) == []
+assert svg_size('<svg viewBox="-2e1 -3.5 1e2 5E+1"/>') == [100.0, 50.0]
+with tempfile.TemporaryDirectory() as d:
+    os.makedirs(f"{d}/head/lib"); os.makedirs(f"{d}/base/lib")
+    path = pathlib.Path(f"{d}/head/lib/{lib_slug(changes[0])}.svg")
+    for svg in ('<svg viewBox="0 0 10 5"/>', '<svg><path d="M0 0L1 1"/></svg>', '<svg viewBox="0 0 nan 5"><path d="M0 0L1 1"/></svg>'):
+        path.write_text(svg)
+        report = library_report(changes[:1], objs_idx, d, {})[0]
+        assert report["note"] == "no drawing" and report["svg"] == {"base": None, "head": None} and "size" not in report
+    path.write_text('<svg viewBox="-2e1 -3.5 1e2 5E+1"><path d="M0 0L1 1"/></svg>')
+    assert library_report(changes[:1], objs_idx, d, {})[0]["size"] == [100.0, 50.0]
+print("ok library final-review parsing, argv and drawing validation")
+
+# Live PR regression fixtures: legacy module names, exported stems, and nickname fallback.
+import json, os, pathlib, tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
+import kicad_review
+
+_LIVE_ITEM = 'ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP'
+def _live_tree(root, removed=False):
+    folder = pathlib.Path(root, 'Libraries/footprints.pretty'); folder.mkdir(parents=True)
+    pads = '(pad 1 smd rect (at -1.91 2.91 0) (size 0.60 1.20) (layers F.Cu F.Paste F.Mask))'
+    if not removed:
+        pads += '(pad 9 smd rect (at 0 0) (size 2.4 3.1) (layers F.Cu F.Paste F.Mask))'
+    (folder / (_LIVE_ITEM + '.kicad_mod')).write_text('(module easyeda2kicad:' + _LIVE_ITEM + ' (layer F.Cu) (tedit 5DC5F6A4)' + pads + ')')
+    pathlib.Path(root, 'Parts.kicad_sym').write_text('(kicad_symbol_lib (version 20231120) (symbol "Imported:LDO" (symbol "LDO_1_1" (pin input line (at 0 0 0) (length 2.54) (name "IN") (number "1")))))')
+
+def _live_names():
+    with tempfile.TemporaryDirectory() as d:
+        _live_tree(d)
+        items = kicad_review.library_items(d)
+        assert set(items) == {('footprints', _LIVE_ITEM, 'footprint'), ('Parts', 'LDO', 'symbol')}, set(items)
+        assert set(items['footprints', _LIVE_ITEM, 'footprint']['pins']) == {'1', '9'}
+
+def _live_export():
+    here = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d); _live_tree('base'); _live_tree('head', removed=True)
+            pathlib.Path('review').mkdir()
+            pathlib.Path('review/detect.json').write_text(json.dumps({'projects': [{'dir': '', 'name': 'Thermal_Camera', 'status': 'modified'}]}))
+            settings = json.loads(json.dumps(kicad_review.DEFAULT_SETTINGS)); settings['libraries']['enabled'] = True
+            calls = []
+            def export(args, **kwargs):
+                calls.append(args)
+                pathlib.Path(args[args.index('-o') + 1], 'item.svg').write_text('<svg viewBox="0 0 10 5"><path d="M0 0L1 1"/></svg>')
+                return SimpleNamespace(returncode=0)
+            with patch('kicad_review.load_settings', return_value=settings), patch('kicad_review.render_side'), patch('kicad_review.subprocess.run', side_effect=export):
+                kicad_review.cmd_render(None)
+            assert len(calls) == 2 and all('--footprint=' + _LIVE_ITEM in args for args in calls), calls
+    finally:
+        os.chdir(here)
+
+def _live_usage():
+    with tempfile.TemporaryDirectory() as d:
+        _live_tree(d + '/base'); _live_tree(d + '/head', removed=True)
+        items = {side: kicad_review.library_items(d + '/' + side) for side in ('base', 'head')}
+        changes = kicad_review.library_changes(items['base'], items['head'])
+        # Use the correct item identity independently of parser assertions.
+        change = next(c for c in changes if c['kind'] == 'footprint'); change['item'] = _LIVE_ITEM
+        objects = [{'kind': 'footprint', 'lib': 'Thermal Footprints:' + _LIVE_ITEM, 'ref': 'U1', 'side': 'head'}]
+        report = kicad_review.library_report([change], objects, d, {}, local_items=set(items['base']) | set(items['head']))[0]
+        assert report['used_by'] == ['U1'] and report['warnings'] == ['⚠ pad 9 removed while U1 uses ' + _LIVE_ITEM], report
+        keys = set(items['head']) | {('Other', _LIVE_ITEM, 'footprint')}
+        assert kicad_review.library_report([change], objects, d, {}, local_items=keys)[0]['used_by'] == []
+        # A known local nickname must not fall back to a different library's same-named item.
+        keys = set(items['head']) | {('Thermal Footprints', 'Different', 'footprint')}
+        assert kicad_review.library_report([change], objects, d, {}, local_items=keys)[0]['used_by'] == []
+        # Exact matches remain valid even when another library has a duplicate item name.
+        objects[0]['lib'] = 'footprints:' + _LIVE_ITEM
+        assert kicad_review.library_report([change], objects, d, {}, local_items=set(items['head']) | {('Other', _LIVE_ITEM, 'footprint')})[0]['used_by'] == ['U1']
+
+
+_live_names(); _live_export(); _live_usage()
+print("ok live library identity, legacy export and placed-part usage")
 # Readiness: one check run per check across projects, worst result wins; comment block.
 from kicad_review import check_runs, readiness_markdown
 ck = lambda name, title, status, e=0, ne=0: {"name": name, "title": title, "level": "required", "status": status,

@@ -1,5 +1,41 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["Libraries compare modes, used-by jumps and escaped panel", "", `
+    const P = proj(), sheet = P.sheets.find(s => s.svg); if (!sheet) return "skip";
+    P.objects = [{kind: "symbol", ref: "U1", lib: "Parts:X", sheet: sheet.path, pos: [10, 10], side: "head"}];
+    P.libraries = [{lib: "Parts", item: "X", kind: "symbol", status: "modified", file: "f", size: sheet.size, svg: sheet.svg,
+      pins_diff: [{pin: "<img>", change: "type", before: "<b>old</b>", after: "new"}], used_by: ["U1"], warnings: ["<script>bad</script>"]}];
+    S.t = "checks"; select("lib:0");
+    for (const m of ["side", "overlay", "wipe", "blend", "semantic"]) { S.m = m; await draw(); if (!document.querySelector("#stage .stack .layer")) return m; }
+    if (document.querySelector("#panel .lib-info img, #panel .lib-info script, #panel .lib-info td b") || !document.querySelector("#panel .lib-info")?.textContent.includes("<b>old</b>")) return "unescaped";
+    document.querySelector("#panel [data-lib-object]").click(); await new Promise(r => setTimeout(r, 400));
+    if (S.v !== "sheet:" + sheet.path || document.querySelector("#panel .lib-info")) return "used-by did not leave library";
+    const row = P.changes.find(r => viewOf(r) && currentView(viewOf(r))); if (!row) return "no changed object";
+    select("lib:0"); await goTo(row.id);
+    if (document.querySelector("#panel .lib-info")) return "stale library panel after change selection";
+    P.objects[0].sheet = "/missing"; select("lib:0");
+    return !document.querySelector("#panel [data-lib-object]") && document.querySelector("#panel .lib-info").textContent.includes("U1") || "dead used-by button";`],
+
+  ["Libraries changed items are listed, drawn and explained", "", `
+    const P = proj(), sheet = P.sheets.find(s => s.svg); if (!sheet) return "skip";
+    P.libraries = [{ lib: "Parts", item: "SOT23", kind: "footprint", status: "modified", file: "Parts.pretty/SOT23.kicad_mod", size: sheet.size, svg: sheet.svg,
+                     pins_diff: [{ pin: "3", change: "removed", before: "smd rect (2, 0) 0.6×1", after: null }], used_by: ["U1", "U3"], warnings: ["⚠ pad 3 removed while U1, U3 use SOT23"] },
+                   { lib: "Parts", item: "<b>X</b>", kind: "symbol", status: "added", file: "Parts.kicad_sym", svg: { base: null, head: null }, pins_diff: [], used_by: [], warnings: [], note: "no drawing" }];
+    renderNav();
+    const items = [...document.querySelectorAll('#nav [data-view^="lib:"]')];
+    items[0].click(); await new Promise(r => setTimeout(r, 400));
+    const info = document.querySelector("#panel .lib-info")?.textContent || "";
+    const drew = !!document.querySelector("#stage .stack.head .layer");
+    return items.length === 2 && items[1].textContent.includes("<b>X</b>") && !document.querySelector("#nav b") && drew && info.includes("pad 3") && info.includes("U1, U3") && info.includes("⚠")
+      || JSON.stringify({n: items.length, drew, info});`],
+  ["Libraries views survive address round trip and missing drawings", "", `
+    const P = proj(), sheet = P.sheets.find(s => s.svg); if (!sheet) return "skip";
+    P.libraries = [{ lib: "Parts", item: "SOT23", kind: "footprint", status: "modified", file: "f", size: sheet.size, svg: sheet.svg, pins_diff: [], used_by: [], warnings: [] },
+                   { lib: "Parts", item: "LDO", kind: "symbol", status: "added", file: "f", svg: { base: null, head: null }, pins_diff: [], used_by: [], warnings: [], note: "no drawing" }];
+    renderNav();
+    applyState(decodeState("#p=" + S.p + "&v=lib:1")); await new Promise(r => setTimeout(r, 300));
+    return S.v === "lib:1" && document.querySelector("#stage .empty") !== null || JSON.stringify({v: S.v});`],
+
   ["mode activation retains keyboard focus", "", `
     const b = document.querySelector('#modes [data-mode="overlay"]'); b.focus(); b.click();
     return document.activeElement === document.querySelector('#modes [data-mode="overlay"]') || document.activeElement.tagName;`],
@@ -692,6 +728,15 @@ export const CHECKS = [
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
+  ["Release check shows its package", "p=1&t=checks", `
+    const P = proj(); P.checks.push({ name: "release", title: "Release package", level: "informational", status: "pass", errors: 0, warnings: 0, new_errors: 0, new_warnings: 0, fixed: 0, violations: [],
+      package: { files: [{ path: "b-review-jlcpcb-gerbers.zip", bytes: 20480 }, { path: "b-review-jlcpcb-bom.csv", bytes: 300 }], sha256: "ab".repeat(32) } });
+    renderPanel();
+    const t = document.querySelector("#panel .package")?.textContent || "";
+    return t.includes("2 files") && t.includes("abababab") && t.includes("gerbers.zip") || t;`],
+  ["Reports without a release check show no Release package row", "t=checks", `
+    if (!proj().checks || proj().checks.some(c => c.name === "release")) return "skip";
+    return ![...document.querySelectorAll("#panel .check-title")].some(e => e.textContent === "Release package") || "release row shown";`],
   ["BOM coverage and field changes render in the Parts tab", "", `
     const P = proj(); P.parts = P.parts || { lines: [], changes: [], supplier: null };
     P.parts.coverage = { base: { Value: [4, 4], Footprint: [4, 4], LCSC: [3, 4], MPN: [1, 4], Manufacturer: [0, 4], Datasheet: [2, 4], "Datasheet (critical)": [1, 2], "Order ready": [3, 4] },
