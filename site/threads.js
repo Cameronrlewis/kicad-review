@@ -34,7 +34,7 @@ const mdText = (value) => String(value).replace(/[\r\n]/g, ' ').replace(/[\\`*_[
 export function threadBody({ anchor, text, link }) {
   const where = [`📍 ${mdText(anchor.ref || 'point')}`, `\`${anchor.file.replaceAll('`', "'")}\``, anchor.layer && mdText(anchor.layer),
     `(${anchor.x.toFixed(2)}, ${anchor.y.toFixed(2)}) mm`, `[open in review](${link.replace(/[ ()<>`\\\r\n]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'))})`].filter(Boolean).join(' · ');
-  return `${anchor.severity === 'blocking' ? '**Blocking** · ' : ''}${where}\n\n${text}\n\n<!-- kicad-review-anchor ${encodeAnchor(anchor)} -->`;
+  return `${anchor.severity === 'blocking' ? '**Blocking** · ' : ''}${where}\n\n${String(text).replaceAll('<!-- kicad-review-anchor', '<!-- kicad-review\u200b-anchor')}\n\n<!-- kicad-review-anchor ${encodeAnchor(anchor)} -->`;
 }
 
 export function threadText(body) {
@@ -106,7 +106,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     }
     if (rest === '') {
       const prefix = `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/a/`;
-      if (!validAnchor(body.anchor) || !text || text.length > 10000 || typeof body.link !== 'string' || !body.link.startsWith(prefix) || body.link.length > 2000) return json({ error: 'That thread is not valid.' }, 400);
+      if (!validAnchor(body.anchor) || !text || text.length > 10000 || typeof body.link !== 'string' || !body.link.startsWith(prefix) || body.link.length > 2000 || !/^\d{1,20}(?:#[\w\-.:/%=&]*)?$/.test(body.link.slice(prefix.length))) return json({ error: 'That thread is not valid.' }, 400);
       const pull = await gh(`${root}/pulls/${number}`, token);
       const denied = refused(pull); if (denied) return denied;
       if (!pull.ok) return json({ error: 'Pull request not found.' }, 404);

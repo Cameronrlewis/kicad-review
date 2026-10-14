@@ -14,6 +14,8 @@ export function threadsClient(config) {
     const response = await fetch(config.threads + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
   };
+  const tracked = t => t.comments.slice(1).some(c => /\bTracked in #\d+\b/.test(String(c.body || '')));
+  const reviewLink = () => config.link + (location.hash ? '#' + location.hash.slice(1).replace(/[^\w\-.:/%=&]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase()) : '');
   const show = (id) => {
     const t = threads.find((x) => x.id === id); if (!t) return;
     current = id;
@@ -25,7 +27,7 @@ export function threadsClient(config) {
       li.append(who, body); list.append(li);
     }
     view.querySelector('[data-act=resolve]').textContent = t.resolved ? 'Reopen' : 'Resolve';
-    const issue = view.querySelector('[data-act=issue]'); if (issue) issue.hidden = !issuesOn;
+    const issue = view.querySelector('[data-act=issue]'); if (issue) issue.hidden = !issuesOn || tracked(t);
     status(view, ''); if (!view.open) view.showModal();
   };
   const notice = document.getElementById('thread-notice');
@@ -85,15 +87,19 @@ export function threadsClient(config) {
       if (issueMode && !issuesOn) throw new Error('Issues are turned off for this review.');
       if (issueMode) {
         const response = await fetch(config.issues, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ anchor: { ...pending, severity: 'comment' },
-          title: String(form.get('title') || issueMode.title), text: String(form.get('text') || ''), link: config.link + location.hash, pull: config.pull, threadCommentId: issueMode.threadCommentId }) });
+          title: String(form.get('title') || issueMode.title), text: String(form.get('text') || ''), link: reviewLink(), pull: config.pull, threadCommentId: issueMode.threadCommentId }) });
         const result = await response.json().catch(() => ({}));
+        if (response.status === 409) {
+          composer.close(); issueMode = null; await load();
+          notice.textContent = `${result.error || 'Already tracked.'} ${result.url || ''}`; notice.hidden = false; return;
+        }
         if (!response.ok) throw new Error(result.error || 'GitHub did not create the issue.');
         composer.close(); issueMode = null; await load();
         if (result.warning) { notice.textContent = result.warning; notice.hidden = false; }
         return;
       }
       if (!threadsOn) throw new Error('Threads are turned off for this review.');
-      await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: config.link + location.hash });
+      await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: reviewLink() });
       composer.close(); await load();
     } catch (error) { status(composer, error.message); }
     finally { if (submit) submit.disabled = false; }
@@ -103,8 +109,8 @@ export function threadsClient(config) {
     const t = threads.find((x) => x.id === current);
     if (!t) return status(view, 'This thread no longer exists.');
     if (event.submitter?.dataset.act === 'issue') {
-      if (!issuesOn) return;
-      view.close(); compose(t.anchor, { title: `${t.anchor.ref || 'Point'}: ${t.comments[0]?.body || ''}`.slice(0, 120), threadCommentId: t.comments[0]?.id ?? null }); return;
+      if (!issuesOn || tracked(t)) return;
+      view.close(); compose(t.anchor, { title: `${t.anchor.ref || 'Point'}: ${t.comments[0]?.body || ''}`.replaceAll('@', '@\u200b').slice(0, 120), threadCommentId: t.comments[0]?.id ?? null }); return;
     }
     const text = String(new FormData(event.target).get('text') || '');
     try {

@@ -33,6 +33,7 @@ function acceptIssues(list) {
   S.wantThreads = false;
   if (S.v) { renderPanel(); drawPins(); }
 }
+const issueForAnchor = a => (S.issues || []).find(i => ["project", "file", "ref", "x", "y"].every(key => i.anchor[key] === a[key]));
 function findingAnchor(v) {
   const view = viewOf(v), P = proj(), file = view && viewFile(P, view);
   if (!file || !Array.isArray(v.pos) || !Number.isFinite(v.pos[0]) || !Number.isFinite(v.pos[1])) return null;
@@ -569,9 +570,9 @@ function renderChecks() {
     const vs = g.violations.sort((a, b) => (b.new - a.new) || ((a.severity === "error") ? -1 : 1) - ((b.severity === "error") ? -1 : 1));
     const newCount = vs.filter(v => v.new).length, errors = vs.some(v => v.severity === "error");
     return `<details class="check-group" ${newCount ? "open" : ""}><summary><span class="rule">${esc(g.type)}</span><span class="group-description">${esc(vs[0].description)}</span><span class="group-count">${vs.length}</span>${newCount ? `<b class="new-tag">NEW ${newCount}</b>` : ""}<span class="sev">${errors ? "✕ error" : "! warning"}</span></summary>${vs.slice(0, 200).map(v => {
-      const at = v.pos && currentView(viewOf(v));
+      const at = v.pos && currentView(viewOf(v)), issueAnchor = ISSUES_ON && findingAnchor(v);
       return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'} aria-selected="${S.s === v.id}">
-        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${ISSUES_ON && findingAnchor(v) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
+        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${issueAnchor && !issueForAnchor(issueAnchor) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
   return `<div class="checks-summary">${summary}</div><div class="filters checks-filters">
@@ -677,7 +678,7 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
   for (const b of document.querySelectorAll("#panel [data-issue-for]")) b.onclick = () => {
     const v = allViolations().find(x => x.id === b.dataset.issueFor), a = v && findingAnchor(v);
-    if (ISSUES_ON && a) parent.postMessage({ kicadReviewIssueFor: { ...a, title: `${v.check}: ${v.description}`.slice(0, 200) } }, "*");
+    if (ISSUES_ON && a && !issueForAnchor(a)) parent.postMessage({ kicadReviewIssueFor: { ...a, title: `${v.check}: ${v.description}`.slice(0, 200) } }, "*");
   };
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
   for (const b of document.querySelectorAll("#panel [data-thread-status]")) b.onclick = () => { S.threadFilter.status = b.dataset.threadStatus; renderPanel(); draw(); };

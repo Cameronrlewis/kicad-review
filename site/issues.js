@@ -19,6 +19,8 @@ export function parseIssues(list, owner, repo) {
   }).slice(0, 100);
 }
 
+const sameAnchor = (a, b) => ['project', 'file', 'ref', 'x', 'y'].every(key => a[key] === b[key]);
+
 const permissionHint = "Issues need the app's Issues permission (read and write). Ask the repository owner to add it and accept it on this installation.";
 function refused(response) {
   if (response.status === 429 || response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after'))) return json({ error: 'GitHub rate limit reached. Try again later.' }, 429);
@@ -42,14 +44,18 @@ export async function issuesRoute(request, env, { owner, repo, rest }, { access,
   const result = await (async () => {
     if (rest !== '') return json({ error: 'Not found' }, 404);
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, token = allowed.s.token;
-    if (request.method === 'GET') {
+    const loadIssues = async () => {
       // ponytail: first 100 open issues; paginate if a repository ever anchors more.
       const response = await gh(`${root}/issues?state=open&per_page=100`, token);
       const denied = refused(response); if (denied) return denied;
       if (!response.ok) return json({ error: 'GitHub did not load issues. Try again.' }, 502);
       const list = await response.json();
       if (!Array.isArray(list)) return json({ error: 'GitHub did not load issues. Try again.' }, 502);
-      return json({ issues: parseIssues(list, owner, repo) });
+      return parseIssues(list, owner, repo);
+    };
+    if (request.method === 'GET') {
+      const issues = await loadIssues();
+      return issues instanceof Response ? issues : json({ issues });
     }
     if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
     let body;
@@ -61,8 +67,13 @@ export async function issuesRoute(request, env, { owner, repo, rest }, { access,
     try { link = new URL(body.link, url.origin); } catch { /* invalid link below */ }
     if (!validAnchor(body.anchor) || !title || title.length > 256 || typeof body.text !== 'string' || text.length > 10000
       || typeof body.link !== 'string' || !body.link.startsWith(prefix) || body.link.length > 2000
-      || !link || link.origin !== url.origin || !link.pathname.startsWith(prefix) || !/^\d{1,20}(?:#.*)?$/.test(body.link.slice(prefix.length))
+      || !link || link.origin !== url.origin || !link.pathname.startsWith(prefix) || !/^\d{1,20}(?:#[\w\-.:/%=&]*)?$/.test(body.link.slice(prefix.length))
       || body.pull != null && !positive(body.pull) || body.threadCommentId != null && (!positive(body.threadCommentId) || !positive(body.pull))) return json({ error: 'That issue is not valid.' }, 400);
+    if (!allowed.repo?.permissions?.push) return json({ error: 'You need write access to create issues.' }, 403);
+    const issues = await loadIssues();
+    if (issues instanceof Response) return issues;
+    const existing = issues.find(issue => sameAnchor(issue.anchor, body.anchor));
+    if (existing) return json({ error: 'An open issue already tracks this location.', url: existing.url }, 409);
     const pr = positive(body.pull) ? `\n\nPull request: https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${body.pull}` : '';
     const created = await gh(`${root}/issues`, token, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, body: threadBody({ anchor: body.anchor, text: (text || title) + pr, link: url.origin + body.link }) }) });

@@ -972,4 +972,14 @@ export const CHECKS = [
     ISSUES_ON = true; renderPanel();
     const a = findingAnchor(located), button = document.querySelector('#panel [data-issue-for="' + CSS.escape(located.id) + '"]');
     return !!button && a.target === "point" && a.file.endsWith(".kicad_sch") && a.side === "head" && findingAnchor({ ...located, pos: null }) === null && findingAnchor({ ...located, pos: [NaN, 1] }) === null || "finding action missing";`],
+  ["Issues duplicate findings cannot create another issue", "p=1&t=checks", `
+    const checks = proj().checks || []; if (!checks.some(c => c.violations.length)) return "skip";
+    const v = allViolations().find(v => findingAnchor(v)); if (!v) return "skip";
+    const a = findingAnchor(v); ISSUES_ON = true; S.checks.scope = "all"; S.issues = []; renderPanel();
+    const selector = '#panel [data-issue-for="' + CSS.escape(v.id) + '"]';
+    if (!document.querySelector(selector)) return "initial action missing";
+    acceptIssues([{ number: 88, title: "Already tracked", url: "https://github.com/o/r/issues/88", state: "open", anchor: a }]);
+    if (document.querySelector(selector)) return "duplicate action still shown";
+    acceptIssues([{ number: 88, title: "Other file", url: "https://github.com/o/r/issues/88", state: "open", anchor: { ...a, file: "other.kicad_sch" } }]);
+    return !!document.querySelector(selector) || "different location blocked";`],
 ];
