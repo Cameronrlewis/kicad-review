@@ -552,8 +552,17 @@ for changed, summary, existing in (("false", "skipped", "99"), ("false", "skippe
     assert not os.path.exists(f"{t}/{'posted.md' if existing else 'patched.md'}")
 print("ok WF-S2: unchanged comment and detect failure")
 
+# Readiness gates required checks and blocking threads; optional publishing never fails the job.
+fail = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
+assert "if: steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != ''" in fail
+assert "THREADS: ${{ steps.summary.outputs.threads_failed }}" in fail
+publish = wf[wf.index("- name: Publish check runs"):wf.index("- name: Pull request comment")]
+assert "if: ${{ !cancelled() && steps.summary.outputs.check_runs == 'true' }}" in publish
+assert "HEAD: ${{ steps.detect.outputs.head }}" in publish
+assert "review/check-runs.json" in publish and "continue-on-error: true" in publish and "exit 0; }" in publish
+print("ok readiness workflow gate and optional check runs")
+
 # Reports expose an artifact filename containing the compared revisions and result.
-import re
 def report_output(base, head):
     t = tempfile.mkdtemp()
     out = f"{t}/github-output"
@@ -636,7 +645,7 @@ print("ok CK-S4 settings validation")
 
 # Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
 import base64, gzip
-from kicad_review import load_settings, build_project, board_changed, export_glb
+from kicad_review import build_project, board_changed, export_glb
 here = os.getcwd()
 t = tempfile.mkdtemp()
 os.chdir(t)
@@ -687,7 +696,6 @@ os.chdir(here)
 print("ok")
 
 # DR-S2: child sheet files are relative to their parent, including ..; objects use the same paths.
-from kicad_review import sch_objects
 t = tempfile.mkdtemp()
 write(t, {"P/H.kicad_sch": '(kicad_sch (uuid "root") ' + sheet("Child", "sub/child.kicad_sch", "child") + ')',
           "P/sub/child.kicad_sch": '(kicad_sch ' + sheet("Grand", "grand.kicad_sch", "grand") + ')',
@@ -738,7 +746,6 @@ assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", 
 os.chdir(here)
 print("ok DR-S1 renamed project is added")
 # OB-S1: power net and library symbol changes retain UUID and position.
-from kicad_review import sch_objects
 t = tempfile.mkdtemp()
 power = '(kicad_sch (uuid "root") (symbol (uuid "power") (at 1 2 0) (lib_id "power:+3V3") (property "Reference" "#PWR01") (property "Value" "+3V3")))'
 write(t, {"b/P.kicad_sch": power})
@@ -896,7 +903,7 @@ print("ok TS-S2 release zip and CSV contents")
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
-for command in ('node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
+for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 40\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
@@ -904,7 +911,7 @@ print("ok TS-S1 CI browser matrix")
 print("ok")
 
 # Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
-from kicad_review import parts_lines
+from kicad_review import parts_lines, mark_new_problems
 sym = lambda ref, v, lcsc=None, ds="~", mpn=None: {"kind": "symbol", "ref": ref, "props": {
     "Value": v, "Footprint": "R_0805", "Datasheet": ds, **({"LCSC": lcsc} if lcsc is not None else {}),
     **({"MPN": mpn} if mpn else {})}}
@@ -995,9 +1002,12 @@ try:
                 p = data["projects"][0]
                 assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
                 assert ("3d" in data["settings"]) == models_enabled
+                assert "waivers" not in data["settings"] and "waivers" not in data
                 if parts_enabled:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
-                    assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    mark_new_problems(lines["base"], lines["head"])
+                    assert {k: p["parts"][k] for k in ("lines", "changes", "supplier")} == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    assert set(p["parts"]) == {"lines", "changes", "supplier", "coverage", "field_changes", "dnp_mismatch"}
                     assert p["parts"]["changes"][0]["action"] == "swapped"
                 html = pathlib.Path("review/kicad-review.html").read_text()
                 payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
@@ -1006,7 +1016,9 @@ try:
                 assert embedded == data
         settings["parts"]["enabled"] = True
         with patch("kicad_review.project_objects", return_value={}):
-            assert build_project(project, {}, settings)["parts"] == {"lines": [], "changes": [], "supplier": None}
+            empty = build_project(project, {}, settings)["parts"]
+            assert {k: empty[k] for k in ("lines", "changes", "supplier", "field_changes", "dnp_mismatch")} == {"lines": [], "changes": [], "supplier": None, "field_changes": [], "dnp_mismatch": []}
+            assert empty["coverage"]["base"] is None and all(v == [0, 0] for v in empty["coverage"]["head"].values())
 finally:
     os.chdir(here)
 print("ok parts report data")
@@ -1132,3 +1144,621 @@ with tempfile.TemporaryDirectory() as d:
     finally:
         os.chdir(old_cwd)
 print("ok PDF timeout and launch failure are nonfatal")
+
+# BOM readiness: per-field coverage over BOM parts; placeholders count as missing; multi-unit parts count once.
+from kicad_review import bom_coverage, bom_parts, present
+symp = lambda ref, **p: {"kind": "symbol", "ref": ref, "where": {"sheet": "/"}, "pos": [0, 0], "props": {"in_bom": "yes", **p}}
+objs = {"a": symp("U1", Value="STM32", Footprint="QFN", LCSC="C123", MPN="STM32G0", Manufacturer="ST", Datasheet="https://x/ds.pdf"),
+        "b": symp("U1 unit 2", Value="STM32", Footprint="QFN"),
+        "c": symp("R1", Value="10k", Footprint="0402", LCSC="C25744", MPN="TBD"),
+        "d": symp("J1", Value="USB-C", Footprint="USB", Datasheet="~"),
+        "e": symp("R2", Value="1k", Footprint="0402", dnp="yes"),
+        "f": symp("TP1", Value="TP", Footprint="TP", in_bom="no")}
+assert set(bom_parts(objs)) == {"U1", "R1", "J1"}
+assert not present("TBD") and not present("~") and not present("  ") and present("10k")
+s = json.loads(json.dumps(DEFAULT_SETTINGS))
+cov = bom_coverage(objs, s)
+assert cov["Value"] == [3, 3] and cov["MPN"] == [1, 3] and cov["LCSC"] == [2, 3] and cov["Manufacturer"] == [1, 3]
+assert cov["Datasheet (critical)"] == [1, 2]   # U1 has one, J1 has "~"
+assert cov["Order ready"] == [2, 3]            # jlcpcb preset: Value, Footprint, LCSC
+s["fabrication"]["preset"] = "pcbway"
+assert bom_coverage(objs, s)["Order ready"] == [1, 3]   # pcbway: MPN; R1's "TBD" is a placeholder
+s["bom"]["order_ready_fields"] = ["Value"]
+assert bom_coverage(objs, s)["Order ready"] == [3, 3]
+print("ok placeholders count as missing")
+print("ok multi-unit symbol counts once")
+
+# BOM readiness settings stay out of opted-out reports.
+src = open("kicad_review.py", encoding="utf-8").read()
+assert 'report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}' in src
+s = json.loads(json.dumps(DEFAULT_SETTINGS))
+assert s["parts"]["enabled"] is False and set(s["bom"]) == {"required_fields", "critical_prefixes", "order_ready_fields"}
+print("ok bom readiness settings opt-in")
+
+from kicad_review import field_changes
+b = {"1": symp("R1", Value="10k", Footprint="0402", MPN="RC0402-10K"), "2": symp("R2", Value="10k", Footprint="0402", MPN="RC0402-10K"),
+     "3": symp("U1", Value="LDO", Footprint="SOT23", Datasheet="https://a")}
+h = {"1": symp("R1", Value="10k", Footprint="0402", MPN="ERJ-2RKF1002"), "2": symp("R2", Value="10k", Footprint="0402", MPN="RC0402-10K"),
+     "3": symp("U1", Value="LDO", Footprint="SOT23", Datasheet="https://b", Manufacturer="TI"), "4": symp("C1", Value="1u", Footprint="0402")}
+assert field_changes(b, h) == [
+    {"refs": ["R1"], "field": "MPN", "before": "RC0402-10K", "after": "ERJ-2RKF1002"},
+    {"refs": ["U1"], "field": "Manufacturer", "before": None, "after": "TI"},
+    {"refs": ["U1"], "field": "Datasheet", "before": "https://a", "after": "https://b"}], field_changes(b, h)
+h["2"] = symp("R2", Value="10k", Footprint="0402", MPN="ERJ-2RKF1002")
+assert field_changes(b, h)[0]["refs"] == ["R1", "R2"]
+print("ok MPN-only edit shows per reference")
+
+from kicad_review import dnp_mismatches
+L = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1"), "2": symp("U2", Value="LDO", Footprint="SOT23", LCSC="C9", MPN="AP2112"),
+                 "3": symp("U3", Value="LDO", Footprint="SOT89", LCSC="C10", MPN="AP2112")})
+probs = {l["refs"][0]: l["problems"] for l in L}
+assert "placeholder" in probs["R1"] and "mpn_footprint_conflict" in probs["U2"] and "mpn_footprint_conflict" in probs["U3"], probs
+base_lines = parts_lines({"1": symp("R5", Value="1k", Footprint="0402", LCSC="C7"), "2": symp("R6", Value="2k", Footprint="0402", LCSC="C8")})
+head_lines = parts_lines({"1": symp("R5", Value="1k", Footprint="0402", LCSC="C7"), "2": symp("R6", Value="2k", Footprint="0402", LCSC="C7")})
+mark_new_problems(base_lines, head_lines)
+r5 = next(l for l in head_lines if "R5" in l["refs"])
+assert r5["new_problems"] == ["lcsc_conflict"], r5   # R5's line did not change, but its LCSC number now conflicts
+print("ok problem on unchanged line is new")
+fp = lambda ref, attrs: {"kind": "footprint", "ref": ref, "where": {"board": True}, "pos": [0, 0], "props": {"attributes": attrs, **({"dnp": "yes"} if "dnp" in (attrs or "") else {})}}
+mis = dnp_mismatches({"s1": symp("R1", dnp="no"), "s2": symp("R2", dnp="yes"), "s3": symp("R3"), "f1": fp("R1", "smd dnp"), "f2": fp("R2", "smd dnp"), "f3": fp("R3", "smd")})
+assert mis == ["R1"], mis
+print("ok DNP mismatch symbol vs footprint")
+pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": head_lines, "changes": [], "supplier": None, "dnp_mismatch": ["R1"],
+      "coverage": {"base": {"MPN": [1, 4], "Order ready": [2, 4], "LCSC": [4, 4], "Datasheet (critical)": [0, 0]},
+                   "head": {"MPN": [3, 4], "Order ready": [2, 4], "LCSC": [4, 4], "Datasheet (critical)": [0, 0]}}}}]})
+assert "R5 one LCSC number on several values" in pm and "BOM coverage: order ready 2/4, MPN 3/4 (+2), LCSC 4/4" in pm and "DNP differs between schematic and board: R1" in pm, pm
+print("ok bom readiness comment")
+
+# Grouped lines: every reference's MPN and values are checked, and the comment names only the offending references.
+L = parts_lines({"1": symp("R1", Value="10k", Footprint="0805", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0805", MPN="AP2112"),
+                 "3": symp("R3", Value="10k", Footprint="0805"), "4": symp("U1", Value="LDO", Footprint="SOT23", MPN="AP2112")})
+r = next(l for l in L if "R1" in l["refs"])
+assert "placeholder" in r["problems"] and "mpn_footprint_conflict" in r["problems"], r
+assert r["problem_refs"] == {"placeholder": ["R1"], "mpn_footprint_conflict": ["R2"]}, r
+u = next(l for l in L if "U1" in l["refs"])
+assert u["problem_refs"] == {"mpn_footprint_conflict": ["U1"]}, u
+mark_new_problems([], L)
+pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": L, "changes": [], "supplier": None}}]})
+assert "- R1 placeholder value" in pm and "- R2 one MPN on several footprints" in pm and "R3 placeholder" not in pm and "R1, R2, R3 placeholder" not in pm, pm
+print("ok grouped line problems name their references")
+
+# A problem the named references already had in base is not new, even when another reference joins the line.
+bl = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1")})
+hl = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1"), "2": symp("R2", Value="TBD", Footprint="0402", LCSC="C1")})
+mark_new_problems(bl, hl)
+assert "placeholder" in hl[0]["new_problems"] and hl[0]["problem_refs"]["placeholder"] == ["R1", "R2"], hl
+bl = parts_lines({"1": symp("R1", Value="10k", Footprint="0402", LCSC="C1", MPN="TBD")})
+hl = parts_lines({"1": symp("R1", Value="10k", Footprint="0402", LCSC="C1", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0402", LCSC="C1")})
+mark_new_problems(bl, hl)
+assert "placeholder" not in hl[0]["new_problems"], hl
+print("ok old problem not new when a reference joins")
+# Threads: object index for anchoring. Head objects first; base-only objects keep their base position.
+from kicad_review import object_index
+t1_sym = lambda ref, x: {"kind": "symbol", "ref": ref, "match": ("symbol", ref, "1"), "where": {"sheet": "/sub-uuid/"},
+                      "pos": [x, 1, 0], "props": {"Value": "10k"}}
+t1_fpo = lambda ref, x: {"kind": "footprint", "ref": ref, "match": ("footprint", ref), "where": {"board": True},
+                      "pos": [x, 2, 90], "box": [x - 1, 1, x + 1, 3], "props": {"Value": "1k", "layer": "F.Cu"}}
+t1_wire = {"kind": "wire", "ref": "", "where": {"sheet": "/"}, "pos": [0, 0], "props": {}}
+t1_base = {"/sub-uuid/s1": t1_sym("R1", 1), "f1": t1_fpo("R1", 1), "f2": t1_fpo("R2", 2), "/w": t1_wire}
+t1_head = {"/sub-uuid/s1": t1_sym("R1", 1), "f1": t1_fpo("R1", 5), "new-f3": t1_fpo("R3", 3), "/w": t1_wire}
+t1_idx = object_index(t1_base, t1_head)
+t1_by = {(e["side"], e["kind"], e["ref"]): e for e in t1_idx}
+assert set(t1_by) == {("head", "symbol", "R1"), ("head", "footprint", "R1"), ("head", "footprint", "R3"), ("base", "footprint", "R2")}, t1_by.keys()
+assert t1_by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "footprint": None, "side": "head",
+                                      "pos": [1, 1, 0], "box": None, "sheet": "/sub-uuid/"}, t1_by["head", "symbol", "R1"]
+assert t1_by["head", "footprint", "R1"]["pos_before"] == [1, 2, 90] and t1_by["head", "footprint", "R1"]["layer"] == "F.Cu"
+assert t1_by["head", "footprint", "R3"]["added"] is True and "pos_before" not in t1_by["head", "footprint", "R3"]
+assert t1_by["base", "footprint", "R2"]["uuid"] == "f2" and "sheet" not in t1_by["base", "footprint", "R2"]
+assert [e["side"] for e in t1_idx] == ["head", "head", "head", "base"]
+# Regenerated UUID: matched by reference, so not reported as added.
+assert "added" not in object_index({"/sub-uuid/s1": t1_sym("R1", 1)}, {"/sub-uuid/other": t1_sym("R1", 1)})[0]
+print("ok threads object index")
+
+# Exact UUID matches take priority over reference matches in either head order.
+for t1_head in ({"X": t1_sym("R2", 5), "Y": t1_sym("R1", 1)},
+                {"Y": t1_sym("R1", 1), "X": t1_sym("R2", 5)}):
+    t1_idx = object_index({"X": t1_sym("R1", 1)}, t1_head)
+    t1_by = {e["uuid"]: e for e in t1_idx}
+    assert len(t1_idx) == 2 and all(e["side"] == "head" for e in t1_idx), t1_idx
+    assert "added" not in t1_by["X"] and t1_by["X"]["pos_before"] == [1, 1, 0], t1_idx
+    assert t1_by["Y"]["added"] is True and "pos_before" not in t1_by["Y"], t1_idx
+print("ok threads object index exact-key priority")
+
+# Duplicate unannotated references pair one-to-one in base order.
+t1_idx = object_index({"a": t1_sym("R?", 1), "b": t1_sym("R?", 2)},
+                      {"c": t1_sym("R?", 3), "d": t1_sym("R?", 4)})
+assert len(t1_idx) == 2 and all(e["side"] == "head" and "added" not in e for e in t1_idx), t1_idx
+assert [(e["uuid"], e["pos_before"]) for e in t1_idx] == [("c", [1, 1, 0]), ("d", [2, 1, 0])], t1_idx
+print("ok threads object index duplicate matches")
+
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d); os.makedirs("base")
+        with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = "yes"\n')
+        try:
+            load_settings(); raise AssertionError("threads.enabled must be validated")
+        except SystemExit as e:
+            assert "threads.enabled must be true or false" in str(e)
+        with open("base/kicad-review.toml", "w") as fh: fh.write('[threads]\nenabled = true\n')
+        assert load_settings()["threads"] == {"enabled": True, "block_merge": False}
+    finally:
+        os.chdir(_cwd)
+assert DEFAULT_SETTINGS["threads"] == {"enabled": False, "block_merge": False}
+print("ok threads settings")
+
+# Threads: anchors in comment bodies and the summary line.
+import base64 as _b64, json as _json
+from kicad_review import thread_anchor, thread_counts
+enc = lambda a: "<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(_json.dumps(a).encode()).decode().rstrip("=") + " -->"
+a_block = {"v": 1, "severity": "blocking", "target": "object", "ref": "R1--> x"}
+assert thread_anchor("📍 R1\n\ntext\n\n" + enc(a_block)) == a_block
+assert thread_anchor("no anchor") is None and thread_anchor(None) is None
+assert thread_anchor("<!-- kicad-review-anchor !!!notbase64 -->") is None
+assert thread_anchor("<!-- kicad-review-anchor abc -->") is None
+assert thread_anchor(enc([1])) is None
+assert thread_anchor("<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(b'{"v":2}').decode().rstrip("=") + " -->") is None
+a_other = {**a_block, "ref": "R99"}
+assert thread_anchor("mine " + enc(a_other) + "\n\nstill mine\n\n" + enc(a_block)) == a_block
+assert thread_anchor(enc(a_block) + "\ntext after marker") is None
+assert thread_anchor(enc(a_block) + "\n  \t") == a_block
+for suffix in ["﻿", "\x85", "\x1c", "\x1d", "\x1e", "\x1f"]:
+    assert thread_anchor(enc(a_block) + suffix) is None, repr(suffix)
+print("ok threads anchor decode failures and trailing-only markers")
+gql = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+    {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "blocking"})}]}},
+    {"isResolved": False, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "comment"})}]}},
+    {"isResolved": True, "comments": {"nodes": [{"body": enc({"v": 1, "severity": "blocking"})}]}},
+    {"isResolved": False, "comments": {"nodes": [{"body": "an ordinary code review comment"}]}},
+    {"isResolved": False, "comments": {"nodes": []}}]}}}}}
+assert thread_counts(gql) == {"open": 2, "blocking": 1, "resolved": 1}, thread_counts(gql)
+assert thread_counts({"errors": [{"message": "x"}]}) == {"open": 0, "blocking": 0, "resolved": 0}
+tdata = {**d2, "projects": [{"name": "T", "dir": "", "status": "modified", "changes": [], "checks": []}]}
+body = comment_markdown(tdata, [], "", "77", site="https://site.example",
+                        threads={"open": 2, "blocking": 1, "resolved": 1})
+assert "Threads: 2 open (1 blocking), 1 resolved." in body.splitlines(), body
+assert body.count("https://site.example/r/o/r/a/77") == 1, body
+assert "Threads:" not in comment_markdown(tdata, [], "")
+print("ok threads summary")
+
+# Threads: cmd_summary reads counts only when opted in and warns on malformed JSON.
+from types import SimpleNamespace
+from kicad_review import cmd_summary
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        os.makedirs("review")
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": os.devnull, "GITHUB_OUTPUT": os.devnull}):
+            for settings, contents, expected in (
+                ({"threads": {"enabled": True}}, _json.dumps(gql), "Threads: 2 open (1 blocking), 1 resolved."),
+                ({"threads": {"enabled": True}}, "not json", None),
+                ({}, _json.dumps(gql), None),
+            ):
+                if os.path.exists("review/comment.md"):
+                    os.remove("review/comment.md")
+                with open("review/data.json", "w", encoding="utf-8") as fh:
+                    _json.dump({**tdata, "settings": settings}, fh)
+                with open("review/threads.json", "w", encoding="utf-8") as fh:
+                    fh.write(contents)
+                with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+                with open("review/comment.md", encoding="utf-8") as fh:
+                    comment = fh.read()
+                if expected:
+                    assert expected in comment, comment
+                else:
+                    assert "Threads:" not in comment, comment
+                if contents == "not json":
+                    assert "::warning::review/threads.json is not JSON" in stdout.getvalue(), stdout.getvalue()
+    finally:
+        os.chdir(_cwd)
+print("ok threads cmd_summary")
+
+
+# Inventory: footprint in the object index; emitted for inventory as well as threads.
+s1 = {"kind": "symbol", "ref": "R1", "match": ("symbol", "R1", "1"), "where": {"sheet": "/"}, "pos": [1, 1, 0], "props": {"Value": "10k", "Footprint": "Resistor_SMD:R_0402"}}
+f1 = {"kind": "footprint", "ref": "R1", "match": ("footprint", "R1"), "where": {"board": True}, "pos": [5, 5, 0], "box": [4, 4, 6, 6],
+      "props": {"Value": "10k", "footprint": "Resistor_SMD:R_0402", "layer": "F.Cu"}}
+idx = object_index({}, {"/s1": s1, "f1": f1})
+assert [e["footprint"] for e in idx] == ["Resistor_SMD:R_0402", "Resistor_SMD:R_0402"], idx
+assert DEFAULT_SETTINGS["inventory"] == {"enabled": False}
+print("ok inventory footprint field")
+# Readiness: one check run per check across projects, worst result wins; comment block.
+from kicad_review import check_runs, readiness_markdown
+ck = lambda name, title, status, e=0, ne=0: {"name": name, "title": title, "level": "required", "status": status,
+                                             "errors": e, "new_errors": ne, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+rd = {**d2, "projects": [
+    {"name": "A", "dir": "a", "status": "modified", "changes": [], "checks": [ck("erc", "ERC", "pass"), ck("drc", "DRC", "fail", 2, 1)]},
+    {"name": "B", "dir": "b", "status": "modified", "changes": [], "checks": [ck("erc", "ERC", "warn", 1, 0),
+        {**ck("parity", "Schematic/board parity", "not_run"), "reason": "no schematic"}]}]}
+runs = {r["name"]: r for r in check_runs(rd)}
+assert set(runs) == {"kicad-review / ERC", "kicad-review / DRC", "kicad-review / Schematic/board parity"}, runs.keys()
+assert runs["kicad-review / ERC"]["conclusion"] == "neutral" and runs["kicad-review / DRC"]["conclusion"] == "failure"
+assert runs["kicad-review / Schematic/board parity"]["conclusion"] == "skipped"
+assert "| B | ⚠️ warn | 1 (0) |" in runs["kicad-review / ERC"]["output"]["summary"], runs["kicad-review / ERC"]["output"]["summary"]
+assert runs["kicad-review / DRC"]["output"]["title"] == "1 new error"
+block = "\n".join(readiness_markdown(rd, threads={"open": 3, "blocking": 2, "resolved": 0}))
+assert "#### Ready to merge?" in block and "✕ **Required checks:** failing (A DRC)" in block, block
+assert "✕ **Blocking threads:** 2 open" in block and "**Approvals:** see the pull request's reviewers" in block
+ok = {**d2, "projects": [{"name": "A", "dir": "", "status": "modified", "changes": [], "checks": [ck("erc", "ERC", "pass")]}]}
+assert "✓ **Required checks:** passing" in "\n".join(readiness_markdown(ok)) and "Blocking threads" not in "\n".join(readiness_markdown(ok))
+assert "✓ **Blocking threads:** none open" in "\n".join(readiness_markdown(ok, threads={"open": 1, "blocking": 0, "resolved": 0}))
+assert DEFAULT_SETTINGS["github"] == {"check_runs": False} and DEFAULT_SETTINGS["threads"] == {"enabled": False, "block_merge": False}
+assert "#### Ready to merge?" in comment_markdown(ok, [], "")
+print("ok readiness payloads")
+
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d); os.makedirs("base")
+        for text, error in (('[threads]\nblock_merge = true\n', "threads.block_merge needs threads.enabled = true"),
+                            ('[github]\ncheck_runs = 1\n', "github.check_runs must be true or false")):
+            with open("base/kicad-review.toml", "w") as fh: fh.write(text)
+            try:
+                load_settings(); raise AssertionError(error)
+            except SystemExit as e:
+                assert error in str(e), str(e)
+    finally:
+        os.chdir(_cwd)
+print("ok readiness settings")
+
+# Readiness stays visible after the project body is truncated.
+large = {**ok, "projects": [{**ok["projects"][0], "name": "A" * 300} for _ in range(300)]}
+body = comment_markdown(large, [], "")
+assert "… truncated" in body and "#### Ready to merge?" in body and len(body) < 65536
+assert "↗ **Approvals:**" in body
+print("ok readiness comment truncation")
+
+# The opted-in gate fails closed without readable thread counts.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d); os.makedirs("review")
+        for check_runs, gate, contents, failed in (
+            (True, True, None, "blocking threads could not be read"),
+            (True, True, "not json", "blocking threads could not be read"),
+            (True, True, _json.dumps({"errors": [{"type": "FORBIDDEN"}]}), "blocking threads could not be read"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {}}}}), "blocking threads could not be read"),
+            (True, True, _json.dumps([]), "blocking threads could not be read"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {"totalCount": 101, "nodes": []}}}}}), "blocking threads could not be read"),
+            (True, True, _json.dumps(gql), "1 blocking thread open"),
+            (True, True, _json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}), ""),
+            (False, True, None, "blocking threads could not be read"),
+            (True, False, None, ""),
+        ):
+            if os.path.exists("review/threads.json"):
+                os.remove("review/threads.json")
+            if os.path.exists("review/check-runs.json"):
+                os.remove("review/check-runs.json")
+            if contents is not None:
+                with open("review/threads.json", "w") as fh: fh.write(contents)
+            with open("review/data.json", "w") as fh:
+                _json.dump({**ok, "settings": {"threads": {"enabled": True, "block_merge": gate}, "github": {"check_runs": check_runs}}}, fh)
+            with open("outputs", "w") as fh: pass
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": "outputs", "GITHUB_STEP_SUMMARY": os.devnull}), patch("sys.stdout", new_callable=io.StringIO):
+                cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+            with open("review/comment.md") as fh: comment = fh.read()
+            assert ("- ✕ **Blocking threads:** could not be read" in comment) == (failed == "blocking threads could not be read"), comment
+            with open("outputs") as fh: outputs = fh.read()
+            assert outputs == f"check_runs={'true' if check_runs else 'false'}\nthreads_failed={failed}\n", outputs
+            assert os.path.exists("review/check-runs.json") == check_runs
+            if check_runs:
+                with open("review/check-runs.json") as fh: runs = _json.load(fh)
+                thread_runs = [r for r in runs if r["name"] == "kicad-review / Threads"]
+                assert len(thread_runs) == int(gate)
+                if gate:
+                    assert thread_runs[0]["conclusion"] == ("failure" if failed else "success")
+                    assert thread_runs[0]["output"]["title"] == (failed or "no blocking threads open")
+    finally:
+        os.chdir(_cwd)
+print("ok readiness summary gate")
+
+# Cap raw names before Markdown escaping, including an escape at the boundary.
+escaped = {**ok, "projects": [{**ok["projects"][0], "name": "a" * 999 + "*", "checks": [ck("erc", "ERC", "fail")]}]}
+assert md("a" * 999 + "*… (full list in Checks)") in "\n".join(readiness_markdown(escaped))
+assert "- ✕ **Blocking threads:** could not be read" in readiness_markdown(ok, threads_required=True)
+print("ok readiness unreadable threads and escape boundary")
+
+# Readiness: the gate passes with threads enabled but none blocking.
+assert "✓ **Blocking threads:** none open" in "\n".join(readiness_markdown(ok, threads={"open": 0, "blocking": 0, "resolved": 0}))
+print("ok gate passes with no blocking threads")
+
+# Waivers: a stable key per violation, from the same identity used to call a violation "new".
+from kicad_review import waiver_key, load_violations
+v1 = {"type": "clearance", "severity": "error", "description": "Clearance violation (0.15 mm < 0.2 mm)", "items": ["Pad 1 of J1", "Track"],
+      "uuids": ["u-b", "u-a"], "pos": [10.0, 5.0], "box": None, "where": {"board": True}}
+k = waiver_key(v1)
+assert re.fullmatch(r"w-[0-9a-f]{12}", k), k
+assert k == "w-9ca330438b76"
+assert waiver_key({**v1, "uuids": []}) == "w-6a0c64898488"
+assert waiver_key({**v1, "key": ("custom", "id")}) == "w-07981c798d2b"
+assert waiver_key({**v1, "severity": "warning"}) == "w-46e733a72221"
+assert waiver_key({**v1, "uuids": ["u-a", "u-b"]}) == k
+assert waiver_key({**v1, "description": "Clearance violation (0.11 mm < 0.2 mm)", "pos": [11, 6]}) == k  # same UUIDs: same finding
+assert waiver_key({**v1, "uuids": ["u-c"]}) != k
+assert waiver_key({**v1, "severity": "warning"}) != k
+no_uuid = {**v1, "uuids": []}
+assert waiver_key(no_uuid) == waiver_key({**no_uuid, "description": "Clearance violation (0.1 mm < 0.2 mm)"})  # numbers normalised
+assert waiver_key(no_uuid) != waiver_key({**no_uuid, "pos": [30.0, 5.0]})
+print("ok waiver keys")
+
+import json as _j, tempfile as _t, os as _o
+with _t.TemporaryDirectory() as d:
+    unc = lambda: {"type": "unconnected_items", "severity": "error", "description": "Missing connection",
+                   "items": [{"description": "Pad 1 [GND] of R1", "pos": {"x": 1, "y": 1}}, {"description": "Pad 2 [GND] of R2", "pos": {"x": 2, "y": 2}}]}
+    with open(f"{d}/drc.json", "w") as fh:
+        _j.dump({"violations": [], "unconnected_items": [unc(), unc()]}, fh)
+    vs = load_violations(f"{d}/drc.json", "drc")
+    assert len({waiver_key(v) for v in vs}) == 2, [waiver_key(v) for v in vs]
+    assert [waiver_key(v) for v in vs] == [waiver_key(v) for v in load_violations(f"{d}/drc.json", "drc")]
+print("ok unconnected duplicates get distinct keys")
+
+# Waivers: read from the target ref with git, head copy only proposes; invalid entries skipped; expiry by date.
+import datetime
+from kicad_review import load_waivers
+
+def load_waivers_on(ref, today):
+    with patch("kicad_review.datetime.datetime") as clock:
+        clock.now.return_value.date.return_value = today
+        return load_waivers(ref)
+
+WFILE = '''[[waiver]]
+check = "drc"
+match = "%s"
+reason = "intended"
+by = "ann"
+date = 2026-10-01
+until = 2026-12-31
+
+[[waiver]]
+check = "drc"
+match = "w-000000000000"
+reason = "old"
+by = "ann"
+date = 2026-01-01
+until = 2026-02-01
+
+[[waiver]]
+check = "bom"
+match = "w-111111111111"
+reason = "nope"
+by = "ann"
+date = 2026-10-01
+permanent = true
+
+[[waiver]]
+check = "drc"
+match = "w-222222222222"
+reason = ""
+by = "ann"
+date = 2026-10-01
+permanent = true
+''' % k
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d, patch("sys.stdout", new_callable=io.StringIO):
+    try:
+        os.chdir(d)
+        subprocess.run(["git", "init", "-q", "repo"], check=True)
+        open("repo/kicad-review-waivers.toml", "w").write(WFILE)
+        subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
+        subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "w"], check=True)
+        ref = subprocess.run(["git", "-C", "repo", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        os.makedirs("head")
+        open("head/kicad-review-waivers.toml", "w").write(WFILE + '\n[[waiver]]\ncheck = "erc"\nmatch = "w-333333333333"\nreason = "new"\nby = "bo"\ndate = 2026-10-12\npermanent = true\n')
+        w = load_waivers_on(ref, datetime.date(2026, 10, 12))
+        assert set(w["active"]) == {("drc", k)}, w["active"]
+        assert [e["match"] for e in w["expired"]] == ["w-000000000000"]
+        assert [e["match"] for e in w["proposed"]] == ["w-000000000000", "w-333333333333"]
+        assert len(w["invalid"]) == 4, w["invalid"]  # changed head retains all invalid entries
+        head_file = pathlib.Path("head/kicad-review-waivers.toml")
+        head_file.write_text(WFILE)
+        assert len(load_waivers_on(ref, datetime.date(2026, 10, 12))["invalid"]) == 2  # identical files report once
+        head_file.write_text(WFILE + "\n")
+        assert len(load_waivers_on(ref, datetime.date(2026, 10, 12))["invalid"]) == 4  # even whitespace makes the text distinct
+        head_file.write_text(WFILE.replace("until = 2026-02-01", "until = 2026-12-31"))
+        renewed = load_waivers_on(ref, datetime.date(2026, 10, 12))
+        assert [e["match"] for e in renewed["proposed"]] == ["w-000000000000"], renewed
+        assert renewed["proposed"][0]["until"] == "2026-12-31"
+        head_file.write_text(WFILE.replace("w-222222222222", "w-444444444444"))
+        invalid = load_waivers_on(ref, datetime.date(2026, 10, 12))["invalid"]
+        assert len([m for m in invalid if "reason must not be empty" in m]) == 2, invalid
+        assert load_waivers_on(ref, datetime.date(2027, 1, 1))["active"] == {}  # the day after until
+        assert load_waivers(None)["active"] == {}  # no target ref: nothing applies
+    finally:
+        os.chdir(_cwd)
+print("ok waivers come from the target ref, not the merge base")
+print("ok expired waivers do not apply")
+print("ok invalid waiver entries are skipped, not fatal")
+
+# Applying: the waived error stops failing the check but stays listed.
+settings = json.loads(json.dumps(DEFAULT_SETTINGS)); settings["waivers"] = {"enabled": True}
+active = {"active": {("drc", k): {"check": "drc", "match": k, "reason": "intended", "by": "ann", "until": "2026-12-31", "permanent": False, "ref": None}},
+          "expired": [], "proposed": [], "invalid": []}
+c = run_check("drc", settings, [dict(v1)], [], waivers=active)
+assert c["status"] == "pass" and c["errors"] == 0 and c["new_errors"] == 0 and c["waived"] == 1, c
+assert c["violations"][0]["waived"] == {"reason": "intended", "by": "ann", "until": "2026-12-31", "ref": None}
+assert c["violations"][0]["waiver_key"] == k
+assert run_check("drc", settings, [dict(v1)], [], waivers=None)["status"] == "fail"
+assert "waiver_key" not in run_check("drc", settings, [dict(v1)], [])["violations"][0]
+print("ok waived findings stop failing")
+
+# Invalid TOML shapes and field types must warn, never crash or apply.
+from kicad_review import parse_waivers
+valid = WFILE.split("\n[[waiver]]", 1)[0]
+for bad_text in ("waiver = [1]", "[waiver]\ncheck = 'drc'", "waiver = 'wrong'", "[[waiver]",
+                 valid.replace("until = 2026-12-31", "until = 2026-12-31T00:00:00"),
+                 valid.replace("date = 2026-10-01", "date = 2026-10-01T00:00:00"),
+                 valid.replace('check = "drc"', 'check = ["drc"]'),
+                 valid.replace('match = "' + k + '"', "match = 1"),
+                 valid.replace('reason = "intended"', "reason = false"),
+                 valid.replace('by = "ann"', "by = 1"),
+                 valid + "\npermanent = 'true'", valid + "\nref = 1",
+                 valid.replace("until = 2026-12-31", "until = '2026-12-31'\npermanent = true")):
+    entries, invalid = parse_waivers(bad_text, "fixture")
+    assert entries == [] and invalid, (bad_text, entries, invalid)
+print("ok invalid waiver shapes and types are rejected")
+
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        subprocess.run(["git", "init", "-q", "repo"], check=True)
+        path = pathlib.Path("repo/kicad-review-waivers.toml")
+        path.write_text(valid)
+        subprocess.run(["git", "-C", "repo", "add", "."], check=True)
+        subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "valid"], check=True)
+        sha = subprocess.check_output(["git", "-C", "repo", "rev-parse", "HEAD"], text=True).strip()
+        subprocess.run(["git", "-C", "repo", "update-ref", "refs/remotes/origin/main", sha], check=True)
+        assert set(load_waivers_on("origin/main", datetime.date(2026, 12, 31))["active"]) == {("drc", k)}
+        for bad_text in ("waiver = [1]", "[waiver]\ncheck = 'drc'",
+                         valid.replace("until = 2026-12-31", "until = 2026-12-31T00:00:00")):
+            path.write_text(bad_text)
+            subprocess.run(["git", "-C", "repo", "add", "."], check=True)
+            subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "invalid"], check=True)
+            sha = subprocess.check_output(["git", "-C", "repo", "rev-parse", "HEAD"], text=True).strip()
+            subprocess.run(["git", "-C", "repo", "update-ref", "refs/remotes/origin/main", sha], check=True)
+            with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+                result = load_waivers("origin/main")
+            assert not result["active"] and result["invalid"]
+            assert "::warning::" in warnings.getvalue() and sha[:7] in warnings.getvalue()
+    finally:
+        os.chdir(_cwd)
+print("ok live target ref and invalid target files")
+
+warning = {**v1, "severity": "warning"}
+warning_key = waiver_key(warning)
+all_active = copy.deepcopy(active)
+all_active["active"][("drc", warning_key)] = {**active["active"][("drc", k)], "match": warning_key}
+settings["fail_on"] = "all"
+c = run_check("drc", settings, [dict(v1), warning], [dict(v1)], all_active)
+assert c["status"] == "pass" and c["waived"] == 2 and c["warnings"] == c["new_warnings"] == c["errors"] == c["new_errors"] == c["fixed"] == 0
+plain = run_check("drc", settings, [dict(v1)], [])
+assert "waived" not in plain and "waiver_key" not in plain["violations"][0]
+print("ok waiver counters and opted-out violation fields")
+
+# Report wiring reads no waiver file when off; live target ref wins over local fallback.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        pathlib.Path("review").mkdir()
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "local-base", "head": "h", "reason": "fixture", "projects": [project]}))
+        for enabled, target in ((False, "origin/main"), (True, "origin/release"), (True, "")):
+            settings = copy.deepcopy(DEFAULT_SETTINGS)
+            settings["waivers"]["enabled"] = enabled
+            with patch.dict(os.environ, {"WAIVERS_REF": target}), patch("kicad_review.load_settings", return_value=settings), \
+                 patch("kicad_review.load_waivers", return_value=active) as loader, \
+                 patch("kicad_review.build_project", return_value={"checks": [], "changes": []}) as builder, \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                kicad_review.cmd_report(None)
+            if enabled:
+                loader.assert_called_once_with(target or "local-base")
+            else:
+                loader.assert_not_called()
+                assert "waivers" not in json.loads(pathlib.Path("review/data.json").read_text())
+            assert builder.call_args.args[3] == (active if enabled else None)
+    finally:
+        os.chdir(_cwd)
+print("ok waiver report opt-in and target-ref wiring")
+
+# Untrusted refs cannot become git options; unsafe or huge head files are never parsed.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        subprocess.run(["git", "init", "-q", "repo"], check=True)
+        for ref in ("--output=x", "missing-target"):
+            with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+                result = load_waivers(ref)
+            assert not result["active"] and result["invalid"] == [f"kicad-review-waivers.toml: cannot resolve {ref}"]
+            assert "::warning::" in warnings.getvalue()
+            assert not pathlib.Path("x").exists() and not pathlib.Path("repo/x").exists()
+        pathlib.Path("head").mkdir()
+        head_file = pathlib.Path("head/kicad-review-waivers.toml")
+        head_file.symlink_to("/dev/zero")
+        with patch("sys.stdout", new_callable=io.StringIO), patch("builtins.open", side_effect=AssertionError("symlink must not be opened")):
+            result = load_waivers(None)
+        assert not result["proposed"] and any("symlink" in m for m in result["invalid"])
+        head_file.unlink()
+        head_file.write_bytes(b" " * (1024 * 1024 + 1))
+        with patch("sys.stdout", new_callable=io.StringIO):
+            result = load_waivers(None)
+        assert not result["proposed"] and any("exceeds 1 MiB" in m for m in result["invalid"])
+    finally:
+        os.chdir(_cwd)
+print("ok waiver ref options, missing refs, symlinks and size limit")
+
+# Comment summaries distinguish waived findings from new errors and escape waiver text.
+from kicad_review import waiver_lines, checks_markdown
+entry = {"check": "erc", "match": "w-444444444444", "reason": "gone", "by": "bo"}
+wd = {"projects": [{"name": "A", "checks": [{**c, "violations": [{**v1, "new": True, "waived": {"reason": "intended"}}], "waived": 1}]}],
+      "waivers": {"stale": [entry], "expired": [{**entry, "until": "2026-02-01"}],
+                  "proposed": [entry], "invalid": ["waiver 3: reason must not be empty"]}}
+text = "\n".join(waiver_lines(wd))
+assert "1 finding waived" in text
+assert "Waiver not matched in this review: erc w-444444444444 (gone, by bo) (if its finding is gone, remove it)." in text
+assert "Expired waiver: erc w-444444444444 (gone, by bo) ended 2026-02-01." in text
+assert "Proposed in this change (applies after it merges): erc w-444444444444 (gone, by bo)." in text
+assert "waiver 3: reason must not be empty" in text
+assert "New errors" not in checks_markdown(wd) and "1 finding waived" in checks_markdown(wd)
+unwaived = copy.deepcopy(wd)
+unwaived["projects"][0]["checks"][0]["violations"].append({**v1, "new": True, "description": "real new error"})
+assert "real new error" in checks_markdown(unwaived)
+assert waiver_lines(d2) == [] and "waived" not in checks_markdown(d2)
+unsafe = "[link](x) *bold* <img> @ann | `code`"
+for field in ("check", "match", "reason", "by", "until"):
+    escaped = copy.deepcopy(wd)
+    escaped["waivers"]["expired"][0][field] = unsafe
+    rendered = "\n".join(waiver_lines(escaped))
+    assert md(unsafe) in rendered and unsafe not in rendered, (field, rendered)
+empty = {"projects": [], "waivers": {"stale": [], "expired": [], "proposed": [], "invalid": []}}
+assert waiver_lines(empty) == [] and "waived" not in checks_markdown(empty)
+for field in ("check", "match", "reason", "by", "until"):
+    multiline = copy.deepcopy(wd)
+    multiline["waivers"]["expired"][0][field] = "a\nb\r\n\t c"
+    lines = waiver_lines(multiline)
+    assert any("a b c" in line for line in lines)
+    assert all("\n" not in line and "\r" not in line and "\t" not in line for line in lines)
+multiline["waivers"]["invalid"] = ["a\nb"]
+assert "- Ignored: a b" in waiver_lines(multiline)
+print("ok stale waivers are listed and waived errors stay out of new errors")
+print("ok waiver text stays on one line and empty waiver summaries are omitted")
+
+# Exercise stale classification in cmd_report, including repeated keys across projects.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    try:
+        os.chdir(d)
+        pathlib.Path("review").mkdir()
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [project, project]}))
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings["waivers"]["enabled"] = True
+        loaded = {"active": {("drc", k): {**entry, "check": "drc", "match": k}, ("erc", entry["match"]): entry},
+                  "expired": wd["waivers"]["expired"], "proposed": [entry], "invalid": ["bad entry"]}
+        with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.load_waivers", return_value=loaded), \
+             patch("kicad_review.build_project", side_effect=lambda *args: {"checks": [{"name": "drc", "violations": [{"waiver_key": k, "waived": {"reason": "intended"}}], "status": "pass"}], "changes": []}), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            kicad_review.cmd_report(None)
+        data = json.loads(pathlib.Path("review/data.json").read_text())
+        assert data["waivers"] == {"stale": [entry], "expired": loaded["expired"], "proposed": [entry], "invalid": ["bad entry"]}
+        payload = pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
+        assert json.loads(payload)["waivers"] == data["waivers"]
+    finally:
+        os.chdir(_cwd)
+print("ok report stale classification and embedded waiver data")
+
+# Checkout's full-history fetch populates all remote branches even for detached PR heads.
+wf = pathlib.Path(".github/workflows/review.yml").read_text()
+checkout = wf.split("- name: Check out project history", 1)[1].split("- name: Check out review tools", 1)[0]
+assert "fetch-depth: 0" in checkout and "path: repo" in checkout
+assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in checkout, "SHA checkout must not reset a live origin branch to the event's old commit"
+assert "WAIVERS_REF: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}" in wf
+print("ok workflow live waiver target and full-history project checkout")
+
+# Readiness keeps waived findings visible without treating them as blockers.
+assert "- ↷ **Waived findings:** 1 (not blocking)" in readiness_markdown(wd)
+assert not any("Waived" in line for line in readiness_markdown(d2))
+assert "- ↷ **Waived findings:** 0 (not blocking)" in readiness_markdown(empty)
+assert readiness_markdown(wd)[-2].startswith("- ↷ **Waived findings:**")
+print("ok waived row in readiness")
