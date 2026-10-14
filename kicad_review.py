@@ -604,7 +604,7 @@ CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "
 INTERFACE_PATTERNS = {
     "uart_tx": ["TX", "TXD", "UART_TX", "USART_TX"],
     "i2c_sda": ["SDA", "I2C_SDA"], "i2c_scl": ["SCL", "I2C_SCL"], "can_h": ["CANH", "CAN_H"], "can_l": ["CANL", "CAN_L"],
-    "spi": ["MOSI", "MISO", "SCK", "SCLK", "SDI", "SDO"],
+    "spi": [],  # accepted for compatibility with existing settings; no SPI rule
     "esd_parts": ["ESD", "TVS", "USBLC", "PESD", "PRTR", "SRV05", "TPD", "SP05", "SMAJ", "SMBJ"],
 }
 
@@ -948,7 +948,7 @@ def interface_check(p, settings, objs, out_dir):
 
 def interface_findings(comps, nets, patterns, where_of):
     """Design-review rules on one revision's netlist. Every finding carries its nets and pins as evidence."""
-    out, detected, skipped = [], {}, []
+    out, detected = [], {}
     pin_net = {(n["ref"], n["pin"]): name for name, nodes in nets.items() for n in nodes}
     # ponytail: resistor arrays are ignored; add per-element topology if array support is needed.
     is_res = lambda ref: re.match(r"R\d", ref) and ohms(comps.get(ref, {}).get("value")) is not None
@@ -982,8 +982,10 @@ def interface_findings(comps, nets, patterns, where_of):
             elif len(ups) > 1:
                 par = 1 / sum(1 / ohms(comps[n["ref"]]["value"]) for n in ups)
                 add("i2c_multiple_pullups", "warning", f"{name} has {len(ups)} pull-ups in parallel ({round(par)} Ω).", ups[0]["ref"], [node_txt(n) for n in ups])
-    can_h = [name for name, nodes in nets.items() if matches(short(name), patterns["can_h"]) or any(matches(n["function"], patterns["can_h"]) for n in nodes)]
-    can_l = [name for name, nodes in nets.items() if matches(short(name), patterns["can_l"]) or any(matches(n["function"], patterns["can_l"]) for n in nodes)]
+    def matching_nets(key):
+        return [name for name, nodes in nets.items() if matches(short(name), patterns[key]) or any(matches(n["function"], patterns[key]) for n in nodes)]
+
+    can_h, can_l = matching_nets("can_h"), matching_nets("can_l")
     if can_h and can_l:
         detected["CAN"] = len(can_h)
         terminated = any(is_res(n["ref"]) and 114 <= ohms(comps[n["ref"]]["value"]) <= 126 and other(n["ref"], n["pin"]) in can_l for h in can_h for n in nets[h])
@@ -994,14 +996,14 @@ def interface_findings(comps, nets, patterns, where_of):
         if not (re.match(r"J\d", ref) and re.search(r"USB.?C|TYPE.?C", f"{c['lib']} {c['value']} {c['footprint']}", re.I)):
             continue
         detected["USB-C"] = detected.get("USB-C", 0) + 1
-        for (r, pin), name in pin_net.items():
-            node = next(n for n in nets[name] if n["ref"] == r and n["pin"] == pin)
-            if r != ref or not re.fullmatch(r"CC\d?", node["function"].upper()):
-                continue
-            pulled = any(is_res(n["ref"]) and 4850 <= ohms(comps[n["ref"]]["value"]) <= 5360 and is_ground(other(n["ref"], n["pin"]) or "") for n in nets[name])
-            driven = any(n["ref"] != ref and not is_res(n["ref"]) and not esd(n["ref"]) for n in nets[name])
-            if not pulled and not driven:
-                add("usb_cc_floating", "error", f"{node['function']} of {ref} floats: needs 5.1 kΩ to GND or a PD controller.", ref, [node_txt(node)])
+        for name, nodes in nets.items():
+            for node in nodes:
+                if node["ref"] != ref or not re.fullmatch(r"CC\d?", node["function"].upper()):
+                    continue
+                pulled = any(is_res(n["ref"]) and 4850 <= ohms(comps[n["ref"]]["value"]) <= 5360 and is_ground(other(n["ref"], n["pin"]) or "") for n in nets[name])
+                driven = any(n["ref"] != ref and not is_res(n["ref"]) and not esd(n["ref"]) for n in nets[name])
+                if not pulled and not driven:
+                    add("usb_cc_floating", "error", f"{node['function']} of {ref} floats: needs 5.1 kΩ to GND or a PD controller.", ref, [node_txt(node)])
     # ponytail: same-net only; follow series resistors one hop if teams protect through them
     total = prot = 0
     for ref in sorted((r for r in comps if re.match(r"J\d", r)), key=natural):
@@ -1030,11 +1032,7 @@ def interface_findings(comps, nets, patterns, where_of):
             if rails[a].isdisjoint(rails[b]):
                 add("voltage_domain", "warning", f"{name} joins {a} ({', '.join(sorted(rails[a]))}) and {b} ({', '.join(sorted(rails[b]))}). Check levels.", a, [name])
                 break
-    if any(matches(short(n), patterns["spi"]) for n in nets):
-        detected["SPI nets"] = sum(1 for n in nets if matches(short(n), patterns["spi"]))
-        skipped.append({"interface": "SPI", "reason": "no SPI rule yet"})
-    checked = [k for k in detected if k != "SPI nets"] + (["connector protection"] if total else [])
-    return out, {"detected": detected, "checked": checked, "skipped": skipped, "protected": [prot, total]}
+    return out, {"detected": detected, "protected": [prot, total]}
 
 
 def page_svg(out_dir, name, page):

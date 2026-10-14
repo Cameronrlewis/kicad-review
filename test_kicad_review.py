@@ -1186,8 +1186,8 @@ class FinalReviewTests(unittest.TestCase):
 
     def test_coverage_units(self):
         _, cov = self.findings({}, {"SDA": [("U1", "1", "SDA", "bidirectional")], "SCK": []})
-        self.assertEqual(cov["detected"], {"I2C nets": 1, "SPI nets": 1})
-        self.assertNotIn("SPI nets", cov["checked"])
+        self.assertEqual(cov["detected"], {"I2C nets": 1})
+        self.assertEqual(cov["protected"], [0, 0])
 
 _result = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(FinalReviewTests))
 assert _result.wasSuccessful(), "final-review regressions failed"

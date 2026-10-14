@@ -694,10 +694,10 @@ export const CHECKS = [
     return S.s === "c2" && S.v === "3d";`],
   ["Interfaces check shows coverage", "p=1&t=checks", `
     proj().checks.push({ name: "interfaces", title: "Interfaces", level: "informational", status: "pass", errors: 0, warnings: 0, new_errors: 0, new_warnings: 0, fixed: 0, violations: [],
-      coverage: { detected: { "I2C nets": 2, "SPI nets": 4 }, checked: ["I2C nets", "connector protection"], skipped: [{ interface: "SPI", reason: "no SPI rule yet" }], protected: [3, 5] } });
+      coverage: { detected: { "I2C nets": 2 }, protected: [3, 5] } });
     renderPanel();
     const t = document.querySelector("#panel .check-coverage")?.textContent || "";
-    return t.includes("I2C nets 2") && t.includes("SPI nets 4") && t.includes("SPI: no SPI rule yet") && t.includes("3 of 5 connector signal pins") || t;`],
+    return t.includes("I2C nets 2") && t.includes("3 of 5 connector signal pins") || t;`],
   ["Reports without an interfaces check show no Interfaces row", "t=checks", `
     if (!proj().checks || proj().checks.some(c => c.name === "interfaces")) return "skip";
     return ![...document.querySelectorAll("#panel .check-title")].some(e => e.textContent === "Interfaces") || "interfaces row shown";`],
