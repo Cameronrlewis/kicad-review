@@ -31,6 +31,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Fetch all branch tips into origin/*, including the live waiver target on reruns.
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: repo
@@ -109,7 +110,22 @@ jobs:
         if: steps.detect.outputs.changed == 'true'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Read the live PR target tip; non-PR runs use the default branch, not the pushed branch.
+          WAIVERS_REF: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: python3 tools/kicad_review.py report
+
+      # Threads live on the pull request as review comments; the summary only counts them.
+      - name: Collect review threads
+        if: steps.report.outputs.threads == 'true' && github.event.pull_request.number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # ponytail: first 100 threads only; gate fails closed above that ceiling; paginate if needed.
+          gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR" \
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount nodes{isResolved comments(first:1){nodes{body}}}}}}}' \
+            > review/threads.json || { rm -f review/threads.json; echo "::warning::Could not read review threads"; }
 
       - name: Copy named report
         if: steps.detect.outputs.changed == 'true'
@@ -171,6 +187,21 @@ jobs:
           done
           exit 1
 
+      # The opt-in review log lives in the bot's existing PR comment.
+      - name: Fetch previous review log
+        if: ${{ !cancelled() && github.event.pull_request.number && github.event.pull_request.head.repo.full_name == github.repository && vars.KICAD_REVIEW_HISTORY == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p review
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
+            -q '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- kicad-review -->"))) | .body' \
+            | python3 -c 'import sys; t = sys.stdin.read(); s, e = "<!-- kicad-review-log -->", "<!-- /kicad-review-log -->"; print(t[t.index(s):t.index(e) + len(e)] if s in t and e in t and t.index(s) < t.index(e) else "", end="")' \
+            > review/previous-log.md
+          [ -s review/previous-log.md ] || rm -f review/previous-log.md
+
       - name: Job summary
         id: summary
         if: steps.detect.outputs.changed == 'true'
@@ -179,7 +210,24 @@ jobs:
           ARTIFACT: ${{ steps.upload.outputs.artifact-url }}
           ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           SITE: ${{ vars.KICAD_REVIEW_SITE }}
+          HISTORY: ${{ vars.KICAD_REVIEW_HISTORY }}
         run: python3 tools/kicad_review.py summary --image-base "$IMAGES" --artifact-url "$ARTIFACT" --artifact-id "$ARTIFACT_ID" > /dev/null
+
+      # Optional: one check run per check, so branch protection can require ERC, DRC... separately.
+      # The caller must grant checks: write; without it GitHub answers 403 and this step only warns.
+      - name: Publish check runs
+        if: ${{ !cancelled() && steps.summary.outputs.check_runs == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ steps.detect.outputs.head }}
+        run: |
+          [ -f review/check-runs.json ] || { echo "::warning::review/check-runs.json missing; no check runs published."; exit 0; }
+          jq -c '.[]' review/check-runs.json | while read -r run; do
+            printf '%s\n' "$run" | jq --arg sha "$HEAD" '. + {head_sha: $sha, status: "completed"}' \
+              | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input - > /dev/null \
+              || { echo "::warning::Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml."; exit 0; }
+          done
 
       - name: Pull request comment
         id: comment
@@ -195,9 +243,11 @@ jobs:
           mkdir -p review
           if [ "$CHANGED" = false ]; then
             printf '<!-- kicad-review -->\n### No KiCad changes in this commit\n' > review/comment.md
+            if [ -f review/previous-log.md ]; then printf '\n' >> review/comment.md; cat review/previous-log.md >> review/comment.md; fi
           elif [ "$SUMMARY" != success ]; then
             # The failure body prevents earlier results from looking current.
             printf '<!-- kicad-review -->\n### KiCad review failed — see [run](%s)\n\nNo review for `%s`. Results from earlier commits were removed so they are not mistaken for this one.\n' "$RUN_URL" "${SHA:0:7}" > review/comment.md
+            if [ -f review/previous-log.md ]; then printf '\n' >> review/comment.md; cat review/previous-log.md >> review/comment.md; fi
           fi
           [ -n "$PR" ] || exit 0
           # One comment per pull request, edited in place on every run.
@@ -211,11 +261,13 @@ jobs:
           fi
 
       - name: Fail on required checks
-        if: steps.report.outputs.failed != ''
+        if: steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != ''
         env:
           FAILED: ${{ steps.report.outputs.failed }}
+          THREADS: ${{ steps.summary.outputs.threads_failed }}
         run: |
-          echo "::error::Required checks failed: $FAILED"
+          [ -z "$FAILED" ] || echo "::error::Required checks failed: $FAILED"
+          [ -z "$THREADS" ] || echo "::error::Merge blocked: $THREADS"
           exit 1
 
       - name: Fabrication outputs for the version tag
