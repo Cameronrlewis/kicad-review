@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal } from './worker.js';
+import { reportCsp, frameCsp } from './csp.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { CHECKS } from '../ui/checks.mjs';
@@ -435,8 +436,10 @@ test('review route shows the repository after a pull-access check and refreshes 
   } finally { restore(); }
 });
 
-const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
-const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+test('shared CSP module preserves the original report sandbox and wrapper policies', () => {
+  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'");
+  assert.equal(frameCsp, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+});
 
 test('artifact frame and raw route redirect unsigned users without GitHub calls', async () => {
   let calls = 0;
@@ -1576,4 +1579,14 @@ test('installation token cache isolates installation, repository, App and permis
     assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', read), 'cached-6');
     assert.equal(minted, 6);
   } finally { Date.now = originalNow; restore(); }
+});
+
+
+test('worker main named exports are functions or handlers, never CSP strings', async () => {
+  const exports = await import('./worker.js');
+  assert.equal(typeof exports.default.fetch, 'function');
+  for (const [name, value] of Object.entries(exports)) {
+    if (name === 'default') continue;
+    assert.ok(typeof value === 'function' || typeof value?.fetch === 'function', `${name} is not a workerd-compatible entrypoint`);
+  }
 });

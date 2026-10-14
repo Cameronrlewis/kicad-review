@@ -1,4 +1,5 @@
 import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
+import { reportCsp, frameCsp } from './csp.js';
 import { escapeHtml, sharedPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 
 const text = new TextEncoder();
@@ -188,10 +189,6 @@ export async function access(request, env, owner, repo) {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
 }
-
-export const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
-  + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
-export const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
