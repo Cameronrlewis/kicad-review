@@ -1216,7 +1216,7 @@ function shareCreationFetch({ push = true, metadata = shareMeta(), generation = 
     if (url.endsWith('/actions/artifacts/123')) return shareJson(metadata);
     if (url.endsWith('/installation')) return shareJson({ id: 7 });
     if (url.endsWith('/access_tokens')) {
-      assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', variables: 'read' } });
+      assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', actions_variables: 'read' } });
       return shareJson({ token: 'installation-secret' }, 201);
     }
     if (url.endsWith('/KICAD_REVIEW_SHARE_GEN')) return shareJson({ value: generation }, genStatus);
@@ -1296,7 +1296,7 @@ function guestFetch({ generation = '2', genStatus = 200, metadata = shareMeta(),
     assert.doesNotMatch(url, /\/s\//, 'share capability must not be forwarded upstream');
     if (url.endsWith('/installation')) return shareJson({ id: 7 });
     if (url.endsWith('/access_tokens')) {
-      assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', variables: 'read' } });
+      assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', actions_variables: 'read' } });
       return shareJson({ token: 'installation-secret' }, 201);
     }
     if (url.endsWith('/KICAD_REVIEW_SHARE_GEN')) return shareJson({ value: generation }, genStatus);
@@ -1400,7 +1400,7 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
       const result = await response.json(); assert.equal(String(result.generation), generation); assert.notEqual(generation, old);
     }
     assert.equal(patches, 2);
-    for (const body of minted) assert.deepEqual(body, { repositories: ['repo'], permissions: { variables: 'write' } });
+    for (const body of minted) assert.deepEqual(body, { repositories: ['repo'], permissions: { actions_variables: 'write' } });
   } finally { restore(); }
   const restoreReader = shareCreationFetch({ push: false });
   try { const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke'), appEnv); assert.equal(response.status, 403); assert.ok((await response.json()).error); }
@@ -1545,7 +1545,7 @@ test('two guest views reuse one scoped installation token but always reread revo
   const restore = mockFetch(async (url, options = {}) => {
     if (url.endsWith('/installation')) return shareJson({ id: 7 });
     if (url.endsWith('/access_tokens')) {
-      minted++; assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', variables: 'read' } });
+      minted++; assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', actions_variables: 'read' } });
       return shareJson({ token: 'cached-installation-secret', expires_at: new Date(Date.now() + 3600_000).toISOString() }, 201);
     }
     if (url.endsWith('/KICAD_REVIEW_SHARE_GEN')) { generations++; return shareJson({ value: generation }); }
@@ -1560,7 +1560,7 @@ test('two guest views reuse one scoped installation token but always reread revo
 });
 test('installation token cache isolates installation, repository, App and permission scope and refreshes five minutes early', async () => {
   const { installationToken } = await import('./share.js'); const config = { ...appEnv, GITHUB_APP_ID: '44' };
-  const read = { actions: 'read', variables: 'read' }; let installation = 8, minted = 0;
+  const read = { actions: 'read', actions_variables: 'read' }; let installation = 8, minted = 0;
   const originalNow = Date.now; let now = originalNow();
   const restore = mockFetch(async (url, options = {}) => {
     if (url.endsWith('/installation')) return shareJson({ id: installation });
@@ -1570,9 +1570,9 @@ test('installation token cache isolates installation, repository, App and permis
   Date.now = () => now;
   try {
     assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', read), 'cached-1');
-    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', { variables: 'read', actions: 'read' }), 'cached-1');
+    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', { actions_variables: 'read', actions: 'read' }), 'cached-1');
     assert.equal(await installationToken(config, 'Cameronrlewis', 'other', read), 'cached-2');
-    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', { variables: 'write' }), 'cached-3');
+    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', { actions_variables: 'write' }), 'cached-3');
     installation = 9; assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', read), 'cached-4');
     assert.equal(await installationToken({ ...config, GITHUB_APP_ID: '45' }, 'Cameronrlewis', 'repo', read), 'cached-5');
     now += 55 * 60_000;

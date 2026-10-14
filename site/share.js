@@ -116,7 +116,7 @@ export async function createShare(request, env, { owner, repo, id }, deps) {
     if (!meta.ok) return fail('Review not found.', 404);
     const artifact = await meta.json();
     if (!validArtifact(artifact)) return fail('Review unavailable or expired.', 410);
-    const inst = await installationToken(env, owner, repo, { actions: 'read', variables: 'read' });
+    const inst = await installationToken(env, owner, repo, { actions: 'read', actions_variables: 'read' });
     if (!inst) return fail('App permissions unavailable.', 502);
     const g = await shareGeneration(deps.gh, inst, owner, repo);
     const exp = Math.min(Date.now() + days * 86400_000, Date.parse(artifact.expires_at));
@@ -147,7 +147,7 @@ export async function serveShare(request, env, token, raw, deps) {
     const c = await verifyShare(token, env);
     if (!c || !deps.allowedOwners(env).includes(c.o.toLowerCase())) return missing();
     if (raw && request.headers.get('Sec-Fetch-Dest') !== 'iframe') return guestResponse(deps, null, { status: 302, headers: { Location: `/s/${token}` } });
-    const inst = await installationToken(env, c.o, c.r, { actions: 'read', variables: 'read' });
+    const inst = await installationToken(env, c.o, c.r, { actions: 'read', actions_variables: 'read' });
     if (!inst || await shareGeneration(deps.gh, inst, c.o, c.r) !== c.g) return missing();
     const base = `/repos/${encodeURIComponent(c.o)}/${encodeURIComponent(c.r)}/actions/artifacts/${c.a}`;
     const meta = await deps.gh(base, inst, { redirect: 'error' });
@@ -172,7 +172,7 @@ export async function revokeShares(request, env, { owner, repo }, deps) {
     if (!allowed.repo.permissions?.push) return fail('Only writers can revoke share links.', 403);
     const body = await request.json().catch(() => null);
     if (!body || Array.isArray(body) || typeof body !== 'object') return fail('Send a JSON object.', 400);
-    const inst = await installationToken(env, owner, repo, { variables: 'write' });
+    const inst = await installationToken(env, owner, repo, { actions_variables: 'write' });
     if (!inst) return fail('App permissions unavailable.', 502);
     const previous = await shareGeneration(deps.gh, inst, owner, repo);
     // ponytail: one opaque generation per repo; a deny-list is needed for single-link revocation.
