@@ -31,6 +31,16 @@ enabled = false
 # Tag-to-tag review and a marked section in GitHub release notes; fabrication remains independent.
 [release]
 review = false
+
+# Optional stock and price by MPN. Requires parts.enabled and caller secrets: inherit.
+# Set DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET as repository Actions secrets.
+# Keep it off in public repositories; DigiKey data is for permitted internal use only.
+# [digikey]
+# enabled = false
+# site = "US"
+# currency = "USD"
+# max_lookups = 100
+
 # [interfaces]           # extra net or pin-function names per rule
 # i2c_sda = ["SDA", "TOUCH_SDA"]
 [threads]

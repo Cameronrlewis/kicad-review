@@ -1,4 +1,7 @@
-import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
+import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
+import { reportCsp, frameCsp } from './csp.js';
+import { escapeHtml, sharedPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
+
 import { threadsRoute } from './threads.js';
 import { historyRoute } from './history.js';
 
@@ -118,7 +121,7 @@ export async function session(request, env) {
   };
 }
 
-function response(body, init = {}) {
+export function response(body, init = {}) {
   const headers = new Headers(init.headers);
   for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
   if (!headers.has('Content-Security-Policy')) headers.set('Content-Security-Policy', "frame-ancestors 'none'");
@@ -135,7 +138,7 @@ function sessionRedirect(location, status, active) {
   return redirect(location, active?.setCookie ? [active.setCookie] : [], status);
 }
 
-function sessionResponse(body, init, active) {
+export function sessionResponse(body, init, active) {
   const headers = new Headers(init?.headers);
   if (active?.setCookie) headers.set('Set-Cookie', active.setCookie);
   return response(body, { ...init, headers });
@@ -155,7 +158,7 @@ function errorPage(status, title, message, links = [], active, init = {}, detail
   return sessionResponse(messagePage({ title, message, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
-function gh(path, token, init = {}) {
+export function gh(path, token, init = {}) {
   return fetch(`https://api.github.com${path}`, {
     ...init,
     headers: {
@@ -167,7 +170,7 @@ function gh(path, token, init = {}) {
   });
 }
 
-function allowedOwners(env) {
+export function allowedOwners(env) {
   return env.ALLOWED_OWNERS.split(',').map((name) => name.trim().toLowerCase());
 }
 
@@ -191,10 +194,6 @@ export async function access(request, env, owner, repo) {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
   }
 }
-
-const reportCsp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; "
-  + "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'";
-const frameCsp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 function pdfError(active, status = 404) {
   return sessionResponse(JSON.stringify({ error: 'PDF unavailable' }), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
@@ -236,7 +235,7 @@ async function pdfDownload(owner, repo, id, active) {
   } catch { return pdfError(active); }
 }
 
-async function artifactReport(request, env, owner, repo, id, active, raw) {
+async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
     const metadataResponse = await gh(base, active.token);
@@ -261,8 +260,9 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
           if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
         }
       } catch { /* PR discovery must not prevent opening the report. */ }
+      const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion,
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -629,6 +629,12 @@ export default {
       if (request.method === 'GET' && url.pathname === '/callback') return await callback(request, env);
       if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
+      const shareView = url.pathname.match(/^\/s\/([^/]+)(\/raw)?$/);
+      if (request.method === 'GET' && shareView) return await serveShare(request, env, shareView[1], Boolean(shareView[2]), { gh, response, reportCsp, frameCsp, sharedPage, allowedOwners });
+      const revoke = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/share\/revoke$/);
+      if (request.method === 'POST' && revoke) return await revokeShares(request, env, { owner: revoke[1], repo: revoke[2] }, { access, gh, response, sessionResponse });
+      const shareCreate = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/share$/);
+      if (request.method === 'POST' && shareCreate) return await createShare(request, env, { owner: shareCreate[1], repo: shareCreate[2], id: shareCreate[3] }, { access, gh, response, sessionResponse });
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id, raw] = artifactRoute;
@@ -645,7 +651,7 @@ export default {
           }
           return pdfDownload(owner, repo, id, allowed.s);
         }
-        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, raw === '/raw');
+        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, raw === '/raw', Boolean(allowed.repo.permissions?.push));
       }
       const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
       if (request.method === 'POST' && compareRoute) {

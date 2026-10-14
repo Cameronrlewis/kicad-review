@@ -1,6 +1,11 @@
 name: KiCad review
 on:
   workflow_call:
+    secrets:
+      DIGIKEY_CLIENT_ID:
+        required: false
+      DIGIKEY_CLIENT_SECRET:
+        required: false
 
 env:
   # Official KiCad image, pinned by digest so a new upload under the same tag cannot change results.
@@ -106,6 +111,16 @@ jobs:
             fi
             rm -rf "$tmp"
           done
+
+      # Optional lookup; missing secrets (including fork PRs) are recorded as skipped.
+      - name: Look up parts at DigiKey
+        if: steps.detect.outputs.changed == 'true'
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          DIGIKEY_CLIENT_ID: ${{ secrets.DIGIKEY_CLIENT_ID }}
+          DIGIKEY_CLIENT_SECRET: ${{ secrets.DIGIKEY_CLIENT_SECRET }}
+        run: python3 tools/kicad_review.py lookup
 
       - name: Build comparison report and checks
         id: report
