@@ -1360,7 +1360,7 @@ def _live_usage():
         change = next(c for c in changes if c['kind'] == 'footprint'); change['item'] = _LIVE_ITEM
         objects = [{'kind': 'footprint', 'lib': 'Thermal Footprints:' + _LIVE_ITEM, 'ref': 'U1', 'side': 'head'}]
         report = kicad_review.library_report([change], objects, d, {}, local_items=set(items['base']) | set(items['head']))[0]
-        assert report['used_by'] == ['U1'] and report['warnings'] == ['⚠ pad 9 removed while U1 use ' + _LIVE_ITEM], report
+        assert report['used_by'] == ['U1'] and report['warnings'] == ['⚠ pad 9 removed while U1 uses ' + _LIVE_ITEM], report
         keys = set(items['head']) | {('Other', _LIVE_ITEM, 'footprint')}
         assert kicad_review.library_report([change], objects, d, {}, local_items=keys)[0]['used_by'] == []
         # A known local nickname must not fall back to a different library's same-named item.

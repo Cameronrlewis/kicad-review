@@ -757,7 +757,7 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
         for d in c["pins_diff"] if users else []:
             word = "pin" if c["kind"] == "symbol" else "pad"
             if d["change"] == "removed":
-                entry["warnings"].append(f"⚠ {word} {d['pin']} removed while {', '.join(users)} use {c['item']}")
+                entry["warnings"].append(f"⚠ {word} {d['pin']} removed while {', '.join(users)} {'uses' if len(users) == 1 else 'use'} {c['item']}")
             elif d["change"] == "type":
                 entry["warnings"].append(f"⚠ pin {d['pin']} type {d['before']} → {d['after']} on {c['item']}, used by {', '.join(users)}")
         out.append(entry)
