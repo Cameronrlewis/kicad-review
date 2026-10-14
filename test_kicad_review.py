@@ -609,6 +609,14 @@ site_url = "https://kicad-review.example.workers.dev/r/o/r/a/5"
 assert site_default == site_empty, "empty site changes the existing comment"
 assert site_body.count(site_url) == 1 and f"**[Open the review]({site_url})**" in site_body, site_body
 assert "[Open the review page](https://github.com/o/r/actions/runs/9/artifacts/5)" in site_body
+pdf_link_args = ([], "https://github.com/o/r/actions/runs/9/artifacts/5", "5")
+pdf_off_data = {**d, "settings": {**d.get("settings", {}), "pdf": {"enabled": False}}}
+pdf_on_data = {**d, "settings": {**d.get("settings", {}), "pdf": {"enabled": True}}}
+assert comment_markdown(pdf_off_data, *pdf_link_args, site="https://kicad-review.example.workers.dev/") == site_body
+pdf_site_body = comment_markdown(pdf_on_data, *pdf_link_args, site="https://kicad-review.example.workers.dev/")
+assert pdf_site_body == site_body.replace(f"({site_url})", f"({site_url}?pdf=1)")
+assert comment_markdown(pdf_on_data, *pdf_link_args) == site_default
+print("ok PDF site comment link opt-in and off byte identity")
 print("ok")
 
 # The site deploy workflow is manual, least-privileged, pin-only, and does not contain credentials.
@@ -1081,7 +1089,7 @@ print("ok parts comment budget")
 
 # DigiKey client: only the MPN is sent; each MPN once; 429 stops the run; ambiguous MPNs show no price.
 import io as _io, urllib.error
-from kicad_review import mpn_for_lookup, digikey_lookup, digikey_pick, DEFAULT_SETTINGS
+from kicad_review import mpn_for_lookup, digikey_lookup, digikey_pick
 assert mpn_for_lookup(" mp3302dj-lf-z ") == "mp3302dj-lf-z" and mpn_for_lookup("TBD") is None and mpn_for_lookup("<script>") is None
 calls = []
 def resp(obj, status=200, headers=None):
@@ -1403,6 +1411,96 @@ example = pathlib.Path(kicad_review.__file__).parent.joinpath("examples/kicad-re
 for wording in ('# [digikey]', '# enabled = false', '# site = "US"', '# currency = "USD"', '# max_lookups = 100'):
     assert wording in example, wording
 print("ok DigiKey setup, limits, terms and manufacturer docs")
+# PDF: a static print page.
+from kicad_review import print_html
+pdata = {**d2, "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "projects": [{"name": "A&B", "dir": "", "status": "modified", "checks": [
+    {"name": "drc", "title": "DRC", "level": "required", "status": "fail", "errors": 1, "new_errors": 1, "warnings": 0, "new_warnings": 0, "fixed": 0,
+     "violations": [{"new": True, "severity": "error", "description": "Clearance <1mm>", "items": ["J1"], "where": {"board": True}}]}],
+    "changes": [{"action": "modified", "kind": "footprint", "ref": f"R{i}", "changes": [["Value", "1k", "2k"]]} for i in range(250)], "sheets": [], "board": {"changed": False}}]}
+with tempfile.TemporaryDirectory() as d:
+    png = f"{d}/p0-board.png"; open(png, "wb").write(b"\x89PNG\r\n\x1a\nfake")
+    html = print_html(pdata, [{"project": 0, "title": "A&B: board", "path": png}], "<script>x</script> & y", "ann", "2026-10-12 10:00 UTC")
+assert "<script" not in html.replace("&lt;script&gt;", "") and "&lt;script&gt;x&lt;/script&gt; &amp; y" in html and "A&amp;B" in html
+assert "data:image/png;base64," in html and "Clearance &lt;1mm&gt;" in html and "aaaaaaa → bbbbbbb" in html
+assert "http-equiv='Content-Security-Policy'" in html
+assert "default-src 'none'; img-src data:; style-src 'unsafe-inline'" in html
+assert html.count("pictures unavailable") == 0
+missing = print_html(pdata, [], "", "", "now")
+assert missing.count("pictures unavailable") == 1
+print("ok print page escapes everything")
+assert html.count("<tr class=\"change\">") == 200 and "50 more changes are in the interactive report" in html
+print("ok long change lists are capped")
+assert "pictures unavailable" in print_html(pdata, [], "", "", "now")
+print("ok missing screenshots are explained")
+
+from kicad_review import cmd_pdf
+import types as _types, kicad_review as kr
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d); os.makedirs("review/images")
+    json.dump({**pdata, "settings": {"pdf": {"enabled": True}}, "links": d2["links"], "reason": "x"}, open("review/data.json", "w"))
+    seen = []
+    saved = kr.subprocess.run
+    kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
+    try:
+        os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
+        cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+    finally:
+        kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
+    assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
+    os.chdir(_cwd)
+print("ok chrome failure does not fail the review")
+
+# Disabled PDF is byte-identical to settings predating PDF, including summaries.
+with tempfile.TemporaryDirectory() as d:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        os.makedirs("review")
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "test", "projects": []}))
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        before = copy.deepcopy(settings)
+        before.pop("pdf")
+        outputs = []
+        for current in (before, settings):
+            with patch("kicad_review.load_settings", return_value=current):
+                kr.cmd_report(None)
+            outputs.append(tuple(pathlib.Path("review/" + name).read_bytes() for name in ("kicad-review.html", "data.json")))
+        assert outputs[0] == outputs[1]
+        assert not os.path.exists("review/print.html")
+        with patch("kicad_review.subprocess.run", side_effect=AssertionError("Chrome must not run")):
+            cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        assert not os.path.exists("review/print.html")
+    finally:
+        os.chdir(old_cwd)
+print("ok PDF disabled report byte identity and no files")
+
+for invalid in ("enabled = 1", "enabled = 'yes'"):
+    with tempfile.TemporaryDirectory() as d:
+        pathlib.Path(d, "kicad-review.toml").write_text("[pdf]\n" + invalid)
+        try:
+            load_settings((d,))
+            raise AssertionError("invalid PDF setting accepted")
+        except SystemExit as error:
+            assert "pdf.enabled must be true or false" in str(error)
+print("ok PDF settings validate booleans")
+
+with tempfile.TemporaryDirectory() as d:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        os.makedirs("review")
+        pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
+        with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
+            for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
+                with patch("kicad_review.subprocess.run", side_effect=failure):
+                    cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+                assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
+    finally:
+        os.chdir(old_cwd)
+print("ok PDF timeout and launch failure are nonfatal")
+
+
 
 # Interface checks: netlist parsing and helpers.
 from kicad_review import parse_netlist, ohms, short, is_ground, is_power, matches
@@ -2146,8 +2244,6 @@ print("ok library final-review parsing, argv and drawing validation")
 
 # Live PR regression fixtures: legacy module names, exported stems, and nickname fallback.
 import json, os, pathlib, tempfile
-from types import SimpleNamespace
-from unittest.mock import patch
 
 _LIVE_ITEM = 'ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP'
 def _live_tree(root, removed=False):
