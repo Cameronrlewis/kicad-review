@@ -591,6 +591,7 @@ def object_index(base, head):
     uuid is the KiCad UUID (schematic keys are sheet path + UUID); sheet or layer says which drawing it is on."""
     def entry(key, o, side):
         e = {"uuid": key.rsplit("/", 1)[-1], "kind": o["kind"], "ref": o["ref"], "value": o["props"].get("Value"),
+             "footprint": o["props"].get("Footprint") or o["props"].get("footprint"),
              "side": side, "pos": o.get("pos"), "box": o.get("box")}
         if o["where"].get("sheet") is not None:
             e["sheet"] = o["where"]["sheet"]
@@ -625,11 +626,15 @@ def object_index(base, head):
 DEFAULT_SETTINGS = {
     "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
-    "bom": {"required_fields": ["Value", "Footprint"]},
+    "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
+            "order_ready_fields": []},  # empty: the fabrication preset's fields
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
-    "threads": {"enabled": False},
+    "threads": {"enabled": False, "block_merge": False},
+    "github": {"check_runs": False},
+    "waivers": {"enabled": False},
+    "inventory": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -648,11 +653,17 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers", "inventory"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
         sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
+    for key in ("critical_prefixes", "order_ready_fields"):
+        if not isinstance(settings["bom"][key], list) or not all(isinstance(f, str) for f in settings["bom"][key]):
+            sys.exit(f"{SETTINGS_FILE}: bom.{key} must be a list of strings")
+    bad = [f for f in settings["bom"]["order_ready_fields"] if f not in COVERAGE_FIELDS]
+    if bad:
+        sys.exit(f"{SETTINGS_FILE}: bom.order_ready_fields: unknown {', '.join(bad)}; use {', '.join(COVERAGE_FIELDS)}")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
             sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
@@ -666,6 +677,15 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
+    if not isinstance(settings["inventory"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: inventory.enabled must be true or false")
+    for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
+        if not isinstance(value, bool):
+            sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
+    if not isinstance(settings["waivers"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: waivers.enabled must be true or false")
+    if settings["threads"]["block_merge"] and not settings["threads"]["enabled"]:
+        sys.exit(f"{SETTINGS_FILE}: threads.block_merge needs threads.enabled = true")
     return settings
 
 
@@ -799,12 +819,53 @@ def bom_violations(objs, fields):
 
 LCSC_FIELDS = ("lcsc", "lcsc part", "lcsc part #", "lcsc part number", "jlcpcb part #")
 MPN_FIELDS = ("mpn", "manufacturer_part_number", "manufacturer part number", "mfr. part #", "mfg part #")
+MANUFACTURER_FIELDS = ("manufacturer", "mfr", "mfr.", "manufacturer_name", "manufacturer name")
+PLACEHOLDERS = {"tbd", "?", "x", "todo", "na", "n/a", "-", "~", ""}
 
 
 def field(props, names):
     v = next((props[k] for k in props if k.strip().lower() in names), "")
     v = (v or "").strip()
     return None if v in ("", "~") else v
+
+
+def present(v):
+    return (v or "").strip().lower() not in PLACEHOLDERS
+
+
+def placeholder(v):
+    return (v or "").strip() not in ("", "~") and not present(v)
+
+
+COVERAGE_FIELDS = {
+    "Value": lambda p: p.get("Value"), "Footprint": lambda p: p.get("Footprint"),
+    "LCSC": lambda p: field(p, LCSC_FIELDS), "MPN": lambda p: field(p, MPN_FIELDS),
+    "Manufacturer": lambda p: field(p, MANUFACTURER_FIELDS), "Datasheet": lambda p: field(p, ("datasheet",)),
+}
+
+
+def bom_parts(objs):
+    """BOM symbols, one entry per reference (units of one part count once); DNP, excluded and unannotated parts left out."""
+    out = {}
+    for o in objs.values():
+        p = o["props"]
+        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+            continue
+        out.setdefault(o["ref"].split(" unit ")[0], p)
+    return out
+
+
+def bom_coverage(objs, settings):
+    """Covered and total parts per BOM field; critical-part datasheets; parts with every order-ready field."""
+    parts = bom_parts(objs)
+    has = lambda p, f: present(COVERAGE_FIELDS[f](p))
+    cov = {f: [sum(has(p, f) for p in parts.values()), len(parts)] for f in COVERAGE_FIELDS}
+    prefixes = set(settings["bom"]["critical_prefixes"])
+    critical = [p for r, p in parts.items() if (m := re.match(r"[A-Za-z]+", r)) and m.group(0) in prefixes]
+    cov["Datasheet (critical)"] = [sum(has(p, "Datasheet") for p in critical), len(critical)]
+    order = settings["bom"]["order_ready_fields"] or (["Value", "Footprint", "LCSC"] if settings["fabrication"]["preset"] == "jlcpcb" else ["Value", "Footprint", "MPN"])
+    cov["Order ready"] = [sum(all(has(p, f) for f in order) for p in parts.values()), len(parts)]
+    return cov
 
 
 def parts_lines(objs):
@@ -822,6 +883,8 @@ def parts_lines(objs):
             "refs": [], "problems": []})
         if o["ref"] not in line["refs"]:
             line["refs"].append(o["ref"])
+            # Per-reference values: a grouped line can hide one reference's MPN or placeholder behind another's.
+            line.setdefault("_each", []).append((o["ref"], field(p, MPN_FIELDS), (p.get("Value", ""), field(p, MPN_FIELDS), lcsc)))
     by_lcsc = {}
     for l in lines.values():
         l["refs"].sort(key=natural)
@@ -832,11 +895,25 @@ def parts_lines(objs):
             l["problems"].append("missing_lcsc")
         if not l["mpn"] and not l["lcsc"]:
             l["problems"].append("missing_mpn")
+        bad = [r for r, _, vals in l["_each"] if any(placeholder(v) for v in vals)]
+        if bad:
+            l["problems"].append("placeholder")
+            l.setdefault("problem_refs", {})["placeholder"] = bad
         if l["lcsc"]:
             by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
     for l in lines.values():
         if l["lcsc"] and len(by_lcsc[l["lcsc"]]) > 1:
             l["problems"].append("lcsc_conflict")
+    by_mpn = {}
+    for l in lines.values():
+        for _, mpn, _ in l["_each"]:
+            if mpn and present(mpn):
+                by_mpn.setdefault(mpn.upper(), set()).add(l["footprint"])
+    for l in lines.values():
+        hit = [r for r, mpn, _ in l.pop("_each") if mpn and len(by_mpn.get(mpn.upper(), ())) > 1]
+        if hit:
+            l["problems"].append("mpn_footprint_conflict")
+            l.setdefault("problem_refs", {})["mpn_footprint_conflict"] = hit
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
@@ -855,6 +932,34 @@ def diff_parts(base, head):
     return list(rows.values())
 
 
+def field_changes(base, head):
+    """BOM field edits per reference, grouped when several references changed the same way."""
+    b, h = bom_parts(base), bom_parts(head)
+    norm = lambda v: v.strip() if present(v) else None
+    rows = {}
+    for ref in sorted(set(b) & set(h), key=natural):
+        for f, get in COVERAGE_FIELDS.items():
+            x, y = norm(get(b[ref])), norm(get(h[ref]))
+            if x != y:
+                rows.setdefault((f, x, y), {"refs": [], "field": f, "before": x, "after": y})["refs"].append(ref)
+    order = list(COVERAGE_FIELDS)
+    return sorted(rows.values(), key=lambda r: (natural(r["refs"][0]), order.index(r["field"])))
+
+
+def mark_new_problems(base_lines, head_lines):
+    """A head problem is new when any of its references did not have it in base, even if the line itself did not change."""
+    before = {r: set(l["problems"]) for l in base_lines for r in l["refs"]}
+    for l in head_lines:
+        l["new_problems"] = [p for p in l["problems"] if any(p not in before.get(r, set()) for r in l.get("problem_refs", {}).get(p, l["refs"]))]
+
+
+def dnp_mismatches(objs):
+    """References fitted on one of schematic and board and DNP on the other."""
+    sym = {o["ref"].split(" unit ")[0]: o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
+    fp = {o["ref"]: "dnp" in (o["props"].get("attributes") or "").split() for o in objs.values() if o["kind"] == "footprint"}
+    return sorted((r for r in sym.keys() & fp.keys() if sym[r] != fp[r]), key=natural)
+
+
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
     sig = (v["severity"], tuple(sorted(v["where"].items())))
@@ -867,7 +972,96 @@ def vkeys(v):
     return {k + sig for k in keys}
 
 
-def run_check(name, settings, head, base):
+def waiver_key(v):
+    """One stable identity per violation for kicad-review-waivers.toml: the strongest of the identities vkeys matches on."""
+    ident = max(vkeys(v if v.get("key") else {**v, "uuids": sorted(v["uuids"])}), key=lambda k: k[0] == "u")
+    return "w-" + hashlib.sha1(repr(ident).encode()).hexdigest()[:12]
+
+
+WAIVERS_FILE = "kicad-review-waivers.toml"
+WAIVABLE = ("erc", "drc", "parity")
+
+
+def parse_waivers(text, source):
+    """Entries of one waivers file, and messages for the ones that cannot apply. Never exits: a bad entry must not stop reviews."""
+    try:
+        raw = tomllib.loads(text).get("waiver", [])
+    except tomllib.TOMLDecodeError as e:
+        return [], [f"{source}: not valid TOML ({e})"]
+    if not isinstance(raw, list):
+        return [], [f"{source}: waiver must be a list of tables"]
+    good, bad = [], []
+    for i, w in enumerate(raw, 1):
+        where = f"{source} waiver {i}"
+        if not isinstance(w, dict):
+            bad.append(f"{where}: must be a table")
+            continue
+        problems = [p for p, ok in (
+            (f"check must be one of {', '.join(WAIVABLE)}, not {w.get('check')!r}", w.get("check") in WAIVABLE),
+            ("match must be a waiver key like w-1a2b3c4d5e6f", isinstance(w.get("match"), str) and re.fullmatch(r"w-[0-9a-f]{12}", w["match"])),
+            ("reason must not be empty", isinstance(w.get("reason"), str) and w["reason"].strip()),
+            ("by must be a GitHub login", isinstance(w.get("by"), str) and w["by"].strip()),
+            ("date must be a date like 2026-10-12", type(w.get("date")) is datetime.date),
+            ("permanent must be true or false", "permanent" not in w or isinstance(w["permanent"], bool)),
+            ("ref must be a string", "ref" not in w or isinstance(w["ref"], str)),
+            ("until must be a date like 2026-12-31", "until" not in w or type(w["until"]) is datetime.date),
+            ("set until = <date> or permanent = true", type(w.get("until")) is datetime.date or w.get("permanent") is True),
+        ) if not ok]
+        if problems:
+            bad.append(f"{where}: {'; '.join(problems)}")
+            continue
+        good.append({"check": w["check"], "match": w["match"], "reason": w["reason"].strip(), "by": w["by"].strip(),
+                     "date": w["date"].isoformat(), "until": w["until"].isoformat() if type(w.get("until")) is datetime.date else None,
+                     "permanent": w.get("permanent") is True, "ref": w.get("ref") if isinstance(w.get("ref"), str) else None})
+    return good, bad
+
+
+def load_waivers(ref):
+    """Waivers that apply come from the target branch at ref (repo/ history), so a change cannot waive its own violations.
+    The head copy's extra entries are only proposals."""
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    head_path = f"head/{WAIVERS_FILE}"
+    out = {"active": {}, "expired": [], "proposed": [], "invalid": []}
+    resolved = git("-C", "repo", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}", check=False) if ref else None
+    if ref and not resolved:
+        out["invalid"].append(f"{WAIVERS_FILE}: cannot resolve {ref}")
+    label = resolved[:7] if resolved else ref
+    try:
+        result = subprocess.run(["git", "-C", "repo", "show", f"{resolved}:{WAIVERS_FILE}"], capture_output=True) if resolved else None
+        text = result.stdout.decode("utf-8") if result and result.returncode == 0 else None
+    except UnicodeError as e:
+        text = None
+        out["invalid"].append(f"{WAIVERS_FILE} at {label}: cannot read ({e})")
+    if text:
+        entries, out["invalid"] = parse_waivers(text, f"{WAIVERS_FILE} at {label}")
+        for e in entries:
+            if e["until"] and datetime.date.fromisoformat(e["until"]) < today:
+                out["expired"].append(e)
+            else:
+                out["active"][(e["check"], e["match"])] = e
+    if os.path.islink(head_path) or (os.path.exists(head_path) and not os.path.isfile(head_path)):
+        out["invalid"].append(f"{WAIVERS_FILE} in this change: must be a regular file, not a symlink")
+    elif os.path.isfile(head_path):
+        try:
+            with open(head_path, "rb") as fh:
+                content = fh.read(1024 * 1024 + 1)
+            if len(content) > 1024 * 1024:
+                entries, invalid = [], [f"{WAIVERS_FILE} in this change: exceeds 1 MiB"]
+            else:
+                head_text = content.decode("utf-8")
+                entries, invalid = parse_waivers(head_text, f"{WAIVERS_FILE} in this change")
+                if head_text == text:
+                    invalid = []
+        except (OSError, UnicodeError) as e:
+            entries, invalid = [], [f"{WAIVERS_FILE} in this change: cannot read ({e})"]
+        out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in out["active"]]
+        out["invalid"] += invalid
+    for m in out["invalid"]:
+        print(f"::warning::{m}")
+    return out
+
+
+def run_check(name, settings, head, base, waivers=None):
     level = settings["checks"].get(name, "off")
     if level == "off" or head is None:
         return None
@@ -875,18 +1069,27 @@ def run_check(name, settings, head, base):
     head_keys = set().union(*(vkeys(v) for v in head))
     for v in head:
         v["new"] = not (vkeys(v) & base_keys)
-    count = lambda sev, new=False: sum(1 for v in head if v["severity"] == sev and (v["new"] or not new))
+        if waivers is not None:
+            v["waiver_key"] = waiver_key(v)
+            w = waivers["active"].get((name, v["waiver_key"]))
+            if w:
+                v["waived"] = {"reason": w["reason"], "by": w["by"], "until": w["until"], "ref": w["ref"]}
+    live = [v for v in head if not v.get("waived")]
+    count = lambda sev, new=False: sum(1 for v in live if v["severity"] == sev and (v["new"] or not new))
     failing = count("error", new=settings["fail_on"] == "new") > 0
     head.sort(key=lambda v: (not v["new"], v["severity"] != "error", v["type"]))
-    return {"name": name, "title": CHECK_NAMES[name], "level": level,
-            "status": "pass" if not failing else "fail" if level == "required" else "warn",
-            "errors": count("error"), "warnings": count("warning"),
-            "new_errors": count("error", True), "new_warnings": count("warning", True),
-            "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
-            "violations": head}
+    result = {"name": name, "title": CHECK_NAMES[name], "level": level,
+              "status": "pass" if not failing else "fail" if level == "required" else "warn",
+              "errors": count("error"), "warnings": count("warning"),
+              "new_errors": count("error", True), "new_warnings": count("warning", True),
+              "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
+              "violations": head}
+    if waivers is not None:
+        result["waived"] = len(head) - len(live)
+    return result
 
 
-def project_checks(p, settings, objs):
+def project_checks(p, settings, objs, waivers=None):
     out = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
@@ -897,10 +1100,10 @@ def project_checks(p, settings, objs):
         return load_violations(f"{out}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
-        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
-        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
+        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
+        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc"), waivers),
         run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
-                  side("base", "drc.json", "parity") if sch("base") else None),
+                  side("base", "drc.json", "parity") if sch("base") else None, waivers),
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
@@ -973,7 +1176,7 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings):
+def build_project(p, blobs, settings, waivers=None):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -1011,8 +1214,12 @@ def build_project(p, blobs, settings):
     parts = None
     if settings["parts"]["enabled"]:
         lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
+        mark_new_problems(lines["base"], lines["head"])
+        has_base = any(o["kind"] == "symbol" for o in objs["base"].values())
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
-                 "supplier": None}  # JLCPCB lookup not built yet: no approved API access
+                 "supplier": None,  # JLCPCB lookup not built yet: no approved API access
+                 "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
+                 "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -1021,9 +1228,9 @@ def build_project(p, blobs, settings):
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
-            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] else {})}
+            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] or settings["inventory"]["enabled"] else {})}
 
 
 def assign_ids(projects):
@@ -1082,7 +1289,10 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "threads") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items()
+                       if not ((k in ("3d", "parts", "threads", "waivers", "inventory") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+    if not settings["parts"]["enabled"]:
+        report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -1091,8 +1301,14 @@ def cmd_report(args):
         "settings": report_settings,
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
-    data["projects"] = [build_project(p, blobs, settings) for p in det["projects"]]
+    waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
+    data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
     assign_ids(data["projects"])
+    if waivers is not None:
+        used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
+                for v in c["violations"] if v.get("waived")}
+        data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
+                           "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
@@ -1233,7 +1449,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
             out += ["</details>"]
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
-    body, checks = "\n".join(out), checks_markdown(data)
+    body = "\n".join(out)
+    checks = "\n".join(readiness_markdown(data, threads, threads_required=data.get("settings", {}).get("threads", {}).get("block_merge", False))) + checks_markdown(data)
     if len(log) > 30000:
         log = "\n" + merge_log(extract_log(log), "")
     if log and len(checks) + len(log) > 59000:
@@ -1302,7 +1519,17 @@ def cmd_summary(args):
     if data["settings"].get("threads", {}).get("enabled") and os.path.exists("review/threads.json"):
         with open("review/threads.json", encoding="utf-8") as fh:
             try:
-                threads = thread_counts(json.load(fh))
+                raw = json.load(fh)
+                review_threads = raw
+                for key in ("data", "repository", "pullRequest", "reviewThreads"):
+                    review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
+                if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
+                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
+                    # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
+                    print("::warning::review/threads.json is incomplete; thread counts left out")
+                else:
+                    threads = thread_counts(raw)
             except ValueError:
                 print("::warning::review/threads.json is not JSON; thread counts left out")
     log = ""
@@ -1316,14 +1543,32 @@ def cmd_summary(args):
     body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads, log=log)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
+    settings = data["settings"]
+    block_merge = settings.get("threads", {}).get("block_merge")
+    publish_checks = settings.get("github", {}).get("check_runs")
+    threads_failed = ""
+    if block_merge:
+        threads_failed = "blocking threads could not be read" if threads is None else (plural(threads["blocking"], "blocking thread") + " open" if threads["blocking"] else "")
+    if publish_checks:
+        runs = check_runs(data)
+        if block_merge:
+            runs.append({"name": "kicad-review / Threads", "conclusion": "failure" if threads_failed else "success",
+                         "output": {"title": threads_failed or "no blocking threads open",
+                                    "summary": "Resolve blocking threads in the review site or on GitHub."}})
+        with open("review/check-runs.json", "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+    with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+        fh.write(f"check_runs={'true' if publish_checks else 'false'}\n")
+        fh.write(f"threads_failed={threads_failed}\n")
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
 
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
+                "placeholder": "placeholder value", "mpn_footprint_conflict": "one MPN on several footprints",
                 "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
-BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
 def parts_markdown(data):
@@ -1332,8 +1577,11 @@ def parts_markdown(data):
         parts = p.get("parts")
         if not parts:
             continue
-        introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
-                      for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
+        if any("new_problems" in l for l in parts["lines"]):
+            introduced = [(l.get("problem_refs", {}).get(pr, l["refs"]), pr) for l in parts["lines"] for pr in l.get("new_problems", []) if pr in BLOCKING]
+        else:
+            introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
+                          for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
         s = parts["supplier"]
         head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
         when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
@@ -1341,6 +1589,15 @@ def parts_markdown(data):
         bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
+        cov = parts.get("coverage")
+        if cov:
+            def item(f, label):
+                c, t = cov["head"][f]
+                d = c - cov["base"][f][0] if cov.get("base") else 0
+                return f"{label} {c}/{t}" + (f" ({'+' if d > 0 else ''}{d})" if d else "")
+            out += ["", "BOM coverage: " + ", ".join(item(f, l) for f, l in (("Order ready", "order ready"), ("MPN", "MPN"), ("LCSC", "LCSC"), ("Datasheet (critical)", "datasheet on critical parts"))) + "."]
+        if parts.get("dnp_mismatch"):
+            out.append(f"DNP differs between schematic and board: {md(', '.join(parts['dnp_mismatch']))}.")
     return "\n".join(out)
 
 
@@ -1377,6 +1634,24 @@ def thread_counts(response):
     return c
 
 
+def waiver_lines(data):
+    """Comment summaries for covered findings and waivers that need attention."""
+    w = data.get("waivers")
+    if not w:
+        return []
+    waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+    if not waived and not any(w.values()):
+        return []
+    one = lambda s: md(" ".join(str(s).split()))
+    out = ["", f"{plural(waived, 'finding')} waived by kicad-review-waivers.toml (reasons in the report)."]
+    say = lambda e: f"{one(e['check'])} {one(e['match'])} ({one(e['reason'])}, by {one(e['by'])})"
+    out += [f"- Waiver not matched in this review: {say(e)} (if its finding is gone, remove it)." for e in w["stale"]]
+    out += [f"- Expired waiver: {say(e)} ended {one(e['until'])}." for e in w["expired"]]
+    out += [f"- Proposed in this change (applies after it merges): {say(e)}." for e in w["proposed"]]
+    out += [f"- Ignored: {one(m)}" for m in w["invalid"]]
+    return out
+
+
 def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
@@ -1384,13 +1659,13 @@ def checks_markdown(data):
             lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
-            if v["new"] and v["severity"] == "error"]
+            if v["new"] and v["severity"] == "error" and not v.get("waived")]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
         lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
-    checks = "\n".join(lines) + "\n"
+    checks = "\n".join(lines + waiver_lines(data)) + "\n"
     if len(checks) > 50000:  # leave room for the comment body and closing details tags
         checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
@@ -1429,6 +1704,51 @@ def merge_log(previous_rows, row, keep=50) -> str:
     while sum(len(line) + 1 for line in rows) > 29500:
         rows.pop(0)
     return "\n".join([LOG_START, "<details><summary>Review log</summary>", "", *LOG_HEAD, *rows, "", "</details>", LOG_END, ""])
+
+CHECK_RESULTS = [("fail", "failure", "failing"), ("warn", "neutral", "warnings"),
+                 ("pass", "success", "passing"), ("not_run", "skipped", "not run")]
+
+
+def check_runs(data):
+    """One GitHub check run per check name across all projects; the worst project result is the run's conclusion."""
+    runs = {}
+    for p in data["projects"]:
+        for c in p["checks"]:
+            r = runs.setdefault(c["name"], {"name": f"kicad-review / {c['title']}", "rows": [], "conclusions": [], "new": 0})
+            rank = next((i for i, result in enumerate(CHECK_RESULTS) if result[0] == c["status"]), None)
+            if rank is None:
+                raise KeyError(c["status"])
+            r["conclusions"].append(rank)
+            r["new"] += c["new_errors"]
+            r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
+    out = []
+    for r in runs.values():
+        _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]
+        if r["new"]:
+            title = plural(r["new"], "new error")
+        summary = "\n".join(["| Project | Result | Errors (new) | Warnings (new) |", "|---|---|---|---|", *r["rows"]])
+        out.append({"name": r["name"], "conclusion": conclusion, "output": {"title": title, "summary": summary}})
+    return out
+
+
+def readiness_markdown(data, threads=None, threads_required=False):
+    """The 'Ready to merge?' block: required checks, blocking threads, and where approvals live."""
+    failing = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    failures = ", ".join(failing)
+    if len(failures) > 1000:
+        failures = failures[:1000] + "… (full list in Checks)"
+    failures = md(failures)
+    lines = ["", "#### Ready to merge?", "",
+             f"- ✕ **Required checks:** failing ({failures})" if failing else "- ✓ **Required checks:** passing"]
+    if threads is not None:
+        lines.append(f"- ✕ **Blocking threads:** {threads['blocking']} open" if threads["blocking"] else "- ✓ **Blocking threads:** none open")
+    elif threads_required:
+        lines.append("- ✕ **Blocking threads:** could not be read")
+    if data.get("waivers") is not None:
+        waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+        lines.append(f"- ↷ **Waived findings:** {waived} (not blocking)")
+    lines.append("- ↗ **Approvals:** see the pull request's reviewers (the review site shows them per commit).")
+    return lines
 
 
 def main():

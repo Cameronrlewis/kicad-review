@@ -692,6 +692,52 @@ export const CHECKS = [
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
+  ["BOM coverage and field changes render in the Parts tab", "", `
+    const P = proj(); P.parts = P.parts || { lines: [], changes: [], supplier: null };
+    P.parts.coverage = { base: { Value: [4, 4], Footprint: [4, 4], LCSC: [3, 4], MPN: [1, 4], Manufacturer: [0, 4], Datasheet: [2, 4], "Datasheet (critical)": [1, 2], "Order ready": [3, 4] },
+                         head: { Value: [5, 5], Footprint: [5, 5], LCSC: [4, 5], MPN: [3, 5], Manufacturer: [0, 5], Datasheet: [2, 5], "Datasheet (critical)": [1, 3], "Order ready": [4, 5] } };
+    P.parts.field_changes = [{ refs: ["R1", "R2"], field: "MPN", before: null, after: "<i>ERJ</i>" }];
+    P.parts.dnp_mismatch = ["C9"];
+    S.t = "parts"; renderPanel();
+    const cov = document.querySelector("#panel .bom-coverage")?.textContent || "", fc = document.querySelector("#panel .field-changes")?.textContent || "";
+    return cov.includes("incomplete: Manufacturer") && cov.includes("MPN") && cov.includes("3 / 5") && cov.includes("+2") && cov.includes("Order ready") && fc.includes("R1, R2") && fc.includes("<i>ERJ</i>")
+      && !document.querySelector("#panel .field-changes i") && document.querySelector("#panel .dnp-mismatch")?.textContent.includes("C9") || JSON.stringify({cov, fc});`],
+  ["Inventory lists every part, searchable, with change badges", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head") && r.kind === "footprint"); if (!row) return "skip";
+    const b = rowBox(row, "head");
+    P.objects = [{ uuid: "u1", kind: "footprint", ref: row.ref, value: "1k", footprint: "R_0402", side: "head", pos: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0], box: b, layer: "F.Cu" },
+                 { uuid: "u2", kind: "footprint", ref: "ZZ9", value: '<b>"x"</b>', footprint: "SOT23", side: "head", pos: [1, 1, 0], box: null, layer: "B.Cu" }];
+    S.t = "changes"; S.filter.all = true; renderPanel();
+    const rows = document.querySelectorAll("#panel .inv-row"), first = [...rows].find(r => r.textContent.includes(row.ref));
+    const q = document.querySelector("#panel .q"); q.value = "zz9"; q.dispatchEvent(new Event("input"));
+    const after = document.querySelectorAll("#panel .inv-row");
+    return rows.length === 2 && first.textContent.includes(row.action) && after.length === 1 && after[0].textContent.includes('<b>"x"</b>') && !document.querySelector("#panel .inv-row b") || JSON.stringify({n: rows.length, after: after.length});`],
+  ["Inventory removed part is listed and zooms", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    const b = rowBox(row, "head");
+    P.objects = [{ uuid: "u3", kind: "footprint", ref: "GONE1", value: "x", footprint: "y", side: "base", pos: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0], box: b, layer: "F.Cu" }];
+    S.filter.all = true; S.filter.q = ""; renderPanel();
+    const r = document.querySelector("#panel .inv-row"); if (!r.textContent.includes("removed")) return "no removed badge";
+    await goToObject(0);
+    return S.v === "board" && Math.abs(S.x - (b[0] + b[2]) / 2) < 0.01 || JSON.stringify({v: S.v, x: S.x});`],
+  ["Inventory caps long lists", "", `
+    const P = proj(); P.objects = Array.from({ length: 1600 }, (_, i) => ({ uuid: "u" + i, kind: "footprint", ref: "R" + i, value: "1k", footprint: "f", side: "head", pos: [i, 0, 0], box: null, layer: "F.Cu" }));
+    S.filter.all = true; S.filter.q = ""; renderPanel();
+    return document.querySelectorAll("#panel .inv-row").length === 1500 && document.querySelector("#panel .cards").textContent.includes("showing 1500 of 1600") || "no cap";`],
+  ["Inventory follows project", "", `
+    if (D.projects.length < 2) return "skip";
+    D.projects[0].objects = [{ uuid: "a", kind: "symbol", ref: "PA1", side: "head", pos: [0, 0], box: null, sheet: "/" }];
+    D.projects[1].objects = [{ uuid: "b", kind: "symbol", ref: "PB1", side: "head", pos: [0, 0], box: null, sheet: "/" }];
+    S.filter.all = true; openProject(1);
+    return document.querySelector("#panel .cards").textContent.includes("PB1") && !document.querySelector("#panel .cards").textContent.includes("PA1") || "wrong project";`],
+  ["Inventory badges follow side and search covers layer", "", `
+    const P = proj(); P.changes = [{ kind: "footprint", ref: "Q1", action: "added", where: { board: true } }, { kind: "footprint", ref: "Q1", action: "removed", where: { board: true } }];
+    P.objects = [{ uuid: "b", kind: "footprint", ref: "Q1", side: "base", pos: [0, 0, 0], box: null, layer: "F.Cu" }, { uuid: "h", kind: "footprint", ref: "Q1", side: "head", pos: [0, 0, 0], box: null, layer: "B.Cu" }];
+    S.t = "changes"; S.filter.all = true; S.filter.q = ""; renderPanel();
+    const rows = [...document.querySelectorAll("#panel .inv-row")].map(r => r.textContent);
+    const q = document.querySelector("#panel .q"); q.value = "b.cu"; q.dispatchEvent(new Event("input"));
+    const n = document.querySelectorAll("#panel .inv-row").length;
+    return rows[0].includes("removed") && rows[1].includes("added") && n === 1 || JSON.stringify({ rows, n });`],
   ["Parts fixture sorts problems and greys stale stock", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
   document.querySelector('[data-tab=parts]').click();
@@ -744,6 +790,8 @@ export const CHECKS = [
     && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
     && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
 `],
+  ["Readiness ready message blockMerge is false when unframed", "", `
+    return !THREADS_ON && typeof readyMessage === "function" && readyMessage().blockMerge === false && readyMessage().kicadReviewReady === true || "ready message";`],
   ["Threads arrival preserves the drawing during the first right-click", "v=board", `
     const vp = document.querySelector("#stage .vp"), world = vp.querySelector(".world");
     const rect = vp.getBoundingClientRect(), event = new MouseEvent("contextmenu", {bubbles:true, cancelable:true, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2});
@@ -931,4 +979,39 @@ export const CHECKS = [
     const throwing = { get id() { throw new Error("bad thread"); } };
     acceptThreads([throwing, thread("ok1")]);
     return S.threads.length === 1 && S.threads[0].id === "ok1" || "validation error dropped valid thread";`],
+  ["Waivers hide waived findings behind a chip and tag them", "p=1&t=checks", `
+    const P = proj(), c = (P.checks || []).find(c => c.violations.length); if (!c) return "skip";
+    const v = c.violations[0]; v.waiver_key = "w-abcdefabcdef"; v.waived = { reason: "intended <b>x</b>", by: "ann", until: "2026-12-31", ref: null };
+    c.waived = 1; S.checks.scope = "all"; renderPanel();
+    const hidden = !document.querySelector('#panel .viol[data-id="' + v.id + '"]'), chip = document.querySelector('#panel [data-check-waived]');
+    chip.focus(); chip.click();
+    const focused = document.activeElement.matches("[data-check-waived]"), summary = document.querySelector("#panel .check-counts").textContent;
+    const shown = document.querySelector('#panel .viol[data-id="' + v.id + '"]');
+    return focused && summary.includes("1 waived") && hidden && chip.textContent.includes("Waived 1") && !!shown && shown.textContent.includes("WAIVED") && shown.textContent.includes("intended <b>x</b>")
+      && !document.querySelector("#panel .viol b") || JSON.stringify({hidden, chip: chip?.textContent, shown: shown?.textContent});`],
+  ["Waivers offer a copyable TOML entry for an unwaived finding", "p=1&t=checks", `
+    const P = proj(), c = (P.checks || []).find(c => ["erc", "drc", "parity"].includes(c.name) && c.violations.length); if (!c) return "skip";
+    const v = c.violations.find(x => !x.waived); v.waiver_key = "w-0123456789ab"; S.checks.scope = "all"; renderPanel();
+    const b = document.querySelector('#panel [data-waive="' + v.id + '"]'); b.closest('details').open = true; b.focus(); b.click();
+    const pre = document.querySelector("#panel .waiver-snippet")?.textContent || "";
+    const button = document.activeElement;
+    return button.matches('[data-waive]') && button.getAttribute('aria-label') === 'Waive ' + (v.items.join(' · ') || v.description)
+      && document.querySelector("#panel .waiver-help").textContent.includes("on the pull request's target branch")
+      && document.getElementById(button.getAttribute('aria-controls'))?.textContent === pre && pre.includes('check = "' + c.name + '"') && pre.includes('match = "w-0123456789ab"') && pre.includes("until = ") && pre.includes("[[waiver]]") || pre;`],
+  ["Waivers show no waive button without keys", "p=1&t=checks", `
+    proj().checks.forEach(c => c.violations.forEach(v => { delete v.waiver_key; delete v.waived; })); S.checks.scope = "all"; renderPanel();
+    return !document.querySelector("#panel [data-waive]") && !document.querySelector("#panel [data-check-waived]") || "shown";`],
+
+  ["Waivers show-all reveals an only-waived change", "p=1&t=checks", `
+    const c = (proj().checks || []).find(c => c.violations.length); if (!c) return "skip";
+    proj().checks.forEach(c => c.violations.forEach(v => { v.new = true; v.waived = { reason: "intentional", by: "ann" }; }));
+    S.checks.scope = null; renderPanel();
+    const scope = document.querySelector('[data-check-scope="all"]').getAttribute("aria-pressed");
+    document.querySelector("#panel .show-all").click();
+    return scope === "true" && S.checks.waived && !!document.querySelector("#panel .viol .waived-reason") || "not revealed";`],
+  ["Waivers snippets preserve quoted keys and remove comment controls", "p=1&t=checks", `
+    const key = 'w-"\\\\b\\\\f\\n\\r\\t' + String.fromCharCode(0, 8, 12, 31, 127);
+    const text = waiverSnippet({waiver_key:key, description:'x\\r\\n' + String.fromCharCode(0, 127) + '<b>x</b>'}, 'erc');
+    const match = text.split("\\n").find(l => l.startsWith("match = ")).slice(8);
+    return JSON.parse(match) === key && !/[\\u0000-\\u0008\\u000b-\\u001f\\u007f]/.test(text) && text.includes('# x  ') || text;`],
 ];

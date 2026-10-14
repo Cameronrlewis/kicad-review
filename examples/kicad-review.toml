@@ -12,6 +12,8 @@ bom = "informational"    # every part has the fields below
 
 [bom]
 required_fields = ["Value", "Footprint"]
+# critical_prefixes = ["U", "J", "Q", "D", "Y", "X", "K", "F"]   # datasheet coverage shown separately (Parts)
+# order_ready_fields = []   # empty: the fabrication preset's fields (Parts)
 
 [fabrication]
 preset = "jlcpcb"        # or "pcbway"
@@ -27,4 +29,17 @@ enabled = false
 [threads]
 # Pin discussion threads to parts and points in the review site. Threads are pull-request review comments.
 # Needs the review site and its GitHub App's Pull requests permission. Off by default.
+enabled = false
+block_merge = false  # fail the review while a blocking thread is open; needs enabled = true
+
+[github]
+# One GitHub check run per check, for branch protection. Needs "checks: write" in the caller workflow. Off by default.
+check_runs = false
+
+[waivers]
+# Read kicad-review-waivers.toml and let waived findings pass required checks. Off by default.
+enabled = false
+
+[inventory]
+# "All parts" list in the report. Adds about 100 bytes per part to the report.
 enabled = false

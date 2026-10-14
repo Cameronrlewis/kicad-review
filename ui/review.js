@@ -2,9 +2,10 @@
 // KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see README, "Data format").
 const D = window.REVIEW_DATA;
 const $ = s => document.querySelector(s);
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true } };
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
+const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
@@ -33,7 +34,7 @@ function openThread(id) {
   const r = resolveAnchor(t.anchor), drawable = !r.detached && currentView(r.view);
   S.thread = id;
   const show = () => { if (drawable) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
-  if (drawable && r.view !== S.v) { S.placing = false; document.body.classList.remove("placing"); S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(() => { show(); saveHash(); }); }
+  if (drawable && r.view !== S.v) { stopPlacing(); S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(() => { show(); saveHash(); }); }
   show();
 }
 const proj = () => D.projects[S.p];
@@ -124,7 +125,8 @@ function firstChangedView(p) {
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
-function select(view) { S.placing = false; document.body.classList.remove("placing"); S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); saveHash(); }
+function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
+function select(view) { stopPlacing(); S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -411,7 +413,7 @@ function drawPins() {
   }
 }
 function pickAt(vp, e) {
-  if (S.placing) { S.placing = false; document.body.classList.remove("placing"); proposePin(vp, e); return; }
+  if (S.placing) { stopPlacing(); proposePin(vp, e); return; }
   const r = vp.getBoundingClientRect();
   const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
   const rows = proj().changes.filter(c => onView(c, S.v));
@@ -480,7 +482,7 @@ function resolveAnchor(a) {
   if (base) return { view: objView(base), side: "base", pos: base.pos, notes: [...notes, `${a.ref} was removed in this change`] };
   return { detached: `${a.ref || "its object"} is not in either revision of this review` };
 }
-S.filter = { added: true, removed: true, modified: true, kind: "", q: "" };
+S.filter = { added: true, removed: true, modified: true, kind: "", q: "", all: false };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
 const PROP_ORDER = ["Value", "Footprint", "footprint", "layer", "position", "net", "layers", "text", "file", "width"];
 const rank = k => { const i = PROP_ORDER.indexOf(k); return i < 0 ? PROP_ORDER.length : i; };
@@ -494,6 +496,32 @@ function card(r) {
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
     <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${body}</button>`;
 }
+function inventoryHtml() {
+  // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
+  const changes = new Map();
+  for (const r of proj().changes) changes.set(`${r.kind}\0${r.ref}\0${r.action === "removed"}`, r);
+  const changeFor = o => changes.get(`${o.kind}\0${o.ref}\0${o.side === "base"}`) || (o.side === "base" ? { action: "removed" } : o.added ? { action: "added" } : null);
+  const place = o => o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet);
+  const q = S.filter.q.toLowerCase(), objs = (proj().objects || []).map((o, i) => ({ o, i }))
+    .filter(({ o }) => !q || [o.ref, o.value, o.footprint, place(o)].some(v => String(v ?? "").toLowerCase().includes(q)));
+  return (objs.slice(0, 1500).map(({ o, i }) => {
+    const ch = changeFor(o), view = objView(o), drawn = !!currentView(view);
+    return `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
+      ${ch ? `<span class="badge ${esc(ch.action)}">${GLYPH[ch.action] ?? ""} ${esc(ch.action)}</span>` : ""}
+      <div class="prop"><span>value</span><span class="new wide">${esc(o.value ?? "—")}</span></div><div class="prop"><span>footprint</span><span class="new wide">${esc(o.footprint ?? "—")}</span></div>
+      <div class="more muted">${esc(place(o))}${drawn ? "" : " · drawing unchanged: no render"}</div></button>`;
+  }).join("") || '<p class="muted">No parts match.</p>') + (objs.length > 1500 ? `<p class="muted">showing 1500 of ${objs.length}; narrow the search to see the rest</p>` : "");
+}
+function goToObject(i) {
+  const o = proj().objects?.[i]; if (!o) return Promise.resolve();
+  const view = objView(o); if (!currentView(view)) return Promise.resolve();
+  const p = o.pos, box = o.box || (p && [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3]);
+  if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
+  return draw().then(() => { if (box) zoomTo(box); saveHash(); });
+}
+function bindInventory() {
+  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goToObject(+b.dataset.obj); };
+}
 function cardsHtml() {
   const f = S.filter, q = f.q.toLowerCase();
   const rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
@@ -502,6 +530,11 @@ function cardsHtml() {
     + (rows.length > 1500 ? `<p class="muted">showing 1500 of ${rows.length}; narrow the filter to see the rest</p>` : "");
 }
 function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
+function waiverSnippet(v, check) {
+  const today = new Date(), until = new Date(today.getTime() + 90 * 864e5).toISOString().slice(0, 10);
+  const quote = x => '"' + String(x).replace(/["\\\u0000-\u001f\u007f]/g, c => c === '"' || c === "\\" ? "\\" + c : "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")) + '"';
+  return `[[waiver]]\ncheck = ${quote(check)}\nmatch = ${quote(v.waiver_key)}\n# ${String(v.description).replace(/[\u0000-\u001f\u007f]/g, " ")}\nreason = ""          # why this is acceptable\nby = ""              # your GitHub login\ndate = ${today.toISOString().slice(0, 10)}\nuntil = ${until}    # or replace with: permanent = true`;
+}
 function renderChecks() {
   const p = proj(), state = S.checks;
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
@@ -512,7 +545,7 @@ function renderChecks() {
   const configured = names.map(name => ({ name, check: byName.get(name), setting: D.settings?.checks?.[name] }));
   const ran = configured.filter(r => r.check && r.setting !== "off").map(r => r.check);
   const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
-  const totalNew = all.filter(v => v.new).length;
+  const totalNew = all.filter(v => v.new && !v.waived).length;
   const scope = state.scope ?? (totalNew ? "new" : "all");
   const checked = state.check && byName.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
@@ -524,9 +557,9 @@ function renderChecks() {
     const newer = check.new_errors + check.new_warnings;
     return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
       <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
-      <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
+      <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
-  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity]);
+  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived));
   const totalShown = shown.length;
   const groups = new Map();
   for (const v of shown) {
@@ -541,10 +574,10 @@ function renderChecks() {
   }).map(g => {
     const vs = g.violations.sort((a, b) => (b.new - a.new) || ((a.severity === "error") ? -1 : 1) - ((b.severity === "error") ? -1 : 1));
     const newCount = vs.filter(v => v.new).length, errors = vs.some(v => v.severity === "error");
-    return `<details class="check-group" ${newCount ? "open" : ""}><summary><span class="rule">${esc(g.type)}</span><span class="group-description">${esc(vs[0].description)}</span><span class="group-count">${vs.length}</span>${newCount ? `<b class="new-tag">NEW ${newCount}</b>` : ""}<span class="sev">${errors ? "✕ error" : "! warning"}</span></summary>${vs.slice(0, 200).map(v => {
+    return `<details class="check-group" ${newCount || vs.some(v => v.id === S.waiveOpen) ? "open" : ""}><summary><span class="rule">${esc(g.type)}</span><span class="group-description">${esc(vs[0].description)}</span><span class="group-count">${vs.length}</span>${newCount ? `<b class="new-tag">NEW ${newCount}</b>` : ""}<span class="sev">${errors ? "✕ error" : "! warning"}</span></summary>${vs.slice(0, 200).map(v => {
       const at = v.pos && currentView(viewOf(v));
       return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'} aria-selected="${S.s === v.id}">
-        ${v.new ? '<span class="new-tag">NEW</span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>`;
+        ${v.new ? '<span class="new-tag">NEW</span>' : ""}${v.waived ? '<span class="waived-tag">WAIVED</span><span class="waived-reason"></span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${v.waiver_key && !v.waived && ["erc", "drc", "parity"].includes(v.check.name) ? `<button class="waive" data-waive="${esc(v.id)}" aria-label="Waive ${esc(v.items.join(" · ") || v.description)}" aria-controls="waiver-${esc(v.id)}" aria-expanded="${S.waiveOpen === v.id}">Waive…</button>${S.waiveOpen === v.id ? `<pre class="waiver-snippet" id="waiver-${esc(v.id)}" data-waiver-snippet="${esc(v.id)}"></pre><p class="muted waiver-help">Add this to kicad-review-waivers.toml on the pull request's target branch through a pull request, fill in reason and by, then re-run this review.</p>` : ""}` : ""}`;
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
   return `<div class="checks-summary">${summary}</div><div class="filters checks-filters">
@@ -552,20 +585,35 @@ function renderChecks() {
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
     <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
+    ${all.some(v => v.waived) ? `<button class="check-chip" data-check-waived aria-pressed="${state.waived}">Waived ${all.filter(v => v.waived).length}</button>` : ""}
   </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
-const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"]);
+const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"]);
 // One rule for every count, filter, sort and ⚠: a problem blocks ordering the part.
 const blocking = l => l.problems.some(p => PARTS_BLOCKING.has(p));
 const partsProblemCount = parts => parts.lines.filter(blocking).length;
-const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
+const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
 function partsAge(s) {
   if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
   const h = (Date.now() - Date.parse(s.fetched_at)) / 36e5;
   if (!Number.isFinite(h)) return { text: `JLCPCB data age unavailable: invalid timestamp ${esc(s.fetched_at)}`, stale: true };
   return { text: `JLCPCB data as of ${esc(s.fetched_at.replace("T", " ").slice(0, 16))} UTC (${h < 48 ? Math.round(h) + " h" : Math.round(h / 24) + " days"} old)`,
            stale: h > 24, warn: h > 6 };
+}
+function coverageHtml(parts) {
+  const c = parts.coverage; if (!c) return "";
+  const rows = Object.keys(c.head).map(f => {
+    const [n, t] = c.head[f], d = c.base?.[f] ? n - c.base[f][0] : 0, pct = t ? Math.round(100 * n / t) : 100;
+    return `<tr${n < t ? ' class="short"' : ""}><th scope="row">${n < t ? '<span aria-hidden="true">⚠ </span><span class="sr-only">incomplete: </span>' : ""}${esc(f)}</th><td>${n} / ${t}</td><td>${pct}%</td><td>${d ? (d > 0 ? "+" : "") + d : ""}</td></tr>`;
+  }).join("");
+  return `<table class="bom-coverage"><caption>BOM coverage (this revision; change from base)</caption><thead><tr><th>Field</th><th>Parts</th><th>%</th><th>Δ</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function fieldChangesHtml(parts) {
+  const fc = parts.field_changes || [];
+  return (fc.length ? `<table class="field-changes"><caption>Field changes</caption><thead><tr><th>Refs</th><th>Field</th><th>Base</th><th>Head</th></tr></thead><tbody>${fc.map(r =>
+    `<tr><td>${esc(r.refs.join(", "))}</td><td>${esc(r.field)}</td><td>${esc(r.before ?? "—")}</td><td>${esc(r.after ?? "—")}</td></tr>`).join("")}</tbody></table>` : "")
+    + (parts.dnp_mismatch?.length ? `<p class="dnp-mismatch">⚠ DNP differs between schematic and board: ${esc(parts.dnp_mismatch.join(", "))}</p>` : "");
 }
 function renderParts() {
   const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter;
@@ -575,7 +623,7 @@ function renderParts() {
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
   const shown = rows.filter(r => (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => Number(blocking(b.line)) - Number(blocking(a.line)));
-  return `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
+  return `${coverageHtml(parts)}<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
     <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
     <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "JLCPCB", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
       // A change row names only the refs it moved; the line's other refs did not change.
@@ -595,7 +643,7 @@ function renderParts() {
       }
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
       return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${l.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${esc(stock)}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
-    }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
+    }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
   const f = S.threadFilter, all = (S.threads || []).filter(t => t.anchor.project === proj().dir);
@@ -618,7 +666,7 @@ function renderThreads() {
     ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
 }
 function renderPanel() {
-  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-parts-filter", "data-thread-status", "data-thread"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
   if (S.t === "threads" && !S.threads) { S.wantThreads = true; S.t = "changes"; }
@@ -631,19 +679,31 @@ function renderPanel() {
       ${S.threads ? `<button role="tab" data-tab="threads" aria-selected="${S.t === "threads"}">Threads ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}</button>` : ""}</div>` +
     (S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
-    <div class="filters">${["added", "removed", "modified"].map(a =>
+    ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
+    ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
-      <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
-    <div class="cards">${cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
+      <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
+    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
   for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-severity]")) b.onclick = () => { S.checks[b.dataset.checkSeverity] = !S.checks[b.dataset.checkSeverity]; renderPanel(); };
-  $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true }); renderPanel(); });
+  $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true, waived: true }); renderPanel(); });
+  const wc = $("#panel [data-check-waived]"); if (wc) wc.onclick = () => { S.checks.waived = !S.checks.waived; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-waive]")) b.onclick = () => { S.waiveOpen = S.waiveOpen === b.dataset.waive ? null : b.dataset.waive; renderPanel(); };
+  if (S.t === "checks") for (const c of p.checks || []) for (const v of c.violations) {
+    if (!v.waived && S.waiveOpen !== v.id) continue;
+    const reason = $(`#panel .viol[data-id="${CSS.escape(v.id)}"] .waived-reason`);
+    if (reason) reason.textContent = `${v.waived.reason} · ${v.waived.by}${v.waived.until ? ` · until ${v.waived.until}` : " · permanent"}`;
+    const pre = $(`#panel [data-waiver-snippet="${CSS.escape(v.id)}"]`);
+    if (pre) pre.textContent = waiverSnippet(v, c.name);
+  }
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
-  const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
+  const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = f.all ? inventoryHtml() : cardsHtml(); bindCards(); bindInventory(); };
+  for (const b of document.querySelectorAll("#panel [data-inv]")) b.onclick = () => { f.all = b.dataset.inv === "1"; renderPanel(); };
+  bindInventory();
   bindCards();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
@@ -683,7 +743,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
   else if (e.key === "c" && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
   else if (e.key === "f") fit();
-  else if (e.key === "Escape") { S.placing = false; document.body.classList.remove("placing"); S.s = null; markSelected(); draw(); saveHash(); }
+  else if (e.key === "Escape") { stopPlacing(); S.s = null; markSelected(); draw(); saveHash(); }
 });
 function positionLink() {
   const where = S.v === "board" ? `${proj().name} board` : `${proj().name} sheet ${proj().sheets.find(s => `sheet:${s.path}` === S.v)?.name ?? ""}`;
@@ -766,7 +826,7 @@ function start() {
       const v = currentView(); if (v) { const boxes = await computeRegions(v); if (boxes.length) zoomTo([boxes[0].x0, boxes[0].y0, boxes[0].x1, boxes[0].y1], 4); }
       document.title = "ready";
     }
-  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage({ kicadReviewReady: true, threads: THREADS_ON }, "*"); });   // cmd_shots must never wait out its budget
+  }).catch(e => console.error(e)).finally(() => { window.reviewReady = true; if (parent !== window) parent.postMessage(readyMessage(), "*"); });   // cmd_shots must never wait out its budget
 }
 start();
 window.addEventListener("hashchange", () => applyState(decodeState(location.hash)));
