@@ -1,8 +1,5 @@
 // The review page's thread client. It runs in the trusted wrapper, never in the sandboxed report.
 // The report only proposes anchors and asks to open threads; text and requests stay here.
-export function acceptFromReport(event, iframe) {
-  return event.source === iframe.contentWindow && !!event.data && typeof event.data === 'object';
-}
 
 export function threadsClient(config) {
   const iframe = document.getElementById('review-report');
