@@ -782,6 +782,10 @@ def present(v):
     return (v or "").strip().lower() not in PLACEHOLDERS
 
 
+def placeholder(v):
+    return (v or "").strip() not in ("", "~") and not present(v)
+
+
 COVERAGE_FIELDS = {
     "Value": lambda p: p.get("Value"), "Footprint": lambda p: p.get("Footprint"),
     "LCSC": lambda p: field(p, LCSC_FIELDS), "MPN": lambda p: field(p, MPN_FIELDS),
@@ -840,7 +844,7 @@ def parts_lines(objs):
             l["problems"].append("missing_lcsc")
         if not l["mpn"] and not l["lcsc"]:
             l["problems"].append("missing_mpn")
-        bad = [r for r, _, vals in l["_each"] if any((v or "").strip().lower() in PLACEHOLDERS - {"", "~"} for v in vals)]
+        bad = [r for r, _, vals in l["_each"] if any(placeholder(v) for v in vals)]
         if bad:
             l["problems"].append("placeholder")
             l.setdefault("problem_refs", {})["placeholder"] = bad
