@@ -4,6 +4,92 @@ import { runInNewContext } from 'node:vm';
 import worker, { open, seal } from './worker.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
+import { historyEvents, HISTORY_QUERY } from './history.js';
+import { historyPage } from './pages.js';
+
+const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
+test('history ignores unrelated artifacts from the same run', () => {
+  const artifacts = [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 } }, { id: 901, name: 'build.zip', workflow_run: { id: 77 } }];
+  const checks = historyEvents(historyFixture(),artifacts, '/r/o/r', historyArtifactName).filter(e => e.kind === 'checks');
+  assert.equal(checks[0].href, '/r/o/r/a/900');
+  assert.equal(historyEvents(historyFixture(),artifacts.slice(1), '/r/o/r', historyArtifactName).find(e => e.kind === 'checks').href, null);
+});
+
+const historyFixture = () => ({ data: { repository: { pullRequest: { title: 'Move R16',
+  commits: { nodes: [{ commit: { oid: 'a'.repeat(40), messageHeadline: 'Move R16', committedDate: '2026-10-12T09:00:00Z', author: { name: 'Cam' } } }] },
+  reviews: { nodes: [{ author: null, state: 'APPROVED', submittedAt: '2026-10-12T11:00:00Z', commit: { oid: 'a'.repeat(40) } }] },
+  reviewThreads: { nodes: [{ isResolved: true, resolvedBy: { login: 'bo' }, comments: { nodes: [{ author: { login: 'ann' }, createdAt: '2026-10-12T10:00:00Z', body: threadBody({ anchor, text: 'check', link: 'https://s/r' }) }] } }] },
+  comments: { nodes: [{ author: { login: 'github-actions' }, body: '<!-- kicad-review -->\n<!-- kicad-review-log -->\n| [2026-10-12 10:04](https://github.com/o/r/actions/runs/77) | `aaaaaaa` | ✅ pass | A\\|B: ERC 0 (0) |\n| [2026-09-01 08:00](https://github.com/o/r/actions/runs/5) | `bbbbbbb` | ❌ fail | ERC 1 (1) |\n<!-- /kicad-review-log -->' }] }
+} } } });
+
+test('history joins sources newest first, parses escaped pipes and links active reports', () => {
+  const events = historyEvents(historyFixture(),[{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: false }], '/r/o/r', historyArtifactName);
+  assert.deepEqual(events.map(e => e.kind), ['review', 'checks', 'thread', 'commit', 'checks']);
+  assert.equal(events[0].who, 'ghost');
+  assert.equal(events[1].href, '/r/o/r/a/900');
+  assert.match(events[1].text, /A\|B/);
+  assert.equal(events[2].text, 'Blocking thread on R16 (resolved by bo)');
+  assert.equal(events[4].href, null);
+  assert.match(HISTORY_QUERY, /comments\(first:100\)/);
+});
+
+test('history trusts only bot-authored marked logs and drops expired links', () => {
+  const gq = historyFixture();
+  const bot = gq.data.repository.pullRequest.comments.nodes[0];
+  gq.data.repository.pullRequest.comments.nodes.unshift({ ...bot, author: { login: 'attacker' } });
+  const events = historyEvents(gq,[{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: true }], '/r/o/r', historyArtifactName);
+  assert.equal(events.filter(e => e.kind === 'checks').length, 2);
+  assert.ok(events.filter(e => e.kind === 'checks').every(e => e.href === null));
+  bot.author.login = 'attacker';
+  assert.equal(historyEvents(gq).filter(e => e.kind === 'checks').length, 0);
+});
+
+test('history page escapes text, validates links and defaults unknown filters to all', () => {
+  const html = historyPage({ user: 'u', owner: 'o', repo: 'r', pull: 7, title: '<b>t</b>', filter: 'unknown',
+    events: [{ time: '2026-10-12T11:00:00Z', kind: 'review', text: 'Approved <script>', who: 'ghost', href: 'javascript:alert(1)' }] });
+  assert.match(html, /&lt;b&gt;t&lt;\/b&gt;/); assert.match(html, /Approved &lt;script&gt;/);
+  assert.match(html, /class="filter-chip" href="\?f=all" aria-current="page"/);
+  assert.doesNotMatch(html, /javascript:|Waivers/);
+});
+
+test('history route preserves refreshed cookies and security headers on every outcome', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  for (const [outcome, status] of [['ok', 200], ['throw', 502], ['forbidden', 403], ['rate', 429], ['graphql', 502], ['http', 502]]) {
+    const seen = [];
+    const restore = mockFetch(async url => {
+      seen.push(url);
+      if (url.includes('access_token')) return tokenResponse();
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.includes('/actions/artifacts')) throw new Error('artifact failure degrades');
+      if (outcome === 'throw') throw new Error('network failure');
+      if (outcome === 'rate') return new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0' } });
+      if (outcome === 'http') return new Response('{}', { status: 500 });
+      if (outcome === 'forbidden' || outcome === 'graphql') return new Response(JSON.stringify({ errors: [{ type: outcome === 'forbidden' ? 'FORBIDDEN' : 'NOT_FOUND' }] }));
+      return new Response(JSON.stringify(historyFixture()));
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/history', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, status, outcome);
+      assert.ok(cookieValue(response, 's'), outcome);
+      assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff');
+      const body = await response.text();
+      if (status === 403) assert.match(body, /Pull requests and Contents permissions/);
+      if (status === 429) assert.match(body, /rate limit/);
+      if (status === 200) assert.match(body, /Move R16/);
+      assert.ok(!seen.some(url => url.includes('waivers')));
+    } finally { restore(); }
+  }
+});
+
+test('history checks access before timeline calls', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls++; return new Response('{}', { status: 404 }); });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/history');
+    assert.equal(response.status, 302); assert.equal(calls, 0);
+  } finally { restore(); }
+});
+
 import { CHECKS } from '../ui/checks.mjs';
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -515,7 +601,7 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.equal(response.headers.get('Content-Security-Policy'), frameCsp);
     const body = await response.text();
     assert.match(body, /Review deadbee → cafebad/);
-    assert.match(body, /✕ failing/);
+    assert.match(body, /✕ checks failing/);
     assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/123/);
     assert.match(body, /<iframe[^>]+src="\/r\/Cameronrlewis\/repo\/a\/44\/raw"/);
     assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
@@ -895,13 +981,13 @@ test('running review refreshes safely and shows a GitHub run link only', async (
   } finally { restoreUnsafe(); }
 });
 
-test('completed review redirects to its review artifact', async () => {
+test('completed rerun redirects to newest non-expired review artifact even after a failed gate', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'success' }));
+    if (url.endsWith('/runs/12')) return new Response(JSON.stringify({ status: 'completed', conclusion: 'failure' }));
     assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/12/artifacts');
-    return new Response(JSON.stringify({ artifacts: [{ id: 56, name: 'kicad-review-deadbee-cafebad-pass.html' }] }));
+    return new Response(JSON.stringify({ artifacts: [{ id: 55, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-11' }, { id: 57, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-13', expired: true }, { id: 56, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-12' }] }));
   });
   try {
     const response = await call('/r/Cameronrlewis/repo/run/12', { headers: { Cookie: `s=${sealed}` } });
@@ -1482,10 +1568,11 @@ test('thread routes distinguish GitHub secondary rate limits from permission fai
   } finally { restore(); }
 });
 
-import { acceptFromReport, threadsClient } from './threads-client.js';
+import { threadsClient } from './threads-client.js';
 
 test('review page for a pull request carries the thread composer and config', () => {
   const html = reviewPage({ user: 'u', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: 7 });
+  assert.match(html, /href="\/r\/Cameronrlewis\/repo\/pull\/7\/history">History<\/a>/);
   assert.match(html, /<dialog id="thread-composer"/);
   assert.match(html, /<dialog id="thread-view"/);
   assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
@@ -1497,14 +1584,11 @@ test('review page without a pull request offers issues but no thread route', () 
   assert.match(html, /"threads":null/);
   assert.match(html, /"issues":"\/r\/Cameronrlewis\/repo\/issues"/);
   assert.doesNotMatch(html, /\/pull\/null\/threads/);
+  assert.doesNotMatch(html, />History<\/a>/);
 });
 
 test('wrapper accepts report messages only from its own iframe', () => {
-  const frame = { contentWindow: {} };
-  assert.equal(acceptFromReport({ source: frame.contentWindow, data: { kicadReviewPin: {} } }, frame), true);
-  assert.equal(acceptFromReport({ source: {}, data: { kicadReviewPin: {} } }, frame), false);
-  assert.equal(acceptFromReport({ source: frame.contentWindow, data: 'x' }, frame), false);
-  assert.equal(typeof threadsClient, 'function');
+  assert.match(threadsClient.toString(), /event\.source === iframe\.contentWindow && !!event\.data && typeof event\.data === 'object'/);
 });
 
 
@@ -1516,7 +1600,7 @@ test('artifact wrapper discovers PR number and disables thread requests for push
       if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
         name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 123 },
       }));
-      if (url.endsWith('/actions/runs/123')) return new Response(JSON.stringify({ event, pull_requests: [{ number: 7 }] }));
+      if (url.endsWith('/actions/runs/123')) return new Response(JSON.stringify({ event, status: 'completed', conclusion: 'failure', pull_requests: [{ number: 7 }] }));
       throw new Error(`unexpected ${url}`);
     });
     try {
@@ -1524,6 +1608,8 @@ test('artifact wrapper discovers PR number and disables thread requests for push
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('Content-Security-Policy'), frameCsp);
       const html = await response.text();
+      assert.match(html, /✕ run failure/);
+      assert.doesNotMatch(html, /✓ checks passing/);
       if (event === 'pull_request') {
         assert.match(html, /<dialog id="thread-composer"/);
         assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
@@ -1542,7 +1628,7 @@ test('serialized thread client has no bundler name helpers and notice is in revi
 
 test('thread client contains load failures, clears notice, and guards vanished threads', async () => {
   const listeners = {}, notice = { textContent: '' }, sent = [];
-  const node = () => ({ textContent: '', value: '', closest() { return this; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const node = () => ({ textContent: '', value: '', closest() { return this; }, replaceChildren() {}, append() {}, querySelectorAll() { return []; }, addEventListener(type, fn) { this[type] = fn; } });
   const dialog = () => {
     const nodes = {};
     return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } };
@@ -1550,7 +1636,8 @@ test('thread client contains load failures, clears notice, and guards vanished t
   const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
   let response = () => Promise.reject(new Error('offline')), posts = 0;
   runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', link: '/review' })`, {
-    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+    CustomEvent: class { constructor(type) { this.type = type; } },
+    document: { dispatchEvent(event) { assert.equal(event.type, 'kicad-review-threads-changed'); }, getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
     addEventListener(type, fn) { listeners[type] = fn; },
     fetch: async (url, options) => { if (options) {
       posts++; assert.equal(JSON.parse(options.body).link, '/review#v=board&x=1&y=2'); return { ok: true };
@@ -1705,7 +1792,7 @@ test('threads client loads issues and sends them to the report', () => {
 
 test('issue client is gated, loads independently, resets composer and strips finding title', async () => {
   const listeners = {}, sent = [], calls = [], notice = { textContent: '' };
-  const node = () => ({ textContent: '', value: '', hidden: false, disabled: false, required: false, closest() { return this; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const node = () => ({ textContent: '', value: '', hidden: false, disabled: false, required: false, closest() { return this; }, querySelectorAll() { return []; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
   const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
   const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
   let denied = false, duplicate = false, threadsAllowed = false, values = { title: 'Fix R16', text: 'later' };
@@ -1846,7 +1933,7 @@ test('final fixes: summary documentation limits touches line to pull-request run
 
 
 test('final fixes: thread with a tracked reply hides and refuses Create issue', async () => {
-  const listeners = {}, node = () => ({ textContent: '', value: '', closest() { return this; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const listeners = {}, node = () => ({ textContent: '', value: '', closest() { return this; }, querySelectorAll() { return []; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
   const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
   const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage() {} } };
   runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', issues: '/issues' })`, {
@@ -1859,4 +1946,335 @@ test('final fixes: thread with a tracked reply hides and refuses Create issue', 
   message({ kicadReviewOpenThread: 'T' }); assert.equal(view.querySelector('[data-act=issue]').hidden, true);
   await view.querySelector('form').submit({ preventDefault() {}, target: {}, submitter: { dataset: { act: 'issue' } } });
   assert.equal(composer.open, false);
+});
+
+test('report readiness announces the gate only with framed enabled threads', () => {
+  const source = readFileSync('ui/review.js', 'utf8');
+  const declarations = source.slice(source.indexOf('let THREADS_ON'), source.indexOf('const validThread'));
+  for (const framed of [false, true]) for (const enabled of [false, true]) for (const block_merge of [false, true]) {
+    const window = {}, parent = framed ? {} : window;
+    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D: { settings: { threads: { enabled, block_merge } } } });
+    assert.equal(message.kicadReviewReady, true);
+    assert.equal(message.threads, framed && enabled);
+    assert.equal(message.blockMerge, framed && enabled && block_merge);
+  }
+  const html = reviewPage({ owner: 'owner', repo: 'repo', id: '123', pull: 7 });
+  assert.match(html, /"rerun":"\/r\/owner\/repo\/pull\/7\/rerun"/);
+});
+
+test('thread changes rerun only an announced blocking gate and expose rerun failures', async () => {
+  for (const gate of [undefined, false, true]) for (const severity of ['comment', 'blocking']) {
+    const listeners = {}, calls = [], notice = { textContent: '', append(link) { this.link = link; } };
+    let changes = 0;
+    const node = () => ({ textContent: '', closest() { return this; }, buttons: [{ disabled: false }, { disabled: false }], querySelectorAll() { return this.buttons; }, replaceChildren() {}, append() {}, reset() {}, addEventListener(type, fn) { this[type] = fn; } });
+    const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
+    const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage() {} } };
+    const thread = { id: 'thread', resolved: false, anchor: { severity }, comments: [{ id: 'comment' }] };
+    let failure = null, mutationFails = false;
+    runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', rerun: '/rerun', run: '/run/', link: '/review' })`, {
+      URLSearchParams,
+      CustomEvent: class { constructor(type) { this.type = type; } },
+    document: { dispatchEvent(event) { changes++; assert.equal(event.type, 'kicad-review-threads-changed'); }, getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+      addEventListener(type, fn) { listeners[type] = fn; },
+      fetch: async (url, options) => {
+        if (options) calls.push({ url, options });
+        if (url === '/rerun' && failure === 'offline') throw new Error('offline');
+        if (url === '/rerun' && failure) return { ok: false, json: async () => ({ error: failure }) };
+        if (options && url !== '/rerun' && mutationFails) return { ok: false, json: async () => ({ error: 'mutation refused' }) };
+        return { ok: true, json: async () => ({ threads: [thread], run: 555 }) };
+      },
+      FormData: class { get(key) { return key === 'severity' ? severity : 'text'; } }, location: { hash: '' },
+    });
+    const message = data => listeners.message({ source: iframe.contentWindow, data });
+    listeners.message({ source: {}, data: { kicadReviewReady: true, threads: true, blockMerge: true } });
+    message({ kicadReviewReady: true, threads: true, blockMerge: gate });
+    await new Promise(resolve => setImmediate(resolve));
+    message({ kicadReviewOpenThread: 'thread' });
+    const submit = async (dialog, act) => {
+      const form = dialog.querySelector('form');
+      const event = { preventDefault() {}, target: { reset() {} }, submitter: { dataset: { act } } };
+      const first = form.submit(event);
+      if (!mutationFails) assert.ok(form.buttons.every(button => button.disabled));
+      await Promise.all([first, form.submit(event)]);
+      assert.ok(form.buttons.every(button => !button.disabled));
+    };
+    const expected = gate === true && severity === 'blocking' ? 1 : 0;
+    for (const resolved of [false, true]) {
+      thread.resolved = resolved; calls.length = 0;
+      await submit(view, 'resolve');
+      assert.equal(calls.length, 1 + expected);
+      assert.equal(calls[0].url, `/threads/thread/${resolved ? 'unresolve' : 'resolve'}`);
+      assert.equal(calls.filter(c => c.url === '/rerun').length, expected);
+    }
+    calls.length = 0; await submit(view, 'reply');
+    assert.equal(calls.length, 1); assert.equal(calls[0].url, '/threads/comment/reply');
+    message({ kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } });
+    calls.length = 0; await submit(composer);
+    assert.equal(calls.length, 1 + expected);
+    assert.equal(calls.filter(c => c.url === '/rerun').length, expected);
+    assert.equal(changes, 4);
+    if (expected) { assert.match(notice.textContent, /The review is re-running/); assert.equal(notice.link.href, '/run/555'); }
+    for (const call of calls.filter(c => c.url === '/rerun')) {
+      assert.equal(call.options.method, 'POST'); assert.equal(call.options.headers['Content-Type'], 'application/json'); assert.equal(call.options.body, '{}');
+    }
+    if (expected) {
+      thread.resolved = false;
+      for (failure of ['write access required', 'offline']) {
+        await submit(view, 'resolve');
+        assert.match(view.querySelector('[role=status]').textContent, /Resolved\. The review was not re-run:/);
+        assert.match(view.querySelector('[role=status]').textContent, new RegExp(failure));
+        message({ kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } });
+        await submit(composer);
+        assert.match(notice.textContent, /Created\. The review was not re-run:/);
+        assert.equal(composer.open, false);
+      }
+    }
+    mutationFails = true; calls.length = 0; await submit(view, 'resolve');
+    assert.equal(calls.filter(c => c.url === '/rerun').length, 0);
+    assert.equal(view.querySelector('[role=status]').textContent, 'mutation refused');
+  }
+});
+
+import { latestDecisions } from './readiness.js';
+
+test('readiness keeps each reviewer\'s latest decision', () => {
+  const head = 'h'.repeat(40);
+  const reviews = [
+    { user: { login: 'ann' }, state: 'APPROVED', commit_id: head, submitted_at: '2026-10-12T10:00:00Z' },
+    { user: { login: 'ann' }, state: 'CHANGES_REQUESTED', commit_id: head, submitted_at: '2026-10-12T11:00:00Z' },
+    { user: { login: 'ann' }, state: 'COMMENTED', commit_id: head, submitted_at: '2026-10-12T12:00:00Z' },
+    { user: { login: 'bo' }, state: 'APPROVED', commit_id: head, submitted_at: '2026-10-12T09:00:00Z' }];
+  assert.deepEqual(latestDecisions(reviews, head), [{ login: 'ann', state: 'CHANGES_REQUESTED', stale: false }, { login: 'bo', state: 'APPROVED', stale: false }]);
+});
+
+test('readiness marks approvals on older commits stale', () => {
+  assert.deepEqual(latestDecisions([{ user: { login: 'cy' }, state: 'APPROVED', commit_id: 'o'.repeat(40), submitted_at: '2026-10-12T10:00:00Z' }], 'n'.repeat(40)),
+    [{ login: 'cy', state: 'APPROVED', stale: true }]);
+});
+
+test('readiness route joins the PR, reviews and threads as the user', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const restore = mockFetch(async (url, options = {}) => {
+    assert.equal(options.headers.Authorization, 'Bearer access-secret');
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/pulls/7') return new Response(JSON.stringify({ head: { sha: 'n'.repeat(40) }, requested_reviewers: [{ login: 'dee' }] }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/pulls/7/reviews?per_page=100') return new Response(JSON.stringify([{ user: { login: 'cy' }, state: 'APPROVED', commit_id: 'o'.repeat(40), submitted_at: '2026-10-12T10:00:00Z' }]));
+    assert.equal(url, 'https://api.github.com/graphql');
+    return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [
+      { id: 'T', isResolved: false, comments: { nodes: [{ databaseId: 1, body: threadBody({ anchor, text: 'x', link: 'https://s/r' }) }] } }] } } } } }));
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { head: 'n'.repeat(40), decisions: [{ login: 'cy', state: 'APPROVED', stale: true }], requested: ['dee'], blocking: 1, open: 1 });
+  } finally { restore(); }
+});
+
+test('readiness ignores pending reviews and dismissed decisions, independent of input order', () => {
+  const review = (login, state, hour) => ({ user: { login }, state, commit_id: 'head', submitted_at: `2026-10-12T${hour}:00:00Z` });
+  assert.deepEqual(latestDecisions([review('ann', 'DISMISSED', '12'), review('bo', 'PENDING', '13'),
+    review('ann', 'APPROVED', '10'), review('bo', 'APPROVED', '11')], 'head'),
+    [{ login: 'bo', state: 'APPROVED', stale: false }]);
+});
+
+test('readiness treats GraphQL errors, missing data and unreadable threads as unknown', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const payload of [{ errors: [{ type: 'FORBIDDEN' }] }, { data: { repository: null } }, {},
+    { data: { repository: { pullRequest: { reviewThreads: { totalCount: 101, nodes: [] } } } } },
+    { data: { repository: { pullRequest: { reviewThreads: { nodes: [null] } } } } }, 'bad JSON', 'http error', 'network error']) {
+    const restore = mockFetch(async (url, options = {}) => {
+      assert.equal(options.headers.Authorization, 'Bearer access-secret');
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.endsWith('/pulls/7')) return new Response(JSON.stringify({ head: { sha: 'head' } }));
+      if (url.includes('/reviews?')) return new Response('[]');
+      if (payload === 'network error') throw new Error('offline');
+      return new Response(payload === 'bad JSON' ? '{' : JSON.stringify(payload), { status: payload === 'http error' ? 403 : 200 });
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.blocking, null);
+      assert.equal(body.open, null);
+    } finally { restore(); }
+  }
+});
+
+test('readiness access failures are JSON and retain access cookies', async () => {
+  const response = await call('/r/Cameronrlewis/repo/pull/7/readiness');
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Sign in again.' });
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  const restore = mockFetch(async url => url.includes('access_token') ? tokenResponse() : new Response('{}', { status: 404 }));
+  try {
+    const denied = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(denied.status, 404);
+    assert.deepEqual(await denied.json(), { error: "Can't open this repository." });
+    assert.ok(cookieValue(denied, 's'));
+  } finally { restore(); }
+});
+
+test('readiness retains refreshed cookies on success and GitHub failures', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  for (const status of [200, 403, 429, 502]) {
+    const restore = mockFetch(async url => {
+      if (url.includes('access_token')) return tokenResponse();
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.endsWith('/pulls/7')) return new Response(JSON.stringify({ head: { sha: 'head' } }),
+        { status: status === 429 ? 403 : status, headers: status === 429 ? { 'retry-after': '60' } : {} });
+      if (url.includes('/reviews?')) return new Response('[]');
+      return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }));
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, status);
+      assert.ok(cookieValue(response, 's'));
+      const body = await response.json();
+      if (status === 200) { assert.equal(body.blocking, 0); assert.equal(body.open, 0); }
+      else assert.ok(body.error);
+    } finally { restore(); }
+  }
+});
+
+test('readiness rejects missing heads and preserves pull and review error semantics', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const [failure, status, expected] of [['head', 200, 502], ['pull', 404, 404], ['reviews', 404, 404],
+    ['pull', 422, 502], ['reviews', 422, 502]]) {
+    const restore = mockFetch(async url => {
+      if (url.endsWith('/repo')) return repoOk();
+      if (url.endsWith('/pulls/7')) return new Response(JSON.stringify(failure === 'head' ? {} : { head: { sha: 'head' } }), { status: failure === 'pull' ? status : 200 });
+      if (url.includes('/reviews?')) return new Response('[]', { status: failure === 'reviews' ? status : 200 });
+      return new Response(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, nodes: [] } } } } }));
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, expected);
+      assert.deepEqual(await response.json(), { error: expected === 404 ? 'Pull request not found.' : 'GitHub did not answer. Try again.' });
+    } finally { restore(); }
+  }
+});
+
+import { readinessClient } from './readiness-client.js';
+import { rerunRoute } from './readiness.js';
+
+test('rerun validates callers before access, and selects only this PR head run', async () => {
+  const sealed = await signedIn();
+  const calls = [];
+  const head = 'b'.repeat(40);
+  const valid = { id: 555, head_sha: head, event: 'pull_request', repository: { full_name: 'Cameronrlewis/repo' }, pull_requests: [{ number: 7 }] };
+  const restore = mockFetch(async (url, options = {}) => {
+    calls.push([url, options.method || 'GET']);
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/pulls/7')) return new Response(JSON.stringify({ head: { sha: head } }));
+    if (url.includes('/workflows/kicad-review.yml/runs?')) {
+      assert.match(url, /head_sha=bbbb/); assert.match(url, /event=pull_request/);
+      return new Response(JSON.stringify({ total_count: 3, workflow_runs: [{ ...valid, id: 999, pull_requests: [{ number: 8 }] }, { ...valid, id: 888, repository: { full_name: 'other/repo' } }, valid] }));
+    }
+    assert.equal(url, 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/555/rerun');
+    return new Response(null, { status: 201 });
+  });
+  try {
+    const path = '/r/Cameronrlewis/repo/pull/7/rerun';
+    assert.equal((await threadsJson(path, {}, 'https://evil.example', sealed)).status, 403);
+    assert.equal((await call(path, { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'text/plain', Cookie: `s=${sealed}` } })).status, 415);
+    assert.equal(calls.length, 0);
+    const response = await threadsJson(path, { run: 999 }, undefined, sealed);
+    assert.equal(response.status, 201);
+    assert.deepEqual(await response.json(), { ok: true, run: 555 });
+    assert.equal(calls.at(-1)[1], 'POST');
+  } finally { restore(); }
+});
+
+test('rerun retains refreshed cookie across errors and success', async () => {
+  for (const kind of ['success', 'fork', 'same-repo-empty', 'missing', 'forbidden', 'forbidden-access', 'forbidden-old', 'network', 'wrong-pr', 'no-head']) {
+    let posts = 0;
+    const response = await rerunRoute(new Request('https://site.example/r/o/r/pull/7/rerun', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json' } }), {}, { owner: 'o', repo: 'r', number: 7 }, {
+      access: async () => ({ s: { token: 't', setCookie: 's=refreshed' } }),
+      gh: async (path, token, options) => {
+        if (kind === 'network') throw new Error('offline');
+        if (path.includes('/pulls/')) return new Response(JSON.stringify(kind === 'no-head' ? {} : { head: { sha: 'head' } }));
+        if (path.includes('/workflows/')) return new Response(JSON.stringify({ workflow_runs: kind === 'missing' ? [] : [{ id: 9, head_sha: 'head', event: 'pull_request', repository: { full_name: 'o/r' }, head_repository: { full_name: kind === 'fork' ? 'fork/r' : 'o/r' }, pull_requests: ['fork', 'same-repo-empty'].includes(kind) ? [] : [{ number: kind === 'wrong-pr' ? 8 : 7 }] }] }));
+        posts++; assert.equal(options.method, 'POST');
+        return kind.startsWith('forbidden') ? new Response(JSON.stringify({ message: kind === 'forbidden-access' ? 'Resource not accessible by integration' : kind === 'forbidden-old' ? 'Run is older than 30 days' : 'Run is not completed' }), { status: 403 }) : new Response(null, { status: 201 });
+      },
+    });
+    assert.equal(response.headers.get('Set-Cookie'), 's=refreshed');
+    const body = await response.json();
+    if (['success', 'fork'].includes(kind)) assert.equal(response.status, 201);
+    else assert.ok(body.error);
+    if (kind === 'forbidden') assert.equal(body.error, 'Run is not completed');
+    if (kind === 'forbidden-access') assert.equal(body.error, 'Re-running needs write access to this repository.');
+    if (kind === 'forbidden-old') assert.equal(body.error, 'Run is older than 30 days');
+    if (['missing', 'wrong-pr', 'same-repo-empty', 'no-head'].includes(kind)) assert.equal(posts, 0);
+  }
+});
+
+test('PR review page includes serialized readiness before thread notice', () => {
+  const args = { user: 'u', owner: 'o', repo: 'r', id: '1', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: 7 };
+  const html = reviewPage(args);
+  assert.match(html, /<section id="readiness" class="readiness" aria-live="polite">/);
+  assert.match(html, /"readiness":"\/r\/o\/r\/pull\/7\/readiness"/);
+  assert.match(html, /"reviewHead":"bbbbbbb"/);
+  assert.match(reviewPage({ ...args, name: 'unknown' }), /"reviewHead":null/);
+  assert.doesNotMatch(reviewPage({ ...args, pull: null }), /id="readiness"/);
+  assert.doesNotMatch(readinessClient.toString(), /__name/);
+});
+
+test('readiness client handles fresh, stale, unreadable, requested and failed responses', async () => {
+  const node = () => ({ children: [], append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; } });
+  const render = async (body, reviewHead = 'bbbbbbb', status = 200, reject = false) => {
+    const panel = node();
+    await runInNewContext(`(${readinessClient.toString()})(config)`, { config: { readiness: '/ready', reviewHead }, document: { addEventListener() {}, getElementById: () => panel, createElement: node }, fetch: async () => { if (reject) throw new Error('offline'); return new Response(JSON.stringify(body), { status }); } });
+    return panel.children[0].children.map(n => n.textContent).join('\n');
+  };
+  const data = { head: 'b'.repeat(40), decisions: [], requested: [], blocking: 0, open: 0 };
+  assert.match(await render(data), /latest commit/);
+  assert.match(await render(data), /none open/);
+  const stale = await render({ ...data, head: 'c'.repeat(40), decisions: [{ login: 'u', state: 'APPROVED', stale: true }] });
+  assert.match(stale, /✕ stale — This review/); assert.doesNotMatch(stale, /blocking — This review/); assert.match(stale, /out of date/); assert.match(stale, /older commit, stale/);
+  const unreadable = await render({ ...data, blocking: null, open: null });
+  assert.match(unreadable, /could not be read/); assert.doesNotMatch(unreadable, /none open/);
+  assert.match(await render(data, null), /freshness unknown/);
+  assert.match(await render({ ...data, requested: ['reviewer'] }), /waiting for reviewer/);
+  assert.match(await render({ error: 'denied' }, null, 401), /Sign in again/);
+  assert.match(await render({}, null, 200, true), /could not be loaded/);
+});
+
+test('review badge uses workflow conclusion, not artifact checks', () => {
+  const args = { owner: 'o', repo: 'r', id: 1, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
+  assert.match(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'failure' }), /✕ run failure/);
+  assert.doesNotMatch(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'failure' }), /✓ (?:checks )?passing/);
+  assert.match(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'success' }), /✓ run passing/);
+  assert.match(reviewPage({ ...args, runStatus: 'in_progress' }), /… run in progress/);
+  assert.match(reviewPage(args), /✓ checks passing/);
+});
+
+test('readiness reloads on thread mutations and ignores older responses', async () => {
+  const panel = { replaceChildren(list) { this.list = list; } }, listeners = {}, pending = [];
+  const node = () => ({ children: [], append(...items) { this.children.push(...items); } });
+  const initial = runInNewContext(`(${readinessClient.toString()})({ readiness: '/ready', reviewHead: 'bbbbbbb' })`, {
+    document: { getElementById: () => panel, createElement: node, addEventListener(type, fn) { listeners[type] = fn; } },
+    fetch: () => new Promise(resolve => pending.push(resolve)),
+  });
+  const data = { head: 'b'.repeat(40), decisions: [], requested: [], blocking: 0, open: 0 };
+  pending.shift()(new Response(JSON.stringify(data))); await initial;
+  assert.match(panel.list.children[2].textContent, /none open/);
+  const older = listeners['kicad-review-threads-changed']();
+  const newer = listeners['kicad-review-threads-changed']();
+  pending.pop()(new Response(JSON.stringify({ ...data, blocking: 1, open: 1 }))); await newer;
+  pending.pop()(new Response(JSON.stringify(data))); await older;
+  assert.match(panel.list.children[2].textContent, /1 open/);
+  const resolved = listeners['kicad-review-threads-changed']();
+  pending.pop()(new Response(JSON.stringify(data))); await resolved;
+  assert.match(panel.list.children[2].textContent, /none open/);
+});
+
+test('missing artifact points readers to the updated PR comment', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async url => url.endsWith('/repo') ? accessibleRepo() : new Response('{}', { status: 404 }));
+  try {
+    const response = await call('/r/Cameronrlewis/repo/a/42', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 404);
+    assert.match(await response.text(), /Open the review from the pull request comment/);
+  } finally { restore(); }
 });

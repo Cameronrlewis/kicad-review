@@ -6,13 +6,33 @@ export function acceptFromReport(event, iframe) {
 export function threadsClient(config) {
   const iframe = document.getElementById('review-report');
   const composer = document.getElementById('thread-composer'), view = document.getElementById('thread-view');
-  let threads = [], pending = null, current = null, issueMode = null, threadsOn = false, issuesOn = false;
+  let threads = [], pending = null, current = null, issueMode = null, threadsOn = false, issuesOn = false, blockMerge = false;
   const accept = (event) => event.source === iframe.contentWindow && !!event.data && typeof event.data === 'object';
   const send = (data) => iframe.contentWindow?.postMessage(data, '*');
   const status = (el, text) => { el.querySelector('[role=status]').textContent = text; };
   const post = async (path, body) => {
     const response = await fetch(config.threads + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
+    document.dispatchEvent(new CustomEvent('kicad-review-threads-changed'));
+  };
+  const rerun = async (severity, el, action) => {
+    if (!blockMerge || severity !== 'blocking') return;
+    notice.hidden = false;
+    try {
+      const response = await fetch(config.rerun, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
+      const data = await response.json().catch(() => ({}));
+      if (!Number.isSafeInteger(data.run) || data.run <= 0) { notice.textContent = 'The review is re-running.'; return; }
+      const link = document.createElement('a');
+      link.href = config.run + data.run;
+      link.textContent = 'Open the new review when it finishes.';
+      notice.textContent = 'The review is re-running. ';
+      notice.append(link);
+    } catch (error) {
+      const text = `${action}. The review was not re-run: ${error.message}`;
+      if (el === composer) notice.textContent = text;
+      else status(el, text);
+    }
   };
   const tracked = t => t.comments.slice(1).some(c => /\bTracked in #\d+\b/.test(String(c.body || '')));
   const reviewLink = anchor => {
@@ -73,6 +93,7 @@ export function threadsClient(config) {
   addEventListener('message', (event) => {
     if (!accept(event)) return;
     if (event.data.kicadReviewReady === true) {
+      blockMerge = event.data.blockMerge === true;
       threadsOn = event.data.threads === true && !!config.threads;
       issuesOn = event.data.issues === true && !!config.issues;
       if (threadsOn || issuesOn) load();
@@ -86,10 +107,11 @@ export function threadsClient(config) {
   });
   composer.querySelector('form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const form = new FormData(event.target), submit = event.target.querySelector?.('button:not([type=button])');
-    if (submit?.disabled) return;
-    if (submit) submit.disabled = true;
+    const buttons = composer.querySelector('form').querySelectorAll('button');
+    if (buttons[0]?.disabled) return;
+    for (const button of buttons) button.disabled = true;
     try {
+      const form = new FormData(event.target);
       if (issueMode && !issuesOn) throw new Error('Issues are turned off for this review.');
       if (issueMode) {
         const response = await fetch(config.issues, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ anchor: { ...pending, severity: 'comment' },
@@ -105,23 +127,29 @@ export function threadsClient(config) {
       if (!threadsOn) throw new Error('Threads are turned off for this review.');
       await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: reviewLink(pending) });
       composer.close(); await load();
+      await rerun(form.get('severity'), composer, 'Created');
     } catch (error) { status(composer, error.message); }
-    finally { if (submit) submit.disabled = false; }
+    finally { for (const button of buttons) button.disabled = false; }
   });
   view.querySelector('form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    const buttons = view.querySelector('form').querySelectorAll('button');
+    if (buttons[0]?.disabled) return;
     const t = threads.find((x) => x.id === current);
     if (!t) return status(view, 'This thread no longer exists.');
     if (event.submitter?.dataset.act === 'issue') {
       if (!issuesOn || tracked(t)) return;
       view.close(); compose(t.anchor, { title: `${t.anchor.ref || 'Point'}: ${t.comments[0]?.body || ''}`.replaceAll('@', '@\u200b').slice(0, 120), threadCommentId: t.comments[0]?.id ?? null }); return;
     }
-    const text = String(new FormData(event.target).get('text') || '');
+    for (const button of buttons) button.disabled = true;
     try {
+      const text = String(new FormData(event.target).get('text') || '');
       if (event.submitter?.dataset.act === 'resolve') await post(`/${encodeURIComponent(t.id)}/${t.resolved ? 'unresolve' : 'resolve'}`, {});
       else await post(`/${encodeURIComponent(t.comments[0].id)}/reply`, { text });
       event.target.reset(); await load();
+      if (event.submitter?.dataset.act === 'resolve') await rerun(t.anchor.severity, view, t.resolved ? 'Reopened' : 'Resolved');
     } catch (error) { status(view, error.message); }
+    finally { for (const button of buttons) button.disabled = false; }
   });
   for (const dialog of [composer, view]) dialog.querySelector('[data-act=close]').addEventListener('click', () => dialog.close());
 }

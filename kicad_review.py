@@ -6,6 +6,7 @@ Standard library only. Subcommands are called from the reusable workflow.
 import argparse
 import base64
 import csv
+import datetime
 import gzip
 import hashlib
 import json
@@ -172,12 +173,14 @@ def board_layers(pcb_path):
     return names
 
 
-def render_side(src_dir, name, out):
+def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
         kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
+        if netlist:
+            kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
     if os.path.exists(pcb):
         # Drill marks off: with them every layer, even an empty one, is full of holes.
         # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
@@ -225,10 +228,38 @@ def cmd_render(args):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
-            render_side(posixpath.join(side, p["dir"]), p["name"], out)
+            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
             if export_3d:
                 export_glb(p, side, out)
+            if settings["checks"].get("release", "off") != "off":
+                pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+                if os.path.exists(pro):
+                    os.makedirs(f"{out}/fab", exist_ok=True)
+                    release_project(pro, "review", settings, f"{out}/fab", p["name"])
             print(f"{p['name']}: rendered {side}")
+        if settings["libraries"]["enabled"]:
+            roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
+            items = {side: library_items(root) for side, root in roots.items()}
+            for c in library_changes(items["base"], items["head"]):
+                for side in ("base", "head"):
+                    source = items[side].get((c["lib"], c["item"], c["kind"]))
+                    if source is None:
+                        continue
+                    lib = posixpath.join(roots[side], source["file"])
+                    dest = f"review/{project_id(p['dir'])}/{side}/lib"
+                    os.makedirs(dest, exist_ok=True)
+                    with tempfile.TemporaryDirectory() as tmp:
+                        args = (["sym", "export", "svg", f"--symbol={c['item']}", "-o", tmp, lib] if c["kind"] == "symbol"
+                                else ["fp", "export", "svg", f"--footprint={c['item']}", "-o", tmp, posixpath.dirname(lib)])
+                        try:
+                            r = subprocess.run(["kicad-cli", *args], capture_output=True, text=True)
+                            made = sorted(pathlib.Path(tmp).glob("*.svg"), key=lambda path: natural(path.name))
+                            if r.returncode or not made:
+                                raise OSError("no SVG exported")
+                            # ponytail: unit 1 drawing; compare all units' pins, add unit views when requested.
+                            pathlib.Path(f"{dest}/{lib_slug(c)}.svg").write_bytes(made[0].read_bytes())
+                        except OSError:
+                            print(f"::warning::No drawing for library item {c['lib']}:{c['item']} ({side})")
 
 
 TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
@@ -585,12 +616,15 @@ def natural(s):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s or "")]
 
 
-def object_index(base, head):
+def object_index(base, head, libraries=False):
     """Every symbol and footprint of head, then the base-only ones: what a thread can be pinned to.
     uuid is the KiCad UUID (schematic keys are sheet path + UUID); sheet or layer says which drawing it is on."""
     def entry(key, o, side):
         e = {"uuid": key.rsplit("/", 1)[-1], "kind": o["kind"], "ref": o["ref"], "value": o["props"].get("Value"),
+             "footprint": o["props"].get("Footprint") or o["props"].get("footprint"),
              "side": side, "pos": o.get("pos"), "box": o.get("box")}
+        if libraries:
+            e["lib"] = o["props"].get("symbol") if o["kind"] == "symbol" else o["props"].get("footprint")
         if o["where"].get("sheet") is not None:
             e["sheet"] = o["where"]["sheet"]
         else:
@@ -619,19 +653,149 @@ def object_index(base, head):
     return out
 
 
+# ---- Library review: project-local symbol and footprint libraries. ----
+def _strip(node):
+    """Node without uuid/tstamp children, so regenerated ids do not count as edits."""
+    return [c if not isinstance(c, list) else _strip(c) for c in node if not (isinstance(c, list) and c and c[0] in ("uuid", "tstamp"))]
+
+
+def library_items(proj_dir):
+    """Symbols of *.kicad_sym and footprints of *.pretty/*.kicad_mod under the project folder.
+    ponytail: nickname = file stem, KiCad's default; read the lib tables if a team renames nicknames. Libraries outside the folder are not reviewed."""
+    items = {}
+    for root, dirs, files in os.walk(proj_dir):
+        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and not os.path.islink(posixpath.join(root, x)))
+        rel = posixpath.relpath(root, proj_dir)
+        for f in sorted(files):
+            path = posixpath.join(root, f)
+            if os.path.islink(path):
+                continue
+            if f.endswith(".kicad_sym") and not is_junk(path):
+                lib = f[: -len(".kicad_sym")]
+                for s in findall(parse_sexpr(open(path, encoding="utf-8").read()), "symbol"):
+                    pins = {}
+                    for unit in [s] + findall(s, "symbol"):
+                        for p in findall(unit, "pin"):
+                            number = val(p, "number")
+                            if number is not None:
+                                pins[number] = {"type": p[1], "name": val(p, "name"), "geometry": repr([find(p, "at"), find(p, "length")])}
+                    items[(lib, s[1].rsplit(":", 1)[-1], "symbol")] = {"pins": pins, "hash": hashlib.sha1(repr(_strip(s)).encode()).hexdigest(), "file": posixpath.normpath(posixpath.join(rel, f))}
+            elif f.endswith(".kicad_mod") and root.endswith(".pretty") and not is_junk(path):
+                fp = parse_sexpr(open(path, encoding="utf-8").read())
+                pads = {}
+                for p in findall(fp, "pad"):
+                    a, sz = at(p), find(p, "size")
+                    summary = f"{p[2]} {p[3]} {fmt_at(a[:2]) if a else '?'} {num(sz[1]) if sz else '?'}×{num(sz[2]) if sz and len(sz) > 2 else '?'}"
+                    pads[p[1]] = pads[p[1]] + '; ' + summary if p[1] in pads else summary
+                items[(posixpath.basename(root)[: -len(".pretty")], f[:-len(".kicad_mod")], "footprint")] = {
+                    "pins": pads, "hash": hashlib.sha1(repr(_strip(fp)).encode()).hexdigest(), "file": posixpath.normpath(posixpath.join(rel, f))}
+    return items
+
+
+def library_changes(b, h):
+    out = []
+    for key in sorted(set(b) | set(h), key=lambda k: (k[2], k[0], natural(k[1]))):
+        x, y = b.get(key), h.get(key)
+        if x and y and x["hash"] == y["hash"]:
+            continue
+        diff = []
+        before, after = (x or {"pins": {}})["pins"], (y or {"pins": {}})["pins"]
+        for pin in sorted(set(before) | set(after), key=natural):
+            p, q = before.get(pin), after.get(pin)
+            if p == q:
+                continue
+            if p is None or q is None:
+                diff.append({"pin": pin, "change": "added" if p is None else "removed", "before": p if isinstance(p, str) else (p and f"{p['name']} ({p['type']})"),
+                             "after": q if isinstance(q, str) else (q and f"{q['name']} ({q['type']})")})
+            elif isinstance(p, dict):
+                for field_ in ("type", "name", "geometry"):
+                    if p[field_] != q[field_]:
+                        diff.append({"pin": pin, "change": field_, "before": p[field_], "after": q[field_]})
+            else:
+                diff.append({"pin": pin, "change": "geometry", "before": p, "after": q})
+        out.append({"lib": key[0], "item": key[1], "kind": key[2], "status": "added" if not x else "removed" if not y else "modified",
+                    "file": (y or x)["file"], "pins_diff": diff})
+    return out
+
+
+def lib_slug(c):
+    identity = repr((c["kind"], c["lib"], c["item"]))
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", f"{c['kind']}-{c['lib']}-{c['item']}")[:100] + "-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+
+
+def library_report(changes, objects, out_dir, blobs, *, local_items=None):
+    """Changed library items for the report: drawings, who uses them, and warnings for edits that break placed parts."""
+    local_items = set(local_items if local_items is not None else ((c["lib"], c["item"], c["kind"]) for c in changes))
+    libraries = {(kind, lib) for lib, item, kind in local_items}
+    by_item = {}
+    for lib, item, kind in local_items:
+        by_item.setdefault((kind, item), set()).add(lib)
+    out = []
+    for c in changes:
+        key = f"{c['lib']}:{c['item']}"
+        users = set()
+        for o in objects:
+            if o["kind"] != c["kind"] or o["side"] != "head":
+                continue
+            identity = o.get("lib") or ""
+            nickname, _, item = identity.rpartition(":")
+            if identity == key or ((c["kind"], nickname) not in libraries and item == c["item"]
+                                   and by_item.get((c["kind"], item)) == {c["lib"]}):
+                users.add(o["ref"].split(" unit ")[0])
+        users = sorted(users, key=natural)
+        svg, sizes = {}, {}
+        for side in ("base", "head"):
+            text = svg_body(f"{out_dir}/{side}/lib/{lib_slug(c)}.svg")
+            svg[side] = None
+            if text and has_drawing(text):
+                try:
+                    sizes[side] = svg_size(text)
+                    svg[side] = text
+                except ValueError:
+                    pass  # A malformed export stays listed without a drawing.
+        entry = {**c, "used_by": users, "svg": {s: add_blob(blobs, t) for s, t in svg.items()}, "warnings": []}
+        drawn = "head" if svg["head"] else "base" if svg["base"] else None
+        if drawn:
+            entry["size"] = sizes[drawn]
+        else:
+            entry["note"] = "no drawing"
+        for d in c["pins_diff"] if users else []:
+            word = "pin" if c["kind"] == "symbol" else "pad"
+            if d["change"] == "removed":
+                entry["warnings"].append(f"⚠ {word} {d['pin']} removed while {', '.join(users)} {'uses' if len(users) == 1 else 'use'} {c['item']}")
+            elif d["change"] == "type":
+                entry["warnings"].append(f"⚠ pin {d['pin']} type {d['before']} → {d['after']} on {c['item']}, used by {', '.join(users)}")
+        out.append(entry)
+    return out
+
+
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off"},
+    "interfaces": {},  # pattern overrides for the interfaces check
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
-    "bom": {"required_fields": ["Value", "Footprint"]},
+    "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
+            "order_ready_fields": []},  # empty: the fabrication preset's fields
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
-    "threads": {"enabled": False},
+    "threads": {"enabled": False, "block_merge": False},
     "issues": {"enabled": False},
+    "github": {"check_runs": False},
+    "waivers": {"enabled": False},
+    "inventory": {"enabled": False},
+    "libraries": {"enabled": False},
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package"}
+
+
+INTERFACE_PATTERNS = {
+    "uart_tx": ["TX", "TXD", "UART_TX", "USART_TX"],
+    "i2c_sda": ["SDA", "I2C_SDA"], "i2c_scl": ["SCL", "I2C_SCL"], "can_h": ["CANH", "CAN_H"], "can_l": ["CANL", "CAN_L"],
+    "spi": [],  # accepted for compatibility with existing settings; no SPI rule
+    "esd_parts": ["ESD", "TVS", "USBLC", "PESD", "PRTR", "SRV05", "TPD", "SP05", "SMAJ", "SMBJ"],
+}
 
 
 def load_settings(roots=("base", "head")):
@@ -648,14 +812,23 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "issues"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
         sys.exit(f"{SETTINGS_FILE}: bom.required_fields must be a list of strings")
+    for key in ("critical_prefixes", "order_ready_fields"):
+        if not isinstance(settings["bom"][key], list) or not all(isinstance(f, str) for f in settings["bom"][key]):
+            sys.exit(f"{SETTINGS_FILE}: bom.{key} must be a list of strings")
+    bad = [f for f in settings["bom"]["order_ready_fields"] if f not in COVERAGE_FIELDS]
+    if bad:
+        sys.exit(f"{SETTINGS_FILE}: bom.order_ready_fields: unknown {', '.join(bad)}; use {', '.join(COVERAGE_FIELDS)}")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
-            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
+            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of {', '.join(CHECK_NAMES)} = required/informational/off")
+    for k, v in settings["interfaces"].items():
+        if k not in INTERFACE_PATTERNS or not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
+            sys.exit(f"{SETTINGS_FILE}: interfaces.{k} must be one of {', '.join(INTERFACE_PATTERNS)} with a list of names")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if settings["fail_on"] not in ("new", "all"):
@@ -668,6 +841,17 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
     if not isinstance(settings["issues"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: issues.enabled must be true or false")
+    if not isinstance(settings["inventory"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: inventory.enabled must be true or false")
+    if not isinstance(settings["libraries"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: libraries.enabled must be true or false")
+    for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
+        if not isinstance(value, bool):
+            sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
+    if not isinstance(settings["waivers"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: waivers.enabled must be true or false")
+    if settings["threads"]["block_merge"] and not settings["threads"]["enabled"]:
+        sys.exit(f"{SETTINGS_FILE}: threads.block_merge needs threads.enabled = true")
     return settings
 
 
@@ -730,6 +914,101 @@ def release_project(pro_path, tag, settings, out_dir, label):
     return made
 
 
+def fab_violation(type_, severity, description, items=()):
+    # The key ignores items, so a finding that only regroups (one part's BOM line moved) is neither new nor fixed.
+    return {"type": type_, "severity": severity, "description": description, "items": list(items), "uuids": [],
+            "pos": None, "box": None, "where": {"board": True}, "key": ("release", type_, description)}
+
+
+def bom_refs_expand(designators):
+    """'C1,C3-C5' -> {'C1', 'C3', 'C4', 'C5'}: fab BOMs write runs of references as ranges."""
+    out = set()
+    for part in (designators or "").split(","):
+        part = part.strip()
+        m = re.fullmatch(r"([A-Za-z_]+)(\d+)-\1?(\d+)", part)
+        if m and int(m.group(3)) >= int(m.group(2)) and int(m.group(3)) - int(m.group(2)) < 10000:
+            out |= {f"{m.group(1)}{n}" for n in range(int(m.group(2)), int(m.group(3)) + 1)}
+        elif part:
+            out.add(part)
+    return out
+
+
+def smd_pad_sides(pcb_text):
+    """Board sides ('F', 'B') with at least one SMD pad: only those need paste."""
+    sides = set()
+    for m in re.finditer(r'\(footprint\s+"[^"]*"\s*(?:(?:locked|placed)\s+)*\(layer\s+"([FB])\.Cu"\)', pcb_text):
+        end = pcb_text.find("(footprint ", m.end())
+        if re.search(r'\(pad\s+"[^"]*"\s+smd\b', pcb_text[m.end():end if end != -1 else None]):
+            sides.add(m.group(1))
+    return sides
+
+
+def has_draw(text):
+    return re.search(r"D0?[13]\*", text) is not None  # any draw (D01) or flash (D03): the layer is not empty
+
+
+def release_findings(fab_dir, label, preset, pcb_path, board_objs):
+    """What would stop a fab from building this board from the package kicad-review generates."""
+    stem = f"{fab_dir}/{label}-review-{preset}"
+    if not os.path.exists(f"{stem}-gerbers.zip"):
+        return [fab_violation("missing_package", "error", "No fabrication package was produced")]
+    with zipfile.ZipFile(f"{stem}-gerbers.zip") as z:
+        files = {n: z.read(n).decode("latin-1") for n in z.namelist()}
+    # KiCad names a Gerber after the layer's user name when it has one (e.g. In1.Cu renamed "GND_PLANE").
+    pcb_text = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
+    alias = {c: u for c, u in re.findall(r'\(\d+\s+"([^"]+)"\s+\w+\s+"([^"]+)"\)', pcb_text)}
+    names = lambda layer: {layer.replace(".", "_"), alias.get(layer, layer).replace(".", "_").replace(" ", "_")}
+    find_layer = lambda layer: next((t for n, t in files.items() if any(f"-{x}." in n for x in names(layer))), None)
+    out = []
+    for layer in [l for l in board_layers(pcb_path) if l.endswith(".Cu")] + ["Edge.Cuts"]:
+        if find_layer(layer) is None:
+            out.append(fab_violation("missing_layer", "error", f"No Gerber for {'copper layer ' if layer.endswith('.Cu') else ''}{layer}"))
+    fps = [o for o in board_objs.values() if o["kind"] == "footprint"]
+    attrs = lambda o: (o["props"].get("attributes") or "").split()
+    smd = [o for o in fps if "smd" in attrs(o) and "dnp" not in attrs(o)]
+    # Pads come from the board file, so pcb_objects (and every report's change list) needs no new prop.
+    paste_sides = smd_pad_sides(pcb_text) | {o["props"]["layer"][0] for o in smd if "smd" in (o["props"].get("pads_kind") or "").split()}
+    for side in ("F", "B"):
+        if any(o["props"].get("layer") == f"{side}.Cu" for o in smd):
+            for kind in ("Mask", "Paste") if side in paste_sides else ("Mask",):
+                t = find_layer(f"{side}.{kind}")
+                if t is None or not has_draw(t):
+                    out.append(fab_violation("missing_layer", "error", f"{side}.{kind} is missing or empty but {side} side has SMD parts"))
+    holes = any(o["kind"] == "via" for o in board_objs.values()) or re.search(r'\(pad\s+"[^"]*"\s+(?:np_)?thru_hole\b', pcb_text) is not None \
+        or any("thru_hole" in (o["props"].get("pads_kind") or "") for o in fps)
+    if holes and not any(n.lower().endswith(".drl") for n in files):
+        out.append(fab_violation("missing_drill", "error", "The board has holes but the package has no drill file"))
+    pos, bom = f"{stem}-positions.csv", f"{stem}-bom.csv"
+    pos_refs = set()
+    if os.path.exists(pos):
+        with open(pos, newline="", encoding="utf-8") as fh:
+            pos_refs = {r["Designator"] for r in csv.DictReader(fh)}
+    if smd and not pos_refs:
+        out.append(fab_violation("missing_positions", "error", "SMD parts are fitted but the position file is empty"))
+    if os.path.exists(bom):
+        with open(bom, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        part_col = PRESETS[preset]["bom"][-1][1] if preset == "jlcpcb" else "Mfg Part #"
+        bom_refs = set().union(*(bom_refs_expand(row.get("Designator")) for row in rows))
+        missing_pn = [row.get("Designator", "") for row in rows if not (row.get(part_col) or "").strip()]
+        if missing_pn:
+            out.append(fab_violation("bom_missing_part_number", "warning", f"BOM lines without {part_col}", missing_pn))
+        extra = sorted(pos_refs - bom_refs, key=natural)
+        if extra:
+            out.append(fab_violation("position_not_in_bom", "warning", "Parts placed by the position file but missing from the BOM", extra))
+    return out
+
+
+def package_summary(fab_dir):
+    files = sorted(f for f in os.listdir(fab_dir) if "-review-" in f) if os.path.isdir(fab_dir) else []
+    zip_ = next((f for f in files if f.endswith("-gerbers.zip")), None)
+    sha = None
+    if zip_:
+        with open(f"{fab_dir}/{zip_}", "rb") as fh:
+            sha = hashlib.file_digest(fh, "sha256").hexdigest()
+    return {"files": [{"path": f, "bytes": os.path.getsize(f"{fab_dir}/{f}")} for f in files], "sha256": sha}
+
+
 def cmd_release(args):
     settings = load_settings(("repo",))
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
@@ -747,6 +1026,16 @@ def cmd_release(args):
     for label, pro in labels.items():
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
+    os.makedirs("release", exist_ok=True)
+    sums = []
+    for f in sorted(os.listdir("release")):
+        if f != "SHA256SUMS":
+            with open(f"release/{f}", "rb") as fh:
+                sums.append(f"{hashlib.file_digest(fh, 'sha256').hexdigest()}  {f}")
+    if sums:
+        with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
+            fh.write("\n".join(sums) + "\n")
+        print("release/SHA256SUMS")
 
 
 def violation(v, scale, where):
@@ -801,12 +1090,53 @@ def bom_violations(objs, fields):
 
 LCSC_FIELDS = ("lcsc", "lcsc part", "lcsc part #", "lcsc part number", "jlcpcb part #")
 MPN_FIELDS = ("mpn", "manufacturer_part_number", "manufacturer part number", "mfr. part #", "mfg part #")
+MANUFACTURER_FIELDS = ("manufacturer", "mfr", "mfr.", "manufacturer_name", "manufacturer name")
+PLACEHOLDERS = {"tbd", "?", "x", "todo", "na", "n/a", "-", "~", ""}
 
 
 def field(props, names):
     v = next((props[k] for k in props if k.strip().lower() in names), "")
     v = (v or "").strip()
     return None if v in ("", "~") else v
+
+
+def present(v):
+    return (v or "").strip().lower() not in PLACEHOLDERS
+
+
+def placeholder(v):
+    return (v or "").strip() not in ("", "~") and not present(v)
+
+
+COVERAGE_FIELDS = {
+    "Value": lambda p: p.get("Value"), "Footprint": lambda p: p.get("Footprint"),
+    "LCSC": lambda p: field(p, LCSC_FIELDS), "MPN": lambda p: field(p, MPN_FIELDS),
+    "Manufacturer": lambda p: field(p, MANUFACTURER_FIELDS), "Datasheet": lambda p: field(p, ("datasheet",)),
+}
+
+
+def bom_parts(objs):
+    """BOM symbols, one entry per reference (units of one part count once); DNP, excluded and unannotated parts left out."""
+    out = {}
+    for o in objs.values():
+        p = o["props"]
+        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+            continue
+        out.setdefault(o["ref"].split(" unit ")[0], p)
+    return out
+
+
+def bom_coverage(objs, settings):
+    """Covered and total parts per BOM field; critical-part datasheets; parts with every order-ready field."""
+    parts = bom_parts(objs)
+    has = lambda p, f: present(COVERAGE_FIELDS[f](p))
+    cov = {f: [sum(has(p, f) for p in parts.values()), len(parts)] for f in COVERAGE_FIELDS}
+    prefixes = set(settings["bom"]["critical_prefixes"])
+    critical = [p for r, p in parts.items() if (m := re.match(r"[A-Za-z]+", r)) and m.group(0) in prefixes]
+    cov["Datasheet (critical)"] = [sum(has(p, "Datasheet") for p in critical), len(critical)]
+    order = settings["bom"]["order_ready_fields"] or (["Value", "Footprint", "LCSC"] if settings["fabrication"]["preset"] == "jlcpcb" else ["Value", "Footprint", "MPN"])
+    cov["Order ready"] = [sum(all(has(p, f) for f in order) for p in parts.values()), len(parts)]
+    return cov
 
 
 def parts_lines(objs):
@@ -824,6 +1154,8 @@ def parts_lines(objs):
             "refs": [], "problems": []})
         if o["ref"] not in line["refs"]:
             line["refs"].append(o["ref"])
+            # Per-reference values: a grouped line can hide one reference's MPN or placeholder behind another's.
+            line.setdefault("_each", []).append((o["ref"], field(p, MPN_FIELDS), (p.get("Value", ""), field(p, MPN_FIELDS), lcsc)))
     by_lcsc = {}
     for l in lines.values():
         l["refs"].sort(key=natural)
@@ -834,11 +1166,25 @@ def parts_lines(objs):
             l["problems"].append("missing_lcsc")
         if not l["mpn"] and not l["lcsc"]:
             l["problems"].append("missing_mpn")
+        bad = [r for r, _, vals in l["_each"] if any(placeholder(v) for v in vals)]
+        if bad:
+            l["problems"].append("placeholder")
+            l.setdefault("problem_refs", {})["placeholder"] = bad
         if l["lcsc"]:
             by_lcsc.setdefault(l["lcsc"], set()).add(l["value"])
     for l in lines.values():
         if l["lcsc"] and len(by_lcsc[l["lcsc"]]) > 1:
             l["problems"].append("lcsc_conflict")
+    by_mpn = {}
+    for l in lines.values():
+        for _, mpn, _ in l["_each"]:
+            if mpn and present(mpn):
+                by_mpn.setdefault(mpn.upper(), set()).add(l["footprint"])
+    for l in lines.values():
+        hit = [r for r, mpn, _ in l.pop("_each") if mpn and len(by_mpn.get(mpn.upper(), ())) > 1]
+        if hit:
+            l["problems"].append("mpn_footprint_conflict")
+            l.setdefault("problem_refs", {})["mpn_footprint_conflict"] = hit
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
@@ -857,6 +1203,34 @@ def diff_parts(base, head):
     return list(rows.values())
 
 
+def field_changes(base, head):
+    """BOM field edits per reference, grouped when several references changed the same way."""
+    b, h = bom_parts(base), bom_parts(head)
+    norm = lambda v: v.strip() if present(v) else None
+    rows = {}
+    for ref in sorted(set(b) & set(h), key=natural):
+        for f, get in COVERAGE_FIELDS.items():
+            x, y = norm(get(b[ref])), norm(get(h[ref]))
+            if x != y:
+                rows.setdefault((f, x, y), {"refs": [], "field": f, "before": x, "after": y})["refs"].append(ref)
+    order = list(COVERAGE_FIELDS)
+    return sorted(rows.values(), key=lambda r: (natural(r["refs"][0]), order.index(r["field"])))
+
+
+def mark_new_problems(base_lines, head_lines):
+    """A head problem is new when any of its references did not have it in base, even if the line itself did not change."""
+    before = {r: set(l["problems"]) for l in base_lines for r in l["refs"]}
+    for l in head_lines:
+        l["new_problems"] = [p for p in l["problems"] if any(p not in before.get(r, set()) for r in l.get("problem_refs", {}).get(p, l["refs"]))]
+
+
+def dnp_mismatches(objs):
+    """References fitted on one of schematic and board and DNP on the other."""
+    sym = {o["ref"].split(" unit ")[0]: o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
+    fp = {o["ref"]: "dnp" in (o["props"].get("attributes") or "").split() for o in objs.values() if o["kind"] == "footprint"}
+    return sorted((r for r in sym.keys() & fp.keys() if sym[r] != fp[r]), key=natural)
+
+
 def vkeys(v):
     """Identities of a violation for matching base and head: its item UUIDs, and its type plus what and where."""
     sig = (v["severity"], tuple(sorted(v["where"].items())))
@@ -869,7 +1243,96 @@ def vkeys(v):
     return {k + sig for k in keys}
 
 
-def run_check(name, settings, head, base):
+def waiver_key(v):
+    """One stable identity per violation for kicad-review-waivers.toml: the strongest of the identities vkeys matches on."""
+    ident = max(vkeys(v if v.get("key") else {**v, "uuids": sorted(v["uuids"])}), key=lambda k: k[0] == "u")
+    return "w-" + hashlib.sha1(repr(ident).encode()).hexdigest()[:12]
+
+
+WAIVERS_FILE = "kicad-review-waivers.toml"
+WAIVABLE = ("erc", "drc", "parity")
+
+
+def parse_waivers(text, source):
+    """Entries of one waivers file, and messages for the ones that cannot apply. Never exits: a bad entry must not stop reviews."""
+    try:
+        raw = tomllib.loads(text).get("waiver", [])
+    except tomllib.TOMLDecodeError as e:
+        return [], [f"{source}: not valid TOML ({e})"]
+    if not isinstance(raw, list):
+        return [], [f"{source}: waiver must be a list of tables"]
+    good, bad = [], []
+    for i, w in enumerate(raw, 1):
+        where = f"{source} waiver {i}"
+        if not isinstance(w, dict):
+            bad.append(f"{where}: must be a table")
+            continue
+        problems = [p for p, ok in (
+            (f"check must be one of {', '.join(WAIVABLE)}, not {w.get('check')!r}", w.get("check") in WAIVABLE),
+            ("match must be a waiver key like w-1a2b3c4d5e6f", isinstance(w.get("match"), str) and re.fullmatch(r"w-[0-9a-f]{12}", w["match"])),
+            ("reason must not be empty", isinstance(w.get("reason"), str) and w["reason"].strip()),
+            ("by must be a GitHub login", isinstance(w.get("by"), str) and w["by"].strip()),
+            ("date must be a date like 2026-10-12", type(w.get("date")) is datetime.date),
+            ("permanent must be true or false", "permanent" not in w or isinstance(w["permanent"], bool)),
+            ("ref must be a string", "ref" not in w or isinstance(w["ref"], str)),
+            ("until must be a date like 2026-12-31", "until" not in w or type(w["until"]) is datetime.date),
+            ("set until = <date> or permanent = true", type(w.get("until")) is datetime.date or w.get("permanent") is True),
+        ) if not ok]
+        if problems:
+            bad.append(f"{where}: {'; '.join(problems)}")
+            continue
+        good.append({"check": w["check"], "match": w["match"], "reason": w["reason"].strip(), "by": w["by"].strip(),
+                     "date": w["date"].isoformat(), "until": w["until"].isoformat() if type(w.get("until")) is datetime.date else None,
+                     "permanent": w.get("permanent") is True, "ref": w.get("ref") if isinstance(w.get("ref"), str) else None})
+    return good, bad
+
+
+def load_waivers(ref):
+    """Waivers that apply come from the target branch at ref (repo/ history), so a change cannot waive its own violations.
+    The head copy's extra entries are only proposals."""
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    head_path = f"head/{WAIVERS_FILE}"
+    out = {"active": {}, "expired": [], "proposed": [], "invalid": []}
+    resolved = git("-C", "repo", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}", check=False) if ref else None
+    if ref and not resolved:
+        out["invalid"].append(f"{WAIVERS_FILE}: cannot resolve {ref}")
+    label = resolved[:7] if resolved else ref
+    try:
+        result = subprocess.run(["git", "-C", "repo", "show", f"{resolved}:{WAIVERS_FILE}"], capture_output=True) if resolved else None
+        text = result.stdout.decode("utf-8") if result and result.returncode == 0 else None
+    except UnicodeError as e:
+        text = None
+        out["invalid"].append(f"{WAIVERS_FILE} at {label}: cannot read ({e})")
+    if text:
+        entries, out["invalid"] = parse_waivers(text, f"{WAIVERS_FILE} at {label}")
+        for e in entries:
+            if e["until"] and datetime.date.fromisoformat(e["until"]) < today:
+                out["expired"].append(e)
+            else:
+                out["active"][(e["check"], e["match"])] = e
+    if os.path.islink(head_path) or (os.path.exists(head_path) and not os.path.isfile(head_path)):
+        out["invalid"].append(f"{WAIVERS_FILE} in this change: must be a regular file, not a symlink")
+    elif os.path.isfile(head_path):
+        try:
+            with open(head_path, "rb") as fh:
+                content = fh.read(1024 * 1024 + 1)
+            if len(content) > 1024 * 1024:
+                entries, invalid = [], [f"{WAIVERS_FILE} in this change: exceeds 1 MiB"]
+            else:
+                head_text = content.decode("utf-8")
+                entries, invalid = parse_waivers(head_text, f"{WAIVERS_FILE} in this change")
+                if head_text == text:
+                    invalid = []
+        except (OSError, UnicodeError) as e:
+            entries, invalid = [], [f"{WAIVERS_FILE} in this change: cannot read ({e})"]
+        out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in out["active"]]
+        out["invalid"] += invalid
+    for m in out["invalid"]:
+        print(f"::warning::{m}")
+    return out
+
+
+def run_check(name, settings, head, base, waivers=None):
     level = settings["checks"].get(name, "off")
     if level == "off" or head is None:
         return None
@@ -877,39 +1340,208 @@ def run_check(name, settings, head, base):
     head_keys = set().union(*(vkeys(v) for v in head))
     for v in head:
         v["new"] = not (vkeys(v) & base_keys)
-    count = lambda sev, new=False: sum(1 for v in head if v["severity"] == sev and (v["new"] or not new))
+        if waivers is not None:
+            v["waiver_key"] = waiver_key(v)
+            w = waivers["active"].get((name, v["waiver_key"]))
+            if w:
+                v["waived"] = {"reason": w["reason"], "by": w["by"], "until": w["until"], "ref": w["ref"]}
+    live = [v for v in head if not v.get("waived")]
+    count = lambda sev, new=False: sum(1 for v in live if v["severity"] == sev and (v["new"] or not new))
     failing = count("error", new=settings["fail_on"] == "new") > 0
     head.sort(key=lambda v: (not v["new"], v["severity"] != "error", v["type"]))
-    return {"name": name, "title": CHECK_NAMES[name], "level": level,
-            "status": "pass" if not failing else "fail" if level == "required" else "warn",
-            "errors": count("error"), "warnings": count("warning"),
-            "new_errors": count("error", True), "new_warnings": count("warning", True),
-            "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
-            "violations": head}
+    result = {"name": name, "title": CHECK_NAMES[name], "level": level,
+              "status": "pass" if not failing else "fail" if level == "required" else "warn",
+              "errors": count("error"), "warnings": count("warning"),
+              "new_errors": count("error", True), "new_warnings": count("warning", True),
+              "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
+              "violations": head}
+    if waivers is not None:
+        result["waived"] = len(head) - len(live)
+    return result
 
 
-def project_checks(p, settings, objs):
-    out = f"review/{project_id(p['dir'])}"
+def project_checks(p, settings, objs, waivers=None):
+    out_dir = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
-        if os.path.exists(src) and not os.path.exists(f"{out}/{s}/{f}"):  # never drop a check because its output is missing
+        if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
-        return load_violations(f"{out}/{s}/{f}", k)
+        return load_violations(f"{out_dir}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
-        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
-        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
+        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
+        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc"), waivers),
         run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
-                  side("base", "drc.json", "parity") if sch("base") else None),
+                  side("base", "drc.json", "parity") if sch("base") else None, waivers),
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
-    return [c for c in checks if c] + [
+    out = [c for c in checks if c] + [
         {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
          "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
         for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
+    if settings["checks"].get("release", "off") != "off":
+        pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
+        preset = settings["fabrication"]["preset"]
+        if not os.path.exists(pcb("head")):
+            out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
+                        "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
+        else:
+            side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) else None
+            c = run_check("release", settings, side("head"), side("base"))
+            c["package"] = package_summary(f"{out_dir}/head/fab")
+            out.append(c)
+    ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}")
+    return out + ([ic] if ic else [])
+
+
+# ---- Interface checks: design-review rules on the schematic netlist. ----
+GROUND = re.compile(r"^[ADP]?GND\w*$|^VSS\w*$|^EARTH$", re.I)
+RAIL = re.compile(r"^\+|^V(CC|DD|BUS|IN|BAT|SYS)|^P\d+V\d*|^\d+V\d*(?:[A-Z_].*)?$|^\d+\.\d+V$|_\d+V\d*$", re.I)
+
+
+def parse_netlist(text):
+    root = parse_sexpr(text)
+    comps = {}
+    for c in findall(find(root, "components") or [], "comp"):
+        ls = find(c, "libsource")
+        comps[val(c, "ref")] = {"value": val(c, "value", ""), "footprint": val(c, "footprint", ""),
+                                "lib": f"{val(ls, 'lib', '')}:{val(ls, 'part', '')}", "description": val(ls, "description", "")}
+    nets = {val(n, "name"): [{"ref": val(x, "ref"), "pin": val(x, "pin"), "function": val(x, "pinfunction", ""), "type": val(x, "pintype", "")}
+                             for x in findall(n, "node")] for n in findall(find(root, "nets") or [], "net")}
+    return comps, nets
+
+
+def ohms(value):
+    if not value or len(value) > 32:
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([rRkKmM]?)(\d*)(?=\s|Ω|$|[oO][hH][mM])", value)
+    if not m:
+        return None
+    whole, unit, frac = m.groups()
+    return float(f"{whole}.{frac}" if frac else whole) * {"": 1, "r": 1, "R": 1, "k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e6}[unit]
+
+
+short = lambda net: re.sub(r"^NET-\((.*)\)$", r"\1", (net or "").rstrip("/").split("/")[-1].upper())  # Net-(U1-SDA) -> U1-SDA
+is_ground = lambda net: bool(GROUND.match(short(net)))
+is_power = lambda net, nodes: is_ground(net) or bool(RAIL.search(short(net))) or any(n["type"] == "power_out" for n in nodes)
+
+
+def matches(name, patterns):
+    tokens = re.split(r"[^A-Z0-9]+", (name or "").upper())
+    return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
+
+
+def interface_check(p, settings, objs, out_dir):
+    if settings["checks"].get("interfaces", "off") == "off":
+        return None
+    patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
+    def side(s):
+        path = f"{out_dir}/{s}/netlist.net"
+        if not os.path.exists(path):
+            return None, None
+        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
+        where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
+        with open(path, encoding="utf-8") as fh:
+            return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
+    (head, coverage), (base, _) = side("head"), side("base")
+    if head is None:
+        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"], "status": "not_run",
+                "reason": "no schematic", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+    c = run_check("interfaces", settings, head, base)
+    c["coverage"] = coverage
+    return c
+
+
+def interface_findings(comps, nets, patterns, where_of):
+    """Design-review rules on one revision's netlist. Every finding carries its nets and pins as evidence."""
+    out, detected = [], {}
+    pin_net = {(n["ref"], n["pin"]): name for name, nodes in nets.items() for n in nodes}
+    # ponytail: resistor arrays are ignored; add per-element topology if array support is needed.
+    is_res = lambda ref: re.match(r"R\d", ref) and ohms(comps.get(ref, {}).get("value")) is not None
+    other = lambda ref, pin: next((name for (r, p), name in pin_net.items() if r == ref and p != pin), None)
+    esd = lambda r: re.search("|".join(map(re.escape, patterns["esd_parts"])), f"{comps.get(r, {}).get('lib', '')} {comps.get(r, {}).get('value', '')} {comps.get(r, {}).get('description', '')}", re.I)
+    node_txt = lambda n: f"{n['ref']} pin {n['pin']}" + (f" ({n['function']})" if n["function"] else "")
+
+    def add(type_, severity, description, ref, items):
+        where, pos = where_of(ref)
+        out.append({"type": type_, "severity": severity, "description": description, "items": items, "uuids": [],
+                    "pos": pos, "box": None, "where": where})
+
+    for name, nodes in nets.items():
+        if any(matches(n["function"], patterns["can_h"] + patterns["can_l"]) or
+               re.search(r"CAN|RS485|RS-485|LIN|transceiver", " ".join(comps.get(n["ref"], {}).get(k, "") for k in ("lib", "value", "description")), re.I) for n in nodes):
+            continue
+        tx = [n for n in nodes if n["type"] in ("output", "bidirectional") and matches(n["function"], patterns["uart_tx"])]
+        if tx: detected["UART"] = detected.get("UART", 0) + 1
+        if len({n["ref"] for n in tx}) > 1:
+            add("uart_tx_to_tx", "error", f"Two transmit pins drive {name}. Assumes pin functions name UART directions.", tx[0]["ref"], [node_txt(n) for n in tx])
+    for key in ("i2c_sda", "i2c_scl"):
+        for name, nodes in nets.items():
+            if not matches(short(name), patterns[key]) and not any(matches(n["function"], patterns[key]) for n in nodes):
+                continue
+            detected["I2C nets"] = detected.get("I2C nets", 0) + 1
+            nearby = {name} | {o for n in nodes if is_res(n["ref"]) and ohms(comps[n["ref"]]["value"]) < 1000 and (o := other(n["ref"], n["pin"])) and not is_power(o, nets.get(o, []))}
+            ups = [n for bus in nearby for n in nets.get(bus, []) if is_res(n["ref"]) and (o := other(n["ref"], n["pin"])) and is_power(o, nets.get(o, [])) and not is_ground(o)]
+            ic = next((n["ref"] for n in nodes if not is_res(n["ref"])), nodes[0]["ref"] if nodes else "")
+            if not ups:
+                add("i2c_no_pullup", "error", f"{name} has no pull-up resistor to a supply. Assumes the pull-up is on this board.", ic, [node_txt(n) for n in nodes])
+            elif len(ups) > 1:
+                par = 1 / sum(1 / ohms(comps[n["ref"]]["value"]) for n in ups)
+                add("i2c_multiple_pullups", "warning", f"{name} has {len(ups)} pull-ups in parallel ({round(par)} Ω).", ups[0]["ref"], [node_txt(n) for n in ups])
+    def matching_nets(key):
+        return [name for name, nodes in nets.items() if matches(short(name), patterns[key]) or any(matches(n["function"], patterns[key]) for n in nodes)]
+
+    can_h, can_l = matching_nets("can_h"), matching_nets("can_l")
+    if can_h and can_l:
+        detected["CAN"] = len(can_h)
+        terminated = any(is_res(n["ref"]) and 114 <= ohms(comps[n["ref"]]["value"]) <= 126 and other(n["ref"], n["pin"]) in can_l for h in can_h for n in nets[h])
+        if not terminated:
+            ref = next((n["ref"] for n in nets[can_h[0]] if not is_res(n["ref"])), nets[can_h[0]][0]["ref"])
+            add("can_no_termination", "warning", f"No 120 Ω resistor between {can_h[0]} and {can_l[0]}. Fine if this node is not at a bus end.", ref, [can_h[0], can_l[0]])
+    for ref, c in comps.items():
+        if not (re.match(r"J\d", ref) and re.search(r"USB.?C|TYPE.?C", f"{c['lib']} {c['value']} {c['footprint']}", re.I)):
+            continue
+        detected["USB-C"] = detected.get("USB-C", 0) + 1
+        for name, nodes in nets.items():
+            for node in nodes:
+                if node["ref"] != ref or not re.fullmatch(r"CC\d?", node["function"].upper()):
+                    continue
+                pulled = any(is_res(n["ref"]) and 4850 <= ohms(comps[n["ref"]]["value"]) <= 5360 and is_ground(other(n["ref"], n["pin"]) or "") for n in nets[name])
+                driven = any(n["ref"] != ref and not is_res(n["ref"]) and not esd(n["ref"]) for n in nets[name])
+                if not pulled and not driven:
+                    add("usb_cc_floating", "error", f"{node['function']} of {ref} floats: needs 5.1 kΩ to GND or a PD controller.", ref, [node_txt(node)])
+    # ponytail: same-net only; follow series resistors one hop if teams protect through them
+    total = prot = 0
+    for ref in sorted((r for r in comps if re.match(r"J\d", r)), key=natural):
+        bare = []
+        for (r, pin), name in sorted(pin_net.items(), key=lambda e: natural(e[0][1])):
+            if r != ref or is_power(name, nets[name]) or len(nets[name]) < 2:
+                continue
+            total += 1
+            if any(esd(n["ref"]) for n in nets[name] if n["ref"] != ref):
+                prot += 1
+            else:
+                bare.append(f"{ref} pin {pin} on {name}")
+        if bare:
+            add("connector_no_esd", "warning", f"{ref} signal pins without an ESD or TVS part on the same net. Assumes protection is not elsewhere on the cable.", ref, bare)
+    rails = {}
+    for name, nodes in nets.items():
+        if is_power(name, nodes) and not is_ground(name):
+            for n in nodes:
+                if n["type"] == "power_in" and n["ref"].startswith("U"):
+                    rails.setdefault(n["ref"], set()).add(name)
+    for name, nodes in nets.items():
+        if is_power(name, nodes):
+            continue
+        ics = sorted({n["ref"] for n in nodes if n["ref"] in rails}, key=natural)
+        for a, b in ((x, y) for i, x in enumerate(ics) for y in ics[i + 1:]):
+            if rails[a].isdisjoint(rails[b]):
+                add("voltage_domain", "warning", f"{name} joins {a} ({', '.join(sorted(rails[a]))}) and {b} ({', '.join(sorted(rails[b]))}). Check levels.", a, [name])
+                break
+    return out, {"detected": detected, "protected": [prot, total]}
 
 
 def page_svg(out_dir, name, page):
@@ -929,8 +1561,11 @@ def svg_body(path):
 
 
 def svg_size(text):
-    w, h = re.search(r'viewBox="[\d.]+ [\d.]+ ([\d.]+) ([\d.]+)"', text).groups()
-    return [float(w), float(h)]
+    match = re.search(r"viewBox\s*=\s*[\"']([^\"']+)[\"']", text)
+    values = [float(v) for v in re.split(r"[\s,]+", match[1].strip())] if match else []
+    if len(values) != 4 or not all(math.isfinite(v) for v in values) or min(values[2:]) <= 0:
+        raise ValueError("SVG needs a finite viewBox with positive width and height")
+    return values[2:]
 
 
 def has_drawing(text):
@@ -975,7 +1610,7 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings):
+def build_project(p, blobs, settings, waivers=None):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -1013,8 +1648,12 @@ def build_project(p, blobs, settings):
     parts = None
     if settings["parts"]["enabled"]:
         lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
+        mark_new_problems(lines["base"], lines["head"])
+        has_base = any(o["kind"] == "symbol" for o in objs["base"].values())
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
-                 "supplier": None}  # JLCPCB lookup not built yet: no approved API access
+                 "supplier": None,  # JLCPCB lookup not built yet: no approved API access
+                 "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
+                 "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -1022,10 +1661,19 @@ def build_project(p, blobs, settings):
             board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
+    index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
+        settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
+    libraries = None
+    if settings["libraries"]["enabled"]:
+        roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
+        items = {side: library_items(root) for side, root in roots.items()}
+        libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
+                                   local_items=set(items["base"]) | set(items["head"])) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
-            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] or settings["issues"]["enabled"] else {})}
+            **({"libraries": libraries} if libraries else {}),
+            **({"objects": index} if index is not None else {})}
 
 
 def assign_ids(projects):
@@ -1084,7 +1732,15 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "threads", "issues") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items()
+                       if not ((k in ("3d", "parts", "threads", "issues", "waivers", "inventory", "libraries") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+    if not settings["parts"]["enabled"]:
+        report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
+    if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
+        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}
+        report_settings.pop("interfaces", None)
+    if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
+        report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -1093,8 +1749,14 @@ def cmd_report(args):
         "settings": report_settings,
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
-    data["projects"] = [build_project(p, blobs, settings) for p in det["projects"]]
+    waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
+    data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
     assign_ids(data["projects"])
+    if waivers is not None:
+        used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
+                for v in c["violations"] if v.get("waived")}
+        data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
+                           "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
@@ -1168,6 +1830,9 @@ def summary_sentence(p):
     for kind in ("title block", "design rules"):
         if any(r["kind"] == kind for r in rows):
             parts.append(f"{kind} changed")
+    for c in p.get("libraries", []):
+        parts.append(f"{c['kind']} {md(c['item'])} {c['status']}" + (f" (used by {md(', '.join(c['used_by'][:3]))}{', …' if len(c['used_by']) > 3 else ''})" if c["used_by"] else "")
+                     + (f" — **{len(c['warnings'])} warning{'s' if len(c['warnings']) > 1 else ''}**" if c["warnings"] else ""))
     for c in p["checks"]:
         if c["new_errors"] and c["name"] == "bom":
             parts.append(f"**{plural(c['new_errors'], 'part')} newly missing BOM fields**")
@@ -1202,7 +1867,7 @@ def changes_markdown(p, limit=60):
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, issues=None):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, log="", issues=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -1238,7 +1903,14 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
             out += ["</details>"]
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
-    body, checks = "\n".join(out), checks_markdown(data)
+    body = "\n".join(out)
+    checks = "\n".join(readiness_markdown(data, threads, threads_required=data.get("settings", {}).get("threads", {}).get("block_merge", False))) + checks_markdown(data)
+    if len(log) > 30000:
+        log = "\n" + merge_log(extract_log(log), "")
+    if log and len(checks) + len(log) > 59000:
+        checks = checks[:max(0, 58900 - len(log))].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
+        checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
+    checks += log
     parts = parts_markdown(data)
     if parts:
         # Reserve room for the body truncation notice and closing details tags.
@@ -1249,7 +1921,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
-            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads, issues)
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads, log, issues)
         body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
@@ -1301,7 +1973,17 @@ def cmd_summary(args):
     if data["settings"].get("threads", {}).get("enabled") and os.path.exists("review/threads.json"):
         with open("review/threads.json", encoding="utf-8") as fh:
             try:
-                threads = thread_counts(json.load(fh))
+                raw = json.load(fh)
+                review_threads = raw
+                for key in ("data", "repository", "pullRequest", "reviewThreads"):
+                    review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
+                if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
+                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
+                    # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
+                    print("::warning::review/threads.json is incomplete; thread counts left out")
+                else:
+                    threads = thread_counts(raw)
             except ValueError:
                 print("::warning::review/threads.json is not JSON; thread counts left out")
     issues = None
@@ -1311,17 +1993,43 @@ def cmd_summary(args):
                 issues = touched_issues(json.load(fh), data)
             except ValueError:
                 print("::warning::review/issues.json is not JSON; issue links left out")
-    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads, issues=issues)
+    log = ""
+    if os.environ.get("HISTORY") == "true":
+        previous = ""
+        if os.path.exists("review/previous-log.md"):
+            with open("review/previous-log.md", encoding="utf-8") as fh:
+                previous = fh.read()
+        when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        log = "\n" + merge_log(extract_log(previous), log_row(data, when))
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads, log=log, issues=issues)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
+    settings = data["settings"]
+    block_merge = settings.get("threads", {}).get("block_merge")
+    publish_checks = settings.get("github", {}).get("check_runs")
+    threads_failed = ""
+    if block_merge:
+        threads_failed = "blocking threads could not be read" if threads is None else (plural(threads["blocking"], "blocking thread") + " open" if threads["blocking"] else "")
+    if publish_checks:
+        runs = check_runs(data)
+        if block_merge:
+            runs.append({"name": "kicad-review / Threads", "conclusion": "failure" if threads_failed else "success",
+                         "output": {"title": threads_failed or "no blocking threads open",
+                                    "summary": "Resolve blocking threads in the review site or on GitHub."}})
+        with open("review/check-runs.json", "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+    with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+        fh.write(f"check_runs={'true' if publish_checks else 'false'}\n")
+        fh.write(f"threads_failed={threads_failed}\n")
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
 
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
+                "placeholder": "placeholder value", "mpn_footprint_conflict": "one MPN on several footprints",
                 "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
-BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
 def parts_markdown(data):
@@ -1330,8 +2038,11 @@ def parts_markdown(data):
         parts = p.get("parts")
         if not parts:
             continue
-        introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
-                      for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
+        if any("new_problems" in l for l in parts["lines"]):
+            introduced = [(l.get("problem_refs", {}).get(pr, l["refs"]), pr) for l in parts["lines"] for pr in l.get("new_problems", []) if pr in BLOCKING]
+        else:
+            introduced = [(r["refs"], pr) for r in parts["changes"] if r["after"] and r["action"] != "removed"
+                          for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
         s = parts["supplier"]
         head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
         when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
@@ -1339,6 +2050,15 @@ def parts_markdown(data):
         bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
+        cov = parts.get("coverage")
+        if cov:
+            def item(f, label):
+                c, t = cov["head"][f]
+                d = c - cov["base"][f][0] if cov.get("base") else 0
+                return f"{label} {c}/{t}" + (f" ({'+' if d > 0 else ''}{d})" if d else "")
+            out += ["", "BOM coverage: " + ", ".join(item(f, l) for f, l in (("Order ready", "order ready"), ("MPN", "MPN"), ("LCSC", "LCSC"), ("Datasheet (critical)", "datasheet on critical parts"))) + "."]
+        if parts.get("dnp_mismatch"):
+            out.append(f"DNP differs between schematic and board: {md(', '.join(parts['dnp_mismatch']))}.")
     return "\n".join(out)
 
 
@@ -1391,6 +2111,24 @@ def thread_counts(response):
     return c
 
 
+def waiver_lines(data):
+    """Comment summaries for covered findings and waivers that need attention."""
+    w = data.get("waivers")
+    if not w:
+        return []
+    waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+    if not waived and not any(w.values()):
+        return []
+    one = lambda s: md(" ".join(str(s).split()))
+    out = ["", f"{plural(waived, 'finding')} waived by kicad-review-waivers.toml (reasons in the report)."]
+    say = lambda e: f"{one(e['check'])} {one(e['match'])} ({one(e['reason'])}, by {one(e['by'])})"
+    out += [f"- Waiver not matched in this review: {say(e)} (if its finding is gone, remove it)." for e in w["stale"]]
+    out += [f"- Expired waiver: {say(e)} ended {one(e['until'])}." for e in w["expired"]]
+    out += [f"- Proposed in this change (applies after it merges): {say(e)}." for e in w["proposed"]]
+    out += [f"- Ignored: {one(m)}" for m in w["invalid"]]
+    return out
+
+
 def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
@@ -1398,17 +2136,96 @@ def checks_markdown(data):
             lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
-            if v["new"] and v["severity"] == "error"]
+            if v["new"] and v["severity"] == "error" and not v.get("waived")]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
         lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
-    checks = "\n".join(lines) + "\n"
+    checks = "\n".join(lines + waiver_lines(data)) + "\n"
     if len(checks) > 50000:  # leave room for the comment body and closing details tags
         checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
     return checks
+
+
+LOG_START, LOG_END = "<!-- kicad-review-log -->", "<!-- /kicad-review-log -->"
+LOG_HEAD = ["| Run (UTC) | Commit | Result | Checks |", "|---|---|---|---|"]
+LOG_ROW = re.compile(r"^\| \[\d{4}-\d\d-\d\d \d\d:\d\d\]\(https://[^)]*/actions/runs/\d+\) \| `[0-9a-f]{7}` \| (✅ pass|❌ fail) \| .* \|$")
+
+
+def log_row(data, when: str) -> str:
+    """One strict review-log row; local runs without a run URL have no row."""
+    failed = any(c["status"] == "fail" for p in data["projects"] for c in p["checks"])
+    per = [("" if len(data["projects"]) == 1 else f"{md(p['name'])}: ")
+           + " · ".join(f"{md(c['title'])} {c['errors']} ({c['new_errors']})" for c in p["checks"])
+           for p in data["projects"]]
+    row = f"| [{when}]({data['links'].get('run', '')}) | `{(data['head'] or '')[:7]}` | {'❌ fail' if failed else '✅ pass'} | {' ; '.join(per) or '—'} |"
+    row = row.replace("\n", " ").replace("\r", " ")
+    return row if LOG_ROW.fullmatch(row) else ""
+
+
+def extract_log(text) -> list[str]:
+    """Validated rows of a log block, or [] for missing or broken markers."""
+    text = text or ""
+    start, end = text.find(LOG_START), text.find(LOG_END)
+    if start < 0 or end < start:
+        return []
+    return [line for line in text[start + len(LOG_START):end].splitlines() if LOG_ROW.fullmatch(line)]
+
+
+def merge_log(previous_rows, row, keep=50) -> str:
+    rows = [line for line in [*previous_rows, row] if LOG_ROW.fullmatch(line)]
+    rows = rows[-keep:] if keep > 0 else []
+    # Keep whole newest rows; leave ample room for checks and the comment body.
+    while sum(len(line) + 1 for line in rows) > 29500:
+        rows.pop(0)
+    return "\n".join([LOG_START, "<details><summary>Review log</summary>", "", *LOG_HEAD, *rows, "", "</details>", LOG_END, ""])
+
+CHECK_RESULTS = [("fail", "failure", "failing"), ("warn", "neutral", "warnings"),
+                 ("pass", "success", "passing"), ("not_run", "skipped", "not run")]
+
+
+def check_runs(data):
+    """One GitHub check run per check name across all projects; the worst project result is the run's conclusion."""
+    runs = {}
+    for p in data["projects"]:
+        for c in p["checks"]:
+            r = runs.setdefault(c["name"], {"name": f"kicad-review / {c['title']}", "rows": [], "conclusions": [], "new": 0})
+            rank = next((i for i, result in enumerate(CHECK_RESULTS) if result[0] == c["status"]), None)
+            if rank is None:
+                raise KeyError(c["status"])
+            r["conclusions"].append(rank)
+            r["new"] += c["new_errors"]
+            r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
+    out = []
+    for r in runs.values():
+        _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]
+        if r["new"]:
+            title = plural(r["new"], "new error")
+        summary = "\n".join(["| Project | Result | Errors (new) | Warnings (new) |", "|---|---|---|---|", *r["rows"]])
+        out.append({"name": r["name"], "conclusion": conclusion, "output": {"title": title, "summary": summary}})
+    return out
+
+
+def readiness_markdown(data, threads=None, threads_required=False):
+    """The 'Ready to merge?' block: required checks, blocking threads, and where approvals live."""
+    failing = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    failures = ", ".join(failing)
+    if len(failures) > 1000:
+        failures = failures[:1000] + "… (full list in Checks)"
+    failures = md(failures)
+    lines = ["", "#### Ready to merge?", "",
+             f"- ✕ **Required checks:** failing ({failures})" if failing else "- ✓ **Required checks:** passing"]
+    if threads is not None:
+        lines.append(f"- ✕ **Blocking threads:** {threads['blocking']} open" if threads["blocking"] else "- ✓ **Blocking threads:** none open")
+    elif threads_required:
+        lines.append("- ✕ **Blocking threads:** could not be read")
+    if data.get("waivers") is not None:
+        waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+        lines.append(f"- ↷ **Waived findings:** {waived} (not blocking)")
+    lines.append("- ↗ **Approvals:** see the pull request's reviewers (the review site shows them per commit).")
+    return lines
 
 
 def main():
