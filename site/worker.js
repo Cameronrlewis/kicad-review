@@ -228,7 +228,7 @@ async function pdfDownload(owner, repo, id, active) {
     if (download.status !== 302) return pdfError(active);
     const location = new URL(download.headers.get('Location'));
     if (location.protocol !== 'https:' || location.username || location.password) return pdfError(active);
-    const blob = await fetch(location.href, { redirect: 'error' });
+    const blob = await fetch(location.href, { redirect: 'manual' });
     if (!blob.ok || !blob.body) return pdfError(active);
     return sessionResponse(blob.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${artifact.name}"` } }, active);
   } catch { return pdfError(active); }
