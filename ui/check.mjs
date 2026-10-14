@@ -63,7 +63,7 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   const r = await evaluate(`(async () => { ${expr} })()`);
   if (r.result?.value === "skip" && !errors.length) return ["SKIP " + name, noSkip];
   const ok = r.result?.value === true && !errors.length;
-  return [`${ok ? "PASS" : "FAIL"} ${name}${ok ? "" : ` -> ${JSON.stringify(r.result?.value ?? r.exceptionDetails?.exception?.description)} ${errors.join(" | ")}`}`, !ok];
+  return [`${ok ? "PASS" : "FAIL"} ${name}${ok ? "" : ` -> ${JSON.stringify(r.exceptionDetails?.exception?.description ?? r.exceptionDetails?.text ?? r.result?.value)} ${errors.join(" | ")}`}`, !ok];
     })();
     const [line, bad] = await Promise.race([body, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), Number(process.env.CHECK_WALL_TIMEOUT || 60000)); })]);
     console.log(line); if (bad) failed++;

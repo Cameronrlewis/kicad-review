@@ -28,7 +28,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - the sheet hierarchy with changed sheets marked
 - the change table and the check results, where clicking a row zooms to the object or violation
 
-Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. Runs whose changes touch no KiCad file are not started at all, thanks to the path filters. A newer push to a pull request cancels that pull request's older run. Every push to a branch gets its own run, so no commit goes unreviewed.
+Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. The path filters also start runs for settings and waiver-file changes; a waiver-only pull request shows "No KiCad changes". A newer push to a pull request cancels that pull request's older run. Every push to a branch gets its own run, so no commit goes unreviewed.
 
 ## Add it to a repository
 
@@ -36,10 +36,14 @@ Every KiCad project in the repository (each folder with a `.kicad_pro`) is revie
 2. Optional: copy [`examples/kicad-review.toml`](examples/kicad-review.toml) to `kicad-review.toml` at the repository root and change what differs: which checks are required, which BOM fields every part must have, and which fabrication preset to use. Without the file the defaults in that example apply.
 3. If the repository belongs to an organisation, open *Organisation settings → Actions → General* and check two things:
    - **Policies** must allow reusable workflows from `Cameronrlewis/kicad-review`, either by allowing all actions or by adding it to the allow list.
-   - **Workflow permissions** can stay read-only by default, because the caller file asks for exactly `contents: write` and `pull-requests: write`.
+   - **Workflow permissions** can stay read-only by default, because the caller file asks for `contents: write` and `pull-requests: write` (also `checks: write` when `github.check_runs` is enabled).
 4. Open a pull request that touches a `.kicad_sch` or `.kicad_pcb` file. The comment appears in about two minutes.
 
 To make checks block merging, require the status check **`review / review`** in a branch protection rule or ruleset. **This is not available for private repositories on GitHub Free**: the API answers "Upgrade to GitHub Pro or make this repository public". On Free, a failing required check still marks the run and the pull request with a red ✗, but it cannot block the merge. Enforcement needs GitHub Team for the organisation, or a public repository.
+
+With `[github] check_runs = true` you can require individual checks instead: `kicad-review / ERC`, `kicad-review / DRC`, `kicad-review / Schematic/board parity`, `kicad-review / BOM fields`, and `kicad-review / Threads` when `threads.block_merge` is on. Add `checks: write` to the caller's permissions. `review / review` stays as before.
+
+The site's re-run feature expects the caller workflow to be named `kicad-review.yml`.
 
 ## Settings (`kicad-review.toml`)
 
@@ -48,22 +52,49 @@ To make checks block merging, require the status check **`review / review`** in 
 | `fail_on` | `"new"` | `"new"`: a required check fails only on errors the change introduced. `"all"`: any error fails it. |
 | `checks.erc`, `checks.drc`, `checks.parity` | `"required"` | `required`, `informational` or `off` |
 | `checks.bom` | `"informational"` | as above |
+| `checks.interfaces` | `"off"` | as above; design-review rules on the schematic netlist |
+| `interfaces.<rule>` | built-in names | net or pin-function names for a rule (`uart_tx`, `i2c_sda`, `i2c_scl`, `can_h`, `can_l`, `esd_parts`; `spi` is accepted for compatibility but unused) |
+| `checks.release` | `"off"` | as above; builds and checks the fabrication package (adds about 2–4 s per board) |
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
+| `bom.critical_prefixes` | `["U", "J", "Q", "D", "Y", "X", "K", "F"]` | reference prefixes whose datasheet coverage is shown separately |
+| `bom.order_ready_fields` | preset's fields | fields every part needs to count as order-ready (JLCPCB: Value, Footprint, LCSC; PCBWay: Value, Footprint, MPN) |
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 | `release.review` | `false` | on a `v*` tag, review changes since the previous `v*` tag and add a "KiCad review" section to the release notes |
+| `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
+| `inventory.enabled` | `false` | add an "All parts" list to the report's Changes tab: every symbol and footprint, searchable, click to zoom |
+| `libraries.enabled` | `false` | Review local symbol and footprint libraries: drawings, pin/pad changes, used-by references, and warnings |
+| `github.check_runs` | `false` | also publish one GitHub check run per check (`kicad-review / ERC`, `… / DRC`, …); the caller needs `checks: write` |
+| `threads.block_merge` | `false` | fail the review while any blocking thread is open; needs `threads.enabled`; creating, resolving or reopening a blocking thread in the review site re-runs the review |
+| `waivers.enabled` | `false` | read `kicad-review-waivers.toml`; a waived ERC, DRC or parity finding stays listed but no longer fails its check |
+
+With `checks.release` on, each review also builds the fabrication package for the chosen preset and checks it: a Gerber for every copper layer and the outline, mask and paste on sides with SMD parts, drill files when the board has holes, a position file when SMD parts are fitted, and BOM and position file agreeing on references. Tagged releases also get a `SHA256SUMS` file so the files sent to the fab can be checked against the release.
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used. The workflow reads `release.review` from the tagged revision to decide whether to start its review; check settings still follow the base-first rule.
 
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
+Review history is off by default. Set the Actions variable `KICAD_REVIEW_HISTORY` to exactly `true` to keep the newest 50 review runs in the PR comment. The log records errors (new errors), not warnings. Failed or cancelled runs add no row; the previous log is carried over.
+
+## Interface checks (optional)
+
+With `checks.interfaces` set to `informational` or `required` (default `off`), each review exports the schematic netlist and applies these rules:
+- UART TX wired to TX;
+- I2C pull-ups missing or doubled;
+- CAN without a 120 Ω termination;
+- USB-C CC pins floating (no 5.1 kΩ to GND and no PD controller);
+- connector signal pins without an ESD or TVS part on the same net;
+- signals joining parts powered from different rails.
+
+Each finding names the nets and pins it is based on and states its assumption. A coverage line under the checks says what was detected and how many connector signal pins are protected. Pin-function names must contain the role token (e.g. `USART1_TX`, `SDA`). Symbols with only port names (`PA9`) or fused names (`U0TXD`) are not matched; add patterns under `[interfaces]`. Names are matched by whole tokens of the net name (last path element) and pin functions. Extend them under `[interfaces]`, for example `i2c_sda = ["SDA", "TOUCH_SDA"]`.
+
 ## Parts (optional)
 
 Set `enabled = true` under `[parts]` in `kicad-review.toml` (default: `false`). The Parts tab and pull request comment section list each distinct part's value, footprint, references, LCSC number and manufacturer part number, with a datasheet link from the symbol's `Datasheet` field (http/https only). They flag missing or malformed LCSC numbers and one LCSC number used on several values, and show which parts the change added, removed, swapped to another LCSC number, or gave a new value or footprint.
 
-Add an `LCSC` field to each symbol for its JLCPCB part (for example `C17414`), and `Manufacturer_Part_Number` for the PCBWay BOM. Optionally add `"LCSC"` to `bom.required_fields` to require it.
+Add an `LCSC` field to each symbol for its JLCPCB part (for example `C17414`), and `Manufacturer_Part_Number` for the PCBWay BOM. Optionally add `"LCSC"` to `bom.required_fields` to require it. It also shows BOM coverage per field (with the change from base), field-by-field edits per reference, placeholder values such as `TBD`, one MPN used on several footprints, and parts that are DNP on only one of schematic and board.
 
 Recognised field names (case-insensitive):
 
@@ -72,11 +103,42 @@ Recognised field names (case-insensitive):
 
 Supplier stock/price is not yet available; a JLCPCB Components API lookup at workflow time is planned and needs approved API access. Today nothing is sent to any supplier, and no supplier API secret is needed. PCBWay publishes no parts API.
 
+## Threads (optional)
+
+With `[threads] enabled = true` and the review site, a reviewer starts a thread on a part or point of a changed sheet or board. Right-click the drawing, or press `c` and click. Each thread is a pull-request review comment on the `.kicad_sch` or `.kicad_pcb` file. Its first line names the part and position and links back to the exact view, so it reads well on GitHub too. Replies, @mentions, notifications and resolving all work on GitHub as for any review comment.
+
+Every later review places the thread on the same part by its KiCad UUID, or by its reference if the UUID changed, and says when the part moved or was removed. A thread whose part is in neither revision shows as "Detached". Threads exist only on pull requests. They are file-level comments, so the review site places them from the anchor in the comment, not from GitHub's line position.
+
+When thread collection succeeds, the pull request comment shows "Threads: N open (M blocking), K resolved". The counts cover only threads started from the review site, among the pull request's first 100 review threads. The offline report file shows no threads.
+
+Threads are off by default. The site exposes them only on review pages for `pull_request` runs. The GitHub App needs Pull requests and Contents permissions (read and write); GitHub requires Contents write to resolve review threads. A 403 response shows a hint to ask the repository owner to accept those permissions. A rate-limit response shows "GitHub rate limit reached. Try again later." (429).
+
+When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts unless `threads.block_merge` is enabled, in which case the gate fails closed. Each blocking-thread create, resolve or reopen re-runs the whole review (about 2–3 Actions minutes); anyone with write access can trigger a re-run, so only writers can spend Actions minutes this way. GitHub requires a run no older than 30 days.
+
+## Waivers (optional)
+
+A waiver accepts one specific ERC, DRC or parity finding: for example a deliberate clearance under a connector shield. BOM-field findings cannot be waived; fix their fields in the schematic. Waivers are off by default. Enable them with `enabled = true` under `[waivers]` in `kicad-review.toml` on the default branch. Settings still come from the review's base revision, so open pull requests pick up that setting after merging the default branch into their head.
+
+Press **Waive…** on a finding in the report to get a TOML snippet, not an automatic waiver. Fill in `reason` and `by`, and add the entry to `kicad-review-waivers.toml` at the repository root through a separate pull request to the target branch. See the fully commented [example file](examples/kicad-review-waivers.toml). Once that merges, re-run the review that had the finding.
+
+In GitHub Actions, waivers are read only from the current tip of the pull request's target branch (`origin/<base.ref>`), or the repository's default branch for push and manual-dispatch runs. They never apply from the change being reviewed, so a pull request cannot waive its own findings, and waivers merged later apply on re-run. Protect the target branch: anyone who can push directly to it can accept waivers without review. Direct pushes to the default branch already bypass review. For local CLI runs without `WAIVERS_REF`, the comparison's base revision is the fallback.
+
+When a review includes KiCad changes, valid extra entries in its head file appear as "proposed" in the comment, not as active waivers (entries already active on the target branch are not repeated). A waiver-only pull request has no KiCad changes to review; its entries apply once it merges. Its comment shows **No KiCad changes**, not proposed entries.
+
+A waived finding stays listed, tagged **WAIVED** with its reason, under the report's **Waived** filter, which appears when something is waived. It does not count toward `fail_on`; the comment's **Ready to merge?** block lists waived findings as not blocking. Each entry needs `until = <date>` or `permanent = true`. The `until` date is inclusive through that day in UTC; expiry starts the next UTC day. Malformed files warn and are ignored; invalid entries warn and are skipped without breaking the review. The comment lists invalid, expired and proposed entries, and waivers not matched in this review; these lists are not shown in the offline HTML report. An unmatched entry may belong to an unchanged project or a check that is off, so remove it only if its finding is gone. The file's git history records who accepted what and when.
+
+Waiver keys have limits. Several unconnected items on one net are keyed by occurrence in KiCad's output, so fixing one can shift another's key, making its waiver stale or matching a different occurrence. A finding without part UUIDs uses a position-based fallback, so moving the part makes its waiver stale. Recheck these waivers after edits.
+
 ## Review site (optional)
 
 The small Cloudflare Worker review site lets people sign in with GitHub and open reviews only in repositories they can already read. See [the site setup guide](site/README.md) to create the GitHub App, run it locally, and deploy it manually.
 
 The review list can group pull-request reviews by GitHub milestone. Choose **Milestones** to see open and merged PR counts, review verdicts, and a link to each milestone. This view reads the latest 100 PRs live and needs the App's **Pull requests: read** permission; without it, the page shows permission guidance. Reviews join to the newest PR with the same head branch, so reused or same-named fork branches can be ambiguous. Manual comparisons and unmatched reviews appear under **No milestone**. No milestone data is stored.
+Pull-request reviews have a **History** page: commits, approvals and change requests, review threads, and logged check results, newest first. Checks, Reviews, Threads and Commits filters narrow the timeline. Thread resolution is shown at creation time because GitHub supplies no resolution time. Waiver history is deferred until the waivers feature lands.
+
+The check log is **off by default**. Alongside `KICAD_REVIEW_SITE`, set the calling repository's Actions variable `KICAD_REVIEW_HISTORY=true` to keep the newest 50 check-result rows in the existing bot comment. This adds a comments fetch on same-repository PR runs; forks do not fetch it. With the variable unset, comments and job summaries stay unchanged. History still shows commits, reviews and threads without the log.
+
+Logged results outlive the 90-day reports; links disappear when their artifacts expire or are unavailable. Rows record errors (total and new), not warnings. Failed or cancelled runs add no row; failure and no-change comments carry the previous log. The log is editable by anyone who can edit the bot comment, not immutable. History trusts only the GitHub Actions bot's marked comment and reads the first 100 comments/threads and last 100 commits/reviews.
 
 ## When the workflow repository moves (for example to ParadigmEngineering)
 
@@ -156,3 +218,6 @@ and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `
 and an export runs, `board.model3d` has base/head GLB blob ids (or `null`), `board.model3d_failed` marks
 failed exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
 footprint`). Positions and boxes are drawing millimetres.
+
+Library review (`[libraries] enabled = true`) covers only library files inside the project folder. Nicknames come from the file name (`Parts.kicad_sym` or `Parts.pretty` means `Parts`); library tables and external libraries are not resolved. Footprint item names come from `.kicad_mod` file stems, including legacy KiCad `module` files; symbol item names come from their declarations without a library prefix. For placed-part usage, exact library IDs win. When a placed part's nickname is not a local library, its item name is matched only if exactly one local library across the compared revisions contains that item of the same kind. This supports renamed or global nicknames without guessing when names are ambiguous, including duplicates in unchanged local libraries. All symbol units contribute pins; the drawing shows unit 1. Pad removals or renumbering and symbol electrical-type changes warn when placed parts use the item.
+With waivers enabled, format v1 adds `violations[].waiver_key`, `violations[].waived` for matched findings, `checks[].waived` counts on waivable checks, and top-level `waivers` lists (`stale`, `expired`, `proposed`, `invalid`); these additive fields are absent when waivers are off.

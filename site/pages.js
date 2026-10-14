@@ -1,5 +1,7 @@
 import tokens from '../ui/tokens.css';
 import site from './site.css';
+import { readinessClient } from './readiness-client.js';
+import { threadsClient } from './threads-client.js';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -7,6 +9,22 @@ export function escapeHtml(value) {
 const e = escapeHtml;
 const repoPath = (owner, repo) => `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 const link = (href, label, className = '') => `<a${className ? ` class="${className}"` : ''} href="${e(href)}">${e(label)}</a>`;
+
+const HISTORY_KINDS = [['all', 'All'], ['checks', 'Checks'], ['review', 'Reviews'], ['thread', 'Threads'], ['commit', 'Commits']];
+export function historyPage({ user, owner, repo, pull, title, events, filter }) {
+  if (['reviews', 'threads', 'commits'].includes(filter)) filter = filter.slice(0, -1);
+  if (!HISTORY_KINDS.some(([kind]) => kind === filter)) filter = 'all';
+  const path = repoPath(owner, repo);
+  const shown = filter === 'all' ? events : events.filter(ev => ev.kind === filter);
+  const rows = shown.map(ev => {
+    const safe = String(ev.href || '').startsWith(`${path}/a/`) && /^\d+$/.test(String(ev.href).slice(`${path}/a/`.length));
+    return `<li class="hist"><time datetime="${e(ev.time)}">${e(String(ev.time).replace('T', ' ').slice(0, 16))} UTC</time> <span class="hist-kind">${e(ev.kind)}</span> ${safe ? link(ev.href, ev.text) : e(ev.text)} <span class="muted">${e(ev.who)}</span></li>`;
+  }).join('');
+  return frame({ title: `History #${pull}`, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: `#${pull} history` }],
+    body: `<main class="page"><div class="page-head"><div><h1>${e(title)}</h1><p class="lead">Everything that happened in this pull request's review, newest first.</p></div></div>
+      <nav class="filter-row" aria-label="History filters">${HISTORY_KINDS.map(([kind, label]) => `<a class="filter-chip" href="?f=${kind}"${filter === kind ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav>
+      <ol class="history">${rows || '<li class="muted">Nothing yet.</li>'}</ol></main>` });
+}
 
 export function frame({ title, user, crumbs = [], body, meta = '' }) {
   const trail = crumbs.map((crumb, index) => `<span>${index < crumbs.length - 1 && crumb.href ? link(crumb.href, crumb.label) : e(crumb.label)}</span>`).join('');
@@ -125,16 +143,28 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" type="submit">Start review</button><div class="muted" role="status"></div></div></div><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select><button class="btn" form="source-picker">Show</button></div><table class="table"><thead><tr><th>Base</th><th>Head</th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></form><form id="source-picker" method="get"></form>${script}</main>` });
 }
 
-export function reviewPage({ user, owner, repo, id, name, workflowRunId }) {
+export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = null, runStatus = null, runConclusion = null }) {
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
-  const result = match ? (match[3] === 'pass' ? '<span class="status status-pass">✓ passing</span>' : '<span class="status status-fail">✕ failing</span>') : '';
+  const result = runStatus === 'completed' && runConclusion ? (runConclusion === 'success' ? '<span class="status status-pass">✓ run passing</span>' : `<span class="status status-fail">✕ run ${e(runConclusion.replace(/_/g, ' '))}</span>`)
+    : runStatus ? `<span class="status">… run ${e(runStatus.replace(/_/g, ' '))}</span>`
+    : match ? (match[3] === 'pass' ? '<span class="status status-pass">✓ checks passing</span>' : '<span class="status status-fail">✕ checks failing</span>') : '';
   const raw = `${path}/a/${encodeURIComponent(id)}/raw`;
   const run = /^\d+$/.test(String(workflowRunId)) ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(workflowRunId)}` : '';
   const runLink = run ? link(run, 'Open the run on GitHub ↗') : '';
   const script = `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); iframe.addEventListener('load', () => { fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) loading.hidden = true; if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
-  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}` });
+  const readiness = Number.isInteger(pull) ? `<section id="readiness" class="readiness" aria-live="polite"><p class="muted">Checking merge readiness…</p></section><script>(${readinessClient.toString()})(${JSON.stringify({ readiness: `${path}/pull/${pull}/readiness`, reviewHead: match ? match[2] : null }).replace(/</g, '\\u003c')});</script>` : '';
+  const notice = Number.isInteger(pull) ? '<p id="thread-notice" class="muted" role="status"></p>' : '';
+  const threads = Number.isInteger(pull) ? `<dialog id="thread-composer" class="thread-dialog"><form method="dialog"><h2>New thread</h2><p class="thread-target mono"></p>
+      <fieldset><legend>Kind</legend><label><input type="radio" name="severity" value="comment" checked> Comment</label> <label><input type="radio" name="severity" value="blocking"> Blocking: must be resolved before merging</label></fieldset>
+      <label>Text<textarea name="text" rows="5" required maxlength="10000"></textarea></label>
+      <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary">Create thread</button> <button type="button" class="btn" data-act="close">Cancel</button></p></form></dialog>
+    <dialog id="thread-view" class="thread-dialog"><form method="dialog"><h2></h2><ol class="thread-comments"></ol>
+      <label>Reply<textarea name="text" rows="3" maxlength="10000"></textarea></label>
+      <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
+    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: `${path}/pull/${pull}/threads`, rerun: `${path}/pull/${pull}/rerun`, run: `${path}/run/`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>` : '';
+  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}${readiness}${Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : ''}${notice}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${threads}` });
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;
