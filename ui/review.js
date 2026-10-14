@@ -115,6 +115,7 @@ function renderNav() {
           <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
       : '<li class="muted">No board changes</li>'}
       ${p.board.model3d && (p.board.model3d.base || p.board.model3d.head) ? `<li><button data-view='3d' aria-current="${S.v === '3d'}"><span class="name">3D view</span></button></li>` : ""}</ul>
+    ${p.libraries?.length ? `<h3>Libraries</h3><ul class="tree">${p.libraries.map((c, i) => `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">● ${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span>${c.warnings.length ? ` <span aria-label="${c.warnings.length} warnings">⚠ ${c.warnings.length}</span>` : ""}</button></li>`).join("")}</ul>` : ""}
     <div id="layers"></div>`;
   $("#proj").onchange = e => openProject(+e.target.value);
   for (const b of document.querySelectorAll("#nav [data-view]")) b.onclick = () => select(b.dataset.view);
@@ -122,11 +123,11 @@ function renderNav() {
 }
 function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
-  return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
+  return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { stopPlacing(); S.v = view; S.x = S.y = S.z = null; renderModes(); renderNav(); renderZoombar(); draw(); saveHash(); }
+function select(view) { const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:"); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -140,7 +141,7 @@ function decodeState(hash) {
 }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
-  if ((st.v === "board" && p.board.changed) || (st.v === '3d' && p.board.model3d && (p.board.model3d.base || p.board.model3d.head)) || p.sheets.some(s => `sheet:${s.path}` === st.v)) out.v = st.v;
+  if ((st.v === "board" && p.board.changed) || (st.v === '3d' && p.board.model3d && (p.board.model3d.base || p.board.model3d.head)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
@@ -187,6 +188,10 @@ function currentView(v = S.v) {   // null when the view has no render (unchanged
     if (!p.board.changed) return null;
     const on = new Set(layersOn());
     return { kind: "board", size: p.board.size, layers: p.board.layers.filter(l => on.has(l.name)) };
+  }
+  if (String(v).startsWith("lib:")) {
+    const c = p.libraries?.[+v.slice(4)];
+    return c && (c.svg.base || c.svg.head) ? { kind: "lib", size: c.size, layers: [{ name: "item", changed: true, svg: c.svg }] } : null;
   }
   const pg = p.sheets.find(s => `sheet:${s.path}` === v);
   return pg && pg.svg ? { kind: "sheet", size: pg.size, layers: [{ name: "sheet", changed: true, svg: pg.svg }] } : null;
@@ -432,7 +437,7 @@ function goTo(id) {
   const view = viewOf(r) ?? S.v;
   const box = rowBox(r, r.action === "removed" ? "base" : "head");
   const zoom = () => { if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
-  if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
+  if (view !== S.v) { const library = String(S.v).startsWith("lib:"); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(zoom);
 }
 // ---- Threads: anchors pin a discussion to a KiCad object (UUID, reference fallback) or a point, in mm. ----
@@ -516,7 +521,7 @@ function goToObject(i) {
   const o = proj().objects?.[i]; if (!o) return Promise.resolve();
   const view = objView(o); if (!currentView(view)) return Promise.resolve();
   const p = o.pos, box = o.box || (p && [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3]);
-  if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
+  if (view !== S.v) { const library = String(S.v).startsWith("lib:"); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(() => { if (box) zoomTo(box); saveHash(); });
 }
 function bindInventory() {
@@ -538,8 +543,8 @@ function waiverSnippet(v, check) {
 function renderChecks() {
   const p = proj(), state = S.checks;
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
-  const order = ["erc", "drc", "parity", "bom"];
-  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields" };
+  const order = ["erc", "drc", "parity", "bom"];  // release is listed only when it ran: older reports never had it
+  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields", interfaces: "Interfaces", release: "Release package" };
   const byName = new Map(p.checks.map(c => [c.name, c]));
   const names = [...order, ...p.checks.map(c => c.name).filter(n => !order.includes(n))];
   const configured = names.map(name => ({ name, check: byName.get(name), setting: D.settings?.checks?.[name] }));
@@ -586,7 +591,8 @@ function renderChecks() {
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
     <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
     ${all.some(v => v.waived) ? `<button class="check-chip" data-check-waived aria-pressed="${state.waived}">Waived ${all.filter(v => v.waived).length}</button>` : ""}
-  </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
+  </div>${ran.filter(c => c.coverage).map(c => { const cv = c.coverage, det = Object.entries(cv.detected);
+  return `<p class="check-coverage">${esc(c.title)}: ${det.length ? `detected ${esc(det.map(([k, n]) => `${k} ${n}`).join(", "))}` : "nothing detected"}${cv.protected[1] ? ` · ${cv.protected[0]} of ${cv.protected[1]} connector signal pins protected` : ""}</p>`; }).join("")}${ran.filter(c => c.package).map(c => `<details class="package"><summary>Package (${c.package.files.length} files) · SHA-256 ${esc((c.package.sha256 || "").slice(0, 12))}…</summary><ul>${c.package.files.map(f => `<li>${esc(f.path)} · ${(f.bytes / 1024).toFixed(1)} kB</li>`).join("")}</ul><p class="muted mono">${esc(c.package.sha256 || "")}</p></details>`).join("")}<div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
 const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"]);
@@ -665,6 +671,15 @@ function renderThreads() {
     <div class="cards">${placed.map(cardFor).join("") || '<p class="muted">No threads match.</p>'}</div>
     ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
 }
+function libInfoHtml(c) {
+  // ponytail: unchanged drawings have no render; link those references when unchanged drawings are retained.
+  return `<div class="lib-info"><p><b>${esc(c.lib)}:${esc(c.item)}</b> · ${esc(c.kind)} · ${esc(c.status)}${c.note ? ` · ${esc(c.note)}` : ""}</p>
+    ${c.warnings.map(w => `<p class="lib-warn">${esc(w)}</p>`).join("")}
+    ${c.pins_diff.length ? `<table class="field-changes"><caption>${c.kind === "symbol" ? "Pins" : "Pads"}</caption><thead><tr><th>#</th><th>Change</th><th>Base</th><th>Head</th></tr></thead><tbody>${c.pins_diff.map(d =>
+      `<tr><td>${esc(d.pin)}</td><td>${esc(d.change)}</td><td>${esc(d.before ?? "—")}</td><td>${esc(d.after ?? "—")}</td></tr>`).join("")}</tbody></table>` : '<p class="muted">No pin or pad changes.</p>'}
+    <p>Used by: ${c.used_by.length ? c.used_by.map(ref => { const i = proj().objects?.findIndex(o => o.kind === c.kind && o.lib === `${c.lib}:${c.item}` && o.side === "head" && o.ref.split(" unit ")[0] === ref); return i >= 0 && currentView(objView(proj().objects[i])) ? `<button data-lib-object="${i}">${esc(ref)}</button>` : esc(ref); }).join(", ") : '<span class="muted">nothing in this project</span>'}</p></div>`;
+}
+
 function renderPanel() {
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
@@ -678,6 +693,7 @@ function renderPanel() {
       ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}</button>` : ""}
       ${S.threads ? `<button role="tab" data-tab="threads" aria-selected="${S.t === "threads"}">Threads ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}</button>` : ""}</div>` +
     (S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
+    ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
@@ -703,6 +719,7 @@ function renderPanel() {
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
   const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = f.all ? inventoryHtml() : cardsHtml(); bindCards(); bindInventory(); };
   for (const b of document.querySelectorAll("#panel [data-inv]")) b.onclick = () => { f.all = b.dataset.inv === "1"; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-lib-object]")) b.onclick = () => goToObject(+b.dataset.libObject);
   bindInventory();
   bindCards();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
