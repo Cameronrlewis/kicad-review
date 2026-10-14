@@ -134,6 +134,8 @@ Waiver keys have limits. Several unconnected items on one net are keyed by occur
 
 The small Cloudflare Worker review site lets people sign in with GitHub and open reviews only in repositories they can already read. See [the site setup guide](site/README.md) to create the GitHub App, run it locally, and deploy it manually.
 
+Optional [read-only share links](site/README.md#share-links-optional) let writers share one expiring review with guests; they are off until the owner enables the required App permission and worker secrets.
+
 Pull-request reviews have a **History** page: commits, approvals and change requests, review threads, and logged check results, newest first. Checks, Reviews, Threads and Commits filters narrow the timeline. Thread resolution is shown at creation time because GitHub supplies no resolution time. Waiver history is deferred until the waivers feature lands.
 
 The check log is **off by default**. Alongside `KICAD_REVIEW_SITE`, set the calling repository's Actions variable `KICAD_REVIEW_HISTORY=true` to keep the newest 50 check-result rows in the existing bot comment. This adds a comments fetch on same-repository PR runs; forks do not fetch it. With the variable unset, comments and job summaries stay unchanged. History still shows commits, reviews and threads without the log.
