@@ -1,5 +1,6 @@
 import { escapeHtml, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, stages, stageForStep } from './pages.js';
 import { threadsRoute } from './threads.js';
+import { readinessRoute, rerunRoute } from './readiness.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -197,7 +198,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
     const metadataResponse = await gh(base, active.token);
-    if (metadataResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    if (metadataResponse.status !== 200) return errorPage(404, "Can't open this page", "This artifact may have been replaced by a re-run. Open the review from the pull request comment, or check that your GitHub account can see it.", [], active);
     const metadata = await metadataResponse.json();
     if (metadata.expired) {
       const match = String(metadata.name || '').match(/^kicad-review-([0-9a-f]{7})-([0-9a-f]{7})-(?:pass|fail)\.html$/);
@@ -207,17 +208,19 @@ async function artifactReport(request, env, owner, repo, id, active, raw) {
     }
     if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     if (!raw) {
-      let pull = null;
+      let pull = null, runStatus = null, runConclusion = null;
       const runId = metadata.workflow_run?.id;
       try {
         if (/^\d+$/.test(String(runId))) {
           const runResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`, active.token);
           const runData = runResponse.ok ? await runResponse.json() : null;
+          runStatus = runData?.status || null;
+          runConclusion = runData?.conclusion || null;
           if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
         }
       } catch { /* PR discovery must not prevent opening the report. */ }
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pull,
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pull, runStatus, runConclusion,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -566,6 +569,16 @@ export default {
         const [, owner, repo, id] = runRoute;
         if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
         return run(request, env, owner, repo, id, url);
+      }
+      const readyRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/readiness$/);
+      if (request.method === 'GET' && readyRoute) {
+        const result = await readinessRoute(request, env, { owner: readyRoute[1], repo: readyRoute[2], number: Number(readyRoute[3]) }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
+      }
+      const rerunMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/rerun$/);
+      if (request.method === 'POST' && rerunMatch) {
+        const result = await rerunRoute(request, env, { owner: rerunMatch[1], repo: rerunMatch[2], number: Number(rerunMatch[3]) }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
       }
       const threadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/threads(\/.*)?$/);
       if (threadRoute && ['GET', 'POST'].includes(request.method)) {
