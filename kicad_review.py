@@ -4,6 +4,12 @@
 Standard library only. Subcommands are called from the reusable workflow.
 """
 import argparse
+import datetime
+import http.client
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import base64
 import csv
 import datetime
@@ -780,6 +786,7 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "digikey": {"enabled": False, "site": "US", "currency": "USD", "max_lookups": 100},
     "pdf": {"enabled": False},
 
     "threads": {"enabled": False, "block_merge": False},
@@ -813,7 +820,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "digikey", "threads", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -838,6 +845,16 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    cfg = settings["digikey"]
+    if not isinstance(cfg["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: digikey.enabled must be true or false")
+    if cfg["enabled"] and not settings["parts"]["enabled"]:
+        sys.exit(f"{SETTINGS_FILE}: digikey.enabled requires parts.enabled")
+    for key, pattern in (("site", r"[A-Z]{2}"), ("currency", r"[A-Z]{3}")):
+        if not isinstance(cfg[key], str) or not re.fullmatch(pattern, cfg[key]):
+            sys.exit(f"{SETTINGS_FILE}: digikey.{key} must match {pattern}")
+    if type(cfg["max_lookups"]) is not int or not 1 <= cfg["max_lookups"] <= 900:
+        sys.exit(f"{SETTINGS_FILE}: digikey.max_lookups must be an integer from 1 to 900")
     if not isinstance(settings["pdf"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: pdf.enabled must be true or false")
 
@@ -1088,6 +1105,161 @@ def bom_violations(objs, fields):
                         "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
                         "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
     return out
+
+
+# ---- DigiKey lookup. Only MPNs leave the runner; results live only in this run's report. ----
+DIGIKEY = "https://api.digikey.com"
+MPN_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/+#,()-]{0,79}$")
+
+
+class DigiKeyError(Exception):
+    pass
+
+
+class DigiKeyStop(DigiKeyError):
+    """Rate limit or suspension: no further calls this run."""
+
+
+class DigiKeyAuth(DigiKeyError):
+    """A search token expired or was rejected (401)."""
+
+
+def digikey_placeholder(value):
+    return value.lower() in ("", "~", "tbd", "?", "x", "todo", "na", "n/a", "-")
+
+
+def mpn_for_lookup(mpn):
+    v = " ".join((mpn or "").split())
+    return v if not digikey_placeholder(v) and MPN_OK.fullmatch(v) else None
+
+
+def _digikey_open(req, urlopen):
+    try:
+        with urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                raise DigiKeyError("invalid response")
+            return data
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 403):
+            raise DigiKeyStop("rate limit reached" if e.code == 429 else "access refused (403; possibly a 10-minute suspension)")
+        if e.code == 401:
+            raise DigiKeyAuth("HTTP 401")
+        if e.code == 404:
+            return {"ExactMatches": [], "Products": [], "ProductsCount": 0}
+        raise DigiKeyError(f"HTTP {e.code}")
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        raise DigiKeyError(type(e).__name__)
+
+
+def digikey_token(client_id, secret, urlopen=urllib.request.urlopen):
+    body = urllib.parse.urlencode({"client_id": client_id, "client_secret": secret, "grant_type": "client_credentials"}).encode()
+    req = urllib.request.Request(f"{DIGIKEY}/v1/oauth2/token", data=body, method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    tok = _digikey_open(req, urlopen).get("access_token")
+    if not tok:
+        raise DigiKeyError("no access token")
+    return tok
+
+
+def digikey_search(token, client_id, mpn, locale, urlopen=urllib.request.urlopen):
+    req = urllib.request.Request(f"{DIGIKEY}/products/v4/search/keyword", method="POST",
+                                 data=json.dumps({"Keywords": mpn, "Limit": 10, "Offset": 0}).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}",
+                                          "X-DIGIKEY-Client-Id": client_id, "X-DIGIKEY-Locale-Site": locale["site"],
+                                          "X-DIGIKEY-Locale-Currency": locale["currency"], "X-DIGIKEY-Locale-Language": "en"})
+    return _digikey_open(req, urlopen)
+
+
+def digikey_product_url(value):
+    try:
+        url = urllib.parse.urlsplit(value or "")
+        host = r"www\.digikey\.(com|ca|co\.uk|de|fr|it|es|nl|be|at|ch|se|dk|fi|no|ie|pl|cz|com\.au|co\.nz|jp|cn|com\.mx|com\.br|in|sg|hk|tw|kr)"
+        if url.scheme == "https" and url.username is None and url.password is None and url.port is None and re.fullmatch(host, url.hostname or ""):
+            return value
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def digikey_pick(resp, mpn, manufacturer):
+    exact = [p for p in resp.get("ExactMatches") or [] if str(p.get("ManufacturerProductNumber") or "").upper() == mpn.upper()]
+    manufacturer = str(manufacturer or "").strip().lower()
+    if manufacturer and len(exact) > 1:
+        exact = [p for p in exact if str((p.get("Manufacturer") or {}).get("Name") or "").lower().startswith(manufacturer)] or exact
+    if not exact:
+        return {"status": "not_found", "mpn": mpn}
+    if len(exact) > 1:
+        return {"status": "ambiguous", "mpn": mpn, "matches": len(exact)}
+    p = exact[0]
+    var = (p.get("ProductVariations") or [{}])[0]
+    status = "discontinued" if p.get("Discontinued") or p.get("EndOfLife") else "out_of_stock" if not p.get("QuantityAvailable") else "ok"
+    return {"status": status, "mpn": mpn,
+            "quantity": p.get("QuantityAvailable"), "unit_price": p.get("UnitPrice"),
+            "breaks": [[b.get("BreakQuantity"), round(b["UnitPrice"], 12) if isinstance(b.get("UnitPrice"), (int, float)) else None] for b in var.get("StandardPricing") or []][:6],
+            "product_status": (p.get("ProductStatus") or {}).get("Status"),
+            "url": digikey_product_url(p.get("ProductUrl"))}
+
+
+def supplier_info(currency, fetched_at=None, error=None):
+    return {"name": "DigiKey", "fetched_at": fetched_at, "currency": currency, "calls": 0, "error": error, "skipped": None}
+
+
+def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, sleep=time.sleep,
+                   now=lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")):
+    cfg = settings["digikey"]
+    sup = supplier_info(cfg["currency"], now())
+    results, stop = {}, None
+    failures, consecutive, last_error, refreshed = 0, 0, None, False
+    locale = {"site": cfg["site"], "currency": cfg["currency"]}
+    try:
+        sup["calls"] += 1
+        token = digikey_token(creds[0], creds[1], urlopen)
+    except DigiKeyError as e:
+        stop = f"sign-in failed: {e}"
+    def call(mpn):
+        nonlocal token, refreshed
+        sup["calls"] += 1
+        try:
+            return digikey_search(token, creds[0], mpn, locale, urlopen)
+        except DigiKeyAuth as e:
+            if refreshed:
+                raise DigiKeyStop(str(e))
+        refreshed = True
+        sleep(0.6)
+        sup["calls"] += 1
+        try:
+            token = digikey_token(creds[0], creds[1], urlopen)
+        except DigiKeyError as e:
+            raise DigiKeyStop(f"sign-in failed: {e}")
+        sleep(0.6)
+        return call(mpn)
+
+    for i, k in enumerate(sorted(wanted)):
+        if stop or i >= cfg["max_lookups"]:
+            results[k] = {"status": "unavailable" if stop else "run_limit", "mpn": wanted[k]["mpn"]}
+            continue
+        if i:
+            sleep(0.6)  # stays under DigiKey's 120/min burst limit
+        try:
+            response = call(wanted[k]["mpn"])
+            try:
+                results[k] = digikey_pick(response, wanted[k]["mpn"], wanted[k]["manufacturer"])
+            except (AttributeError, TypeError, KeyError, IndexError, ValueError):
+                raise DigiKeyError("invalid response")
+            consecutive = 0
+        except DigiKeyStop as e:
+            stop = str(e)
+            results[k] = {"status": "unavailable", "mpn": wanted[k]["mpn"]}
+        except DigiKeyError as e:
+            failures += 1
+            consecutive += 1
+            last_error = str(e)
+            results[k] = {"status": "unavailable", "mpn": wanted[k]["mpn"]}
+            if consecutive >= 3:
+                stop = f"3 consecutive lookups failed (last: {last_error})"
+    sup["error"] = stop or (f"{failures} lookups failed (last: {last_error})" if failures else None)
+    return {"supplier": sup, "results": results}
 
 
 LCSC_FIELDS = ("lcsc", "lcsc part", "lcsc part #", "lcsc part number", "jlcpcb part #")
@@ -1653,7 +1825,7 @@ def build_project(p, blobs, settings, waivers=None):
         mark_new_problems(lines["base"], lines["head"])
         has_base = any(o["kind"] == "symbol" for o in objs["base"].values())
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
-                 "supplier": None,  # JLCPCB lookup not built yet: no approved API access
+                 "supplier": None,  # Filled only when DigiKey lookup is enabled.
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
     if settings["3d"]["enabled"]:
@@ -1727,6 +1899,80 @@ def inline_page(data_js):
     return page
 
 
+def cmd_lookup(args):
+    settings = load_settings()
+    if not settings["digikey"]["enabled"]:
+        return
+    with open("review/detect.json", encoding="utf-8") as fh:
+        det = json.load(fh)
+    wanted, manufacturers = {}, {}
+    for project in det["projects"]:
+        objects = project_objects(posixpath.join("head", project["dir"]), project["name"])
+        for line in parts_lines(objects):
+            raw = " ".join((line["mpn"] or "").split())
+            mpn = mpn_for_lookup(raw)
+            if not mpn:
+                continue
+            key = mpn.upper()
+            wanted.setdefault(key, {"mpn": key, "manufacturer": None})
+            hints = manufacturers.setdefault(key, set())
+            for obj in objects.values():
+                if obj["kind"] == "symbol" and obj["ref"] in line["refs"]:
+                    name = field(obj["props"], ("manufacturer",))
+                    if name and not digikey_placeholder(name.lower()):
+                        hints.add(name.strip().lower())
+    for key, hints in manufacturers.items():
+        wanted[key]["manufacturer"] = next(iter(hints)) if len(hints) == 1 else None
+    cfg = settings["digikey"]
+    supplier = supplier_info(cfg["currency"])
+    creds = (os.environ.get("DIGIKEY_CLIENT_ID", ""), os.environ.get("DIGIKEY_CLIENT_SECRET", ""))
+    output = {"supplier": supplier, "results": {}}
+    if not all(creds):
+        supplier["skipped"] = "no credentials (forked pull request or secrets not set)"
+    elif wanted:
+        try:
+            output = digikey_lookup(wanted, creds, settings)
+        except Exception as error:
+            # No response bodies or exception messages: they may contain credentials.
+            supplier["error"] = f"lookup unavailable ({type(error).__name__})"
+    else:
+        supplier["skipped"] = "no valid MPNs"
+    with open("review/supplier.json", "w", encoding="utf-8") as fh:
+        json.dump(output, fh)
+    print(f"DigiKey lookup: {output['supplier']['calls']} calls")
+
+
+def merge_supplier(projects, lookup):
+    for project in projects:
+        parts = project.get("parts")
+        if parts is None:
+            continue
+        counts = {"no_mpn": 0, "invalid_mpn": 0, "run_limit": 0}
+        looked_up = set()
+        for line in parts["lines"]:
+            raw = line["mpn"] or ""
+            mpn = mpn_for_lookup(raw)
+            if not mpn:
+                reason = "no_mpn" if digikey_placeholder(" ".join(raw.split())) else "invalid_mpn"
+                counts[reason] += 1
+                line["supplier"] = {"status": reason}
+                continue
+            result = lookup["results"].get(mpn.upper())
+            if result:
+                line["supplier"] = result
+                if result["status"] == "run_limit":
+                    counts["run_limit"] += 1
+                elif result["status"] != "unavailable":
+                    looked_up.add(mpn.upper())
+            elif not lookup["supplier"].get("skipped"):
+                line["supplier"] = {"status": "unavailable", "mpn": mpn}
+        for change in parts.get("changes", []):
+            if change["action"] == "removed" and change.get("before"):
+                line = change["before"]
+                line["supplier"] = {"status": "no_mpn" if digikey_placeholder(" ".join((line.get("mpn") or "").split())) else "invalid_mpn"}
+        parts["supplier"] = {**lookup["supplier"], "looked_up": len(looked_up), "not_looked_up": counts}
+
+
 def cmd_report(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
@@ -1735,7 +1981,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if not ((k in ("3d", "parts", "threads", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if not ((k in ("3d", "parts", "digikey", "threads", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
@@ -1753,6 +1999,15 @@ def cmd_report(args):
     }
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
     data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
+    if settings.get("digikey", {}).get("enabled"):
+        try:
+            with open("review/supplier.json", encoding="utf-8") as fh:
+                lookup = json.load(fh)
+            if not isinstance(lookup.get("supplier"), dict) or not isinstance(lookup.get("results"), dict):
+                raise ValueError("invalid supplier file")
+        except (OSError, ValueError, AttributeError):
+            lookup = {"supplier": supplier_info(settings["digikey"]["currency"], error="lookup unavailable (lookup step did not finish)"), "results": {}}
+        merge_supplier(data["projects"], lookup)
     assign_ids(data["projects"])
     if waivers is not None:
         used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
@@ -2023,7 +2278,7 @@ def cmd_summary(args):
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
                 "placeholder": "placeholder value", "mpn_footprint_conflict": "one MPN on several footprints",
-                "out_of_stock": "out of stock", "not_found": "not found at JLCPCB", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
+                "out_of_stock": "out of stock", "not_found": "not found at DigiKey", "ambiguous": "several DigiKey matches", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
 BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
@@ -2040,10 +2295,31 @@ def parts_markdown(data):
                           for pr in r["after"]["problems"] if pr in BLOCKING and pr not in ((r["before"] or {}).get("problems") or [])]
         s = parts["supplier"]
         head = f"#### Parts: {md(p['name'])}" + (f" — {plural(len(introduced), 'problem')} introduced" if introduced else "")
-        when = f"JLCPCB data as of {md(s['fetched_at'])}." if s and s.get("fetched_at") else \
-               f"Supplier lookup not run ({md((s or {}).get('error') or 'not available')})."
+        literal = lambda value: md(" ".join(str(value).split()))
+        if s and s.get("skipped"):
+            reason = s["skipped"]
+            safe_reason = reason if reason in ("no credentials (forked pull request or secrets not set)", "no valid MPNs") else literal(reason)
+            when = f"DigiKey lookup skipped: {safe_reason}."
+        elif s and s.get("fetched_at"):
+            stamp = str(s["fetched_at"]).replace("T", " ")[:16]
+            when = f"DigiKey data as of {literal(stamp)} UTC (stock and price from DigiKey)."
+        else:
+            when = f"Supplier lookup not run ({literal((s or {}).get('error') or 'not available')})."
         bad = sum(1 for l in parts["lines"] if BLOCKING & set(l["problems"]))
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
+        if s:
+            if not s.get("skipped"):
+                statuses = [(l.get("supplier") or {}).get("status") for l in parts["lines"]]
+                summary = [(status, {"ok": "in stock", "unavailable": "unavailable"}.get(status, PROBLEM_TEXT.get(status)))
+                           for status in ("ok", "out_of_stock", "not_found", "ambiguous", "discontinued", "unavailable")]
+                counts = [f"{statuses.count(status)} {label}" for status, label in summary if status in statuses]
+                out.append(f"{s.get('looked_up', 0)} looked up" + (": " + ", ".join(counts) if counts else "") + ".")
+            if s.get("error"):
+                out.append(f"DigiKey lookup unavailable: {literal(s['error'])}.")
+            for key, reason in (("no_mpn", "no MPN"), ("invalid_mpn", "invalid MPN"), ("run_limit", "run limit")):
+                count = (s.get("not_looked_up") or {}).get(key, 0)
+                if count:
+                    out.append(f"{plural(count, 'part')} not looked up: {reason}.")
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
         cov = parts.get("coverage")
         if cov:
@@ -2306,6 +2582,8 @@ def main():
     p.add_argument("--artifact-url", default="")
     p.add_argument("--artifact-id", default="")
     p.set_defaults(func=cmd_summary)
+    p = sub.add_parser("lookup", help="DigiKey stock and price for MPNs (needs DIGIKEY_CLIENT_ID/SECRET; off by default)")
+    p.set_defaults(func=cmd_lookup)
     p = sub.add_parser("report", help="self-contained HTML comparison report")
     p.set_defaults(func=cmd_report)
     args = ap.parse_args()

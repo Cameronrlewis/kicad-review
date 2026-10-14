@@ -1017,7 +1017,15 @@ try:
                 settings["3d"]["enabled"] = models_enabled
                 with patch("kicad_review.load_settings", return_value=settings):
                     kicad_review.cmd_report(None)
+                opted_out = json.loads(pathlib.Path("review/data.json").read_text())
+                opted_out_embedded = json.loads(pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
+                legacy_settings = copy.deepcopy(settings)
+                del legacy_settings["digikey"]
+                with patch("kicad_review.load_settings", return_value=legacy_settings):
+                    kicad_review.cmd_report(None)
                 data = json.loads(pathlib.Path("review/data.json").read_text())
+                assert data == opted_out, "DigiKey opt-out must preserve pre-feature report data and settings"
+                assert "digikey" not in data["settings"]
                 p = data["projects"][0]
                 assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
                 assert ("3d" in data["settings"]) == models_enabled
@@ -1028,9 +1036,13 @@ try:
                     assert {k: p["parts"][k] for k in ("lines", "changes", "supplier")} == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
                     assert set(p["parts"]) == {"lines", "changes", "supplier", "coverage", "field_changes", "dnp_mismatch"}
                     assert p["parts"]["changes"][0]["action"] == "swapped"
+                    assert all("supplier" not in line for line in p["parts"]["lines"])
                 html = pathlib.Path("review/kicad-review.html").read_text()
+                for old_label in ("not found at JLCPCB", "JLCPCB data as of", '"LCSC", "JLCPCB", "PCBWay"'):
+                    assert old_label not in html, old_label
                 payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
                 embedded = json.loads(payload)
+                assert embedded == opted_out_embedded
                 del embedded["blobs"]
                 assert embedded == data
         settings["parts"]["enabled"] = True
@@ -1054,7 +1066,7 @@ for action, before, after in (("value", line, line), ("removed", line, None)):
     p["parts"]["changes"] = [{"action": action, "refs": ["R1"], "before": before, "after": after}]
     assert "introduced" not in parts_markdown({"projects": [p]})
 p["parts"]["supplier"] = {"fetched_at": "2026-10-08T14:02:00Z", "error": None}
-assert "JLCPCB data as of 2026-10-08T14:02:00Z." in parts_markdown({"projects": [p]})
+assert "DigiKey data as of 2026-10-08 14:02 UTC" in parts_markdown({"projects": [p]})
 assert "#### Parts: X" in comment_markdown({**d2, "projects": [{**p, "dir": "", "status": "modified", "changes": [], "checks": []}]}, [], "")
 conflict = {"refs": ["R2"], "value": "1k", "lcsc": "C1", "problems": ["lcsc_conflict"]}
 m = parts_markdown({"projects": [{"name": "C", "parts": {"lines": [conflict], "supplier": None,
@@ -1075,6 +1087,330 @@ assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
 
+# DigiKey client: only the MPN is sent; each MPN once; 429 stops the run; ambiguous MPNs show no price.
+import io as _io, urllib.error
+from kicad_review import mpn_for_lookup, digikey_lookup, digikey_pick
+assert mpn_for_lookup(" mp3302dj-lf-z ") == "mp3302dj-lf-z" and mpn_for_lookup("TBD") is None and mpn_for_lookup("<script>") is None
+calls = []
+def resp(obj, status=200, headers=None):
+    r = _io.BytesIO(json.dumps(obj).encode()); r.status = status; r.headers = headers or {}; return r
+prod = lambda mpn, mfr, qty, price: {"ManufacturerProductNumber": mpn, "Manufacturer": {"Name": mfr}, "QuantityAvailable": qty, "UnitPrice": price,
+    "ProductStatus": {"Status": "Active"}, "Discontinued": False, "EndOfLife": False, "ProductUrl": "https://www.digikey.com/x",
+    "ProductVariations": [{"DigiKeyProductNumber": "DK-1", "StandardPricing": [{"BreakQuantity": 1, "UnitPrice": price}, {"BreakQuantity": 10, "UnitPrice": price * 0.8}]}]}
+def fake(req, timeout=None):
+    body = req.data.decode() if req.data else ""
+    calls.append((req.full_url, body))
+    if req.full_url.endswith("/oauth2/token"):
+        return resp({"access_token": "T", "expires_in": 599})
+    kw = json.loads(body)["Keywords"]
+    if kw == "LIMIT":
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {"Retry-After": "60"}, _io.BytesIO(b"{}"))
+    if kw == "CR2032":
+        return resp({"ExactMatches": [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)], "Products": [], "ProductsCount": 2})
+    if kw == "NOPE":
+        return resp({"ExactMatches": [], "Products": [], "ProductsCount": 0})
+    return resp({"ExactMatches": [prod(kw, "MPS", 1234, 1.5)], "Products": [], "ProductsCount": 1, "SearchLocaleUsed": {"Currency": "USD"}})
+s = json.loads(json.dumps(DEFAULT_SETTINGS)); s["parts"]["enabled"] = True; s["digikey"]["enabled"] = True
+wanted = {"MP3302DJ-LF-Z": {"mpn": "MP3302DJ-LF-Z", "manufacturer": None}, "CR2032": {"mpn": "CR2032", "manufacturer": None},
+          "NOPE": {"mpn": "NOPE", "manufacturer": None}}
+out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fake, sleep=lambda t: None, now=lambda: "2026-10-13T12:00:00Z")
+assert sum(u.endswith("/oauth2/token") for u, _ in calls) == 1 and len(calls) == 4, calls
+assert all(json.loads(b) == {"Keywords": json.loads(b)["Keywords"], "Limit": 10, "Offset": 0} for u, b in calls[1:]), calls
+r = out["results"]
+assert r["MP3302DJ-LF-Z"]["status"] == "ok" and r["MP3302DJ-LF-Z"]["quantity"] == 1234 and r["MP3302DJ-LF-Z"]["breaks"][1] == [10, 1.2]
+assert r["CR2032"]["status"] == "ambiguous" and r["CR2032"].get("unit_price") is None and r["CR2032"]["matches"] == 2
+assert r["NOPE"]["status"] == "not_found"
+assert out["supplier"]["calls"] == 4 and out["supplier"]["fetched_at"] == "2026-10-13T12:00:00Z" and out["supplier"]["error"] is None
+print("ok each MPN fetched once")
+print("ok ambiguous MPN")
+assert digikey_pick({"ExactMatches": [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)]}, "CR2032", "renata")["quantity"] == 7
+calls.clear()
+wanted = {"A": {"mpn": "A", "manufacturer": None}, "LIMIT": {"mpn": "LIMIT", "manufacturer": None}, "Z": {"mpn": "Z", "manufacturer": None}}
+out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fake, sleep=lambda t: None, now=lambda: "2026-10-13T12:00:00Z")
+assert out["results"]["A"]["status"] == "ok" and out["results"]["LIMIT"]["status"] == "unavailable" and out["results"]["Z"]["status"] == "unavailable"
+assert len(calls) == 3 and "rate limit" in out["supplier"]["error"], (calls, out["supplier"])
+print("ok rate limit stops the run")
+
+# DigiKey settings validate even when disabled; booleans are not lookup counts.
+for value in ("", "~", "TBD", "?", "X", "todo", "NA", "n/a", "-"):
+    assert mpn_for_lookup(value) is None
+assert mpn_for_lookup(" A   B ") == "A B"
+for text in ('[digikey]\nenabled = "yes"', '[digikey]\nenabled = true', '[digikey]\nsite = "us"',
+             '[digikey]\ncurrency = "US"', '[digikey]\nmax_lookups = true', '[digikey]\nmax_lookups = 0',
+             '[digikey]\nmax_lookups = 901', 'digikey = false'):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        try:
+            load_settings()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(text)
+with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(b'[parts]\nenabled = true\n[digikey]\nenabled = true\nsite = "CA"\ncurrency = "CAD"\nmax_lookups = 900'), create=True):
+    assert load_settings()["digikey"] == {"enabled": True, "site": "CA", "currency": "CAD", "max_lookups": 900}
+
+# Error paths use only injected transports; a failed run never leaks response bodies.
+for code in (403,):
+    calls.clear()
+    def fail(req, timeout=None):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/oauth2/token"):
+            return resp({"access_token": "T"})
+        raise urllib.error.HTTPError(req.full_url, code, "secret response", {}, _io.BytesIO(b"secret"))
+    out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fail, sleep=lambda t: None)
+    assert len(calls) == 2 and all(v["status"] == "unavailable" for v in out["results"].values())
+    assert out["supplier"]["error"] and "secret" not in json.dumps(out)
+calls.clear()
+s["digikey"]["max_lookups"] = 1
+out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=fake, sleep=lambda t: None)
+assert len(calls) == 2 and out["results"]["Z"]["status"] == "run_limit"
+print("ok DigiKey validation, failure handling, and run limit")
+
+from kicad_review import digikey_search, DigiKeyError
+for data in ({}, [], "invalid"):
+    out = digikey_lookup(wanted, ("id", "secret"), s, urlopen=lambda req, timeout=None: resp(data), sleep=lambda t: None)
+    assert out["supplier"]["calls"] == 1 and out["supplier"]["error"].startswith("sign-in failed:")
+def missing(req, timeout=None):
+    raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, _io.BytesIO(b"{}"))
+assert digikey_pick(digikey_search("T", "id", "NOPE", {"site": "US", "currency": "USD"}, urlopen=missing), "NOPE", None)["status"] == "not_found"
+assert digikey_pick({"ExactMatches": [prod("A", "MPS", 0, 1.5)]}, "A", None)["status"] == "out_of_stock"
+p = prod("A", "MPS", 5, 1.5); p["EndOfLife"] = True
+assert digikey_pick({"ExactMatches": [p]}, "A", None)["status"] == "discontinued"
+s["digikey"]["max_lookups"] = 100
+pauses = []
+digikey_lookup({"A": {"mpn": "A", "manufacturer": None}, "B": {"mpn": "B", "manufacturer": None}}, ("id", "secret"), s, urlopen=fake, sleep=pauses.append)
+assert pauses == [0.6]
+print("ok DigiKey token errors, 404, statuses, and pacing")
+
+# Task 2 review regressions. Each transport is local; no real HTTP requests.
+import unittest
+import inspect
+import http.client
+
+class DigiKeyReviewTests(unittest.TestCase):
+    def run_lookup(self, events):
+        calls, pauses = [], []
+        queue = iter(events)
+        def transport(req, timeout=None):
+            calls.append(req.full_url)
+            self.assertEqual(timeout, 15)
+            if req.full_url.endswith("/oauth2/token"):
+                return resp({"access_token": "T"})
+            event = next(queue)
+            if isinstance(event, int):
+                raise urllib.error.HTTPError(req.full_url, event, "secret", {}, _io.BytesIO(b"secret"))
+            if isinstance(event, Exception):
+                raise event
+            mpn = json.loads(req.data)["Keywords"]
+            return resp(event if event is not None else {"ExactMatches": [prod(mpn, "MPS", 10, 1.5)]})
+        wanted = {key: {"mpn": key, "manufacturer": None} for key in "ABCDE"}
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings["parts"]["enabled"] = settings["digikey"]["enabled"] = True
+        return digikey_lookup(wanted, ("id", "secret"), settings, urlopen=transport, sleep=pauses.append), calls, pauses
+
+    def test_1_product_urls(self):
+        for url in ("https://www.digikey.evil.com/x", "https://www.digikey.com@evil.com/x",
+                    "https://www.digikey.com:443/x", "https://user@www.digikey.com/x", "http://www.digikey.com/x"):
+            p = prod("A", "MPS", 10, 1.5); p["ProductUrl"] = url
+            self.assertIsNone(digikey_pick({"ExactMatches": [p]}, "A", None)["url"], url)
+        p["ProductUrl"] = "https://www.digikey.ca/en/products/x"
+        self.assertEqual(digikey_pick({"ExactMatches": [p]}, "A", None)["url"], p["ProductUrl"])
+
+    def test_2_malformed_responses(self):
+        out, calls, _ = self.run_lookup([http.client.IncompleteRead(b"secret"), None, None, None, None])
+        self.assertEqual(out["results"]["A"]["status"], "unavailable")
+        self.assertEqual(out["results"]["B"]["status"], "ok")
+        p = prod("CR2032", "MPS", 10, 1.5); p["Manufacturer"]["Name"] = None
+        other = prod("CR2032", "Renata", 20, 2)
+        self.assertEqual(digikey_pick({"ExactMatches": [p, other]}, "CR2032", "Renata")["quantity"], 20)
+        p["ManufacturerProductNumber"] = 123
+        self.assertEqual(digikey_pick({"ExactMatches": [p]}, "123", None)["status"], "ok")
+        out, _, _ = self.run_lookup([{"ExactMatches": [None]}, None, None, None, None])
+        self.assertEqual(out["results"]["A"], {"status": "unavailable", "mpn": "A"})
+        self.assertEqual(out["supplier"]["error"], "1 lookups failed (last: invalid response)")
+
+    def test_3_transient_and_consecutive_errors(self):
+        out, calls, _ = self.run_lookup([None, 500, None, None, None])
+        self.assertEqual(out["results"]["C"]["status"], "ok")
+        self.assertEqual(out["supplier"]["error"], "1 lookups failed (last: HTTP 500)")
+        self.assertEqual(len(calls), 6)
+        out, calls, _ = self.run_lookup([500, 500, 500])
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(p["status"] == "unavailable" for p in out["results"].values()))
+        out, calls, _ = self.run_lookup([500, None, 500, None, 500])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(out["supplier"]["error"], "3 lookups failed (last: HTTP 500)")
+
+    def test_4_token_refresh(self):
+        out, calls, pauses = self.run_lookup([401, None, None, None, None, None])
+        self.assertEqual(out["results"]["A"]["status"], "ok")
+        self.assertEqual(sum(u.endswith("/oauth2/token") for u in calls), 2)
+        self.assertEqual(out["supplier"]["calls"], 8)
+        self.assertNotIn("looked_up", out["supplier"])
+        self.assertIsNone(out["supplier"]["error"])
+        self.assertTrue(all(t >= 0.6 for t in pauses))
+        out, calls, _ = self.run_lookup([401, 401])
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(out["supplier"]["error"], "HTTP 401")
+        out, calls, _ = self.run_lookup([401, None, 401])
+        self.assertEqual(len(calls), 5)
+        self.assertTrue(all("error" not in p for p in out["results"].values()))
+
+    def test_5_no_line_errors(self):
+        out, _, _ = self.run_lookup([500, None, None, None, None])
+        self.assertEqual(out["results"]["A"], {"status": "unavailable", "mpn": "A"})
+        self.assertNotIn("secret", json.dumps(out))
+
+    def test_6_no_redundant_urlerror(self):
+        self.assertNotIn("urllib.error.URLError", inspect.getsource(kicad_review._digikey_open))
+
+    def test_7_manufacturer_whitespace(self):
+        products = [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)]
+        self.assertEqual(digikey_pick({"ExactMatches": products}, "CR2032", "  RENATA  ")["quantity"], 7)
+
+    def test_8_unmatched_manufacturer(self):
+        products = [prod("CR2032", "Panasonic", 5, 0.3), prod("CR2032", "Renata", 7, 0.4)]
+        result = digikey_pick({"ExactMatches": products}, "CR2032", "Unknown")
+        self.assertEqual(result, {"status": "ambiguous", "mpn": "CR2032", "matches": 2})
+        self.assertNotIn("unit_price", result)
+
+review_result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DigiKeyReviewTests))
+assert review_result.wasSuccessful(), "DigiKey review regressions failed"
+
+class DigiKeyIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.here = os.getcwd()
+        self.tmp = tempfile.TemporaryDirectory()
+        os.chdir(self.tmp.name)
+        write(self.tmp.name, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [{"dir": "p", "name": "P", "status": "modified"}]})})
+        self.settings = copy.deepcopy(DEFAULT_SETTINGS)
+        self.settings["parts"]["enabled"] = self.settings["digikey"]["enabled"] = True
+        self.objects = {"1": sym("U1", "reg", "C1"), "2": sym("R1", "10k", "C2"), "3": sym("R2", "20k", "C3")}
+        self.objects["1"]["props"].update(MPN=" mp3302dj-lf-z ", Manufacturer=" MPS ")
+        self.objects["3"]["props"]["MPN"] = "<invalid>"
+
+    def tearDown(self):
+        os.chdir(self.here)
+        self.tmp.cleanup()
+
+    def lookup(self, creds=("", "")):
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch.dict(os.environ, {"DIGIKEY_CLIENT_ID": creds[0], "DIGIKEY_CLIENT_SECRET": creds[1]}), patch("kicad_review.digikey_lookup") as client:
+            client.return_value = {"supplier": {"name": "DigiKey", "fetched_at": "2026-10-13T12:00:00Z", "currency": "USD", "calls": 2, "error": None, "skipped": None}, "results": {"MP3302DJ-LF-Z": {"status": "ok", "mpn": "MP3302DJ-LF-Z", "quantity": 1234, "unit_price": 1.5}}}
+            kicad_review.cmd_lookup(None)
+            return client
+
+    def test_no_credentials_and_off(self):
+        client = self.lookup()
+        self.assertFalse(client.called)
+        data = json.loads(pathlib.Path("review/supplier.json").read_text())
+        self.assertEqual(data["supplier"]["calls"], 0)
+        self.assertEqual(data["supplier"]["skipped"], "no credentials (forked pull request or secrets not set)")
+        self.assertEqual(data["results"], {})
+        self.assertNotIn("projects", data)
+        self.assertNotIn("looked_up", data["supplier"])
+        pathlib.Path("review/supplier.json").unlink()
+        self.settings["digikey"]["enabled"] = False
+        self.assertFalse(self.lookup(("id", "secret")).called)
+        self.assertFalse(pathlib.Path("review/supplier.json").exists())
+
+    def test_deduplication_and_conflicting_manufacturers(self):
+        self.objects["3"]["props"].update(MPN="MP3302DJ-LF-Z", Manufacturer="Renata")
+        client = self.lookup(("id", "secret"))
+        self.assertEqual(client.call_args.args[0], {"MP3302DJ-LF-Z": {"mpn": "MP3302DJ-LF-Z", "manufacturer": None}})
+        self.assertNotIn("secret", pathlib.Path("review/supplier.json").read_text())
+
+    def test_merge_and_opt_out_identity(self):
+        self.lookup(("id", "secret"))
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+            kicad_review.cmd_report(None)
+            data = json.loads(pathlib.Path("review/data.json").read_text())
+            parts = data["projects"][0]["parts"]
+            self.assertEqual(next(line for line in parts["lines"] if "U1" in line["refs"])["supplier"]["status"], "ok")
+            self.assertEqual(parts["supplier"]["not_looked_up"], {"no_mpn": 1, "invalid_mpn": 1, "run_limit": 0})
+            self.settings["digikey"]["enabled"] = False
+            kicad_review.cmd_report(None)
+            before = {name: pathlib.Path(f"review/{name}").read_bytes() for name in ("data.json", "kicad-review.html")}
+            pathlib.Path("review/supplier.json").unlink()
+            kicad_review.cmd_report(None)
+            self.assertTrue(all(pathlib.Path(f"review/{name}").read_bytes() == content for name, content in before.items()))
+            self.assertIsNone(json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]["supplier"])
+
+    def test_missing_lookup_and_run_limit(self):
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+            kicad_review.cmd_report(None)
+            parts = json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]
+            self.assertIn("did not finish", parts["supplier"]["error"])
+            self.assertEqual(next(l for l in parts["lines"] if "U1" in l["refs"])["supplier"]["status"], "unavailable")
+            pathlib.Path("review/supplier.json").write_text(json.dumps({"supplier": {"name": "DigiKey", "error": None}, "results": {"MP3302DJ-LF-Z": {"status": "run_limit", "mpn": "MP3302DJ-LF-Z"}}}))
+            kicad_review.cmd_report(None)
+            self.assertEqual(json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]["supplier"]["not_looked_up"]["run_limit"], 1)
+
+    def test_whitespace_placeholder_counts(self):
+        self.objects["3"]["props"]["MPN"] = " TBD "
+        self.lookup()
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+            kicad_review.cmd_report(None)
+        parts = json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]
+        self.assertEqual(parts["supplier"]["not_looked_up"], {"no_mpn": 2, "invalid_mpn": 0, "run_limit": 0})
+        raw_parts = [{"parts": {"lines": [{"mpn": " TBD "}]}}]
+        kicad_review.merge_supplier(raw_parts, {"supplier": {}, "results": {}})
+        self.assertEqual(raw_parts[0]["parts"]["supplier"]["not_looked_up"], {"no_mpn": 1, "invalid_mpn": 0, "run_limit": 0})
+
+    def test_workflow_secrets_step_scope(self):
+        workflow = pathlib.Path(self.here, ".github/workflows/review.yml").read_text()
+        self.assertIn("DIGIKEY_CLIENT_ID:\n        required: false", workflow)
+        self.assertIn("DIGIKEY_CLIENT_SECRET:\n        required: false", workflow)
+        step = workflow.split("      - name: Look up parts at DigiKey\n")[1].split("      - name:")[0]
+        self.assertIn("continue-on-error: true", step)
+        self.assertIn("timeout-minutes: 5", step)
+        self.assertIn("if: steps.detect.outputs.changed == 'true'", step)
+        self.assertIn("run: python3 tools/kicad_review.py lookup", step)
+        self.assertNotIn("${{", step.split("run:")[1])
+        self.assertEqual(workflow.count("${{ secrets.DIGIKEY_CLIENT_ID }}"), 1)
+        self.assertEqual(workflow.count("${{ secrets.DIGIKEY_CLIENT_SECRET }}"), 1)
+
+integration_result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DigiKeyIntegrationTests))
+assert integration_result.wasSuccessful(), "DigiKey integration regressions failed"
+
+
+supplier_lines = [{"refs": ["U1"], "problems": [], "supplier": {"status": "ok", "quantity": 1234, "unit_price": 1.5}},
+                  {"refs": ["U2"], "problems": [], "supplier": {"status": "out_of_stock", "quantity": 0, "unit_price": 7.25}},
+                  {"refs": ["U3"], "problems": [], "supplier": {"status": "not_found"}}]
+supplier_parts = {"lines": supplier_lines, "changes": [], "supplier": {"name": "DigiKey", "fetched_at": "2026-10-13T12:00:00Z", "looked_up": 2, "not_looked_up": {"no_mpn": 54, "invalid_mpn": 1, "run_limit": 2}, "error": None, "skipped": None}}
+supplier_data = {"projects": [{"name": "P", "parts": supplier_parts}]}
+text = parts_markdown(supplier_data)
+assert "DigiKey data as of 2026-10-13 12:00 UTC (stock and price from DigiKey)." in text
+assert "2 looked up: 1 in stock, 1 out of stock, 1 not found at DigiKey." in text
+assert "54 parts not looked up: no MPN." in text
+assert "1 part not looked up: invalid MPN." in text and "2 parts not looked up: run limit." in text
+assert "1234" not in text and "1.5" not in text and "7.25" not in text and "$" not in text
+supplier_parts["supplier"]["skipped"] = "no credentials (forked pull request or secrets not set)"
+assert "DigiKey lookup skipped: no credentials (forked pull request or secrets not set)." in parts_markdown(supplier_data)
+supplier_parts["supplier"]["skipped"] = None
+supplier_parts["supplier"]["error"] = "HTTP 500\n<script>"
+assert "DigiKey lookup unavailable: HTTP 500 &lt;script&gt;." in parts_markdown(supplier_data)
+print("ok DigiKey comment counts, skipped lookup, and not looked up counts")
+
+assert '"LCSC", "DigiKey", "PCBWay"' in inline_page('window.REVIEW_DATA = {"version":1};')
+assert 'https://www.digikey.evil.com/x' not in text
+# No lookup leaves comment and job-summary content unchanged.
+assert parts_markdown({"projects": [{"name": "P", "parts": {"lines": [], "changes": [], "supplier": None}}]}) == "#### Parts: P\n\nSupplier lookup not run (not available). 0 lines, 0 with a problem.\n"
+print("ok DigiKey disabled comment and enabled asset selection")
+
+project_counts = [{"parts": {"lines": [{"mpn": "A"}, {"mpn": "a"}, {"mpn": "B"}]}}, {"parts": {"lines": [{"mpn": "C"}]}}]
+kicad_review.merge_supplier(project_counts, {"supplier": {"looked_up": 3}, "results": {"A": {"status": "ok"}, "B": {"status": "unavailable"}, "C": {"status": "not_found"}}})
+assert [p["parts"]["supplier"]["looked_up"] for p in project_counts] == [1, 1], "Supplier lookup count must belong to the project"
+
+# Setup docs cover opt-in, credentials, terms and the conservative manufacturer rule.
+readme = pathlib.Path(kicad_review.__file__).with_name("README.md").read_text()
+for wording in ("### DigiKey stock and price (optional)", "DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "secrets: inherit", "MPNs only",
+                "120 per minute", "1000 per day", "case-insensitive prefix", "Keep it off in public repositories", "only in the run's report",
+                "digikey.enabled", "digikey.site", "digikey.currency", "digikey.max_lookups"):
+    assert wording in readme, wording
+assert "JLCPCB Components API lookup" not in readme
+example = pathlib.Path(kicad_review.__file__).parent.joinpath("examples/kicad-review.toml").read_text()
+for wording in ('# [digikey]', '# enabled = false', '# site = "US"', '# currency = "USD"', '# max_lookups = 100'):
+    assert wording in example, wording
+print("ok DigiKey setup, limits, terms and manufacturer docs")
 # PDF: a static print page.
 from kicad_review import print_html
 pdata = {**d2, "repo": "o/r", "base": "a" * 40, "head": "b" * 40, "projects": [{"name": "A&B", "dir": "", "status": "modified", "checks": [
