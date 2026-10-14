@@ -728,6 +728,15 @@ export const CHECKS = [
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
+  ["Interfaces check shows coverage", "p=1&t=checks", `
+    proj().checks.push({ name: "interfaces", title: "Interfaces", level: "informational", status: "pass", errors: 0, warnings: 0, new_errors: 0, new_warnings: 0, fixed: 0, violations: [],
+      coverage: { detected: { "I2C nets": 2 }, protected: [3, 5] } });
+    renderPanel();
+    const t = document.querySelector("#panel .check-coverage")?.textContent || "";
+    return t.includes("I2C nets 2") && t.includes("3 of 5 connector signal pins") || t;`],
+  ["Reports without an interfaces check show no Interfaces row", "t=checks", `
+    if (!proj().checks || proj().checks.some(c => c.name === "interfaces")) return "skip";
+    return ![...document.querySelectorAll("#panel .check-title")].some(e => e.textContent === "Interfaces") || "interfaces row shown";`],
   ["Release check shows its package", "p=1&t=checks", `
     const P = proj(); P.checks.push({ name: "release", title: "Release package", level: "informational", status: "pass", errors: 0, warnings: 0, new_errors: 0, new_warnings: 0, fixed: 0, violations: [],
       package: { files: [{ path: "b-review-jlcpcb-gerbers.zip", bytes: 20480 }, { path: "b-review-jlcpcb-bom.csv", bytes: 300 }], sha256: "ab".repeat(32) } });

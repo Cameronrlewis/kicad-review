@@ -173,12 +173,14 @@ def board_layers(pcb_path):
     return names
 
 
-def render_side(src_dir, name, out):
+def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
         kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
+        if netlist:
+            kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
     if os.path.exists(pcb):
         # Drill marks off: with them every layer, even an empty one, is full of holes.
         # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
@@ -226,7 +228,7 @@ def cmd_render(args):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
-            render_side(posixpath.join(side, p["dir"]), p["name"], out)
+            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
             if export_3d:
                 export_glb(p, side, out)
             if settings["checks"].get("release", "off") != "off":
@@ -770,7 +772,8 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off"},
+    "interfaces": {},  # pattern overrides for the interfaces check
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
             "order_ready_fields": []},  # empty: the fabrication preset's fields
@@ -783,7 +786,15 @@ DEFAULT_SETTINGS = {
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "release": "Release package"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package"}
+
+
+INTERFACE_PATTERNS = {
+    "uart_tx": ["TX", "TXD", "UART_TX", "USART_TX"],
+    "i2c_sda": ["SDA", "I2C_SDA"], "i2c_scl": ["SCL", "I2C_SCL"], "can_h": ["CANH", "CAN_H"], "can_l": ["CANL", "CAN_L"],
+    "spi": [],  # accepted for compatibility with existing settings; no SPI rule
+    "esd_parts": ["ESD", "TVS", "USBLC", "PESD", "PRTR", "SRV05", "TPD", "SP05", "SMAJ", "SMBJ"],
+}
 
 
 def load_settings(roots=("base", "head")):
@@ -800,7 +811,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers", "inventory", "libraries"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers", "inventory", "libraries", "interfaces"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -814,6 +825,9 @@ def load_settings(roots=("base", "head")):
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
             sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of {', '.join(CHECK_NAMES)} = required/informational/off")
+    for k, v in settings["interfaces"].items():
+        if k not in INTERFACE_PATTERNS or not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
+            sys.exit(f"{SETTINGS_FILE}: interfaces.{k} must be one of {', '.join(INTERFACE_PATTERNS)} with a list of names")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if settings["fail_on"] not in ("new", "all"):
@@ -1376,7 +1390,155 @@ def project_checks(p, settings, objs, waivers=None):
             c = run_check("release", settings, side("head"), side("base"))
             c["package"] = package_summary(f"{out_dir}/head/fab")
             out.append(c)
-    return out
+    ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}")
+    return out + ([ic] if ic else [])
+
+
+# ---- Interface checks: design-review rules on the schematic netlist. ----
+GROUND = re.compile(r"^[ADP]?GND\w*$|^VSS\w*$|^EARTH$", re.I)
+RAIL = re.compile(r"^\+|^V(CC|DD|BUS|IN|BAT|SYS)|^P\d+V\d*|^\d+V\d*(?:[A-Z_].*)?$|^\d+\.\d+V$|_\d+V\d*$", re.I)
+
+
+def parse_netlist(text):
+    root = parse_sexpr(text)
+    comps = {}
+    for c in findall(find(root, "components") or [], "comp"):
+        ls = find(c, "libsource")
+        comps[val(c, "ref")] = {"value": val(c, "value", ""), "footprint": val(c, "footprint", ""),
+                                "lib": f"{val(ls, 'lib', '')}:{val(ls, 'part', '')}", "description": val(ls, "description", "")}
+    nets = {val(n, "name"): [{"ref": val(x, "ref"), "pin": val(x, "pin"), "function": val(x, "pinfunction", ""), "type": val(x, "pintype", "")}
+                             for x in findall(n, "node")] for n in findall(find(root, "nets") or [], "net")}
+    return comps, nets
+
+
+def ohms(value):
+    if not value or len(value) > 32:
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([rRkKmM]?)(\d*)(?=\s|Ω|$|[oO][hH][mM])", value)
+    if not m:
+        return None
+    whole, unit, frac = m.groups()
+    return float(f"{whole}.{frac}" if frac else whole) * {"": 1, "r": 1, "R": 1, "k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e6}[unit]
+
+
+short = lambda net: re.sub(r"^NET-\((.*)\)$", r"\1", (net or "").rstrip("/").split("/")[-1].upper())  # Net-(U1-SDA) -> U1-SDA
+is_ground = lambda net: bool(GROUND.match(short(net)))
+is_power = lambda net, nodes: is_ground(net) or bool(RAIL.search(short(net))) or any(n["type"] == "power_out" for n in nodes)
+
+
+def matches(name, patterns):
+    tokens = re.split(r"[^A-Z0-9]+", (name or "").upper())
+    return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
+
+
+def interface_check(p, settings, objs, out_dir):
+    if settings["checks"].get("interfaces", "off") == "off":
+        return None
+    patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
+    def side(s):
+        path = f"{out_dir}/{s}/netlist.net"
+        if not os.path.exists(path):
+            return None, None
+        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
+        where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
+        with open(path, encoding="utf-8") as fh:
+            return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
+    (head, coverage), (base, _) = side("head"), side("base")
+    if head is None:
+        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"], "status": "not_run",
+                "reason": "no schematic", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+    c = run_check("interfaces", settings, head, base)
+    c["coverage"] = coverage
+    return c
+
+
+def interface_findings(comps, nets, patterns, where_of):
+    """Design-review rules on one revision's netlist. Every finding carries its nets and pins as evidence."""
+    out, detected = [], {}
+    pin_net = {(n["ref"], n["pin"]): name for name, nodes in nets.items() for n in nodes}
+    # ponytail: resistor arrays are ignored; add per-element topology if array support is needed.
+    is_res = lambda ref: re.match(r"R\d", ref) and ohms(comps.get(ref, {}).get("value")) is not None
+    other = lambda ref, pin: next((name for (r, p), name in pin_net.items() if r == ref and p != pin), None)
+    esd = lambda r: re.search("|".join(map(re.escape, patterns["esd_parts"])), f"{comps.get(r, {}).get('lib', '')} {comps.get(r, {}).get('value', '')} {comps.get(r, {}).get('description', '')}", re.I)
+    node_txt = lambda n: f"{n['ref']} pin {n['pin']}" + (f" ({n['function']})" if n["function"] else "")
+
+    def add(type_, severity, description, ref, items):
+        where, pos = where_of(ref)
+        out.append({"type": type_, "severity": severity, "description": description, "items": items, "uuids": [],
+                    "pos": pos, "box": None, "where": where})
+
+    for name, nodes in nets.items():
+        if any(matches(n["function"], patterns["can_h"] + patterns["can_l"]) or
+               re.search(r"CAN|RS485|RS-485|LIN|transceiver", " ".join(comps.get(n["ref"], {}).get(k, "") for k in ("lib", "value", "description")), re.I) for n in nodes):
+            continue
+        tx = [n for n in nodes if n["type"] in ("output", "bidirectional") and matches(n["function"], patterns["uart_tx"])]
+        if tx: detected["UART"] = detected.get("UART", 0) + 1
+        if len({n["ref"] for n in tx}) > 1:
+            add("uart_tx_to_tx", "error", f"Two transmit pins drive {name}. Assumes pin functions name UART directions.", tx[0]["ref"], [node_txt(n) for n in tx])
+    for key in ("i2c_sda", "i2c_scl"):
+        for name, nodes in nets.items():
+            if not matches(short(name), patterns[key]) and not any(matches(n["function"], patterns[key]) for n in nodes):
+                continue
+            detected["I2C nets"] = detected.get("I2C nets", 0) + 1
+            nearby = {name} | {o for n in nodes if is_res(n["ref"]) and ohms(comps[n["ref"]]["value"]) < 1000 and (o := other(n["ref"], n["pin"])) and not is_power(o, nets.get(o, []))}
+            ups = [n for bus in nearby for n in nets.get(bus, []) if is_res(n["ref"]) and (o := other(n["ref"], n["pin"])) and is_power(o, nets.get(o, [])) and not is_ground(o)]
+            ic = next((n["ref"] for n in nodes if not is_res(n["ref"])), nodes[0]["ref"] if nodes else "")
+            if not ups:
+                add("i2c_no_pullup", "error", f"{name} has no pull-up resistor to a supply. Assumes the pull-up is on this board.", ic, [node_txt(n) for n in nodes])
+            elif len(ups) > 1:
+                par = 1 / sum(1 / ohms(comps[n["ref"]]["value"]) for n in ups)
+                add("i2c_multiple_pullups", "warning", f"{name} has {len(ups)} pull-ups in parallel ({round(par)} Ω).", ups[0]["ref"], [node_txt(n) for n in ups])
+    def matching_nets(key):
+        return [name for name, nodes in nets.items() if matches(short(name), patterns[key]) or any(matches(n["function"], patterns[key]) for n in nodes)]
+
+    can_h, can_l = matching_nets("can_h"), matching_nets("can_l")
+    if can_h and can_l:
+        detected["CAN"] = len(can_h)
+        terminated = any(is_res(n["ref"]) and 114 <= ohms(comps[n["ref"]]["value"]) <= 126 and other(n["ref"], n["pin"]) in can_l for h in can_h for n in nets[h])
+        if not terminated:
+            ref = next((n["ref"] for n in nets[can_h[0]] if not is_res(n["ref"])), nets[can_h[0]][0]["ref"])
+            add("can_no_termination", "warning", f"No 120 Ω resistor between {can_h[0]} and {can_l[0]}. Fine if this node is not at a bus end.", ref, [can_h[0], can_l[0]])
+    for ref, c in comps.items():
+        if not (re.match(r"J\d", ref) and re.search(r"USB.?C|TYPE.?C", f"{c['lib']} {c['value']} {c['footprint']}", re.I)):
+            continue
+        detected["USB-C"] = detected.get("USB-C", 0) + 1
+        for name, nodes in nets.items():
+            for node in nodes:
+                if node["ref"] != ref or not re.fullmatch(r"CC\d?", node["function"].upper()):
+                    continue
+                pulled = any(is_res(n["ref"]) and 4850 <= ohms(comps[n["ref"]]["value"]) <= 5360 and is_ground(other(n["ref"], n["pin"]) or "") for n in nets[name])
+                driven = any(n["ref"] != ref and not is_res(n["ref"]) and not esd(n["ref"]) for n in nets[name])
+                if not pulled and not driven:
+                    add("usb_cc_floating", "error", f"{node['function']} of {ref} floats: needs 5.1 kΩ to GND or a PD controller.", ref, [node_txt(node)])
+    # ponytail: same-net only; follow series resistors one hop if teams protect through them
+    total = prot = 0
+    for ref in sorted((r for r in comps if re.match(r"J\d", r)), key=natural):
+        bare = []
+        for (r, pin), name in sorted(pin_net.items(), key=lambda e: natural(e[0][1])):
+            if r != ref or is_power(name, nets[name]) or len(nets[name]) < 2:
+                continue
+            total += 1
+            if any(esd(n["ref"]) for n in nets[name] if n["ref"] != ref):
+                prot += 1
+            else:
+                bare.append(f"{ref} pin {pin} on {name}")
+        if bare:
+            add("connector_no_esd", "warning", f"{ref} signal pins without an ESD or TVS part on the same net. Assumes protection is not elsewhere on the cable.", ref, bare)
+    rails = {}
+    for name, nodes in nets.items():
+        if is_power(name, nodes) and not is_ground(name):
+            for n in nodes:
+                if n["type"] == "power_in" and n["ref"].startswith("U"):
+                    rails.setdefault(n["ref"], set()).add(name)
+    for name, nodes in nets.items():
+        if is_power(name, nodes):
+            continue
+        ics = sorted({n["ref"] for n in nodes if n["ref"] in rails}, key=natural)
+        for a, b in ((x, y) for i, x in enumerate(ics) for y in ics[i + 1:]):
+            if rails[a].isdisjoint(rails[b]):
+                add("voltage_domain", "warning", f"{name} joins {a} ({', '.join(sorted(rails[a]))}) and {b} ({', '.join(sorted(rails[b]))}). Check levels.", a, [name])
+                break
+    return out, {"detected": detected, "protected": [prot, total]}
 
 
 def page_svg(out_dir, name, page):
@@ -1571,8 +1733,11 @@ def cmd_report(args):
                        if not ((k in ("3d", "parts", "threads", "waivers", "inventory", "libraries") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
+    if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
+        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}
+        report_settings.pop("interfaces", None)
     if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
-        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "release"}
+        report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),

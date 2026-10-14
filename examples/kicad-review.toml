@@ -9,6 +9,7 @@ erc = "required"
 drc = "required"
 parity = "required"      # schematic and board agree (DRC --schematic-parity)
 bom = "informational"    # every part has the fields below
+interfaces = "off"     # netlist design-review rules (UART, I2C, CAN, USB-C CC, connector ESD, voltage domains)
 release = "off"        # fabrication package completeness; costs ~2-4 s per board
 
 [bom]
@@ -27,6 +28,8 @@ enabled = false            # export changed boards as GLB and report footprints 
 [parts]
 enabled = false
 
+# [interfaces]           # extra net or pin-function names per rule
+# i2c_sda = ["SDA", "TOUCH_SDA"]
 [threads]
 # Pin discussion threads to parts and points in the review site. Threads are pull-request review comments.
 # Needs the review site and its GitHub App's Pull requests permission. Off by default.

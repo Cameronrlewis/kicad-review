@@ -52,6 +52,8 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `fail_on` | `"new"` | `"new"`: a required check fails only on errors the change introduced. `"all"`: any error fails it. |
 | `checks.erc`, `checks.drc`, `checks.parity` | `"required"` | `required`, `informational` or `off` |
 | `checks.bom` | `"informational"` | as above |
+| `checks.interfaces` | `"off"` | as above; design-review rules on the schematic netlist |
+| `interfaces.<rule>` | built-in names | net or pin-function names for a rule (`uart_tx`, `i2c_sda`, `i2c_scl`, `can_h`, `can_l`, `esd_parts`; `spi` is accepted for compatibility but unused) |
 | `checks.release` | `"off"` | as above; builds and checks the fabrication package (adds about 2–4 s per board) |
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
 | `bom.critical_prefixes` | `["U", "J", "Q", "D", "Y", "X", "K", "F"]` | reference prefixes whose datasheet coverage is shown separately |
@@ -74,6 +76,18 @@ For pull requests the base revision's settings file wins, so a change cannot rel
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
 Review history is off by default. Set the Actions variable `KICAD_REVIEW_HISTORY` to exactly `true` to keep the newest 50 review runs in the PR comment. The log records errors (new errors), not warnings. Failed or cancelled runs add no row; the previous log is carried over.
+
+## Interface checks (optional)
+
+With `checks.interfaces` set to `informational` or `required` (default `off`), each review exports the schematic netlist and applies these rules:
+- UART TX wired to TX;
+- I2C pull-ups missing or doubled;
+- CAN without a 120 Ω termination;
+- USB-C CC pins floating (no 5.1 kΩ to GND and no PD controller);
+- connector signal pins without an ESD or TVS part on the same net;
+- signals joining parts powered from different rails.
+
+Each finding names the nets and pins it is based on and states its assumption. A coverage line under the checks says what was detected and how many connector signal pins are protected. Pin-function names must contain the role token (e.g. `USART1_TX`, `SDA`). Symbols with only port names (`PA9`) or fused names (`U0TXD`) are not matched; add patterns under `[interfaces]`. Names are matched by whole tokens of the net name (last path element) and pin functions. Extend them under `[interfaces]`, for example `i2c_sda = ["SDA", "TOUCH_SDA"]`.
 
 ## Parts (optional)
 

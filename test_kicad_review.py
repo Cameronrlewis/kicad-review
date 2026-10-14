@@ -1067,6 +1067,161 @@ assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
 
+# Interface checks: netlist parsing and helpers.
+from kicad_review import parse_netlist, ohms, short, is_ground, is_power, matches
+def netlist(comps, nets):
+    c = "".join(f'(comp (ref "{r}") (value "{v}") (footprint "{fp}") (libsource (lib "{lib.split(":")[0]}") (part "{lib.split(":")[1]}") (description "")))'
+                for r, (v, fp, lib) in comps.items())
+    n = "".join(f'(net (code "{i}") (name "{name}") ' + "".join(f'(node (ref "{r}") (pin "{p}") (pinfunction "{f}") (pintype "{t}"))' for r, p, f, t in nodes) + ")"
+                for i, (name, nodes) in enumerate(nets.items(), 1))
+    return f'(export (version "E") (components {c}) (nets {n}))'
+comps, nets = parse_netlist(netlist({"R1": ("4k7", "R_0402", "Device:R")}, {"/MCU/SDA": [("R1", "1", "", "passive"), ("U1", "5", "PB7/I2C1_SDA", "bidirectional")]}))
+assert comps["R1"] == {"value": "4k7", "footprint": "R_0402", "lib": "Device:R", "description": ""}
+assert nets["/MCU/SDA"][1] == {"ref": "U1", "pin": "5", "function": "PB7/I2C1_SDA", "type": "bidirectional"}
+for v, want in (("4k7", 4700), ("4.7k", 4700), ("4K7 1%", 4700), ("120R", 120), ("120", 120), ("5k1", 5100), ("1M", 1e6), ("10k Ω", 10000)):
+    assert ohms(v) == want, (v, ohms(v))
+assert ohms("DNP") is None and ohms("100n") is None
+print("ok resistor values parse")
+assert short("/MCU/SDA") == "SDA" and short("Net-(U1-SDA)") == "U1-SDA"
+assert matches("SDA", ["SDA"]) and matches("I2C1_SDA", ["SDA"]) and not matches("SDAX", ["SDA"]) and matches("PB7/I2C1_SDA", ["SDA"])
+assert all(is_power(n, []) for n in ("+3V3", "VDD_3V3", "3.3V", "VBUS", "+5V", "GND")) and is_ground("AGND") and not is_power("/SDA", [])
+assert is_power("/RAIL", [{"type": "power_out"}])
+print("ok power nets are recognised")
+
+from kicad_review import interface_findings, INTERFACE_PATTERNS
+W = lambda ref: ({"sheet": "/"}, [1.0, 2.0])
+types = lambda vs: sorted((v["type"], v["severity"]) for v in vs)
+# UART TX to TX
+c, n = parse_netlist(netlist({"U1": ("MCU", "", "MCU:M"), "U2": ("GPS", "", "GPS:G")},
+    {"/TX": [("U1", "1", "USART1_TX", "output"), ("U2", "3", "TXD", "output")]}))
+vs, cov = interface_findings(c, n, INTERFACE_PATTERNS, W)
+assert types(vs) == [("uart_tx_to_tx", "error")] and "U1 pin 1 (USART1_TX)" in vs[0]["items"] and vs[0]["where"] == {"sheet": "/"}, vs
+# I2C: none, then two pull-ups
+i2c = lambda pullups: netlist({"U1": ("MCU", "", "MCU:M"), **{f"R{i}": ("4k7", "", "Device:R") for i in range(1, pullups + 1)}},
+    {"/MCU/SDA": [("U1", "5", "SDA", "bidirectional")] + [(f"R{i}", "1", "", "passive") for i in range(1, pullups + 1)],
+     "/MCU/SCL": [("U1", "6", "SCL", "bidirectional")], "+3V3": [(f"R{i}", "2", "", "passive") for i in range(1, pullups + 1)]})
+assert types(interface_findings(*parse_netlist(i2c(0)), INTERFACE_PATTERNS, W)[0]) == [("i2c_no_pullup", "error"), ("i2c_no_pullup", "error")]
+vs = interface_findings(*parse_netlist(i2c(2)), INTERFACE_PATTERNS, W)[0]
+assert ("i2c_multiple_pullups", "warning") in types(vs) and any("2350" in v["description"] for v in vs), vs
+print("ok hierarchical net names match")
+# CAN termination
+can = lambda r: netlist({"U3": ("TCAN", "", "If:T"), **({"R9": (r, "", "Device:R")} if r else {})},
+    {"/CANH": [("U3", "7", "CANH", "bidirectional")] + ([("R9", "1", "", "passive")] if r else []), "/CANL": [("U3", "6", "CANL", "bidirectional")] + ([("R9", "2", "", "passive")] if r else [])})
+assert types(interface_findings(*parse_netlist(can(None)), INTERFACE_PATTERNS, W)[0]) == [("can_no_termination", "warning")]
+assert interface_findings(*parse_netlist(can("120R")), INTERFACE_PATTERNS, W)[0] == []
+# USB-C CC: floating, resistor, controller
+usb = lambda cc_nodes: netlist({"J1": ("USB_C_Receptacle", "USB_C", "Connector:USB_C_Receptacle"), "R1": ("5.1k", "", "Device:R"), "U9": ("TPS65987", "", "PD:T")},
+    {"/CC1": [("J1", "A5", "CC1", "bidirectional")] + cc_nodes, "GND": [("R1", "2", "", "passive"), ("J1", "A1", "GND", "power_in")]})
+assert types(interface_findings(*parse_netlist(usb([])), INTERFACE_PATTERNS, W)[0]) == [("usb_cc_floating", "error")]
+cc_errors = lambda nodes: [v for v in interface_findings(*parse_netlist(usb(nodes)), INTERFACE_PATTERNS, W)[0] if v["type"] == "usb_cc_floating"]
+assert cc_errors([("R1", "1", "", "passive")]) == [] and cc_errors([("U9", "4", "CC1", "bidirectional")]) == []
+print("ok CC to a controller is fine")
+# Connector ESD: J2 pin 2 unprotected, pin 3 protected by a TVS on the same net
+c, n = parse_netlist(netlist({"J2": ("Conn_01x03", "", "Connector:Conn"), "D1": ("PESD5V0", "", "Diode:ESD"), "U1": ("MCU", "", "MCU:M")},
+    {"GND": [("J2", "1", "", "passive")], "/SIG_A": [("J2", "2", "", "passive"), ("U1", "8", "PA0", "input")],
+     "/SIG_B": [("J2", "3", "", "passive"), ("U1", "9", "PA1", "input"), ("D1", "1", "", "passive")]}))
+vs, cov = interface_findings(c, n, INTERFACE_PATTERNS, W)
+assert types(vs) == [("connector_no_esd", "warning")] and vs[0]["items"] == ["J2 pin 2 on /SIG_A"] and cov["protected"] == [1, 2], (vs, cov)
+# Voltage domains
+c, n = parse_netlist(netlist({"U1": ("MCU", "", "MCU:M"), "U2": ("SENSOR", "", "S:S")},
+    {"+3V3": [("U1", "1", "VDD", "power_in")], "+5V": [("U2", "1", "VCC", "power_in")], "/INT": [("U1", "2", "PA2", "input"), ("U2", "4", "INT", "output")]}))
+vs = interface_findings(c, n, INTERFACE_PATTERNS, W)[0]
+assert types(vs) == [("voltage_domain", "warning")] and "+3V3" in vs[0]["description"] and "+5V" in vs[0]["description"], vs
+
+from kicad_review import interface_check
+settings = json.loads(json.dumps(DEFAULT_SETTINGS)); settings["checks"]["interfaces"] = "required"
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    for s in ("base", "head"):
+        os.makedirs(f"review/p/{s}")
+        open(f"review/p/{s}/netlist.net", "w").write(netlist({"R1": ("10k", "", "Device:R")}, {"GND": [("R1", "1", "", "passive")]}))
+    c = interface_check({"dir": "p", "name": "b"}, settings, {"base": {}, "head": {}}, "review/p")
+    os.chdir(_cwd)
+assert c["name"] == "interfaces" and c["status"] == "pass" and c["coverage"]["detected"] == {} and c["coverage"]["protected"] == [0, 0], c
+print("ok no interfaces is reported, not hidden")
+assert DEFAULT_SETTINGS["checks"]["interfaces"] == "off" and interface_check({"dir": "p", "name": "b"}, json.loads(json.dumps(DEFAULT_SETTINGS)), {}, "x") is None
+_src = open("kicad_review.py", encoding="utf-8").read()
+assert 'report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}' in _src and 'report_settings.pop("interfaces", None)' in _src
+print("ok interfaces settings stay out of opted-out reports")
+
+# Final-review regressions run together so every pre-fix failure is visible.
+import unittest
+class FinalReviewTests(unittest.TestCase):
+    def findings(self, c, n):
+        return interface_findings(*parse_netlist(netlist(c, n)), INTERFACE_PATTERNS, W)
+
+    def test_uart_transceivers_and_pin_types(self):
+        for value in ("TJA1050 CAN", "RS485", "RS-485", "LIN", "transceiver"):
+            with self.subTest(value=value):
+                vs, _ = self.findings({"U1": ("MCU", "", "MCU:M"), "U2": (value, "", "If:T")},
+                    {"TX": [("U1", "1", "CAN1_TX", "output"), ("U2", "1", "TXD", "output")]})
+                self.assertEqual(vs, [])
+        for pin_type in ("input", "passive"):
+            with self.subTest(pin_type=pin_type):
+                vs, _ = self.findings({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "TXD", pin_type)]})
+                self.assertEqual(vs, [])
+        vs, _ = self.findings({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "TXD", "output"), ("U3", "1", "CAN_H", "input")]})
+        self.assertEqual(vs, [])
+
+    def test_i2c_series(self):
+        for resistance, pullup, errors in (("33R", True, 0), ("4.7k", False, 2), ("1k", True, 1)):
+            with self.subTest(resistance=resistance, pullup=pullup):
+                c = {"R1": (resistance, "", "Device:R"), "R2": ("4k7", "", "Device:R")}
+                n = {"SDA": [("R1", "1", "", "passive")], "IC_SDA": [("R1", "2", "", "passive"), ("U1", "1", "SDA", "bidirectional")]}
+                if pullup:
+                    n["SDA"].append(("R2", "1", "", "passive"))
+                    n["+3V3"] = [("R2", "2", "", "passive")]
+                vs, _ = self.findings(c, n)
+                self.assertEqual(sum(v["type"] == "i2c_no_pullup" for v in vs), errors)
+
+    def test_jumper(self):
+        vs, cov = self.findings({"JP1": ("USB_C", "USB_C", "Connector:USB_C")},
+            {"CC1": [("JP1", "1", "CC1", "passive"), ("U1", "1", "", "input")]})
+        self.assertEqual(vs, [])
+        self.assertEqual(cov["protected"], [0, 0])
+        self.assertNotIn("USB-C", cov["detected"])
+
+    def test_patterns_extend(self):
+        settings = json.loads(json.dumps(DEFAULT_SETTINGS))
+        settings["checks"]["interfaces"] = "required"
+        settings["interfaces"] = {"uart_tx": ["SEND"]}
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(f"{d}/head")
+            with open(f"{d}/head/netlist.net", "w") as f:
+                f.write(netlist({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "SEND", "output")]}))
+            result = interface_check({}, settings, {}, d)
+        self.assertIn(("uart_tx_to_tx", "error"), types(result["violations"]))
+
+    def test_ohms(self):
+        for value, expected in (("1m", .001), ("1M", 1e6), ("2.2k 0402", 2200), ("1" * 33, None), ("100n", None)):
+            with self.subTest(value=value):
+                self.assertEqual(ohms(value), expected)
+
+    def test_arrays_ignored(self):
+        vs, _ = self.findings({"RN1": ("4k7", "", "Device:R")}, {"SDA": [("U1", "1", "SDA", "bidirectional"), ("RN1", "1", "", "passive")], "+3V3": [("RN1", "2", "", "passive")]})
+        self.assertIn(("i2c_no_pullup", "error"), types(vs))
+
+    def test_cc_tvs(self):
+        vs, _ = self.findings({"J1": ("USB_C", "USB_C", "Connector:USB_C"), "D1": ("TVS", "", "Diode:ESD")},
+            {"CC1": [("J1", "1", "CC1", "passive"), ("D1", "1", "", "passive")]})
+        self.assertIn(("usb_cc_floating", "error"), types(vs))
+
+    def test_rails(self):
+        for name in ("P3V3", "P5V", "3V3A_SENSOR", "3V3_A"):
+            with self.subTest(name=name):
+                self.assertTrue(is_power(name, []))
+
+    def test_unused_rx_removed(self):
+        self.assertNotIn("uart_rx", INTERFACE_PATTERNS)
+
+    def test_coverage_units(self):
+        _, cov = self.findings({}, {"SDA": [("U1", "1", "SDA", "bidirectional")], "SCK": []})
+        self.assertEqual(cov["detected"], {"I2C nets": 1})
+        self.assertEqual(cov["protected"], [0, 0])
+
+_result = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(FinalReviewTests))
+assert _result.wasSuccessful(), "final-review regressions failed"
 # Release readiness: setting and export in render.
 from kicad_review import CHECK_NAMES, cmd_render
 import kicad_review as kr
@@ -1079,7 +1234,7 @@ with tempfile.TemporaryDirectory() as d:
     for s in ("base", "head"): open(f"{s}/p/b.kicad_pro", "w").write("{}")
     json.dump({"projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
     saved = (kr.render_side, kr.release_project)
-    kr.render_side = lambda *a: None
+    kr.render_side = lambda *a, **kw: None
     kr.release_project = lambda pro, tag, s, out, label: calls.append((pro, tag, out, label)) or []
     try:
         cmd_render(None); assert calls == []            # off by default
@@ -1090,7 +1245,7 @@ with tempfile.TemporaryDirectory() as d:
     os.chdir(_cwd)
 assert calls == [("base/p/b.kicad_pro", "review", "review/p/base/fab", "b"), ("head/p/b.kicad_pro", "review", "review/p/head/fab", "b")], calls
 print("ok release export in render")
-assert 'report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "release"}' in open("kicad_review.py", encoding="utf-8").read()
+assert 'report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}' in open("kicad_review.py", encoding="utf-8").read()
 print("ok release setting stays out of opted-out reports")
 
 from kicad_review import release_findings, package_summary
@@ -1455,7 +1610,7 @@ print("ok broken log starts fresh and strict row contract")
 
 # A real four-project/four-check log survives body truncation within GitHub's limit.
 large = {**ld, "projects": [{**ld["projects"][0], "name": f"Project {i}",
-         "checks": [ck2(n, title, 2, 1) for n, title in CHECK_NAMES.items()]} for i in range(4)], "reason": "x" * 60000}
+         "checks": [ck2(n, title, 2, 1) for n, title in list(CHECK_NAMES.items())[:4]]} for i in range(4)], "reason": "x" * 60000}
 large_row = log_row(large, "2026-10-12 10:04")
 large_log = "\n" + merge_log([large_row] * 49, large_row)
 large_body = comment_markdown(large, [], "", log=large_log)
@@ -1656,7 +1811,6 @@ print("ok library final-review parsing, argv and drawing validation")
 import json, os, pathlib, tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
-import kicad_review
 
 _LIVE_ITEM = 'ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP'
 def _live_tree(root, removed=False):
