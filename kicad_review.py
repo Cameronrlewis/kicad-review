@@ -6,6 +6,7 @@ Standard library only. Subcommands are called from the reusable workflow.
 import argparse
 import base64
 import csv
+import datetime
 import gzip
 import hashlib
 import json
@@ -585,6 +586,40 @@ def natural(s):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s or "")]
 
 
+def object_index(base, head):
+    """Every symbol and footprint of head, then the base-only ones: what a thread can be pinned to.
+    uuid is the KiCad UUID (schematic keys are sheet path + UUID); sheet or layer says which drawing it is on."""
+    def entry(key, o, side):
+        e = {"uuid": key.rsplit("/", 1)[-1], "kind": o["kind"], "ref": o["ref"], "value": o["props"].get("Value"),
+             "side": side, "pos": o.get("pos"), "box": o.get("box")}
+        if o["where"].get("sheet") is not None:
+            e["sheet"] = o["where"]["sheet"]
+        else:
+            e["layer"] = o["props"].get("layer")
+        return e
+    keep = lambda objs: {k: o for k, o in objs.items() if o["kind"] in ("symbol", "footprint")}
+    b, h = keep(base), keep(head)
+    used = set(b) & set(h)  # Reserve exact keys before any reference fallback.
+    by_match = {}
+    for k, o in b.items():
+        if k not in used and o.get("match"):
+            by_match.setdefault(o["match"], []).append(k)
+    out = []
+    for k, o in h.items():
+        matches = by_match.get(o.get("match"), [])
+        bk = k if k in b else (matches.pop(0) if matches else None)
+        e = entry(k, o, "head")
+        if bk is None:
+            e["added"] = True
+        else:
+            used.add(bk)
+            if b[bk].get("pos") != o.get("pos"):
+                e["pos_before"] = b[bk].get("pos")
+        out.append(e)
+    out += [entry(k, o, "base") for k, o in b.items() if k not in used]
+    return out
+
+
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
@@ -595,6 +630,9 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "threads": {"enabled": False, "block_merge": False},
+    "github": {"check_runs": False},
+    "waivers": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -613,7 +651,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -635,6 +673,15 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    if not isinstance(settings["threads"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
+    for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
+        if not isinstance(value, bool):
+            sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
+    if not isinstance(settings["waivers"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: waivers.enabled must be true or false")
+    if settings["threads"]["block_merge"] and not settings["threads"]["enabled"]:
+        sys.exit(f"{SETTINGS_FILE}: threads.block_merge needs threads.enabled = true")
     return settings
 
 
@@ -921,7 +968,96 @@ def vkeys(v):
     return {k + sig for k in keys}
 
 
-def run_check(name, settings, head, base):
+def waiver_key(v):
+    """One stable identity per violation for kicad-review-waivers.toml: the strongest of the identities vkeys matches on."""
+    ident = max(vkeys(v if v.get("key") else {**v, "uuids": sorted(v["uuids"])}), key=lambda k: k[0] == "u")
+    return "w-" + hashlib.sha1(repr(ident).encode()).hexdigest()[:12]
+
+
+WAIVERS_FILE = "kicad-review-waivers.toml"
+WAIVABLE = ("erc", "drc", "parity")
+
+
+def parse_waivers(text, source):
+    """Entries of one waivers file, and messages for the ones that cannot apply. Never exits: a bad entry must not stop reviews."""
+    try:
+        raw = tomllib.loads(text).get("waiver", [])
+    except tomllib.TOMLDecodeError as e:
+        return [], [f"{source}: not valid TOML ({e})"]
+    if not isinstance(raw, list):
+        return [], [f"{source}: waiver must be a list of tables"]
+    good, bad = [], []
+    for i, w in enumerate(raw, 1):
+        where = f"{source} waiver {i}"
+        if not isinstance(w, dict):
+            bad.append(f"{where}: must be a table")
+            continue
+        problems = [p for p, ok in (
+            (f"check must be one of {', '.join(WAIVABLE)}, not {w.get('check')!r}", w.get("check") in WAIVABLE),
+            ("match must be a waiver key like w-1a2b3c4d5e6f", isinstance(w.get("match"), str) and re.fullmatch(r"w-[0-9a-f]{12}", w["match"])),
+            ("reason must not be empty", isinstance(w.get("reason"), str) and w["reason"].strip()),
+            ("by must be a GitHub login", isinstance(w.get("by"), str) and w["by"].strip()),
+            ("date must be a date like 2026-10-12", type(w.get("date")) is datetime.date),
+            ("permanent must be true or false", "permanent" not in w or isinstance(w["permanent"], bool)),
+            ("ref must be a string", "ref" not in w or isinstance(w["ref"], str)),
+            ("until must be a date like 2026-12-31", "until" not in w or type(w["until"]) is datetime.date),
+            ("set until = <date> or permanent = true", type(w.get("until")) is datetime.date or w.get("permanent") is True),
+        ) if not ok]
+        if problems:
+            bad.append(f"{where}: {'; '.join(problems)}")
+            continue
+        good.append({"check": w["check"], "match": w["match"], "reason": w["reason"].strip(), "by": w["by"].strip(),
+                     "date": w["date"].isoformat(), "until": w["until"].isoformat() if type(w.get("until")) is datetime.date else None,
+                     "permanent": w.get("permanent") is True, "ref": w.get("ref") if isinstance(w.get("ref"), str) else None})
+    return good, bad
+
+
+def load_waivers(ref):
+    """Waivers that apply come from the target branch at ref (repo/ history), so a change cannot waive its own violations.
+    The head copy's extra entries are only proposals."""
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    head_path = f"head/{WAIVERS_FILE}"
+    out = {"active": {}, "expired": [], "proposed": [], "invalid": []}
+    resolved = git("-C", "repo", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}", check=False) if ref else None
+    if ref and not resolved:
+        out["invalid"].append(f"{WAIVERS_FILE}: cannot resolve {ref}")
+    label = resolved[:7] if resolved else ref
+    try:
+        result = subprocess.run(["git", "-C", "repo", "show", f"{resolved}:{WAIVERS_FILE}"], capture_output=True) if resolved else None
+        text = result.stdout.decode("utf-8") if result and result.returncode == 0 else None
+    except UnicodeError as e:
+        text = None
+        out["invalid"].append(f"{WAIVERS_FILE} at {label}: cannot read ({e})")
+    if text:
+        entries, out["invalid"] = parse_waivers(text, f"{WAIVERS_FILE} at {label}")
+        for e in entries:
+            if e["until"] and datetime.date.fromisoformat(e["until"]) < today:
+                out["expired"].append(e)
+            else:
+                out["active"][(e["check"], e["match"])] = e
+    if os.path.islink(head_path) or (os.path.exists(head_path) and not os.path.isfile(head_path)):
+        out["invalid"].append(f"{WAIVERS_FILE} in this change: must be a regular file, not a symlink")
+    elif os.path.isfile(head_path):
+        try:
+            with open(head_path, "rb") as fh:
+                content = fh.read(1024 * 1024 + 1)
+            if len(content) > 1024 * 1024:
+                entries, invalid = [], [f"{WAIVERS_FILE} in this change: exceeds 1 MiB"]
+            else:
+                head_text = content.decode("utf-8")
+                entries, invalid = parse_waivers(head_text, f"{WAIVERS_FILE} in this change")
+                if head_text == text:
+                    invalid = []
+        except (OSError, UnicodeError) as e:
+            entries, invalid = [], [f"{WAIVERS_FILE} in this change: cannot read ({e})"]
+        out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in out["active"]]
+        out["invalid"] += invalid
+    for m in out["invalid"]:
+        print(f"::warning::{m}")
+    return out
+
+
+def run_check(name, settings, head, base, waivers=None):
     level = settings["checks"].get(name, "off")
     if level == "off" or head is None:
         return None
@@ -929,18 +1065,27 @@ def run_check(name, settings, head, base):
     head_keys = set().union(*(vkeys(v) for v in head))
     for v in head:
         v["new"] = not (vkeys(v) & base_keys)
-    count = lambda sev, new=False: sum(1 for v in head if v["severity"] == sev and (v["new"] or not new))
+        if waivers is not None:
+            v["waiver_key"] = waiver_key(v)
+            w = waivers["active"].get((name, v["waiver_key"]))
+            if w:
+                v["waived"] = {"reason": w["reason"], "by": w["by"], "until": w["until"], "ref": w["ref"]}
+    live = [v for v in head if not v.get("waived")]
+    count = lambda sev, new=False: sum(1 for v in live if v["severity"] == sev and (v["new"] or not new))
     failing = count("error", new=settings["fail_on"] == "new") > 0
     head.sort(key=lambda v: (not v["new"], v["severity"] != "error", v["type"]))
-    return {"name": name, "title": CHECK_NAMES[name], "level": level,
-            "status": "pass" if not failing else "fail" if level == "required" else "warn",
-            "errors": count("error"), "warnings": count("warning"),
-            "new_errors": count("error", True), "new_warnings": count("warning", True),
-            "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
-            "violations": head}
+    result = {"name": name, "title": CHECK_NAMES[name], "level": level,
+              "status": "pass" if not failing else "fail" if level == "required" else "warn",
+              "errors": count("error"), "warnings": count("warning"),
+              "new_errors": count("error", True), "new_warnings": count("warning", True),
+              "fixed": sum(1 for v in base or [] if not (vkeys(v) & head_keys)),
+              "violations": head}
+    if waivers is not None:
+        result["waived"] = len(head) - len(live)
+    return result
 
 
-def project_checks(p, settings, objs):
+def project_checks(p, settings, objs, waivers=None):
     out = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
@@ -951,10 +1096,10 @@ def project_checks(p, settings, objs):
         return load_violations(f"{out}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
-        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc")),
-        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc")),
+        run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
+        run_check("drc", settings, side("head", "drc.json", "drc"), side("base", "drc.json", "drc"), waivers),
         run_check("parity", settings, side("head", "drc.json", "parity") if sch("head") else None,
-                  side("base", "drc.json", "parity") if sch("base") else None),
+                  side("base", "drc.json", "parity") if sch("base") else None, waivers),
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
@@ -1027,7 +1172,7 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings):
+def build_project(p, blobs, settings, waivers=None):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -1079,8 +1224,9 @@ def build_project(p, blobs, settings):
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
-            **({"parts": parts} if parts else {})}
+            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs, waivers),
+            **({"parts": parts} if parts else {}),
+            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] else {})}
 
 
 def assign_ids(projects):
@@ -1139,7 +1285,8 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items()
+                       if not ((k in ("3d", "parts", "threads", "waivers") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     data = {
@@ -1150,8 +1297,14 @@ def cmd_report(args):
         "settings": report_settings,
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
-    data["projects"] = [build_project(p, blobs, settings) for p in det["projects"]]
+    waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
+    data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
     assign_ids(data["projects"])
+    if waivers is not None:
+        used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
+                for v in c["violations"] if v.get("waived")}
+        data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
+                           "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
@@ -1167,6 +1320,7 @@ def cmd_report(args):
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
         fh.write(f"name={name}\n")
+        fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
@@ -1257,7 +1411,7 @@ def changes_markdown(p, limit=60):
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site=""):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -1267,6 +1421,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id})**")
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
+    if threads is not None:
+        out.append(f"Threads: {threads['open']} open ({threads['blocking']} blocking), {threads['resolved']} resolved.")
     if artifact_id and data.get("repo"):
         out += ["", "<details><summary>From a terminal</summary>", "",
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
@@ -1289,7 +1445,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
             out += ["</details>"]
         elif other:
             out += ["", f"Changed: {other}. Full list in the report."]
-    body, checks = "\n".join(out), checks_markdown(data)
+    body = "\n".join(out)
+    checks = "\n".join(readiness_markdown(data, threads, threads_required=data.get("settings", {}).get("threads", {}).get("block_merge", False))) + checks_markdown(data)
     parts = parts_markdown(data)
     if parts:
         # Reserve room for the body truncation notice and closing details tags.
@@ -1300,7 +1457,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
-            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads)
         body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
@@ -1348,9 +1505,43 @@ def cmd_summary(args):
         with open(f"review/images/shots.json", encoding="utf-8") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
     site = os.environ.get("SITE", "").rstrip("/")
-    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site)
+    threads = None
+    if data["settings"].get("threads", {}).get("enabled") and os.path.exists("review/threads.json"):
+        with open("review/threads.json", encoding="utf-8") as fh:
+            try:
+                raw = json.load(fh)
+                review_threads = raw
+                for key in ("data", "repository", "pullRequest", "reviewThreads"):
+                    review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
+                if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
+                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
+                    # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
+                    print("::warning::review/threads.json is incomplete; thread counts left out")
+                else:
+                    threads = thread_counts(raw)
+            except ValueError:
+                print("::warning::review/threads.json is not JSON; thread counts left out")
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
+    settings = data["settings"]
+    block_merge = settings.get("threads", {}).get("block_merge")
+    publish_checks = settings.get("github", {}).get("check_runs")
+    threads_failed = ""
+    if block_merge:
+        threads_failed = "blocking threads could not be read" if threads is None else (plural(threads["blocking"], "blocking thread") + " open" if threads["blocking"] else "")
+    if publish_checks:
+        runs = check_runs(data)
+        if block_merge:
+            runs.append({"name": "kicad-review / Threads", "conclusion": "failure" if threads_failed else "success",
+                         "output": {"title": threads_failed or "no blocking threads open",
+                                    "summary": "Resolve blocking threads in the review site or on GitHub."}})
+        with open("review/check-runs.json", "w", encoding="utf-8") as fh:
+            json.dump(runs, fh)
+    with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+        fh.write(f"check_runs={'true' if publish_checks else 'false'}\n")
+        fh.write(f"threads_failed={threads_failed}\n")
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
     print(body)
@@ -1392,6 +1583,57 @@ def parts_markdown(data):
     return "\n".join(out)
 
 
+ANCHOR = re.compile(r"<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->[ \t\r\n]*$")
+
+
+def thread_anchor(body):
+    """The anchor a review-site thread carries in its first comment, or None for any other comment."""
+    m = ANCHOR.search(body or "")
+    if not m:
+        return None
+    try:
+        a = json.loads(base64.urlsafe_b64decode(m.group(1) + "=" * (-len(m.group(1)) % 4)))
+    except ValueError:  # bad base64, bad UTF-8 and bad JSON all subclass ValueError
+        return None
+    return a if isinstance(a, dict) and a.get("v") == 1 else None
+
+
+def thread_counts(response):
+    """Open, blocking-and-open, and resolved review-site threads in a reviewThreads GraphQL response."""
+    c = {"open": 0, "blocking": 0, "resolved": 0}
+    nodes = (((((response or {}).get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+             .get("reviewThreads") or {}).get("nodes") or []
+    for n in nodes:
+        first = ((n.get("comments") or {}).get("nodes") or [{}])[0]
+        a = thread_anchor(first.get("body"))
+        if not a:
+            continue
+        if n.get("isResolved"):
+            c["resolved"] += 1
+        else:
+            c["open"] += 1
+            c["blocking"] += a.get("severity") == "blocking"
+    return c
+
+
+def waiver_lines(data):
+    """Comment summaries for covered findings and waivers that need attention."""
+    w = data.get("waivers")
+    if not w:
+        return []
+    waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+    if not waived and not any(w.values()):
+        return []
+    one = lambda s: md(" ".join(str(s).split()))
+    out = ["", f"{plural(waived, 'finding')} waived by kicad-review-waivers.toml (reasons in the report)."]
+    say = lambda e: f"{one(e['check'])} {one(e['match'])} ({one(e['reason'])}, by {one(e['by'])})"
+    out += [f"- Waiver not matched in this review: {say(e)} (if its finding is gone, remove it)." for e in w["stale"]]
+    out += [f"- Expired waiver: {say(e)} ended {one(e['until'])}." for e in w["expired"]]
+    out += [f"- Proposed in this change (applies after it merges): {say(e)}." for e in w["proposed"]]
+    out += [f"- Ignored: {one(m)}" for m in w["invalid"]]
+    return out
+
+
 def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
@@ -1399,17 +1641,63 @@ def checks_markdown(data):
             lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
-            if v["new"] and v["severity"] == "error"]
+            if v["new"] and v["severity"] == "error" and not v.get("waived")]
     if news:
         lines += ["", "<details><summary>New errors</summary>", ""]
         lines += [f"- **{md(n)}** {t}: {md(v['description'][:300])}" + (f" ({md('; '.join(v['items'][:2]))})" if v["items"] else "")
                   for n, t, v in news[:50]]
         lines += ["", "</details>"]
-    checks = "\n".join(lines) + "\n"
+    checks = "\n".join(lines + waiver_lines(data)) + "\n"
     if len(checks) > 50000:  # leave room for the comment body and closing details tags
         checks = checks[:49900].rsplit("\n", 1)[0] + "\n\n… checks truncated. Full list in the report.\n"
         checks += "\n</details>" * (checks.count("<details") - checks.count("</details>"))
     return checks
+
+
+CHECK_RESULTS = [("fail", "failure", "failing"), ("warn", "neutral", "warnings"),
+                 ("pass", "success", "passing"), ("not_run", "skipped", "not run")]
+
+
+def check_runs(data):
+    """One GitHub check run per check name across all projects; the worst project result is the run's conclusion."""
+    runs = {}
+    for p in data["projects"]:
+        for c in p["checks"]:
+            r = runs.setdefault(c["name"], {"name": f"kicad-review / {c['title']}", "rows": [], "conclusions": [], "new": 0})
+            rank = next((i for i, result in enumerate(CHECK_RESULTS) if result[0] == c["status"]), None)
+            if rank is None:
+                raise KeyError(c["status"])
+            r["conclusions"].append(rank)
+            r["new"] += c["new_errors"]
+            r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
+    out = []
+    for r in runs.values():
+        _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]
+        if r["new"]:
+            title = plural(r["new"], "new error")
+        summary = "\n".join(["| Project | Result | Errors (new) | Warnings (new) |", "|---|---|---|---|", *r["rows"]])
+        out.append({"name": r["name"], "conclusion": conclusion, "output": {"title": title, "summary": summary}})
+    return out
+
+
+def readiness_markdown(data, threads=None, threads_required=False):
+    """The 'Ready to merge?' block: required checks, blocking threads, and where approvals live."""
+    failing = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    failures = ", ".join(failing)
+    if len(failures) > 1000:
+        failures = failures[:1000] + "… (full list in Checks)"
+    failures = md(failures)
+    lines = ["", "#### Ready to merge?", "",
+             f"- ✕ **Required checks:** failing ({failures})" if failing else "- ✓ **Required checks:** passing"]
+    if threads is not None:
+        lines.append(f"- ✕ **Blocking threads:** {threads['blocking']} open" if threads["blocking"] else "- ✓ **Blocking threads:** none open")
+    elif threads_required:
+        lines.append("- ✕ **Blocking threads:** could not be read")
+    if data.get("waivers") is not None:
+        waived = sum(c.get("waived", 0) for p in data["projects"] for c in p["checks"])
+        lines.append(f"- ↷ **Waived findings:** {waived} (not blocking)")
+    lines.append("- ↗ **Approvals:** see the pull request's reviewers (the review site shows them per commit).")
+    return lines
 
 
 def main():
