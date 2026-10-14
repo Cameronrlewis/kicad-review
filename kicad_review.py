@@ -808,6 +808,7 @@ DEFAULT_SETTINGS = {
     "pdf": {"enabled": False},
 
     "threads": {"enabled": False, "block_merge": False},
+    "issues": {"enabled": False},
     "github": {"check_runs": False},
     "waivers": {"enabled": False},
     "inventory": {"enabled": False},
@@ -838,7 +839,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -880,6 +881,8 @@ def load_settings(roots=("base", "head")):
 
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
+    if not isinstance(settings["issues"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: issues.enabled must be true or false")
     if not isinstance(settings["inventory"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: inventory.enabled must be true or false")
     if not isinstance(settings["libraries"]["enabled"], bool):
@@ -1856,7 +1859,7 @@ def build_project(p, blobs, settings, waivers=None):
                                 for side, path in models.items()}
             board["no_model"] = model3d_missing(out, objs)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
-        settings[name]["enabled"] for name in ("threads", "inventory", "libraries")) else None
+        settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None
     if settings["libraries"]["enabled"]:
         roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
@@ -2001,7 +2004,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
@@ -2049,6 +2052,7 @@ def cmd_report(args):
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
         fh.write(f"name={name}\n")
+        fh.write(f"issues={'true' if settings['issues']['enabled'] else 'false'}\n")
         fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
 
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
@@ -2145,7 +2149,7 @@ def changes_markdown(p, limit=60):
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, log=""):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, log="", issues=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -2158,6 +2162,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
     if threads is not None:
         out.append(f"Threads: {threads['open']} open ({threads['blocking']} blocking), {threads['resolved']} resolved.")
+    if issues:
+        out.append(f"Touches parts named in {', '.join(f'#{n}' for n in issues)}.")
     if artifact_id and data.get("repo"):
         out += ["", "<details><summary>From a terminal</summary>", "",
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
@@ -2198,7 +2204,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
-            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads, log)
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads, log, issues)
         body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
@@ -2263,6 +2269,13 @@ def cmd_summary(args):
                     threads = thread_counts(raw)
             except ValueError:
                 print("::warning::review/threads.json is not JSON; thread counts left out")
+    issues = None
+    if data["settings"].get("issues", {}).get("enabled") and os.path.exists("review/issues.json"):
+        with open("review/issues.json", encoding="utf-8") as fh:
+            try:
+                issues = touched_issues(json.load(fh), data)
+            except ValueError:
+                print("::warning::review/issues.json is not JSON; issue links left out")
     log = ""
     if os.environ.get("HISTORY") == "true":
         previous = ""
@@ -2271,7 +2284,7 @@ def cmd_summary(args):
                 previous = fh.read()
         when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
         log = "\n" + merge_log(extract_log(previous), log_row(data, when))
-    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads, log=log)
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads, log=log, issues=issues)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
     settings = data["settings"]
@@ -2366,6 +2379,22 @@ def thread_anchor(body):
     except ValueError:  # bad base64, bad UTF-8 and bad JSON all subclass ValueError
         return None
     return a if isinstance(a, dict) and a.get("v") == 1 else None
+
+
+def touched_issues(issues, data):
+    """Open non-PR issues whose anchor names a part this change touched."""
+    changed = {(p["dir"], r["ref"]) for p in data["projects"] for r in p["changes"] if r.get("ref")}
+    out = set()
+    for issue in issues if isinstance(issues, list) else []:
+        if not isinstance(issue, dict) or "pull_request" in issue or issue.get("state", "open") != "open":
+            continue
+        number, body = issue.get("number"), issue.get("body")
+        anchor = thread_anchor(body) if isinstance(body, str) else None
+        if (anchor and isinstance(anchor.get("project", ""), str) and isinstance(anchor.get("ref"), str)
+                and (anchor.get("project", ""), anchor["ref"]) in changed
+                and type(number) is int and number > 0):
+            out.add(number)
+    return sorted(out)
 
 
 def thread_counts(response):

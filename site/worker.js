@@ -3,6 +3,7 @@ import { reportCsp, frameCsp } from './csp.js';
 import { escapeHtml, sharedPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute } from './threads.js';
+import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
 
 import { readinessRoute, rerunRoute } from './readiness.js';
@@ -680,6 +681,12 @@ export default {
       if (threadRoute && ['GET', 'POST'].includes(request.method)) {
         const [, owner, repo, number, rest = ''] = threadRoute;
         const result = await threadsRoute(request, env, { owner, repo, number: Number(number), rest }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
+      }
+      const issueRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/issues(\/.*)?$/);
+      if (issueRoute && ['GET', 'POST'].includes(request.method)) {
+        const [, owner, repo, rest = ''] = issueRoute;
+        const result = await issuesRoute(request, env, { owner, repo, rest }, { access, gh });
         return response(result.body, { status: result.status, headers: result.headers });
       }
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);

@@ -67,3 +67,8 @@ enabled = false
 
 [libraries]
 enabled = false
+
+[issues]
+# Track findings and threads as anchored GitHub issues; show open issues on later reviews.
+# App: Issues read/write; opted-in workflow caller: issues: read. Independent of threads.
+enabled = false

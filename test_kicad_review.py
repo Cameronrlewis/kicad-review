@@ -2865,3 +2865,58 @@ assert not any("Waived" in line for line in readiness_markdown(d2))
 assert "- ↷ **Waived findings:** 0 (not blocking)" in readiness_markdown(empty)
 assert readiness_markdown(wd)[-2].startswith("- ↷ **Waived findings:**")
 print("ok waived row in readiness")
+
+# Issues: match only open anchored issues, keep the disabled summary identical.
+from kicad_review import touched_issues
+enc_issue = lambda n, ref, project="": {"number": n, "body": enc({"v": 1, "project": project, "ref": ref, "severity": "comment"})}
+idata = {**d2, "projects": [{"name": "A", "dir": "", "status": "modified", "checks": [], "changes": [{"ref": "R16", "kind": "footprint", "action": "modified", "changes": [], "props": {}}]}]}
+issues = [enc_issue(12, "R16"), enc_issue(15, "C3"), {"number": 20, "body": "plain issue"}, enc_issue(21, "R16", "other"), {**enc_issue(22, "R16"), "pull_request": {}}, {**enc_issue(23, "R16"), "state": "closed"}, enc_issue(12, "R16"), {**enc_issue(24, "R16"), "body": 5}, enc_issue("unsafe", "R16")]
+assert touched_issues(issues, idata) == [12]
+assert touched_issues({"message": "denied"}, idata) == []
+assert "Touches parts named in #12, #15." in comment_markdown(idata, [], "", issues=[12, 15])
+assert comment_markdown(idata, [], "") == comment_markdown(idata, [], "", issues=None) == comment_markdown(idata, [], "", issues=[])
+assert DEFAULT_SETTINGS["issues"] == {"enabled": False}
+print("ok touched issues and disabled summary byte identity")
+
+# Issues: opt-out data and summary bytes keep the legacy shape, including an existing issues file.
+from kicad_review import cmd_report, review_links
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        os.makedirs("review")
+        det = {"base": "a" * 40, "head": "b" * 40, "reason": "test", "projects": []}
+        with open("review/detect.json", "w") as fh: _json.dump(det, fh)
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": os.devnull, "GITHUB_STEP_SUMMARY": os.devnull}, clear=True):
+            with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
+                cmd_report(SimpleNamespace())
+            legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+            assert open("review/data.json").read() == _json.dumps(legacy)
+            assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**legacy, "blobs": {}}, separators=(",", ":")) + ";"
+            with open("review/issues.json", "w") as fh: _json.dump(issues, fh)
+            with patch("sys.stdout", new_callable=io.StringIO): cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+            assert open("review/comment.md").read() == comment_markdown(legacy, [], "")
+            assert "issues" not in _json.load(open("review/data.json"))["settings"]
+        os.makedirs("base")
+        for value in ['"yes"', '3', '[]']:
+            with open("base/kicad-review.toml", "w") as fh: fh.write('[issues]\nenabled = ' + value + '\n')
+            try: load_settings(); raise AssertionError("bad issue enabled accepted")
+            except SystemExit as error: assert "issues.enabled must be true or false" in str(error)
+    finally: os.chdir(_cwd)
+print("ok issues disabled report payload, data and comment byte identity")
+
+# Issues: cmd_summary opts in and degrades on invalid JSON.
+_cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t); os.makedirs("review")
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": os.devnull}):
+            for contents, expected in [(_json.dumps(issues), True), ('not json', False), (_json.dumps({"message": "denied"}), False)]:
+                with open("review/data.json", "w") as fh: _json.dump({**idata, "settings": {"issues": {"enabled": True}}}, fh)
+                with open("review/issues.json", "w") as fh: fh.write(contents)
+                with patch("sys.stdout", new_callable=io.StringIO) as stdout: cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
+                assert ("Touches parts named in #12." in open("review/comment.md").read()) == expected
+                if contents == 'not json': assert "::warning::review/issues.json is not JSON" in stdout.getvalue()
+    finally: os.chdir(_cwd)
+print("ok issues cmd_summary opt-in and malformed data")

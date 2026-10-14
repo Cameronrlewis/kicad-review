@@ -1065,6 +1065,57 @@ export const CHECKS = [
     const throwing = { get id() { throw new Error("bad thread"); } };
     acceptThreads([throwing, thread("ok1")]);
     return S.threads.length === 1 && S.threads[0].id === "ok1" || "validation error dropped valid thread";`],
+  ["Issues issue pins reuse re-anchoring", "", `
+    const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
+    const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
+    P.objects = [{ uuid: "u-9", kind: "footprint", ref: "Q7", side: "base", pos: [x, y, 0], box: b, layer: "F.Cu" }];
+    S.threads = []; acceptIssues([{ number: 12, title: "Q7 heat", url: "https://github.com/o/r/issues/12", state: "open",
+      anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", uuid: "u-9", kind: "footprint", ref: "Q7", x, y, side: "head", commit: D.head, severity: "comment" } }]);
+    await goTo(row.id);
+    const pins = [...document.querySelectorAll("#stage .pin-issue")];
+    S.t = "threads"; renderPanel();
+    return pins.length === 1 && pins[0].textContent === "#12" && !!pins[0].closest(".world").querySelector(".stack.base")
+      && document.querySelector("#panel .issues-group")?.textContent.includes("#12 Q7 heat") || JSON.stringify({pins: pins.length});`],
+  ["Issues unlocated findings cannot become issues", "p=1&t=checks", `
+    const vs = (proj().checks || []).flatMap(c => c.violations); if (!vs.length) return "skip";
+    S.threads = []; S.issues = []; S.checks.scope = "all"; renderPanel();
+    const located = vs.find(v => v.pos), unlocated = vs.find(v => !v.pos);
+    return (!located || !!findingAnchor(located)) && (!unlocated || findingAnchor(unlocated) === null)
+      && (!unlocated || !document.querySelector('#panel [data-issue-for="' + unlocated.id + '"]')) || "wrong";`],
+
+  ["Issues forged and opted-out messages are ignored", "", `
+    S.issues = null;
+    const wrong = handleParentMessage({ source: {}, data: { kicadReviewIssues: [] } }, false, true);
+    const off = handleParentMessage({ source: parent, data: { kicadReviewIssues: [] } }, false, false);
+    if (wrong || off || S.issues !== null) return "accepted forbidden message";
+    const ok = handleParentMessage({ source: parent, data: { kicadReviewIssues: [] } }, false, true);
+    return ok && Array.isArray(S.issues) || "rejected opted-in parent";`],
+  ["Issues invalid links and numbers never become cards or pins", "", `
+    const anchor = { v: 1, project: proj().dir, file: "f.kicad_pcb", target: "point", sheet: null, x: 1, y: 1, side: "head", commit: D.head };
+    const issue = { number: 12, title: "<img src=x onerror=alert(1)>", url: "https://github.com/o/r/issues/12", anchor, state: "open" };
+    acceptIssues([{ ...issue, url: "javascript:alert(1)" }, { ...issue, number: -1 }, { ...issue, url: "https://evil.example/o/r/issues/12" }, { ...issue, state: "closed" }, issue]);
+    S.t = "threads"; renderPanel();
+    return S.issues.length === 1 && !document.querySelector("#panel img") && document.querySelector("#panel .issues-group")?.textContent.includes("<img") || "unsafe issues";`],
+  ["Issues actions are opt-in and finding points remain valid", "p=1&t=checks", `
+    const checks = proj().checks || []; if (!checks.some(c => c.violations.length)) return "skip";
+    const vs = allViolations();
+    S.checks.scope = "all"; ISSUES_ON = false; renderPanel(); const before = document.querySelector("#panel").innerHTML;
+    S.issues = null; renderPanel();
+    if (document.querySelector("#panel [data-issue-for]") || document.querySelector("#panel").innerHTML !== before) return "off changed checks";
+    const located = vs.find(v => findingAnchor(v)); if (!located) return "skip";
+    ISSUES_ON = true; renderPanel();
+    const a = findingAnchor(located), button = document.querySelector('#panel [data-issue-for="' + CSS.escape(located.id) + '"]');
+    return !!button && a.target === "point" && a.file.endsWith(".kicad_sch") && a.side === "head" && findingAnchor({ ...located, pos: null }) === null && findingAnchor({ ...located, pos: [NaN, 1] }) === null || "finding action missing";`],
+  ["Issues duplicate findings cannot create another issue", "p=1&t=checks", `
+    const checks = proj().checks || []; if (!checks.some(c => c.violations.length)) return "skip";
+    const v = allViolations().find(v => findingAnchor(v)); if (!v) return "skip";
+    const a = findingAnchor(v); ISSUES_ON = true; S.checks.scope = "all"; S.issues = []; renderPanel();
+    const selector = '#panel [data-issue-for="' + CSS.escape(v.id) + '"]';
+    if (!document.querySelector(selector)) return "initial action missing";
+    acceptIssues([{ number: 88, title: "Already tracked", url: "https://github.com/o/r/issues/88", state: "open", anchor: a }]);
+    if (document.querySelector(selector)) return "duplicate action still shown";
+    acceptIssues([{ number: 88, title: "Other file", url: "https://github.com/o/r/issues/88", state: "open", anchor: { ...a, file: "other.kicad_sch" } }]);
+    return !!document.querySelector(selector) || "different location blocked";`],
   ["Waivers hide waived findings behind a chip and tag them", "p=1&t=checks", `
     const P = proj(), c = (P.checks || []).find(c => c.violations.length); if (!c) return "skip";
     const v = c.violations[0]; v.waiver_key = "w-abcdefabcdef"; v.waived = { reason: "intended <b>x</b>", by: "ann", until: "2026-12-31", ref: null };

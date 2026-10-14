@@ -14,7 +14,7 @@ const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_
   target: 'object', uuid: '0a1b2c3d-0000-4000-8000-000000000001', kind: 'footprint', ref: 'R16', x: 12.3, y: 45.6,
   side: 'head', commit: 'a'.repeat(40), severity: 'blocking' };
 
-const repoOk = () => new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
+const repoOk = () => new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true }, default_branch: 'main' }));
 
 test('history ignores unrelated artifacts from the same run', () => {
   const artifacts = [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 } }, { id: 901, name: 'build.zip', workflow_run: { id: 77 } }];
@@ -1621,7 +1621,7 @@ test('threads: only the trailing anchor marker counts', () => {
   const text = `mine ${spoof}\n\nstill mine`;
   const body = threadBody({ anchor, text, link: 'https://s/r' });
   assert.deepEqual(parseAnchor(body), anchor);
-  assert.equal(threadText(body), text);
+  assert.equal(threadText(body), text.replaceAll('<!-- kicad-review-anchor', '<!-- kicad-review\u200b-anchor'));
   assert.equal(parseAnchor(`${spoof}\ntext after marker`), null);
   assert.equal(threadText(`${spoof}\ntext after marker`), `${spoof}\ntext after marker`);
   assert.deepEqual(parseAnchor(`${body}\n \t`), anchor);
@@ -1917,9 +1917,12 @@ test('review page for a pull request carries the thread composer and config', ()
   assert.match(html, /"link":"\/r\/Cameronrlewis\/repo\/a\/123"/);
 });
 
-test('review page without a pull request has no composer', () => {
+test('review page without a pull request offers issues but no thread route', () => {
   const html = reviewPage({ user: 'u', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: null });
-  assert.doesNotMatch(html, /thread-composer|threads-client|kicadReviewPin|>History<\/a>/);
+  assert.match(html, /"threads":null/);
+  assert.match(html, /"issues":"\/r\/Cameronrlewis\/repo\/issues"/);
+  assert.doesNotMatch(html, /\/pull\/null\/threads/);
+  assert.doesNotMatch(html, />History<\/a>/);
 });
 
 test('wrapper accepts report messages only from its own iframe', () => {
@@ -1927,7 +1930,7 @@ test('wrapper accepts report messages only from its own iframe', () => {
 });
 
 
-test('artifact wrapper discovers PR number and omits thread UI for push runs', async () => {
+test('artifact wrapper discovers PR number and disables thread requests for push runs', async () => {
   const sealed = await signedIn();
   for (const event of ['pull_request', 'push']) {
     const restore = mockFetch(async (url) => {
@@ -1948,7 +1951,7 @@ test('artifact wrapper discovers PR number and omits thread UI for push runs', a
       if (event === 'pull_request') {
         assert.match(html, /<dialog id="thread-composer"/);
         assert.match(html, /"threads":"\/r\/Cameronrlewis\/repo\/pull\/7\/threads"/);
-      } else assert.doesNotMatch(html, /thread-composer|kicadReviewPin/);
+      } else { assert.match(html, /"threads":null/); assert.match(html, /"issues":"\/r\/Cameronrlewis\/repo\/issues"/); }
     } finally { restore(); }
   }
 });
@@ -2073,8 +2076,8 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
 test('missing share secrets keep existing review HTML byte-identical and guest routes inactive', async () => {
   const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
   const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>');
-  // Fixed digest of merged main HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '92c504a940439f8079a772b4563a2ddde31f7952b7781e69a6d5cf488f7512c2');
+  // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
+  assert.equal(createHash('sha256').update(current).digest('hex'), '82be67bc0030511bc6cca251252770b78a742053b98f7e08d74ba0e027824daa');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -2099,7 +2102,7 @@ test('share dialog executes create and revoke JSON POSTs, rejects unsafe URLs an
   const elements = Object.fromEntries(['share-dialog', 'share-status', 'share-result', 'share-open', 'share-form', 'share-days', 'share-revoke'].map(id => [id, { textContent: '', value: id === 'share-days' ? '7' : '' }]));
   let opened = false; elements['share-dialog'].showModal = () => { opened = true; };
   let link = 'https://site.example/s/body.signature'; const posts = [];
-  runInNewContext(scripts[1], { document: { getElementById: id => elements[id] }, location: { origin: 'https://site.example' }, URL, confirm: () => true,
+  runInNewContext(scripts.find(script => script.includes("getElementById('share-dialog')")), { document: { getElementById: id => elements[id] }, location: { origin: 'https://site.example' }, URL, confirm: () => true,
     fetch: async (url, options) => { posts.push([url, options]); return shareJson(url.endsWith('/revoke') ? { generation: 9 } : { url: link, expires: Date.now() + 1000 }); } });
   elements['share-open'].onclick(); assert.equal(opened, true);
   await elements['share-form'].onsubmit({ preventDefault() {} });
@@ -2264,7 +2267,7 @@ test('serialized thread client has no bundler name helpers and notice is in revi
 
 test('thread client contains load failures, clears notice, and guards vanished threads', async () => {
   const listeners = {}, notice = { textContent: '' }, sent = [];
-  const node = () => ({ textContent: '', value: '', replaceChildren() {}, append() {}, querySelectorAll() { return []; }, addEventListener(type, fn) { this[type] = fn; } });
+  const node = () => ({ textContent: '', value: '', closest() { return this; }, replaceChildren() {}, append() {}, querySelectorAll() { return []; }, addEventListener(type, fn) { this[type] = fn; } });
   const dialog = () => {
     const nodes = {};
     return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } };
@@ -2275,19 +2278,24 @@ test('thread client contains load failures, clears notice, and guards vanished t
     CustomEvent: class { constructor(type) { this.type = type; } },
     document: { dispatchEvent(event) { assert.equal(event.type, 'kicad-review-threads-changed'); }, getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
     addEventListener(type, fn) { listeners[type] = fn; },
-    fetch: async (url, options) => { if (options) { posts++; return { ok: true }; } return response(); },
-    FormData: class { get() { return 'text'; } }, location: { hash: '' },
+    fetch: async (url, options) => { if (options) {
+      posts++; assert.equal(JSON.parse(options.body).link, '/review#v=board&x=1&y=2'); return { ok: true };
+    } return response(); },
+    URLSearchParams, FormData: class { get() { return 'text'; } }, location: { hash: '' },
   });
   const message = data => listeners.message({ source: iframe.contentWindow, data });
+  message({ kicadReviewReady: true, threads: true });
   const pin = { kicadReviewPin: { file: 'board.kicad_pcb', x: 1, y: 2 } };
   listeners.message({ source: {}, data: pin }); assert.equal(composer.open, false);
   for (let i = 0; i < 2; i++) {
     composer.querySelector('[name=severity]').value = 'blocking';
+    composer.querySelector('[name=severity]').checked = false;
     composer.querySelector('textarea').value = 'old draft';
     composer.querySelector('[role=status]').textContent = 'old error';
     message(pin);
     assert.equal(composer.open, true);
     assert.equal(composer.querySelector('[name=severity]').value, 'comment');
+    assert.equal(composer.querySelector('[name=severity]').checked, true);
     assert.equal(composer.querySelector('textarea').value, '');
     assert.equal(composer.querySelector('[role=status]').textContent, '');
     composer.close();
@@ -2310,12 +2318,281 @@ test('thread client contains load failures, clears notice, and guards vanished t
   assert.equal(composer.querySelector('[role=status]').textContent, ''); assert.equal(posts, 1);
 });
 
+import { parseIssues } from './issues.js';
+
+test('issues: only anchored, non-PR issues are listed', () => {
+  const body = threadBody({ anchor, text: 'move it', link: 'https://s/r' });
+  assert.deepEqual(parseIssues([{ number: 3, title: 'J1 placement', html_url: 'https://github.com/o/r/issues/3', body },
+    { number: 4, title: 'x', html_url: 'u', body: 'plain' }, { number: 5, title: 'pr', html_url: 'u', body, pull_request: {} }]),
+    [{ number: 3, title: 'J1 placement', url: 'https://github.com/o/r/issues/3', anchor, state: 'open' }]);
+});
+
+test('creating an issue posts the anchored body and replies in its thread', async () => {
+  const sealed = await signedIn();
+  const calls = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+    if (url.endsWith('/issues?state=open&per_page=100')) return new Response('[]');
+    calls.push([url, JSON.parse(options.body || '{}')]);
+    if (url.endsWith('/issues')) return new Response(JSON.stringify({ number: 41, html_url: 'https://github.com/Cameronrlewis/repo/issues/41' }), { status: 201 });
+    return new Response('{}', { status: 201 });
+  });
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/issues', { anchor, title: 'Move R16 on rev C', text: 'Not this PR', link: '/r/Cameronrlewis/repo/a/1#v=board', pull: 7, threadCommentId: 11 }, undefined, sealed);
+    assert.equal(response.status, 201);
+    assert.deepEqual(await response.json(), { number: 41, url: 'https://github.com/Cameronrlewis/repo/issues/41' });
+    assert.equal(calls[0][0], 'https://api.github.com/repos/Cameronrlewis/repo/issues');
+    assert.equal(calls[0][1].title, 'Move R16 on rev C');
+    assert.deepEqual(parseAnchor(calls[0][1].body), anchor);
+    assert.deepEqual(calls[1], ['https://api.github.com/repos/Cameronrlewis/repo/pulls/7/comments/11/replies', { body: 'Tracked in #41.' }]);
+  } finally { restore(); }
+});
+
+test('issues disabled is explained', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? repoOk()
+    : new Response(JSON.stringify({ message: 'Issues are disabled for this repo' }), { status: 410 }));
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/issues', { anchor, title: 't', text: 'x', link: '/r/Cameronrlewis/repo/a/1' }, undefined, sealed);
+    assert.equal(response.status, 410);
+    assert.match((await response.json()).error, /Issues are turned off/);
+  } finally { restore(); }
+});
+
+import { issuesRoute } from './issues.js';
+const issueRequest = body => new Request('https://site.example/r/o/r/issues', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const issueInput = { anchor, title: 'Move it', text: 'later', link: '/r/o/r/a/1', pull: 7, threadCommentId: 11 };
+const issueAccess = async () => ({ s: { token: 'user-token', setCookie: 's=refreshed; Secure' }, repo: { permissions: { push: true } } });
+
+test('issue routes reject unsafe input before posting and retain refreshed cookies', async () => {
+  let calls = 0;
+  for (const body of [null, [], 5, { ...issueInput, title: [] }, { ...issueInput, text: {} }, { ...issueInput, link: '/r/o/r/a/1/../../evil' }, { ...issueInput, link: 'https://evil.example' }, { ...issueInput, pull: -1 }, { ...issueInput, threadCommentId: 1.5 }, { ...issueInput, anchor: { ...anchor, x: null } }]) {
+    const response = await issuesRoute(issueRequest(body), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => { calls++; throw Error('unexpected'); } });
+    assert.equal(response.status, 400);
+    assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+    assert.ok((await response.json()).error);
+  }
+  assert.equal(calls, 0);
+});
+
+test('issue route exits explain permissions, rate limits and upstream failures with cookies', async () => {
+  for (const [status, headers, expected, message] of [[403, {}, 403, /Issues permission.*read and write/], [403, { 'x-ratelimit-remaining': '0' }, 429, /rate limit/], [403, { 'retry-after': '60' }, 429, /rate limit/], [410, {}, 410, /turned off/], [500, {}, 502, /GitHub/]]) {
+    for (const request of [new Request('https://site.example/r/o/r/issues'), issueRequest(issueInput)]) {
+      const response = await issuesRoute(request, {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => new Response('{}', { status, headers }) });
+      assert.equal(response.status, expected);
+      assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+      assert.match((await response.json()).error, message);
+    }
+  }
+  const network = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => { throw Error('secret'); } });
+  assert.equal(network.status, 502);
+  assert.match(network.headers.get('Set-Cookie'), /refreshed/);
+  assert.doesNotMatch(await network.text(), /secret/);
+});
+
+test('issue reply failure reports successful creation rather than inviting duplicate issues', async () => {
+  let calls = 0;
+  const response = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async path => path.includes('?state=open') ? new Response('[]') : ++calls === 1
+    ? new Response(JSON.stringify({ number: 41, html_url: 'https://github.com/o/r/issues/41' }), { status: 201 }) : new Response('{}', { status: 403 }) });
+  assert.equal(response.status, 201);
+  assert.match((await response.json()).warning, /was created.*do not create it again/);
+  assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+});
+
+test('issue parser ignores closed, malformed and unsafe issue URLs', () => {
+  const body = threadBody({ anchor, text: 'x', link: 'https://site.example/r' });
+  assert.deepEqual(parseIssues([null, { number: 1, html_url: 'javascript:alert(1)', body }, { number: 2, html_url: 'https://github.com/o/r/issues/2', body, state: 'closed' }, { number: -1, html_url: 'https://github.com/o/r/issues/1', body }]), []);
+  assert.deepEqual(parseIssues({ message: 'no' }), []);
+});
+
+test('issue routes authenticate before issue API calls and use worker security headers', async () => {
+  const unauthenticated = await call('/r/Cameronrlewis/repo/issues');
+  assert.equal(unauthenticated.status, 401);
+  assert.equal((await unauthenticated.json()).error, 'Sign in again.');
+  assert.ok(unauthenticated.headers.get('Content-Security-Policy'));
+  let calls = 0;
+  const restore = mockFetch(async () => { calls++; throw Error('unexpected'); });
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/repo/issues', issueInput, 'https://evil.example');
+    assert.equal(response.status, 403);
+    assert.equal(calls, 0);
+    const badType = await call('/r/Cameronrlewis/repo/issues', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/jsonp' }, body: '{}' });
+    assert.equal(badType.status, 415);
+  } finally { restore(); }
+});
+
+
+test('threads client loads issues and sends them to the report', () => {
+  const source = threadsClient.toString();
+  assert.match(source, /send\(\{ kicadReviewIssues: /);
+  assert.match(source, /kicadReviewIssueFor/);
+});
+
+
+test('issue client is gated, loads independently, resets composer and strips finding title', async () => {
+  const listeners = {}, sent = [], calls = [], notice = { textContent: '' };
+  const node = () => ({ textContent: '', value: '', hidden: false, disabled: false, required: false, closest() { return this; }, querySelectorAll() { return []; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
+  const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
+  let denied = false, duplicate = false, threadsAllowed = false, values = { title: 'Fix R16', text: 'later' };
+  runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', issues: '/issues', pull: 7, link: '/r/o/r/a/1' })`, {
+    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
+    addEventListener(type, fn) { listeners[type] = fn; },
+    fetch: async (url, options) => {
+      calls.push([url, options]);
+      if (options) return duplicate ? { ok: false, status: 409, json: async () => ({ error: 'Already tracked.', url: 'https://github.com/o/r/issues/41' }) }
+        : { ok: true, json: async () => ({ number: 41, warning: 'Issue created; reply failed.' }) };
+      if (url === '/threads') return threadsAllowed ? { ok: true, json: async () => ({ threads: [{ id: 'T41', anchor, comments: [{ id: 11, author: 'alice', body: 'Move on rev C @alice' }] }] }) } : { ok: false, json: async () => ({ error: 'Threads denied' }) };
+      return denied ? { ok: false, json: async () => ({ error: "Issues need the app's Issues permission." }) } : { ok: true, json: async () => ({ issues: [{ number: 1 }] }) };
+    },
+    URLSearchParams, FormData: class { get(name) { return values[name]; } }, location: { hash: '#p=1&v=sheet%3A%2F&t=checks&x=999&y=888&s=old&l=F_Cu,B_Cu' },
+  });
+  const message = (data, source = iframe.contentWindow) => listeners.message({ source, data });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  message({ kicadReviewReady: true, threads: false, issues: false }); await settle(); assert.equal(calls.length, 0);
+  message({ kicadReviewIssueFor: { ...anchor, title: 'forged' } }, {}); assert.equal(composer.open, false);
+  message({ kicadReviewReady: true, threads: true, issues: false }); await settle(); assert.equal(calls.length, 1); assert.equal(calls[0][0], '/threads');
+  calls.length = 0;
+  message({ kicadReviewReady: true, threads: true, issues: true }); await settle();
+  assert.deepEqual(calls.map(c => c[0]), ['/threads', '/issues']);
+  assert.equal(sent.at(-1).kicadReviewIssues[0].number, 1); assert.equal(notice.textContent, 'Threads denied');
+  composer.querySelector('textarea').value = 'stale thread draft';
+  message({ kicadReviewIssueFor: { ...anchor, title: 'Fix R16' } });
+  assert.equal(composer.open, true); assert.equal(composer.querySelector('h2').textContent, 'New issue');
+  assert.equal(composer.querySelector('textarea').value, ''); assert.equal(composer.querySelector('textarea').required, false);
+  const form = composer.querySelector('form'); form.querySelector = () => node();
+  await form.submit({ preventDefault() {}, target: form });
+  const posted = JSON.parse(calls.find(c => c[1])[1].body);
+  assert.equal(posted.anchor.title, undefined); assert.equal(posted.anchor.severity, 'comment'); assert.equal(posted.title, 'Fix R16');
+  const linkState = link => Object.fromEntries(new URLSearchParams(link.split('#')[1]));
+  assert.deepEqual(linkState(posted.link), { p: '1', t: 'checks', v: 'board', x: String(anchor.x), y: String(anchor.y) });
+  assert.equal(posted.pull, 7);
+  assert.equal(composer.open, false); assert.equal(notice.textContent, 'Issue created; reply failed.');
+  message({ kicadReviewPin: anchor });
+  assert.equal(composer.querySelector('h2').textContent, 'New thread'); assert.equal(composer.querySelector('[name=title]').hidden, true);
+  assert.equal(composer.querySelector('textarea').value, ''); assert.equal(composer.querySelector('textarea').required, true);
+  denied = true;
+  message({ kicadReviewReady: true, threads: false, issues: true }); await settle();
+  assert.match(notice.textContent, /Issues permission/); assert.equal(sent.at(-1).kicadReviewIssues.length, 0);
+  denied = false; threadsAllowed = true;
+  message({ kicadReviewReady: true, threads: true, issues: true }); await settle();
+  message({ kicadReviewOpenThread: 'T41' }); assert.equal(view.open, true);
+  composer.querySelector('textarea').value = 'old finding draft';
+  await view.querySelector('form').submit({ preventDefault() {}, target: {}, submitter: { dataset: { act: 'issue' } } });
+  assert.equal(view.open, false); assert.equal(composer.open, true);
+  assert.equal(composer.querySelector('[name=title]').value, 'R16: Move on rev C @\u200balice');
+  assert.equal(composer.querySelector('textarea').value, '');
+  await form.submit({ preventDefault() {}, target: form });
+  const threadIssue = JSON.parse(calls.filter(c => c[1]).at(-1)[1].body);
+  assert.equal(threadIssue.threadCommentId, 11); assert.equal(threadIssue.pull, 7);
+  assert.deepEqual(linkState(threadIssue.link), { p: '1', t: 'checks', v: 'board', x: String(anchor.x), y: String(anchor.y) });
+  const schematic = { ...anchor, file: 'Thermal_Camera/sub.kicad_sch', sheet: '/sub/', x: 12.5, y: 42 };
+  message({ kicadReviewIssueFor: { ...schematic, title: 'Fix sub-sheet' } });
+  await form.submit({ preventDefault() {}, target: form });
+  assert.deepEqual(linkState(JSON.parse(calls.filter(c => c[1]).at(-1)[1].body).link), { p: '1', t: 'checks', v: 'sheet:/sub/', x: '12.5', y: '42' });
+  assert.equal(threadIssue.anchor.uuid, anchor.uuid); assert.equal(threadIssue.anchor.severity, 'comment');
+  duplicate = true; calls.length = 0;
+  message({ kicadReviewIssueFor: { ...anchor, title: 'Fix R16' } });
+  await form.submit({ preventDefault() {}, target: form });
+  assert.equal(composer.open, false); assert.equal(notice.textContent, 'Already tracked. https://github.com/o/r/issues/41');
+  assert.deepEqual(calls.map(c => [c[0], !!c[1]]), [['/issues', true], ['/threads', false], ['/issues', false]]);
+});
+
+
+test('issue access failures and malformed requests remain JSON with session cookies', async () => {
+  const denied = await issuesRoute(new Request('https://site.example/r/o/r/issues'), {}, { owner: 'o', repo: 'r', rest: '' }, {
+    access: async () => new Response(null, { status: 302, headers: { 'Set-Cookie': 's=refreshed; Secure' } }), gh: async () => { throw Error('must not call GitHub'); } });
+  assert.equal(denied.status, 401); assert.match(denied.headers.get('Set-Cookie'), /refreshed/); assert.equal((await denied.json()).error, 'Sign in again.');
+  const request = new Request('https://site.example/r/o/r/issues', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json' }, body: '{' });
+  const bad = await issuesRoute(request, {}, { owner: 'o', repo: 'r', rest: '' }, { access: issueAccess, gh: async () => { throw Error('must not call GitHub'); } });
+  assert.equal(bad.status, 400); assert.match(bad.headers.get('Set-Cookie'), /refreshed/); assert.equal((await bad.json()).error, 'Send JSON');
+  const missing = await issuesRoute(new Request('https://site.example/r/o/r/issues/unknown'), {}, { owner: 'o', repo: 'r', rest: '/unknown' }, { access: issueAccess, gh: async () => { throw Error('must not call GitHub'); } });
+  assert.equal(missing.status, 404); assert.match(missing.headers.get('Set-Cookie'), /refreshed/);
+});
+
+
+test('issue client for a non-PR review never loads threads even when the report enables them', async () => {
+  const listeners = {}, calls = [], sent = [];
+  const form = { addEventListener() {} }, button = { addEventListener() {} }, notice = {};
+  const dialog = { querySelector(s) { return s === 'form' ? form : button; } };
+  const iframe = { contentWindow: { postMessage(data) { sent.push(data); } } };
+  runInNewContext(`(${threadsClient.toString()})({ threads: null, issues: '/issues', pull: null, link: '/r/o/r/a/1' })`, {
+    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': dialog, 'thread-view': dialog, 'thread-notice': notice }[id]; } },
+    addEventListener(type, fn) { listeners[type] = fn; }, fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ issues: [] }) }; },
+  });
+  listeners.message({ source: iframe.contentWindow, data: { kicadReviewReady: true, threads: true, issues: false } });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(calls.length, 0);
+  listeners.message({ source: iframe.contentWindow, data: { kicadReviewReady: true, threads: true, issues: true } });
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(calls, ['/issues']); assert.equal(sent[0].kicadReviewIssues.length, 0); assert.equal(notice.hidden, true);
+});
+
+
+test('final fixes: issue creation requires repository write access before issue API calls', async () => {
+  let calls = 0;
+  const response = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, {
+    access: async () => ({ s: { token: 'read-token', setCookie: 's=refreshed' }, repo: { permissions: { pull: true, push: false } } }),
+    gh: async () => { calls++; return new Response('{}', { status: 201 }); },
+  });
+  assert.equal(response.status, 403); assert.equal((await response.json()).error, 'You need write access to create issues.');
+  assert.equal(calls, 0); assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+});
+
+test('final fixes: existing open anchored issue rejects duplicate creation with its URL', async () => {
+  const calls = [], existing = { number: 41, title: 'Tracked', html_url: 'https://github.com/o/r/issues/41', state: 'open', body: threadBody({ anchor, text: 'existing', link: 'https://site.example/r/o/r/a/1' }) };
+  const response = await issuesRoute(issueRequest(issueInput), {}, { owner: 'o', repo: 'r', rest: '' }, {
+    access: async () => ({ s: { token: 'user-token', setCookie: 's=refreshed' }, repo: { permissions: { push: true } } }),
+    gh: async (path, token, options) => { calls.push([path, options?.method || 'GET']); return options ? new Response('{}', { status: 201 }) : new Response(JSON.stringify([existing])); },
+  });
+  assert.equal(response.status, 409); const result = await response.json();
+  assert.match(result.error, /already/); assert.equal(result.url, existing.html_url);
+  assert.deepEqual(calls, [['/repos/o/r/issues?state=open&per_page=100', 'GET']]); assert.match(response.headers.get('Set-Cookie'), /refreshed/);
+});
+
+test('final fixes: user text cannot introduce additional anchor markers', () => {
+  const fake = { ...anchor, ref: 'FAKE' }, text = `quoted <!-- kicad-review-anchor ${encodeAnchor(fake)} -->`;
+  const body = threadBody({ anchor, text, link: 'https://site.example/r/o/r/a/1' });
+  assert.equal((body.match(/<!-- kicad-review-anchor/g) || []).length, 1);
+  assert.deepEqual(parseAnchor(body), anchor); assert.equal(parseAnchor(body + '\nnot a trailing marker'), null);
+});
+
+test('final fixes: issue links reject unsafe fragment characters', async () => {
+  for (const fragment of ['#x=<script>', '#x=a,b', '#x=?', '#x= ', '#x=(a)', '#x=\"']) {
+    let calls = 0;
+    const response = await issuesRoute(issueRequest({ ...issueInput, link: '/r/o/r/a/1' + fragment }), {}, { owner: 'o', repo: 'r', rest: '' }, {
+      access: async () => ({ s: { token: 'user-token' }, repo: { permissions: { push: true } } }),
+      gh: async () => { calls++; return new Response('[]'); },
+    });
+    assert.equal(response.status, 400, fragment); assert.equal(calls, 0);
+  }
+});
+
+test('final fixes: summary documentation limits touches line to pull-request runs', () => {
+  assert.match(readFileSync('README.md', 'utf8'), /On pull-request runs only/);
+});
+
+
+test('final fixes: thread with a tracked reply hides and refuses Create issue', async () => {
+  const listeners = {}, node = () => ({ textContent: '', value: '', closest() { return this; }, querySelectorAll() { return []; }, replaceChildren() {}, append() {}, addEventListener(type, fn) { this[type] = fn; } });
+  const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
+  const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage() {} } };
+  runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', issues: '/issues' })`, {
+    document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': node() }[id]; }, createElement: node },
+    addEventListener(type, fn) { listeners[type] = fn; }, fetch: async url => ({ ok: true, json: async () => url === '/threads'
+      ? { threads: [{ id: 'T', anchor, comments: [{ id: 11, body: 'original' }, { id: 12, body: 'Tracked in #41.' }] }] } : { issues: [] } }),
+  });
+  const message = data => listeners.message({ source: iframe.contentWindow, data });
+  message({ kicadReviewReady: true, threads: true, issues: true }); await new Promise(resolve => setImmediate(resolve));
+  message({ kicadReviewOpenThread: 'T' }); assert.equal(view.querySelector('[data-act=issue]').hidden, true);
+  await view.querySelector('form').submit({ preventDefault() {}, target: {}, submitter: { dataset: { act: 'issue' } } });
+  assert.equal(composer.open, false);
+});
+
 test('report readiness announces the gate only with framed enabled threads', () => {
   const source = readFileSync('ui/review.js', 'utf8');
   const declarations = source.slice(source.indexOf('let THREADS_ON'), source.indexOf('const validThread'));
   for (const framed of [false, true]) for (const enabled of [false, true]) for (const block_merge of [false, true]) {
     const window = {}, parent = framed ? {} : window;
-    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, D: { settings: { threads: { enabled, block_merge } } } });
+    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D: { settings: { threads: { enabled, block_merge } } } });
     assert.equal(message.kicadReviewReady, true);
     assert.equal(message.threads, framed && enabled);
     assert.equal(message.blockMerge, framed && enabled && block_merge);
@@ -2328,12 +2605,13 @@ test('thread changes rerun only an announced blocking gate and expose rerun fail
   for (const gate of [undefined, false, true]) for (const severity of ['comment', 'blocking']) {
     const listeners = {}, calls = [], notice = { textContent: '', append(link) { this.link = link; } };
     let changes = 0;
-    const node = () => ({ textContent: '', buttons: [{ disabled: false }, { disabled: false }], querySelectorAll() { return this.buttons; }, replaceChildren() {}, append() {}, reset() {}, addEventListener(type, fn) { this[type] = fn; } });
+    const node = () => ({ textContent: '', closest() { return this; }, buttons: [{ disabled: false }, { disabled: false }], querySelectorAll() { return this.buttons; }, replaceChildren() {}, append() {}, reset() {}, addEventListener(type, fn) { this[type] = fn; } });
     const dialog = () => { const nodes = {}; return { open: false, querySelector(s) { return nodes[s] ||= node(); }, showModal() { this.open = true; }, close() { this.open = false; } }; };
     const composer = dialog(), view = dialog(), iframe = { contentWindow: { postMessage() {} } };
     const thread = { id: 'thread', resolved: false, anchor: { severity }, comments: [{ id: 'comment' }] };
     let failure = null, mutationFails = false;
     runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', rerun: '/rerun', run: '/run/', link: '/review' })`, {
+      URLSearchParams,
       CustomEvent: class { constructor(type) { this.type = type; } },
     document: { dispatchEvent(event) { changes++; assert.equal(event.type, 'kicad-review-threads-changed'); }, getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
       addEventListener(type, fn) { listeners[type] = fn; },
