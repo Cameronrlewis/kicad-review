@@ -863,17 +863,21 @@ def digikey_pick(resp, mpn, manufacturer):
     p = exact[0]
     var = (p.get("ProductVariations") or [{}])[0]
     status = "discontinued" if p.get("Discontinued") or p.get("EndOfLife") else "out_of_stock" if not p.get("QuantityAvailable") else "ok"
-    return {"status": status, "mpn": mpn, "manufacturer": (p.get("Manufacturer") or {}).get("Name"),
+    return {"status": status, "mpn": mpn,
             "quantity": p.get("QuantityAvailable"), "unit_price": p.get("UnitPrice"),
             "breaks": [[b.get("BreakQuantity"), round(b["UnitPrice"], 12) if isinstance(b.get("UnitPrice"), (int, float)) else None] for b in var.get("StandardPricing") or []][:6],
-            "dk_part": var.get("DigiKeyProductNumber"), "product_status": (p.get("ProductStatus") or {}).get("Status"),
+            "product_status": (p.get("ProductStatus") or {}).get("Status"),
             "url": digikey_product_url(p.get("ProductUrl"))}
+
+
+def supplier_info(currency, fetched_at=None, error=None):
+    return {"name": "DigiKey", "fetched_at": fetched_at, "currency": currency, "calls": 0, "error": error, "skipped": None}
 
 
 def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, sleep=time.sleep,
                    now=lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")):
     cfg = settings["digikey"]
-    sup = {"name": "DigiKey", "fetched_at": now(), "currency": cfg["currency"], "calls": 0, "error": None, "skipped": None}
+    sup = supplier_info(cfg["currency"], now())
     results, stop = {}, None
     failures, consecutive, last_error, refreshed = 0, 0, None, False
     locale = {"site": cfg["site"], "currency": cfg["currency"]}
@@ -882,6 +886,24 @@ def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, slee
         token = digikey_token(creds[0], creds[1], urlopen)
     except DigiKeyError as e:
         stop = f"sign-in failed: {e}"
+    def call(mpn):
+        nonlocal token, refreshed
+        sup["calls"] += 1
+        try:
+            return digikey_search(token, creds[0], mpn, locale, urlopen)
+        except DigiKeyAuth as e:
+            if refreshed:
+                raise DigiKeyStop(str(e))
+        refreshed = True
+        sleep(0.6)
+        sup["calls"] += 1
+        try:
+            token = digikey_token(creds[0], creds[1], urlopen)
+        except DigiKeyError as e:
+            raise DigiKeyStop(f"sign-in failed: {e}")
+        sleep(0.6)
+        return call(mpn)
+
     for i, k in enumerate(sorted(wanted)):
         if stop or i >= cfg["max_lookups"]:
             results[k] = {"status": "unavailable" if stop else "run_limit", "mpn": wanted[k]["mpn"]}
@@ -889,25 +911,7 @@ def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, slee
         if i:
             sleep(0.6)  # stays under DigiKey's 120/min burst limit
         try:
-            try:
-                sup["calls"] += 1
-                response = digikey_search(token, creds[0], wanted[k]["mpn"], locale, urlopen)
-            except DigiKeyAuth as e:
-                if refreshed:
-                    raise DigiKeyStop(str(e))
-                refreshed = True
-                sleep(0.6)
-                try:
-                    sup["calls"] += 1
-                    token = digikey_token(creds[0], creds[1], urlopen)
-                except DigiKeyError as refresh_error:
-                    raise DigiKeyStop(f"sign-in failed: {refresh_error}")
-                sleep(0.6)
-                try:
-                    sup["calls"] += 1
-                    response = digikey_search(token, creds[0], wanted[k]["mpn"], locale, urlopen)
-                except DigiKeyAuth as retry_error:
-                    raise DigiKeyStop(str(retry_error))
+            response = call(wanted[k]["mpn"])
             try:
                 results[k] = digikey_pick(response, wanted[k]["mpn"], wanted[k]["manufacturer"])
             except (AttributeError, TypeError, KeyError, IndexError, ValueError):
@@ -1195,12 +1199,11 @@ def inline_page(data_js):
     page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
-    script = read("review.js")
     prefix = ""
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
-    page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{script}</script>")
+    page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
     if re.search(r'''(?:href|src)=(["'])(?:tokens\.css|review\.css|sample/review-data\.js|review\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
@@ -1230,8 +1233,7 @@ def cmd_lookup(args):
     for key, hints in manufacturers.items():
         wanted[key]["manufacturer"] = next(iter(hints)) if len(hints) == 1 else None
     cfg = settings["digikey"]
-    supplier = {"name": "DigiKey", "fetched_at": None, "currency": cfg["currency"], "calls": 0,
-                "error": None, "skipped": None}
+    supplier = supplier_info(cfg["currency"])
     creds = (os.environ.get("DIGIKEY_CLIENT_ID", ""), os.environ.get("DIGIKEY_CLIENT_SECRET", ""))
     output = {"supplier": supplier, "results": {}}
     if not all(creds):
@@ -1260,7 +1262,9 @@ def merge_supplier(projects, lookup):
             raw = line["mpn"] or ""
             mpn = mpn_for_lookup(raw)
             if not mpn:
-                counts["no_mpn" if digikey_placeholder(" ".join(raw.split()).lower()) else "invalid_mpn"] += 1
+                reason = "no_mpn" if digikey_placeholder(" ".join(raw.split())) else "invalid_mpn"
+                counts[reason] += 1
+                line["supplier"] = {"status": reason}
                 continue
             result = lookup["results"].get(mpn.upper())
             if result:
@@ -1271,6 +1275,10 @@ def merge_supplier(projects, lookup):
                     looked_up.add(mpn.upper())
             elif not lookup["supplier"].get("skipped"):
                 line["supplier"] = {"status": "unavailable", "mpn": mpn}
+        for change in parts.get("changes", []):
+            if change["action"] == "removed" and change.get("before"):
+                line = change["before"]
+                line["supplier"] = {"status": "no_mpn" if digikey_placeholder(" ".join((line.get("mpn") or "").split())) else "invalid_mpn"}
         parts["supplier"] = {**lookup["supplier"], "looked_up": len(looked_up), "not_looked_up": counts}
 
 
@@ -1298,8 +1306,7 @@ def cmd_report(args):
             if not isinstance(lookup.get("supplier"), dict) or not isinstance(lookup.get("results"), dict):
                 raise ValueError("invalid supplier file")
         except (OSError, ValueError, AttributeError):
-            lookup = {"supplier": {"name": "DigiKey", "fetched_at": None, "currency": settings["digikey"]["currency"],
-                                   "calls": 0, "error": "lookup unavailable (lookup step did not finish)", "skipped": None}, "results": {}}
+            lookup = {"supplier": supplier_info(settings["digikey"]["currency"], error="lookup unavailable (lookup step did not finish)"), "results": {}}
         merge_supplier(data["projects"], lookup)
     assign_ids(data["projects"])
     data["blobs"] = blobs
@@ -1536,8 +1543,8 @@ def parts_markdown(data):
         if s:
             if not s.get("skipped"):
                 statuses = [(l.get("supplier") or {}).get("status") for l in parts["lines"]]
-                summary = [("ok", "in stock"), ("out_of_stock", "out of stock"), ("not_found", "not found at DigiKey"),
-                           ("ambiguous", "several DigiKey matches"), ("discontinued", "discontinued"), ("unavailable", "unavailable")]
+                summary = [(status, {"ok": "in stock", "unavailable": "unavailable"}.get(status, PROBLEM_TEXT.get(status)))
+                           for status in ("ok", "out_of_stock", "not_found", "ambiguous", "discontinued", "unavailable")]
                 counts = [f"{statuses.count(status)} {label}" for status, label in summary if status in statuses]
                 out.append(f"{s.get('looked_up', 0)} looked up" + (": " + ", ".join(counts) if counts else "") + ".")
             if s.get("error"):

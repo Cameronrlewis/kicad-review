@@ -499,13 +499,13 @@ function renderParts() {
       if (parts.supplier?.skipped) stock = "not looked up";
       else if (supplier) {
         stock = supplier.status === "ok" ? `${age.stale ? "" : "✔ "}${supplier.quantity ?? "—"}${age.stale ? " (stale)" : " in stock"}`
-          : ({out_of_stock:"out of stock", not_found:"not found", ambiguous:"several matches", discontinued:"discontinued", unavailable:"unavailable", run_limit:"not looked up: run limit"})[supplier.status] || "unavailable";
+          : ({out_of_stock:"out of stock", not_found:"not found", ambiguous:"several matches", discontinued:"discontinued", unavailable:"unavailable", run_limit:"not looked up: run limit", no_mpn:"not looked up: no MPN", invalid_mpn:"not looked up: invalid MPN"})[supplier.status] || "unavailable";
         const price = supplier.breaks?.find(b => b[0] === 1)?.[1] ?? supplier.unit_price;
         if (["ok", "out_of_stock", "discontinued"].includes(supplier.status) && Number.isFinite(price)) {
           try { stock += ` ${new Intl.NumberFormat("en-US", {style:"currency", currency:parts.supplier.currency || "USD"}).format(price)}`; }
           catch { stock += ` ${price.toFixed(2)} ${parts.supplier.currency || "USD"}`; }
         }
-      } else if (parts.supplier) stock = /^(?:|~|tbd|\?|x|todo|na|n\/a|-)$/i.test(String(l.mpn || "").trim()) ? "not looked up: no MPN" : "not looked up: invalid MPN";
+      } else if (parts.supplier) stock = "not looked up: invalid MPN";
       const product = !parts.supplier?.skipped && supplier ? digiKeyUrl(supplier.url) : null;
       const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
       const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
