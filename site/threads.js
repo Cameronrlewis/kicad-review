@@ -59,8 +59,7 @@ export function parseThreads(graphql) {
 
 // ponytail: first 100 threads and 50 comments each; paginate if a review ever needs more.
 export const LIST_QUERY = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewThreads(first:100){nodes{id isResolved resolvedBy{login} comments(first:50){nodes{databaseId body author{login} createdAt url}}}}}}}';
-export const RESOLVE_MUTATION = 'mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}';
-export const UNRESOLVE_MUTATION = 'mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}';
+export const threadMutation = (op) => `mutation($id:ID!){${op}ReviewThread(input:{threadId:$id}){thread{isResolved}}}`;
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 const permissionHint = "Threads need the app's Pull requests and Contents permissions (read and write). Ask the repository owner to accept them.";
@@ -91,7 +90,8 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
       const denied = refused(response); if (denied) return denied;
       if (!response.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
       const data = await response.json();
-      if (data.errors?.length) return json({ error: data.errors.some(error => error.type === 'FORBIDDEN') ? permissionHint : 'GitHub did not answer. Try again.' }, data.errors.some(error => error.type === 'FORBIDDEN') ? 403 : 502);
+      const forbidden = data.errors?.some(error => error.type === 'FORBIDDEN');
+      if (data.errors?.length) return json({ error: forbidden ? permissionHint : 'GitHub did not answer. Try again.' }, forbidden ? 403 : 502);
       return data;
     };
     let body = {};
@@ -123,7 +123,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     }
     const resolve = /^\/([A-Za-z0-9_=-]{1,100})\/(resolve|unresolve)$/.exec(rest);
     if (resolve) {
-      const response = await graphql(resolve[2] === 'resolve' ? RESOLVE_MUTATION : UNRESOLVE_MUTATION, { id: resolve[1] });
+      const response = await graphql(threadMutation(resolve[2]), { id: resolve[1] });
       return response instanceof Response ? response : json({ ok: true });
     }
     return json({ error: 'Not found' }, 404);
