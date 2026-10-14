@@ -139,11 +139,17 @@ def detect(base, head):
 
 def cmd_detect(args):
     env = dict(os.environ)
-    if env.get("TAG") and not load_settings(("",))["release"]["review"]:
-        with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
-            fh.write("base=\nhead=\nchanged=false\n")
-        print("Tag review is off ([release] review = false); only fabrication outputs are made.")
-        return
+    if env.get("TAG"):
+        try:
+            review = load_settings(("",))["release"]["review"]
+        except (SystemExit, tomllib.TOMLDecodeError, OSError):
+            print("::warning::Cannot read tag review settings; tag review stays off.")
+            review = False
+        if not review:
+            with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+                fh.write("base=\nhead=\nchanged=false\n")
+            print("Tag review is off ([release] review = false); only fabrication outputs are made.")
+            return
     base, head, reason = resolve_revisions(env)
     projects = detect(base, head)
     ids = [project_id(p["dir"]) for p in projects]
@@ -1345,9 +1351,9 @@ def release_notes(data, site, artifact_id):
 def merge_notes(existing, section):
     """Replace only the marked section, preserving surrounding manual notes."""
     existing = existing or ""
-    start = existing.find(NOTES_START)
-    end = existing.find(NOTES_END, start + len(NOTES_START)) if start >= 0 else -1
-    if end >= 0:
+    end = existing.find(NOTES_END)
+    start = existing.rfind(NOTES_START, 0, end) if end >= 0 else -1
+    if 0 <= start < end:
         return existing[:start] + section.rstrip("\n") + existing[end + len(NOTES_END):]
     return existing.rstrip("\n") + ("\n\n" if existing.strip() else "") + section
 

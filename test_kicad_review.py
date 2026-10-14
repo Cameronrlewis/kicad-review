@@ -1150,3 +1150,53 @@ assert "continue-on-error: true" in notes_step and "steps.report.outcome == 'suc
 assert '--existing review/release-body.md --artifact-id "$ARTIFACT_ID"' in notes_step
 print("ok tag workflow wiring")
 
+# Final review: an orphan marker must never consume subsequent manual notes.
+orphan = "<!-- kicad-review-release -->\nhuman text that must survive\n"
+merged = merge_notes(orphan, sec)
+merged_again = merge_notes(merged, sec.replace("2 warnings", "3 warnings"))
+assert merged_again.startswith(orphan) and "human text that must survive" in merged_again
+assert merge_notes(merged_again, sec.replace("2 warnings", "3 warnings")) == merged_again
+print("ok orphaned release marker preserves human notes")
+
+# Invalid tag settings remain off without invoking revision detection.
+for settings_error in (SystemExit("invalid settings"), kicad_review.tomllib.TOMLDecodeError("bad TOML")):
+    output = io.StringIO()
+    class KeepOpen(io.StringIO):
+        def close(self):
+            pass
+    written = KeepOpen()
+    with patch.dict(os.environ, {"TAG": "v1"}, clear=True), patch("kicad_review.load_settings", side_effect=settings_error), patch("kicad_review.open", return_value=written), patch("sys.stdout", new=output), patch("kicad_review.resolve_revisions", side_effect=AssertionError("must stay off")):
+        kicad_review.cmd_detect(None)
+    assert written.getvalue() == "base=\nhead=\nchanged=false\n"
+    assert "::warning::" in output.getvalue()
+print("ok invalid tagged settings keep detection off")
+
+checkout_tools = wf[wf.index("- name: Check out review tools"):wf.index("- name: Find changed KiCad projects")]
+assert "id: tools" in checkout_tools
+assert "steps.tools.outcome == 'success'" in fab_step
+assert "steps.report.outcome" not in fab_step, "review failures must not suppress fabrication"
+print("ok fabrication requires successful tool checkout")
+
+# Execute the notes shell with a local gh stub, proving a changed body is not overwritten.
+import textwrap
+script = textwrap.dedent(notes_step.split("run: |\n", 1)[1])
+tool_source = pathlib.Path(kicad_review.__file__).read_text()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        write(t, {"review/data.json": json.dumps(rdata), "tools/kicad_review.py": tool_source,
+                  "bin/gh": "#!" + sys.executable + "\nimport os, pathlib, sys\nif sys.argv[2] == 'view':\n p = pathlib.Path('view-count'); n = int(p.read_text()) if p.exists() else 0; p.write_text(str(n + 1)); print('changed notes' if n and os.environ['BODY_CHANGED'] == '1' else 'human notes')\nelif sys.argv[2] == 'edit':\n pathlib.Path('edited').write_text('yes')\n"})
+        pathlib.Path("bin/gh").chmod(0o755)
+        for changed in (False, True):
+            pathlib.Path("view-count").unlink(missing_ok=True)
+            pathlib.Path("edited").unlink(missing_ok=True)
+            result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True, env={**os.environ, "PATH": f"{t}/bin:" + os.environ["PATH"], "BODY_CHANGED": str(int(changed)), "GITHUB_REF_NAME": "v1", "GITHUB_REPOSITORY": "o/r", "ARTIFACT_ID": "77"})
+            assert result.returncode == 0, result.stderr
+            assert pathlib.Path("edited").exists() is not changed
+            assert int(pathlib.Path("view-count").read_text()) == 2
+            if changed:
+                assert "::warning::" in result.stdout
+    finally:
+        os.chdir(here)
+print("ok release notes re-read prevents stale body edits")
+

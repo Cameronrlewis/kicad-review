@@ -1246,6 +1246,15 @@ test('milestone route reads PRs only on opt-in, after access, preserving refresh
   } finally { restore(); }
 });
 
+test('both view chip hrefs escape the filter at interpolation', () => {
+  const source = readFileSync('site/pages.js', 'utf8');
+  assert.equal(source.split('${e(filter)}').length - 1, 2);
+  const page = reviewsPage({ user: 'octocat', owner: 'o', repo: 'r', items: [], view: 'milestones', groups: [], filter: '\" onclick=\"evil&' });
+  assert.doesNotMatch(page, /href="[^"]*" onclick=/);
+  assert.doesNotMatch(page, /&amp;quot;/, 'do not double escape the helper output');
+  assert.match(page, /filter=&quot; onclick=&quot;evil&amp;/);
+});
+
 test('milestone permission or network failure keeps the review list accessible', async () => {
   const sealed = await signedIn();
   for (const fail of [() => new Response('denied', { status: 403 }), () => { throw new Error('network'); }]) {

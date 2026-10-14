@@ -44,7 +44,7 @@ export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'a
   const chips = [['all', 'All'], ['passing', 'Passing'], ['failing', 'Failing'], ['older', 'Older']]
     .map(([value, label]) => `<a class="filter-chip" href="${path}?filter=${value}${view === 'milestones' ? '&amp;view=milestones' : ''}"${filter === value ? ' aria-current="page"' : ''}>${label} ${counts[value] || 0}</a>`).join('')
     + ` <a class="filter-chip" href="${path}?view=milestones&amp;filter=${e(filter)}"${view === 'milestones' ? ' aria-current="page"' : ''}>Milestones</a>`
-    + (view === 'milestones' ? ` ${link(`${path}?filter=${filter}`, 'List', 'filter-chip')}` : '');
+    + (view === 'milestones' ? ` <a class="filter-chip" href="${path}?filter=${e(filter)}">List</a>` : '');
   const card = (item) => {
     const branch = item.manual ? 'Manual comparison' : item.branch;
     const label = item.label ? `<span class="muted">${e(item.label)}</span>` : '';
