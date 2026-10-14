@@ -34,6 +34,9 @@ a.card:hover { border-color: var(--accent); }
 .filter-row { display: flex; gap: var(--space-2); margin: 0 0 var(--space-3); }
 .filter-chip { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-1) var(--space-2); color: var(--muted); text-decoration: none; }
 .filter-chip[aria-current="page"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.history { list-style: none; padding: 0; }
+.hist { padding: var(--space-2) 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.hist-kind { display: inline-block; min-width: 5em; font-weight: 600; text-transform: capitalize; }
 .review-list { display: grid; gap: var(--space-3); }
 .review-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .8fr) auto; gap: var(--space-4); align-items: start; padding: var(--space-4); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
 .review-card h2 { margin: 0; font-size: 15px; font-weight: 600; }.review-card p { margin: var(--space-1) 0 0; }
