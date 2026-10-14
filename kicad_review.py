@@ -671,7 +671,7 @@ def library_items(proj_dir):
                             number = val(p, "number")
                             if number is not None:
                                 pins[number] = {"type": p[1], "name": val(p, "name"), "geometry": repr([find(p, "at"), find(p, "length")])}
-                    items[(lib, s[1], "symbol")] = {"pins": pins, "hash": hashlib.sha1(repr(_strip(s)).encode()).hexdigest(), "file": posixpath.normpath(posixpath.join(rel, f))}
+                    items[(lib, s[1].rsplit(":", 1)[-1], "symbol")] = {"pins": pins, "hash": hashlib.sha1(repr(_strip(s)).encode()).hexdigest(), "file": posixpath.normpath(posixpath.join(rel, f))}
             elif f.endswith(".kicad_mod") and root.endswith(".pretty") and not is_junk(path):
                 fp = parse_sexpr(open(path, encoding="utf-8").read())
                 pads = {}
@@ -679,7 +679,7 @@ def library_items(proj_dir):
                     a, sz = at(p), find(p, "size")
                     summary = f"{p[2]} {p[3]} {fmt_at(a[:2]) if a else '?'} {num(sz[1]) if sz else '?'}×{num(sz[2]) if sz and len(sz) > 2 else '?'}"
                     pads[p[1]] = pads[p[1]] + '; ' + summary if p[1] in pads else summary
-                items[(posixpath.basename(root)[: -len(".pretty")], fp[1], "footprint")] = {
+                items[(posixpath.basename(root)[: -len(".pretty")], f[:-len(".kicad_mod")], "footprint")] = {
                     "pins": pads, "hash": hashlib.sha1(repr(_strip(fp)).encode()).hexdigest(), "file": posixpath.normpath(posixpath.join(rel, f))}
     return items
 
@@ -718,12 +718,26 @@ def lib_slug(c):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", f"{c['kind']}-{c['lib']}-{c['item']}")[:100] + "-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
-def library_report(changes, objects, out_dir, blobs):
+def library_report(changes, objects, out_dir, blobs, *, local_items=None):
     """Changed library items for the report: drawings, who uses them, and warnings for edits that break placed parts."""
+    local_items = set(local_items if local_items is not None else ((c["lib"], c["item"], c["kind"]) for c in changes))
+    libraries = {(kind, lib) for lib, item, kind in local_items}
+    by_item = {}
+    for lib, item, kind in local_items:
+        by_item.setdefault((kind, item), set()).add(lib)
     out = []
     for c in changes:
         key = f"{c['lib']}:{c['item']}"
-        users = sorted({o["ref"].split(" unit ")[0] for o in objects if o.get("lib") == key and o["kind"] == c["kind"] and o["side"] == "head"}, key=natural)
+        users = set()
+        for o in objects:
+            if o["kind"] != c["kind"] or o["side"] != "head":
+                continue
+            identity = o.get("lib") or ""
+            nickname, _, item = identity.rpartition(":")
+            if identity == key or ((c["kind"], nickname) not in libraries and item == c["item"]
+                                   and by_item.get((c["kind"], item)) == {c["lib"]}):
+                users.add(o["ref"].split(" unit ")[0])
+        users = sorted(users, key=natural)
         svg, sizes = {}, {}
         for side in ("base", "head"):
             text = svg_body(f"{out_dir}/{side}/lib/{lib_slug(c)}.svg")
@@ -1163,8 +1177,10 @@ def build_project(p, blobs, settings):
         settings[name]["enabled"] for name in ("threads", "inventory", "libraries")) else None
     libraries = None
     if settings["libraries"]["enabled"]:
-        libraries = library_report(library_changes(posixpath.join("base", p["dir"]), posixpath.join("head", p["dir"])),
-                                   index, out, blobs) or None
+        roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
+        items = {side: library_items(root) for side, root in roots.items()}
+        libraries = library_report(library_changes(roots["base"], roots["head"], items=items), index, out, blobs,
+                                   local_items=set(items["base"]) | set(items["head"])) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
             **({"parts": parts} if parts else {}),

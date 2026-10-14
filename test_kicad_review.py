@@ -1309,3 +1309,67 @@ with tempfile.TemporaryDirectory() as d:
     path.write_text('<svg viewBox="-2e1 -3.5 1e2 5E+1"><path d="M0 0L1 1"/></svg>')
     assert library_report(changes[:1], objs_idx, d, {})[0]["size"] == [100.0, 50.0]
 print("ok library final-review parsing, argv and drawing validation")
+
+# Live PR regression fixtures: legacy module names, exported stems, and nickname fallback.
+import json, os, pathlib, tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
+import kicad_review
+
+_LIVE_ITEM = 'ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP'
+def _live_tree(root, removed=False):
+    folder = pathlib.Path(root, 'Libraries/footprints.pretty'); folder.mkdir(parents=True)
+    pads = '(pad 1 smd rect (at -1.91 2.91 0) (size 0.60 1.20) (layers F.Cu F.Paste F.Mask))'
+    if not removed:
+        pads += '(pad 9 smd rect (at 0 0) (size 2.4 3.1) (layers F.Cu F.Paste F.Mask))'
+    (folder / (_LIVE_ITEM + '.kicad_mod')).write_text('(module easyeda2kicad:' + _LIVE_ITEM + ' (layer F.Cu) (tedit 5DC5F6A4)' + pads + ')')
+    pathlib.Path(root, 'Parts.kicad_sym').write_text('(kicad_symbol_lib (version 20231120) (symbol "Imported:LDO" (symbol "LDO_1_1" (pin input line (at 0 0 0) (length 2.54) (name "IN") (number "1")))))')
+
+def _live_names():
+    with tempfile.TemporaryDirectory() as d:
+        _live_tree(d)
+        items = kicad_review.library_items(d)
+        assert set(items) == {('footprints', _LIVE_ITEM, 'footprint'), ('Parts', 'LDO', 'symbol')}, set(items)
+        assert set(items['footprints', _LIVE_ITEM, 'footprint']['pins']) == {'1', '9'}
+
+def _live_export():
+    here = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d); _live_tree('base'); _live_tree('head', removed=True)
+            pathlib.Path('review').mkdir()
+            pathlib.Path('review/detect.json').write_text(json.dumps({'projects': [{'dir': '', 'name': 'Thermal_Camera', 'status': 'modified'}]}))
+            settings = json.loads(json.dumps(kicad_review.DEFAULT_SETTINGS)); settings['libraries']['enabled'] = True
+            calls = []
+            def export(args, **kwargs):
+                calls.append(args)
+                pathlib.Path(args[args.index('-o') + 1], 'item.svg').write_text('<svg viewBox="0 0 10 5"><path d="M0 0L1 1"/></svg>')
+                return SimpleNamespace(returncode=0)
+            with patch('kicad_review.load_settings', return_value=settings), patch('kicad_review.render_side'), patch('kicad_review.subprocess.run', side_effect=export):
+                kicad_review.cmd_render(None)
+            assert len(calls) == 2 and all('--footprint=' + _LIVE_ITEM in args for args in calls), calls
+    finally:
+        os.chdir(here)
+
+def _live_usage():
+    with tempfile.TemporaryDirectory() as d:
+        _live_tree(d + '/base'); _live_tree(d + '/head', removed=True)
+        items = {side: kicad_review.library_items(d + '/' + side) for side in ('base', 'head')}
+        changes = kicad_review.library_changes(d + '/base', d + '/head', items=items)
+        # Use the correct item identity independently of parser assertions.
+        change = next(c for c in changes if c['kind'] == 'footprint'); change['item'] = _LIVE_ITEM
+        objects = [{'kind': 'footprint', 'lib': 'Thermal Footprints:' + _LIVE_ITEM, 'ref': 'U1', 'side': 'head'}]
+        report = kicad_review.library_report([change], objects, d, {}, local_items=set(items['base']) | set(items['head']))[0]
+        assert report['used_by'] == ['U1'] and report['warnings'] == ['⚠ pad 9 removed while U1 use ' + _LIVE_ITEM], report
+        keys = set(items['head']) | {('Other', _LIVE_ITEM, 'footprint')}
+        assert kicad_review.library_report([change], objects, d, {}, local_items=keys)[0]['used_by'] == []
+        # A known local nickname must not fall back to a different library's same-named item.
+        keys = set(items['head']) | {('Thermal Footprints', 'Different', 'footprint')}
+        assert kicad_review.library_report([change], objects, d, {}, local_items=keys)[0]['used_by'] == []
+        # Exact matches remain valid even when another library has a duplicate item name.
+        objects[0]['lib'] = 'footprints:' + _LIVE_ITEM
+        assert kicad_review.library_report([change], objects, d, {}, local_items=set(items['head']) | {('Other', _LIVE_ITEM, 'footprint')})[0]['used_by'] == ['U1']
+
+
+_live_names(); _live_export(); _live_usage()
+print("ok live library identity, legacy export and placed-part usage")
