@@ -43,6 +43,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out review tools
+        id: tools
         if: steps.gate.outputs.skip != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -53,10 +54,11 @@ jobs:
 
       - name: Find changed KiCad projects
         id: detect
-        if: steps.gate.outputs.skip != 'true' && !startsWith(github.ref, 'refs/tags/')
+        if: steps.gate.outputs.skip != 'true'
         working-directory: repo
         env:
           EVENT: ${{ github.event_name }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -293,7 +295,7 @@ jobs:
           fi
 
       - name: Fail on required checks
-        if: steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != ''
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && (steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != '') }}
         env:
           FAILED: ${{ steps.report.outputs.failed }}
           THREADS: ${{ steps.summary.outputs.threads_failed }}
@@ -303,16 +305,36 @@ jobs:
           exit 1
 
       - name: Fabrication outputs for the version tag
-        if: startsWith(github.ref, 'refs/tags/')
+        id: fabrication
+        if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') && steps.tools.outcome == 'success' }}
         run: |
           docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
             python3 tools/kicad_review.py release --tag "$GITHUB_REF_NAME"
 
       - name: Attach to the GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
+        id: attach
+        if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') && steps.fabrication.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
           gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber release/*
+
+      - name: Write release notes
+        if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') && steps.detect.outputs.changed == 'true' && steps.report.outcome == 'success' && steps.attach.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SITE: ${{ vars.KICAD_REVIEW_SITE }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json body -q .body > review/release-body.md
+          python3 tools/kicad_review.py release-notes --existing review/release-body.md --artifact-id "$ARTIFACT_ID"
+          # ponytail: GitHub has no conditional release edit; re-read narrows the remaining race window.
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json body -q .body > review/release-body-current.md
+          if ! cmp -s review/release-body.md review/release-body-current.md; then
+            echo "::warning::Release notes changed while the review section was built; skipping the edit."
+            exit 0
+          fi
+          gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --notes-file review/release-notes.md

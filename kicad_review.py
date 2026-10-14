@@ -27,6 +27,7 @@ import tempfile
 import tomllib
 import zipfile
 from collections import Counter
+from urllib.parse import urlsplit
 
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
@@ -62,6 +63,11 @@ def is_kicad_file(path):
 
 def resolve_revisions(env):
     """Return (base, head, reason) for the triggering event. base may be None (nothing to compare with)."""
+    if env.get("TAG"):
+        tag = env["TAG"]
+        prev = git("describe", "--tags", "--abbrev=0", "--match", "v*", f"{tag}^", check=False) or None
+        head = commit(tag) or env["AFTER"]
+        return (commit(prev) if prev else None), head, f"release {tag} vs {prev}" if prev else f"release {tag} (first release)"
     event = env["EVENT"]
     if event == "pull_request":
         head = env["PR_HEAD"]
@@ -135,6 +141,17 @@ def detect(base, head):
 
 def cmd_detect(args):
     env = dict(os.environ)
+    if env.get("TAG"):
+        try:
+            review = load_settings(("",))["release"]["review"]
+        except (SystemExit, tomllib.TOMLDecodeError, OSError):
+            print("::warning::Cannot read tag review settings; tag review stays off.")
+            review = False
+        if not review:
+            with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+                fh.write("base=\nhead=\nchanged=false\n")
+            print("Tag review is off ([release] review = false); only fabrication outputs are made.")
+            return
     base, head, reason = resolve_revisions(env)
     projects = detect(base, head)
     ids = [project_id(p["dir"]) for p in projects]
@@ -786,6 +803,7 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "release": {"review": False},
     "digikey": {"enabled": False, "site": "US", "currency": "USD", "max_lookups": 100},
     "pdf": {"enabled": False},
 
@@ -810,7 +828,7 @@ def load_settings(roots=("base", "head")):
     """Repository settings from kicad-review.toml. The base revision's copy wins, so a change cannot relax its own checks."""
     settings = json.loads(json.dumps(DEFAULT_SETTINGS))
     for side in roots:
-        path = f"{side}/{SETTINGS_FILE}"
+        path = f"{side}/{SETTINGS_FILE}" if side else SETTINGS_FILE
         if os.path.exists(path):
             with open(path, "rb") as fh:
                 user = tomllib.load(fh)
@@ -820,7 +838,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "digikey", "threads", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -845,6 +863,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    if not isinstance(settings["release"]["review"], bool):
+        sys.exit(f"{SETTINGS_FILE}: release.review must be true or false")
     cfg = settings["digikey"]
     if not isinstance(cfg["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: digikey.enabled must be true or false")
@@ -1981,7 +2001,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if not ((k in ("3d", "parts", "digikey", "threads", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
@@ -2404,6 +2424,47 @@ def checks_markdown(data):
     return checks
 
 
+NOTES_START, NOTES_END = "<!-- kicad-review-release -->", "<!-- /kicad-review-release -->"
+
+
+def release_notes(data, site, artifact_id):
+    """A marked review section; repository and KiCad text stays literal markdown."""
+    literal = lambda value: md(" ".join(str(value).splitlines()))
+    out = [NOTES_START, "## KiCad review", "", f"{literal(data['reason'])}."]
+    site = site.rstrip("/")
+    try:
+        url = urlsplit(site)
+        valid_site = url.scheme in ("https", "http") and url.hostname and url.username is None and url.password is None and not url.query and not url.fragment
+        url.port  # Access validates malformed or out-of-range ports.
+    except ValueError:
+        valid_site = False
+    if valid_site and not re.search(r'[\s\\()\[\]<>"\x00-\x1f\x7f]', site) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", data.get("repo", "")) and re.fullmatch(r"\d{1,20}", str(artifact_id)):
+        out.append(f"[Open the review]({site}/r/{data['repo']}/a/{artifact_id})")
+    for p in data["projects"]:
+        out += ["", f"**{literal(p['name'])}**: {' '.join(summary_sentence(p).splitlines())}.", ""]
+        out += [f"- {literal(c['title'])} {STATUS_ICON[c['status']]} {literal(c['status'].replace('_', ' '))} ({literal(plural(c['errors'], 'error'))}, {literal(plural(c['warnings'], 'warning'))})" for c in p["checks"]]
+    return "\n".join(out + ["", NOTES_END, ""])
+
+
+def merge_notes(existing, section):
+    """Replace only the marked section, preserving surrounding manual notes."""
+    existing = existing or ""
+    end = existing.find(NOTES_END)
+    start = existing.rfind(NOTES_START, 0, end) if end >= 0 else -1
+    if 0 <= start < end:
+        return existing[:start] + section.rstrip("\n") + existing[end + len(NOTES_END):]
+    return existing.rstrip("\n") + ("\n\n" if existing.strip() else "") + section
+
+
+def cmd_release_notes(args):
+    with open("review/data.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    existing = ""
+    if args.existing and os.path.exists(args.existing):
+        with open(args.existing, encoding="utf-8") as fh:
+            existing = fh.read()
+    with open("review/release-notes.md", "w", encoding="utf-8") as fh:
+        fh.write(merge_notes(existing, release_notes(data, os.environ.get("SITE", ""), args.artifact_id)))
 import html as htmllib
 
 PRINT_CSS = """@page { size: A4 landscape; margin: 14mm 12mm;
@@ -2571,6 +2632,10 @@ def main():
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
     p.add_argument("--tag", required=True)
     p.set_defaults(func=cmd_release)
+    p = sub.add_parser("release-notes", help="merge the KiCad review section into a release body")
+    p.add_argument("--existing", default="")
+    p.add_argument("--artifact-id", default="")
+    p.set_defaults(func=cmd_release_notes)
     p = sub.add_parser("shots", help="before/after screenshots of changed drawings for the comment")
     p.add_argument("--chrome", default="google-chrome")
     p.set_defaults(func=cmd_shots)

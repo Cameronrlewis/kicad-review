@@ -573,7 +573,7 @@ print("ok history fetch opt-in and fork guard")
 
 # Readiness gates required checks and blocking threads; optional publishing never fails the job.
 fail = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
-assert "if: steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != ''" in fail
+assert "if: ${{ !startsWith(github.ref, 'refs/tags/') && (steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != '') }}" in fail
 assert "THREADS: ${{ steps.summary.outputs.threads_failed }}" in fail
 publish = wf[wf.index("- name: Publish check runs"):wf.index("- name: Pull request comment")]
 assert "if: ${{ !cancelled() && steps.summary.outputs.check_runs == 'true' }}" in publish
@@ -1085,6 +1085,171 @@ cut = body[:body.index("… Parts truncated")].rstrip("\n").rsplit("\n", 1)[1]
 assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cut at a whole line: " + cut
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
+
+# Tag review resolves lightweight/annotated tags, ignoring non-v predecessors.
+from kicad_review import resolve_revisions
+here = os.getcwd()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        def g(*args):
+            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True, capture_output=True, text=True).stdout.strip()
+        g("init", "-q")
+        pathlib.Path("P.kicad_pro").write_text("1")
+        g("add", "."); g("commit", "-qm", "one"); g("tag", "v1.0")
+        first = g("rev-parse", "HEAD")
+        pathlib.Path("P.kicad_pro").write_text("2")
+        g("commit", "-qam", "two"); g("tag", "test-1")
+        pathlib.Path("P.kicad_pro").write_text("3")
+        g("commit", "-qam", "three"); g("tag", "-am", "release", "v1.1")
+        head = g("rev-parse", "HEAD")
+        g("branch", "v1.1", first)  # A same-named branch must not shadow the pushed tag.
+        assert resolve_revisions({"EVENT": "push", "TAG": "test-1", "AFTER": head}) == (first, g("rev-parse", "test-1"), "release test-1 vs v1.0")
+        assert resolve_revisions({"EVENT": "push", "TAG": "v1.1", "AFTER": head}) == (first, head, "release v1.1 vs v1.0")
+        assert resolve_revisions({"EVENT": "push", "TAG": "v1.0", "AFTER": first}) == (None, first, "release v1.0 (first release)")
+        print("ok previous tag is the last v-tag")
+        print("ok first tag has no base")
+        assert DEFAULT_SETTINGS["release"] == {"review": False}
+        output = pathlib.Path("outputs")
+        with patch.dict(os.environ, {"TAG": "v1.1", "GITHUB_OUTPUT": str(output)}, clear=True), patch("kicad_review.resolve_revisions", side_effect=AssertionError("off must skip detection")):
+            kicad_review.cmd_detect(None)
+        assert output.read_text() == "base=\nhead=\nchanged=false\n"
+        pathlib.Path("kicad-review.toml").write_text("[release]\nreview = true\n")
+        assert load_settings(("",))["release"]["review"] is True
+        for invalid in ('"true"', '1', '[]'):
+            pathlib.Path("kicad-review.toml").write_text("[release]\nreview = " + invalid + "\n")
+            try:
+                load_settings(("",))
+                raise AssertionError("invalid release.review accepted")
+            except SystemExit as exc:
+                assert str(exc) == "kicad-review.toml: release.review must be true or false"
+        print("ok tag detection opt-in and settings")
+    finally:
+        os.chdir(here)
+
+# Workflow-only release settings cannot change existing report/comment/summary bytes.
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        write(t, {"review/detect.json": json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "fixture", "projects": []})})
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings.pop("release")
+        results = []
+        for option in (None, False, True):
+            current = copy.deepcopy(settings)
+            if option is not None:
+                current["release"] = {"review": option}
+            with patch("kicad_review.load_settings", return_value=current):
+                kicad_review.cmd_report(None)
+            data = json.loads(pathlib.Path("review/data.json").read_text())
+            pathlib.Path("summary.md").write_text("")
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": "summary.md"}), patch("sys.stdout", new=io.StringIO()):
+                kicad_review.cmd_summary(type("A", (), {"image_base": "", "artifact_url": "", "artifact_id": ""}))
+            results.append((pathlib.Path("review/data.json").read_bytes(), pathlib.Path("review/kicad-review.html").read_bytes(), pathlib.Path("review/comment.md").read_bytes(), pathlib.Path("summary.md").read_bytes()))
+        assert results[0] == results[1] == results[2]
+        print("ok release settings preserve report and summary bytes")
+    finally:
+        os.chdir(here)
+
+# Release section preserves manual notes, is idempotent, and escapes untrusted data.
+from kicad_review import release_notes, merge_notes, cmd_release_notes
+rdata = {**d2, "repo": "o/r", "reason": "release v1.1 vs v1.0", "projects": [{"name": "Cam", "dir": "", "status": "modified", "changes": [], "checks": [
+    {"name": "drc", "title": "DRC", "level": "required", "status": "pass", "errors": 0, "new_errors": 0, "warnings": 2, "new_warnings": 0, "fixed": 0, "violations": []}]}]}
+sec = release_notes(rdata, "https://site.example", "77")
+assert sec.startswith("<!-- kicad-review-release -->") and sec.rstrip().endswith("<!-- /kicad-review-release -->")
+assert "release v1.1 vs v1.0" in sec and "**Cam**: no reviewable changes" in sec and "DRC ✅ pass (0 errors, 2 warnings)" in sec
+assert "[Open the review](https://site.example/r/o/r/a/77)" in sec
+once = merge_notes("## What's Changed\n* x\n", sec)
+twice = merge_notes(once + "\nhand-written footer\n", sec.replace("2 warnings", "3 warnings"))
+assert twice.count("<!-- kicad-review-release -->") == 1
+assert "## What's Changed\n* x" in twice and "hand-written footer" in twice and "3 warnings" in twice and "2 warnings" not in twice
+assert merge_notes(twice, sec.replace("2 warnings", "3 warnings")) == twice
+assert "Open the review" not in release_notes(rdata, "javascript:alert(1)", "77")
+assert "Open the review" not in release_notes(rdata, "https://site.example:bad", "77")
+assert "Open the review" not in release_notes(rdata, "https://@site.example", "77")
+assert "Open the review" not in release_notes(rdata, "https://site.example/x)\n# injected", "77")
+assert "Open the review" not in release_notes(rdata, "https://site.example", "x")
+evil = copy.deepcopy(rdata)
+evil["reason"] = "release <b>\n# injected"
+evil["projects"][0]["name"] = "Cam\n# injected"
+evil["projects"][0]["checks"][0]["title"] = "DRC\n<script>"
+escaped = release_notes(evil, "", "")
+assert "\n# injected" not in escaped and "<script>" not in escaped and "<b>" not in escaped
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        write(t, {"review/data.json": json.dumps(rdata), "existing.md": "manual body"})
+        with patch.dict(os.environ, {"SITE": "https://site.example"}):
+            cmd_release_notes(type("A", (), {"existing": "existing.md", "artifact_id": "77"}))
+        assert pathlib.Path("review/release-notes.md").read_text() == merge_notes("manual body", sec)
+    finally:
+        os.chdir(here)
+print("ok notes section is replaced, not added twice")
+
+wf = pathlib.Path(".github/workflows/review.yml").read_text()
+detect_step = wf[wf.index("- name: Find changed KiCad projects"):wf.index("- name: Check out both")]
+assert "refs/tags" not in detect_step.splitlines()[2]
+assert "TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}" in detect_step
+fail_step = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
+assert "!startsWith(github.ref, 'refs/tags/')" in fail_step
+fab_step = wf[wf.index("- name: Fabrication outputs"):wf.index("- name: Attach to")]
+attach_step = wf[wf.index("- name: Attach to"):wf.index("- name: Write release notes")]
+assert "always()" in fab_step and "!cancelled()" in fab_step and "id: fabrication" in fab_step
+assert "always()" in attach_step and "steps.fabrication.outcome == 'success'" in attach_step
+notes_step = wf[wf.index("- name: Write release notes"):]
+assert "continue-on-error: true" in notes_step and "steps.report.outcome == 'success'" in notes_step
+assert '--existing review/release-body.md --artifact-id "$ARTIFACT_ID"' in notes_step
+print("ok tag workflow wiring")
+
+# Final review: an orphan marker must never consume subsequent manual notes.
+orphan = "<!-- kicad-review-release -->\nhuman text that must survive\n"
+merged = merge_notes(orphan, sec)
+merged_again = merge_notes(merged, sec.replace("2 warnings", "3 warnings"))
+assert merged_again.startswith(orphan) and "human text that must survive" in merged_again
+assert merge_notes(merged_again, sec.replace("2 warnings", "3 warnings")) == merged_again
+print("ok orphaned release marker preserves human notes")
+
+# Invalid tag settings remain off without invoking revision detection.
+for settings_error in (SystemExit("invalid settings"), kicad_review.tomllib.TOMLDecodeError("bad TOML")):
+    output = io.StringIO()
+    class KeepOpen(io.StringIO):
+        def close(self):
+            pass
+    written = KeepOpen()
+    with patch.dict(os.environ, {"TAG": "v1"}, clear=True), patch("kicad_review.load_settings", side_effect=settings_error), patch("kicad_review.open", return_value=written), patch("sys.stdout", new=output), patch("kicad_review.resolve_revisions", side_effect=AssertionError("must stay off")):
+        kicad_review.cmd_detect(None)
+    assert written.getvalue() == "base=\nhead=\nchanged=false\n"
+    assert "::warning::" in output.getvalue()
+print("ok invalid tagged settings keep detection off")
+
+checkout_tools = wf[wf.index("- name: Check out review tools"):wf.index("- name: Find changed KiCad projects")]
+assert "id: tools" in checkout_tools
+assert "steps.tools.outcome == 'success'" in fab_step
+assert "steps.report.outcome" not in fab_step, "review failures must not suppress fabrication"
+print("ok fabrication requires successful tool checkout")
+
+# Execute the notes shell with a local gh stub, proving a changed body is not overwritten.
+import textwrap
+script = textwrap.dedent(notes_step.split("run: |\n", 1)[1])
+tool_source = pathlib.Path(kicad_review.__file__).read_text()
+with tempfile.TemporaryDirectory() as t:
+    try:
+        os.chdir(t)
+        write(t, {"review/data.json": json.dumps(rdata), "tools/kicad_review.py": tool_source,
+                  "bin/gh": "#!" + sys.executable + "\nimport os, pathlib, sys\nif sys.argv[2] == 'view':\n p = pathlib.Path('view-count'); n = int(p.read_text()) if p.exists() else 0; p.write_text(str(n + 1)); print('changed notes' if n and os.environ['BODY_CHANGED'] == '1' else 'human notes')\nelif sys.argv[2] == 'edit':\n pathlib.Path('edited').write_text('yes')\n"})
+        pathlib.Path("bin/gh").chmod(0o755)
+        for changed in (False, True):
+            pathlib.Path("view-count").unlink(missing_ok=True)
+            pathlib.Path("edited").unlink(missing_ok=True)
+            result = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True, env={**os.environ, "PATH": f"{t}/bin:" + os.environ["PATH"], "BODY_CHANGED": str(int(changed)), "GITHUB_REF_NAME": "v1", "GITHUB_REPOSITORY": "o/r", "ARTIFACT_ID": "77"})
+            assert result.returncode == 0, result.stderr
+            assert pathlib.Path("edited").exists() is not changed
+            assert int(pathlib.Path("view-count").read_text()) == 2
+            if changed:
+                assert "::warning::" in result.stdout
+    finally:
+        os.chdir(here)
+print("ok release notes re-read prevents stale body edits")
 
 
 # DigiKey client: only the MPN is sent; each MPN once; 429 stops the run; ambiguous MPNs show no price.
