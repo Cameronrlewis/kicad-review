@@ -95,13 +95,11 @@ export function threadsClient(config) {
         const response = await fetch(config.issues, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ anchor: { ...pending, severity: 'comment' },
           title: String(form.get('title') || issueMode.title), text: String(form.get('text') || ''), link: reviewLink(pending), pull: config.pull, threadCommentId: issueMode.threadCommentId }) });
         const result = await response.json().catch(() => ({}));
-        if (response.status === 409) {
-          composer.close(); issueMode = null; await load();
-          notice.textContent = `${result.error || 'Already tracked.'} ${result.url || ''}`; notice.hidden = false; return;
-        }
-        if (!response.ok) throw new Error(result.error || 'GitHub did not create the issue.');
+        if (!response.ok && response.status !== 409) throw new Error(result.error || 'GitHub did not create the issue.');
         composer.close(); issueMode = null; await load();
-        if (result.warning) { notice.textContent = result.warning; notice.hidden = false; }
+        if (response.status === 409) {
+          notice.textContent = `${result.error || 'Already tracked.'} ${result.url || ''}`; notice.hidden = false;
+        } else if (result.warning) { notice.textContent = result.warning; notice.hidden = false; }
         return;
       }
       if (!threadsOn) throw new Error('Threads are turned off for this review.');
