@@ -1,5 +1,6 @@
 import tokens from '../ui/tokens.css';
 import site from './site.css';
+import { threadsClient } from './threads-client.js';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -115,7 +116,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" type="submit">Start review</button><div class="muted" role="status"></div></div></div><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select><button class="btn" form="source-picker">Show</button></div><table class="table"><thead><tr><th>Base</th><th>Head</th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></form><form id="source-picker" method="get"></form>${script}</main>` });
 }
 
-export function reviewPage({ user, owner, repo, id, name, workflowRunId }) {
+export function reviewPage({ user, owner, repo, id, name, workflowRunId, pull = null }) {
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
@@ -124,7 +125,16 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId }) {
   const run = /^\d+$/.test(String(workflowRunId)) ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(workflowRunId)}` : '';
   const runLink = run ? link(run, 'Open the run on GitHub ↗') : '';
   const script = `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); iframe.addEventListener('load', () => { fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) loading.hidden = true; if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
-  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}` });
+  const notice = Number.isInteger(pull) ? '<p id="thread-notice" class="muted" role="status"></p>' : '';
+  const threads = Number.isInteger(pull) ? `<dialog id="thread-composer" class="thread-dialog"><form method="dialog"><h2>New thread</h2><p class="thread-target mono"></p>
+      <fieldset><legend>Kind</legend><label><input type="radio" name="severity" value="comment" checked> Comment</label> <label><input type="radio" name="severity" value="blocking"> Blocking: must be resolved before merging</label></fieldset>
+      <label>Text<textarea name="text" rows="5" required maxlength="10000"></textarea></label>
+      <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary">Create thread</button> <button type="button" class="btn" data-act="close">Cancel</button></p></form></dialog>
+    <dialog id="thread-view" class="thread-dialog"><form method="dialog"><h2></h2><ol class="thread-comments"></ol>
+      <label>Reply<textarea name="text" rows="3" maxlength="10000"></textarea></label>
+      <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
+    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: `${path}/pull/${pull}/threads`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>` : '';
+  return frame({ title: revision, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: match ? `Review ${revision}` : 'Review' }], body: `<main class="review-page"><div class="review-bar">${link(path, '← All reviews')}<span class="mono">${e(revision)}</span>${result}${runLink}${notice}</div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${threads}` });
 }
 
 const revisionSha = /^[0-9a-f]{7,40}$/;

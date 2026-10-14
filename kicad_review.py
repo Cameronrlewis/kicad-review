@@ -585,6 +585,40 @@ def natural(s):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s or "")]
 
 
+def object_index(base, head):
+    """Every symbol and footprint of head, then the base-only ones: what a thread can be pinned to.
+    uuid is the KiCad UUID (schematic keys are sheet path + UUID); sheet or layer says which drawing it is on."""
+    def entry(key, o, side):
+        e = {"uuid": key.rsplit("/", 1)[-1], "kind": o["kind"], "ref": o["ref"], "value": o["props"].get("Value"),
+             "side": side, "pos": o.get("pos"), "box": o.get("box")}
+        if o["where"].get("sheet") is not None:
+            e["sheet"] = o["where"]["sheet"]
+        else:
+            e["layer"] = o["props"].get("layer")
+        return e
+    keep = lambda objs: {k: o for k, o in objs.items() if o["kind"] in ("symbol", "footprint")}
+    b, h = keep(base), keep(head)
+    used = set(b) & set(h)  # Reserve exact keys before any reference fallback.
+    by_match = {}
+    for k, o in b.items():
+        if k not in used and o.get("match"):
+            by_match.setdefault(o["match"], []).append(k)
+    out = []
+    for k, o in h.items():
+        matches = by_match.get(o.get("match"), [])
+        bk = k if k in b else (matches.pop(0) if matches else None)
+        e = entry(k, o, "head")
+        if bk is None:
+            e["added"] = True
+        else:
+            used.add(bk)
+            if b[bk].get("pos") != o.get("pos"):
+                e["pos_before"] = b[bk].get("pos")
+        out.append(e)
+    out += [entry(k, o, "base") for k, o in b.items() if k not in used]
+    return out
+
+
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
@@ -594,6 +628,7 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "threads": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -612,7 +647,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -628,6 +663,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    if not isinstance(settings["threads"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
     return settings
 
 
@@ -984,7 +1021,8 @@ def build_project(p, blobs, settings):
             board["no_model"] = model3d_missing(out, objs)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),
-            **({"parts": parts} if parts else {})}
+            **({"parts": parts} if parts else {}),
+            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] else {})}
 
 
 def assign_ids(projects):
@@ -1043,7 +1081,7 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts") and not v["enabled"])}
+    report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "threads") and not v["enabled"])}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -1069,6 +1107,7 @@ def cmd_report(args):
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
         fh.write(f"name={name}\n")
+        fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
@@ -1159,7 +1198,7 @@ def changes_markdown(p, limit=60):
     return lines
 
 
-def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site=""):
+def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
     out.append(f"Comparing `{short(data['base'])}` → `{short(data['head'])}` ({data['reason']}). "
@@ -1169,6 +1208,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id})**")
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
+    if threads is not None:
+        out.append(f"Threads: {threads['open']} open ({threads['blocking']} blocking), {threads['resolved']} resolved.")
     if artifact_id and data.get("repo"):
         out += ["", "<details><summary>From a terminal</summary>", "",
                 "```sh", f"gh api repos/{data['repo']}/actions/artifacts/{artifact_id}/zip > kicad-review.html && open kicad-review.html", "```",
@@ -1202,7 +1243,7 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
         checks += "\n" + parts + "\n"
     if len(body) + len(checks) > 60000:  # GitHub comments are limited to 65536 characters; the checks always stay
         if rows:
-            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site)
+            return comment_markdown(data, images, artifact_url, artifact_id, rows // 2, site, threads)
         body = body[:max(0, 60000 - len(checks))] + "\n\n… truncated. The full list is in the report.\n"
         body += "\n</details>" * (body.count("<details") - body.count("</details>"))
     return body + "\n" + checks
@@ -1250,7 +1291,14 @@ def cmd_summary(args):
         with open(f"review/images/shots.json", encoding="utf-8") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
     site = os.environ.get("SITE", "").rstrip("/")
-    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site)
+    threads = None
+    if data["settings"].get("threads", {}).get("enabled") and os.path.exists("review/threads.json"):
+        with open("review/threads.json", encoding="utf-8") as fh:
+            try:
+                threads = thread_counts(json.load(fh))
+            except ValueError:
+                print("::warning::review/threads.json is not JSON; thread counts left out")
+    body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads)
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
@@ -1279,6 +1327,39 @@ def parts_markdown(data):
         out += [head, "", f"{when} {plural(len(parts['lines']), 'line')}, {bad} with a problem.", ""]
         out += [f"- {md(', '.join(refs))} {PROBLEM_TEXT[pr]}" for refs, pr in introduced]
     return "\n".join(out)
+
+
+ANCHOR = re.compile(r"<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->[ \t\r\n]*$")
+
+
+def thread_anchor(body):
+    """The anchor a review-site thread carries in its first comment, or None for any other comment."""
+    m = ANCHOR.search(body or "")
+    if not m:
+        return None
+    try:
+        a = json.loads(base64.urlsafe_b64decode(m.group(1) + "=" * (-len(m.group(1)) % 4)))
+    except ValueError:  # bad base64, bad UTF-8 and bad JSON all subclass ValueError
+        return None
+    return a if isinstance(a, dict) and a.get("v") == 1 else None
+
+
+def thread_counts(response):
+    """Open, blocking-and-open, and resolved review-site threads in a reviewThreads GraphQL response."""
+    c = {"open": 0, "blocking": 0, "resolved": 0}
+    nodes = (((((response or {}).get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+             .get("reviewThreads") or {}).get("nodes") or []
+    for n in nodes:
+        first = ((n.get("comments") or {}).get("nodes") or [{}])[0]
+        a = thread_anchor(first.get("body"))
+        if not a:
+            continue
+        if n.get("isResolved"):
+            c["resolved"] += 1
+        else:
+            c["open"] += 1
+            c["blocking"] += a.get("severity") == "blocking"
+    return c
 
 
 def checks_markdown(data):
