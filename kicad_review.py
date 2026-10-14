@@ -780,6 +780,8 @@ DEFAULT_SETTINGS = {
     "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
+    "pdf": {"enabled": False},
+
     "threads": {"enabled": False, "block_merge": False},
     "github": {"check_runs": False},
     "waivers": {"enabled": False},
@@ -811,7 +813,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers", "inventory", "libraries", "interfaces"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -836,6 +838,9 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: 3d.enabled must be true or false")
     if not isinstance(settings["parts"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
+    if not isinstance(settings["pdf"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: pdf.enabled must be true or false")
+
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
     if not isinstance(settings["inventory"]["enabled"], bool):
@@ -1730,7 +1735,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if not ((k in ("3d", "parts", "threads", "waivers", "inventory", "libraries") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if not ((k in ("3d", "parts", "threads", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
@@ -1769,6 +1774,8 @@ def cmd_report(args):
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"failed={', '.join(failed)}\n")
         fh.write(f"name={name}\n")
+        fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
+
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
 
 
@@ -1870,7 +1877,8 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
                + (f"[Workflow run]({data['links']['run']})" if data["links"].get("run") else ""))
     if site and artifact_id and data.get("repo"):
         site = site.rstrip("/")
-        out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id})**")
+        pdf_hint = "?pdf=1" if data.get("settings", {}).get("pdf", {}).get("enabled", False) else ""
+        out.append(f"**[Open the review]({site}/r/{data['repo']}/a/{artifact_id}{pdf_hint})**")
     if artifact_url:
         out.append(f"**[Open the review page]({artifact_url})** — downloads `kicad-review.html`; open it in a browser.")
     if threads is not None:
@@ -2120,6 +2128,84 @@ def checks_markdown(data):
     return checks
 
 
+import html as htmllib
+
+PRINT_CSS = """@page { size: A4 landscape; margin: 14mm 12mm;
+  @top-left { content: string(revs); font: 9px sans-serif; color: #555; }
+  @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 9px sans-serif; color: #555; } }
+body { font: 11px/1.4 system-ui, sans-serif; color: #111; } h1 { font-size: 22px; } h2 { font-size: 16px; break-before: page; }
+table { border-collapse: collapse; width: 100%; margin: 6px 0; } th, td { border: 1px solid #bbb; padding: 2px 4px; text-align: left; vertical-align: top; }
+img { max-width: 100%; max-height: 150mm; display: block; margin: 4px 0; } .fail { font-weight: 700; } figure { break-inside: avoid; margin: 0 0 8px; }"""
+
+
+def print_html(data, images, pr_title, pr_author, now):
+    """A static, script-free page for Chrome to print: cover, then per project its summary, pictures, changes and new errors."""
+    e = lambda v: htmllib.escape(str(v if v is not None else "—"))
+    plain = lambda s: htmllib.unescape(re.sub(r"\\(.)", r"\1", s)).replace("​", "")
+    bold = lambda s: re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", e(plain(s)))
+    failed = [f"{p['name']} {c['title']}" for p in data["projects"] for c in p["checks"] if c["status"] == "fail"]
+    short = lambda s: (s or "none")[:7]
+    # Chromium supports literal @page margin content, but not running strings.
+    header = f"{data['repo']} · {short(data['base'])} → {short(data['head'])}"
+    css_header = '"' + ''.join(f"\\{ord(c):x} " for c in header) + '"'
+    css = PRINT_CSS.replace("string(revs)", css_header)
+    out = [f"<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><title>KiCad review {e(short(data['base']))} → {e(short(data['head']))}</title><style>{css}</style></head><body>",
+           f"<p class='revs'>{e(header)}</p>",
+           f"<h1>KiCad review</h1><table><tr><th>Repository</th><td>{e(data['repo'])}</td></tr><tr><th>Revisions</th><td>{e(short(data['base']))} → {e(short(data['head']))} ({e(data['reason'])})</td></tr>"
+           + (f"<tr><th>Pull request</th><td>{e(pr_title)} by {e(pr_author)}</td></tr>" if pr_title else "")
+           + f"<tr><th>Made</th><td>{e(now)}</td></tr><tr><th>Verdict</th><td class='{'fail' if failed else ''}'>{'✕ failing: ' + e(', '.join(failed)) if failed else '✓ required checks passing'}</td></tr>"
+           + "</table>"]
+    for i, p in enumerate(data["projects"]):
+        out.append(f"<h2>{e(p['name'])}</h2><p>{bold(summary_sentence(p))}.</p>")
+        out.append("<table><tr><th>Check</th><th>Result</th><th>Errors (new)</th><th>Warnings (new)</th><th>Fixed</th></tr>" + "".join(
+            f"<tr><td>{e(c['title'])} ({e(c['level'])})</td><td>{e(c['status'].replace('_', ' '))}</td><td>{e(c['errors'])} ({e(c['new_errors'])})</td><td>{e(c['warnings'])} ({e(c['new_warnings'])})</td><td>{e(c['fixed'])}</td></tr>" for c in p["checks"]) + "</table>")
+        pics = [s for s in images if s["project"] == i and os.path.exists(s["path"])]
+        out += [f"<figure><figcaption>{e(s['title'])}: before and after</figcaption><img src='data:image/png;base64,{base64.b64encode(open(s['path'], 'rb').read()).decode()}'></figure>" for s in pics] \
+            or ["<p><i>Before/after pictures unavailable for this run.</i></p>"]
+        rows = p["changes"][:200]
+        out.append("<table><tr><th>Change</th><th>Object</th><th>Ref</th><th>Details</th></tr>" + "".join(
+            f"<tr class=\"change\"><td>{e(r['action'])}</td><td>{e(r['kind'])}</td><td>{e(r.get('ref'))}</td><td>"
+            + ("<br>".join(f"{e(k)}: {e(a)} → {e(b)}" for k, a, b in r.get("changes", [])[:6]) or ", ".join(f"{e(k)}: {e(v)}" for k, v in list((r.get('props') or {}).items())[:4]))
+            + "</td></tr>" for r in rows) + "</table>")
+        if len(p["changes"]) > 200:
+            out.append(f"<p>{len(p['changes']) - 200} more changes are in the interactive report.</p>")
+        news = [(c["title"], v) for c in p["checks"] for v in c["violations"] if v.get("new") and v["severity"] == "error"]
+        if news:
+            out.append("<h3>New errors</h3><ul>" + "".join(f"<li><b>{e(t)}</b>: {e(v['description'])}" + (f" ({e('; '.join(v['items'][:2]))})" if v["items"] else "") + "</li>" for t, v in news) + "</ul>")
+    return "\n".join(out) + "</body></html>"
+
+
+def cmd_pdf(args):
+    with open("review/data.json", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not data.get("settings", {}).get("pdf", {}).get("enabled", False):
+        return
+    shots = json.load(open("review/images/shots.json", encoding="utf-8")) if os.path.exists("review/images/shots.json") else []
+    images = [{**s, "path": f"review/images/{s['file']}"} for s in shots]
+    page = print_html(data, images, os.environ.get("PR_TITLE", ""), os.environ.get("PR_AUTHOR", ""),
+                      datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    with open("review/print.html", "w", encoding="utf-8") as fh:
+        fh.write(page)
+    name = os.environ.get("PDF_NAME", "")
+    if not re.fullmatch(r"kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.pdf", name):
+        print("::warning::PDF report failed: invalid PDF_NAME")
+        return
+    out = os.path.abspath(f"review/{name}")
+    try:
+        if os.path.exists(out):
+            os.remove(out)
+        result = subprocess.run([args.chrome, "--headless=new", "--no-sandbox", "--no-pdf-header-footer", f"--print-to-pdf={out}",
+                                 f"file://{os.path.abspath('review/print.html')}"], capture_output=True, text=True, timeout=120)
+        if result.returncode or not os.path.exists(out) or os.path.getsize(out) == 0:
+            raise OSError("Chrome did not produce a PDF")
+    except (OSError, subprocess.TimeoutExpired):
+        if os.path.exists(out):
+            os.remove(out)
+        print("::warning::PDF report failed: Chrome unavailable, failed or timed out")
+        return
+    print(f"{out}: {os.path.getsize(out) / 1e6:.2f} MB")
+
+
 LOG_START, LOG_END = "<!-- kicad-review-log -->", "<!-- /kicad-review-log -->"
 LOG_HEAD = ["| Run (UTC) | Commit | Result | Checks |", "|---|---|---|---|"]
 LOG_ROW = re.compile(r"^\| \[\d{4}-\d\d-\d\d \d\d:\d\d\]\(https://[^)]*/actions/runs/\d+\) \| `[0-9a-f]{7}` \| (✅ pass|❌ fail) \| .* \|$")
@@ -2212,6 +2298,9 @@ def main():
     p = sub.add_parser("shots", help="before/after screenshots of changed drawings for the comment")
     p.add_argument("--chrome", default="google-chrome")
     p.set_defaults(func=cmd_shots)
+    p = sub.add_parser("pdf", help="printable PDF of the review (needs Chrome)")
+    p.add_argument("--chrome", default="google-chrome")
+    p.set_defaults(func=cmd_pdf)
     p = sub.add_parser("summary", help="markdown for the pull request comment and job summary")
     p.add_argument("--image-base", default="")
     p.add_argument("--artifact-url", default="")

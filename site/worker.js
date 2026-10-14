@@ -195,6 +195,46 @@ export async function access(request, env, owner, repo) {
   }
 }
 
+function pdfError(active, status = 404) {
+  return sessionResponse(JSON.stringify({ error: 'PDF unavailable' }), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
+}
+
+function matchingPdf(artifacts, metadata) {
+  const name = String(metadata.name || '').replace(/\.html$/, '.pdf');
+  return artifacts.find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id))
+    && a.workflow_run?.id === metadata.workflow_run?.id);
+}
+
+async function pdfArtifact(owner, repo, id, token) {
+  try {
+    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
+    const result = await gh(`${root}/artifacts/${id}`, token);
+    if (!result.ok) return null;
+    const metadata = await result.json();
+    if (metadata.expired || !/^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/.test(metadata.name)) return null;
+    const runId = metadata.workflow_run?.id;
+    if (!/^\d{1,20}$/.test(String(runId))) return null;
+    const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100`, token);
+    if (!list.ok) return null;
+    const name = metadata.name.slice(0, -5) + '.pdf';
+    return ((await list.json()).artifacts || []).find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id))) || null;
+  } catch { return null; }
+}
+
+async function pdfDownload(owner, repo, id, active) {
+  try {
+    const artifact = await pdfArtifact(owner, repo, id, active.token);
+    if (!artifact) return pdfError(active);
+    const download = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifact.id}/zip`, active.token, { redirect: 'manual' });
+    if (download.status !== 302) return pdfError(active);
+    const location = new URL(download.headers.get('Location'));
+    if (location.protocol !== 'https:' || location.username || location.password) return pdfError(active);
+    const blob = await fetch(location.href, { redirect: 'manual' });
+    if (!blob.ok || !blob.body) return pdfError(active);
+    return sessionResponse(blob.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${artifact.name}"` } }, active);
+  } catch { return pdfError(active); }
+}
+
 async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
   try {
@@ -222,7 +262,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       } catch { /* PR discovery must not prevent opening the report. */ }
       const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pull, runStatus, runConclusion, share: sharing,
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -307,13 +347,14 @@ async function reviewList(request, env, owner, repo, url) {
   if (allowed instanceof Response) return allowed;
   try {
     const artifactResponse = await artifactList(owner, repo, allowed.s.token);
-    const list = artifactResponse.ok ? reviews((await artifactResponse.json()).artifacts) : [];
+    const artifacts = artifactResponse.ok ? (await artifactResponse.json()).artifacts || [] : [];
+    const list = reviews(artifacts);
     const items = list.map((item) => {
       const event = item.workflow_run?.event;
       const branchTip = String(item.workflow_run?.head_sha || '').slice(0, 7);
       const manual = item.revisionsRecorded && item.base !== 'none' && branchTip && item.head !== branchTip;
       return {
-        id: item.id, createdAt: item.created_at, date: date(item.created_at),
+        id: item.id, pdf: Boolean(matchingPdf(artifacts, item)), createdAt: item.created_at, date: date(item.created_at),
         branch: item.workflow_run?.head_branch || 'Unknown branch',
         label: manual ? 'manual' : ({ push: 'branch push', pull_request: 'pull request' }[event] || ''),
         manual, base: item.base, head: item.head,
@@ -355,7 +396,8 @@ async function commitsData(owner, repo, token, branch, tag = '') {
   const commitsResponse = await gh(`${root}/commits?sha=${encodeURIComponent(sha || branch)}&per_page=50`, token);
   if (!commitsResponse.ok) return null;
   const commitList = await commitsResponse.json();
-  const reviewList = artifactsResponse.ok ? reviews((await artifactsResponse.json()).artifacts) : [];
+  const artifacts = artifactsResponse.ok ? (await artifactsResponse.json()).artifacts || [] : [];
+  const reviewList = reviews(artifacts);
   const byHead = new Map(reviewList.filter((item) => item.head !== '?').map((item) => [String(item.head).slice(0, 7), item]));
   return {
     branch, tags: tags.map((item) => ({ name: String(item.name || '') })).filter((item) => item.name),
@@ -363,7 +405,8 @@ async function commitsData(owner, repo, token, branch, tag = '') {
     commits: commitList.map((commit) => {
       const sha = String(commit.sha || ''); const fullMessage = String(commit.commit?.message || '');
       const exactDate = date(commit.commit?.author?.date);
-      return { sha, fullMessage, message: fullMessage.split('\n', 1)[0], author: commit.author?.login || commit.commit?.author?.name || '?', date: relativeDate(commit.commit?.author?.date), exactDate, review: byHead.get(sha.slice(0, 7))?.id };
+      const review = byHead.get(sha.slice(0, 7));
+      return { sha, fullMessage, message: fullMessage.split('\n', 1)[0], author: commit.author?.login || commit.commit?.author?.name || '?', date: relativeDate(commit.commit?.author?.date), exactDate, review: review?.id, pdf: review ? Boolean(matchingPdf(artifacts, review)) : false };
     }),
   };
 }
@@ -476,8 +519,9 @@ async function run(request, env, owner, repo, id, url) {
   try {
     const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
     if (artifactsResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
-    const artifact = reviews((await artifactsResponse.json()).artifacts)[0];
-    if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}`, 302, allowed.s);
+    const artifacts = (await artifactsResponse.json()).artifacts || [];
+    const artifact = reviews(artifacts)[0];
+    if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}${matchingPdf(artifacts, artifact) ? '?pdf=1' : ''}`, 302, allowed.s);
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
@@ -561,12 +605,23 @@ export default {
       if (request.method === 'POST' && revoke) return await revokeShares(request, env, { owner: revoke[1], repo: revoke[2] }, { access, gh, response, sessionResponse });
       const shareCreate = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/share$/);
       if (request.method === 'POST' && shareCreate) return await createShare(request, env, { owner: shareCreate[1], repo: shareCreate[2], id: shareCreate[3] }, { access, gh, response, sessionResponse });
-      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw)?$/);
+      const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id, raw] = artifactRoute;
-        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+        if (!/^\d{1,20}$/.test(id)) {
+          if (raw === '/pdf') return pdfError(await session(request, env));
+          return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+        }
         const allowed = await access(request, env, owner, repo);
-        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, Boolean(raw), Boolean(allowed.repo.permissions?.push));
+        if (raw === '/pdf') {
+          if (allowed instanceof Response) {
+            const headers = new Headers(allowed.headers);
+            headers.set('Content-Type', 'application/json; charset=utf-8');
+            return response(JSON.stringify({ error: 'PDF unavailable' }), { status: allowed.status >= 400 ? allowed.status : 401, headers });
+          }
+          return pdfDownload(owner, repo, id, allowed.s);
+        }
+        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, raw === '/raw', Boolean(allowed.repo.permissions?.push));
       }
       const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
       if (request.method === 'POST' && compareRoute) {
