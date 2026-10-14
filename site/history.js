@@ -10,8 +10,7 @@ export const HISTORY_QUERY = 'query($owner:String!,$name:String!,$number:Int!){r
 
 const LOG_ROW = /^\| \[(\d{4}-\d\d-\d\d \d\d:\d\d)\]\(https:\/\/[^)]*\/actions\/runs\/(\d+)\) \| `([0-9a-f]{7})` \| (✅ pass|❌ fail) \| (.*) \|$/;
 
-// Waivers are reserved for plan 3; there is deliberately no waiver source yet.
-export function historyEvents(graphql, waivers = [], artifacts = [], path = '', artifactName = /^$/) {
+export function historyEvents(graphql, artifacts = [], path = '', artifactName = /^$/) {
   const pr = graphql?.data?.repository?.pullRequest || {};
   const byRun = new Map(artifacts.filter(a => !a.expired && artifactName.test(a.name || '') && /^\d+$/.test(String(a.id))).map(a => [String(a.workflow_run?.id), a.id]));
   const events = [];
@@ -60,7 +59,7 @@ export async function historyRoute(request, env, { owner, repo, number }, { acce
       const response = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts?per_page=100`, token);
       if (response.ok) artifacts = (await response.json()).artifacts || [];
     } catch { /* Artifacts only add links; keep the durable timeline when unavailable. */ }
-    const events = historyEvents(data, [], artifacts, path, artifactName);
+    const events = historyEvents(data, artifacts, path, artifactName);
     return sessionResponse(historyPage({ user: allowed.s.login, owner, repo, pull: number, title: data?.data?.repository?.pullRequest?.title || `#${number}`, events, filter: new URL(request.url).searchParams.get('f') || 'all' }),
       { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch { return fail(502, 'GitHub did not answer. Try again.'); }

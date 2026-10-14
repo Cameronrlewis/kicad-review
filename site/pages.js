@@ -9,11 +9,12 @@ const e = escapeHtml;
 const repoPath = (owner, repo) => `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 const link = (href, label, className = '') => `<a${className ? ` class="${className}"` : ''} href="${e(href)}">${e(label)}</a>`;
 
-const HISTORY_KINDS = [['all', 'All'], ['checks', 'Checks'], ['reviews', 'Reviews'], ['threads', 'Threads'], ['commits', 'Commits']];
+const HISTORY_KINDS = [['all', 'All'], ['checks', 'Checks'], ['review', 'Reviews'], ['thread', 'Threads'], ['commit', 'Commits']];
 export function historyPage({ user, owner, repo, pull, title, events, filter }) {
+  if (['reviews', 'threads', 'commits'].includes(filter)) filter = filter.slice(0, -1);
   if (!HISTORY_KINDS.some(([kind]) => kind === filter)) filter = 'all';
-  const path = repoPath(owner, repo), kindOf = { checks: 'checks', reviews: 'review', threads: 'thread', commits: 'commit' };
-  const shown = filter === 'all' ? events : events.filter(ev => ev.kind === kindOf[filter]);
+  const path = repoPath(owner, repo);
+  const shown = filter === 'all' ? events : events.filter(ev => ev.kind === filter);
   const rows = shown.map(ev => {
     const safe = String(ev.href || '').startsWith(`${path}/a/`) && /^\d+$/.test(String(ev.href).slice(`${path}/a/`.length));
     return `<li class="hist"><time datetime="${e(ev.time)}">${e(String(ev.time).replace('T', ' ').slice(0, 16))} UTC</time> <span class="hist-kind">${e(ev.kind)}</span> ${safe ? link(ev.href, ev.text) : e(ev.text)} <span class="muted">${e(ev.who)}</span></li>`;

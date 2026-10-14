@@ -10,9 +10,9 @@ import { historyPage } from './pages.js';
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 test('history ignores unrelated artifacts from the same run', () => {
   const artifacts = [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 } }, { id: 901, name: 'build.zip', workflow_run: { id: 77 } }];
-  const checks = historyEvents(historyFixture(), [], artifacts, '/r/o/r', historyArtifactName).filter(e => e.kind === 'checks');
+  const checks = historyEvents(historyFixture(),artifacts, '/r/o/r', historyArtifactName).filter(e => e.kind === 'checks');
   assert.equal(checks[0].href, '/r/o/r/a/900');
-  assert.equal(historyEvents(historyFixture(), [], artifacts.slice(1), '/r/o/r', historyArtifactName).find(e => e.kind === 'checks').href, null);
+  assert.equal(historyEvents(historyFixture(),artifacts.slice(1), '/r/o/r', historyArtifactName).find(e => e.kind === 'checks').href, null);
 });
 
 const historyFixture = () => ({ data: { repository: { pullRequest: { title: 'Move R16',
@@ -23,7 +23,7 @@ const historyFixture = () => ({ data: { repository: { pullRequest: { title: 'Mov
 } } } });
 
 test('history joins sources newest first, parses escaped pipes and links active reports', () => {
-  const events = historyEvents(historyFixture(), [], [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: false }], '/r/o/r', historyArtifactName);
+  const events = historyEvents(historyFixture(),[{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: false }], '/r/o/r', historyArtifactName);
   assert.deepEqual(events.map(e => e.kind), ['review', 'checks', 'thread', 'commit', 'checks']);
   assert.equal(events[0].who, 'ghost');
   assert.equal(events[1].href, '/r/o/r/a/900');
@@ -37,7 +37,7 @@ test('history trusts only bot-authored marked logs and drops expired links', () 
   const gq = historyFixture();
   const bot = gq.data.repository.pullRequest.comments.nodes[0];
   gq.data.repository.pullRequest.comments.nodes.unshift({ ...bot, author: { login: 'attacker' } });
-  const events = historyEvents(gq, [], [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: true }], '/r/o/r', historyArtifactName);
+  const events = historyEvents(gq,[{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 }, expired: true }], '/r/o/r', historyArtifactName);
   assert.equal(events.filter(e => e.kind === 'checks').length, 2);
   assert.ok(events.filter(e => e.kind === 'checks').every(e => e.href === null));
   bot.author.login = 'attacker';
