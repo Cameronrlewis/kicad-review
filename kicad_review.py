@@ -1312,7 +1312,7 @@ import html as htmllib
 PRINT_CSS = """@page { size: A4 landscape; margin: 14mm 12mm;
   @top-left { content: string(revs); font: 9px sans-serif; color: #555; }
   @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 9px sans-serif; color: #555; } }
-body { font: 11px/1.4 system-ui, sans-serif; color: #111; } h1 { font-size: 22px; } h2 { font-size: 16px; break-before: page; } .revs { string-set: revs content(); }
+body { font: 11px/1.4 system-ui, sans-serif; color: #111; } h1 { font-size: 22px; } h2 { font-size: 16px; break-before: page; }
 table { border-collapse: collapse; width: 100%; margin: 6px 0; } th, td { border: 1px solid #bbb; padding: 2px 4px; text-align: left; vertical-align: top; }
 img { max-width: 100%; max-height: 150mm; display: block; margin: 4px 0; } .fail { font-weight: 700; } figure { break-inside: avoid; margin: 0 0 8px; }"""
 

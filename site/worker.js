@@ -202,14 +202,12 @@ function matchingPdf(artifacts, metadata) {
     && a.workflow_run?.id === metadata.workflow_run?.id);
 }
 
-async function pdfArtifact(owner, repo, id, token, metadata) {
+async function pdfArtifact(owner, repo, id, token) {
   try {
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
-    if (!metadata) {
-      const result = await gh(`${root}/artifacts/${id}`, token);
-      if (!result.ok) return null;
-      metadata = await result.json();
-    }
+    const result = await gh(`${root}/artifacts/${id}`, token);
+    if (!result.ok) return null;
+    const metadata = await result.json();
     if (metadata.expired || !/^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/.test(metadata.name)) return null;
     const runId = metadata.workflow_run?.id;
     if (!/^\d{1,20}$/.test(String(runId))) return null;
