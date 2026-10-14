@@ -1552,8 +1552,10 @@ test('thread client contains load failures, clears notice, and guards vanished t
   runInNewContext(`(${threadsClient.toString()})({ threads: '/threads', link: '/review' })`, {
     document: { getElementById(id) { return { 'review-report': iframe, 'thread-composer': composer, 'thread-view': view, 'thread-notice': notice }[id]; }, createElement: node },
     addEventListener(type, fn) { listeners[type] = fn; },
-    fetch: async (url, options) => { if (options) { posts++; return { ok: true }; } return response(); },
-    FormData: class { get() { return 'text'; } }, location: { hash: '' },
+    fetch: async (url, options) => { if (options) {
+      posts++; assert.equal(JSON.parse(options.body).link, '/review#v=board&x=1&y=2'); return { ok: true };
+    } return response(); },
+    URLSearchParams, FormData: class { get() { return 'text'; } }, location: { hash: '' },
   });
   const message = data => listeners.message({ source: iframe.contentWindow, data });
   message({ kicadReviewReady: true, threads: true });
@@ -1717,7 +1719,7 @@ test('issue client is gated, loads independently, resets composer and strips fin
       if (url === '/threads') return threadsAllowed ? { ok: true, json: async () => ({ threads: [{ id: 'T41', anchor, comments: [{ id: 11, author: 'alice', body: 'Move on rev C @alice' }] }] }) } : { ok: false, json: async () => ({ error: 'Threads denied' }) };
       return denied ? { ok: false, json: async () => ({ error: "Issues need the app's Issues permission." }) } : { ok: true, json: async () => ({ issues: [{ number: 1 }] }) };
     },
-    FormData: class { get(name) { return values[name]; } }, location: { hash: '#v=board&l=F_Cu,B_Cu' },
+    URLSearchParams, FormData: class { get(name) { return values[name]; } }, location: { hash: '#p=1&v=sheet%3A%2F&t=checks&x=999&y=888&s=old&l=F_Cu,B_Cu' },
   });
   const message = (data, source = iframe.contentWindow) => listeners.message({ source, data });
   const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -1736,7 +1738,9 @@ test('issue client is gated, loads independently, resets composer and strips fin
   await form.submit({ preventDefault() {}, target: form });
   const posted = JSON.parse(calls.find(c => c[1])[1].body);
   assert.equal(posted.anchor.title, undefined); assert.equal(posted.anchor.severity, 'comment'); assert.equal(posted.title, 'Fix R16');
-  assert.equal(posted.link, '/r/o/r/a/1#v=board&l=F_Cu%2CB_Cu'); assert.equal(posted.pull, 7);
+  const linkState = link => Object.fromEntries(new URLSearchParams(link.split('#')[1]));
+  assert.deepEqual(linkState(posted.link), { p: '1', t: 'checks', v: 'board', x: String(anchor.x), y: String(anchor.y) });
+  assert.equal(posted.pull, 7);
   assert.equal(composer.open, false); assert.equal(notice.textContent, 'Issue created; reply failed.');
   message({ kicadReviewPin: anchor });
   assert.equal(composer.querySelector('h2').textContent, 'New thread'); assert.equal(composer.querySelector('[name=title]').hidden, true);
@@ -1755,6 +1759,11 @@ test('issue client is gated, loads independently, resets composer and strips fin
   await form.submit({ preventDefault() {}, target: form });
   const threadIssue = JSON.parse(calls.filter(c => c[1]).at(-1)[1].body);
   assert.equal(threadIssue.threadCommentId, 11); assert.equal(threadIssue.pull, 7);
+  assert.deepEqual(linkState(threadIssue.link), { p: '1', t: 'checks', v: 'board', x: String(anchor.x), y: String(anchor.y) });
+  const schematic = { ...anchor, file: 'Thermal_Camera/sub.kicad_sch', sheet: '/sub/', x: 12.5, y: 42 };
+  message({ kicadReviewIssueFor: { ...schematic, title: 'Fix sub-sheet' } });
+  await form.submit({ preventDefault() {}, target: form });
+  assert.deepEqual(linkState(JSON.parse(calls.filter(c => c[1]).at(-1)[1].body).link), { p: '1', t: 'checks', v: 'sheet:/sub/', x: '12.5', y: '42' });
   assert.equal(threadIssue.anchor.uuid, anchor.uuid); assert.equal(threadIssue.anchor.severity, 'comment');
   duplicate = true; calls.length = 0;
   message({ kicadReviewIssueFor: { ...anchor, title: 'Fix R16' } });

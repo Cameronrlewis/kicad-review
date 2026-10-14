@@ -15,7 +15,13 @@ export function threadsClient(config) {
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
   };
   const tracked = t => t.comments.slice(1).some(c => /\bTracked in #\d+\b/.test(String(c.body || '')));
-  const reviewLink = () => config.link + (location.hash ? '#' + location.hash.slice(1).replace(/[^\w\-.:/%=&]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase()) : '');
+  const reviewLink = anchor => {
+    const current = new URLSearchParams(location.hash.slice(1)), target = new URLSearchParams();
+    for (const key of ['p', 't']) if (current.has(key)) target.set(key, current.get(key));
+    target.set('v', anchor.file.endsWith('.kicad_pcb') ? 'board' : `sheet:${anchor.sheet || '/'}`);
+    target.set('x', anchor.x); target.set('y', anchor.y);
+    return config.link + '#' + target.toString();
+  };
   const show = (id) => {
     const t = threads.find((x) => x.id === id); if (!t) return;
     current = id;
@@ -87,7 +93,7 @@ export function threadsClient(config) {
       if (issueMode && !issuesOn) throw new Error('Issues are turned off for this review.');
       if (issueMode) {
         const response = await fetch(config.issues, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ anchor: { ...pending, severity: 'comment' },
-          title: String(form.get('title') || issueMode.title), text: String(form.get('text') || ''), link: reviewLink(), pull: config.pull, threadCommentId: issueMode.threadCommentId }) });
+          title: String(form.get('title') || issueMode.title), text: String(form.get('text') || ''), link: reviewLink(pending), pull: config.pull, threadCommentId: issueMode.threadCommentId }) });
         const result = await response.json().catch(() => ({}));
         if (response.status === 409) {
           composer.close(); issueMode = null; await load();
@@ -99,7 +105,7 @@ export function threadsClient(config) {
         return;
       }
       if (!threadsOn) throw new Error('Threads are turned off for this review.');
-      await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: reviewLink() });
+      await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: reviewLink(pending) });
       composer.close(); await load();
     } catch (error) { status(composer, error.message); }
     finally { if (submit) submit.disabled = false; }
