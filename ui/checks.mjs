@@ -738,13 +738,14 @@ export const CHECKS = [
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;
     const line = (ref, supplier, mpn = ref) => ({refs:[ref], key:ref, value:ref, footprint:'F', lcsc:'C1', mpn, datasheet:null, problems:[], supplier});
-    p.parts = {lines:[line('U1',{status:'ok',quantity:1234,unit_price:9,breaks:[[1,1.5]],url:'https://www.digikey.ca/en/products/x'}),
+    p.parts = {lines:[line('U1',{status:'ok',quantity:1234,unit_price:9,breaks:[[1,1.5]],product_status:'Active <img src=x>',url:'https://www.digikey.ca/en/products/x'}),
       line('U2',{status:'out_of_stock',quantity:0,unit_price:2}), line('U3',{status:'ambiguous',matches:2,unit_price:99}),
       line('R1',null,null)],changes:[],supplier:{name:'DigiKey',currency:'USD',fetched_at:new Date().toISOString(),error:null,skipped:null,not_looked_up:{no_mpn:54,invalid_mpn:1,run_limit:2}}};
     S.t='parts'; S.partsFilter={problems:false,changed:false}; renderPanel();
     const cells = () => [...document.querySelectorAll('.parts-stock')];
     if (![...document.querySelectorAll('.parts-table th')].some(x=>x.textContent==='DigiKey')) return 'header';
     if (!cells()[0].textContent.includes('✔ 1234') || !cells()[0].textContent.includes('$1.50') || !cells()[0].querySelector('a')?.href.startsWith('https://www.digikey.ca/')) return 'stock or price';
+    if (!cells()[0].textContent.includes('Active <img src=x>') || cells()[0].querySelector('img')) return 'product status escaping';
     if (cells()[0].querySelector('a').rel!=='noopener noreferrer' || !document.querySelector('.parts-age').textContent.includes('DigiKey data as of') || !document.querySelector('.parts-attribution').textContent.includes('Stock and price from DigiKey')) return 'attribution';
     if (!document.querySelector('.parts-not-looked-up').textContent.includes('54 parts not looked up: no MPN') || document.querySelector('#panel').textContent.includes('JLCPCB')) return 'coverage';
     if (!cells()[2].textContent.includes('several matches') || cells()[2].textContent.includes('99')) return 'ambiguous';

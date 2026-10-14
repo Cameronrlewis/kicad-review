@@ -505,7 +505,8 @@ function renderParts() {
         }
       } else if (parts.supplier) stock = /^(?:|~|tbd|\?|x|todo|na|n\/a|-)$/i.test(String(l.mpn || "").trim()) ? "not looked up: no MPN" : "not looked up: invalid MPN";
       const product = !parts.supplier?.skipped && supplier ? digiKeyUrl(supplier.url) : null;
-      const stockHtml = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
+      const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
+      const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
       return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
