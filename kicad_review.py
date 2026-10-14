@@ -736,8 +736,8 @@ def release_findings(fab_dir, label, preset, pcb_path, board_objs):
     with zipfile.ZipFile(f"{stem}-gerbers.zip") as z:
         files = {n: z.read(n).decode("latin-1") for n in z.namelist()}
     # KiCad names a Gerber after the layer's user name when it has one (e.g. In1.Cu renamed "GND_PLANE").
-    pcb_head = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
-    alias = {c: u for c, u in re.findall(r'\(\d+\s+"([^"]+)"\s+\w+\s+"([^"]+)"\)', pcb_head)}
+    pcb_text = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
+    alias = {c: u for c, u in re.findall(r'\(\d+\s+"([^"]+)"\s+\w+\s+"([^"]+)"\)', pcb_text)}
     names = lambda layer: {layer.replace(".", "_"), alias.get(layer, layer).replace(".", "_").replace(" ", "_")}
     find_layer = lambda layer: next((t for n, t in files.items() if any(f"-{x}." in n for x in names(layer))), None)
     out = []
@@ -748,7 +748,6 @@ def release_findings(fab_dir, label, preset, pcb_path, board_objs):
     attrs = lambda o: (o["props"].get("attributes") or "").split()
     smd = [o for o in fps if "smd" in attrs(o) and "dnp" not in attrs(o)]
     # Pads come from the board file, so pcb_objects (and every report's change list) needs no new prop.
-    pcb_text = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
     paste_sides = smd_pad_sides(pcb_text) | {o["props"]["layer"][0] for o in smd if "smd" in (o["props"].get("pads_kind") or "").split()}
     for side in ("F", "B"):
         if any(o["props"].get("layer") == f"{side}.Cu" for o in smd):
@@ -787,7 +786,7 @@ def package_summary(fab_dir):
     sha = None
     if zip_:
         with open(f"{fab_dir}/{zip_}", "rb") as fh:
-            sha = hashlib.sha256(fh.read()).hexdigest()
+            sha = hashlib.file_digest(fh, "sha256").hexdigest()
     return {"files": [{"path": f, "bytes": os.path.getsize(f"{fab_dir}/{f}")} for f in files], "sha256": sha}
 
 
@@ -813,7 +812,7 @@ def cmd_release(args):
     for f in sorted(os.listdir("release")):
         if f != "SHA256SUMS":
             with open(f"release/{f}", "rb") as fh:
-                sums.append(f"{hashlib.sha256(fh.read()).hexdigest()}  {f}")
+                sums.append(f"{hashlib.file_digest(fh, 'sha256').hexdigest()}  {f}")
     if sums:
         with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
             fh.write("\n".join(sums) + "\n")
