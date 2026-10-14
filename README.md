@@ -28,7 +28,7 @@ A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone chang
 - the sheet hierarchy with changed sheets marked
 - the change table and the check results, where clicking a row zooms to the object or violation
 
-Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. Runs whose changes touch no KiCad file are not started at all, thanks to the path filters. A newer push to a pull request cancels that pull request's older run. Every push to a branch gets its own run, so no commit goes unreviewed.
+Every KiCad project in the repository (each folder with a `.kicad_pro`) is reviewed separately. The path filters also start runs for settings and waiver-file changes; a waiver-only pull request shows "No KiCad changes". A newer push to a pull request cancels that pull request's older run. Every push to a branch gets its own run, so no commit goes unreviewed.
 
 ## Add it to a repository
 
@@ -60,6 +60,7 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
 | `github.check_runs` | `false` | also publish one GitHub check run per check (`kicad-review / ERC`, `… / DRC`, …); the caller needs `checks: write` |
 | `threads.block_merge` | `false` | fail the review while any blocking thread is open; needs `threads.enabled`; creating, resolving or reopening a blocking thread in the review site re-runs the review |
+| `waivers.enabled` | `false` | read `kicad-review-waivers.toml`; a waived ERC, DRC or parity finding stays listed but no longer fails its check |
 
 For pull requests the base revision's settings file wins, so a change cannot relax the checks it is judged by. Only when the base has no settings file is the head's copy used.
 
@@ -89,6 +90,20 @@ When thread collection succeeds, the pull request comment shows "Threads: N open
 Threads are off by default. The site exposes them only on review pages for `pull_request` runs. The GitHub App needs Pull requests and Contents permissions (read and write); GitHub requires Contents write to resolve review threads. A 403 response shows a hint to ask the repository owner to accept those permissions. A rate-limit response shows "GitHub rate limit reached. Try again later." (429).
 
 When enabled, the workflow's "Collect review threads" step reads the pull request's review threads with `gh api graphql` for the summary counts. If collection fails, the review continues without thread counts unless `threads.block_merge` is enabled, in which case the gate fails closed. Each blocking-thread create, resolve or reopen re-runs the whole review (about 2–3 Actions minutes); anyone with write access can trigger a re-run, so only writers can spend Actions minutes this way. GitHub requires a run no older than 30 days.
+
+## Waivers (optional)
+
+A waiver accepts one specific ERC, DRC or parity finding: for example a deliberate clearance under a connector shield. BOM-field findings cannot be waived; fix their fields in the schematic. Waivers are off by default. Enable them with `enabled = true` under `[waivers]` in `kicad-review.toml` on the default branch. Settings still come from the review's base revision, so open pull requests pick up that setting after merging the default branch into their head.
+
+Press **Waive…** on a finding in the report to get a TOML snippet, not an automatic waiver. Fill in `reason` and `by`, and add the entry to `kicad-review-waivers.toml` at the repository root through a separate pull request to the target branch. See the fully commented [example file](examples/kicad-review-waivers.toml). Once that merges, re-run the review that had the finding.
+
+In GitHub Actions, waivers are read only from the current tip of the pull request's target branch (`origin/<base.ref>`), or the repository's default branch for push and manual-dispatch runs. They never apply from the change being reviewed, so a pull request cannot waive its own findings, and waivers merged later apply on re-run. Protect the target branch: anyone who can push directly to it can accept waivers without review. Direct pushes to the default branch already bypass review. For local CLI runs without `WAIVERS_REF`, the comparison's base revision is the fallback.
+
+When a review includes KiCad changes, valid extra entries in its head file appear as "proposed" in the comment, not as active waivers (entries already active on the target branch are not repeated). A waiver-only pull request has no KiCad changes to review; its entries apply once it merges. Its comment shows **No KiCad changes**, not proposed entries.
+
+A waived finding stays listed, tagged **WAIVED** with its reason, under the report's **Waived** filter, which appears when something is waived. It does not count toward `fail_on`; the comment's **Ready to merge?** block lists waived findings as not blocking. Each entry needs `until = <date>` or `permanent = true`. The `until` date is inclusive through that day in UTC; expiry starts the next UTC day. Malformed files warn and are ignored; invalid entries warn and are skipped without breaking the review. The comment lists invalid, expired and proposed entries, and waivers not matched in this review; these lists are not shown in the offline HTML report. An unmatched entry may belong to an unchanged project or a check that is off, so remove it only if its finding is gone. The file's git history records who accepted what and when.
+
+Waiver keys have limits. Several unconnected items on one net are keyed by occurrence in KiCad's output, so fixing one can shift another's key, making its waiver stale or matching a different occurrence. A finding without part UUIDs uses a position-based fallback, so moving the part makes its waiver stale. Recheck these waivers after edits.
 
 ## Review site (optional)
 
@@ -172,3 +187,5 @@ and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `
 and an export runs, `board.model3d` has base/head GLB blob ids (or `null`), `board.model3d_failed` marks
 failed exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
 footprint`). Positions and boxes are drawing millimetres.
+
+With waivers enabled, format v1 adds `violations[].waiver_key`, `violations[].waived` for matched findings, `checks[].waived` counts on waivable checks, and top-level `waivers` lists (`stale`, `expired`, `proposed`, `invalid`); these additive fields are absent when waivers are off.

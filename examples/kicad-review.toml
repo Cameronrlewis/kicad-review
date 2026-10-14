@@ -33,3 +33,7 @@ block_merge = false  # fail the review while a blocking thread is open; needs en
 [github]
 # One GitHub check run per check, for branch protection. Needs "checks: write" in the caller workflow. Off by default.
 check_runs = false
+
+[waivers]
+# Read kicad-review-waivers.toml and let waived findings pass required checks. Off by default.
+enabled = false
