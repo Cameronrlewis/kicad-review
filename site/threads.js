@@ -62,7 +62,7 @@ export const LIST_QUERY = 'query($owner:String!,$name:String!,$number:Int!){repo
 export const RESOLVE_MUTATION = 'mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}';
 export const UNRESOLVE_MUTATION = 'mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}';
 
-const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+export const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 const permissionHint = "Threads need the app's Pull requests and Contents permissions (read and write). Ask the repository owner to accept them.";
 
 export function refused(response) {

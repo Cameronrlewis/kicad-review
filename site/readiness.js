@@ -1,7 +1,5 @@
 // Merge readiness derives from GitHub reviews and anchored review threads.
-import { LIST_QUERY, parseThreads, refused, accessFailure, sessionResponse } from './threads.js';
-
-const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+import { LIST_QUERY, parseThreads, refused, accessFailure, sessionResponse, json } from './threads.js';
 
 export function latestDecisions(reviews, head) {
   const latest = new Map();
