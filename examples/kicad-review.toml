@@ -9,6 +9,7 @@ erc = "required"
 drc = "required"
 parity = "required"      # schematic and board agree (DRC --schematic-parity)
 bom = "informational"    # every part has the fields below
+release = "off"        # fabrication package completeness; costs ~2-4 s per board
 
 [bom]
 required_fields = ["Value", "Footprint"]

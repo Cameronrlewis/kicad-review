@@ -692,6 +692,15 @@ export const CHECKS = [
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
+  ["Release check shows its package", "p=1&t=checks", `
+    const P = proj(); P.checks.push({ name: "release", title: "Release package", level: "informational", status: "pass", errors: 0, warnings: 0, new_errors: 0, new_warnings: 0, fixed: 0, violations: [],
+      package: { files: [{ path: "b-review-jlcpcb-gerbers.zip", bytes: 20480 }, { path: "b-review-jlcpcb-bom.csv", bytes: 300 }], sha256: "ab".repeat(32) } });
+    renderPanel();
+    const t = document.querySelector("#panel .package")?.textContent || "";
+    return t.includes("2 files") && t.includes("abababab") && t.includes("gerbers.zip") || t;`],
+  ["Reports without a release check show no Release package row", "t=checks", `
+    if (!proj().checks || proj().checks.some(c => c.name === "release")) return "skip";
+    return ![...document.querySelectorAll("#panel .check-title")].some(e => e.textContent === "Release package") || "release row shown";`],
   ["BOM coverage and field changes render in the Parts tab", "", `
     const P = proj(); P.parts = P.parts || { lines: [], changes: [], supplier: null };
     P.parts.coverage = { base: { Value: [4, 4], Footprint: [4, 4], LCSC: [3, 4], MPN: [1, 4], Manufacturer: [0, 4], Datasheet: [2, 4], "Datasheet (critical)": [1, 2], "Order ready": [3, 4] },
