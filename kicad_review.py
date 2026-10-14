@@ -232,7 +232,7 @@ def cmd_render(args):
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
             items = {side: library_items(root) for side, root in roots.items()}
-            for c in library_changes(roots["base"], roots["head"], items=items):
+            for c in library_changes(items["base"], items["head"]):
                 for side in ("base", "head"):
                     source = items[side].get((c["lib"], c["item"], c["kind"]))
                     if source is None:
@@ -684,10 +684,7 @@ def library_items(proj_dir):
     return items
 
 
-def library_changes(base_dir, head_dir, *, items=None):
-    b, h = ((items["base"], items["head"]) if items is not None else
-            (library_items(base_dir) if os.path.isdir(base_dir) else {},
-             library_items(head_dir) if os.path.isdir(head_dir) else {}))
+def library_changes(b, h):
     out = []
     for key in sorted(set(b) | set(h), key=lambda k: (k[2], k[0], natural(k[1]))):
         x, y = b.get(key), h.get(key)
@@ -1179,7 +1176,7 @@ def build_project(p, blobs, settings):
     if settings["libraries"]["enabled"]:
         roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
         items = {side: library_items(root) for side, root in roots.items()}
-        libraries = library_report(library_changes(roots["base"], roots["head"], items=items), index, out, blobs,
+        libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs),

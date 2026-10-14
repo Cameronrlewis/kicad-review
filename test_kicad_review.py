@@ -1189,7 +1189,7 @@ with tempfile.TemporaryDirectory() as d:
              extra_fp=("SOT23-5", FP([("1", 0)])))
     items = library_items(f"{d}/b")
     assert set(items) == {("Parts", "LDO", "symbol"), ("Parts", "SOT23", "footprint")} and set(items["Parts", "LDO", "symbol"]["pins"]) == {"1", "2", "3", "4"}
-    ch = {(c["kind"], c["item"]): c for c in library_changes(f"{d}/b", f"{d}/h")}
+    ch = {(c["kind"], c["item"]): c for c in library_changes(library_items(f"{d}/b"), library_items(f"{d}/h"))}
     assert ch["symbol", "LDO"]["status"] == "modified" and ch["symbol", "LDO"]["pins_diff"] == [{"pin": "4", "change": "type", "before": "input", "after": "passive"}], ch["symbol", "LDO"]
     print("ok multi-unit symbol pins are compared together")
     assert ch["footprint", "SOT23"]["pins_diff"] == [{"pin": "3", "change": "removed", "before": "smd rect (2, 0) 0.6×1", "after": None}]
@@ -1197,18 +1197,18 @@ with tempfile.TemporaryDirectory() as d:
     print("ok renamed item is removed plus added")
 with tempfile.TemporaryDirectory() as d:
     lib_tree(f"{d}/b", SYM([("1", "A", "passive")]), FP([("1", 0)], model="a.step")); lib_tree(f"{d}/h", SYM([("1", "A", "passive")]), FP([("1", 0)], model="b.step"))
-    ch = library_changes(f"{d}/b", f"{d}/h")
+    ch = library_changes(library_items(f"{d}/b"), library_items(f"{d}/h"))
     assert [(c["item"], c["status"], c["pins_diff"]) for c in ch] == [("SOT23", "modified", [])], ch
 print("ok non-pad edits are modified without warnings")
 
 with tempfile.TemporaryDirectory() as d:
     lib_tree(f"{d}/b", SYM([("1", "A", "passive")]), FP([("1", 0), ("1", 1)]))
     lib_tree(f"{d}/h", SYM([("1", "A", "passive")]).replace('(length 2.54)', '(length 3)'), FP([("1", 0), ("1", 2)]))
-    changed = library_changes(f"{d}/b", f"{d}/h")
+    changed = library_changes(library_items(f"{d}/b"), library_items(f"{d}/h"))
     assert all(c["pins_diff"][0]["change"] == "geometry" for c in changed)
     os.remove(f"{d}/h/Parts.pretty/SOT23.kicad_mod")
     pathlib.Path(f"{d}/h/Parts.pretty/Renamed.kicad_mod").write_text(FP([("1", 0)]).replace('"SOT23"', '"Renamed"'))
-    renamed = [c for c in library_changes(f"{d}/b", f"{d}/h") if c["kind"] == "footprint"]
+    renamed = [c for c in library_changes(library_items(f"{d}/b"), library_items(f"{d}/h")) if c["kind"] == "footprint"]
     assert {(c["item"], c["status"]) for c in renamed} == {("SOT23", "removed"), ("Renamed", "added")}
     assert next(c for c in renamed if c["status"] == "removed")["pins_diff"][0]["change"] == "removed"
 print("ok library geometry and true rename")
@@ -1297,7 +1297,7 @@ print("ok library exports, objects emission and off byte identity")
 # Final review: precomputed item maps avoid parsing; absent/invalid SVGs cannot produce drawable views.
 from kicad_review import svg_size
 with patch("kicad_review.library_items", side_effect=AssertionError("parsed precomputed items")):
-    assert library_changes("missing-base", "missing-head", items={"base": {}, "head": {}}) == []
+    assert library_changes({}, {}) == []
 assert svg_size('<svg viewBox="-2e1 -3.5 1e2 5E+1"/>') == [100.0, 50.0]
 with tempfile.TemporaryDirectory() as d:
     os.makedirs(f"{d}/head/lib"); os.makedirs(f"{d}/base/lib")
@@ -1355,7 +1355,7 @@ def _live_usage():
     with tempfile.TemporaryDirectory() as d:
         _live_tree(d + '/base'); _live_tree(d + '/head', removed=True)
         items = {side: kicad_review.library_items(d + '/' + side) for side in ('base', 'head')}
-        changes = kicad_review.library_changes(d + '/base', d + '/head', items=items)
+        changes = kicad_review.library_changes(items['base'], items['head'])
         # Use the correct item identity independently of parser assertions.
         change = next(c for c in changes if c['kind'] == 'footprint'); change['item'] = _LIVE_ITEM
         objects = [{'kind': 'footprint', 'lib': 'Thermal Footprints:' + _LIVE_ITEM, 'ref': 'U1', 'side': 'head'}]
