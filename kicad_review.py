@@ -1189,8 +1189,8 @@ def cmd_report(args):
     env = os.environ
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    opted_out = lambda k, v: (k in ("3d", "parts", "threads", "waivers") and not v["enabled"]) or (k == "github" and not v["check_runs"])
-    report_settings = {k: v for k, v in settings.items() if not opted_out(k, v)}
+    report_settings = {k: v for k, v in settings.items()
+                       if not ((k in ("3d", "parts", "threads", "waivers") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -1428,19 +1428,21 @@ def cmd_summary(args):
     with open(f"review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
     settings = data["settings"]
+    block_merge = settings.get("threads", {}).get("block_merge")
+    publish_checks = settings.get("github", {}).get("check_runs")
     threads_failed = ""
-    if settings.get("threads", {}).get("block_merge"):
+    if block_merge:
         threads_failed = "blocking threads could not be read" if threads is None else (plural(threads["blocking"], "blocking thread") + " open" if threads["blocking"] else "")
-    if settings.get("github", {}).get("check_runs"):
+    if publish_checks:
         runs = check_runs(data)
-        if settings.get("threads", {}).get("block_merge"):
+        if block_merge:
             runs.append({"name": "kicad-review / Threads", "conclusion": "failure" if threads_failed else "success",
                          "output": {"title": threads_failed or "no blocking threads open",
                                     "summary": "Resolve blocking threads in the review site or on GitHub."}})
         with open("review/check-runs.json", "w", encoding="utf-8") as fh:
             json.dump(runs, fh)
     with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
-        fh.write(f"check_runs={'true' if settings.get('github', {}).get('check_runs') else 'false'}\n")
+        fh.write(f"check_runs={'true' if publish_checks else 'false'}\n")
         fh.write(f"threads_failed={threads_failed}\n")
     with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(body.replace(MARKER, ""))
@@ -1541,8 +1543,8 @@ def checks_markdown(data):
     return checks
 
 
-CONCLUSION = {"fail": "failure", "warn": "neutral", "pass": "success", "not_run": "skipped"}
-WORST = ["failure", "neutral", "success", "skipped"]
+CHECK_RESULTS = [("fail", "failure", "failing"), ("warn", "neutral", "warnings"),
+                 ("pass", "success", "passing"), ("not_run", "skipped", "not run")]
 
 
 def check_runs(data):
@@ -1551,13 +1553,17 @@ def check_runs(data):
     for p in data["projects"]:
         for c in p["checks"]:
             r = runs.setdefault(c["name"], {"name": f"kicad-review / {c['title']}", "rows": [], "conclusions": [], "new": 0})
-            r["conclusions"].append(CONCLUSION[c["status"]])
+            rank = next((i for i, result in enumerate(CHECK_RESULTS) if result[0] == c["status"]), None)
+            if rank is None:
+                raise KeyError(c["status"])
+            r["conclusions"].append(rank)
             r["new"] += c["new_errors"]
             r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
     out = []
     for r in runs.values():
-        conclusion = min(r["conclusions"], key=WORST.index)
-        title = plural(r["new"], "new error") if r["new"] else {"failure": "failing", "neutral": "warnings", "success": "passing", "skipped": "not run"}[conclusion]
+        _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]
+        if r["new"]:
+            title = plural(r["new"], "new error")
         summary = "\n".join(["| Project | Result | Errors (new) | Warnings (new) |", "|---|---|---|---|", *r["rows"]])
         out.append({"name": r["name"], "conclusion": conclusion, "output": {"title": title, "summary": summary}})
     return out

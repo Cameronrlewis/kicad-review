@@ -1,8 +1,5 @@
 // The review page's thread client. It runs in the trusted wrapper, never in the sandboxed report.
 // The report only proposes anchors and asks to open threads; text and requests stay here.
-export function acceptFromReport(event, iframe) {
-  return event.source === iframe.contentWindow && !!event.data && typeof event.data === 'object';
-}
 
 export function threadsClient(config) {
   const iframe = document.getElementById('review-report');
@@ -11,11 +8,6 @@ export function threadsClient(config) {
   const accept = (event) => event.source === iframe.contentWindow && !!event.data && typeof event.data === 'object';
   const send = (data) => iframe.contentWindow?.postMessage(data, '*');
   const status = (el, text) => { el.querySelector('[role=status]').textContent = text; };
-  const busy = new Set();
-  const setBusy = (dialog, on) => {
-    if (on) busy.add(dialog); else busy.delete(dialog);
-    for (const button of dialog.querySelector('form').querySelectorAll('button')) button.disabled = on;
-  };
   const post = async (path, body) => {
     const response = await fetch(config.threads + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'GitHub did not accept that.');
@@ -73,22 +65,24 @@ export function threadsClient(config) {
   });
   composer.querySelector('form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (busy.has(composer)) return;
-    setBusy(composer, true);
+    const buttons = composer.querySelector('form').querySelectorAll('button');
+    if (buttons[0]?.disabled) return;
+    for (const button of buttons) button.disabled = true;
     try {
       const form = new FormData(event.target);
       await post('', { anchor: { ...pending, severity: form.get('severity') === 'blocking' ? 'blocking' : 'comment' }, text: String(form.get('text') || ''), link: config.link + location.hash });
       composer.close(); await load();
       await rerun(form.get('severity'), composer, 'Created');
     } catch (error) { status(composer, error.message); }
-    finally { setBusy(composer, false); }
+    finally { for (const button of buttons) button.disabled = false; }
   });
   view.querySelector('form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (busy.has(view)) return;
+    const buttons = view.querySelector('form').querySelectorAll('button');
+    if (buttons[0]?.disabled) return;
     const t = threads.find((x) => x.id === current);
     if (!t) return status(view, 'This thread no longer exists.');
-    setBusy(view, true);
+    for (const button of buttons) button.disabled = true;
     try {
       const text = String(new FormData(event.target).get('text') || '');
       if (event.submitter?.dataset.act === 'resolve') await post(`/${encodeURIComponent(t.id)}/${t.resolved ? 'unresolve' : 'resolve'}`, {});
@@ -96,7 +90,7 @@ export function threadsClient(config) {
       event.target.reset(); await load();
       if (event.submitter?.dataset.act === 'resolve') await rerun(t.anchor.severity, view, t.resolved ? 'Reopened' : 'Resolved');
     } catch (error) { status(view, error.message); }
-    finally { setBusy(view, false); }
+    finally { for (const button of buttons) button.disabled = false; }
   });
   for (const dialog of [composer, view]) dialog.querySelector('[data-act=close]').addEventListener('click', () => dialog.close());
 }
