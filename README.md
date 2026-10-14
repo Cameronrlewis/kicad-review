@@ -60,6 +60,7 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 | `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
+| `inventory.enabled` | `false` | add an "All parts" list to the report's Changes tab: every symbol and footprint, searchable, click to zoom |
 | `github.check_runs` | `false` | also publish one GitHub check run per check (`kicad-review / ERC`, `… / DRC`, …); the caller needs `checks: write` |
 | `threads.block_merge` | `false` | fail the review while any blocking thread is open; needs `threads.enabled`; creating, resolving or reopening a blocking thread in the review site re-runs the review |
 | `waivers.enabled` | `false` | read `kicad-review-waivers.toml`; a waived ERC, DRC or parity finding stays listed but no longer fails its check |

@@ -482,7 +482,7 @@ function resolveAnchor(a) {
   if (base) return { view: objView(base), side: "base", pos: base.pos, notes: [...notes, `${a.ref} was removed in this change`] };
   return { detached: `${a.ref || "its object"} is not in either revision of this review` };
 }
-S.filter = { added: true, removed: true, modified: true, kind: "", q: "" };
+S.filter = { added: true, removed: true, modified: true, kind: "", q: "", all: false };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
 const PROP_ORDER = ["Value", "Footprint", "footprint", "layer", "position", "net", "layers", "text", "file", "width"];
 const rank = k => { const i = PROP_ORDER.indexOf(k); return i < 0 ? PROP_ORDER.length : i; };
@@ -495,6 +495,32 @@ function card(r) {
   return `<button class="card" data-id="${esc(r.id)}" data-action="${esc(r.action)}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
     <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${body}</button>`;
+}
+function inventoryHtml() {
+  // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
+  const changes = new Map();
+  for (const r of proj().changes) changes.set(`${r.kind}\0${r.ref}\0${r.action === "removed"}`, r);
+  const changeFor = o => changes.get(`${o.kind}\0${o.ref}\0${o.side === "base"}`) || (o.side === "base" ? { action: "removed" } : o.added ? { action: "added" } : null);
+  const place = o => o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet);
+  const q = S.filter.q.toLowerCase(), objs = (proj().objects || []).map((o, i) => ({ o, i }))
+    .filter(({ o }) => !q || [o.ref, o.value, o.footprint, place(o)].some(v => String(v ?? "").toLowerCase().includes(q)));
+  return (objs.slice(0, 1500).map(({ o, i }) => {
+    const ch = changeFor(o), view = objView(o), drawn = !!currentView(view);
+    return `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
+      ${ch ? `<span class="badge ${esc(ch.action)}">${GLYPH[ch.action] ?? ""} ${esc(ch.action)}</span>` : ""}
+      <div class="prop"><span>value</span><span class="new wide">${esc(o.value ?? "—")}</span></div><div class="prop"><span>footprint</span><span class="new wide">${esc(o.footprint ?? "—")}</span></div>
+      <div class="more muted">${esc(place(o))}${drawn ? "" : " · drawing unchanged: no render"}</div></button>`;
+  }).join("") || '<p class="muted">No parts match.</p>') + (objs.length > 1500 ? `<p class="muted">showing 1500 of ${objs.length}; narrow the search to see the rest</p>` : "");
+}
+function goToObject(i) {
+  const o = proj().objects?.[i]; if (!o) return Promise.resolve();
+  const view = objView(o); if (!currentView(view)) return Promise.resolve();
+  const p = o.pos, box = o.box || (p && [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3]);
+  if (view !== S.v) { S.v = view; S.x = S.y = S.z = null; renderNav(); }
+  return draw().then(() => { if (box) zoomTo(box); saveHash(); });
+}
+function bindInventory() {
+  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goToObject(+b.dataset.obj); };
 }
 function cardsHtml() {
   const f = S.filter, q = f.q.toLowerCase();
@@ -640,7 +666,7 @@ function renderThreads() {
     ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
 }
 function renderPanel() {
-  const active = document.activeElement, key = ["data-tab", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
   if (S.t === "threads" && !S.threads) { S.wantThreads = true; S.t = "changes"; }
@@ -653,10 +679,11 @@ function renderPanel() {
       ${S.threads ? `<button role="tab" data-tab="threads" aria-selected="${S.t === "threads"}">Threads ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}</button>` : ""}</div>` +
     (S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
-    <div class="filters">${["added", "removed", "modified"].map(a =>
+    ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
+    ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
-      <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
-    <div class="cards">${cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
+      <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
+    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
   for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
@@ -674,7 +701,9 @@ function renderPanel() {
     if (pre) pre.textContent = waiverSnippet(v, c.name);
   }
   const k = $("#panel select.kind"); if (k) k.onchange = () => { f.kind = k.value; renderPanel(); };
-  const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = cardsHtml(); bindCards(); };
+  const q = $("#panel .q"); if (q) q.oninput = () => { f.q = q.value; $("#panel .cards").innerHTML = f.all ? inventoryHtml() : cardsHtml(); bindCards(); bindInventory(); };
+  for (const b of document.querySelectorAll("#panel [data-inv]")) b.onclick = () => { f.all = b.dataset.inv === "1"; renderPanel(); };
+  bindInventory();
   bindCards();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
   for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };

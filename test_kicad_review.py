@@ -1147,7 +1147,7 @@ t1_head = {"/sub-uuid/s1": t1_sym("R1", 1), "f1": t1_fpo("R1", 5), "new-f3": t1_
 t1_idx = object_index(t1_base, t1_head)
 t1_by = {(e["side"], e["kind"], e["ref"]): e for e in t1_idx}
 assert set(t1_by) == {("head", "symbol", "R1"), ("head", "footprint", "R1"), ("head", "footprint", "R3"), ("base", "footprint", "R2")}, t1_by.keys()
-assert t1_by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "side": "head",
+assert t1_by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "footprint": None, "side": "head",
                                       "pos": [1, 1, 0], "box": None, "sheet": "/sub-uuid/"}, t1_by["head", "symbol", "R1"]
 assert t1_by["head", "footprint", "R1"]["pos_before"] == [1, 2, 90] and t1_by["head", "footprint", "R1"]["layer"] == "F.Cu"
 assert t1_by["head", "footprint", "R3"]["added"] is True and "pos_before" not in t1_by["head", "footprint", "R3"]
@@ -1259,6 +1259,14 @@ with tempfile.TemporaryDirectory() as t:
 print("ok threads cmd_summary")
 
 
+# Inventory: footprint in the object index; emitted for inventory as well as threads.
+s1 = {"kind": "symbol", "ref": "R1", "match": ("symbol", "R1", "1"), "where": {"sheet": "/"}, "pos": [1, 1, 0], "props": {"Value": "10k", "Footprint": "Resistor_SMD:R_0402"}}
+f1 = {"kind": "footprint", "ref": "R1", "match": ("footprint", "R1"), "where": {"board": True}, "pos": [5, 5, 0], "box": [4, 4, 6, 6],
+      "props": {"Value": "10k", "footprint": "Resistor_SMD:R_0402", "layer": "F.Cu"}}
+idx = object_index({}, {"/s1": s1, "f1": f1})
+assert [e["footprint"] for e in idx] == ["Resistor_SMD:R_0402", "Resistor_SMD:R_0402"], idx
+assert DEFAULT_SETTINGS["inventory"] == {"enabled": False}
+print("ok inventory footprint field")
 # Readiness: one check run per check across projects, worst result wins; comment block.
 from kicad_review import check_runs, readiness_markdown
 ck = lambda name, title, status, e=0, ne=0: {"name": name, "title": title, "level": "required", "status": status,

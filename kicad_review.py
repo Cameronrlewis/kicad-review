@@ -591,6 +591,7 @@ def object_index(base, head):
     uuid is the KiCad UUID (schematic keys are sheet path + UUID); sheet or layer says which drawing it is on."""
     def entry(key, o, side):
         e = {"uuid": key.rsplit("/", 1)[-1], "kind": o["kind"], "ref": o["ref"], "value": o["props"].get("Value"),
+             "footprint": o["props"].get("Footprint") or o["props"].get("footprint"),
              "side": side, "pos": o.get("pos"), "box": o.get("box")}
         if o["where"].get("sheet") is not None:
             e["sheet"] = o["where"]["sheet"]
@@ -633,6 +634,7 @@ DEFAULT_SETTINGS = {
     "threads": {"enabled": False, "block_merge": False},
     "github": {"check_runs": False},
     "waivers": {"enabled": False},
+    "inventory": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
 
@@ -651,7 +653,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "threads", "github", "waivers", "inventory"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -675,6 +677,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: parts.enabled must be true or false")
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
+    if not isinstance(settings["inventory"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: inventory.enabled must be true or false")
     for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
         if not isinstance(value, bool):
             sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
@@ -1226,7 +1230,7 @@ def build_project(p, blobs, settings, waivers=None):
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
             "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
-            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] else {})}
+            **({"objects": object_index(objs["base"], objs["head"])} if settings["threads"]["enabled"] or settings["inventory"]["enabled"] else {})}
 
 
 def assign_ids(projects):
@@ -1286,7 +1290,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if not ((k in ("3d", "parts", "threads", "waivers") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if not ((k in ("3d", "parts", "threads", "waivers", "inventory") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     data = {
