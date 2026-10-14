@@ -1279,6 +1279,10 @@ v1 = {"type": "clearance", "severity": "error", "description": "Clearance violat
       "uuids": ["u-b", "u-a"], "pos": [10.0, 5.0], "box": None, "where": {"board": True}}
 k = waiver_key(v1)
 assert re.fullmatch(r"w-[0-9a-f]{12}", k), k
+assert k == "w-9ca330438b76"
+assert waiver_key({**v1, "uuids": []}) == "w-6a0c64898488"
+assert waiver_key({**v1, "key": ("custom", "id")}) == "w-07981c798d2b"
+assert waiver_key({**v1, "severity": "warning"}) == "w-46e733a72221"
 assert waiver_key({**v1, "uuids": ["u-a", "u-b"]}) == k
 assert waiver_key({**v1, "description": "Clearance violation (0.11 mm < 0.2 mm)", "pos": [11, 6]}) == k  # same UUIDs: same finding
 assert waiver_key({**v1, "uuids": ["u-c"]}) != k
@@ -1302,6 +1306,12 @@ print("ok unconnected duplicates get distinct keys")
 # Waivers: read from the target ref with git, head copy only proposes; invalid entries skipped; expiry by date.
 import datetime, subprocess
 from kicad_review import load_waivers, run_check, DEFAULT_SETTINGS
+
+def load_waivers_on(ref, today):
+    with patch("kicad_review.datetime.datetime") as clock:
+        clock.now.return_value.date.return_value = today
+        return load_waivers(ref)
+
 WFILE = '''[[waiver]]
 check = "drc"
 match = "%s"
@@ -1345,24 +1355,24 @@ with tempfile.TemporaryDirectory() as d, patch("sys.stdout", new_callable=io.Str
         ref = subprocess.run(["git", "-C", "repo", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         os.makedirs("head")
         open("head/kicad-review-waivers.toml", "w").write(WFILE + '\n[[waiver]]\ncheck = "erc"\nmatch = "w-333333333333"\nreason = "new"\nby = "bo"\ndate = 2026-10-12\npermanent = true\n')
-        w = load_waivers(ref, today=datetime.date(2026, 10, 12))
+        w = load_waivers_on(ref, datetime.date(2026, 10, 12))
         assert set(w["active"]) == {("drc", k)}, w["active"]
         assert [e["match"] for e in w["expired"]] == ["w-000000000000"]
         assert [e["match"] for e in w["proposed"]] == ["w-000000000000", "w-333333333333"]
         assert len(w["invalid"]) == 4, w["invalid"]  # changed head retains all invalid entries
         head_file = pathlib.Path("head/kicad-review-waivers.toml")
         head_file.write_text(WFILE)
-        assert len(load_waivers(ref, today=datetime.date(2026, 10, 12))["invalid"]) == 2  # identical files report once
+        assert len(load_waivers_on(ref, datetime.date(2026, 10, 12))["invalid"]) == 2  # identical files report once
         head_file.write_text(WFILE + "\n")
-        assert len(load_waivers(ref, today=datetime.date(2026, 10, 12))["invalid"]) == 4  # even whitespace makes the text distinct
+        assert len(load_waivers_on(ref, datetime.date(2026, 10, 12))["invalid"]) == 4  # even whitespace makes the text distinct
         head_file.write_text(WFILE.replace("until = 2026-02-01", "until = 2026-12-31"))
-        renewed = load_waivers(ref, today=datetime.date(2026, 10, 12))
+        renewed = load_waivers_on(ref, datetime.date(2026, 10, 12))
         assert [e["match"] for e in renewed["proposed"]] == ["w-000000000000"], renewed
         assert renewed["proposed"][0]["until"] == "2026-12-31"
         head_file.write_text(WFILE.replace("w-222222222222", "w-444444444444"))
-        invalid = load_waivers(ref, today=datetime.date(2026, 10, 12))["invalid"]
+        invalid = load_waivers_on(ref, datetime.date(2026, 10, 12))["invalid"]
         assert len([m for m in invalid if "reason must not be empty" in m]) == 2, invalid
-        assert load_waivers(ref, today=datetime.date(2027, 1, 1))["active"] == {}  # the day after until
+        assert load_waivers_on(ref, datetime.date(2027, 1, 1))["active"] == {}  # the day after until
         assert load_waivers(None)["active"] == {}  # no target ref: nothing applies
     finally:
         os.chdir(_cwd)
@@ -1409,7 +1419,7 @@ with tempfile.TemporaryDirectory() as d:
         subprocess.run(["git", "-C", "repo", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "valid"], check=True)
         sha = subprocess.check_output(["git", "-C", "repo", "rev-parse", "HEAD"], text=True).strip()
         subprocess.run(["git", "-C", "repo", "update-ref", "refs/remotes/origin/main", sha], check=True)
-        assert set(load_waivers("origin/main", today=datetime.date(2026, 12, 31))["active"]) == {("drc", k)}
+        assert set(load_waivers_on("origin/main", datetime.date(2026, 12, 31))["active"]) == {("drc", k)}
         for bad_text in ("waiver = [1]", "[waiver]\ncheck = 'drc'",
                          valid.replace("until = 2026-12-31", "until = 2026-12-31T00:00:00")):
             path.write_text(bad_text)

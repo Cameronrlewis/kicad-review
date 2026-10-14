@@ -878,15 +878,8 @@ def vkeys(v):
 
 def waiver_key(v):
     """One stable identity per violation for kicad-review-waivers.toml: the strongest of the identities vkeys matches on."""
-    sig = (v["severity"], tuple(sorted(v["where"].items())))
-    if v.get("key"):
-        ident = v["key"]
-    elif v["uuids"]:
-        ident = ("u", v["type"], tuple(sorted(v["uuids"])))
-    else:
-        ident = ("p", v["type"], re.sub(r"[\d.]+", "#", v["description"]), tuple(v["items"]),
-                 tuple(tuple(round(c, 1) for c in p) for p in ([v["pos"]] if v["pos"] else [])))
-    return "w-" + hashlib.sha1(repr(ident + sig).encode()).hexdigest()[:12]
+    ident = max(vkeys(v if v.get("key") else {**v, "uuids": sorted(v["uuids"])}), key=lambda k: k[0] == "u")
+    return "w-" + hashlib.sha1(repr(ident).encode()).hexdigest()[:12]
 
 
 WAIVERS_FILE = "kicad-review-waivers.toml"
@@ -927,10 +920,11 @@ def parse_waivers(text, source):
     return good, bad
 
 
-def load_waivers(ref, head_path=f"head/{WAIVERS_FILE}", today=None):
+def load_waivers(ref):
     """Waivers that apply come from the target branch at ref (repo/ history), so a change cannot waive its own violations.
     The head copy's extra entries are only proposals."""
-    today = today or datetime.datetime.now(datetime.timezone.utc).date()
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    head_path = f"head/{WAIVERS_FILE}"
     out = {"active": {}, "expired": [], "proposed": [], "invalid": []}
     resolved = git("-C", "repo", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}", check=False) if ref else None
     if ref and not resolved:
