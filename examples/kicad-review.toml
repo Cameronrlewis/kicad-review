@@ -37,3 +37,7 @@ check_runs = false
 [waivers]
 # Read kicad-review-waivers.toml and let waived findings pass required checks. Off by default.
 enabled = false
+
+[inventory]
+# "All parts" list in the report. Adds about 100 bytes per part to the report.
+enabled = false

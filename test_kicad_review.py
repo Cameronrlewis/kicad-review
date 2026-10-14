@@ -1058,7 +1058,7 @@ t1_head = {"/sub-uuid/s1": t1_sym("R1", 1), "f1": t1_fpo("R1", 5), "new-f3": t1_
 t1_idx = object_index(t1_base, t1_head)
 t1_by = {(e["side"], e["kind"], e["ref"]): e for e in t1_idx}
 assert set(t1_by) == {("head", "symbol", "R1"), ("head", "footprint", "R1"), ("head", "footprint", "R3"), ("base", "footprint", "R2")}, t1_by.keys()
-assert t1_by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "side": "head",
+assert t1_by["head", "symbol", "R1"] == {"uuid": "s1", "kind": "symbol", "ref": "R1", "value": "10k", "footprint": None, "side": "head",
                                       "pos": [1, 1, 0], "box": None, "sheet": "/sub-uuid/"}, t1_by["head", "symbol", "R1"]
 assert t1_by["head", "footprint", "R1"]["pos_before"] == [1, 2, 90] and t1_by["head", "footprint", "R1"]["layer"] == "F.Cu"
 assert t1_by["head", "footprint", "R3"]["added"] is True and "pos_before" not in t1_by["head", "footprint", "R3"]
@@ -1172,8 +1172,16 @@ with tempfile.TemporaryDirectory() as t:
 print("ok threads cmd_summary")
 
 
+# Inventory: footprint in the object index; emitted for inventory as well as threads.
+s1 = {"kind": "symbol", "ref": "R1", "match": ("symbol", "R1", "1"), "where": {"sheet": "/"}, "pos": [1, 1, 0], "props": {"Value": "10k", "Footprint": "Resistor_SMD:R_0402"}}
+f1 = {"kind": "footprint", "ref": "R1", "match": ("footprint", "R1"), "where": {"board": True}, "pos": [5, 5, 0], "box": [4, 4, 6, 6],
+      "props": {"Value": "10k", "footprint": "Resistor_SMD:R_0402", "layer": "F.Cu"}}
+idx = object_index({}, {"/s1": s1, "f1": f1})
+assert [e["footprint"] for e in idx] == ["Resistor_SMD:R_0402", "Resistor_SMD:R_0402"], idx
+assert DEFAULT_SETTINGS["inventory"] == {"enabled": False}
+print("ok inventory footprint field")
 # Readiness: one check run per check across projects, worst result wins; comment block.
-from kicad_review import check_runs, readiness_markdown, DEFAULT_SETTINGS
+from kicad_review import check_runs, readiness_markdown
 ck = lambda name, title, status, e=0, ne=0: {"name": name, "title": title, "level": "required", "status": status,
                                              "errors": e, "new_errors": ne, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
 rd = {**d2, "projects": [
@@ -1264,7 +1272,6 @@ print("ok readiness summary gate")
 
 # Cap raw names before Markdown escaping, including an escape at the boundary.
 escaped = {**ok, "projects": [{**ok["projects"][0], "name": "a" * 999 + "*", "checks": [ck("erc", "ERC", "fail")]}]}
-from kicad_review import md
 assert md("a" * 999 + "*… (full list in Checks)") in "\n".join(readiness_markdown(escaped))
 assert "- ✕ **Blocking threads:** could not be read" in readiness_markdown(ok, threads_required=True)
 print("ok readiness unreadable threads and escape boundary")
@@ -1305,7 +1312,7 @@ print("ok unconnected duplicates get distinct keys")
 
 # Waivers: read from the target ref with git, head copy only proposes; invalid entries skipped; expiry by date.
 import datetime, subprocess
-from kicad_review import load_waivers, run_check, DEFAULT_SETTINGS
+from kicad_review import load_waivers
 
 def load_waivers_on(ref, today):
     with patch("kicad_review.datetime.datetime") as clock:
@@ -1499,7 +1506,7 @@ with tempfile.TemporaryDirectory() as d:
 print("ok waiver ref options, missing refs, symlinks and size limit")
 
 # Comment summaries distinguish waived findings from new errors and escape waiver text.
-from kicad_review import waiver_lines, checks_markdown, md
+from kicad_review import waiver_lines, checks_markdown
 entry = {"check": "erc", "match": "w-444444444444", "reason": "gone", "by": "bo"}
 wd = {"projects": [{"name": "A", "checks": [{**c, "violations": [{**v1, "new": True, "waived": {"reason": "intended"}}], "waived": 1}]}],
       "waivers": {"stale": [entry], "expired": [{**entry, "until": "2026-02-01"}],
