@@ -1302,7 +1302,7 @@ function guestFetch({ generation = '2', genStatus = 200, metadata = shareMeta(),
     if (url.endsWith('/KICAD_REVIEW_SHARE_GEN')) return shareJson({ value: generation }, genStatus);
     if (url.endsWith('/actions/artifacts/123')) return shareJson(metadata);
     if (url.endsWith('/actions/artifacts/123/zip')) return new Response(null, { status: 302, headers: { Location: location } });
-    if (url === shareBlob) { assert.equal(options.headers, undefined); assert.equal(options.redirect, 'error'); return new Response('<html>report</html>'); }
+    if (url === shareBlob) { assert.equal(options.headers, undefined); assert.equal(options.redirect, 'manual'); return new Response('<html>report</html>'); }
     if (unexpected) { unexpected(url); return new Response('<html>unsafe report</html>'); }
     throw new Error(`Unexpected guest URL: ${url}`);
   });

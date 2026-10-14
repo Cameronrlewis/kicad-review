@@ -38,7 +38,7 @@ export async function appJwt(env, now = Date.now()) {
   return `${unsigned}.${b64url(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc.encode(unsigned)))}`;
 }
 async function asApp(env, path, init = {}) {
-  return fetch(`https://api.github.com${path}`, { ...init, redirect: 'error', headers: { ...init.headers,
+  return fetch(`https://api.github.com${path}`, { ...init, redirect: 'manual', headers: { ...init.headers,
     Authorization: `Bearer ${await appJwt(env)}`, 'User-Agent': 'kicad-review-site', 'X-GitHub-Api-Version': '2022-11-28' } });
 }
 // Isolate-local only: no revocation state or share capabilities are cached.
@@ -67,7 +67,7 @@ export async function installationToken(env, owner, repo, permissions) {
   return data.token;
 }
 export async function shareGeneration(gh, token, owner, repo) {
-  const result = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/variables/KICAD_REVIEW_SHARE_GEN`, token, { redirect: 'error' });
+  const result = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/variables/KICAD_REVIEW_SHARE_GEN`, token, { redirect: 'manual' });
   if (result.status === 404) return 0;
   if (!result.ok) throw new Error('Share state unavailable');
   const { value } = await result.json();
@@ -112,7 +112,7 @@ export async function createShare(request, env, { owner, repo, id }, deps) {
     if (!Number.isInteger(days) || days < 1 || days > 30) return fail('Days must be an integer from 1 to 30.', 400);
     const artifactId = Number(id);
     if (!Number.isSafeInteger(artifactId) || artifactId <= 0) return fail('Review not found.', 404);
-    const meta = await deps.gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifactId}`, allowed.s.token, { redirect: 'error' });
+    const meta = await deps.gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifactId}`, allowed.s.token, { redirect: 'manual' });
     if (!meta.ok) return fail('Review not found.', 404);
     const artifact = await meta.json();
     if (!validArtifact(artifact)) return fail('Review unavailable or expired.', 410);
@@ -150,13 +150,13 @@ export async function serveShare(request, env, token, raw, deps) {
     const inst = await installationToken(env, c.o, c.r, { actions: 'read', actions_variables: 'read' });
     if (!inst || await shareGeneration(deps.gh, inst, c.o, c.r) !== c.g) return missing();
     const base = `/repos/${encodeURIComponent(c.o)}/${encodeURIComponent(c.r)}/actions/artifacts/${c.a}`;
-    const meta = await deps.gh(base, inst, { redirect: 'error' });
+    const meta = await deps.gh(base, inst, { redirect: 'manual' });
     const artifact = meta.ok ? await meta.json() : null;
     if (!validArtifact(artifact)) return missing();
     if (!raw) return guestResponse(deps, deps.sharedPage({ token, name: artifact.name }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': deps.frameCsp } });
     const zip = await deps.gh(`${base}/zip`, inst, { redirect: 'manual' });
     const location = zip.status === 302 ? downloadUrl(zip.headers.get('Location')) : null;
-    const blob = location ? await fetch(location, { redirect: 'error', referrerPolicy: 'no-referrer' }) : null;
+    const blob = location ? await fetch(location, { redirect: 'manual', referrerPolicy: 'no-referrer' }) : null;
     if (!blob?.ok || !blob.body) return missing();
     return guestResponse(deps, blob.body, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': deps.reportCsp, 'X-Frame-Options': 'SAMEORIGIN' } });
   } catch { return missing(); }
@@ -179,7 +179,7 @@ export async function revokeShares(request, env, { owner, repo }, deps) {
     let next;
     do { const bytes = crypto.getRandomValues(new Uint32Array(2)); next = (bytes[0] & 0x1fffff) * 4294967296 + bytes[1]; } while (!next || next === previous);
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/variables`;
-    const init = { method: 'PATCH', redirect: 'error', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: String(next) }) };
+    const init = { method: 'PATCH', redirect: 'manual', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: String(next) }) };
     let saved = await deps.gh(`${root}/KICAD_REVIEW_SHARE_GEN`, inst, init);
     if (saved.status === 404) saved = await deps.gh(root, inst, { ...init, method: 'POST', body: JSON.stringify({ name: 'KICAD_REVIEW_SHARE_GEN', value: String(next) }) });
     return saved.ok ? json(deps, { generation: next }, 200, allowed.s) : fail('GitHub did not revoke the links.', 502);
