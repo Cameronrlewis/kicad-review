@@ -1,0 +1,14 @@
+# Waivers accept one ERC, DRC or parity finding on purpose. Copy an entry from the report's "Waive…" button.
+# Waivers apply from the current tip of the PR's target branch (default branch for push/manual runs).
+# Add or remove them through their own pull request to that branch, then re-run the review.
+# This example is fully commented: uncomment a real entry copied from your report, not this sample key.
+
+# [[waiver]]
+# check = "drc"                       # erc, drc or parity; not BOM
+# match = "w-1a2b3c4d5e6f"            # the finding's waiver key, shown in the report
+# reason = "Shield tab clearance is intended; checked with the fab"
+# by = "cameronrlewis"                # GitHub login of whoever accepts it
+# date = 2026-10-12
+# until = 2027-01-31                  # inclusive through this UTC date; omit only with permanent = true
+# permanent = true
+# ref = "https://github.com/owner/repo/pull/7"

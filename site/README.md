@@ -15,7 +15,7 @@ The owner does this once.
 1. Go to **Settings → Developer settings → GitHub Apps → New**.
 2. Set the callback URL to `http://localhost:8787/callback` for local testing. Then add `https://<name>.<account>.workers.dev/callback`.
 3. Turn **Expire user authorization tokens** on and leave webhooks off.
-4. Under repository permissions, grant Metadata read, Contents read and write, Actions read and write, and Pull requests read and write. Actions write is only used to start a comparison. Pull requests write is only used to create, reply to and resolve review threads as the signed-in person. Threads also need Contents read and write because GitHub requires Contents write to resolve review threads.
+4. Under repository permissions, grant Metadata read, Contents read and write, Actions read and write, and Pull requests read and write. Actions write is used to start a comparison and, with `threads.block_merge`, to re-run the review. Pull requests write is only used to create, reply to and resolve review threads as the signed-in person. Threads also need Contents read and write because GitHub requires Contents write to resolve review threads.
 5. Generate a client secret. Install the app on the chosen repositories.
 6. Keep the client secret out of the repository, chat and logs.
 
