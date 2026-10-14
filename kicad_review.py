@@ -229,6 +229,11 @@ def cmd_render(args):
             render_side(posixpath.join(side, p["dir"]), p["name"], out)
             if export_3d:
                 export_glb(p, side, out)
+            if settings["checks"].get("release", "off") != "off":
+                pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+                if os.path.exists(pro):
+                    os.makedirs(f"{out}/fab", exist_ok=True)
+                    release_project(pro, "review", settings, f"{out}/fab", p["name"])
             print(f"{p['name']}: rendered {side}")
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
@@ -765,7 +770,7 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off"},
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
             "order_ready_fields": []},  # empty: the fabrication preset's fields
@@ -778,7 +783,7 @@ DEFAULT_SETTINGS = {
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "release": "Release package"}
 
 
 def load_settings(roots=("base", "head")):
@@ -808,7 +813,7 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: bom.order_ready_fields: unknown {', '.join(bad)}; use {', '.join(COVERAGE_FIELDS)}")
     for name, level in settings["checks"].items():
         if name not in CHECK_NAMES or level not in ("required", "informational", "off"):
-            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of erc/drc/parity/bom = required/informational/off")
+            sys.exit(f"{SETTINGS_FILE}: checks.{name} = {level!r}; expected one of {', '.join(CHECK_NAMES)} = required/informational/off")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if settings["fail_on"] not in ("new", "all"):
@@ -892,6 +897,101 @@ def release_project(pro_path, tag, settings, out_dir, label):
     return made
 
 
+def fab_violation(type_, severity, description, items=()):
+    # The key ignores items, so a finding that only regroups (one part's BOM line moved) is neither new nor fixed.
+    return {"type": type_, "severity": severity, "description": description, "items": list(items), "uuids": [],
+            "pos": None, "box": None, "where": {"board": True}, "key": ("release", type_, description)}
+
+
+def bom_refs_expand(designators):
+    """'C1,C3-C5' -> {'C1', 'C3', 'C4', 'C5'}: fab BOMs write runs of references as ranges."""
+    out = set()
+    for part in (designators or "").split(","):
+        part = part.strip()
+        m = re.fullmatch(r"([A-Za-z_]+)(\d+)-\1?(\d+)", part)
+        if m and int(m.group(3)) >= int(m.group(2)) and int(m.group(3)) - int(m.group(2)) < 10000:
+            out |= {f"{m.group(1)}{n}" for n in range(int(m.group(2)), int(m.group(3)) + 1)}
+        elif part:
+            out.add(part)
+    return out
+
+
+def smd_pad_sides(pcb_text):
+    """Board sides ('F', 'B') with at least one SMD pad: only those need paste."""
+    sides = set()
+    for m in re.finditer(r'\(footprint\s+"[^"]*"\s*(?:(?:locked|placed)\s+)*\(layer\s+"([FB])\.Cu"\)', pcb_text):
+        end = pcb_text.find("(footprint ", m.end())
+        if re.search(r'\(pad\s+"[^"]*"\s+smd\b', pcb_text[m.end():end if end != -1 else None]):
+            sides.add(m.group(1))
+    return sides
+
+
+def has_draw(text):
+    return re.search(r"D0?[13]\*", text) is not None  # any draw (D01) or flash (D03): the layer is not empty
+
+
+def release_findings(fab_dir, label, preset, pcb_path, board_objs):
+    """What would stop a fab from building this board from the package kicad-review generates."""
+    stem = f"{fab_dir}/{label}-review-{preset}"
+    if not os.path.exists(f"{stem}-gerbers.zip"):
+        return [fab_violation("missing_package", "error", "No fabrication package was produced")]
+    with zipfile.ZipFile(f"{stem}-gerbers.zip") as z:
+        files = {n: z.read(n).decode("latin-1") for n in z.namelist()}
+    # KiCad names a Gerber after the layer's user name when it has one (e.g. In1.Cu renamed "GND_PLANE").
+    pcb_text = open(pcb_path, encoding="utf-8").read() if os.path.exists(pcb_path) else ""
+    alias = {c: u for c, u in re.findall(r'\(\d+\s+"([^"]+)"\s+\w+\s+"([^"]+)"\)', pcb_text)}
+    names = lambda layer: {layer.replace(".", "_"), alias.get(layer, layer).replace(".", "_").replace(" ", "_")}
+    find_layer = lambda layer: next((t for n, t in files.items() if any(f"-{x}." in n for x in names(layer))), None)
+    out = []
+    for layer in [l for l in board_layers(pcb_path) if l.endswith(".Cu")] + ["Edge.Cuts"]:
+        if find_layer(layer) is None:
+            out.append(fab_violation("missing_layer", "error", f"No Gerber for {'copper layer ' if layer.endswith('.Cu') else ''}{layer}"))
+    fps = [o for o in board_objs.values() if o["kind"] == "footprint"]
+    attrs = lambda o: (o["props"].get("attributes") or "").split()
+    smd = [o for o in fps if "smd" in attrs(o) and "dnp" not in attrs(o)]
+    # Pads come from the board file, so pcb_objects (and every report's change list) needs no new prop.
+    paste_sides = smd_pad_sides(pcb_text) | {o["props"]["layer"][0] for o in smd if "smd" in (o["props"].get("pads_kind") or "").split()}
+    for side in ("F", "B"):
+        if any(o["props"].get("layer") == f"{side}.Cu" for o in smd):
+            for kind in ("Mask", "Paste") if side in paste_sides else ("Mask",):
+                t = find_layer(f"{side}.{kind}")
+                if t is None or not has_draw(t):
+                    out.append(fab_violation("missing_layer", "error", f"{side}.{kind} is missing or empty but {side} side has SMD parts"))
+    holes = any(o["kind"] == "via" for o in board_objs.values()) or re.search(r'\(pad\s+"[^"]*"\s+(?:np_)?thru_hole\b', pcb_text) is not None \
+        or any("thru_hole" in (o["props"].get("pads_kind") or "") for o in fps)
+    if holes and not any(n.lower().endswith(".drl") for n in files):
+        out.append(fab_violation("missing_drill", "error", "The board has holes but the package has no drill file"))
+    pos, bom = f"{stem}-positions.csv", f"{stem}-bom.csv"
+    pos_refs = set()
+    if os.path.exists(pos):
+        with open(pos, newline="", encoding="utf-8") as fh:
+            pos_refs = {r["Designator"] for r in csv.DictReader(fh)}
+    if smd and not pos_refs:
+        out.append(fab_violation("missing_positions", "error", "SMD parts are fitted but the position file is empty"))
+    if os.path.exists(bom):
+        with open(bom, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        part_col = PRESETS[preset]["bom"][-1][1] if preset == "jlcpcb" else "Mfg Part #"
+        bom_refs = set().union(*(bom_refs_expand(row.get("Designator")) for row in rows))
+        missing_pn = [row.get("Designator", "") for row in rows if not (row.get(part_col) or "").strip()]
+        if missing_pn:
+            out.append(fab_violation("bom_missing_part_number", "warning", f"BOM lines without {part_col}", missing_pn))
+        extra = sorted(pos_refs - bom_refs, key=natural)
+        if extra:
+            out.append(fab_violation("position_not_in_bom", "warning", "Parts placed by the position file but missing from the BOM", extra))
+    return out
+
+
+def package_summary(fab_dir):
+    files = sorted(f for f in os.listdir(fab_dir) if "-review-" in f) if os.path.isdir(fab_dir) else []
+    zip_ = next((f for f in files if f.endswith("-gerbers.zip")), None)
+    sha = None
+    if zip_:
+        with open(f"{fab_dir}/{zip_}", "rb") as fh:
+            sha = hashlib.file_digest(fh, "sha256").hexdigest()
+    return {"files": [{"path": f, "bytes": os.path.getsize(f"{fab_dir}/{f}")} for f in files], "sha256": sha}
+
+
 def cmd_release(args):
     settings = load_settings(("repo",))
     pros = sorted(posixpath.join(d, f) for d, _, files in os.walk("repo") if "/." not in d for f in files
@@ -909,6 +1009,16 @@ def cmd_release(args):
     for label, pro in labels.items():
         for f in release_project(pro, args.tag, settings, "release", label):
             print(f)
+    os.makedirs("release", exist_ok=True)
+    sums = []
+    for f in sorted(os.listdir("release")):
+        if f != "SHA256SUMS":
+            with open(f"release/{f}", "rb") as fh:
+                sums.append(f"{hashlib.file_digest(fh, 'sha256').hexdigest()}  {f}")
+    if sums:
+        with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
+            fh.write("\n".join(sums) + "\n")
+        print("release/SHA256SUMS")
 
 
 def violation(v, scale, where):
@@ -1234,14 +1344,14 @@ def run_check(name, settings, head, base, waivers=None):
 
 
 def project_checks(p, settings, objs, waivers=None):
-    out = f"review/{project_id(p['dir'])}"
+    out_dir = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
-        if os.path.exists(src) and not os.path.exists(f"{out}/{s}/{f}"):  # never drop a check because its output is missing
+        if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
-        return load_violations(f"{out}/{s}/{f}", k)
+        return load_violations(f"{out_dir}/{s}/{f}", k)
     fields = settings["bom"]["required_fields"]
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
@@ -1251,10 +1361,22 @@ def project_checks(p, settings, objs, waivers=None):
         run_check("bom", settings, bom_violations(objs["head"], fields) if sch("head") else None,
                   bom_violations(objs["base"], fields) if sch("base") else None),
     ]
-    return [c for c in checks if c] + [
+    out = [c for c in checks if c] + [
         {"name": name, "title": CHECK_NAMES[name], "level": settings["checks"][name], "status": "not_run", "reason": "no schematic",
          "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
         for name in ("parity", "bom") if not sch("head") and settings["checks"].get(name, "off") != "off"]
+    if settings["checks"].get("release", "off") != "off":
+        pcb = lambda s: posixpath.join(s, p["dir"], f"{p['name']}.kicad_pcb")
+        preset = settings["fabrication"]["preset"]
+        if not os.path.exists(pcb("head")):
+            out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
+                        "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
+        else:
+            side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) else None
+            c = run_check("release", settings, side("head"), side("base"))
+            c["package"] = package_summary(f"{out_dir}/head/fab")
+            out.append(c)
+    return out
 
 
 def page_svg(out_dir, name, page):
@@ -1449,6 +1571,8 @@ def cmd_report(args):
                        if not ((k in ("3d", "parts", "threads", "waivers", "inventory", "libraries") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
+    if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
+        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "release"}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
