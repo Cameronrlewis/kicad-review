@@ -31,6 +31,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Fetch all branch tips into origin/*, including the live waiver target on reruns.
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: repo
@@ -109,7 +110,22 @@ jobs:
         if: steps.detect.outputs.changed == 'true'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Read the live PR target tip; non-PR runs use the default branch, not the pushed branch.
+          WAIVERS_REF: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: python3 tools/kicad_review.py report
+
+      # Threads live on the pull request as review comments; the summary only counts them.
+      - name: Collect review threads
+        if: steps.report.outputs.threads == 'true' && github.event.pull_request.number
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # ponytail: first 100 threads only; gate fails closed above that ceiling; paginate if needed.
+          gh api graphql -f owner="${GITHUB_REPOSITORY%/*}" -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR" \
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount nodes{isResolved comments(first:1){nodes{body}}}}}}}' \
+            > review/threads.json || { rm -f review/threads.json; echo "::warning::Could not read review threads"; }
 
       - name: Copy named report
         if: steps.detect.outputs.changed == 'true'
@@ -181,6 +197,22 @@ jobs:
           SITE: ${{ vars.KICAD_REVIEW_SITE }}
         run: python3 tools/kicad_review.py summary --image-base "$IMAGES" --artifact-url "$ARTIFACT" --artifact-id "$ARTIFACT_ID" > /dev/null
 
+      # Optional: one check run per check, so branch protection can require ERC, DRC... separately.
+      # The caller must grant checks: write; without it GitHub answers 403 and this step only warns.
+      - name: Publish check runs
+        if: ${{ !cancelled() && steps.summary.outputs.check_runs == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ steps.detect.outputs.head }}
+        run: |
+          [ -f review/check-runs.json ] || { echo "::warning::review/check-runs.json missing; no check runs published."; exit 0; }
+          jq -c '.[]' review/check-runs.json | while read -r run; do
+            printf '%s\n' "$run" | jq --arg sha "$HEAD" '. + {head_sha: $sha, status: "completed"}' \
+              | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input - > /dev/null \
+              || { echo "::warning::Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml."; exit 0; }
+          done
+
       - name: Pull request comment
         id: comment
         if: ${{ !cancelled() && github.event.pull_request.number && github.event.pull_request.head.repo.full_name == github.repository }}
@@ -211,11 +243,13 @@ jobs:
           fi
 
       - name: Fail on required checks
-        if: steps.report.outputs.failed != ''
+        if: steps.report.outputs.failed != '' || steps.summary.outputs.threads_failed != ''
         env:
           FAILED: ${{ steps.report.outputs.failed }}
+          THREADS: ${{ steps.summary.outputs.threads_failed }}
         run: |
-          echo "::error::Required checks failed: $FAILED"
+          [ -z "$FAILED" ] || echo "::error::Required checks failed: $FAILED"
+          [ -z "$THREADS" ] || echo "::error::Merge blocked: $THREADS"
           exit 1
 
       - name: Fabrication outputs for the version tag
