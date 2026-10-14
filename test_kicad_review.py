@@ -983,13 +983,14 @@ try:
                 settings["3d"]["enabled"] = models_enabled
                 with patch("kicad_review.load_settings", return_value=settings):
                     kicad_review.cmd_report(None)
-                opted_out = {name: pathlib.Path(f"review/{name}").read_bytes() for name in ("data.json", "kicad-review.html")}
+                opted_out = json.loads(pathlib.Path("review/data.json").read_text())
+                opted_out_embedded = json.loads(pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
                 legacy_settings = copy.deepcopy(settings)
                 del legacy_settings["digikey"]
                 with patch("kicad_review.load_settings", return_value=legacy_settings):
                     kicad_review.cmd_report(None)
-                assert all(pathlib.Path(f"review/{name}").read_bytes() == content for name, content in opted_out.items()), "DigiKey opt-out must be byte-identical"
                 data = json.loads(pathlib.Path("review/data.json").read_text())
+                assert data == opted_out, "DigiKey opt-out must preserve pre-feature report data and settings"
                 assert "digikey" not in data["settings"]
                 p = data["projects"][0]
                 assert ("parts" in data["settings"]) == ("parts" in p) == parts_enabled
@@ -998,9 +999,13 @@ try:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
                     assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
                     assert p["parts"]["changes"][0]["action"] == "swapped"
+                    assert all("supplier" not in line for line in p["parts"]["lines"])
                 html = pathlib.Path("review/kicad-review.html").read_text()
+                for old_label in ("not found at JLCPCB", "JLCPCB data as of", '"LCSC", "JLCPCB", "PCBWay"'):
+                    assert old_label not in html, old_label
                 payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
                 embedded = json.loads(payload)
+                assert embedded == opted_out_embedded
                 del embedded["blobs"]
                 assert embedded == data
         settings["parts"]["enabled"] = True
@@ -1201,7 +1206,7 @@ class DigiKeyReviewTests(unittest.TestCase):
         self.assertEqual(out["results"]["A"]["status"], "ok")
         self.assertEqual(sum(u.endswith("/oauth2/token") for u in calls), 2)
         self.assertEqual(out["supplier"]["calls"], 8)
-        self.assertEqual(out["supplier"]["looked_up"], 5)
+        self.assertNotIn("looked_up", out["supplier"])
         self.assertIsNone(out["supplier"]["error"])
         self.assertTrue(all(t >= 0.6 for t in pauses))
         out, calls, _ = self.run_lookup([401, 401])
@@ -1250,7 +1255,7 @@ class DigiKeyIntegrationTests(unittest.TestCase):
 
     def lookup(self, creds=("", "")):
         with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch.dict(os.environ, {"DIGIKEY_CLIENT_ID": creds[0], "DIGIKEY_CLIENT_SECRET": creds[1]}), patch("kicad_review.digikey_lookup") as client:
-            client.return_value = {"supplier": {"name": "DigiKey", "fetched_at": "2026-10-13T12:00:00Z", "currency": "USD", "calls": 2, "looked_up": 1, "error": None, "skipped": None}, "results": {"MP3302DJ-LF-Z": {"status": "ok", "mpn": "MP3302DJ-LF-Z", "quantity": 1234, "unit_price": 1.5}}}
+            client.return_value = {"supplier": {"name": "DigiKey", "fetched_at": "2026-10-13T12:00:00Z", "currency": "USD", "calls": 2, "error": None, "skipped": None}, "results": {"MP3302DJ-LF-Z": {"status": "ok", "mpn": "MP3302DJ-LF-Z", "quantity": 1234, "unit_price": 1.5}}}
             kicad_review.cmd_lookup(None)
             return client
 
@@ -1261,7 +1266,8 @@ class DigiKeyIntegrationTests(unittest.TestCase):
         self.assertEqual(data["supplier"]["calls"], 0)
         self.assertEqual(data["supplier"]["skipped"], "no credentials (forked pull request or secrets not set)")
         self.assertEqual(data["results"], {})
-        self.assertEqual(data["projects"]["p"], {"no_mpn": 1, "invalid_mpn": 1})
+        self.assertNotIn("projects", data)
+        self.assertNotIn("looked_up", data["supplier"])
         pathlib.Path("review/supplier.json").unlink()
         self.settings["digikey"]["enabled"] = False
         self.assertFalse(self.lookup(("id", "secret")).called)
@@ -1299,6 +1305,17 @@ class DigiKeyIntegrationTests(unittest.TestCase):
             kicad_review.cmd_report(None)
             self.assertEqual(json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]["supplier"]["not_looked_up"]["run_limit"], 1)
 
+    def test_whitespace_placeholder_counts(self):
+        self.objects["3"]["props"]["MPN"] = " TBD "
+        self.lookup()
+        with patch("kicad_review.load_settings", return_value=self.settings), patch("kicad_review.project_objects", return_value=self.objects), patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
+            kicad_review.cmd_report(None)
+        parts = json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["parts"]
+        self.assertEqual(parts["supplier"]["not_looked_up"], {"no_mpn": 2, "invalid_mpn": 0, "run_limit": 0})
+        raw_parts = [{"parts": {"lines": [{"mpn": " TBD "}]}}]
+        kicad_review.merge_supplier(raw_parts, {"supplier": {}, "results": {}})
+        self.assertEqual(raw_parts[0]["parts"]["supplier"]["not_looked_up"], {"no_mpn": 1, "invalid_mpn": 0, "run_limit": 0})
+
     def test_workflow_secrets_step_scope(self):
         workflow = pathlib.Path(self.here, ".github/workflows/review.yml").read_text()
         self.assertIn("DIGIKEY_CLIENT_ID:\n        required: false", workflow)
@@ -1315,9 +1332,6 @@ class DigiKeyIntegrationTests(unittest.TestCase):
 integration_result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DigiKeyIntegrationTests))
 assert integration_result.wasSuccessful(), "DigiKey integration regressions failed"
 
-# Disabled report assets must remain byte-identical even after the supplier UI changes.
-import hashlib
-assert hashlib.sha256(inline_page('window.REVIEW_DATA = {"version":1};').encode()).hexdigest() == "78ce543361f773b9e8569fe4565b0a8d1a80e371cb4d2a6fc5fe8665cbdc07ae", "DigiKey opt-out changed embedded assets"
 
 supplier_lines = [{"refs": ["U1"], "problems": [], "supplier": {"status": "ok", "quantity": 1234, "unit_price": 1.5}},
                   {"refs": ["U2"], "problems": [], "supplier": {"status": "out_of_stock", "quantity": 0, "unit_price": 7.25}},
@@ -1337,7 +1351,7 @@ supplier_parts["supplier"]["error"] = "HTTP 500\n<script>"
 assert "DigiKey lookup unavailable: HTTP 500 &lt;script&gt;." in parts_markdown(supplier_data)
 print("ok DigiKey comment counts, skipped lookup, and not looked up counts")
 
-assert '"LCSC", "DigiKey", "PCBWay"' in inline_page('window.REVIEW_DATA = {"version":1};', digikey=True)
+assert '"LCSC", "DigiKey", "PCBWay"' in inline_page('window.REVIEW_DATA = {"version":1};')
 assert 'https://www.digikey.evil.com/x' not in text
 # No lookup leaves comment and job-summary content unchanged.
 assert parts_markdown({"projects": [{"name": "P", "parts": {"lines": [], "changes": [], "supplier": None}}]}) == "#### Parts: P\n\nSupplier lookup not run (not available). 0 lines, 0 with a problem.\n"

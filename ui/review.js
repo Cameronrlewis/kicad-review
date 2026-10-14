@@ -474,25 +474,27 @@ function renderParts() {
   const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter;
   const changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
+  // Removed lines are not in the head BOM; keep them visible for change review.
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
   const shown = rows.filter(r => (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
   const notLookedUp = [["no_mpn", "no MPN"], ["invalid_mpn", "invalid MPN"], ["run_limit", "run limit"]]
     .filter(([key]) => counts[key] > 0).map(([key, reason]) => `${esc(counts[key])} part${counts[key] === 1 ? "" : "s"} not looked up: ${reason}`).join(". ");
-  return `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
+  return `${parts.supplier ? `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>` : ""}
     ${parts.supplier?.fetched_at ? '<p class="parts-attribution parts-age">Stock and price from DigiKey</p>' : ""}
     ${parts.supplier?.error ? `<p class="parts-lookup-error parts-age">DigiKey lookup unavailable: ${esc(parts.supplier.error)}</p>` : ""}
     ${notLookedUp ? `<p class="parts-not-looked-up parts-age">${notLookedUp}.</p>` : ""}
     <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
     <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "DigiKey", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
+      // A change row names only the refs it moved; the line's other refs did not change.
       const moved = [...new Set(cs.flatMap(r => r.refs))], refs = f.changed ? moved : l.refs;
       const changeText = field => {
         const old = [...new Set(cs.filter(r => r.before && r.after && r.before[field] !== r.after[field]).map(r => r.before[field] || "—"))];
         const who = moved.length && moved.length < l.refs.length ? ` (${moved.join(", ")})` : "";
         return esc(old.length ? `${old.join(", ")} → ${l[field] || "—"}${who}` : l[field] || "—");
       };
-      const problems = l.problems.map(p => PARTS_PROBLEMS[p] || p), supplier = l.supplier;
+      const problems = l.problems.map(p => PARTS_PROBLEMS[p] || p), supplier = parts.supplier ? l.supplier : null;
       let stock = "—";
       if (parts.supplier?.skipped) stock = "not looked up";
       else if (supplier) {

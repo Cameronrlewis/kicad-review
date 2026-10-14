@@ -873,7 +873,7 @@ def digikey_pick(resp, mpn, manufacturer):
 def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, sleep=time.sleep,
                    now=lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")):
     cfg = settings["digikey"]
-    sup = {"name": "DigiKey", "fetched_at": now(), "currency": cfg["currency"], "calls": 0, "looked_up": 0, "error": None, "skipped": None}
+    sup = {"name": "DigiKey", "fetched_at": now(), "currency": cfg["currency"], "calls": 0, "error": None, "skipped": None}
     results, stop = {}, None
     failures, consecutive, last_error, refreshed = 0, 0, None, False
     locale = {"site": cfg["site"], "currency": cfg["currency"]}
@@ -912,7 +912,6 @@ def digikey_lookup(wanted, creds, settings, urlopen=urllib.request.urlopen, slee
                 results[k] = digikey_pick(response, wanted[k]["mpn"], wanted[k]["manufacturer"])
             except (AttributeError, TypeError, KeyError, IndexError, ValueError):
                 raise DigiKeyError("invalid response")
-            sup["looked_up"] += 1
             consecutive = 0
         except DigiKeyStop as e:
             stop = str(e)
@@ -1189,7 +1188,7 @@ def review_links(env, det):
 UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
 
 
-def inline_page(data_js, digikey=False):
+def inline_page(data_js):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
     read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
     has_3d = '"model3d"' in data_js
@@ -1197,9 +1196,6 @@ def inline_page(data_js, digikey=False):
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
     script = read("review.js")
-    if not digikey and "const PARTS_PROBLEMS =" in script:
-        # Preserve opted-out reports byte-for-byte, including their embedded assets.
-        script = re.sub(r"const PARTS_PROBLEMS =.*?(?=function renderPanel\(\))", lambda _: read("parts-legacy.js"), script, flags=re.S)
     prefix = ""
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
@@ -1215,15 +1211,13 @@ def cmd_lookup(args):
         return
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
-    wanted, projects, manufacturers = {}, {}, {}
+    wanted, manufacturers = {}, {}
     for project in det["projects"]:
         objects = project_objects(posixpath.join("head", project["dir"]), project["name"])
-        counts = {"no_mpn": 0, "invalid_mpn": 0}
         for line in parts_lines(objects):
-            raw = line["mpn"] or ""
+            raw = " ".join((line["mpn"] or "").split())
             mpn = mpn_for_lookup(raw)
             if not mpn:
-                counts["no_mpn" if digikey_placeholder(raw.lower()) else "invalid_mpn"] += 1
                 continue
             key = mpn.upper()
             wanted.setdefault(key, {"mpn": key, "manufacturer": None})
@@ -1233,12 +1227,11 @@ def cmd_lookup(args):
                     name = field(obj["props"], ("manufacturer",))
                     if name and not digikey_placeholder(name.lower()):
                         hints.add(name.strip().lower())
-        projects[project["dir"]] = counts
     for key, hints in manufacturers.items():
         wanted[key]["manufacturer"] = next(iter(hints)) if len(hints) == 1 else None
     cfg = settings["digikey"]
     supplier = {"name": "DigiKey", "fetched_at": None, "currency": cfg["currency"], "calls": 0,
-                "looked_up": 0, "error": None, "skipped": None}
+                "error": None, "skipped": None}
     creds = (os.environ.get("DIGIKEY_CLIENT_ID", ""), os.environ.get("DIGIKEY_CLIENT_SECRET", ""))
     output = {"supplier": supplier, "results": {}}
     if not all(creds):
@@ -1251,7 +1244,6 @@ def cmd_lookup(args):
             supplier["error"] = f"lookup unavailable ({type(error).__name__})"
     else:
         supplier["skipped"] = "no valid MPNs"
-    output["projects"] = projects
     with open("review/supplier.json", "w", encoding="utf-8") as fh:
         json.dump(output, fh)
     print(f"DigiKey lookup: {output['supplier']['calls']} calls")
@@ -1268,7 +1260,7 @@ def merge_supplier(projects, lookup):
             raw = line["mpn"] or ""
             mpn = mpn_for_lookup(raw)
             if not mpn:
-                counts["no_mpn" if digikey_placeholder(raw.lower()) else "invalid_mpn"] += 1
+                counts["no_mpn" if digikey_placeholder(" ".join(raw.split()).lower()) else "invalid_mpn"] += 1
                 continue
             result = lookup["results"].get(mpn.upper())
             if result:
@@ -1288,7 +1280,7 @@ def cmd_report(args):
     blobs = {}
     env = os.environ
     settings = load_settings()
-    # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
+    # Opted-out report data and settings remain compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items() if not (k in ("3d", "parts", "digikey") and not v["enabled"])}
     data = {
         "version": 1,
@@ -1307,12 +1299,12 @@ def cmd_report(args):
                 raise ValueError("invalid supplier file")
         except (OSError, ValueError, AttributeError):
             lookup = {"supplier": {"name": "DigiKey", "fetched_at": None, "currency": settings["digikey"]["currency"],
-                                   "calls": 0, "looked_up": 0, "error": "lookup unavailable (lookup step did not finish)", "skipped": None}, "results": {}}
+                                   "calls": 0, "error": "lookup unavailable (lookup step did not finish)", "skipped": None}, "results": {}}
         merge_supplier(data["projects"], lookup)
     assign_ids(data["projects"])
     data["blobs"] = blobs
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
-    html = inline_page(f"window.REVIEW_DATA = {payload};", digikey=settings.get("digikey", {}).get("enabled", False))
+    html = inline_page(f"window.REVIEW_DATA = {payload};")
     with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")

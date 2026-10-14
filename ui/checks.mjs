@@ -698,7 +698,7 @@ export const CHECKS = [
   const rows = [...document.querySelectorAll('#panel .parts-row')];
   if (rows.length !== REVIEW_DATA.projects[0].parts.lines.length || !rows[0].classList.contains('problem')) return 'rows';
   if (!document.querySelector('.parts-age.stale') || rows.some(r => !r.querySelector('.parts-stock.stale') || r.querySelector('.parts-stock').textContent.includes('✔'))
-    || !rows.some(r => r.querySelector('.parts-stock').textContent.endsWith('(stale)'))) return 'stale';
+    || !rows.some(r => r.querySelector('.parts-stock').textContent.includes('(stale)'))) return 'stale';
   if (document.querySelector('.parts-table img') || [...document.querySelectorAll('.parts-table a')].some(a => !/^https?:/.test(a.href) || a.rel !== 'noopener noreferrer' || a.target !== '_blank')) return 'escaping';
   document.querySelector('[data-parts-filter=problems]').click();
   if (document.querySelectorAll('.parts-row').length !== 2 || document.querySelector('.parts-table').textContent.includes('U5')) return 'problems filter';
@@ -712,13 +712,13 @@ export const CHECKS = [
   if (!line.classList.contains('changed') || line.children[1].textContent !== 'R6, R7' || line.querySelector('strong').textContent !== 'R7'
     || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 2) return 'changed marking';
   REVIEW_DATA.projects[0].parts.supplier = null; renderPanel();
-  if (!document.querySelector('.parts-age').textContent.includes('Supplier lookup not run') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
+  if (document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
   if (valid({t:'parts'}).t !== 'parts') return 'hash';
   const parts = REVIEW_DATA.projects[0].parts;
   if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 5 · 2 ⚠') return 'blocking count';
   parts.supplier = {error:'503'}; renderPanel();
   const unavailable = document.querySelector('.parts-row.unavailable .parts-stock').textContent;
-  if (!unavailable.includes('unavailable') || !unavailable.includes('503') || document.querySelector('.parts-table img')) return 'failed lookup';
+  if (!unavailable.includes('unavailable') || !document.querySelector('.parts-lookup-error')?.textContent.includes('503') || document.querySelector('.parts-table img')) return 'failed lookup';
   parts.supplier = {fetched_at:'invalid <timestamp>'}; renderPanel();
   if (!document.querySelector('.parts-age.stale') || document.querySelector('.parts-age').textContent.includes('NaN')
       || [...document.querySelectorAll('.parts-stock')].some(c => !c.classList.contains('stale') || c.textContent.includes('✔'))) return 'invalid timestamp';
@@ -763,6 +763,8 @@ export const CHECKS = [
     if (!document.querySelector('.parts-age').textContent.includes('DigiKey lookup skipped: no credentials') || cells().some(x=>x.textContent.includes('✔'))) return 'skipped';
     p.parts.supplier.skipped=null; p.parts.lines[0].supplier={status:'unavailable',mpn:'<img src=x onerror=alert(1)>'}; renderPanel();
     if (!cells()[0].textContent.includes('unavailable') || document.querySelector('.parts-table img')) return 'unavailable';
+    p.parts.supplier=null; renderPanel();
+    if (cells().some(x=>x.textContent!=='—') || document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error')) return 'disabled supplier UI';
     p.parts=old; return true;
   `],
   ["Parts report matches head BOM line count", "t=parts", `
@@ -772,6 +774,6 @@ export const CHECKS = [
   return document.querySelector('[data-tab=parts]').textContent === 'Parts ' + parts.lines.length + (partsProblemCount(parts) ? ' · ' + partsProblemCount(parts) + ' ⚠' : '')
     && document.querySelectorAll('.parts-row').length === parts.lines.length
     && (!REVIEW_DATA.projects[S.p].name.includes('Thermal_Camera') || parts.lines.length === 29)
-    && document.querySelector('.parts-age').textContent.includes('Supplier lookup not run');
+    && !document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error');
 `],
 ];
