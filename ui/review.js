@@ -589,17 +589,31 @@ function renderChecks() {
   </div><div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
-const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "out_of_stock", "not_found", "discontinued"]);
+const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"]);
 // One rule for every count, filter, sort and ⚠: a problem blocks ordering the part.
 const blocking = l => l.problems.some(p => PARTS_BLOCKING.has(p));
 const partsProblemCount = parts => parts.lines.filter(blocking).length;
-const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
+const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at JLCPCB", discontinued: "discontinued", unavailable: "lookup unavailable" };
 function partsAge(s) {
   if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
   const h = (Date.now() - Date.parse(s.fetched_at)) / 36e5;
   if (!Number.isFinite(h)) return { text: `JLCPCB data age unavailable: invalid timestamp ${esc(s.fetched_at)}`, stale: true };
   return { text: `JLCPCB data as of ${esc(s.fetched_at.replace("T", " ").slice(0, 16))} UTC (${h < 48 ? Math.round(h) + " h" : Math.round(h / 24) + " days"} old)`,
            stale: h > 24, warn: h > 6 };
+}
+function coverageHtml(parts) {
+  const c = parts.coverage; if (!c) return "";
+  const rows = Object.keys(c.head).map(f => {
+    const [n, t] = c.head[f], d = c.base?.[f] ? n - c.base[f][0] : 0, pct = t ? Math.round(100 * n / t) : 100;
+    return `<tr${n < t ? ' class="short"' : ""}><th scope="row">${n < t ? '<span aria-hidden="true">⚠ </span><span class="sr-only">incomplete: </span>' : ""}${esc(f)}</th><td>${n} / ${t}</td><td>${pct}%</td><td>${d ? (d > 0 ? "+" : "") + d : ""}</td></tr>`;
+  }).join("");
+  return `<table class="bom-coverage"><caption>BOM coverage (this revision; change from base)</caption><thead><tr><th>Field</th><th>Parts</th><th>%</th><th>Δ</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function fieldChangesHtml(parts) {
+  const fc = parts.field_changes || [];
+  return (fc.length ? `<table class="field-changes"><caption>Field changes</caption><thead><tr><th>Refs</th><th>Field</th><th>Base</th><th>Head</th></tr></thead><tbody>${fc.map(r =>
+    `<tr><td>${esc(r.refs.join(", "))}</td><td>${esc(r.field)}</td><td>${esc(r.before ?? "—")}</td><td>${esc(r.after ?? "—")}</td></tr>`).join("")}</tbody></table>` : "")
+    + (parts.dnp_mismatch?.length ? `<p class="dnp-mismatch">⚠ DNP differs between schematic and board: ${esc(parts.dnp_mismatch.join(", "))}</p>` : "");
 }
 function renderParts() {
   const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter;
@@ -609,7 +623,7 @@ function renderParts() {
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
   const shown = rows.filter(r => (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => Number(blocking(b.line)) - Number(blocking(a.line)));
-  return `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
+  return `${coverageHtml(parts)}<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>
     <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
     <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "JLCPCB", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
       // A change row names only the refs it moved; the line's other refs did not change.
@@ -629,7 +643,7 @@ function renderParts() {
       }
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
       return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${l.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${esc(stock)}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
-    }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
+    }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
   const f = S.threadFilter, all = (S.threads || []).filter(t => t.anchor.project === proj().dir);

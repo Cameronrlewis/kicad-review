@@ -12,6 +12,8 @@ bom = "informational"    # every part has the fields below
 
 [bom]
 required_fields = ["Value", "Footprint"]
+# critical_prefixes = ["U", "J", "Q", "D", "Y", "X", "K", "F"]   # datasheet coverage shown separately (Parts)
+# order_ready_fields = []   # empty: the fabrication preset's fields (Parts)
 
 [fabrication]
 preset = "jlcpcb"        # or "pcbway"

@@ -563,7 +563,6 @@ assert "review/check-runs.json" in publish and "continue-on-error: true" in publ
 print("ok readiness workflow gate and optional check runs")
 
 # Reports expose an artifact filename containing the compared revisions and result.
-import re
 def report_output(base, head):
     t = tempfile.mkdtemp()
     out = f"{t}/github-output"
@@ -638,7 +637,7 @@ print("ok CK-S4 settings validation")
 
 # Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
 import base64, gzip
-from kicad_review import load_settings, build_project, board_changed, export_glb
+from kicad_review import build_project, board_changed, export_glb
 here = os.getcwd()
 t = tempfile.mkdtemp()
 os.chdir(t)
@@ -689,7 +688,6 @@ os.chdir(here)
 print("ok")
 
 # DR-S2: child sheet files are relative to their parent, including ..; objects use the same paths.
-from kicad_review import sch_objects
 t = tempfile.mkdtemp()
 write(t, {"P/H.kicad_sch": '(kicad_sch (uuid "root") ' + sheet("Child", "sub/child.kicad_sch", "child") + ')',
           "P/sub/child.kicad_sch": '(kicad_sch ' + sheet("Grand", "grand.kicad_sch", "grand") + ')',
@@ -740,7 +738,6 @@ assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "P", "name": "new", 
 os.chdir(here)
 print("ok DR-S1 renamed project is added")
 # OB-S1: power net and library symbol changes retain UUID and position.
-from kicad_review import sch_objects
 t = tempfile.mkdtemp()
 power = '(kicad_sch (uuid "root") (symbol (uuid "power") (at 1 2 0) (lib_id "power:+3V3") (property "Reference" "#PWR01") (property "Value" "+3V3")))'
 write(t, {"b/P.kicad_sch": power})
@@ -906,7 +903,7 @@ print("ok TS-S1 CI browser matrix")
 print("ok")
 
 # Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
-from kicad_review import parts_lines
+from kicad_review import parts_lines, mark_new_problems
 sym = lambda ref, v, lcsc=None, ds="~", mpn=None: {"kind": "symbol", "ref": ref, "props": {
     "Value": v, "Footprint": "R_0805", "Datasheet": ds, **({"LCSC": lcsc} if lcsc is not None else {}),
     **({"MPN": mpn} if mpn else {})}}
@@ -1000,7 +997,9 @@ try:
                 assert "waivers" not in data["settings"] and "waivers" not in data
                 if parts_enabled:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
-                    assert p["parts"] == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    mark_new_problems(lines["base"], lines["head"])
+                    assert {k: p["parts"][k] for k in ("lines", "changes", "supplier")} == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
+                    assert set(p["parts"]) == {"lines", "changes", "supplier", "coverage", "field_changes", "dnp_mismatch"}
                     assert p["parts"]["changes"][0]["action"] == "swapped"
                 html = pathlib.Path("review/kicad-review.html").read_text()
                 payload = html.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0]
@@ -1009,7 +1008,9 @@ try:
                 assert embedded == data
         settings["parts"]["enabled"] = True
         with patch("kicad_review.project_objects", return_value={}):
-            assert build_project(project, {}, settings)["parts"] == {"lines": [], "changes": [], "supplier": None}
+            empty = build_project(project, {}, settings)["parts"]
+            assert {k: empty[k] for k in ("lines", "changes", "supplier", "field_changes", "dnp_mismatch")} == {"lines": [], "changes": [], "supplier": None, "field_changes": [], "dnp_mismatch": []}
+            assert empty["coverage"]["base"] is None and all(v == [0, 0] for v in empty["coverage"]["head"].values())
 finally:
     os.chdir(here)
 print("ok parts report data")
@@ -1046,8 +1047,96 @@ assert cut.startswith("- R") and cut.endswith(" missing LCSC number"), "parts cu
 assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
+
+# BOM readiness: per-field coverage over BOM parts; placeholders count as missing; multi-unit parts count once.
+from kicad_review import bom_coverage, bom_parts, present
+symp = lambda ref, **p: {"kind": "symbol", "ref": ref, "where": {"sheet": "/"}, "pos": [0, 0], "props": {"in_bom": "yes", **p}}
+objs = {"a": symp("U1", Value="STM32", Footprint="QFN", LCSC="C123", MPN="STM32G0", Manufacturer="ST", Datasheet="https://x/ds.pdf"),
+        "b": symp("U1 unit 2", Value="STM32", Footprint="QFN"),
+        "c": symp("R1", Value="10k", Footprint="0402", LCSC="C25744", MPN="TBD"),
+        "d": symp("J1", Value="USB-C", Footprint="USB", Datasheet="~"),
+        "e": symp("R2", Value="1k", Footprint="0402", dnp="yes"),
+        "f": symp("TP1", Value="TP", Footprint="TP", in_bom="no")}
+assert set(bom_parts(objs)) == {"U1", "R1", "J1"}
+assert not present("TBD") and not present("~") and not present("  ") and present("10k")
+s = json.loads(json.dumps(DEFAULT_SETTINGS))
+cov = bom_coverage(objs, s)
+assert cov["Value"] == [3, 3] and cov["MPN"] == [1, 3] and cov["LCSC"] == [2, 3] and cov["Manufacturer"] == [1, 3]
+assert cov["Datasheet (critical)"] == [1, 2]   # U1 has one, J1 has "~"
+assert cov["Order ready"] == [2, 3]            # jlcpcb preset: Value, Footprint, LCSC
+s["fabrication"]["preset"] = "pcbway"
+assert bom_coverage(objs, s)["Order ready"] == [1, 3]   # pcbway: MPN; R1's "TBD" is a placeholder
+s["bom"]["order_ready_fields"] = ["Value"]
+assert bom_coverage(objs, s)["Order ready"] == [3, 3]
+print("ok placeholders count as missing")
+print("ok multi-unit symbol counts once")
+
+# BOM readiness settings stay out of opted-out reports.
+src = open("kicad_review.py", encoding="utf-8").read()
+assert 'report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}' in src
+s = json.loads(json.dumps(DEFAULT_SETTINGS))
+assert s["parts"]["enabled"] is False and set(s["bom"]) == {"required_fields", "critical_prefixes", "order_ready_fields"}
+print("ok bom readiness settings opt-in")
+
+from kicad_review import field_changes
+b = {"1": symp("R1", Value="10k", Footprint="0402", MPN="RC0402-10K"), "2": symp("R2", Value="10k", Footprint="0402", MPN="RC0402-10K"),
+     "3": symp("U1", Value="LDO", Footprint="SOT23", Datasheet="https://a")}
+h = {"1": symp("R1", Value="10k", Footprint="0402", MPN="ERJ-2RKF1002"), "2": symp("R2", Value="10k", Footprint="0402", MPN="RC0402-10K"),
+     "3": symp("U1", Value="LDO", Footprint="SOT23", Datasheet="https://b", Manufacturer="TI"), "4": symp("C1", Value="1u", Footprint="0402")}
+assert field_changes(b, h) == [
+    {"refs": ["R1"], "field": "MPN", "before": "RC0402-10K", "after": "ERJ-2RKF1002"},
+    {"refs": ["U1"], "field": "Manufacturer", "before": None, "after": "TI"},
+    {"refs": ["U1"], "field": "Datasheet", "before": "https://a", "after": "https://b"}], field_changes(b, h)
+h["2"] = symp("R2", Value="10k", Footprint="0402", MPN="ERJ-2RKF1002")
+assert field_changes(b, h)[0]["refs"] == ["R1", "R2"]
+print("ok MPN-only edit shows per reference")
+
+from kicad_review import dnp_mismatches
+L = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1"), "2": symp("U2", Value="LDO", Footprint="SOT23", LCSC="C9", MPN="AP2112"),
+                 "3": symp("U3", Value="LDO", Footprint="SOT89", LCSC="C10", MPN="AP2112")})
+probs = {l["refs"][0]: l["problems"] for l in L}
+assert "placeholder" in probs["R1"] and "mpn_footprint_conflict" in probs["U2"] and "mpn_footprint_conflict" in probs["U3"], probs
+base_lines = parts_lines({"1": symp("R5", Value="1k", Footprint="0402", LCSC="C7"), "2": symp("R6", Value="2k", Footprint="0402", LCSC="C8")})
+head_lines = parts_lines({"1": symp("R5", Value="1k", Footprint="0402", LCSC="C7"), "2": symp("R6", Value="2k", Footprint="0402", LCSC="C7")})
+mark_new_problems(base_lines, head_lines)
+r5 = next(l for l in head_lines if "R5" in l["refs"])
+assert r5["new_problems"] == ["lcsc_conflict"], r5   # R5's line did not change, but its LCSC number now conflicts
+print("ok problem on unchanged line is new")
+fp = lambda ref, attrs: {"kind": "footprint", "ref": ref, "where": {"board": True}, "pos": [0, 0], "props": {"attributes": attrs, **({"dnp": "yes"} if "dnp" in (attrs or "") else {})}}
+mis = dnp_mismatches({"s1": symp("R1", dnp="no"), "s2": symp("R2", dnp="yes"), "s3": symp("R3"), "f1": fp("R1", "smd dnp"), "f2": fp("R2", "smd dnp"), "f3": fp("R3", "smd")})
+assert mis == ["R1"], mis
+print("ok DNP mismatch symbol vs footprint")
+pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": head_lines, "changes": [], "supplier": None, "dnp_mismatch": ["R1"],
+      "coverage": {"base": {"MPN": [1, 4], "Order ready": [2, 4], "LCSC": [4, 4], "Datasheet (critical)": [0, 0]},
+                   "head": {"MPN": [3, 4], "Order ready": [2, 4], "LCSC": [4, 4], "Datasheet (critical)": [0, 0]}}}}]})
+assert "R5 one LCSC number on several values" in pm and "BOM coverage: order ready 2/4, MPN 3/4 (+2), LCSC 4/4" in pm and "DNP differs between schematic and board: R1" in pm, pm
+print("ok bom readiness comment")
+
+# Grouped lines: every reference's MPN and values are checked, and the comment names only the offending references.
+L = parts_lines({"1": symp("R1", Value="10k", Footprint="0805", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0805", MPN="AP2112"),
+                 "3": symp("R3", Value="10k", Footprint="0805"), "4": symp("U1", Value="LDO", Footprint="SOT23", MPN="AP2112")})
+r = next(l for l in L if "R1" in l["refs"])
+assert "placeholder" in r["problems"] and "mpn_footprint_conflict" in r["problems"], r
+assert r["problem_refs"] == {"placeholder": ["R1"], "mpn_footprint_conflict": ["R2"]}, r
+u = next(l for l in L if "U1" in l["refs"])
+assert u["problem_refs"] == {"mpn_footprint_conflict": ["U1"]}, u
+mark_new_problems([], L)
+pm = parts_markdown({"projects": [{"name": "X", "parts": {"lines": L, "changes": [], "supplier": None}}]})
+assert "- R1 placeholder value" in pm and "- R2 one MPN on several footprints" in pm and "R3 placeholder" not in pm and "R1, R2, R3 placeholder" not in pm, pm
+print("ok grouped line problems name their references")
+
+# A problem the named references already had in base is not new, even when another reference joins the line.
+bl = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1")})
+hl = parts_lines({"1": symp("R1", Value="TBD", Footprint="0402", LCSC="C1"), "2": symp("R2", Value="TBD", Footprint="0402", LCSC="C1")})
+mark_new_problems(bl, hl)
+assert "placeholder" in hl[0]["new_problems"] and hl[0]["problem_refs"]["placeholder"] == ["R1", "R2"], hl
+bl = parts_lines({"1": symp("R1", Value="10k", Footprint="0402", LCSC="C1", MPN="TBD")})
+hl = parts_lines({"1": symp("R1", Value="10k", Footprint="0402", LCSC="C1", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0402", LCSC="C1")})
+mark_new_problems(bl, hl)
+assert "placeholder" not in hl[0]["new_problems"], hl
+print("ok old problem not new when a reference joins")
 # Threads: object index for anchoring. Head objects first; base-only objects keep their base position.
-from kicad_review import object_index, load_settings
+from kicad_review import object_index
 t1_sym = lambda ref, x: {"kind": "symbol", "ref": ref, "match": ("symbol", ref, "1"), "where": {"sheet": "/sub-uuid/"},
                       "pos": [x, 1, 0], "props": {"Value": "10k"}}
 t1_fpo = lambda ref, x: {"kind": "footprint", "ref": ref, "match": ("footprint", ref), "where": {"board": True},
@@ -1085,7 +1174,6 @@ assert len(t1_idx) == 2 and all(e["side"] == "head" and "added" not in e for e i
 assert [(e["uuid"], e["pos_before"]) for e in t1_idx] == [("c", [1, 1, 0]), ("d", [2, 1, 0])], t1_idx
 print("ok threads object index duplicate matches")
 
-import os, tempfile
 _cwd = os.getcwd()
 with tempfile.TemporaryDirectory() as d:
     try:
@@ -1099,13 +1187,12 @@ with tempfile.TemporaryDirectory() as d:
         assert load_settings()["threads"] == {"enabled": True, "block_merge": False}
     finally:
         os.chdir(_cwd)
-from kicad_review import DEFAULT_SETTINGS
 assert DEFAULT_SETTINGS["threads"] == {"enabled": False, "block_merge": False}
 print("ok threads settings")
 
 # Threads: anchors in comment bodies and the summary line.
 import base64 as _b64, json as _json
-from kicad_review import thread_anchor, thread_counts, comment_markdown
+from kicad_review import thread_anchor, thread_counts
 enc = lambda a: "<!-- kicad-review-anchor " + _b64.urlsafe_b64encode(_json.dumps(a).encode()).decode().rstrip("=") + " -->"
 a_block = {"v": 1, "severity": "blocking", "target": "object", "ref": "R1--> x"}
 assert thread_anchor("📍 R1\n\ntext\n\n" + enc(a_block)) == a_block
@@ -1311,7 +1398,7 @@ with _t.TemporaryDirectory() as d:
 print("ok unconnected duplicates get distinct keys")
 
 # Waivers: read from the target ref with git, head copy only proposes; invalid entries skipped; expiry by date.
-import datetime, subprocess
+import datetime
 from kicad_review import load_waivers
 
 def load_waivers_on(ref, today):
