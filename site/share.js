@@ -41,15 +41,30 @@ async function asApp(env, path, init = {}) {
   return fetch(`https://api.github.com${path}`, { ...init, redirect: 'error', headers: { ...init.headers,
     Authorization: `Bearer ${await appJwt(env)}`, 'User-Agent': 'kicad-review-site', 'X-GitHub-Api-Version': '2022-11-28' } });
 }
+// Isolate-local only: no revocation state or share capabilities are cached.
+const installationTokens = new Map();
 export async function installationToken(env, owner, repo, permissions) {
   const inst = await asApp(env, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`);
   if (!inst.ok) return null;
   const { id } = await inst.json();
   if (!Number.isSafeInteger(id) || id <= 0) return null;
+  const now = Date.now();
+  for (const [key, entry] of installationTokens) if (entry.until <= now) installationTokens.delete(key);
+  const scope = Object.entries(permissions).sort(([a], [b]) => a.localeCompare(b));
+  const cacheKey = JSON.stringify([String(env.GITHUB_APP_ID), id, owner.toLowerCase(), repo.toLowerCase(), scope]);
+  const cached = installationTokens.get(cacheKey);
+  if (cached) return cached.token;
   const minted = await asApp(env, `/app/installations/${id}/access_tokens`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ repositories: [repo], permissions }) });
-  const value = minted.ok ? (await minted.json()).token : null;
-  return typeof value === 'string' && value ? value : null;
+  const data = minted.ok ? await minted.json() : null;
+  if (typeof data?.token !== 'string' || !data.token) return null;
+  const until = Date.parse(data.expires_at) - 5 * 60_000;
+  if (Number.isFinite(until) && until > Date.now()) {
+    // ponytail: bounded FIFO cache; a full cache only costs another token mint.
+    if (installationTokens.size >= 256) installationTokens.delete(installationTokens.keys().next().value);
+    installationTokens.set(cacheKey, { token: data.token, until });
+  }
+  return data.token;
 }
 export async function shareGeneration(gh, token, owner, repo) {
   const result = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/variables/KICAD_REVIEW_SHARE_GEN`, token, { redirect: 'error' });
@@ -84,12 +99,12 @@ function postError(request) {
 }
 export async function createShare(request, env, { owner, repo, id }, deps) {
   if (!shareEnabled(env)) return json(deps, { error: 'Share links are not set up.' }, 404);
+  const invalid = postError(request);
+  if (invalid) return json(deps, { error: invalid[0] }, invalid[1]);
   const allowed = await shareAccess(request, env, owner, repo, deps);
   if (allowed instanceof Response) return allowed;
   const fail = (error, status) => json(deps, { error }, status, allowed.s);
   try {
-    const invalid = postError(request);
-    if (invalid) return fail(...invalid);
     if (!allowed.repo.permissions?.push) return fail('Only writers can share reviews.', 403);
     const body = await request.json().catch(() => null);
     if (!body || Array.isArray(body) || typeof body !== 'object') return fail('Send a JSON object.', 400);
@@ -148,12 +163,12 @@ export async function serveShare(request, env, token, raw, deps) {
 }
 export async function revokeShares(request, env, { owner, repo }, deps) {
   if (!shareEnabled(env)) return json(deps, { error: 'Share links are not set up.' }, 404);
+  const invalid = postError(request);
+  if (invalid) return json(deps, { error: invalid[0] }, invalid[1]);
   const allowed = await shareAccess(request, env, owner, repo, deps);
   if (allowed instanceof Response) return allowed;
   const fail = (error, status) => json(deps, { error }, status, allowed.s);
   try {
-    const invalid = postError(request);
-    if (invalid) return fail(...invalid);
     if (!allowed.repo.permissions?.push) return fail('Only writers can revoke share links.', 403);
     const body = await request.json().catch(() => null);
     if (!body || Array.isArray(body) || typeof body !== 'object') return fail('Send a JSON object.', 400);

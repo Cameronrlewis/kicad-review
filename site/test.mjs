@@ -1387,7 +1387,7 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
   try {
     for (const [headers, status] of [[{ Origin: 'https://evil.example' }, 403], [{ 'Content-Type': 'text/plain' }, 415]]) {
       const response = await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke', {}, headers, await signedIn({ e: Date.now() - 1 })), appEnv);
-      assert.equal(response.status, status); assert.ok((await response.json()).error); assert.ok(cookieValue(response, 's'));
+      assert.equal(response.status, status); assert.ok((await response.json()).error); assert.equal(cookieValue(response, 's'), undefined);
     }
     assert.equal(patches, 0);
     const old = generation;
@@ -1519,4 +1519,61 @@ test('malformed guest capabilities fail privately without touching a signed-in s
     }
     assert.equal(calls, 0);
   } finally { restore(); }
+});
+
+
+test('invalid share POST Origin or JSON type makes no GitHub or OAuth call', async () => {
+  let calls = 0;
+  const restore = mockFetch(async () => { calls++; throw new Error('invalid POST must not contact GitHub'); });
+  try {
+    for (const path of ['/r/Cameronrlewis/repo/a/123/share', '/r/Cameronrlewis/repo/share/revoke']) {
+      for (const [headers, expected] of [[{ Origin: 'https://evil.example' }, 403], [{ 'Content-Type': 'text/plain' }, 415]]) {
+        const response = await worker.fetch(await sharePost(path, {}, headers, await signedIn({ e: Date.now() - 1 })), appEnv);
+        assert.equal(response.status, expected); assert.ok((await response.json()).error); checkSecurity(response);
+        assert.equal(cookieValue(response, 's'), undefined);
+      }
+    }
+    assert.equal(calls, 0);
+  } finally { restore(); }
+});
+test('two guest views reuse one scoped installation token but always reread revocation state', async () => {
+  const config = { ...appEnv, GITHUB_APP_ID: '43' }; const token = await guestToken();
+  let minted = 0, generations = 0, generation = '2';
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url.endsWith('/installation')) return shareJson({ id: 7 });
+    if (url.endsWith('/access_tokens')) {
+      minted++; assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', variables: 'read' } });
+      return shareJson({ token: 'cached-installation-secret', expires_at: new Date(Date.now() + 3600_000).toISOString() }, 201);
+    }
+    if (url.endsWith('/KICAD_REVIEW_SHARE_GEN')) { generations++; return shareJson({ value: generation }); }
+    assert.ok(url.endsWith('/actions/artifacts/123')); return shareJson(shareMeta());
+  });
+  try {
+    for (let i = 0; i < 2; i++) assert.equal((await worker.fetch(request(`/s/${token}`), config)).status, 200);
+    assert.equal(minted, 1); assert.equal(generations, 2);
+    generation = '3'; assert.equal((await worker.fetch(request(`/s/${token}`), config)).status, 404);
+    assert.equal(minted, 1); assert.equal(generations, 3);
+  } finally { restore(); }
+});
+test('installation token cache isolates installation, repository, App and permission scope and refreshes five minutes early', async () => {
+  const { installationToken } = await import('./share.js'); const config = { ...appEnv, GITHUB_APP_ID: '44' };
+  const read = { actions: 'read', variables: 'read' }; let installation = 8, minted = 0;
+  const originalNow = Date.now; let now = originalNow();
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url.endsWith('/installation')) return shareJson({ id: installation });
+    assert.ok(url.endsWith('/access_tokens')); minted++;
+    return shareJson({ token: `cached-${minted}`, expires_at: new Date(now + 3600_000).toISOString() }, 201);
+  });
+  Date.now = () => now;
+  try {
+    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', read), 'cached-1');
+    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', { variables: 'read', actions: 'read' }), 'cached-1');
+    assert.equal(await installationToken(config, 'Cameronrlewis', 'other', read), 'cached-2');
+    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', { variables: 'write' }), 'cached-3');
+    installation = 9; assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', read), 'cached-4');
+    assert.equal(await installationToken({ ...config, GITHUB_APP_ID: '45' }, 'Cameronrlewis', 'repo', read), 'cached-5');
+    now += 55 * 60_000;
+    assert.equal(await installationToken(config, 'Cameronrlewis', 'repo', read), 'cached-6');
+    assert.equal(minted, 6);
+  } finally { Date.now = originalNow; restore(); }
 });
