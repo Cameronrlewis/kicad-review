@@ -2891,7 +2891,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**legacy, "blobs": {}}, separators=(",", ":")) + ";"
             with open("review/issues.json", "w") as fh: _json.dump(issues, fh)
