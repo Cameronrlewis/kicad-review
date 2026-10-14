@@ -1036,7 +1036,7 @@ assert "#### Parts: Budget" in body
 print("ok parts comment budget")
 
 # Tag review resolves lightweight/annotated tags, ignoring non-v predecessors.
-from kicad_review import previous_tag, resolve_revisions
+from kicad_review import resolve_revisions
 here = os.getcwd()
 with tempfile.TemporaryDirectory() as t:
     try:
@@ -1053,7 +1053,7 @@ with tempfile.TemporaryDirectory() as t:
         g("commit", "-qam", "three"); g("tag", "-am", "release", "v1.1")
         head = g("rev-parse", "HEAD")
         g("branch", "v1.1", first)  # A same-named branch must not shadow the pushed tag.
-        assert previous_tag("v1.1") == previous_tag("test-1") == "v1.0"
+        assert resolve_revisions({"EVENT": "push", "TAG": "test-1", "AFTER": head}) == (first, g("rev-parse", "test-1"), "release test-1 vs v1.0")
         assert resolve_revisions({"EVENT": "push", "TAG": "v1.1", "AFTER": head}) == (first, head, "release v1.1 vs v1.0")
         assert resolve_revisions({"EVENT": "push", "TAG": "v1.0", "AFTER": first}) == (None, first, "release v1.0 (first release)")
         print("ok previous tag is the last v-tag")

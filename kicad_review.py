@@ -54,16 +54,11 @@ def is_kicad_file(path):
     return (name.endswith(KICAD_SUFFIXES) or name in KICAD_NAMES) and not is_junk(path)
 
 
-def previous_tag(tag):
-    """The nearest v* tag before this one, or None for the first release."""
-    return git("describe", "--tags", "--abbrev=0", "--match", "v*", f"{tag}^", check=False) or None
-
-
 def resolve_revisions(env):
     """Return (base, head, reason) for the triggering event. base may be None (nothing to compare with)."""
     if env.get("TAG"):
         tag = env["TAG"]
-        prev = previous_tag(tag)
+        prev = git("describe", "--tags", "--abbrev=0", "--match", "v*", f"{tag}^", check=False) or None
         head = commit(tag) or env["AFTER"]
         return (commit(prev) if prev else None), head, f"release {tag} vs {prev}" if prev else f"release {tag} (first release)"
     event = env["EVENT"]
