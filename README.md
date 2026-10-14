@@ -2,6 +2,10 @@
 
 A reusable GitHub Actions workflow for KiCad 10 projects. Whenever someone changes a KiCad project it shows what changed on the actual schematic and board, not in the S-expression text. Everything runs inside GitHub Actions and appears inside GitHub. By default no secret is needed beyond the token GitHub gives every run, and access is whatever the repository already allows. Optional DigiKey stock and price lookup needs two supplier credentials; the optional companion review site is configured separately.
 
+[![Watch the 2½-minute explainer video](docs/explainer-poster.png)](docs/explainer.mp4)
+
+*A 2½-minute tour of every feature on a real control board: [watch the explainer video](docs/explainer.mp4).*
+
 ## What you get
 
 **On every pull request**, comparing the head with its merge base, a single comment that is edited in place on each push. It contains:
