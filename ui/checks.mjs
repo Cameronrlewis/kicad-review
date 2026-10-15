@@ -1389,4 +1389,52 @@ export const CHECKS = [
     const scene = await loadBoardScene("sceneOk");
     return scene.version === 1 && await loadBoardScene("sceneOk") === scene && fails.length === 2
       && !boardSceneCache.has("sceneBad") && !boardSceneCache.has("sceneShape") && await loadBoardScene(null) === null || "loader";`],
+  ["board rings holes islands and DPR", "", `
+    if (!window.BoardGL) return "missing BoardGL";
+    const R = (...a) => a.map(([x0,y0,x1,y1]) => [[x0,y0],[x1,y0],[x1,y1],[x0,y1]]);
+    const [outer, hole, island] = R([0,0,10000,10000],[2000,2000,8000,8000],[12000,0,14000,2000]);
+    const concave = [[0,0],[10000,0],[10000,10000],[6000,10000],[6000,5000],[4000,5000],[4000,10000],[0,10000]];
+    const zone = (uuid, rings, box) => ({kind:"zone",uuid,changeUuid:uuid,layers:["F.Cu"],net:0,category:"zones",side:null,hidden:false,box:box||[0,0,14000,10000],geometry:{rings}});
+    const mk = objects => ({version:1,units:"um",complete:true,warnings:[],bounds:[0,0,14000,10000],layers:[{id:0,name:"F.Cu",type:"signal",enabled:true}],nets:[{id:0,name:""}],objects});
+    const bg = [0,16,35], copper = [200,52,52], equal = (p,q) => p.slice(0,3).every((v,i)=>Math.abs(v-q[i])<=2);
+    const state = {activeLayer:"F.Cu",layers:{"F.Cu":{color:[200,52,52,1],visible:true}},objects:{zones:{opacity:1}},nets:{}};
+    const reversed = [...hole].reverse();
+    const cases = [["plain",[outer,hole,island]],["reversed hole",[outer,reversed,island]],["repeated closing point",[[...outer,outer[0]],hole,island]]];
+    const failures = [], canvas = document.createElement("canvas");
+    canvas.style.cssText = "position:fixed;left:300px;top:180px;width:400px;height:300px;z-index:9999";
+    document.body.append(canvas);
+    try {
+      for (const dpr of [1,2]) for (const [name, rings] of cases) {
+        const r = BoardGL.create(canvas,{scene:mk([zone("z",rings)]),onFailure:e=>failures.push(e.message)});
+        if (!r) return "WebGL2/stencil unavailable: " + failures;
+        const cam = {x:7,y:5,z:20,width:400,height:300,dpr,flip:false};
+        r.setAppearance(state); r.setCamera(cam); r.draw();
+        const at = (wx,wy) => { const [sx,sy] = BoardGL.worldToScreen([wx,wy],cam); return r.readPixel(Math.round(sx*dpr), Math.round(300*dpr-sy*dpr)); };
+        const got = [at(1,1),at(5,5),at(13,1),at(11,1)];
+        if (![copper,bg,copper,bg].every((c,i)=>equal(got[i],c))) return name+" dpr"+dpr+" "+JSON.stringify(got);
+        r.dispose();
+      }
+      // concave outer: the notch between x 4..6, y 5..10 stays empty; two overlapping zones keep separate parity.
+      let r = BoardGL.create(canvas,{scene:mk([zone("c",[concave],[0,0,10000,10000])]),onFailure:e=>failures.push(e.message)});
+      let cam = {x:7,y:5,z:20,width:400,height:300,dpr:1,flip:false};
+      r.setAppearance(state); r.setCamera(cam); r.draw();
+      let at = (wx,wy) => { const [sx,sy] = BoardGL.worldToScreen([wx,wy],cam); return r.readPixel(Math.round(sx), Math.round(300-sy)); };
+      if (!equal(at(1,8),copper) || !equal(at(5,8),bg) || !equal(at(5,2),copper) || !equal(at(8,8),copper)) return "concave bridge " + JSON.stringify([at(1,8),at(5,8),at(5,2),at(8,8)]);
+      r.dispose();
+      r = BoardGL.create(canvas,{scene:mk([zone("a",[outer],[0,0,10000,10000]),zone("b",[R([4000,4000,12000,9000])[0]],[4000,4000,12000,9000])]),onFailure:e=>failures.push(e.message)});
+      r.setAppearance(state); r.setCamera(cam); r.draw();
+      at = (wx,wy) => { const [sx,sy] = BoardGL.worldToScreen([wx,wy],cam); return r.readPixel(Math.round(sx), Math.round(300-sy)); };
+      if (!equal(at(6,6),copper) || !equal(at(11,6),copper) || !equal(at(1,1),copper) || !equal(at(11,2),bg)) return "overlapping zones " + JSON.stringify([at(6,6),at(11,6),at(1,1),at(11,2)]);
+      // grid: dot at a 0.5 mm intersection, none between; off leaves the board unchanged.
+      r.dispose();
+      r = BoardGL.create(canvas,{scene:mk([]),onFailure:e=>failures.push(e.message)});
+      r.setCamera({x:7,y:5,z:40,width:400,height:300,dpr:1,flip:false});
+      const gstate = {...state, grid:{visible:true,size:.5}}; r.setAppearance(gstate); r.draw();
+      const dot = r.readPixel(200+Math.round((7.5-7)*40),300-(150+Math.round((5.5-5)*40))), gap = r.readPixel(200+Math.round(.25*40),300-(150+Math.round(.25*40)));
+      if (equal(dot,bg) || !equal(gap,bg)) return "grid dot/gap " + JSON.stringify([dot,gap]);
+      r.setAppearance({...state}); r.draw();
+      if (!equal(r.readPixel(200,150),bg)) return "grid off";
+      r.dispose(); r.dispose();
+      return failures.length ? failures.join() : true;
+    } finally { canvas.remove(); }`],
 ];
