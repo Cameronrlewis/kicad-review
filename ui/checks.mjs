@@ -485,16 +485,16 @@ export const CHECKS = [
     return getComputedStyle(document.querySelector("#stage .stack.head")).opacity === "0.2";`],
   ["added project draws its one side in every mode", "p=0&m=overlay", `
     await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head svg").length > 0;`],
-  ["layer list grouped, changed layers marked", "p=1&v=board", `
+  ["layer list grouped, changed layers marked", "p=1&v=board&t=appearance", `
     await new Promise(r => setTimeout(r, 800));
-    const L = document.querySelector("#layers");
-    return ["Top", "Bottom"].every(g => L.textContent.includes(g))
-      && L.querySelectorAll('[data-changed="true"] .mark').length === REVIEW_DATA.projects[1].board.layers.filter(l => l.changed).length;`],
-  ["toggling a layer removes it from the drawing", "p=1&v=board", `
+    const L = document.querySelector("#appearance-root");
+    const want = REVIEW_DATA.projects[1].board.layers, n = L?.querySelectorAll("[data-layer]").length, m = L?.querySelectorAll("[data-layer] .mark").length;
+    return !!L && n >= want.length && m === want.filter(l => l.changed).length && document.querySelector("#layers").children.length === 0 || JSON.stringify([!!L, n, want.length, m, want.filter(l => l.changed).length, S.t, S.v]);`],
+  ["toggling a layer removes it from the drawing", "p=1&v=board&t=appearance", `
     await new Promise(r => setTimeout(r, 800));
-    const cb = document.querySelector('#layers input[data-layer="F_Cu"]'); cb.click();
+    const cb = document.querySelector('#appearance-root [data-layer="F.Cu"] .eye-btn'); cb.click();
     await new Promise(r => setTimeout(r, 800));
-    return !document.querySelector('#stage .layer[data-layer="F_Cu"]') && !S.layers.includes("F_Cu");`],
+    return !document.querySelector('#stage .layer[data-layer="F_Cu"]') && !S.layers.includes("F_Cu") && location.hash.includes("l=");`],
   ["layer list hidden for sheets", "", `return document.querySelector("#layers").children.length === 0;`],
   ["hitTest picks the smallest containing box, cycles on repeat", "", `
     const rows = [{ id: "a", box: [0, 0, 10, 10] }, { id: "b", box: [4, 4, 6, 6] }, { id: "c", box: [20, 20, 30, 30] }];
@@ -1874,4 +1874,56 @@ export const CHECKS = [
   const nav = document.querySelector("#nav");
   return !nav.querySelector("img,script") && nav.scrollWidth <= nav.clientWidth + 1
     && !!nav.querySelector("#proj") && !!nav.querySelector("[data-view]");`],
+  ["board appearance native controls and no uploads", "v=board", `
+    const p = proj(); if (!p.board?.changed) return "skip";
+    const gz = async text => { const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(buf))); };
+    const evil = "<img src=x onerror=window.__pwn=1>";
+    const lay = (id, name) => ({id, name, type:"signal", enabled:true});
+    const scene = {version:1,units:"um",complete:true,warnings:[],bounds:[0,0,8000,5000],layers:[lay(0,"F.Cu"),lay(1,"B.Cu"),lay(2,"Edge.Cuts")],nets:[{id:0,name:""},{id:1,name:"GND"},{id:2,name:evil}],
+      objects:[{kind:"track",uuid:"t",changeUuid:"t",layers:["F.Cu"],net:1,category:"tracks",side:null,hidden:false,box:[750,750,6250,1250],geometry:{segments:[[1000,1000,6000,1000,500]]}}]};
+    D.blobs.apA = await gz(JSON.stringify(scene)); D.blobs.apB = await gz(JSON.stringify(scene));
+    const saved = p.board.geometry, tick = ms => new Promise(r => setTimeout(r, ms));
+    const fire = (el, type) => el.dispatchEvent(new Event(type, {bubbles:true}));
+    try {
+      localStorage.removeItem("kr.appearance.v1"); Appearance.reset();
+      p.board.geometry = {base:"apA", head:"apB"}; boardView.failed = null; S.m = "side"; S.v = "board"; S.t = "appearance"; renderPanel(); await draw(); await tick(50);
+      if (!boardView.renderers.length) return "no GL renderer";
+      const root = document.querySelector("#appearance-root");
+      if (!root || root.querySelectorAll("[role=tab]").length !== 3 || !root.querySelector("[role=tabpanel]:not([hidden]) .appearance-row")) return "no Layers tab";
+      if (root.querySelector("[aria-current=true]")?.textContent !== "F.Cu") return "active layer not marked";
+      const uploads = () => boardView.renderers.map(r => r.stats.uploads).join();
+      const base = uploads();
+      root.querySelector('[data-ap-tab="objects"]').click();
+      const slider = root.querySelector('[data-object="tracks"] input[type=range]'); slider.focus(); slider.value = "25"; fire(slider, "input");
+      if (boardAppearance().objects.tracks.opacity !== .25 || document.activeElement !== slider) return "tracks opacity / focus " + boardAppearance().objects.tracks.opacity;
+      if (!root.querySelector('[data-object="images"]').title.includes("Not present")) return "unavailable row not explained";
+      root.querySelector('[data-ap-tab="layers"]').click();
+      const eye = root.querySelector('[data-layer="B.Cu"] .eye-btn'); eye.click();
+      if (boardAppearance().layers["B.Cu"].visible !== false || S.layers.includes("B_Cu")) return "layer eye not synced";
+      if (root.querySelector('[data-layer="B.Cu"] .eye-btn').getAttribute("aria-pressed") !== "false") return "eye state";
+      root.querySelector('[data-layer="B.Cu"] .name').click();
+      if (boardAppearance().activeLayer !== "B.Cu" || root.querySelector("[aria-current=true]").textContent !== "B.Cu") return "active layer";
+      const radio = v => { const r = root.querySelector('input[name=ap-contrast][value=' + v + ']'); r.checked = true; fire(r, "change"); };
+      radio("dim"); const dim = BoardGL.layerFactor("F.Cu", boardAppearance()), edge = BoardGL.layerFactor("Edge.Cuts", boardAppearance());
+      radio("hide"); const hid = BoardGL.layerFactor("F.Cu", boardAppearance());
+      if (dim !== .2 || edge !== .3 || hid !== 0) return "contrast factors " + [dim, edge, hid];
+      radio("normal");
+      root.querySelector('[data-ap-tab="nets"]').click();
+      const filter = root.querySelector(".net-filter"); filter.value = "<img"; fire(filter, "input");
+      const row = root.querySelector('[data-net]');
+      if (!row || row.dataset.net !== evil || row.querySelector(".name").textContent !== evil || root.querySelector("img") || window.__pwn) return "hostile net name not literal " + JSON.stringify([!!row, row?.dataset.net, row?.querySelector(".name")?.textContent, !!root.querySelector("img"), window.__pwn, root.querySelectorAll("[data-net]").length]);
+      row.querySelector(".name").click();
+      if (boardAppearance().selectedNet !== evil || root.querySelector('[data-net] .name').getAttribute("aria-pressed") !== "true") return "net highlight";
+      row.querySelector(".name").click(); if (boardAppearance().selectedNet !== null) return "highlight not cleared";
+      const color = row.querySelector("input[type=color]"); color.value = "#2864f0"; fire(color, "input");
+      root.querySelector('[data-net] .eye-btn').click();
+      const net = boardAppearance().nets[evil]; if (!net || net.color[2] !== 240 || net.visible !== false) return "net colour/visibility " + JSON.stringify(net);
+      if (uploads() !== base) return "geometry uploaded on appearance change " + base + " -> " + uploads();
+      const env = JSON.parse(localStorage.getItem("kr.appearance.v1")), persisted = Object.values(env.viewers)[0];
+      if (!persisted || persisted.objects.tracks.opacity !== .25 || persisted.contrast !== "normal" || persisted.nets[evil]?.visible !== false) return "not persisted";
+      localStorage.setItem("kr.appearance.v1", "{broken"); if (KrAppearance.createStore({viewerId:"x"}).get().contrast !== "normal") return "malformed JSON";
+      const get = Storage.prototype.getItem; Storage.prototype.getItem = () => { throw new Error("blocked"); };
+      try { if (KrAppearance.createStore({viewerId:"x"}).get().objects.tracks.opacity !== 1) return "blocked storage"; } finally { Storage.prototype.getItem = get; }
+      return true;
+    } finally { p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.t = "changes"; S.layers = null; localStorage.removeItem("kr.appearance.v1"); Appearance.reset(); renderPanel(); }`],
 ];

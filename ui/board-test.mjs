@@ -120,3 +120,24 @@ console.log("PASS contiguous object ranges retain all segment instances");
  assert.equal(G.buildBatches(t).find(b=>b.pass==="text").mesh.length/13,3*6);
  console.log("PASS camera transforms, ring fills and text quads");
 }
+
+{
+ globalThis.window=globalThis;
+ await import("./appearance-state.js");
+ const K=globalThis.KrAppearance, names=["F.Cu","B.Cu","Edge.Cuts"], d=K.boardDefaults(names), norm=(x,n=names)=>K.normalizeBoard(x,n);
+ assert.equal(d.objects.tracks.opacity,1); assert.equal(d.objects.vias.opacity,1); assert.equal(d.objects.pads.opacity,1);
+ assert.equal(d.objects.zones.opacity,.6); assert.equal(d.objects.images.opacity,.6); assert.equal(d.contrast,"normal");
+ assert.equal(norm({layers:{"F.Cu":{opacity:NaN}},contrast:"bad"}).contrast,"normal");
+ assert.equal(norm({layers:{"F.Cu":{visible:false}}},[...names,"In1.Cu"]).layers["In1.Cu"].visible,true);
+ const hostile=norm({nets:{"<img onerror=x>":{visible:false},"__proto__":{visible:false}}});
+ assert.equal(hostile.nets["<img onerror=x>"].visible,false); assert.equal(Object.getPrototypeOf(hostile.nets).hostile,undefined);
+ assert.equal(norm({nets:{GND:{color:[1,2,3,1]}}}).nets.GND.color[0],1);
+ // Blocked or malformed storage still yields a working store; clearing a net colour removes it everywhere.
+ const blocked={getItem(){throw new Error("blocked")},setItem(){throw new Error("blocked")}};
+ const store=K.createStore({viewerId:"t",storage:()=>blocked});
+ store.patch({nets:{GND:{color:[1,2,3,1]}}}); assert.deepEqual(store.get().netColors.GND.length,4);
+ store.patch({nets:{GND:{color:null}}}); assert.equal(store.get().netColors.GND,undefined); assert.equal(store.get().nets.GND.color,undefined);
+ const bad=K.createStore({viewerId:"t",storage:()=>({getItem:()=>"{not json",setItem(){}})});
+ assert.equal(bad.get().contrast,"normal");
+ console.log("PASS Appearance defaults, normalization, net colour clear and blocked storage");
+}

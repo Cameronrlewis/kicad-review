@@ -62,7 +62,7 @@ function openThread(id) {
   const r = resolveAnchor(t.anchor), drawable = !r.detached && currentView(r.view);
   S.thread = id;
   const show = () => { if (drawable) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
-  if (drawable && r.view !== S.v) { stopPlacing(); S.v = r.view; S.x = S.y = S.z = null; renderNav(); return draw().then(() => { show(); saveHash(); }); }
+  if (drawable && r.view !== S.v) { stopPlacing(); const tabs = tabsChange(r.view); S.v = r.view; S.x = S.y = S.z = null; renderNav(); if (tabs) renderPanel(); return draw().then(() => { show(); saveHash(); }); }
   show();
 }
 const proj = () => D.projects[S.p];
@@ -88,13 +88,6 @@ function checksVerdict() {
   const all = D.projects.flatMap(p => p.checks);
   return { failing: all.filter(c => c.status === "fail").length, newErrors: all.reduce((n, c) => n + c.new_errors, 0) };
 }
-function layerGroup(n) {
-  if (/^F_/.test(n)) return "Top";
-  if (/^B_/.test(n)) return "Bottom";
-  if (/^In\d+_Cu$/.test(n)) return "Inner";
-  if (/^(Edge_Cuts|Margin)$/.test(n)) return "Board";
-  return "User";
-}
 function renderLayers() {
   const box = $("#layers");
   if (S.v === "3d") {
@@ -103,18 +96,7 @@ function renderLayers() {
     box.querySelectorAll("[data-3d-group]").forEach(cb => cb.onchange = () => { const h = new Set(S.hidden3d || []); cb.checked ? h.delete(cb.dataset["3dGroup"]) : h.add(cb.dataset["3dGroup"]); S.hidden3d = [...h]; window.Review3D?.setHidden(S.hidden3d); saveHash(); });
     return;
   }
-  if (S.v !== "board" || !proj().board.changed) { box.innerHTML = ""; return; }
-  const on = new Set(layersOn()), groups = {};
-  for (const l of proj().board.layers) (groups[layerGroup(l.name)] ||= []).push(l);
-  box.innerHTML = `<h3>Layers <span class="muted">${on.size}/${proj().board.layers.length}</span></h3>` +
-    ["Top", "Inner", "Bottom", "Board", "User"].filter(g => groups[g]).map(g => `<h4>${g}</h4>` + groups[g].map(l =>
-      `<label data-changed="${l.changed}"><input type="checkbox" data-layer="${esc(l.name)}" ${on.has(l.name) ? "checked" : ""}>
-       ${esc(l.name.replace(/_/g, "."))}${l.changed ? ' <span class="mark" title="changed">≡ changed</span>' : ""}</label>`).join("")).join("");
-  for (const cb of box.querySelectorAll("input")) cb.onchange = () => {
-    S.layers = [...box.querySelectorAll("input:checked")].map(i => i.dataset.layer);
-    saveHash();
-    draw();
-  };
+  box.innerHTML = "";   // board layers live in the Appearance dock
 }
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
@@ -176,7 +158,7 @@ function firstChangedView(p) {
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:"); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -194,7 +176,7 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts) out.t = st.t;
+  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" && st.v === "board" && p.board.changed) out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -207,6 +189,7 @@ function applyState(st) {
   const v = valid(st);
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+  if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
   renderModes();
@@ -237,8 +220,22 @@ function applyAppearance(snapshot) {
   for (const vp of document.querySelectorAll('#stage .vp.sheet')) vp.style.background = cssAppearance(resolved.schematicBackground);
 }
 const boardAppearance = () => Appearance.get();
-const changeBoardAppearance = p => Appearance.patch(p);
-const canon = name => name.replace("_", ".");   // SVG layer file names (F_Cu) -> KiCad names (F.Cu)
+// A layer eye keeps the l= hash list in step, so links and the Appearance dock agree.
+function changeBoardAppearance(patch) {
+  for (const [name, l] of Object.entries(patch.layers || {})) if (l?.visible === true || l?.visible === false) {
+    const svg = proj().board.layers.find(x => canon(x.name) === name)?.name;
+    if (svg) { const on = new Set(layersOn()); l.visible ? on.add(svg) : on.delete(svg); S.layers = [...on]; }
+  }
+  const state = Appearance.patch(patch);
+  saveHash();
+  return state;
+}
+const tabsChange = view => S.t === "appearance" || (S.v === "board") !== (view === "board");
+// SVG layer file names (F_Silkscreen) -> KiCad technical names (F.SilkS), and back for display.
+const USER_LAYERS = {"User.Drawings": "Dwgs.User", "User.Comments": "Cmts.User", "User.Eco1": "Eco1.User", "User.Eco2": "Eco2.User"};
+const SUFFIX_LAYERS = {Silkscreen: "SilkS", Courtyard: "CrtYd", Adhesive: "Adhes"};
+const canon = name => { const n = name.replace("_", ".").replace(/\.(Silkscreen|Courtyard|Adhesive)$/, (_, x) => "." + SUFFIX_LAYERS[x]); return USER_LAYERS[n] || n; };
+const layerLabel = name => { const u = Object.entries(USER_LAYERS).find(([, v]) => v === name); return u ? u[0] : name.replace(/\.(SilkS|CrtYd|Adhes)$/, (_, x) => "." + Object.entries(SUFFIX_LAYERS).find(([, v]) => v === x)[0]); };
 const flipOn = () => S.v === "board" && !!Appearance.get().flip;
 function boardCamera(vp) {
   return {x: S.x, y: S.y, z: S.z, width: vp.clientWidth, height: vp.clientHeight, dpr: devicePixelRatio || 1, flip: flipOn()};
@@ -250,6 +247,7 @@ function disposeBoardRenderers() {
 // Appearance plus the report's own layer eyes (the l= hash): a layer shows only when both allow it.
 function glAppearance(snapshot = KrAppearance.resolve(Appearance.get())) {
   const a = structuredClone(snapshot);
+  a.objects.text = a.objects.footprintText;   // the scene's one text category follows Footprint Text
   for (const [name, l] of Object.entries(a.layers)) l.visible = l.visible && (S.layers ? S.layers.map(canon).includes(name) : !HIDE_LAYERS.test(name));
   return a;
 }
@@ -259,8 +257,28 @@ function boardFallback(note) {   // one route to SVG per project; a later projec
   disposeBoardRenderers();
   if (S.v === "board") draw();
 }
+// Appearance dock: Layers / Objects / Nets mounted into the panel's Appearance tab.
+let appearanceUI = null;
+const UNAVAILABLE = Object.fromEntries(["images", "ratsnest", "drcMarkers", "drawingSheet", "values", "references"].map(k => [k, "Not present in this report"]));
+function appearanceCtx() {
+  const scenes = (boardView.scenes || []).filter(Boolean), sides = (boardView.scenes || []).map(sc => new Set((sc?.layers || []).filter(l => l.enabled).map(l => l.name)));
+  const present = new Set([...scenes.flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...proj().board.layers.map(l => canon(l.name))]);
+  const layers = Object.keys(Appearance.get().layers).filter(n => present.has(n)).map(name => ({ name, label: layerLabel(name), changed: !!proj().board.layers.find(x => canon(x.name) === name)?.changed,
+    title: sides.length === 2 && sides[0].has(name) !== sides[1].has(name) ? `${layerLabel(name)} (${sides[0].has(name) ? "base" : "head"} only)` : layerLabel(name) }));
+  const shown = name => { const svg = proj().board.layers.find(x => canon(x.name) === name)?.name; return S.layers ? !svg || S.layers.includes(svg) : !svg || !HIDE_LAYERS.test(svg); };
+  const fallback = !boardView.useGL;
+  return { layers, fallback, nets: fallback ? [] : [...new Set(scenes.flatMap(sc => sc.nets.map(n => n.name)).filter(Boolean))].sort(),
+    visible: name => Appearance.get().layers[name]?.visible !== false && shown(name),
+    note: S.m !== "side" ? "Colour, alpha and visibility apply here. Other controls apply in Side mode." : boardView.note || "WebGL unavailable. Colour, alpha and visibility apply." };
+}
+function mountAppearance() {
+  const root = $("#appearance-root"); if (!root) return;
+  appearanceUI = Appearance.mount(root, { ...appearanceCtx(), getState: Appearance.get, onChange: changeBoardAppearance, onReset: () => Appearance.reset(), unavailable: UNAVAILABLE });
+}
+function refreshAppearance() { if (appearanceUI && S.t === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
 Appearance.subscribe(snapshot => {
   applyAppearance(snapshot);
+  refreshAppearance();
   updateStatus();
   if (S.v === "board") {
     if (boardView.renderers.length) apply();
@@ -442,6 +460,7 @@ async function draw() {
   if (msg) msg.textContent = S.v === "board" && boardView.note && S.m === "side" ? boardView.note : "Ready";
   if (view && !placed()) fit(); else apply(); afterDraw(view);
   for (const vp of document.querySelectorAll("#stage .vp.sheet")) schematicResize.observe(vp);
+  refreshAppearance();
 }
 function boardDiagnostics(stage) {   // text only: warning objects are never parsed as HTML
   const warnings = (boardView.scenes || []).flatMap((sc, i) => sc ? sc.warnings.map(w => `${i ? "Head" : "Base"}: ${w?.kind ? [w.kind, w.uuid, w.reason].join(" ") : String(w)}`) : []);
@@ -820,7 +839,7 @@ function goTo(id) {
   const view = viewOf(r) ?? S.v;
   const box = rowBox(r, r.action === "removed" ? "base" : "head");
   const zoom = () => { if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
-  if (view !== S.v) { const library = String(S.v).startsWith("lib:"); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
+  if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(zoom);
 }
 // ---- Threads: anchors pin a discussion to a KiCad object (UUID, reference fallback) or a point, in mm. ----
@@ -904,7 +923,7 @@ function goToObject(i) {
   const o = proj().objects?.[i]; if (!o) return Promise.resolve();
   const view = objView(o); if (!currentView(view)) return Promise.resolve();
   const p = o.pos, box = o.box || (p && [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3]);
-  if (view !== S.v) { const library = String(S.v).startsWith("lib:"); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
+  if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(() => { if (box) zoomTo(box); saveHash(); });
 }
 function bindInventory() {
@@ -1090,15 +1109,15 @@ function renderPanel() {
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
+  if (S.t === "appearance" && !(S.v === "board" && p.board.changed)) S.t = "changes";
   if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${S.t === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  // Stage 4 Appearance tab goes first in #panel-tabs.
-  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
-    (S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
+  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${S.v === "board" && p.board.changed ? tab("appearance", "Appearance", true) : ""}${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
+    (S.t === "appearance" ? '<div id="appearance-root"></div>' : S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
@@ -1106,8 +1125,9 @@ function renderPanel() {
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
     <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
-  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { if (t.disabled) return; S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
-  const tabs = [...document.querySelectorAll("#panel [role=tab]:not(:disabled)")];
+  for (const t of document.querySelectorAll("#panel-tabs [role=tab]")) t.onclick = () => { if (t.disabled) return; S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
+  const tabs = [...document.querySelectorAll("#panel-tabs [role=tab]:not(:disabled)")];
+  appearanceUI = null; if (S.t === "appearance") mountAppearance();
   for (const tab of tabs) {
     tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
     tab.addEventListener("keydown", event => {
