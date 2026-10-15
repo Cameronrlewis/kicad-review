@@ -1508,9 +1508,9 @@ export const CHECKS = [
       }
       for (const g of [{base:null, head:"glOk"}, {base:"glOk", head:null}]) {
         p.board.geometry = g; await draw();
-        if (boardView.renderers.length !== 1 || document.querySelectorAll(".vp .tag")[g.base ? 1 : 0].textContent.indexOf("not present") < 0) return "one-sided " + JSON.stringify(g);
+        if (boardView.renderers.length !== 2 || document.querySelectorAll(".vp .tag")[g.base ? 1 : 0].textContent.indexOf("not present") < 0) return "one-sided " + JSON.stringify(g);
       }
-      for (const m of ["overlay","wipe","blend","semantic"]) { p.board.geometry = {base:"glOk", head:"glOk"}; S.m = m; await draw(); if (!svgOk() || boardView.renderers.length) return "mode " + m; }
+      for (const m of ["overlay","wipe","blend","semantic"]) { p.board.geometry = {base:"glOk", head:"glOk"}; S.m = m; await draw(); if (svgOk() || boardView.renderers.length !== 1 || !boardDiff) return "mode " + m; }
       return true;
     } finally { BoardGL.create = create; p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.m = "side"; }`],
   ["board flip adapters mirror camera, overlays and pointer", "v=board&x=10&y=20&z=5", `
@@ -1657,6 +1657,7 @@ export const CHECKS = [
       const uploads=c.panes[0].renderer.stats.uploads;
       state.m='wipe';
       for(const wipe of [0,.5,1]) {state.wipe=wipe;c.render();const a=rgb([10,10]),b=rgb([20,10]);if(!near(a,wipe===0?[0,16,35]:[200,100,40])||!near(b,wipe===1||wipe===.5?[0,16,35]:[200,100,40])) return 'wipe '+wipe+' '+a+' '+b;}
+      state.wipe=.5;state.x=10;c.render();if(!near(rgb([20,10]),[200,100,40]))return 'wipe boundary moved with camera';state.x=25;
       state.m='blend';state.blend=0;c.render();if(!near(rgb([20,10]),[0,16,35]))return 'blend zero';
       state.blend=1;c.render();if(!near(rgb([20,10]),[200,100,40]))return 'blend one';
       // Duplicate coincident head geometry must still receive group alpha only once.
@@ -1666,6 +1667,7 @@ export const CHECKS = [
       if(!near(rgb([30,10]),[40,33,36]))return 'semantic context '+rgb([30,10]);
       for(let n=0;n<50;n++){state.m=['overlay','wipe','blend','semantic'][n%4];state.x=25+n/100;c.render();}
       if(c.panes[0].renderer.stats.uploads!==uploads)return 'camera/mode rebuilt scene buffers';
+      for(let n=0;n<10;n++){stage.style.width=(801+n)+'px';c.render();if(c.panes[0].targets[0].width!==Math.round((801+n)*(devicePixelRatio||1)))return 'resize target';}
       c.dispose();c.dispose();if(!c.panes[0].renderer.stats.disposed)return 'not disposed';
       stage.replaceChildren();state.m='overlay';c=BoardDiff.mount({stage,scenes:{base:null,head:null},changes:[],state,appearance:()=>look});c.render();
       if(!near(rgb([40,10]),[255,255,255]))return 'empty overlay';
@@ -1673,4 +1675,11 @@ export const CHECKS = [
       return true;
     } finally {c?.dispose();stage.remove();}
   `],
+  ...['side','overlay','wipe','blend','semantic'].map(mode=>['board Thermal mode proof '+mode,'v=board&m='+mode,`
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.base || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'${mode}'});
+    if(!boardDiff || boardDiff.panes.length!==('${mode}'==='side'?2:1)) return 'missing compositor';
+    return boardDiff.panes.every(p=>p.renderer.stats.uploads>0 && !p.renderer.stats.disposed);
+  `]),
 ];

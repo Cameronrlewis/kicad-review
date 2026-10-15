@@ -103,7 +103,7 @@
             renderer.setCamera({...state,width:vp.clientWidth,height:vp.clientHeight,dpr}); renderer.setAppearance(look);
             if (!pane.targets || pane.targets[0].width !== width || pane.targets[0].height !== height) {
               pane.targets?.forEach(t=>deleteTarget(gl,t)); pane.targets = [];
-              pane.targets.push(target(gl,width,height),target(gl,width,height));
+              pane.targets.push(target(gl,width,height)); pane.targets.push(target(gl,width,height));
             }
             const mode = state.m;
             for (const [i,side] of ['base','head'].entries()) {
