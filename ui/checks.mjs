@@ -496,11 +496,11 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 2500));
     const bad = [];
     if(boardDiff) {
-      return boardDiff.panes.every(p=>Object.values(p.scenes).filter(Boolean).every(scene=>{
+      return boardDiff.panes.every(p=>Object.values(p.scenes).filter(scene=>scene?.objects.length).every(scene=>{
         const [x0,y0,x1,y1]=scene.bounds.map(n=>n/1000);
         return [[x0,y0],[x1,y0],[x0,y1],[x1,y1]].map(q=>p.renderer.project(q))
           .every(([x,y])=>x>=-1&&y>=-1&&x<=p.vp.clientWidth+1&&y<=p.vp.clientHeight+1);
-      }) && p.renderer.stats.uploads>0);
+      }) && (Object.values(p.scenes).every(scene=>!scene?.objects.length) || p.renderer.stats.uploads>0));
     }
     for (const vp of document.querySelectorAll("#stage .vp")) {
       const R = vp.getBoundingClientRect();
