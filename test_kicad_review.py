@@ -111,7 +111,7 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
 assert "typeof " not in js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
-assert "docs/superpowers" not in js and "docs/superpowers" not in readme and not os.path.exists("docs/superpowers"), "plan doc removed"
+assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")
 
@@ -149,6 +149,75 @@ try:
 except SystemExit as e:
     assert "same name" in str(e), e
 print("ok")
+
+# SCH6: page numbers belong to the project and parent instance, not the shared file.
+from tempfile import TemporaryDirectory
+import kicad_review as kr
+
+with TemporaryDirectory() as t:
+    def child(uid, label, page, parent="/root", project="H"):
+        return (f'(sheet (uuid "{uid}") (property "Sheetname" "{label}") '
+                '(property "Sheetfile" "shared.kicad_sch") '
+                f'(instances (project "Other" (path "{parent}" (page "99"))) '
+                f'(project "{project}" (path "{parent}" (page "{page}")))))')
+    write(t, {"H.kicad_sch": '(kicad_sch (uuid "root") '
+          '(sheet_instances (path "/" (page "1"))) '
+          + child("ten", "Ten", "10") + child("two", "Two", "2") + ')',
+          "shared.kicad_sch": '(kicad_sch ' +
+          child("nested", "Nested", "3", "/root/ten").replace('"shared.kicad_sch"', '"leaf.kicad_sch"')[:-2] +
+          '(project "H" (path "/root/two" (page "7"))))))'})
+    pages = kr.sheet_pages(t, "H")
+    assert {p["path"]: p["page"] for p in pages} == {
+        "/": "1", "/ten/": "10", "/ten/nested/": "3", "/two/": "2", "/two/nested/": "7"}
+    assert pages[1]["file"] == pages[3]["file"] == "shared.kicad_sch"
+    write(t, {"H.kicad_sch": '(kicad_sch (uuid "root") '
+          '(sheet_instances (path "/" (page "1")) (path "/two" (page "A2"))) '
+          + sheet("Two", "shared.kicad_sch", "two") + ')',
+          "shared.kicad_sch": '(kicad_sch)'})
+    assert kr.sheet_pages(t, "H")[1]["page"] == "A2"
+    n = kr.parse_sexpr('(sheet (instances (project "H" '
+        '(path "/root/a" (page "3")) (path "/root/b" (page "7")))))')
+    assert kr.sheet_instance_page(n, "H", "/root/b/") == "7"
+    assert kr.sheet_instance_page(n, "H", "/root/c") is None
+    assert kr.sheet_instance_page(n, "Other", "/root/b") is None
+    write(t, {"H.kicad_sch": '(kicad_sch ' + sheet("Two", "shared.kicad_sch", "two") + ')'})
+    assert [p["page"] for p in kr.sheet_pages(t, "H")] == ["1", "2"]
+    write(t, {"P.kicad_sch": '(kicad_sch)'})
+    calls = []
+    with patch.object(kr, "kicad_cli", side_effect=lambda *a: calls.append(a)):
+        kr.render_side(t, "P", t + "/out")
+    sch = next(c for c in calls if c[:3] == ("sch", "export", "svg"))
+    assert "--exclude-drawing-sheet" not in sch
+    assert "--no-background-color" in sch
+print("ok SCH6 instance pages and transparent framed export")
+
+# Unchanged drawings remain viewable, deduplicate blobs, and prefer head metadata.
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side, page in [("base", "2"), ("head", "10")]:
+            write(t, {f"{side}/H/H.kicad_sch":
+                f'(kicad_sch (sheet_instances (path "/" (page "{page}"))))',
+                f"review/H/{side}/erc.json": '{"sheets": []}',
+                f"review/H/{side}/sch/H.svg":
+                '<svg viewBox="0 0 320 213"><path d="M10 10H310"/></svg>'})
+        blobs = {}
+        p = kr.build_project({"dir": "H", "name": "H", "status": "modified"},
+                             blobs, kr.DEFAULT_SETTINGS)
+        pg = p["sheets"][0]
+        assert pg["page"] == "10" and pg["status"] == "unchanged"
+        assert pg["svg"]["base"] == pg["svg"]["head"]
+        assert pg["size"] == [320, 213] and "stem" not in pg
+        assert len(blobs) == 1
+        os.remove("head/H/H.kicad_sch")
+        removed = kr.build_project({"dir": "H", "name": "H", "status": "modified"},
+                                   {}, kr.DEFAULT_SETTINGS)["sheets"][0]
+        assert removed["page"] == "2" and removed["status"] == "removed"
+        assert removed["svg"]["base"] and removed["svg"]["head"] is None
+    finally:
+        os.chdir(old_cwd)
+print("ok SCH6 unchanged drawing blobs and head page metadata")
 
 # 2. Project folders with non-ASCII names and spaces are found (git quotes such paths unless told not to).
 from kicad_review import detect, commit
@@ -891,7 +960,7 @@ kicad_review.subprocess.run = fake_cli
 try:
     render_side(f"{t}/P", "P", f"{t}/render")
     assert calls == [
-        ["kicad-cli", "sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
+        ["kicad-cli", "sch", "export", "svg", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
         ["kicad-cli", "sch", "erc", "--format", "json", "--severity-all", "-o", f"{t}/render/erc.json", f"{t}/P/P.kicad_sch"],
         ["kicad-cli", "pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1", "--drill-shape-opt", "0", "-l", "F.Cu,B.Cu,Edge.Cuts", "-o", f"{t}/render/pcb", f"{t}/P/P.kicad_pcb"],
         ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity", "-o", f"{t}/render/drc.json", f"{t}/P/P.kicad_pcb"]], "TS-S2 render commands"

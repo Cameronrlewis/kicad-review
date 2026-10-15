@@ -200,7 +200,7 @@ def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
-        kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
+        kicad_cli("sch", "export", "svg", "--no-background-color", "-o", f"{out}/sch", sch)
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
             kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
@@ -313,20 +313,45 @@ def find(node, key):
     return found[0] if found else None
 
 
+def sheet_instance_page(node, project, parent_uuid_path):
+    """Resolve a child sheet's page for this project and parent UUID path."""
+    for entry in findall(find(node, "instances") or [], "project"):
+        if entry[1] != project:
+            continue
+        for path in findall(entry, "path"):
+            if path[1].rstrip("/") == parent_uuid_path.rstrip("/"):
+                page = find(path, "page")
+                if page and len(page) > 1 and str(page[1]).strip():
+                    return str(page[1])
+    return None
+
+
 def sheet_pages(proj_dir, name):
-    """Schematic pages in hierarchy order: [{path, name, file, parent}]. path is the sheet UUID path."""
+    """Schematic pages in hierarchy order, with instance page numbers and UUID paths."""
+    root_file = posixpath.join(proj_dir, f"{name}.kicad_sch")
+    if not os.path.exists(root_file):
+        return []
+    with open(root_file, encoding="utf-8") as fh:
+        root = parse_sexpr(fh.read())
+    root_uuid = (find(root, "uuid") or ["", ""])[1]
+    legacy = {}
+    for instance in findall(find(root, "sheet_instances") or [], "path"):
+        page = find(instance, "page")
+        if page and len(page) > 1 and str(page[1]).strip():
+            legacy[instance[1].rstrip("/") or "/"] = str(page[1])
     pages = []
 
     # stem: the file name kicad-cli gives the page's SVG, the sheet names along its path joined by "-".
-    def walk(file, path, sheet_name, parent, depth, stem):
-        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem})
+    def walk(file, path, sheet_name, parent, depth, stem, page=None):
+        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem,
+                      "page": page or legacy.get(path.rstrip("/") or "/") or str(len(pages) + 1)})
         full = posixpath.join(proj_dir, file)
         if depth > 32 or not os.path.exists(full):
             return
         with open(full, encoding="utf-8") as fh:
-            root = parse_sexpr(fh.read())
+            node = parse_sexpr(fh.read())
         names = set()
-        for s in findall(root, "sheet"):
+        for s in findall(node, "sheet"):
             props = properties(s)
             child = props.get("Sheetname", "?")
             if child in names:
@@ -334,10 +359,13 @@ def sheet_pages(proj_dir, name):
                          "so neither drawing can be shown. Rename one of them.")
             names.add(child)
             safe = re.sub(r"[\\/]", "_", child)
-            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
+            child_path = f"{path}{find(s, 'uuid')[1]}/"
+            parent_uuid_path = f'/{root_uuid}{path.rstrip("/")}'
+            child_page = sheet_instance_page(s, name, parent_uuid_path)
+            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))),
+                 child_path, child, path, depth + 1, f"{stem}-{safe}", child_page)
 
-    if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
-        walk(f"{name}.kicad_sch", "/", name, None, 0, name)
+    walk(f"{name}.kicad_sch", "/", name, None, 0, name)
     return pages
 
 
@@ -1814,6 +1842,7 @@ def build_project(p, blobs, settings, waivers=None):
     for side in sides:
         for pg in sheet_pages(posixpath.join(side, p["dir"]), p["name"]):
             entry = pages.setdefault(pg["path"], {**pg, "svg": {}})
+            entry.update(pg)
             entry["svg"][side] = svg_body(page_svg(f"{out}/{side}", p["name"], pg))
     sheets = []
     for pg in pages.values():
@@ -1821,9 +1850,8 @@ def build_project(p, blobs, settings, waivers=None):
         del pg["stem"]
         b, h = texts.get("base"), texts.get("head")
         pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
-        if pg["status"] != "unchanged":
-            pg["size"] = svg_size(h or b)
-            pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
+        pg["size"] = svg_size(h or b)
+        pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
         sheets.append(pg)
     layers, changed = [], False
     names = sorted({posixpath.basename(f) for s in sides for f in os.listdir(f"{out}/{s}/pcb")}
