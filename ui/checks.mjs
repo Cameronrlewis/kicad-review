@@ -1640,4 +1640,37 @@ export const CHECKS = [
       snapshot.getContext('2d').drawImage(canvas,0,0); canvas.replaceWith(snapshot);
       return true;
     } finally { renderer.dispose(); }`],
+  ["board composite pixels clips group alpha and lifecycle", "v=board&m=overlay", `
+    const stage=document.createElement('main'); stage.style.cssText='position:fixed;left:0;top:0;width:801px;height:400px;display:flex;z-index:9999'; document.body.append(stage);
+    const pad=(x,id)=>({uuid:id,changeUuid:id,kind:'pad',changeIds:id==='same'?[]:[id],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,box:[x-2000,8000,x+2000,12000],geometry:{primitive:{shape:'circle',center:[x,10000],size:[4000,4000],angle:0}}});
+    const scene=objects=>({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,50000,20000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects});
+    const scenes={base:scene([pad(10000,'old'),pad(30000,'same')]),head:scene([pad(20000,'new'),pad(20000,'new'),pad(30000,'same')])};
+    const state={m:'overlay',x:25,y:10,z:12,wipe:.5,blend:.5};
+    const look={layers:{'F.Cu':{visible:true,color:[200,100,40,1],opacity:1}},objects:{},nets:{},grid:{visible:false},background:[0,16,35,1]};
+    let c;
+    const near=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=3);
+    try {
+      c=BoardDiff.mount({stage,scenes,changes:[{id:'old',action:'removed'},{id:'new',action:'added'}],state,appearance:()=>look,onLost:e=>{throw e}});
+      const rgb=p=>Array.from(c.readPixel(0,...c.panes[0].renderer.project(p))).slice(0,3);
+      c.render();
+      for(const [point,color] of [[[10,10],[255,64,64]],[[20,10],[64,255,64]],[[30,10],[64,64,16]],[[40,10],[255,255,255]]]) if(!near(rgb(point),color)) return 'overlay '+point+': '+rgb(point);
+      const uploads=c.panes[0].renderer.stats.uploads;
+      state.m='wipe';
+      for(const wipe of [0,.5,1]) {state.wipe=wipe;c.render();const a=rgb([10,10]),b=rgb([20,10]);if(!near(a,wipe===0?[0,16,35]:[200,100,40])||!near(b,wipe===1||wipe===.5?[0,16,35]:[200,100,40])) return 'wipe '+wipe+' '+a+' '+b;}
+      state.m='blend';state.blend=0;c.render();if(!near(rgb([20,10]),[0,16,35]))return 'blend zero';
+      state.blend=1;c.render();if(!near(rgb([20,10]),[200,100,40]))return 'blend one';
+      // Duplicate coincident head geometry must still receive group alpha only once.
+      // Head buffer contains coincident geometry; alpha belongs to the complete revision.
+      state.blend=.5;c.render();if(!near(rgb([20,10]),[100,58,38]))return 'group alpha '+rgb([20,10]);
+      state.m='semantic';c.render();if(!near(rgb([10,10]),[200,100,40])||!near(rgb([20,10]),[200,100,40]))return 'semantic changes';
+      if(!near(rgb([30,10]),[40,33,36]))return 'semantic context '+rgb([30,10]);
+      for(let n=0;n<50;n++){state.m=['overlay','wipe','blend','semantic'][n%4];state.x=25+n/100;c.render();}
+      if(c.panes[0].renderer.stats.uploads!==uploads)return 'camera/mode rebuilt scene buffers';
+      c.dispose();c.dispose();if(!c.panes[0].renderer.stats.disposed)return 'not disposed';
+      stage.replaceChildren();state.m='overlay';c=BoardDiff.mount({stage,scenes:{base:null,head:null},changes:[],state,appearance:()=>look});c.render();
+      if(!near(rgb([40,10]),[255,255,255]))return 'empty overlay';
+      state.m='wipe';c.render();if(!near(rgb([40,10]),[0,16,35]))return 'empty wipe';
+      return true;
+    } finally {c?.dispose();stage.remove();}
+  `],
 ];

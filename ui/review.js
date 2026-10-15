@@ -225,6 +225,7 @@ async function svgText(id) {
   }
   return cache[id];
 }
+let boardDiff = null;
 const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
 const boardAppearance = () => Appearance.get();
 const changeBoardAppearance = p => Appearance.patch(p);
@@ -234,6 +235,7 @@ function boardCamera(vp) {
   return {x: S.x, y: S.y, z: S.z, width: vp.clientWidth, height: vp.clientHeight, dpr: devicePixelRatio || 1, flip: flipOn()};
 }
 function disposeBoardRenderers() {
+  boardDiff?.dispose(); boardDiff = null;
   for (const r of new Set([...boardView.renderers, ...boardView.panes.filter(Boolean).map(p => p.renderer)])) r.dispose();
   boardView.renderers = []; boardView.panes = [];
 }
@@ -380,7 +382,25 @@ async function draw() {
     Appearance.configure([...new Set([...(scenes || []).filter(Boolean).flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...(proj().board?.layers || []).map(l => canon(l.name))])]);
   }
   if (scenes && scenes.some(sc => sc && !sc.complete)) { boardView.note = "Geometry unsupported — showing SVG"; boardView.useGL = false; }
-  else boardView.useGL = !!scenes && S.m === "side" && boardView.failed !== S.p;
+  else boardView.useGL = !!scenes && boardView.failed !== S.p;
+  if (boardView.useGL) {
+    if (boardDiff && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { apply(); afterDraw(view); return; }
+    disposeBoardRenderers();
+    $("#stage").replaceWith(stage);
+    try {
+      boardDiff = BoardDiff.mount({stage,scenes:{base:scenes[0],head:scenes[1]},changes:proj().changes,state:S,appearance:glAppearance,onLost:()=>boardFallback("WebGL unavailable — showing SVG"),attachPanZoom});
+      boardDiff.mode = S.m; boardDiff.scenes = {base:scenes[0],head:scenes[1]};
+      boardView.panes = boardDiff.panes; boardView.renderers = boardDiff.panes.map(p=>p.renderer);
+      if (S.m === "wipe") addDivider(stage.querySelector(".vp"));
+      boardDiagnostics(stage);
+      if (!placed()) fit(); else apply();
+      afterDraw(view);
+      return;
+    } catch (error) {
+      disposeBoardRenderers(); boardView.failed = S.p; boardView.useGL = false;
+      boardView.note = "WebGL unavailable — showing SVG"; stage.replaceChildren();
+    }
+  }
   if (!boardView.useGL) disposeBoardRenderers();
   if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
   else await MODES[S.m](stage, view);
@@ -388,7 +408,7 @@ async function draw() {
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
   const msg = $("#statusbar .status-message");
-  if (msg) msg.textContent = S.v === "board" && boardView.note && S.m === "side" ? boardView.note : "Ready";
+  if (msg) msg.textContent = S.v === "board" && boardView.note ? boardView.note : "Ready";
   if (view && !placed()) fit(); else apply(); afterDraw(view);
 }
 function boardDiagnostics(stage) {   // text only: warning objects are never parsed as HTML
@@ -446,7 +466,8 @@ function apply() {
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   onApply();
-  for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
+  if (boardDiff) boardDiff.render();
+  else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
 }
 let settle, gesturing = false;
@@ -522,7 +543,7 @@ function sceneBox() {   // retained scene bounds (um -> mm); null when the view 
 }
 function fit() { const v = currentView(); zoomTo(sceneBox() || contentBox() || (v && [0, 0, v.size[0], v.size[1]]), 2); }
 
-const MODE_NAMES = { side: "Side by side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Semantic" };
+const MODE_NAMES = { side: "Side by side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Changes only" };
 S.blend = 0.5; S.wipe = 0.5;
 async function oneWorld(stage, view, label) {
   const w = viewport(stage, label, view.kind);
@@ -538,8 +559,11 @@ MODES.blend = async (stage, view) => {
 };
 MODES.wipe = async (stage, view) => {
   const w = await oneWorld(stage, view, null), vp = w.parentElement;
+  addDivider(vp);
+};
+function addDivider(vp) {
   vp.insertAdjacentHTML("beforeend", `<span class="tag">Base</span><span class="tag right">Head</span>
-    <div class="divider" role="slider" aria-label="Wipe position" tabindex="0"></div>`);
+    <div class="divider" role="slider" aria-label="Wipe position" tabindex="0" aria-valuemin="0" aria-valuemax="100"></div>`);
   const d = vp.querySelector(".divider");
   d.addEventListener("pointerdown", e => {
     e.stopPropagation(); try { d.setPointerCapture(e.pointerId); } catch {}
@@ -549,9 +573,10 @@ MODES.wipe = async (stage, view) => {
     d.addEventListener("pointerup", end, { once: true });
     d.addEventListener("pointercancel", end, { once: true });
   });
-  d.addEventListener("keydown", e => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-    S.wipe = Math.min(1, Math.max(0, S.wipe + (e.key === "ArrowLeft" ? -0.05 : 0.05))); apply(); } });
-};
+  d.addEventListener("keydown", e => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) {
+    e.preventDefault(); e.stopPropagation();
+    S.wipe = e.key === "Home" ? 0 : e.key === "End" ? 1 : Math.min(1, Math.max(0, S.wipe + (e.key === "ArrowLeft" ? -0.05 : 0.05))); apply(); } });
+}
 MODES.semantic = (stage, view) => oneWorld(stage, view, "Changes only");
 function onApply() {
   const vp = document.querySelector("#stage.mode-wipe .vp");
@@ -559,6 +584,7 @@ function onApply() {
   const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, head = vp.querySelector(".stack.head");
   vp.querySelector(".divider").style.left = `${x}px`;
   vp.querySelector(".divider").setAttribute("aria-valuenow", Math.round(S.wipe * 100));
+  if (!head) return;
   if (flipOn()) { const u = (W / 2 + S.x * S.z - x) / k; head.style.clipPath = `inset(0 ${Math.max(0, parseFloat(head.style.width) - u)}px 0 0)`; }   // mirrored: Head is the right of the divider = lower x
   else head.style.clipPath = `inset(0 0 0 ${Math.max(0, (x - (W / 2 - S.x * S.z)) / k)}px)`;
 }
@@ -576,7 +602,7 @@ function renderModes() {
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { if (b.getAttribute("aria-disabled") === "true") return; S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
   const r = document.querySelector("#modes input[type=range]");
   const blendButton = $("#modes [data-3d-blend-toggle]"), buttonText = () => { if (blendButton) blendButton.textContent = S.blend < .5 ? "Show head" : "Show base"; };
-  if (r) r.oninput = () => { S.blend = r.value / 100; if (is3d) window.Review3D?.setBlend(S.blend); else { const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; } buttonText(); };
+  if (r) r.oninput = () => { S.blend = r.value / 100; if (is3d) window.Review3D?.setBlend(S.blend); else if (boardDiff) apply(); else { const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; } buttonText(); };
   blendButton?.addEventListener("click", toggleBlend3D);
   if (focus) $(`#modes [data-mode="${CSS.escape(focus)}"]`)?.focus();
 }

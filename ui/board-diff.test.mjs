@@ -33,3 +33,17 @@ test('cycling preserves hit order and deduplicates aggregate child identities', 
   assert.equal(B.pickFromHits([],null),null);
   assert.equal(B.actionFor({changeIds:['missing','c1']},B.actionMap([{id:'c1',action:'added'}])),'added');
 });
+
+test('mode weights preserve changes and exact clips', () => {
+  assert.equal(B.weights('semantic','head',null,.5),.2);
+  assert.equal(B.weights('semantic','head','added',.5),1);
+  assert.equal(B.weights('blend','head','added',0),0);
+  assert.equal(B.weights('blend','head','added',1),1);
+  assert.equal(B.weights('blend','base',null,0),1);
+  for (const dpr of [1,2]) for (const wipe of [0,.333,.5,1]) {
+    const r=B.clipRects(801*dpr,400*dpr,wipe);
+    assert.equal(r.base[2]+r.head[2],801*dpr);
+    assert.equal(r.base[2],r.head[0]);
+    assert.equal(r.head[0]+r.head[2],801*dpr);
+  }
+});
