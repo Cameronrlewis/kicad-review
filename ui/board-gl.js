@@ -3,6 +3,7 @@
 // setScene uploads geometry; setCamera({x,y,z,width,height,dpr}) never does.
 // All drawing settings, including flip, enter ONLY through setAppearance(state).
 // draw({camera?}) paints the retained scene; readPixel uses backing-pixel GL coordinates.
+// appearance.grid = {visible, size(mm)} draws a dot grid (absent = off); camera {x,y,z,width,height,dpr} z is CSS px/mm.
 (() => {
   "use strict";
   const categories = ["tracks", "vias", "pads", "zones", "filledShapes", "images", "text", "graphics"];
@@ -40,10 +41,10 @@
         if (!point(p.center) || !point(p.size) || p.size.some(n => n < 0) || !Number.isSafeInteger(p.angle ?? 0)) fail();
       }
       const text = o.geometry.text;
-      if (text && (!point(text.at) || !point(text.size))) fail();
+      if (text && (!point(text.at) || !point(text.size) || typeof text.value !== "string")) fail();
       vertices += (o.geometry.segments?.length || 0) * 2;
       vertices += (o.geometry.rings || []).reduce((n,r)=>n+r.length,0);
-      vertices += (o.geometry.primitive ? 4 : 0) + (o.geometry.drill ? 4 : 0) + (text ? 4 : 0);
+      vertices += (o.geometry.primitive ? 4 : 0) + (o.geometry.drill ? 4 : 0) + (text ? text.value.length * 6 : 0);
       if (vertices > MAX_VERTICES) fail();
     }
     return scene;
@@ -53,6 +54,11 @@
     if (!state.activeLayer || layer === state.activeLayer || !["dim", "hide"].includes(state.contrast)) return 1;
     return layer === "Edge.Cuts" ? .3 : state.contrast === "hide" ? 0 : .2;
   }
+  const worldToScreen = ([x,y],c) => [c.width/2+(x-c.x)*c.z*(c.flip?-1:1), c.height/2+(y-c.y)*c.z];
+  const screenToWorld = ([x,y],c) => [c.x+(x-c.width/2)/c.z*(c.flip?-1:1), c.y+(y-c.height/2)/c.z];
+  // Glyph atlas layout is static so batches can be built without a canvas: 95 ASCII glyphs, regular then bold.
+  const CELL_W = 32, CELL_H = 48, ATLAS_COLS = 16, ATLAS_W = CELL_W*ATLAS_COLS, ATLAS_H = CELL_H*12, MESH = 13;
+  const glyphSlot = (ch, bold) => { const code = ch.codePointAt(0); return (bold ? 95 : 0) + (code >= 32 && code <= 126 ? code : 63) - 32; };
   // All instance coordinates are mm relative to this origin, never absolute floats.
   function buildBatches(scene, revision = "head") {
     validateScene(scene);
@@ -75,13 +81,74 @@
       const dx = distance*Math.cos(angle), dy = -distance*Math.sin(angle);
       return [p.center[0]-dx,p.center[1]-dy,p.center[0]+dx,p.center[1]+dy,r];
     }
+    const rel = ([x,y]) => [(x-centerUm[0])/1000, (y-centerUm[1])/1000];
+    function meshBatch(o, layer, pass) {
+      const key = `${revision}|${layer}|${o.kind}|${pass}`;
+      if (!batches.has(key)) batches.set(key, {key, layer, kind:o.kind, pass, instances:[], mesh:[], ranges:[], origin, nets:scene.nets});
+      return batches.get(key);
+    }
+    // Vertex: pos, local, shape(a,b,r,mode), rot(cos,sin), meta(net,category,side). Mode 1 solid, 2 rounded box SDF, 3 glyph.
+    const vert = (b, o, x, y, lx, ly, sa, sb, sr, mode, c, s) =>
+      b.mesh.push(x, y, lx, ly, sa, sb, sr, mode, c, s, netIndices.get(o.net), Math.max(0,categories.indexOf(o.category)), Math.max(0,sides.indexOf(o.side)));
+    const count = b => b.mesh.length / MESH;
+    const range = (b, o, index, first, extra) => b.ranges.push({uuid:o.uuid, changeUuid:o.changeUuid, changeIds:o.changeIds || [], objectIndex:index, first, count:count(b)-first, layers:o.layers, ...extra});
+    function box(b, o, p) {
+      const [w,h] = p.size.map(n => n/2000), t = (p.angle || 0)*Math.PI/180000, c = Math.cos(t), s = Math.sin(t);
+      const r = p.shape === "oval" ? Math.min(w,h) : p.shape === "roundrect" ? Math.min((p.radius || 0)/1000, w, h) : 0;
+      const [cx,cy] = rel(p.center);
+      for (const [sx,sy] of [[-1,-1],[1,-1],[1,1],[-1,-1],[1,1],[-1,1]]) { const lx = sx*w, ly = sy*h; vert(b,o,cx+lx*c+ly*s,cy-lx*s+ly*c,lx,ly,w,h,r,2,c,s); }
+    }
+    function trapezoid(b, o, p) {
+      const [w,h] = p.size.map(n => n/1000), [dx,dy] = (p.delta || [0,0]).map(n => n/1000), t = (p.angle || 0)*Math.PI/180000, c = Math.cos(t), s = Math.sin(t);
+      const [cx,cy] = rel(p.center);
+      const k = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx,sy]) => { const lx = sx*w/2-sx*sy*dy/2, ly = sy*h/2+sx*sy*dx/2; return [cx+lx*c+ly*s, cy-lx*s+ly*c]; });
+      for (const i of [0,1,2,0,2,3]) vert(b,o,k[i][0],k[i][1],0,0,0,0,0,1,1,0);
+    }
+    const quad = (b, o, [x0,y0,x1,y1]) => { for (const [x,y] of [[x0,y0],[x1,y0],[x1,y1],[x0,y0],[x1,y1],[x0,y1]]) vert(b,o,x,y,0,0,0,0,0,1,1,0); };
+    // Triangle fans from each ring's first vertex; stencil parity (see draw) makes concave rings and holes correct.
+    const bounds = pts => [Math.min(...pts.map(p=>p[0]))-.001, Math.min(...pts.map(p=>p[1]))-.001, Math.max(...pts.map(p=>p[0]))+.001, Math.max(...pts.map(p=>p[1]))+.001];
+    function fan(b, o, r) { for (let i = 1; i < r.length-1; i++) for (const p of [r[0],r[i],r[i+1]]) vert(b,o,p[0],p[1],0,0,0,0,0,1,1,0); }
+    function fillObject(b, o, index, rings) {
+      const first = count(b), parts = [], union = o.kind === "pad"; // pad primitives union; zone rings are even-odd together
+      for (const r of rings) {
+        const f = count(b); fan(b,o,r);
+        if (union) { const bf = count(b); quad(b,o,bounds(r)); parts.push({first:f, count:bf-f, boxFirst:bf}); }
+      }
+      if (!union) parts.push({first, count:count(b)-first, boxFirst:count(b)});
+      const boxFirst = count(b); quad(b,o,bounds(rings.flat()));
+      if (!union) parts[0].boxFirst = boxFirst;
+      range(b,o,index,first,{parts,union,boxFirst});
+    }
+    function text(b, o, t) {
+      const [sw,sh] = t.size.map(n => n/1000), lines = t.value.split("\n"), h = lines.length*sh, j = t.justify || [];
+      const top = j.includes("top") ? 0 : j.includes("bottom") ? -h : -h/2, th = t.angle*Math.PI/180000, c = Math.cos(th), s = Math.sin(th), mir = t.mirror ? -1 : 1;
+      const [ax,ay] = rel(t.at), slant = t.italic ? .2 : 0;
+      lines.forEach((line,li) => {
+        const left = j.includes("left") ? 0 : j.includes("right") ? -line.length*sw : -line.length*sw/2;
+        [...line].forEach((ch,ci) => {
+          if (ch === " ") return;
+          const slot = glyphSlot(ch, t.bold), col = slot % ATLAS_COLS, row = Math.floor(slot/ATLAS_COLS);
+          const u0 = col*CELL_W/ATLAS_W, u1 = (col+1)*CELL_W/ATLAS_W, v0 = row*CELL_H/ATLAS_H, v1 = (row+1)*CELL_H/ATLAS_H;
+          // The atlas cell is wider/taller than the glyph body; expand the quad so the body spans the advance.
+          const x0 = left+ci*sw-sw/6, x1 = left+(ci+1)*sw+sw/6, y0 = top+li*sh-.3*sh, y1 = top+(li+1)*sh+.3*sh, yc = top+(li+.5)*sh;
+          const P = (px,py) => { const x = mir*(px-slant*(py-yc)); return [ax+x*c+py*s, ay-x*s+py*c]; };
+          const k = {a:[...P(x0,y0),u0,v0], b:[...P(x1,y0),u1,v0], c:[...P(x1,y1),u1,v1], d:[...P(x0,y1),u0,v1]};
+          for (const i of "abcacd") vert(b,o,k[i][0],k[i][1],k[i][2],k[i][3],0,0,0,3,1,0);
+        });
+      });
+    }
     scene.objects.forEach((o,index) => {
       if (o.hidden) return;
       const g = o.geometry;
+      const rings = (g.rings || []).filter(r => r.length >= 3).map(r => r.map(rel));
       for (const l of o.layers) {
         for (const s of g.segments || []) append(o,index,l,s);
         const p = g.layerPrimitives?.[l] || g.primitive;
         if (p?.shape === "circle") append(o,index,l,[...p.center,...p.center,p.size[0]]);
+        else if (p && p.size[0] > 0 && p.size[1] > 0 && ["rect","oval","roundrect"].includes(p.shape)) { const b = meshBatch(o,l,"mesh"), f = count(b); box(b,o,p); range(b,o,index,f); }
+        else if (p?.shape === "trapezoid") { const b = meshBatch(o,l,"mesh"), f = count(b); trapezoid(b,o,p); range(b,o,index,f); }
+        if (rings.length) { const b = meshBatch(o,l,"fill"); fillObject(b,o,index,rings); }
+        if (g.text) { const b = meshBatch(o,l,"text"), f = count(b); text(b,o,g.text); range(b,o,index,f); }
       }
       // A single drill overlay per object avoids darkened duplicate walls on multilayer pads.
       if (g.drill && o.layers.length) {
@@ -89,10 +156,23 @@
         append(o,index,o.layers[0],wall,"wall"); append(o,index,o.layers[0],hole,"hole");
       }
     });
-    return [...batches.values()].map(b => ({...b,instances:new Float32Array(b.instances)}));
+    return [...batches.values()].map(b => ({...b,instances:new Float32Array(b.instances),mesh:new Float32Array(b.mesh)}));
   }
-  const vertexSource = `#version 300 es
+  const header = `#version 300 es
 precision highp float;
+uniform vec2 cameraCenter;
+uniform vec2 viewportSize;
+uniform float zoom;
+uniform float mirrorX;
+out vec2 localPoint;
+flat out vec4 shape;
+flat out int netIndex;
+flat out int categoryIndex;
+flat out int sideIndex;
+vec4 project(vec2 world){ return vec4((world-cameraCenter)*zoom*vec2(mirrorX,1.0)/viewportSize*vec2(2,-2),0,1); }
+`;
+  // Instanced capsule (segments, circles, drills): shape=(halfLength,radius,0,0).
+  const capsuleVertexSource = header + `
 layout(location=0) in vec2 corner;
 layout(location=1) in vec4 endpoints;
 layout(location=2) in float radius;
@@ -100,16 +180,6 @@ layout(location=3) in float netId;
 layout(location=4) in float categoryId;
 layout(location=5) in float sideId;
 layout(location=6) in float objectId;
-uniform vec2 cameraCenter;
-uniform vec2 viewportSize;
-uniform float zoom;
-uniform float mirrorX;
-out vec2 localPoint;
-flat out float halfLength;
-flat out float r;
-flat out int netIndex;
-flat out int categoryIndex;
-flat out int sideIndex;
 void main() {
  vec2 delta=endpoints.zw-endpoints.xy;
  float len=length(delta);
@@ -118,17 +188,29 @@ void main() {
  vec2 center=(endpoints.xy+endpoints.zw)*0.5;
  float margin=1.0/zoom;
  localPoint=corner*vec2(len*0.5+radius+margin,radius+margin);
- vec2 world=center+tangent*localPoint.x+normal*localPoint.y;
- gl_Position=vec4((world-cameraCenter)*zoom*vec2(mirrorX,1.0)/viewportSize*vec2(2,-2),0,1);
- halfLength=len*0.5; r=radius; netIndex=int(netId);
+ gl_Position=project(center+tangent*localPoint.x+normal*localPoint.y);
+ shape=vec4(len*0.5,radius,0.0,0.0); netIndex=int(netId);
  categoryIndex=int(categoryId); sideIndex=int(sideId);
+}`;
+  // Triangle mesh (pad boxes, fills, glyphs). Rounded boxes grow by one pixel for anti-aliasing.
+  const meshVertexSource = header + `
+layout(location=0) in vec2 pos;
+layout(location=1) in vec2 local;
+layout(location=2) in vec4 shapeIn;
+layout(location=3) in vec2 rot;
+layout(location=4) in vec3 meta;
+void main() {
+ float grow=shapeIn.w==2.0 ? 1.0/zoom : 0.0;
+ vec2 g=sign(local)*grow;
+ localPoint=local+g;
+ gl_Position=project(pos+vec2(g.x*rot.x+g.y*rot.y,-g.x*rot.y+g.y*rot.x));
+ shape=shapeIn; netIndex=int(meta.x); categoryIndex=int(meta.y); sideIndex=int(meta.z);
 }`;
   const fragmentSource = `#version 300 es
 precision highp float;
 precision highp sampler2D;
 in vec2 localPoint;
-flat in float halfLength;
-flat in float r;
+flat in vec4 shape;
 flat in int netIndex;
 flat in int categoryIndex;
 flat in int sideIndex;
@@ -136,6 +218,7 @@ uniform vec4 layerColor;
 uniform vec3 backgroundColor;
 uniform float contrastFactor;
 uniform sampler2D netStyle;
+uniform sampler2D atlas;
 uniform int selectedNet;
 uniform int zeroNet;
 uniform float categoryOpacity[8];
@@ -143,9 +226,12 @@ uniform float sideVisible[3];
 uniform int drillPass;
 out vec4 outColor;
 void main() {
- float d=length(vec2(max(abs(localPoint.x)-halfLength,0.0),localPoint.y))-r;
+ int mode=int(shape.w);
+ float d=-1.0;
+ if(mode==0) d=length(vec2(max(abs(localPoint.x)-shape.x,0.0),localPoint.y))-shape.y;
+ else if(mode==2){ vec2 q=abs(localPoint)-shape.xy+shape.z; d=length(max(q,0.0))+min(max(q.x,q.y),0.0)-shape.z; }
  float aa=max(fwidth(d),0.000001);
- float coverage=1.0-smoothstep(-aa,aa,d);
+ float coverage=mode==1 ? 1.0 : mode==3 ? texture(atlas,localPoint).a : 1.0-smoothstep(-aa,aa,d);
  vec4 ns=texelFetch(netStyle,ivec2(netIndex,0),0);
  float opacity=categoryOpacity[categoryIndex]*sideVisible[sideIndex];
  if(ns.a<0.0 || coverage==0.0 || opacity==0.0) discard;
@@ -154,17 +240,41 @@ void main() {
  if(drillPass==0) rgb=mix(backgroundColor,rgb,contrastFactor*retained);
  outColor=vec4(rgb,layerColor.a*opacity*coverage*(ns.a>0.0 ? ns.a : 1.0));
 }`;
+  // Fullscreen dot grid: world position is rebuilt per fragment so it never swims with pan.
+  const gridVertexSource = `#version 300 es
+layout(location=0) in vec2 corner;
+void main(){ gl_Position=vec4(corner,0,1); }`;
+  const gridFragmentSource = `#version 300 es
+precision highp float;
+uniform vec2 viewportSize;
+uniform vec2 phase;
+uniform float zoom;
+uniform float mirrorX;
+uniform float spacing;
+uniform float dpr;
+uniform vec4 color;
+out vec4 outColor;
+void main() {
+ vec2 css=vec2(gl_FragCoord.x,viewportSize.y*dpr-gl_FragCoord.y)/dpr;
+ vec2 u=(phase+(css-viewportSize*0.5)*vec2(mirrorX,1.0)/zoom)/spacing;
+ float dist=length((fract(u+0.5)-0.5)*spacing*zoom*dpr);
+ float a=1.0-smoothstep(0.5,1.0,dist);
+ if(a<=0.0) discard;
+ outColor=vec4(color.rgb,color.a*a);
+}`;
   function create(canvas, opts = {}) {
     let gl;
     try { gl = canvas.getContext("webgl2", {alpha:false, antialias:false, stencil:true, premultipliedAlpha:false}); } catch { return null; }
     if (!gl || !gl.getParameter(gl.STENCIL_BITS)) return null;
     const resources = [], stats = {uploads:0, textureUploads:0, draws:0, vertices:0, instances:0, disposed:false};
-    let disposed = false, failed = false, scene = null, batches = [], appearance = {}, camera = {}, netDirty = true;
+    let disposed = false, failed = false, scene = null, batches = [], appearance = {}, camera = {}, netDirty = true, observer = null, frame = 0, atlasReady = false;
     const own = (type, value) => { if (!value) throw new Error(`Cannot allocate ${type}`); resources.push([type,value]); return value; };
     function dispose() {
       if (disposed) return;
       disposed = true; stats.disposed = true;
       canvas.removeEventListener("webglcontextlost", lost);
+      observer?.disconnect(); observer = null;
+      if (frame) cancelAnimationFrame(frame); frame = 0;
       for (const [type,value] of resources.splice(0).reverse()) gl[`delete${type}`](value);
       batches = [];
     }
@@ -172,21 +282,42 @@ void main() {
     function lost(event) { event.preventDefault(); failure(new Error("Board WebGL context lost")); }
     canvas.addEventListener("webglcontextlost", lost);
     try {
-      const program = own("Program",gl.createProgram());
-      for (const [type,source] of [[gl.VERTEX_SHADER,vertexSource],[gl.FRAGMENT_SHADER,fragmentSource]]) {
-        const shader = own("Shader",gl.createShader(type)); gl.shaderSource(shader,source); gl.compileShader(shader);
-        if (!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || "Board shader compilation failed");
-        gl.attachShader(program,shader);
+      const names = ["cameraCenter","viewportSize","zoom","mirrorX","layerColor","backgroundColor","contrastFactor","netStyle","atlas","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass"];
+      function link(vertex, fragment, list) {
+        const program = own("Program",gl.createProgram());
+        for (const [type,source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]) {
+          const shader = own("Shader",gl.createShader(type)); gl.shaderSource(shader,source); gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || "Board shader compilation failed");
+          gl.attachShader(program,shader);
+        }
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || "Board shader link failed");
+        return {program, u:Object.fromEntries(list.map(n=>[n,gl.getUniformLocation(program,n)]))};
       }
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || "Board shader link failed");
-      const uniforms = Object.fromEntries(["cameraCenter","viewportSize","zoom","mirrorX","layerColor","backgroundColor","contrastFactor","netStyle","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass"].map(n=>[n,gl.getUniformLocation(program,n)]));
+      const capsuleProgram = link(capsuleVertexSource,fragmentSource,names), meshProgram = link(meshVertexSource,fragmentSource,names);
+      const gridProgram = link(gridVertexSource,gridFragmentSource,["viewportSize","phase","zoom","mirrorX","spacing","dpr","color"]);
       const quad = own("Buffer",gl.createBuffer());
       gl.bindBuffer(gl.ARRAY_BUFFER,quad); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1]),gl.STATIC_DRAW); stats.uploads++;
       const texture = own("Texture",gl.createTexture());
       gl.bindTexture(gl.TEXTURE_2D,texture);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+      const atlas = own("Texture",gl.createTexture());
+      gl.bindTexture(gl.TEXTURE_2D,atlas); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+      // System-monospace glyph atlas, generated locally and uploaded once, only when a scene has text.
+      function uploadAtlas() {
+        if (atlasReady) return;
+        const c = document.createElement("canvas"); c.width = ATLAS_W; c.height = ATLAS_H;
+        const x = c.getContext("2d"); x.fillStyle = "#fff"; x.textAlign = "center"; x.textBaseline = "middle";
+        for (let slot = 0; slot < 190; slot++) {
+          x.font = `${slot >= 95 ? "bold " : ""}40px monospace`;
+          x.fillText(String.fromCharCode(32 + slot % 95), (slot % ATLAS_COLS)*CELL_W + CELL_W/2, Math.floor(slot/ATLAS_COLS)*CELL_H + CELL_H/2);
+        }
+        gl.bindTexture(gl.TEXTURE_2D,atlas); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c); gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+        stats.textureUploads++; atlasReady = true;
+      }
       function setScene(next, revision = "head") {
         if (disposed) return;
         const cpu = buildBatches(next, revision);
@@ -197,10 +328,17 @@ void main() {
         }
         scene = next; batches = [];
         stats.instances = cpu.reduce((n,b)=>n+b.instances.length/9,0);
-        stats.vertices = stats.instances * 6;
+        stats.vertices = stats.instances * 6 + cpu.reduce((n,b)=>n+b.mesh.length/MESH,0);
         try {
+          if (cpu.some(b=>b.pass === "text")) uploadAtlas();
           for (const b of cpu) {
             b.vao = own("VertexArray",gl.createVertexArray()); gl.bindVertexArray(b.vao);
+            if (b.mesh.length) {
+              b.buffer = own("Buffer",gl.createBuffer()); gl.bindBuffer(gl.ARRAY_BUFFER,b.buffer);
+              gl.bufferData(gl.ARRAY_BUFFER,b.mesh,gl.STATIC_DRAW); stats.uploads++;
+              for (const [location,size,offset] of [[0,2,0],[1,2,2],[2,4,4],[3,2,8],[4,3,10]]) { gl.enableVertexAttribArray(location); gl.vertexAttribPointer(location,size,gl.FLOAT,false,MESH*4,offset*4); }
+              batches.push(b); continue;
+            }
             gl.bindBuffer(gl.ARRAY_BUFFER,quad); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
             b.buffer = own("Buffer",gl.createBuffer()); gl.bindBuffer(gl.ARRAY_BUFFER,b.buffer);
             gl.bufferData(gl.ARRAY_BUFFER,b.instances,gl.STATIC_DRAW); stats.uploads++;
@@ -213,6 +351,38 @@ void main() {
         } catch (error) { failure(error); }
       }
       const rgba = c => [c[0]/255,c[1]/255,c[2]/255,c[3] ?? 1];
+      const gridVao = own("VertexArray",gl.createVertexArray());
+      gl.bindVertexArray(gridVao); gl.bindBuffer(gl.ARRAY_BUFFER,quad); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+      // Stencil parity fill: the stencil is cleared per object, so overlapping zones never share parity.
+      // ponytail: full-surface clear per object; scissor to the object box if many fills ever profile hot.
+      function drawFill(r) {
+        gl.enable(gl.STENCIL_TEST); gl.stencilMask(0xff); gl.clearStencil(0); gl.clear(gl.STENCIL_BUFFER_BIT);
+        gl.colorMask(false,false,false,false); gl.stencilFunc(gl.ALWAYS,0,0xff);
+        if (r.union) {
+          // Per ring: bit 0 holds ring parity, then ORs into bit 1 so overlapping pad primitives never cancel.
+          for (const part of r.parts) {
+            gl.stencilMask(1); gl.clear(gl.STENCIL_BUFFER_BIT);
+            gl.stencilFunc(gl.ALWAYS,0,0xff); gl.stencilOp(gl.KEEP,gl.KEEP,gl.INVERT); gl.drawArrays(gl.TRIANGLES,part.first,part.count);
+            gl.stencilMask(2); gl.stencilFunc(gl.EQUAL,3,1); gl.stencilOp(gl.KEEP,gl.KEEP,gl.REPLACE); gl.drawArrays(gl.TRIANGLES,part.boxFirst,6);
+          }
+          gl.colorMask(true,true,true,true); gl.stencilMask(0); gl.stencilFunc(gl.EQUAL,2,2); gl.stencilOp(gl.KEEP,gl.KEEP,gl.KEEP);
+        } else {
+          gl.stencilOp(gl.KEEP,gl.KEEP,gl.INVERT); gl.drawArrays(gl.TRIANGLES,r.parts[0].first,r.parts[0].count);
+          gl.colorMask(true,true,true,true); gl.stencilMask(0); gl.stencilFunc(gl.EQUAL,1,1); gl.stencilOp(gl.KEEP,gl.KEEP,gl.KEEP);
+        }
+        gl.drawArrays(gl.TRIANGLES,r.boxFirst,6); stats.draws++;
+        gl.disable(gl.STENCIL_TEST); gl.stencilMask(0xff);
+      }
+      // Resize observation: one coalesced rAF draw, never a permanent loop; zero-sized docks keep the last valid camera.
+      function scheduleDraw() {
+        if (frame || disposed) return;
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          const w = canvas.clientWidth, h = canvas.clientHeight;
+          if (w > 0 && h > 0) { camera = {...camera, width:w, height:h}; draw(); }
+        });
+      }
+      if (typeof ResizeObserver === "function") { observer = new ResizeObserver(scheduleDraw); observer.observe(canvas); }
       function draw(options = {}) {
         if (disposed || !scene) return false;
         if (options.camera) camera = {...camera,...options.camera};
@@ -223,18 +393,33 @@ void main() {
         if (canvas.width !== bw) canvas.width = bw;
         if (canvas.height !== bh) canvas.height = bh;
         gl.viewport(0,0,bw,bh); gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST);
-        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.useProgram(program);
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.colorMask(true,true,true,true); gl.stencilMask(0xff);
         const background = rgba(globalThis.KicadColors.objects.background);
         gl.clearColor(...background); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
-        gl.uniform3fv(uniforms.backgroundColor,background.slice(0,3));
-        gl.uniform2f(uniforms.viewportSize,width,height); gl.uniform1f(uniforms.zoom,z); gl.uniform1f(uniforms.mirrorX,appearance.flip ? -1 : 1);
         const origin = [(scene.bounds[0]/2+scene.bounds[2]/2)/1000,(scene.bounds[1]/2+scene.bounds[3]/2)/1000];
-        gl.uniform2f(uniforms.cameraCenter,(camera.x ?? origin[0])-origin[0],(camera.y ?? origin[1])-origin[1]);
-        gl.uniform1fv(uniforms["categoryOpacity[0]"],categories.map(c=>appearance.objects?.[c]?.visible===false ? 0 : appearance.objects?.[c]?.opacity ?? 1));
-        gl.uniform1fv(uniforms["sideVisible[0]"],[1,appearance.objects?.frontFootprints?.visible===false ? 0 : 1,appearance.objects?.backFootprints?.visible===false ? 0 : 1]);
-        const selected = scene.nets.findIndex(n=>n.name===appearance.selectedNet);
-        gl.uniform1i(uniforms.selectedNet,selected); gl.uniform1i(uniforms.zeroNet,scene.nets.findIndex(n=>n.id===0));
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,texture); gl.uniform1i(uniforms.netStyle,0);
+        const mirror = appearance.flip ? -1 : 1, selected = scene.nets.findIndex(n=>n.name===appearance.selectedNet);
+        const opacity = categories.map(c=>appearance.objects?.[c]?.visible===false ? 0 : appearance.objects?.[c]?.opacity ?? 1);
+        const sideVisible = [1,appearance.objects?.frontFootprints?.visible===false ? 0 : 1,appearance.objects?.backFootprints?.visible===false ? 0 : 1];
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,atlas);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,texture);
+        for (const {program,u} of [capsuleProgram,meshProgram]) {
+          gl.useProgram(program);
+          gl.uniform3fv(u.backgroundColor,background.slice(0,3));
+          gl.uniform2f(u.viewportSize,width,height); gl.uniform1f(u.zoom,z); gl.uniform1f(u.mirrorX,mirror);
+          gl.uniform2f(u.cameraCenter,(camera.x ?? origin[0])-origin[0],(camera.y ?? origin[1])-origin[1]);
+          gl.uniform1fv(u["categoryOpacity[0]"],opacity); gl.uniform1fv(u["sideVisible[0]"],sideVisible);
+          gl.uniform1i(u.selectedNet,selected); gl.uniform1i(u.zeroNet,scene.nets.findIndex(n=>n.id===0));
+          gl.uniform1i(u.netStyle,0); gl.uniform1i(u.atlas,1);
+        }
+        const grid = appearance.grid;
+        if (grid?.visible && grid.size > 0 && grid.size*z >= 4) {
+          const {program,u} = gridProgram, cx = camera.x ?? origin[0], cy = camera.y ?? origin[1], g = grid.size;
+          gl.useProgram(program); gl.bindVertexArray(gridVao);
+          gl.uniform2f(u.viewportSize,width,height); gl.uniform2f(u.phase,((cx%g)+g)%g,((cy%g)+g)%g);
+          gl.uniform1f(u.zoom,z); gl.uniform1f(u.mirrorX,mirror); gl.uniform1f(u.spacing,g); gl.uniform1f(u.dpr,dpr);
+          gl.uniform4fv(u.color,rgba(globalThis.KicadColors.objects.grid));
+          gl.drawArrays(gl.TRIANGLES,0,6); stats.draws++;
+        }
         if (netDirty) {
           const data = new Float32Array(Math.max(1,scene.nets.length)*4);
           scene.nets.forEach((n,i)=>{
@@ -245,18 +430,22 @@ void main() {
           gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,Math.max(1,scene.nets.length),1,0,gl.RGBA,gl.FLOAT,data); stats.textureUploads++; netDirty=false;
         }
         const priority = globalThis.KicadColors.drawPriority;
+        const rank = {wall:1,hole:2}, within = {fill:0,text:2};
         const ordered = [...batches].sort((a,b)=> {
-          if (a.pass !== "copper" || b.pass !== "copper") return ({copper:0,wall:1,hole:2}[a.pass]-{copper:0,wall:1,hole:2}[b.pass]);
+          const ra = rank[a.pass] ?? 0, rb = rank[b.pass] ?? 0;
+          if (ra || rb) return ra-rb;
           if ((a.layer===appearance.activeLayer)!==(b.layer===appearance.activeLayer)) return a.layer===appearance.activeLayer ? 1 : -1;
-          return priority.indexOf(b.layer)-priority.indexOf(a.layer);
+          return priority.indexOf(b.layer)-priority.indexOf(a.layer) || (within[a.pass] ?? 1)-(within[b.pass] ?? 1);
         });
         for (const b of ordered) {
-          const drill = b.pass !== "copper";
+          const drill = b.pass === "wall" || b.pass === "hole", capsule = drill || b.pass === "copper";
           const factor = drill ? 1 : layerFactor(b.layer,appearance);
           if (!factor) continue;
+          const {program,u} = capsule ? capsuleProgram : meshProgram;
           const color = b.pass === "hole" ? background : b.pass === "wall" ? rgba(globalThis.KicadColors.objects.viaHolewalls) : rgba(appearance.layers?.[b.layer]?.color || globalThis.KicadColors.layers[b.layer] || [194,194,194,1]);
           if (!drill) color[3] *= appearance.layers?.[b.layer]?.opacity ?? 1;
-          gl.uniform4fv(uniforms.layerColor,color); gl.uniform1f(uniforms.contrastFactor,factor); gl.uniform1i(uniforms.drillPass,drill ? 1 : 0);
+          gl.useProgram(program);
+          gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
           gl.bindVertexArray(b.vao);
           if (drill) {
             // Blind/buried drills exist only in their physical copper span. Explicit
@@ -268,7 +457,9 @@ void main() {
               for (const [loc,size,offset] of [[1,4,0],[2,1,4],[3,1,5],[4,1,6],[5,1,7],[6,1,8]]) gl.vertexAttribPointer(loc,size,gl.FLOAT,false,36,range.start*36+offset*4);
               gl.drawArraysInstanced(gl.TRIANGLES,0,6,range.count); stats.draws++;
             }
-          } else { gl.drawArraysInstanced(gl.TRIANGLES,0,6,b.instances.length/9); stats.draws++; }
+          } else if (capsule) { gl.drawArraysInstanced(gl.TRIANGLES,0,6,b.instances.length/9); stats.draws++; }
+          else if (b.pass === "fill") for (const r of b.ranges) drawFill(r);
+          else { gl.drawArrays(gl.TRIANGLES,0,b.mesh.length/MESH); stats.draws++; }
         }
         gl.bindVertexArray(null);
         return true;
@@ -287,5 +478,5 @@ void main() {
       return disposed ? null : api;
     } catch (error) { failure(error); return null; }
   }
-  globalThis.BoardGL = {create,validateScene,buildBatches,layerFactor,categories,sides};
+  globalThis.BoardGL = {create,validateScene,buildBatches,layerFactor,worldToScreen,screenToWorld,categories,sides};
 })();

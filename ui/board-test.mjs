@@ -106,3 +106,17 @@ assert.equal(combined.instances.length,18);
 assert.equal(combined.ranges.length,1);
 assert.equal(combined.ranges[0].count,2);
 console.log("PASS contiguous object ranges retain all segment instances");
+{
+ const camera={x:10,y:20,z:8,width:800,height:600,dpr:2,flip:true};
+ const px=G.worldToScreen([12,23],camera);
+ assert.deepEqual(px,[384,324]);
+ assert.deepEqual(G.screenToWorld(px,camera),[12,23]);
+ assert.deepEqual(G.worldToScreen([10,20],camera),[400,300]);
+ const s=clone();
+ s.objects[0]={...s.objects[0],kind:"zone",category:"zones",geometry:{rings:[[[0,0],[10000,0],[10000,10000],[0,10000]],[[2000,2000],[8000,2000],[8000,8000],[2000,8000]]]}};
+ const fill=G.buildBatches(s).find(b=>b.pass==="fill");
+ assert.equal(fill.ranges.length,1);
+  const t=clone(); t.objects[0]={...t.objects[0],kind:"text",category:"text",geometry:{text:{value:"R1 a",at:[1000,1000],size:[1000,1000],angle:0}}};
+ assert.equal(G.buildBatches(t).find(b=>b.pass==="text").mesh.length/13,3*6);
+ console.log("PASS camera transforms, ring fills and text quads");
+}
