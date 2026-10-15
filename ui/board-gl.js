@@ -215,6 +215,7 @@ flat in int netIndex;
 flat in int categoryIndex;
 flat in int sideIndex;
 uniform vec4 layerColor;
+uniform float layerOpacity;
 uniform vec3 backgroundColor;
 uniform float contrastFactor;
 uniform sampler2D netStyle;
@@ -234,11 +235,12 @@ void main() {
  float coverage=mode==1 ? 1.0 : mode==3 ? texture(atlas,localPoint).a : 1.0-smoothstep(-aa,aa,d);
  vec4 ns=texelFetch(netStyle,ivec2(netIndex,0),0);
  float opacity=categoryOpacity[categoryIndex]*sideVisible[sideIndex];
- if(ns.a<0.0 || coverage==0.0 || opacity==0.0) discard;
- vec3 rgb=ns.a>0.0 && drillPass==0 ? ns.rgb : layerColor.rgb;
+ if(ns.a==-1.0 || coverage==0.0 || opacity==0.0) discard;
+ bool netColor=ns.a>=0.0 && drillPass==0;
+ vec3 rgb=netColor ? ns.rgb : layerColor.rgb;
  float retained=selectedNet>=0 && netIndex!=selectedNet && netIndex!=zeroNet ? 0.2 : 1.0;
  if(drillPass==0) rgb=mix(backgroundColor,rgb,contrastFactor*retained);
- outColor=vec4(rgb,layerColor.a*opacity*coverage*(ns.a>0.0 ? ns.a : 1.0));
+ outColor=vec4(rgb,(netColor ? ns.a*layerOpacity : layerColor.a)*opacity*coverage);
 }`;
   // Fullscreen dot grid: world position is rebuilt per fragment so it never swims with pan.
   const gridVertexSource = `#version 300 es
@@ -282,7 +284,7 @@ void main() {
     function lost(event) { event.preventDefault(); failure(new Error("Board WebGL context lost")); }
     canvas.addEventListener("webglcontextlost", lost);
     try {
-      const names = ["cameraCenter","viewportSize","zoom","mirrorX","layerColor","backgroundColor","contrastFactor","netStyle","atlas","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass"];
+      const names = ["cameraCenter","viewportSize","zoom","mirrorX","layerColor","layerOpacity","backgroundColor","contrastFactor","netStyle","atlas","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass"];
       function link(vertex, fragment, list) {
         const program = own("Program",gl.createProgram());
         for (const [type,source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]) {
@@ -422,6 +424,7 @@ void main() {
         }
         if (netDirty) {
           const data = new Float32Array(Math.max(1,scene.nets.length)*4);
+          for(let i=0;i<scene.nets.length;i++) data[i*4+3]=-2;
           scene.nets.forEach((n,i)=>{
             const style = appearance.nets?.[n.name];
             if (style?.visible === false) data[i*4+3] = -1;
@@ -445,7 +448,7 @@ void main() {
           const color = b.pass === "hole" ? background : b.pass === "wall" ? (appearance.colors?.['board.via_hole_walls'] || rgba(globalThis.KicadColors.objects.viaHolewalls)) : rgba(appearance.layers?.[b.layer]?.color || globalThis.KicadColors.layers[b.layer] || [194,194,194,1]);
           if (!drill) color[3] *= appearance.layers?.[b.layer]?.opacity ?? 1;
           gl.useProgram(program);
-          gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
+          gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.layerOpacity,appearance.layers?.[b.layer]?.opacity??1); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
           gl.bindVertexArray(b.vao);
           if (drill) {
             // Blind/buried drills exist only in their physical copper span. Explicit

@@ -7,7 +7,7 @@
     if (!stores.has(viewerId)) stores.set(viewerId, KrAppearance.createStore({viewerId}));
     if (current !== stores.get(viewerId)) {
       unsubscribe(); current = stores.get(viewerId);
-      unsubscribe = current.subscribe(state => { for (const fn of [...listeners]) fn(state); });
+      unsubscribe = current.subscribe(state => { for (const fn of [...listeners]) fn(structuredClone(state)); });
     }
     return current.get();
   }

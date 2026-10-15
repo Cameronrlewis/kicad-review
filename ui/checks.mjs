@@ -1542,7 +1542,7 @@ export const CHECKS = [
       A.patch({contrast:"bad", flip:"yes", grid:{size:-1}, layers:{"F.Cu":{opacity:NaN,color:[1,2,3]},"__proto__":{visible:false},"Nope":{visible:false}}, objects:{tracks:{opacity:9}}, nets:{"__proto__":{visible:false},"<img>":{visible:false}}});
       const t = A.get();
       if (t.contrast !== "dim" || t.flip !== false || t.grid.size !== 2 || t.layers["F.Cu"].opacity !== .4 || t.layers.Nope || t.objects.tracks.opacity !== 1 || ({}).visible !== undefined || !t.nets["<img>"]) return "validation " + JSON.stringify(t.layers["F.Cu"]);
-      if (JSON.parse(localStorage.getItem("kr.appearance.v1")).contrast !== "dim") return "not persisted";
+      if (!Object.values(JSON.parse(localStorage.getItem("kr.appearance.v1")).viewers).some(s=>s.contrast === "dim")) return "not persisted";
       const throwing = Storage.prototype.setItem; Storage.prototype.setItem = () => { throw new Error("blocked"); };
       try { A.patch({contrast:"hide"}); } finally { Storage.prototype.setItem = throwing; }
       if (A.get().contrast !== "hide") return "blocked storage";

@@ -191,17 +191,22 @@ function createStore({viewerId,storage=()=>window.localStorage}) {
         next[key]={...state[key],...partial[key]};
       }
     }
-    for(const [layer,style] of Object.entries(partial.layers||{})) {
+    const legacy=merge(state,partial);
+    for(const layer of Object.keys(partial.layers||{})) {
+      const style=legacy.layers[layer]; if(!style) continue;
       const key=window.KicadColors.layerThemeKeys[layer];
-      if(key && style.color) next.colors={...next.colors,[key]:style.color.map((v,i)=>i<3?v/255:v)};
-      if(key && own(style,'opacity')) next.layerOpacity={...next.layerOpacity,[layer]:style.opacity};
+      if(key && style.color && !own(partial.colors||{},key)) next.colors={...next.colors,[key]:style.color.map((v,i)=>i<3?v/255:v)};
+      if(key && own(partial.layers[layer],'opacity') && !own(partial.layerOpacity||{},layer)) next.layerOpacity={...next.layerOpacity,[layer]:style.opacity};
     }
-    for(const [kind,style] of Object.entries(partial.objects||{})) {
+    for(const kind of Object.keys(partial.objects||{})) {
+      const style=legacy.objects[kind]; if(!style) continue;
       const key=kind==='filledShapes'?'shapes':kind;
-      if(own(next.objectOpacity,key)&&own(style,'opacity')) next.objectOpacity={...next.objectOpacity,[key]:style.opacity};
+      if(own(next.objectOpacity,key)&&own(style,'opacity')&&!own(partial.objectOpacity||{},key)) next.objectOpacity={...next.objectOpacity,[key]:style.opacity};
     }
-    for(const [net,style] of Object.entries(partial.nets||{}))
-      if(style.color) next.netColors={...next.netColors,[net]:style.color.map((v,i)=>i<3?v/255:v)};
+    for(const net of Object.keys(partial.nets||{})) {
+      const style=Object.hasOwn(legacy.nets,net)&&legacy.nets[net];
+      if(style?.color&&!own(partial.netColors||{},net)) next.netColors={...next.netColors,[net]:style.color.map((v,i)=>i<3?v/255:v)};
+    }
     // Merge legacy record patches without replacing their siblings.
     for(const group of ['layers','objects','nets']) if(own(partial,group))
       next[group]=merge(state,{[group]:partial[group]})[group];
