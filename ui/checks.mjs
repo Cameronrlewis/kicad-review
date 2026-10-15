@@ -1680,6 +1680,25 @@ export const CHECKS = [
     if(p<0 || !D.projects[p].board.geometry?.base || !D.projects[p].board.geometry?.head) return 'skip';
     await applyState({p,v:'board',m:'${mode}'});
     if(!boardDiff || boardDiff.panes.length!==('${mode}'==='side'?2:1)) return 'missing compositor';
+    if('${mode}'==='semantic') {
+      const renderer=boardDiff.panes[0].renderer, draw=renderer.draw, calls=[];
+      renderer.draw=function(options){calls.push(options);return draw.call(this,options);};
+      try {boardDiff.render();} finally {renderer.draw=draw;}
+      let changed=0,context=0;
+      for(const scene of boardView.scenes) for(const o of scene.objects) {
+        const expected=proj().changes.filter(r=>r.where?.board && r.uuid && (r.uuid===o.changeUuid || r.uuid_before===o.changeUuid));
+        if(JSON.stringify(o.changeIds)!==JSON.stringify(expected.map(r=>r.id))) return 'wrong Thermal change IDs '+o.uuid;
+        if(expected.length) changed++; else context++;
+      }
+      if(!changed || !context || calls.length!==3) return 'missing changed/context draws';
+      for(const options of calls) {
+        const contextPass=!!options.override;
+        for(const scene of boardView.scenes) for(const o of scene.objects) {
+          if(options.filter(o)!==(contextPass?!o.changeIds.length:!!o.changeIds.length)) return 'incorrect semantic mask '+o.uuid;
+          if(contextPass && options.override(o,{opacity:1}).opacity!==.2) return 'undimmed context';
+        }
+      }
+    }
     return boardDiff.panes.every(p=>p.renderer.stats.uploads>0 && !p.renderer.stats.disposed);
   `]),
 ];
