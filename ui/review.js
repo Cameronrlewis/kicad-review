@@ -51,8 +51,9 @@ function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON) {
 }
 addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
-  const [x, y] = toWorld(vp, e);
-  const anchor = anchorAt(x, y, sideOf(vp));
+  const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
+  const [x, y] = p?.point || toWorld(vp, e);
+  const anchor = boardDiff ? (hit ? geometryAnchor(hit) : p?.side && pointAnchor(x,y,p.side)) : anchorAt(x, y, sideOf(vp));
   if (anchor && anchor.file) parent.postMessage({ kicadReviewPin: anchor }, "*");
 }
 const shownThreads = () => (S.threads || []).filter(t => (S.threadFilter.status === "all" || (S.threadFilter.status === "resolved") === t.resolved)
@@ -555,7 +556,7 @@ function apply() {
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   onApply();
-  if (boardDiff) boardDiff.render();
+  if (boardDiff) { boardDiff.render(); drawPins(); }
   else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
   drawSchematicGrids(); updateSchematicStatus();
@@ -832,19 +833,29 @@ function afterDraw(view) {
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
   for (const pin of document.querySelectorAll("#stage .pin")) pin.remove();
-  for (const w of document.querySelectorAll("#stage .world")) {
-    const side = sideOf(w);
+  const hosts = boardDiff ? boardDiff.panes.flatMap(pane=>pane.sides.filter(side=>pane.scenes[side]).map(side=>({w:pane.hud,side,pane})))
+    : [...document.querySelectorAll("#stage .world")].map(w=>({w,side:sideOf(w)}));
+  const seen = new Set();
+  for (const {w,side,pane} of hosts) {
     for (const t of [...shownThreads(), ...(S.issues || []).filter(i => i.anchor.project === proj().dir).map(i => ({ ...i, id: `issue-${i.number}`, issue: true }))]) {
       const r = resolveAnchor(t.anchor);
       if (r.detached || r.view !== S.v) continue;
       if (!(r.side === side || (r.side === "head" && side === "base" && !r.added))) continue;
       const p = side === "base" && r.pos_before ? r.pos_before : r.pos;
+      if (pane) {
+        if (!boardDiff.sidesAt(pane.vp,p).includes(side)) continue;
+        const look=glAppearance(), layer=t.anchor.layer;
+        if (layer && (look.layers?.[layer]?.visible === false || look.layers?.[layer]?.opacity === 0)) continue;
+        const key=boardDiff.panes.indexOf(pane)+":"+t.id+":"+p.join(",");
+        if (seen.has(key)) continue; seen.add(key);
+      }
       const kind = t.issue ? "issue" : t.resolved ? "resolved" : t.anchor.severity === "blocking" ? "blocking" : "comment";
       const pin = document.createElement("button");
       pin.className = `pin pin-${kind}`; pin.dataset.thread = t.id;
       pin.textContent = t.issue ? `#${t.number}` : { resolved: "✓", blocking: "!", comment: "…" }[kind];
       pin.setAttribute("aria-label", t.issue ? `Issue #${t.number} on ${t.anchor.ref || "a point"}` : `${kind === "resolved" ? "Resolved" : kind === "blocking" ? "Blocking" : "Comment"} thread on ${t.anchor.ref || "a point"}`);
-      Object.assign(pin.style, { left: `${p[0] * PX}px`, top: `${p[1] * PX}px` });
+      const screen = pane ? pane.renderer.project(p) : p.map(n=>n*PX);
+      Object.assign(pin.style, { left: `${screen[0]}px`, top: `${screen[1]}px` });
       pin.onclick = ev => { ev.stopPropagation(); if (t.issue) window.open(t.url, "_blank", "noopener"); else openThread(t.id); };
       pin.onpointerdown = ev => ev.stopPropagation();
       w.appendChild(pin);
@@ -853,6 +864,11 @@ function drawPins() {
 }
 function pickAt(vp, e) {
   if (S.placing) { stopPlacing(); proposePin(vp, e); return; }
+  if (boardDiff) {
+    const hit=boardDiff.pick(vp,e,S.s);
+    if (hit) { S.s=hit.id; markSelected(); saveHash(); boardDiff.render(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({block:"nearest"}); }
+    return;
+  }
   const [x, y] = toWorld(vp, e);
   const rows = proj().changes.filter(c => onView(c, S.v));
   const side = sideOf(vp);
@@ -868,8 +884,8 @@ function goTo(id) {
   S.s = id;
   if (S.v === "3d") { markSelected(); window.Review3D?.focus(r); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); return Promise.resolve(); }
   const view = viewOf(r) ?? S.v;
-  const box = rowBox(r, r.action === "removed" ? "base" : "head");
-  const zoom = () => { if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
+  const zoom = () => {
+    const box = boardDiff?.bounds(id,r.action === "removed" ? "base" : "head") || rowBox(r, r.action === "removed" ? "base" : "head"); if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
   if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(zoom);
 }
@@ -879,6 +895,19 @@ const objView = o => o.sheet === undefined ? "board" : `sheet:${o.sheet}`;
 function viewFile(P, view) {
   const f = view === "board" ? `${P.name}.kicad_pcb` : P.sheets.find(s => `sheet:${s.path}` === view)?.file;
   return f && (P.dir ? `${P.dir}/${f}` : f);
+}
+function pointAnchor(x,y,side) {
+  const file=viewFile(proj(),S.v); if (!file) return null;
+  return {v:1,project:proj().dir,file,sheet:S.v==='board'?null:S.v.slice(6),layer:null,
+    side,commit:side==='base'?D.base:D.head,severity:'comment',target:'point',uuid:null,kind:null,ref:null,x:round3(x),y:round3(y)};
+}
+function geometryAnchor({object,side,point}) {
+  // Aggregate children anchor to the inventory identity where available; standalone
+  // leaves retain their own UUID and resolve from retained geometry after reload.
+  const inventory=(proj().objects || []).find(o=>o.side===side && (o.uuid===object.uuid || o.uuid===object.changeUuid));
+  const box=BoardDiff.objectBounds(object), p=inventory?.pos || object.anchor || (box ? [(box[0]+box[2])/2,(box[1]+box[3])/2] : point);
+  return {...pointAnchor(p[0],p[1],side),target:'object',uuid:inventory?.uuid || object.uuid,
+    kind:inventory?.kind || object.kind,ref:inventory?.ref || object.ref || null,layer:inventory?.layer || object.layer || object.layers?.[0] || null};
 }
 function anchorAt(x, y, side) {
   const P = proj();
@@ -904,10 +933,17 @@ function resolveAnchor(a) {
     if (a.commit !== D.head && a.commit !== D.base && P.changes.some(r => viewOf(r) === view && (inside(rowBox(r, "head")) || inside(rowBox(r, "base"))))) notes.push(`this area changed since ${short(a.commit)}`);
     return { view, side: a.side === "base" ? "base" : "head", pos: [a.x, a.y], notes };
   }
+  if (a.sheet == null && P === proj() && boardDiff) {
+    const match=side=>boardDiff.scenes[side]?.objects.find(o=>o.uuid===a.uuid);
+    const head=match('head'), base=match('base');
+    const position=o=>{const b=BoardDiff.objectBounds(o); return o.anchor || (b && [(b[0]+b[2])/2,(b[1]+b[3])/2]);};
+    if (head && position(head)) return {view:'board',side:'head',pos:position(head),pos_before:base && position(base),added:!base,notes};
+    if (base && position(base)) return {view:'board',side:'base',pos:position(base),notes:[...notes,`${a.ref || 'object'} was removed in this change`]};
+  }
   const objs = P.objects || [];
   const sameSheet = o => (o.sheet ?? null) === (a.sheet ?? null);
   const sameUuid = o => o.uuid === a.uuid && sameSheet(o);
-  const sameRef = o => o.kind === a.kind && o.ref === a.ref;   // ref carries " unit N", so this matches the unit too
+  const sameRef = o => !!a.ref && o.kind === a.kind && o.ref === a.ref;   // ref carries " unit N", so this matches the unit too
   const find = side => objs.find(o => o.side === side && sameUuid(o))
     || objs.find(o => o.side === side && sameRef(o) && sameSheet(o))
     || objs.find(o => o.side === side && sameRef(o));
@@ -955,7 +991,12 @@ function goToObject(i) {
   const view = objView(o); if (!currentView(view)) return Promise.resolve();
   const p = o.pos, box = o.box || (p && [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3]);
   if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
-  return draw().then(() => { if (box) zoomTo(box); saveHash(); });
+  return draw().then(() => {
+    const side=o.side==='base'?'base':'head';
+    const geometry=boardDiff?.scenes[side]?.objects.filter(g=>g.uuid===o.uuid || g.changeUuid===o.uuid).map(BoardDiff.objectBounds).filter(Boolean);
+    const focus=geometry?.length ? [Math.min(...geometry.map(b=>b[0])),Math.min(...geometry.map(b=>b[1])),Math.max(...geometry.map(b=>b[2])),Math.max(...geometry.map(b=>b[3]))] : box;
+    if (focus) zoomTo(focus); saveHash();
+  });
 }
 function bindInventory() {
   for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goToObject(+b.dataset.obj); };

@@ -2103,4 +2103,31 @@ export const CHECKS = [
     }
     return true;
   `]),
+  ["board geometry pick links row and pins exact annulus", "v=board&m=overlay", `
+    boardDiff?.dispose(); document.querySelector('#stage').replaceChildren();
+    const object=(uuid,ids)=>({uuid,changeUuid:uuid,kind:'pad',ref:uuid,changeIds:ids,box:[8000,8000,12000,12000],
+      geometry:{primitive:{shape:'circle',center:[10000,10000],size:[4000,4000],angle:0},drill:{center:[10000,10000],size:[2000,2000],angle:0}},
+      layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false});
+    const scene=objects=>({version:1,units:'um',complete:true,warnings:[],bounds:[6000,6000,14000,14000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects});
+    const scenes={base:scene([object('removed',['p5-base'])]),head:scene([object('head',['p5-head']),object('unchanged',[])])};
+    proj().changes.push(...['base','head'].map(side=>({id:'p5-'+side,kind:'pad',ref:side,action:side==='base'?'removed':'added',where:{board:true}})));
+    Object.assign(S,{x:10,y:10,z:45,s:null,m:'overlay'}); renderPanel();
+    let look=glAppearance(); boardDiff=BoardDiff.mount({stage:document.querySelector('#stage'),scenes,changes:proj().changes,state:S,appearance:()=>look,attachPanZoom});
+    boardDiff.scenes=scenes; boardDiff.render();
+    const pane=boardDiff.panes[0], rect=pane.vp.getBoundingClientRect(), eventAt=p=>{const q=pane.renderer.project(p);return {clientX:rect.left+q[0],clientY:rect.top+q[1]};};
+    const e=eventAt([11.5,10]);
+    if(boardDiff.pick(pane.vp,eventAt([10,10]),null) || boardDiff.pick(pane.vp,eventAt([8,8]),null)) return 'hole or bbox false hit';
+    pickAt(pane.vp,e);
+    if(S.s!=='p5-head' || document.querySelector('#panel [aria-selected="true"][data-id]')?.dataset.id!==S.s) return 'geometry selection did not link row';
+    pickAt(pane.vp,e); if(S.s!=='p5-base') return 'overlap did not cycle';
+    const hit=boardDiff.hits(pane.vp,e)[0], a=geometryAnchor(hit);
+    if(a.target!=='object' || a.uuid!=='head') return 'geometry anchor identity';
+    const hole=boardDiff.point(pane.vp,eventAt([10,10])); if(hole.side!=='head') return 'primary side';
+    S.m='blend'; S.blend=0; boardDiff.render(); if(boardDiff.pick(pane.vp,e,null)?.side!=='base') return 'transparent head hit';
+    S.m='wipe'; S.wipe=.6; boardDiff.render(); if(boardDiff.point(pane.vp,e).side!=='base') return 'wipe base routing';
+    S.wipe=.4; boardDiff.render(); if(boardDiff.point(pane.vp,e).side!=='head') return 'wipe head routing';
+    look={...look,layers:{...look.layers,'F.Cu':{visible:false,opacity:0}}}; boardDiff.render();
+    if(boardDiff.pick(pane.vp,e,null)) return 'hidden layer hit';
+    return true;
+  `],
 ];

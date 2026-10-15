@@ -18,6 +18,15 @@
     const index = choices.findIndex(choice => choice.id === afterId);
     return choices[(index + 1) % choices.length];
   }
+  const objectBounds = object => object.bounds || object.box?.map(n=>n/1000) || null;
+  function changeBounds(scene,id) {
+    const boxes=(scene?.objects || []).filter(o=>o.changeIds?.includes(id)).map(objectBounds).filter(Boolean);
+    return boxes.length ? [Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))] : null;
+  }
+  function panePoint(pane,event) {
+    const r=pane.vp.getBoundingClientRect(), screen=[event.clientX-r.left,event.clientY-r.top];
+    return {point:pane.renderer.screenToWorld(screen),screen,fraction:Math.max(0,Math.min(1,screen[0]/r.width))};
+  }
   const weights = (mode, revision, action, blend) =>
     (mode === 'blend' && revision === 'head' ? blend : 1) * (mode === 'semantic' && !action ? .2 : 1);
   function clipRects(width, height, wipe) {
@@ -210,6 +219,32 @@
           }
         } catch (error) { controller.dispose(); onLost?.(error); }
       },
+      point(vp,event) {
+        const pane=panes.find(p=>p.vp===vp); if (!pane || disposed) return null;
+        const p=panePoint(pane,event), sides=pane.sides.length===1 ? pane.sides.filter(s=>pane.scenes[s]) : sidesAt(state.m,p.fraction,state.wipe,state.blend,pane.scenes);
+        return {...p,side:sides[0],sides};
+      },
+      hits(vp,event) {
+        const pane=panes.find(p=>p.vp===vp), p=controller.point(vp,event); if (!p) return [];
+        const hits=[];
+        try {
+          pane.renderer.setAppearance(getAppearance());
+          for (const side of p.sides) {
+            pane.renderer.setScene(pane.scenes[side],side);
+            for (const object of pane.renderer.hitTest(p.screen)) hits.push({object,side,point:p.point});
+          }
+        } finally { controller.render(); } // hitTest's mask readback must not replace the compositor.
+        return hits;
+      },
+      pick(vp,event,afterId) {
+        const hits=controller.hits(vp,event), hit=pickFromHits(hits.map(h=>h.object),afterId);
+        return hit ? {...hit,...hits.find(h=>h.object===hit.object)} : null;
+      },
+      bounds(id,side) { return changeBounds(scenes[side],id); },
+      sidesAt(vp,point) {
+        const pane=panes.find(p=>p.vp===vp); if (!pane) return [];
+        return pane.sides.length===1 ? pane.sides.filter(s=>pane.scenes[s]) : sidesAt(state.m,pane.renderer.project(point)[0]/vp.clientWidth,state.wipe,state.blend,pane.scenes);
+      },
       readPixel(index,x,y) {
         const {renderer,canvas} = panes[index], gl = renderer.gl, dpr = globalThis.devicePixelRatio || 1;
         const pixel = new Uint8Array(4); gl.bindFramebuffer(gl.FRAMEBUFFER,null);
@@ -249,5 +284,5 @@
       return controller;
     } catch (error) { controller.dispose(); throw error; }
   }
-  window.BoardDiff = {actionMap, actionFor, sidesAt, pickFromHits, weights, clipRects, mount};
+  window.BoardDiff = {actionMap, actionFor, sidesAt, pickFromHits, weights, clipRects, objectBounds, changeBounds, panePoint, mount};
 })();
