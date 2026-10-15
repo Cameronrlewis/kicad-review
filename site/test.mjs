@@ -7,7 +7,7 @@ import { reportCsp, frameCsp } from './csp.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { historyEvents, HISTORY_QUERY } from './history.js';
-import { historyPage, frame, siteBadge, siteTable } from './pages.js';
+import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -2155,7 +2155,7 @@ test('share default and maximum lifetime are seven and thirty days; only writers
     assert.match(page.headers.get('Content-Security-Policy'), /connect-src 'self'/);
   } finally { restore(); }
   const reader = shareCreationFetch({ push: false });
-  try { const page = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${await signedIn()}` } }), appEnv); assert.doesNotMatch(await page.text(), /share-open|share-dialog/); }
+  try { const page = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${await signedIn()}` } }), appEnv); assert.doesNotMatch(await page.text(), /id="share-open"|id="share-dialog"/); }
   finally { reader(); }
 });
 test('missing App permissions cannot mint a capability or serve a guest, and exceptions retain refreshed cookies', async () => {
@@ -2187,7 +2187,7 @@ test('malformed guest capabilities fail privately without touching a signed-in s
     const cookie = await signedIn({ e: Date.now() - 1 });
     for (const config of [env, appEnv]) {
       const response = await worker.fetch(request('/s/garbage/raw', { headers: { Cookie: `s=${cookie}`, 'Sec-Fetch-Dest': 'iframe' } }), config);
-      assert.equal(response.status, 404); guestSecurity(response); assert.equal(await response.text(), 'Not found');
+      assert.equal(response.status, 404); guestSecurity(response); assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8'); assert.equal(await response.text(), sharedNotFoundPage());
     }
     assert.equal(calls, 0);
   } finally { restore(); }
@@ -3075,4 +3075,54 @@ test('S2 thread keyboard respects composition disabled state and native close', 
   view.querySelector('[data-act=close]').listeners.click();
   assert.equal(composer.open, false); assert.equal(view.open, false);
   assert.equal(prevented, 2);
+});
+
+test('S2 share presents read-only access and copy control', () => {
+  const html = reviewPage({ owner: 'o', repo: 'r', id: 9, name: 'kicad-review.html', share: true });
+  assert.match(html, /id="share-copy" type="button"/);
+  assert.match(html, /Read-only access/);
+  assert.match(html, /min="1" max="30" step="1" value="7"/);
+  assert.match(sharedPage({ token: 'body.signature', name: 'kicad-review.html' }), /Read-only shared review/);
+});
+test('S2 invalid share page is neutral accessible HTML without identity', async () => {
+  const html = sharedNotFoundPage();
+  assert.match(html, /Shared review unavailable/);
+  assert.match(html, /404/);
+  assert.doesNotMatch(html, /Signed in as|class="account"|\/logout|\/login/);
+  const restore = mockFetch(async () => { throw new Error('must not call upstream'); });
+  try {
+    const response = await worker.fetch(request('/s/not-a-capability'), env);
+    assert.equal(response.status, 404);
+    assert.match(response.headers.get('content-type'), /text\/html/);
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
+    assert.equal(await response.text(), html);
+  } finally { restore(); }
+});
+test('S2 share copy and duplicate-submit handlers', async () => {
+  const html = reviewPage({ owner: 'o', repo: 'r', id: 9, name: 'kicad-review.html', share: true });
+  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).find(x => x.includes("getElementById('share-dialog')"));
+  const mk = () => Object.fromEntries(['share-dialog', 'share-status', 'share-result', 'share-open', 'share-form', 'share-days', 'share-revoke', 'share-copy'].map(id => [id, { textContent: '', value: id === 'share-days' ? '7' : '' }]));
+  const run = (clipboard, fetchFn) => {
+    const el = mk(), timers = [], calls = [];
+    el['share-result'].focus = () => calls.push('focus'); el['share-result'].select = () => calls.push('select');
+    runInNewContext(script, { document: { getElementById: id => el[id] }, location: { origin: 'https://site.example' }, URL, confirm: () => true, navigator: { clipboard }, setTimeout: fn => { timers.push(fn); }, fetch: fetchFn });
+    return { el, timers, calls };
+  };
+  const copied = [];
+  const ok = run({ writeText: async v => { copied.push(v); } }, async () => shareJson({ url: 'https://site.example/s/body.signature', expires: Date.now() + 1000 }));
+  await ok.el['share-form'].onsubmit({ preventDefault() {} });
+  await ok.el['share-copy'].onclick();
+  assert.deepEqual(copied, ['https://site.example/s/body.signature']);
+  assert.equal(ok.el['share-status'].textContent, 'Copied ✓'); assert.notEqual(ok.el['share-copy'].disabled, true);
+  ok.timers.forEach(t => t()); assert.equal(ok.el['share-status'].textContent, '');
+  const bad = run({ writeText: async () => { throw new Error('denied'); } }, async () => shareJson({ url: 'https://site.example/s/body.signature', expires: Date.now() + 1000 }));
+  await bad.el['share-form'].onsubmit({ preventDefault() {} }); await bad.el['share-copy'].onclick();
+  assert.match(bad.el['share-status'].textContent, /Copy was blocked/); assert.deepEqual(bad.calls, ['focus', 'select']);
+  let posts = 0, release, fail = true;
+  const dup = run({}, () => { posts++; return new Promise((res, rej) => { release = () => fail ? rej(new Error('nope')) : res(shareJson({ url: 'https://site.example/s/a.b', expires: 1 })); }); });
+  const first = dup.el['share-form'].onsubmit({ preventDefault() {} });
+  await dup.el['share-form'].onsubmit({ preventDefault() {} });
+  assert.equal(posts, 1); release(); await first;
+  const third = dup.el['share-form'].onsubmit({ preventDefault() {} }); assert.equal(posts, 2); fail = false; release(); await third;
 });

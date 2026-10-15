@@ -294,13 +294,28 @@ export function sharedPage({ token, name }) {
   const raw = `/s/${encodeURIComponent(token)}/raw`;
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
-  return frame({ title: 'Shared review', navigation: false, body: `<main class="review-page"><div class="review-bar"><span class="mono">${e(revision)}</span><span>Read-only shared review</span></div><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="no-referrer" title="KiCad review report"></iframe></div></main>${reportFrameScript(raw)}` });
+  return frame({ title: 'Shared review', navigation: false, body: `<main class="review-page"><nav class="review-bar shared-bar" aria-label="Shared review"><span class="mono">${e(revision)}</span><span>Read-only shared review</span></nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="no-referrer" title="KiCad review report"></iframe></div></main>${reportFrameScript(raw)}` });
+}
+export function sharedNotFoundPage() {
+  return frame({ title: 'Shared review unavailable', navigation: false, body: `<main class="page shared-missing"><section class="card"><p class="mono muted">404</p><h1>Shared review unavailable</h1><p>This link is invalid or no longer available. Ask the person who shared it for a new link.</p><p class="muted">No review information is shown.</p></section></main>` });
 }
 function shareControls(create, revoke) {
-  return `<dialog id="share-dialog" aria-labelledby="share-title"><h2 id="share-title">Share this review</h2><p>Anyone with the link can read this review until it expires.</p><form id="share-form"><label>Days (1–30) <input id="share-days" type="number" min="1" max="30" step="1" value="7" required></label><button class="btn btn-primary" type="submit">Create link</button></form><p><label>Read-only link <input id="share-result" readonly></label></p><p id="share-status" role="status" aria-live="polite"></p><button class="btn" id="share-revoke" type="button">Revoke all links for this repository</button><form method="dialog"><button class="btn">Close</button></form></dialog><script>(() => {
+  return `<dialog id="share-dialog" class="share-dialog" aria-labelledby="share-title"><h2 id="share-title">Share this review</h2><p>Anyone with the link can read this review until it expires.</p><p class="muted">Read-only access · Anyone with this link</p><form id="share-form"><label>Days (1–30) <input id="share-days" type="number" min="1" max="30" step="1" value="7" required></label><button class="btn btn-primary" type="submit">Create link</button></form><p><label>Read-only link <input id="share-result" class="mono" readonly></label> <button class="btn" id="share-copy" type="button">Copy</button></p><p id="share-status" role="status" aria-live="polite"></p><button class="btn" id="share-revoke" type="button">Revoke all links for this repository</button><form method="dialog"><button class="btn">Close</button></form></dialog><script>(() => {
     const dialog = document.getElementById('share-dialog');
     const status = document.getElementById('share-status');
     const result = document.getElementById('share-result');
+    let creating = false;
+    const copy = document.getElementById('share-copy');
+    if (copy) copy.onclick = async () => {
+      if (!result.value || copy.disabled) return;
+      copy.disabled = true;
+      try {
+        await navigator.clipboard.writeText(result.value);
+        status.textContent = 'Copied ✓';
+        setTimeout(() => { if (status.textContent === 'Copied ✓') status.textContent = ''; }, 2000);
+      } catch { status.textContent = 'Copy was blocked. Select and copy the read-only link.'; result.focus(); result.select(); }
+      finally { copy.disabled = false; }
+    };
     document.getElementById('share-open').onclick = () => dialog.showModal();
     async function post(url, body) {
       const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -309,13 +324,14 @@ function shareControls(create, revoke) {
       return data;
     }
     document.getElementById('share-form').onsubmit = async event => {
-      event.preventDefault(); result.value = ''; status.textContent = 'Creating link…';
+      event.preventDefault(); if (creating) return; creating = true; result.value = ''; status.textContent = 'Creating link…';
       try {
         const data = await post(${JSON.stringify(create)}, { days: Number(document.getElementById('share-days').value) });
         const url = new URL(data.url);
         if (url.origin !== location.origin || !new RegExp('^/s/[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+$').test(url.pathname) || url.search || url.hash || url.username || url.password) throw new Error('Invalid share link.');
         result.value = url.href; status.textContent = 'Expires ' + new Date(data.expires).toLocaleString();
       } catch (error) { status.textContent = error.message; }
+      finally { creating = false; }
     };
     document.getElementById('share-revoke').onclick = async () => {
       if (!confirm('Revoke every share link for this repository?')) return;

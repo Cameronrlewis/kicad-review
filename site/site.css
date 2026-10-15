@@ -191,3 +191,11 @@ a.card:hover { border-color: var(--accent); }
 .thread-dialog [role=status] { min-height: 1.4em; overflow-wrap: anywhere; }
 .thread-shortcut { font-size: var(--fs-xs); }
 .dialog-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; margin-bottom: 0; }
+/* p2-t7: share dialog, shared review, invalid share */
+.share-dialog label { display: block; margin-bottom: var(--sp-2); font-size: var(--fs-sm); }
+.share-dialog #share-result { display: block; width: 100%; margin-top: var(--sp-1); }
+.share-dialog #share-status { min-height: 1.4em; overflow-wrap: anywhere; }
+.share-dialog #share-revoke { color: var(--removed); border-color: var(--removed); margin-bottom: var(--sp-3); }
+.shared-bar { color: var(--muted); }
+.shared-missing { max-width: 480px; padding-top: clamp(32px, 15vh, 160px); }
+.shared-missing h1 { font-size: var(--fs-2xl); }
