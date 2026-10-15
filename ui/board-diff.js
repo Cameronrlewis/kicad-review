@@ -86,7 +86,7 @@
     gl.drawArrays(gl.TRIANGLES,0,3); gl.disable(gl.SCISSOR_TEST);
   }
   function marks(pane, state, look, actions, background) {
-    const {renderer,hud} = pane, {gl} = renderer, M = window.BoardMarks;
+    const {renderer} = pane, hud = pane.markHud, {gl} = renderer, M = window.BoardMarks;
     const palette = Object.fromEntries(Object.keys(M.styles).map(a=>[a,M.pickColor(a,background)]));
     hud.replaceChildren();
     const legend = document.createElement('div'); legend.className = 'board-mark-legend';
@@ -239,6 +239,7 @@
         const renderer = BoardGL.create(canvas,{retained:true,manual:true,onFailure:onLost});
         if (!renderer) throw Error('WebGL2 unavailable');
         const pane = {vp,canvas,hud,renderer,scenes:sideMode ? {[sides[0]]:scenes[sides[0]]} : scenes,sides,targets:null,program:null,vao:null};
+        pane.markHud = document.createElement('div'); pane.markHud.className='board-marks'; hud.append(pane.markHud);
         panes.push(pane); pane.program = compositor(renderer.gl); pane.markProgram = compositor(renderer.gl,window.BoardMarks.fragmentSource); pane.vao = renderer.gl.createVertexArray();
         renderer.project = point => renderer.worldToScreen(point);
       }

@@ -414,7 +414,7 @@ void main() {
         gl.viewport(0,0,bw,bh); gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST);
         gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA); gl.colorMask(true,true,true,true); gl.stencilMask(0xff);
         const background = options.background || appearance.boardBackground || rgba(appearance.background || globalThis.KicadColors.objects.background);
-        if (options.clear !== false) { gl.clearColor(...(options.mask ? [0,0,0,1] : background)); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT); }
+        if (options.clear !== false) { gl.clearColor(...(options.mask ? [0,0,0,0] : background)); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT); }
         if (!scene) return true;
         const origin = [(scene.bounds[0]/2+scene.bounds[2]/2)/1000,(scene.bounds[1]/2+scene.bounds[3]/2)/1000];
         const mirror = appearance.flip ? -1 : 1, selected = scene.nets.findIndex(n=>n.name===appearance.selectedNet);
@@ -461,6 +461,8 @@ void main() {
         for (const b of ordered) {
           if (options.mask && b.pass === "wall") continue;
           const drill = b.pass === "wall" || b.pass === "hole", capsule = drill || b.pass === "copper";
+          if (options.mask) gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+          if (options.mask && drill) gl.blendFunc(gl.ZERO,gl.ONE_MINUS_SRC_ALPHA);
           const factor = drill ? 1 : layerFactor(b.layer,appearance);
           if (!factor) continue;
           const {program,u} = capsule ? capsuleProgram : meshProgram;

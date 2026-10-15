@@ -24,7 +24,7 @@ uniform vec3 markColor;
 uniform int action,style;
 float coverage(vec2 p){
   if(any(lessThan(p,vec2(0)))||any(greaterThan(p,vec2(1))))return 0.;
-  return texture(maskImage,p).r;
+  return texture(maskImage,p).a;
 }
 void main(){
   float own=coverage(uv),halo=0.,core=0.;

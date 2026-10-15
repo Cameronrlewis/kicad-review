@@ -1806,7 +1806,7 @@ export const CHECKS = [
     if(!boardDiff || boardDiff.panes.length!==('${mode}'==='side'?2:1)) return 'missing compositor';
     if('${mode}'==='semantic') {
       const renderer=boardDiff.panes[0].renderer, draw=renderer.draw, calls=[];
-      renderer.draw=function(options){calls.push(options);return draw.call(this,options);};
+      renderer.draw=function(options){if(!options.mask) calls.push(options);return draw.call(this,options);};
       try {boardDiff.render();} finally {renderer.draw=draw;}
       let changed=0,context=0;
       for(const scene of boardView.scenes) for(const o of scene.objects) {
@@ -2074,4 +2074,21 @@ export const CHECKS = [
       return true;
     } finally { if(descriptor) Object.defineProperty(window,'devicePixelRatio',descriptor); else delete window.devicePixelRatio; c.dispose(); stage.remove(); }
   `],
+  ...['outline','recolour'].map(style=>['board marks Thermal proof '+style,'v=board&m=side',`
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.base || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'side',x:158.5,y:75.4,z:65});
+    Appearance.patch({markStyle:'${style}'}); boardDiff.render();
+    if(boardView.note || !boardDiff || boardDiff.panes.length!==2) return 'no retained geometry';
+    const expected=proj().changes.filter(c=>c.where?.board);
+    for(const row of expected) {
+      const sides=row.action==='modified'?['base','head']:[row.action==='removed'?'base':'head'];
+      for(const side of sides) {
+        const pane=boardDiff.panes.find(p=>p.sides.includes(side));
+        const label=pane.markHud.querySelector('[data-id="'+row.id+'"]');
+        if(!label || !label.textContent.includes(BoardMarks.styles[row.action].word)) return 'missing '+side+' '+row.action+' label';
+      }
+    }
+    return true;
+  `]),
 ];

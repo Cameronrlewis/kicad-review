@@ -315,6 +315,7 @@ body.shot #toolbar { display:none; }
 .appearance-row.object-row input[type=range] { opacity:1; } .appearance-row.object-row input[type=range]:disabled { opacity:.35; }
 
 /* Geometry marks use CSS pixels, independently of camera zoom and board flip. */
+.board-marks {position:absolute;inset:0;pointer-events:none;}
 .board-mark-group {position:absolute;inset:0;pointer-events:none;overflow:hidden;}
 .board-mark-label,.board-mark-key {font:600 11px/14px var(--font-mono);color:var(--mark-color);background:var(--mark-backing);border:1px solid currentColor;padding:0 2px;white-space:nowrap;pointer-events:none;}
 .board-mark-label {position:absolute;}
