@@ -253,7 +253,10 @@ Appearance.subscribe(() => {
   updateStatus();
   if (S.v !== "board") return;
   if (boardView.renderers.length) { for (const r of boardView.renderers) r.setAppearance(glAppearance()); apply(); }
-  else draw();
+  else {
+    const cursor = boardCursor;
+    draw().then(() => { const vp = $("#stage .vp"); if(cursor && vp) updateCoordinates(vp,cursor); });
+  }
 });
 const boardSceneCache = new Map();
 // Scene blobs reuse svgText's gzip decode; the text is JSON, never given to the SVG loader.
