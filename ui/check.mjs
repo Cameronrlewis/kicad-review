@@ -58,6 +58,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   let timer, body, startupScript;
   try {
     body = (async () => {
+  if (name === "board geometry pin flipped Wipe Thermal") await send("Emulation.setDeviceMetricsOverride", {width,height:1080,deviceScaleFactor:2,mobile:false});
   // The framing check tests final geometry, not the two-pane camera animation.
   await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });
   errors.length = 0;
@@ -80,6 +81,32 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
     const q = (await evaluate(`(async()=>{ if(!REVIEW_DATA.projects[0].board.model3d) return null; while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50)); const {THREE}=window.THREE3D, st=window.Review3D.state; let n; st.roots[1].traverse(o=>{ if(!n&&o.name==="J2") n=o; }); const p=new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[1]), r=document.querySelectorAll('#stage canvas')[1].getBoundingClientRect(); return {x:r.left+(p.x*.5+.5)*r.width,y:r.top+(-p.y*.5+.5)*r.height}; })()`)).result.value;
     if (q) for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: q.x, y: q.y, button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
     await sleep(300);
+  }
+  if (name === "board geometry mouse input selects and pin Thermal") {
+    const prepare=await evaluate(`(async () => { ${expr} })()`);
+    const q=(await evaluate('window.__boardInput')).result?.value;
+    if(q) {
+      for (const button of ["left","right"]) {
+        await send("Input.dispatchMouseEvent",{type:"mousePressed",x:q.x,y:q.y,button,buttons:button==="right"?2:1,clickCount:1});
+        await send("Input.dispatchMouseEvent",{type:"mouseMoved",x:q.x+12,y:q.y+8,button,buttons:button==="right"?2:1});
+        await send("Input.dispatchMouseEvent",{type:"mouseReleased",x:q.x+12,y:q.y+8,button,buttons:0,clickCount:1});
+        await sleep(100);
+      }
+      const drag=await evaluate('S.s===null && window.__boardPins.length===0');
+      if(!drag.result?.value) throw Error("drag selected or proposed a pin");
+      await evaluate('setT(window.__boardInput.camera)');
+      for (const button of ["left","right","left"]) {
+        if(button==="left" && (await evaluate('window.__boardPins.length')).result.value) {
+          await send("Input.dispatchKeyEvent",{type:"keyDown",key:"c",code:"KeyC"});
+          await send("Input.dispatchKeyEvent",{type:"keyUp",key:"c",code:"KeyC"});
+        }
+        await send("Input.dispatchMouseEvent",{type:"mouseMoved",x:q.x,y:q.y});
+        await send("Input.dispatchMouseEvent",{type:"mousePressed",x:q.x,y:q.y,button,buttons:button==="right"?2:1,clickCount:1});
+        await send("Input.dispatchMouseEvent",{type:"mouseReleased",x:q.x,y:q.y,button,buttons:0,clickCount:1});
+        await sleep(150);
+      }
+      await evaluate('window.__boardInputDone=true');
+    } else if(prepare.exceptionDetails) throw Error(prepare.exceptionDetails.exception?.description);
   }
   let r = await evaluate(`(async () => { ${expr} })()`);
   if (r.result?.value === true && lifecycle.afterReload) {

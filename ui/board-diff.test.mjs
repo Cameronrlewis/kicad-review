@@ -57,3 +57,16 @@ test('each action passes 3:1 on arbitrary backgrounds and has non-colour marks',
   assert.equal(M.styles.added.glyph,'+'); assert.equal(M.styles.removed.glyph,'−'); assert.equal(M.styles.modified.glyph,'~');
   assert.equal(new Set(Object.values(M.styles).map(s=>s.dash)).size,3);
 });
+
+test('geometry bounds normalize retained um and union aggregate leaves', () => {
+  const scene={objects:[{changeIds:['c1'],box:[1000,2000,4000,5000]},
+    {changeIds:['c1'],box:[0,3000,6000,7000]},{changeIds:['c2'],box:[-9000,0,0,0]}]};
+  assert.equal(JSON.stringify(B.changeBounds(scene,'c1')), '[0,2,6,7]');
+  assert.equal(B.changeBounds(scene,'missing'),null);
+});
+test('pane point uses renderer inverse and CSS fraction, not DPR', () => {
+  const pane={vp:{getBoundingClientRect:()=>({left:100,top:30,width:200})},
+    renderer:{screenToWorld:([x,y])=>[-x/2,y/2]}};
+  const p=B.panePoint(pane,{clientX:150,clientY:50});
+  assert.equal(JSON.stringify(p.point),'[-25,10]'); assert.equal(p.fraction,.25);
+});

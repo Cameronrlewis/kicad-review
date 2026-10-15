@@ -1079,6 +1079,7 @@ export const CHECKS = [
       if (!vp.isConnected || vp.querySelector(".world") !== world) return "thread arrival replaced right-click target";
       vp.dispatchEvent(event);
       vp.dispatchEvent(new PointerEvent("pointerup", {button:2, bubbles:true}));
+      vp.dispatchEvent(new PointerEvent("pointerup", {button:2,bubbles:true,clientX:event.clientX,clientY:event.clientY}));
       return event.defaultPrevented && sent.length === 1 && !!sent[0].kicadReviewPin?.file || JSON.stringify(sent);
     } finally { parent.postMessage = saved; THREADS_ON = enabled; }
   `],
@@ -2571,4 +2572,174 @@ export const CHECKS = [
     editor.dispatchEvent(new KeyboardEvent('keydown',{key:'?',bubbles:true})); const ignored=!d.open; editor.remove();
     opener.click(); const ok=d.open; d.close();
     const txt=d.textContent; return ignored && ok && ['Ctrl+U','N / Shift+N','j / k','PageUp','F1','Esc','?'].every(k=>txt.includes(k));`],
+  ["board geometry pick links row and pins exact annulus", "v=board&m=overlay", `
+    boardDiff?.dispose(); document.querySelector('#stage').replaceChildren();
+    const object=(uuid,ids)=>({uuid,changeUuid:uuid,kind:'pad',ref:uuid,changeIds:ids,box:[8000,8000,12000,12000],
+      geometry:{primitive:{shape:'circle',center:[10000,10000],size:[4000,4000],angle:0},drill:{center:[10000,10000],size:[2000,2000],angle:0}},
+      layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false});
+    const scene=objects=>({version:1,units:'um',complete:true,warnings:[],bounds:[6000,6000,14000,14000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects});
+    const scenes={base:scene([object('removed',['p5-base'])]),head:scene([object('head',['p5-head']),object('unchanged',[])])};
+    proj().changes.push(...['base','head'].map(side=>({id:'p5-'+side,kind:'pad',ref:side,action:side==='base'?'removed':'added',where:{board:true}})));
+    Object.assign(S,{x:10,y:10,z:45,s:null,m:'overlay'}); renderPanel();
+    let look=glAppearance(); boardDiff=BoardDiff.mount({stage:document.querySelector('#stage'),scenes,changes:proj().changes,state:S,appearance:()=>look,attachPanZoom});
+    boardDiff.scenes=scenes; boardDiff.render();
+    const pane=boardDiff.panes[0], rect=pane.vp.getBoundingClientRect(), eventAt=p=>{const q=pane.renderer.project(p);return {clientX:rect.left+q[0],clientY:rect.top+q[1]};};
+    const e=eventAt([11.5,10]);
+    if(boardDiff.pick(pane.vp,eventAt([10,10]),null) || boardDiff.pick(pane.vp,eventAt([8,8]),null)) return 'hole or bbox false hit';
+    pickAt(pane.vp,e);
+    if(S.s!=='p5-head' || document.querySelector('#panel [aria-selected="true"][data-id]')?.dataset.id!==S.s) return 'geometry selection did not link row';
+    pickAt(pane.vp,e); if(S.s!=='p5-base') return 'overlap did not cycle';
+    if(!boardDiff.hits(pane.vp,e).some(h=>h.object.uuid==='unchanged')) return 'unchanged object cannot anchor';
+    const saved=parent.postMessage, proposed=[]; parent.postMessage=data=>proposed.push(data.kicadReviewPin);
+    try { proposePin(pane.vp,eventAt([10,10])); } finally { parent.postMessage=saved; }
+    if(proposed[0]?.target!=='point' || proposed[0].x!==10 || proposed[0].y!==10) return 'hole did not produce mm point anchor';
+    const hit=boardDiff.hits(pane.vp,e)[0], a=geometryAnchor(hit);
+    if(a.target!=='object' || a.uuid!=='head') return 'geometry anchor identity';
+    const hole=boardDiff.point(pane.vp,eventAt([10,10])); if(hole.side!=='head') return 'primary side';
+    S.m='blend'; S.blend=0; boardDiff.render(); if(boardDiff.pick(pane.vp,e,null)?.side!=='base') return 'transparent head hit';
+    S.m='wipe'; S.wipe=.6; boardDiff.render(); if(boardDiff.point(pane.vp,e).side!=='base') return 'wipe base routing';
+    S.wipe=.4; boardDiff.render(); if(boardDiff.point(pane.vp,e).side!=='head') return 'wipe head routing';
+    look={...look,nets:{'':{visible:false}}}; boardDiff.render();
+    if(boardDiff.pick(pane.vp,e,null)) return 'hidden net hit';
+    look={...look,nets:{},layers:{...look.layers,'F.Cu':{visible:false,opacity:0}}}; boardDiff.render();
+    if(boardDiff.pick(pane.vp,e,null)) return 'hidden layer hit';
+    look=glAppearance(); S.m='overlay'; S.s='p5-head'; markSelected(); boardDiff.render();
+    return true;
+  `],
+  ["board geometry mouse input selects and pin Thermal", "v=board&m=side", `
+    if(window.__boardInputDone) {
+      if(S.s!==window.__boardInput.id) return 'native pointer failed selection';
+      if(window.__boardPins.length<2 || window.__boardPins.some(a=>a.target!=='object' || !a.uuid)) return 'right click / placing did not anchor geometry';
+      const anchor=window.__boardPins[0], resolved=resolveAnchor(JSON.parse(JSON.stringify(anchor)));
+      if(resolved.detached) return resolved.detached;
+      const controller=boardDiff; boardDiff=null;
+      try { if(resolveAnchor(anchor).detached) return 'geometry anchor depends on mounted board'; } finally { boardDiff=controller; }
+      acceptThreads([{id:'thermal-geometry',resolved:false,anchor,comments:[{body:'Geometry anchored on Thermal board',author:'Review',created_at:'2026-10-15'}]}]);
+      drawPins();
+      if(!document.querySelector('#stage .pin[data-thread="thermal-geometry"]')) return 'retained pin absent';
+      return true;
+    }
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'side',x:158.5,y:78.2,z:65});
+    const row=proj().changes.find(c=>c.where?.board); await goTo(row.id);
+    const pane=boardDiff.panes.find(p=>p.sides.includes('head')), r=pane.vp.getBoundingClientRect();
+    let event;
+    for(const object of pane.scenes.head.objects.filter(o=>o.changeIds.includes(row.id) && o.pickable!==false)) {
+      const b=BoardDiff.objectBounds(object); if(!b) continue;
+      for(const u of [.25,.5,.75]) for(const v of [.25,.5,.75]) {
+        const q=pane.renderer.project([b[0]+(b[2]-b[0])*u,b[1]+(b[3]-b[1])*v]);
+        const e={clientX:r.left+q[0],clientY:r.top+q[1]};
+        if(boardDiff.pick(pane.vp,e,null)?.id===row.id) {event=e;break;}
+      }
+      if(event) break;
+    }
+    if(!event) return 'no visible Thermal changed geometry';
+    THREADS_ON=true; window.__boardPins=[]; addEventListener('message',e=>{if(e.data?.kicadReviewPin) window.__boardPins.push(e.data.kicadReviewPin);});
+    window.__boardInput={x:event.clientX,y:event.clientY,id:row.id,camera:{x:S.x,y:S.y,z:S.z}}; S.s=null; markSelected(); boardDiff.render();
+    return true;
+  `],
+  ["board geometry selection Thermal proof", "v=board&m=side", `
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'side',x:158.5,y:78.2,z:65});
+    const row=proj().changes.find(c=>c.where?.board); await goTo(row.id);
+    if(S.s!==row.id || !boardDiff.bounds(row.id,'head')) return 'row did not frame geometry';
+    setT({x:158.5,y:77.5,z:55}); return true;
+  `],
+  ["board geometry pin flipped Wipe Thermal", "v=board&m=wipe", `
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'wipe',x:158.5,y:77.5,z:55});
+    Appearance.patch({flip:true}); await draw();
+    const pane=boardDiff.panes[0], row=proj().changes.find(c=>c.where?.board && c.action==='removed');
+    if(!row) return 'fixture needs removed geometry';
+    const object=pane.scenes.base.objects.find(o=>o.changeIds.includes(row.id) && o.pickable!==false && o.kind!=='footprint');
+    if(!object) return 'fixture needs removed leaf';
+    const anchor=geometryAnchor({object,side:'base',point:[158.5,77.5]});
+    const restored=JSON.parse(JSON.stringify(anchor)), resolved=resolveAnchor(restored);
+    if(resolved.detached || resolved.side!=='base') return 'removed geometry failed re-anchor';
+    const controller=boardDiff; boardDiff=null;
+    try { if(resolveAnchor(restored).detached) return 'removed leaf anchor depends on mounted board'; }
+    finally { boardDiff=controller; }
+    S.s=row.id; S.wipe=1; apply();
+    acceptThreads([{id:'thermal-removed',resolved:false,anchor:restored,comments:[]}]);
+    let pin=pane.hud.querySelector('.pin'); if(!pin) return 'removed pin absent';
+    const q=pane.renderer.project(resolved.pos);
+    if(Math.abs(parseFloat(pin.style.left)-q[0])>.1 || Math.abs(parseFloat(pin.style.top)-q[1])>.1) return 'flipped DPR pin projection';
+    S.wipe=0; apply(); if(pane.hud.querySelector('.pin')) return 'base pin visible on head Wipe';
+    S.wipe=1; apply();
+    const e=(()=>{const r=pane.vp.getBoundingClientRect();return{clientX:r.left+q[0],clientY:r.top+q[1]};})();
+    const point=boardDiff.point(pane.vp,e);
+    if(Math.hypot(point.point[0]-resolved.pos[0],point.point[1]-resolved.pos[1])>1e-7 || point.side!=='base') return 'flipped inverse';
+    const layers=Appearance.get().layers;
+    Appearance.patch({layers:{[anchor.layer]:{...layers[anchor.layer],visible:false}}}); await draw(); drawPins();
+    if(document.querySelector('#stage .pin')) return 'hidden layer pin remains';
+    Appearance.patch({layers:{[anchor.layer]:layers[anchor.layer]}}); await draw(); drawPins();
+    return !!document.querySelector('#stage .pin') || 'pin did not recover';
+  `],
+  ["board geometry moved selection and revision pin lifecycle", "v=board&m=side", `
+    boardDiff?.dispose(); document.querySelector('#stage').replaceChildren();
+    const object=(uuid,x,ids=[])=>({uuid,changeUuid:uuid,kind:'pad',ref:null,changeIds:ids,box:[x-1000,9000,x+1000,11000],
+      geometry:{primitive:{shape:'circle',center:[x,10000],size:[2000,2000],angle:0}},
+      layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false});
+    const scene=objects=>({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,24000,20000],
+      layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects});
+    const scenes={base:scene([object('p5-moved',6000,['p5-move']),object('p5-unchanged',12000)]),
+      head:scene([object('p5-moved',18000,['p5-move']),object('p5-unchanged',12000),object('p5-added',21000,['p5-add'])])};
+    proj().changes.push({id:'p5-move',kind:'pad',action:'modified',where:{board:true}},
+      {id:'p5-add',kind:'pad',action:'added',where:{board:true}});
+    Object.assign(S,{x:12,y:10,z:20,s:null,m:'side'}); renderPanel();
+    boardDiff=BoardDiff.mount({stage:document.querySelector('#stage'),scenes,changes:proj().changes,state:S,appearance:glAppearance,attachPanZoom});
+    boardDiff.scenes=scenes; boardDiff.render();
+    const eventAt=(pane,p)=>{const r=pane.vp.getBoundingClientRect(),q=pane.renderer.project(p);return{clientX:r.left+q[0],clientY:r.top+q[1]};};
+    const uploads=boardDiff.panes.map(p=>p.renderer.stats.uploads);
+    for(const [side,x] of [['base',6],['head',18]]) {
+      const pane=boardDiff.panes.find(p=>p.sides.includes(side)), hit=boardDiff.pick(pane.vp,eventAt(pane,[x,10]),null);
+      if(hit?.id!=='p5-move' || hit.side!==side) return 'moved '+side+' hit';
+      pickAt(pane.vp,eventAt(pane,[x,10])); if(S.s!=='p5-move') return 'moved row selection';
+    }
+    if(boardDiff.panes.some((p,i)=>p.renderer.stats.uploads!==uploads[i])) return 'selection rebuilt scene buffers';
+    const anchor=object=>geometryAnchor({object,side:'head',point:[12,10]});
+    (proj().objects ||= []).push({uuid:'p5-rotated',kind:'footprint',ref:'p5-R',side:'head',pos:[12,10,90],pos_before:[12,10,0]});
+    const rotated={...anchor(scenes.head.objects[1]),uuid:'p5-rotated',kind:'footprint',ref:'p5-R'};
+    acceptThreads([...['p5-moved','p5-unchanged','p5-added'].map((uuid,i)=>({id:'p5-thread-'+i,resolved:false,
+      anchor:anchor(scenes.head.objects.find(o=>o.uuid===uuid)),comments:[]})),
+      {id:'p5-rotation',resolved:false,anchor:rotated,comments:[]}]);
+    const pins=(pane,id)=>[...pane.hud.querySelectorAll('.pin')].filter(p=>p.dataset.thread===id);
+    const base=boardDiff.panes[0],head=boardDiff.panes[1];
+    if(pins(base,'p5-thread-0').length!==1 || pins(head,'p5-thread-0').length!==1) return 'moved pins missing';
+    for(const [pane,x] of [[base,6],[head,18]]) {
+      const p=pins(pane,'p5-thread-0')[0], q=pane.renderer.project([x,10]);
+      if(Math.abs(parseFloat(p.style.left)-q[0])>.1) return 'moved before/head projection';
+    }
+    if(pins(base,'p5-thread-1').length!==1 || pins(head,'p5-thread-1').length!==1 || pins(base,'p5-thread-2').length) return 'unchanged/added Side policy';
+    const movedAnchor=S.threads[0].anchor;
+    S.m='overlay'; boardDiff.dispose(); document.querySelector('#stage').replaceChildren();
+    boardDiff=BoardDiff.mount({stage:document.querySelector('#stage'),scenes,changes:proj().changes,state:S,appearance:glAppearance,attachPanZoom});
+    boardDiff.scenes=scenes; apply();
+    const pane=boardDiff.panes[0];
+    if(pins(pane,'p5-thread-0').length!==2 || pins(pane,'p5-thread-1').length!==1) return 'overlay pin deduplication';
+    if(pins(pane,'p5-rotation').length!==1) return 'rotation-only pins must deduplicate at the same XY';
+    S.m='blend'; S.blend=0; apply();
+    if(pins(pane,'p5-thread-2').length || pins(pane,'p5-thread-0').length!==1) return 'zero head alpha pins';
+    S.m='wipe'; S.wipe=.5; apply();
+    if(pins(pane,'p5-thread-0').length!==2) return 'moved pins on both Wipe sides';
+    const unchanged=geometryAnchor({object:scenes.head.objects[1],side:'head',point:[12,10]});
+    if(unchanged.uuid!=='p5-unchanged' || unchanged.target!=='object') return 'unchanged leaf identity';
+    scenes.head.objects.splice(0,1); scenes.base.objects.splice(0,1); S.t='threads'; drawPins(); renderPanel();
+    return !pins(pane,'p5-thread-0').length && !!document.querySelector('#panel .threads-detached')
+      && !!resolveAnchor(movedAnchor).detached || 'detached thread lost';
+  `],
+  ["board address preserves inactive 3D keys and explicit selection camera", "", `
+    const row=proj().changes.find(c=>c.where?.board);
+    const q=new URLSearchParams('p=0&v=board&m=wipe&x=10&y=20&z=5&t=changes&l=F_Cu&c=1,2,3,4,5,6&h=silk');
+    q.set('s',row.id);
+    await applyState(decodeState(q.toString()));
+    if(S.x!==10 || S.y!==20 || S.z!==5 || S.s!==row.id) return 'explicit camera recentered';
+    const back=new URLSearchParams(encodeState());
+    for(const [key,value] of q) if(key!=='t' && back.get(key)!==value) return 'lost address key '+key;
+    await applyState({...decodeState(q.toString()),m:'semantic'});
+    return S.m==='semantic' && document.querySelector('#modes [data-mode="semantic"]').textContent.includes('Changes only');
+  `],
 ];
