@@ -2947,3 +2947,13 @@ test('S2 shell and primitives have dense accessible contracts', () => {
   assert.match(siteTable(['Name'], '<tr><td>R16</td></tr>', 'Parts'), /aria-label="Parts"/);
   assert.match(siteTable(['<b>'], '', 'Empty'), /&lt;b&gt;/);
 });
+
+test('S2 message page shows status and safe collapsible diagnostics', () => {
+  const html = messagePage({ title: '<bad>', message: '<script>', code: 502, details: ['Request ID: <id>'], links: [{ href: '/r/o/r', label: 'Back to reviews' }] });
+  assert.match(html, /class="message-code mono muted">502/);
+  assert.match(html, /<details class="message-diagnostics"><summary>Details<\/summary>/);
+  assert.match(html, /Request ID: &lt;id&gt;/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /href="\/r\/o\/r"/);
+  assert.doesNotMatch(messagePage({ title: 'Missing', message: 'No details' }), /<details class="message-diagnostics"/);
+});

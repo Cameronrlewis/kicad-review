@@ -156,7 +156,7 @@ function errorPage(status, title, message, links = [], active, init = {}, detail
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'text/html; charset=utf-8');
   const pageDetails = title === "Can't open this page" ? refusalDetails : details;
-  return sessionResponse(messagePage({ title, message, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
+  return sessionResponse(messagePage({ title, message, code: status, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
 export function gh(path, token, init = {}) {
