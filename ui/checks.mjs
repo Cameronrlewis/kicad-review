@@ -1370,9 +1370,11 @@ export const CHECKS = [
     return S.v===old || 'board changed';
   `],
   ["board scene stale decode does not replace current view", "v=board&x=10&y=20&z=5", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject>=0) {S.p=geometryProject; await draw();}
     const old = loadBoardScene;
-    let release;
-    loadBoardScene = async key => { await new Promise(r => release = r); return old(key); };
+    let release; const blocked = new Promise(r => release = r);
+    loadBoardScene = async key => { await blocked; return old(key); };
     const a = draw();
     const sheet = proj().sheets.find(s => s.svg);
     if (!sheet) { loadBoardScene = old; release?.(); await a; return "skip"; }
@@ -1508,13 +1510,15 @@ export const CHECKS = [
       }
       for (const g of [{base:null, head:"glOk"}, {base:"glOk", head:null}]) {
         p.board.geometry = g; await draw();
-        if (boardView.renderers.length !== 1 || document.querySelectorAll(".vp .tag")[g.base ? 1 : 0].textContent.indexOf("not present") < 0) return "one-sided " + JSON.stringify(g);
+        if (boardView.renderers.length !== 2 || document.querySelectorAll(".vp .tag")[g.base ? 1 : 0].textContent.indexOf("not present") < 0) return "one-sided " + JSON.stringify(g);
       }
-      for (const m of ["overlay","wipe","blend","semantic"]) { p.board.geometry = {base:"glOk", head:"glOk"}; S.m = m; await draw(); if (!svgOk() || boardView.renderers.length) return "mode " + m; }
+      for (const m of ["overlay","wipe","blend","semantic"]) { p.board.geometry = {base:"glOk", head:"glOk"}; S.m = m; await draw(); if (svgOk() || boardView.renderers.length !== 1 || !boardDiff) return "mode " + m; }
       return true;
     } finally { BoardGL.create = create; p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.m = "side"; }`],
   ["board flip adapters mirror camera, overlays and pointer", "v=board&x=10&y=20&z=5", `
     const p = proj(); if (!p.board?.changed) return "skip";
+    const geometry=p.board.geometry; delete p.board.geometry;
+    try {
     S.v = "board"; S.m = "side"; await draw();
     const vp0 = document.querySelector("#stage .vp"), r0 = vp0.getBoundingClientRect(), e = {clientX: r0.left + r0.width / 2 + 100, clientY: r0.top + r0.height / 2 + 50};
     const plain = toWorld(vp0, e);
@@ -1531,7 +1535,8 @@ export const CHECKS = [
       if (location.hash.includes("flip")) return "flip leaked into the hash";
     } finally { Appearance.patch({flip:false}); }
     await new Promise(r => setTimeout(r, 100));
-    return !document.querySelector("#stage .world").style.transform.includes("scale(-");`],
+    return !document.querySelector("#stage .world").style.transform.includes("scale(-");
+    } finally {p.board.geometry=geometry;} `],
   ["board Appearance store get patch subscribe reset and validation", "", `
     const A = window.Appearance, before = JSON.stringify(A.get());
     let calls = 0; const off = A.subscribe(() => calls++);
@@ -1562,7 +1567,7 @@ export const CHECKS = [
     S.v='board'; S.m='side'; await draw(); fit();
     return Number.isFinite(S.x) && Number.isFinite(S.y) && Number.isFinite(S.z) && S.z>0;`],
   ["Wipe Blend board SVG respect Appearance layer eyes", "v=board", `
-    const before=Appearance.get();
+    const before=Appearance.get(), geometry=proj().board.geometry; delete proj().board.geometry;
     try {
       for(const m of ['wipe','blend']) {
         S.v='board'; S.m=m; await draw();
@@ -1573,8 +1578,12 @@ export const CHECKS = [
         Appearance.patch({layers:{[name]:before.layers[name]}});
       }
       return true;
-    } finally { Appearance.patch(before); }`],
+    } finally { proj().board.geometry=geometry; Appearance.patch(before); }`],
   ["Themes share colours across board and lazy schematic", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
+    await new Promise(r=>setTimeout(r,250));
     const store=appearanceStore(), before=store.get(), hash=location.hash;
     const original=WebGL2RenderingContext.prototype.bufferData, sub=WebGL2RenderingContext.prototype.bufferSubData;
     let uploads=0;
@@ -1600,25 +1609,34 @@ export const CHECKS = [
       for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('18,52,86')) return 'wire stale';
       store.patch({colors:{'schematic.wire':[1,0,0,1]}});
       for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('255,0,0')) return 'mounted wire stale';
+      S.v='board'; await draw();
+      if(appearanceSchematics.size || !appearanceBoards.size) return 'stale schematic after board mount';
       return location.hash===hash || 'appearance changed deep link';
     } finally {
       WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
       store.set(before);
     }`],
   ["Themes fallback modes and context recovery retain snapshot", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
     const store=appearanceStore(), before=store.get();
     try {
       store.import(JSON.stringify({meta:{version:5},board:{background:'#121a24',copper:{f:'rgba(1,2,3,.5)'}}}));
       store.patch({layerOpacity:{'F.Cu':.4}});
       for(const mode of ['side','overlay','wipe','blend','semantic']) {
         S.m=mode; await draw();
-        if(mode==='side' && !appearanceBoards.size) return 'fixture needs supported geometry';
-        if(mode!=='side') {
-          if(appearanceBoards.size) return 'stale board in '+mode;
-          const layers=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
-          if(!layers.length || layers.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'fallback alpha '+mode;
-          if(!layers.some(l=>l.innerHTML.includes('#010203'))) return 'fallback RGB '+mode;
+        if(!appearanceBoards.size) return 'fixture needs supported geometry '+mode;
+        for(const board of appearanceBoards) {
+          if(board.appearance.colors['board.copper.f'][0]!==1/255) return 'compositor stale '+mode;
+          if(Math.abs(board.layerRGBA('F.Cu','zones','')[3]-.2*store.get().objectOpacity.zones)>1e-8) return 'compositor alpha '+mode;
         }
+        boardView.failed=S.p; await draw();
+        if(appearanceBoards.size) return 'stale board in fallback '+mode;
+        const layers=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
+        if(!layers.length || layers.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'fallback alpha '+mode;
+        if(!layers.some(l=>l.innerHTML.includes('#010203'))) return 'fallback RGB '+mode;
+        boardView.failed=null;
       }
       S.m='side'; await draw();
       const canvas=document.querySelector('.board-gl');
@@ -1641,10 +1659,16 @@ export const CHECKS = [
     } finally {store.set(before); S.m='side';}
   `],
   ["Themes board snapshot", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
     S.v='board'; S.m='side'; await draw();
     return appearanceBoards.size===2 || 'fixture needs both live revisions';
   `],
   ["Themes schematic snapshot", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
     S.v='sheet:'+sheet.path; S.m='side'; await draw();
     return appearanceSchematics.size===2 && !appearanceBoards.size || 'incorrect mounted resources';
@@ -1740,6 +1764,67 @@ export const CHECKS = [
       snapshot.getContext('2d').drawImage(canvas,0,0); canvas.replaceWith(snapshot);
       return true;
     } finally { renderer.dispose(); }`],
+  ["board composite pixels clips group alpha and lifecycle", "v=board&m=overlay", `
+    const stage=document.createElement('main'); stage.style.cssText='position:fixed;left:0;top:0;width:801px;height:400px;display:flex;z-index:9999'; document.body.append(stage);
+    const pad=(x,id)=>({uuid:id,changeUuid:id,kind:'pad',changeIds:id==='same'?[]:[id],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,box:[x-2000,8000,x+2000,12000],geometry:{primitive:{shape:'circle',center:[x,10000],size:[4000,4000],angle:0}}});
+    const scene=objects=>({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,50000,20000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects});
+    const scenes={base:scene([pad(10000,'old'),pad(30000,'same')]),head:scene([pad(20000,'new'),pad(20000,'new'),pad(30000,'same')])};
+    const state={m:'overlay',x:25,y:10,z:12,wipe:.5,blend:.5};
+    const look={layers:{'F.Cu':{visible:true,color:[200,100,40,1],opacity:1}},objects:{},nets:{},grid:{visible:false},background:[0,16,35,1]};
+    let c;
+    const near=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=3);
+    try {
+      c=BoardDiff.mount({stage,scenes,changes:[{id:'old',action:'removed'},{id:'new',action:'added'}],state,appearance:()=>look,onLost:e=>{throw e}});
+      const rgb=p=>Array.from(c.readPixel(0,...c.panes[0].renderer.project(p))).slice(0,3);
+      c.render();
+      for(const [point,color] of [[[10,10],[255,64,64]],[[20,10],[64,255,64]],[[30,10],[64,64,16]],[[40,10],[255,255,255]]]) if(!near(rgb(point),color)) return 'overlay '+point+': '+rgb(point);
+      const uploads=c.panes[0].renderer.stats.uploads;
+      state.m='wipe';
+      for(const wipe of [0,.5,1]) {state.wipe=wipe;c.render();const a=rgb([10,10]),b=rgb([20,10]);if(!near(a,wipe===0?[0,16,35]:[200,100,40])||!near(b,wipe===1||wipe===.5?[0,16,35]:[200,100,40])) return 'wipe '+wipe+' '+a+' '+b;}
+      state.wipe=.5;state.x=10;c.render();if(!near(rgb([20,10]),[200,100,40]))return 'wipe boundary moved with camera';state.x=25;
+      state.m='blend';state.blend=0;c.render();if(!near(rgb([20,10]),[0,16,35]))return 'blend zero';
+      state.blend=1;c.render();if(!near(rgb([20,10]),[200,100,40]))return 'blend one';
+      // Duplicate coincident head geometry must still receive group alpha only once.
+      // Head buffer contains coincident geometry; alpha belongs to the complete revision.
+      state.blend=.5;c.render();if(!near(rgb([20,10]),[100,58,38]))return 'group alpha '+rgb([20,10]);
+      state.m='semantic';c.render();if(!near(rgb([10,10]),[200,100,40])||!near(rgb([20,10]),[200,100,40]))return 'semantic changes';
+      if(!near(rgb([30,10]),[40,33,36]))return 'semantic context '+rgb([30,10]);
+      for(let n=0;n<50;n++){state.m=['overlay','wipe','blend','semantic'][n%4];state.x=25+n/100;c.render();}
+      if(c.panes[0].renderer.stats.uploads!==uploads)return 'camera/mode rebuilt scene buffers';
+      for(let n=0;n<10;n++){stage.style.width=(801+n)+'px';c.render();if(c.panes[0].targets[0].width!==Math.round((801+n)*(devicePixelRatio||1)))return 'resize target';}
+      c.dispose();c.dispose();if(!c.panes[0].renderer.stats.disposed)return 'not disposed';
+      stage.replaceChildren();state.m='overlay';c=BoardDiff.mount({stage,scenes:{base:null,head:null},changes:[],state,appearance:()=>look});c.render();
+      if(!near(rgb([40,10]),[255,255,255]))return 'empty overlay';
+      state.m='wipe';c.render();if(!near(rgb([40,10]),[0,16,35]))return 'empty wipe';
+      return true;
+    } finally {c?.dispose();stage.remove();}
+  `],
+  ...['side','overlay','wipe','blend','semantic'].map(mode=>['board Thermal mode proof '+mode,'v=board&m='+mode,`
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.base || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'${mode}'});
+    if(!boardDiff || boardDiff.panes.length!==('${mode}'==='side'?2:1)) return 'missing compositor';
+    if('${mode}'==='semantic') {
+      const renderer=boardDiff.panes[0].renderer, draw=renderer.draw, calls=[];
+      renderer.draw=function(options){calls.push(options);return draw.call(this,options);};
+      try {boardDiff.render();} finally {renderer.draw=draw;}
+      let changed=0,context=0;
+      for(const scene of boardView.scenes) for(const o of scene.objects) {
+        const expected=proj().changes.filter(r=>r.where?.board && r.uuid && (r.uuid===o.changeUuid || r.uuid_before===o.changeUuid));
+        if(JSON.stringify(o.changeIds)!==JSON.stringify(expected.map(r=>r.id))) return 'wrong Thermal change IDs '+o.uuid;
+        if(expected.length) changed++; else context++;
+      }
+      if(!changed || !context || calls.length!==3) return 'missing changed/context draws '+JSON.stringify({changed,context,calls:calls.length});
+      for(const options of calls) {
+        const contextPass=!!options.override;
+        for(const scene of boardView.scenes) for(const o of scene.objects) {
+          if(options.filter(o)!==(contextPass?!o.changeIds.length:!!o.changeIds.length)) return 'incorrect semantic mask '+o.uuid;
+          if(contextPass && options.override(o,{opacity:1}).opacity!==.2) return 'undimmed context';
+        }
+      }
+    }
+    return boardDiff.panes.every(p=>p.renderer.stats.uploads>0 && !p.renderer.stats.disposed);
+  `]),
   ["board keys units grid contrast and editing focus", "v=board", `
     Appearance.reset(); const key=(key,extra={})=>document.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...extra}));
     const before=S.z; key('F1'); if(S.z<before*1.3) return 'F1 zoom'; key('F2');
@@ -1926,4 +2011,16 @@ export const CHECKS = [
       try { if (KrAppearance.createStore({viewerId:"x"}).get().objects.tracks.opacity !== 1) return "blocked storage"; } finally { Storage.prototype.getItem = get; }
       return true;
     } finally { p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.t = "changes"; S.layers = null; localStorage.removeItem("kr.appearance.v1"); Appearance.reset(); renderPanel(); }`],
+  ["Themes compositor resolved background", "v=board", `
+    const stage=document.createElement('main'); stage.style.cssText='position:fixed;left:0;top:0;width:400px;height:200px;display:flex;z-index:9999'; document.body.append(stage);
+    const state={m:'wipe',x:0,y:0,z:10,wipe:.5,blend:.5};
+    const look=KrAppearance.resolve(KrAppearance.defaults()); look.boardBackground=[.2,.4,.6,1]; look.grid.visible=false;
+    const c=BoardDiff.mount({stage,scenes:{base:null,head:null},changes:[],state,appearance:()=>look});
+    try {
+      c.render();
+      const pixel=Array.from(c.readPixel(0,100,100));
+      if(pixel.some((v,i)=>Math.abs(v-[51,102,153,255][i])>1)) return 'resolved background '+pixel;
+      return true;
+    } finally {c.dispose();stage.remove();}
+  `],
 ];

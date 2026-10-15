@@ -1196,9 +1196,9 @@ def diff_objects(base, head):
         changes = [[p, b["props"].get(p), h["props"].get(p)] for p in sorted(set(b["props"]) | set(h["props"]))
                    if b["props"].get(p) != h["props"].get(p)]
         if changes:
-            rows.append(row("modified", h, changes, b))
-    rows += [row("removed", o) for o in b_left.values()]
-    rows += [row("added", o) for o in h_left.values()]
+            rows.append({**row("modified", h, changes, b), "uuid": hk, **({"uuid_before": bk} if bk != hk else {})})
+    rows += [{**row("removed", o), "uuid": k} for k, o in b_left.items()]
+    rows += [{**row("added", o), "uuid": k} for k, o in h_left.items()]
     order = ["title block", "design rules", "symbol", "footprint", "sheet", "label", "global label", "hierarchical label",
              "power symbol", "zone", "board outline", "track", "via", "wire", "bus", "junction", "no connect", "graphic"]
     rows.sort(key=lambda r: (order.index(r["kind"]) if r["kind"] in order else 99, natural(r["ref"])))
@@ -2389,7 +2389,7 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings, waivers=None):
+def build_project(p, blobs, settings, waivers=None, change_offset=0):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -2423,18 +2423,32 @@ def build_project(p, blobs, settings, waivers=None):
         board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
+    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    changes = diff_objects(objs["base"], objs["head"])
+    for n, change in enumerate(changes, change_offset + 1):
+        change["id"] = f"c{n}"
     geometry = {}
     for side in ("base", "head"):
         pcb = posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb")
         geometry[side] = None
         if os.path.isfile(pcb):
             try:
-                geometry[side] = add_blob(blobs, json.dumps(board_geometry(pcb), separators=(",", ":"), sort_keys=True))
+                scene = board_geometry(pcb)
+                # Child pads, text and graphics use their owning footprint's UUID;
+                # standalone tracks/vias/zones use their own. Never match by net/ref.
+                ids = {(r["kind"], r.get("uuid_before", r["uuid"]) if side == "base" else r["uuid"]): r["id"]
+                       for r in changes if (r.get("where") or {}).get("board")
+                       and r["action"] != ("added" if side == "base" else "removed")}
+                for obj in scene["objects"]:
+                    uid = obj["changeUuid"]
+                    kind = objs[side].get(uid, {}).get("kind")
+                    change_id = ids.get((kind, uid))
+                    obj["changeIds"] = [change_id] if change_id else []
+                geometry[side] = add_blob(blobs, json.dumps(scene, separators=(",", ":"), sort_keys=True))
             except (ValueError, IndexError, TypeError) as exc:
                 print(f"{pcb}: geometry unavailable; retaining SVG: {exc}", file=sys.stderr)
     if any(geometry.values()):
         board["geometry"] = geometry
-    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     parts = None
     if settings["parts"]["enabled"]:
         lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
@@ -2460,7 +2474,7 @@ def build_project(p, blobs, settings, waivers=None):
         libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs, waivers),
+            "changes": changes, "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {})}
@@ -2513,9 +2527,9 @@ def inline_page(data_js):
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
-    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js"):
+    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-diff.js"):
         page = page.replace(f'<script src="{asset}"></script>', f'<script>\n{read(asset)}</script>')
-    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
+    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-diff\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
 
@@ -2618,7 +2632,12 @@ def cmd_report(args):
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
-    data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
+    data["projects"] = []
+    change_offset = 0
+    for p in det["projects"]:
+        project = build_project(p, blobs, settings, waivers, change_offset)
+        data["projects"].append(project)
+        change_offset += len(project["changes"])
     if settings.get("digikey", {}).get("enabled"):
         try:
             with open("review/supplier.json", encoding="utf-8") as fh:

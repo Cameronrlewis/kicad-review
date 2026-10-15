@@ -3342,7 +3342,7 @@ gkey = add_blob(gblobs, graw)
 assert add_blob(gblobs, graw) == gkey and len(gblobs) == 1
 assert json.loads(gzip.decompress(base64.b64decode(gblobs[gkey]))) == s
 gpage = inline_page('window.REVIEW_DATA = {"projects":[],"blobs":{}};')
-for asset in ('kicad-colors.js', 'board-gl.js'):
+for asset in ('kicad-colors.js', 'board-gl.js', 'board-diff.js'):
     assert f'src="{asset}"' not in gpage
 assert 'KicadColors' in gpage and 'BoardGL' in gpage
 with TemporaryDirectory() as t:
@@ -3372,3 +3372,37 @@ with TemporaryDirectory() as t:
         patch.stopall()
         os.chdir(old_cwd)
 print('ok board scene blobs, added/removed/no/corrupt geometry')
+
+# Production geometry carries typed, revision-aware change identity, not reference guesses.
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        base = GEOMETRY_FIXTURE.replace('(via ', '(footprint "Test:X" (layer "F.Cu") (at 30 30) (uuid other) (property "Reference" "J1")) (via ')
+        head = base.replace('(at 10 20 90)', '(at 11 20 90)').replace('(width .25)', '(width .5)')
+        head = head.replace('(kicad_pcb ', '(kicad_pcb (setup (pad_to_mask_clearance .1)) ')
+        write(t, {"base/G/G.kicad_pcb": base, "head/G/G.kicad_pcb": head})
+        blobs = {}
+        with patch("kicad_review.project_checks", return_value=[]):
+            report = kr.build_project({"dir": "G", "name": "G", "status": "modified"}, blobs, kr.DEFAULT_SETTINGS)
+        changes = {r["uuid"]: r for r in report["changes"]}
+        assert set(changes) == {"fp", "tr", "meta:setup"}
+        for side in ("base", "head"):
+            scene = json.loads(gzip.decompress(base64.b64decode(blobs[report["board"]["geometry"][side]])))
+            for o in scene["objects"]:
+                expected = [changes[o["changeUuid"]]["id"]] if o["changeUuid"] in changes else []
+                assert o["changeIds"] == expected, (side, o)
+        # Reference-paired regenerated footprint UUIDs must link both revisions explicitly.
+        write(t, {"head/G/G.kicad_pcb": head.replace('(uuid fp)', '(uuid new-fp)')})
+        with patch("kicad_review.project_checks", return_value=[]):
+            second = kr.build_project({"dir": "G", "name": "G", "status": "modified"}, blobs, kr.DEFAULT_SETTINGS, change_offset=len(report["changes"]))
+        moved = next(r for r in second["changes"] if r["kind"] == "footprint")
+        assert moved["uuid"] == "new-fp" and moved["uuid_before"] == "fp"
+        kr.assign_ids([report, second])
+        for side in ("base", "head"):
+            scene = json.loads(gzip.decompress(base64.b64decode(blobs[second["board"]["geometry"][side]])))
+            assert all(o["changeIds"] == [moved["id"]] for o in scene["objects"] if o["changeUuid"] in ("fp", "new-fp"))
+            assert all(o["changeIds"] == [] for o in scene["objects"] if o["changeUuid"] in ("vi", "other"))
+    finally:
+        os.chdir(old_cwd)
+print("ok production geometry typed change IDs, unchanged isolation and multi-project IDs")

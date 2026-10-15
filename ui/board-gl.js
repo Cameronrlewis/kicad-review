@@ -275,6 +275,7 @@ void main() {
     try { gl = canvas.getContext("webgl2", {alpha:false, antialias:false, stencil:true, premultipliedAlpha:false}); } catch { return null; }
     if (!gl || !gl.getParameter(gl.STENCIL_BITS)) return null;
     const resources = [], stats = {uploads:0, textureUploads:0, draws:0, vertices:0, instances:0, disposed:false};
+    const retained = new Map();
     let disposed = false, failed = false, scene = null, batches = [], appearance = {}, camera = {}, netDirty = true, observer = null, frame = 0, atlasReady = false;
     const own = (type, value) => { if (!value) throw new Error(`Cannot allocate ${type}`); resources.push([type,value]); return value; };
     function dispose() {
@@ -284,7 +285,7 @@ void main() {
       observer?.disconnect(); observer = null;
       if (frame) cancelAnimationFrame(frame); frame = 0;
       for (const [type,value] of resources.splice(0).reverse()) gl[`delete${type}`](value);
-      batches = [];
+      batches = []; retained.clear();
     }
     function failure(error) { if (failed) return; failed = true; dispose(); opts.onFailure?.(error); }
     function lost(event) { event.preventDefault(); failure(new Error("Board WebGL context lost")); }
@@ -328,10 +329,12 @@ void main() {
       }
       function setScene(next, revision = "head") {
         if (disposed) return;
+        if (!next) { scene = null; batches = []; netDirty = true; return; }
+        if (opts.retained && retained.has(next)) { scene = next; batches = retained.get(next); netDirty = true; return; }
         const cpu = buildBatches(next, revision);
         if (next.nets.length > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new TypeError("Too many board nets");
         // A scene replacement is the only operation that replaces retained buffers.
-        for (const b of batches) for (const [type,value] of [["Buffer",b.buffer],["VertexArray",b.vao]]) {
+        for (const b of (opts.retained ? [] : batches)) for (const [type,value] of [["Buffer",b.buffer],["VertexArray",b.vao]]) {
           gl[`delete${type}`](value); resources.splice(resources.findIndex(r=>r[1]===value),1);
         }
         scene = next; batches = [];
@@ -355,6 +358,7 @@ void main() {
             }
             batches.push(b);
           }
+          if (opts.retained) retained.set(next, batches);
           netDirty = true;
         } catch (error) { failure(error); }
       }
@@ -383,21 +387,21 @@ void main() {
       }
       // Resize observation: one coalesced rAF draw, never a permanent loop; zero-sized docks keep the last valid camera.
       function scheduleDraw() {
-        if (frame || disposed) return;
+        if (opts.manual || frame || disposed) return;
         frame = requestAnimationFrame(() => {
           frame = 0;
           const w = canvas.clientWidth, h = canvas.clientHeight;
           if (w > 0 && h > 0) { camera = {...camera, width:w, height:h}; draw(); }
         });
       }
-      if (typeof ResizeObserver === "function") { observer = new ResizeObserver(scheduleDraw); observer.observe(canvas); }
+      if (!opts.manual && typeof ResizeObserver === "function") { observer = new ResizeObserver(scheduleDraw); observer.observe(canvas); }
       function layerRGBA(layer,kind,net) {
         const key=globalThis.KicadColors.layerThemeKeys[layer];
         const color=(net==null?null:appearance.netColors?.[net]) || appearance.colors?.[key] || rgba(appearance.layers?.[layer]?.color || globalThis.KicadColors.layers[layer] || [194,194,194,1]);
         return [...color.slice(0,3),color[3]*(appearance.layerOpacity?.[layer]??appearance.layers?.[layer]?.opacity??1)*(appearance.objectOpacity?.[kind]??1)];
       }
       function draw(options = {}) {
-        if (disposed || !scene) return false;
+        if (disposed) return false;
         if (options.camera) camera = {...camera,...options.camera};
         const width = camera.width ?? canvas.clientWidth, height = camera.height ?? canvas.clientHeight;
         const dpr = camera.dpr ?? globalThis.devicePixelRatio ?? 1, z = camera.z ?? 1;
@@ -405,10 +409,13 @@ void main() {
         const bw = Math.max(1,Math.round(width*dpr)), bh = Math.max(1,Math.round(height*dpr));
         if (canvas.width !== bw) canvas.width = bw;
         if (canvas.height !== bh) canvas.height = bh;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, options.target?.framebuffer ?? null);
+        gl.disable(gl.SCISSOR_TEST);
         gl.viewport(0,0,bw,bh); gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST);
-        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.colorMask(true,true,true,true); gl.stencilMask(0xff);
-        const background = appearance.boardBackground || rgba(globalThis.KicadColors.objects.background);
-        gl.clearColor(...(options.mask ? [0,0,0,1] : background)); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+        gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA); gl.colorMask(true,true,true,true); gl.stencilMask(0xff);
+        const background = options.background || appearance.boardBackground || rgba(appearance.background || globalThis.KicadColors.objects.background);
+        if (options.clear !== false) { gl.clearColor(...(options.mask ? [0,0,0,1] : background)); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT); }
+        if (!scene) return true;
         const origin = [(scene.bounds[0]/2+scene.bounds[2]/2)/1000,(scene.bounds[1]/2+scene.bounds[3]/2)/1000];
         const mirror = appearance.flip ? -1 : 1, selected = scene.nets.findIndex(n=>n.name===appearance.selectedNet);
         const opacity = categories.map(c=>appearance.objects?.[c]?.visible===false ? 0 : appearance.objects?.[c]?.opacity ?? 1);
@@ -425,7 +432,7 @@ void main() {
           gl.uniform1i(u.netStyle,0); gl.uniform1i(u.atlas,1); gl.uniform1i(u.customEnabled,0);
         }
         const grid = appearance.grid;
-        if (!options.mask && grid?.visible && grid.size > 0 && grid.size*z >= 4) {
+        if (options.grid !== false && !options.mask && grid?.visible && grid.size > 0 && grid.size*z >= 4) {
           const {program,u} = gridProgram, cx = camera.x ?? origin[0], cy = camera.y ?? origin[1], g = grid.size;
           gl.useProgram(program); gl.bindVertexArray(gridVao);
           gl.uniform2f(u.viewportSize,width,height); gl.uniform2f(u.phase,((cx%g)+g)%g,((cy%g)+g)%g);
@@ -536,7 +543,7 @@ void main() {
         return hits.sort((a,b)=>front(b)-front(a) || area(a)-area(b) || a.uuid.localeCompare(b.uuid));
       }
       const api = {
-        stats, setScene, setCamera(next) { camera = {...next}; },
+        gl, stats, setScene, setCamera(next) { camera = {...next}; },
         get appearance() { return structuredClone(appearance); },
         layerRGBA,
         setAppearance(state) { appearance = structuredClone(state || {}); netDirty = true; scheduleDraw(); },

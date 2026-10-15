@@ -200,6 +200,10 @@ body.shot .report-head { display:none; }
   border: 1px solid var(--line-strong); border-radius: 4px; font-size: 12px; padding: 2px 8px; }
 .board-diag pre { margin: 4px 0; max-height: 160px; overflow: auto; white-space: pre-wrap; }
 
+.vp[data-board-gl] > canvas {position:absolute;inset:0;width:100%;height:100%;display:block;}
+.vp[data-board-gl] > .board-hud {position:absolute;inset:0;pointer-events:none;overflow:hidden;}
+.vp[data-board-gl] .pin {pointer-events:auto;}
+
 /* Native modal supplies focus trapping, Escape, and focus restoration. */
 #shortcuts { color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:4px; max-width:680px; max-height:85vh; padding:24px; }
 #shortcuts::backdrop { background:rgb(0 0 0 / .55); }
