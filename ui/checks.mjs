@@ -2545,4 +2545,30 @@ export const CHECKS = [
     return JSON.stringify(store.get())===JSON.stringify(KrAppearance.defaults()) || 'late read survived panel teardown';
   } finally {File.prototype.text=orig;store.set(before)}
 `],
+  ["status click origin gives dx dy dist, pan keeps it, view change drops it", "v=board", `
+    await draw(); setT({x:100,y:200,z:10});
+    const vp=()=>document.querySelector('#stage .vp'), at=(t,dx,dy,b=0)=>{const r=vp().getBoundingClientRect(); vp().dispatchEvent(new PointerEvent(t,{bubbles:true,pointerId:1,button:b,clientX:r.left+r.width/2+dx,clientY:r.top+r.height/2+dy}));};
+    const raf=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    at('pointerdown',0,0); at('pointerup',0,0); at('pointermove',30,40); await raf();
+    const t=n=>document.querySelector('[data-coordinate='+n+']').textContent;
+    if(t('dx')!=='3.000'||t('dy')!=='4.000'||t('dist')!=='5.000') return 'click '+t('dx')+t('dy')+t('dist');
+    at('pointerdown',50,50); at('pointermove',90,90); at('pointerup',90,90); at('pointermove',90,90); await raf();
+    if(t('dx')==='—') return 'pan dropped origin';
+    S.v='sheet:/not-in-report'; await draw(); await raf();
+    return t('x')==='—' && t('dx')==='—' && !/NaN|Infinity/.test(document.querySelector('#statusbar').textContent);`],
+  ["status change counter matches visible change rows", "", `
+    const row=proj().changes.find(r=>viewOf(r)&&currentView(viewOf(r))); if(!row) return 'skip';
+    await goTo(row.id); await new Promise(r=>requestAnimationFrame(r));
+    const rows=[...document.querySelectorAll('#panel .card[data-id]')], i=rows.findIndex(e=>e.dataset.id===S.s);
+    return document.querySelector('[data-change]').textContent===(i+1)+'/'+rows.length;`],
+  ["shortcut sheet button and question mark open, Escape closes keeping selection and focus", "", `
+    const before=S.s, opener=document.querySelector('#shortcuts-open'); opener.focus();
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'?',bubbles:true}));
+    const d=document.querySelector('#shortcuts'); if(!d.open||!d.contains(document.activeElement)) return 'not open/focused';
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    if(d.open||S.s!==before) return 'escape';
+    const editor=document.createElement('div'); editor.contentEditable='true'; document.body.append(editor); editor.focus();
+    editor.dispatchEvent(new KeyboardEvent('keydown',{key:'?',bubbles:true})); const ignored=!d.open; editor.remove();
+    opener.click(); const ok=d.open; d.close();
+    const txt=d.textContent; return ignored && ok && ['Ctrl+U','N / Shift+N','j / k','PageUp','F1','Esc','?'].every(k=>txt.includes(k));`],
 ];
