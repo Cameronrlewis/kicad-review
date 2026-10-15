@@ -534,6 +534,368 @@ def pcb_objects(path):
     return objs
 
 
+def geometry_um(value):
+    """Round millimetres to integer micrometres, with a bounded scene range."""
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+    try:
+        n = Decimal(str(value)) * 1000
+        if not n.is_finite() or abs(n) > 2_000_000_000:
+            raise ValueError("board coordinate outside supported range")
+        return int(n.to_integral_value(rounding=ROUND_HALF_UP))
+    except InvalidOperation as error:
+        raise ValueError("invalid board coordinate") from error
+
+
+def geometry_point(point, footprint_at=None):
+    # Validate before converting to float, including when rotating local coordinates.
+    for value in point[:2]:
+        geometry_um(value)
+    if not footprint_at:
+        return [geometry_um(value) for value in point[:2]]
+    for value in footprint_at:
+        geometry_um(value)
+    x, y = map(float, point[:2])
+    fx, fy, *angle = footprint_at
+    degrees = float(angle[0]) if angle else 0
+    t = math.radians(degrees)
+    c, s = ((1, 0), (0, 1), (-1, 0), (0, -1))[int(degrees / 90) % 4] if degrees % 90 == 0 else (math.cos(t), math.sin(t))
+    return [geometry_um(float(fx) + x * c + y * s),
+            geometry_um(float(fy) - x * s + y * c)]
+
+
+def geometry_arc(start, middle, end, width):
+    for point in (start, middle, end):
+        geometry_point(point)
+    w = geometry_um(width)
+    if w < 0:
+        raise ValueError("negative geometry size")
+    ax, ay = map(float, start); bx, by = map(float, middle); cx, cy = map(float, end)
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return [[*geometry_point(start), *geometry_point(end), w]]
+    aa, bb, cc = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+    ox = (aa * (by - cy) + bb * (cy - ay) + cc * (ay - by)) / d
+    oy = (aa * (cx - bx) + bb * (ax - cx) + cc * (bx - ax)) / d
+    a, b, c = [math.atan2(y - oy, x - ox) for x, y in ((ax, ay), (bx, by), (cx, cy))]
+    sweep = (c - a) % math.tau
+    if (b - a) % math.tau > sweep:
+        sweep -= math.tau
+    radius = math.hypot(ax - ox, ay - oy)
+    step = 2 * math.acos(max(-1, 1 - .001 / max(radius, .001)))
+    count = max(1, math.ceil(abs(sweep) / max(step, 1e-8)))
+    if count > 65536:
+        raise ValueError("arc exceeds geometry budget")
+    pts = [geometry_point((ox + radius * math.cos(a + sweep * i / count),
+                           oy + radius * math.sin(a + sweep * i / count))) for i in range(count + 1)]
+    pts[0], pts[-1] = geometry_point(start), geometry_point(end)
+    return [[*p, *q, w] for p, q in zip(pts, pts[1:])]
+
+
+def geometry_box(geometry):
+    """Integer bbox of normalized drawable geometry (not a filled footprint box)."""
+    boxes = []
+    for ax, ay, bx, by, width in geometry.get("segments", []):
+        r = width / 2
+        boxes.append([math.floor(min(ax, bx) - r), math.floor(min(ay, by) - r),
+                      math.ceil(max(ax, bx) + r), math.ceil(max(ay, by) + r)])
+    for ring in geometry.get("rings", []):
+        if ring:
+            xs, ys = zip(*ring)
+            boxes.append([min(xs), min(ys), max(xs), max(ys)])
+    primitives = [geometry["primitive"]] if "primitive" in geometry else []
+    if "drill" in geometry:
+        primitives.append({**geometry["drill"], "shape": "oval"})
+    primitives += list(geometry.get("layerPrimitives", {}).values())
+    for p in primitives:
+        x, y = p["center"]; w, h = p["size"]
+        t = math.radians(p.get("angle", 0) / 1000)
+        c, s = abs(math.cos(t)), abs(math.sin(t))
+        if p.get("shape") == "circle":
+            dx, dy = w / 2, h / 2
+        elif p.get("shape") == "oval":
+            r = min(w, h) / 2
+            dx, dy = c * (w / 2 - r) + s * (h / 2 - r) + r, s * (w / 2 - r) + c * (h / 2 - r) + r
+        elif p.get("shape") == "trapezoid":
+            dx, dy = p.get("delta", [0, 0])
+            corners = [(sx * w / 2 - sx * sy * dy / 2,
+                        sy * h / 2 + sx * sy * dx / 2)
+                       for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            xs = [x + px * math.cos(t) + py * math.sin(t) for px, py in corners]
+            ys = [y - px * math.sin(t) + py * math.cos(t) for px, py in corners]
+            boxes.append([math.floor(round(min(xs), 8)), math.floor(round(min(ys), 8)),
+                          math.ceil(round(max(xs), 8)), math.ceil(round(max(ys), 8))])
+            continue
+        elif p.get("shape") == "roundrect":
+            r = p.get("radius", 0)
+            dx, dy = c * (w / 2 - r) + s * (h / 2 - r) + r, s * (w / 2 - r) + c * (h / 2 - r) + r
+        else:
+            delta = p.get("delta", [0, 0])
+            dx, dy = c * (w + abs(delta[1])) / 2 + s * (h + abs(delta[0])) / 2, s * (w + abs(delta[1])) / 2 + c * (h + abs(delta[0])) / 2
+        # Suppress trig noise at exact quarter turns before outward rounding.
+        boxes.append([math.floor(round(x - dx, 8)), math.floor(round(y - dy, 8)),
+                      math.ceil(round(x + dx, 8)), math.ceil(round(y + dy, 8))])
+    return geometry_union(boxes)
+
+
+def geometry_union(boxes):
+    boxes = [b for b in boxes if b is not None]
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes)] if boxes else None
+
+
+def board_geometry(pcb_path):
+    """Extract the revision scene without altering pcb_objects' diff identities."""
+    with open(pcb_path, encoding="utf-8") as fh:
+        root = parse_sexpr(fh.read())
+    scene = {"version": 1, "units": "um", "complete": True, "warnings": [],
+             "bounds": [0, 0, 0, 0], "layers": [], "nets": [], "objects": []}
+    for layer in (find(root, "layers") or [])[1:]:
+        if isinstance(layer, list) and len(layer) >= 3:
+            scene["layers"].append({"id": int(layer[0]), "name": layer[1], "type": layer[2], "enabled": True})
+    names = [l["name"] for l in scene["layers"]]
+    # File order and KiCad numeric enums are not physical stack order.
+    copper = sorted((name for name in names if name.endswith(".Cu")),
+                    key=lambda name: -1 if name == "F.Cu" else (1000 if name == "B.Cu" else int(name[2:-3])))
+
+    def warn(uid, kind, reason, unsupported=True):
+        scene["warnings"].append({"uuid": uid, "kind": kind, "reason": reason})
+        if unsupported:
+            scene["complete"] = False
+
+    def walk(node):
+        yield node
+        for child in node[1:]:
+            if isinstance(child, list):
+                yield from walk(child)
+
+    nets = {int(n[1]): n[2] for n in findall(root, "net") if len(n) > 2}
+    nets[0] = ""
+    named, numbered = set(), set()
+    for node in walk(root):
+        n = find(node, "net")
+        if n and len(n) > 1 and n[1].isdigit() and val(node, "net_name") is not None:
+            nets.setdefault(int(n[1]), val(node, "net_name"))
+        if node[0] == "net" and len(node) > 1:
+            if len(node) > 2:
+                nets.setdefault(int(node[1]), node[2])
+                named.add(nets[int(node[1])])
+            elif node[1].isdigit():
+                numbered.add(int(node[1]))
+            else:
+                named.add(node[1])
+        elif node[0] == "net_name" and len(node) > 1:
+            named.add(node[1])
+    for number in sorted(numbered - nets.keys()):
+        nets[number] = f"Net {number}"
+        warn(str(number), "net", "numeric net has no declared name", False)
+    for name in sorted(named - set(nets.values())):
+        nets[max(nets) + 1] = name
+    nets[0] = ""
+    net_ids = {name: number for number, name in sorted(nets.items(), reverse=True)}
+    scene["nets"] = [{"id": number, "name": name} for number, name in sorted(nets.items())]
+
+    def net_id(node):
+        n = find(node, "net")
+        if n and len(n) > 1:
+            return int(n[1]) if len(n) > 2 or n[1].isdigit() else net_ids[n[1]]
+        return net_ids.get(val(node, "net_name", ""), 0)
+
+    def layers(node, via=False):
+        tokens = (find(node, "layers") or [])[1:] or [val(node, "layer")]
+        result = []
+        for token in tokens:
+            expanded = [n for n in names if n.endswith(token[1:])] if token in ("*.Cu", "*.Mask") else ([n for n in ("F.Cu", "B.Cu") if n in names] if token == "F&B.Cu" else [token])
+            for name in expanded:
+                if name in names and name not in result:
+                    result.append(name)
+                elif name not in names and name is not None:
+                    warn(val(node, "uuid", ""), node[0], f"undeclared layer {name}")
+        if via and len(result) == 2 and all(n in copper for n in result):
+            a, b = sorted(copper.index(n) for n in result)
+            result = copper[a:b + 1]
+        return result
+
+    def hidden(node):
+        effects = find(node, "effects") or []
+        return ("hide" in node or find(node, "hide") == ["hide"] or val(node, "hide") == "yes"
+                or "hide" in effects or find(effects, "hide") == ["hide"] or val(effects, "hide") == "yes")
+
+    def emit(kind, uid, change, ref, ls, net, side, category, geometry, hide=False):
+        obj = {"kind": kind, "uuid": uid, "changeUuid": change, "ref": ref,
+               "layers": ls, "net": net, "side": side, "category": category,
+               "hidden": hide, "geometry": geometry, "box": geometry_box(geometry)}
+        scene["objects"].append(obj)
+        return obj
+
+    def xy(node, key):
+        return (find(node, key) or [key, "0", "0"])[1:3]
+
+    def positive(value):
+        n = geometry_um(value)
+        if n < 0:
+            raise ValueError("negative geometry size")
+        return n
+
+    setup = find(root, "setup")
+
+    def pad_geometry(pad, fp, fp_at, uid):
+        pa = (find(pad, "at") or ["at", "0", "0"])[1:4]
+        center = geometry_point(pa, fp_at)
+        angle = geometry_um(pa[2] if len(pa) > 2 else 0)  # stored in the board frame
+        size = [positive(v) for v in xy(pad, "size")]
+        shape = pad[3]
+        visible = not hidden(fp) and not hidden(pad)
+        if visible and find(pad, "padstack"):
+            warn(uid, "pad", "per-layer padstack geometry not yet supported")
+        p = {"shape": shape, "center": center, "size": size, "angle": angle,
+             "radius": 0, "delta": [geometry_um(v) for v in xy(pad, "rect_delta")]}
+        if shape == "roundrect":
+            ratio = float(val(pad, "roundrect_rratio", 0))
+            if not math.isfinite(ratio) or not 0 <= ratio <= .5:
+                raise ValueError("invalid roundrect radius ratio")
+            p["radius"] = geometry_um(min(size) / 1000 * ratio)
+        geometry = {"primitive": p}
+        if shape not in ("circle", "rect", "oval", "roundrect", "trapezoid", "custom"):
+            if visible:
+                warn(uid, "pad", f"unsupported pad shape {shape}")
+            geometry = {}
+        if shape == "custom":
+            geometry = {"segments": [], "rings": []}
+            world_at = [center[0] / 1000, center[1] / 1000, angle / 1000]
+            def local(point):
+                return geometry_point(point, world_at)
+            options = find(pad, "options")
+            anchor = val(options, "anchor", "rect")
+            geometry["primitive"] = {**p, "shape": anchor}
+            for primitive in (find(pad, "primitives") or [])[1:]:
+                if not isinstance(primitive, list):
+                    continue
+                kind = primitive[0]
+                width = val(primitive, "width", "0")
+                if kind in ("gr_line", "gr_arc"):
+                    segments = geometry_arc(xy(primitive, "start"), xy(primitive, "mid"), xy(primitive, "end"), width) if kind == "gr_arc" else [[*geometry_point(xy(primitive, "start")), *geometry_point(xy(primitive, "end")), positive(width)]]
+                    geometry["segments"] += [[*local([s[0] / 1000, s[1] / 1000]), *local([s[2] / 1000, s[3] / 1000]), s[4]] for s in segments]
+                elif kind in ("gr_poly", "gr_rect"):
+                    ring = [local(n[1:3]) for n in findall(find(primitive, "pts") or [], "xy")] if kind == "gr_poly" else [local(v) for v in (xy(primitive, "start"), [xy(primitive, "end")[0], xy(primitive, "start")[1]], xy(primitive, "end"), [xy(primitive, "start")[0], xy(primitive, "end")[1]])]
+                    filled = val(primitive, "fill", "yes") in ("yes", "solid")
+                    if filled:
+                        geometry["rings"].append(ring)
+                    if positive(width) or not filled:
+                        geometry["segments"] += [[*a, *b, positive(width)] for a, b in zip(ring, ring[1:] + ring[:1])]
+                elif kind == "gr_circle":
+                    c, e = xy(primitive, "center"), xy(primitive, "end")
+                    # Split a circle into two bounded-error arcs, including its stroke.
+                    opposite = [2 * float(c[0]) - float(e[0]), 2 * float(c[1]) - float(e[1])]
+                    dx, dy = float(e[0]) - float(c[0]), float(e[1]) - float(c[1])
+                    segments = geometry_arc(e, [float(c[0]) - dy, float(c[1]) + dx], opposite, width) + geometry_arc(opposite, [float(c[0]) + dy, float(c[1]) - dx], e, width)
+                    transformed = [[*local([s[0] / 1000, s[1] / 1000]), *local([s[2] / 1000, s[3] / 1000]), s[4]] for s in segments]
+                    geometry["segments"] += transformed
+                    if val(primitive, "fill", "no") in ("yes", "solid"):
+                        geometry["rings"].append([s[:2] for s in transformed])
+                elif visible:
+                    warn(uid, "pad", f"unsupported custom primitive {kind}")
+        drill = find(pad, "drill")
+        if drill:
+            values = [v for v in drill[1:] if isinstance(v, str) and v != "oval"]
+            dims = [positive(v) for v in values]
+            if len(dims) == 1:
+                dims *= 2
+            if len(dims) != 2:
+                raise ValueError("invalid pad drill")
+            geometry["drill"] = {"center": geometry_point(xy(drill, "offset"), [center[0] / 1000, center[1] / 1000, angle / 1000]),
+                                 "size": dims, "angle": angle, "plated": pad[2] != "np_thru_hole"}
+        def override(key, setup_key=None):
+            return next((val(node, key) for node in (pad, fp) if val(node, key) is not None), val(setup, setup_key or key, "0"))
+        mask = geometry_um(override("solder_mask_margin", "pad_to_mask_clearance"))
+        paste = geometry_um(override("solder_paste_margin", "pad_to_paste_clearance"))
+        ratio = float(override("solder_paste_margin_ratio", "pad_to_paste_clearance_ratio"))
+        if not math.isfinite(ratio):
+            raise ValueError("invalid paste margin ratio")
+        # Ratio is dimensionless integer thousandths; all dimensions remain micrometres.
+        geometry["maskMargin"], geometry["pasteMargin"], geometry["pasteRatio"] = mask, paste, geometry_um(ratio)
+        ls = layers(pad)
+        exclusions = []
+        tenting = find(pad, "tenting")
+        for side, layer in (("front", "F.Mask"), ("back", "B.Mask")):
+            if find(tenting or [], side) and val(tenting, side, "yes") != "no":
+                exclusions.append(layer)
+        if pad[2] == "np_thru_hole":
+            exclusions += [n for n in ls if n.endswith(".Cu")]
+        geometry["removeUnusedLayers"] = find(pad, "remove_unused_layers") is not None and val(pad, "remove_unused_layers", "yes") != "no"
+        geometry["keepEndLayers"] = find(pad, "keep_end_layers") is not None and val(pad, "keep_end_layers", "yes") != "no"
+        geometry["zoneLayerConnections"] = (find(pad, "zone_layer_connections") or [])[1:]
+        if geometry["removeUnusedLayers"] and not hidden(fp) and not hidden(pad):
+            warn(uid, "pad", "unconnected pad layer removal requires connectivity")
+        ls = [n for n in ls if n not in exclusions]
+        geometry["layerExclusions"] = exclusions
+        if shape == "custom" and visible and ((mask and any(n.endswith(".Mask") for n in ls)) or ((paste or ratio) and any(n.endswith(".Paste") for n in ls))):
+            warn(uid, "pad", "custom pad mask/paste offset not yet supported")
+        if "primitive" in geometry:
+            derived = {}
+            for layer in ls:
+                if layer.endswith((".Mask", ".Paste")):
+                    margin = mask if layer.endswith(".Mask") else paste
+                    dims = [max(0, n + 2 * margin + (geometry_um(n / 1000 * ratio * 2) if layer.endswith(".Paste") else 0)) for n in size]
+                    derived[layer] = {**geometry["primitive"], "size": dims,
+                                      "radius": max(0, min(min(dims) // 2, p["radius"] + margin))}
+            if derived:
+                geometry["layerPrimitives"] = derived
+        return geometry, ls
+
+    for index, node in enumerate(root[1:]):
+        if not isinstance(node, list) or not node:
+            continue
+        kind = node[0]
+        uid = val(node, "uuid") or val(node, "tstamp") or f"board/{kind}:{index}"
+        if kind in ("segment", "arc"):
+            width = positive(val(node, "width", "0"))
+            segments = geometry_arc(xy(node, "start"), xy(node, "mid"), xy(node, "end"), val(node, "width", "0")) if kind == "arc" else [[*geometry_point(xy(node, "start")), *geometry_point(xy(node, "end")), width]]
+            net = net_id(node)
+            emit("arc" if kind == "arc" else "track", uid, uid, nets[net], layers(node), net, None, "tracks", {"segments": segments}, hidden(node))
+        elif kind == "via":
+            center = geometry_point(xy(node, "at")); size = positive(val(node, "size", "0")); drill = positive(val(node, "drill", "0"))
+            emit("via", uid, uid, nets[net_id(node)], layers(node, True), net_id(node), None, "vias",
+                 {"primitive": {"shape": "circle", "center": center, "size": [size, size], "angle": 0, "radius": size // 2, "delta": [0, 0]},
+                  "drill": {"center": center, "size": [drill, drill], "angle": 0, "plated": True}}, hidden(node))
+        elif kind == "footprint":
+            # Same UUID/tstamp and Reference precedence as pcb_objects; no new diff model.
+            ref = properties(node).get("Reference") or next((t[2] for t in findall(node, "fp_text") if t[1] == "reference"), "?")
+            side = "back" if val(node, "layer") == "B.Cu" else "front"
+            fp_at = (find(node, "at") or ["at", "0", "0"])[1:4]
+            geometry_point([0, 0], fp_at)
+            parent = emit("footprint", uid, uid, ref, layers(node), 0, side, "footprints", {}, hidden(node))
+            counts = Counter()
+            children = []
+            for child in node[1:]:
+                if not isinstance(child, list) or not child:
+                    continue
+                child_kind = child[0]
+                if child_kind == "pad":
+                    counts[child[1]] += 1
+                    child_uid = val(child, "uuid") or val(child, "tstamp") or f"{uid}/pad:{child[1]}:{counts[child[1]]}"
+                    geometry, ls = pad_geometry(child, node, fp_at, child_uid)
+                    children.append(emit("pad", child_uid, uid, ref, ls, net_id(child), side, "pads", geometry, parent["hidden"] or hidden(child)))
+                elif child_kind in ("fp_text", "fp_text_box", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly", "fp_curve", "image", "zone") or (child_kind == "property" and find(child, "effects")):
+                    if not parent["hidden"] and not hidden(child):
+                        warn(val(child, "uuid", uid), child_kind, "footprint drawable not yet supported")
+            parent["box"] = geometry_union([c["box"] for c in children]) or [0, 0, 0, 0]
+        elif kind == "zone" or kind.startswith("gr_") or kind in ("dimension", "target", "image", "table"):
+            if not hidden(node):
+                warn(uid, kind, "board drawable not yet supported")
+    scene["bounds"] = geometry_union([o["box"] for o in scene["objects"] if not o["hidden"] and o["kind"] != "footprint"]) or [0, 0, 0, 0]
+    def check_numbers(value):
+        if isinstance(value, dict):
+            for child in value.values():
+                check_numbers(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_numbers(child)
+        elif isinstance(value, (int, float)) and (not isinstance(value, int) or abs(value) > 2_000_000_000):
+            raise ValueError("board geometry outside supported integer range")
+    check_numbers(scene)
+    return scene
+
+
 def pad_points(fp, a):
     """Absolute pad centres of a footprint at a = [x, y, rotation]."""
     if not a:
