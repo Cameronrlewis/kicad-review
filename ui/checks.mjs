@@ -31,6 +31,36 @@ export const CHECKS = [
     if(document.querySelector('[data-coordinate=x]').textContent!=='—') return 'stale';
     await draw();
     return document.querySelector('[data-coordinate=y]').textContent==='—' && location.hash===hash;`],
+["Stage 1 dark default ignores OS and tokens resolve", "", `
+  const root = document.documentElement; root.removeAttribute('data-theme');
+  const c = getComputedStyle(root), b = getComputedStyle(document.body);
+  return c.colorScheme === 'dark' && b.backgroundColor === 'rgb(20, 23, 28)'
+    && c.getPropertyValue('--btn-h').trim() === '24px'
+    && c.getPropertyValue('--tab-h').trim() === '28px'
+    && c.getPropertyValue('--toolbar-h').trim() === '32px'
+    && c.getPropertyValue('--space-2').trim() === '8px';`],
+["Stage 1 both token themes pass text contrast", "", `
+  const root = document.documentElement, old = root.getAttribute('data-theme');
+  const probe = document.createElement('span'); document.body.append(probe);
+  const lum = s => { const rgb = s.match(/[\\d.]+/g).slice(0,3).map(Number).map(v => {v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;}); return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722; };
+  const ratio = (a,b) => (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+  try {
+    for (const theme of ['dark','light']) {
+      root.dataset.theme = theme;
+      for (const surface of ['bg','surface','surface-2','surface-3']) {
+        probe.style.backgroundColor = 'var(--'+surface+')';
+        for (const text of ['text','muted','accent','added','removed','modified','waived']) {
+          probe.style.color = 'var(--'+text+')'; const s = getComputedStyle(probe);
+          if (ratio(lum(s.color),lum(s.backgroundColor)) < 4.5) return theme+': '+text+' on '+surface;
+        }
+      }
+      probe.style.backgroundColor = 'var(--accent-fill)'; probe.style.color = 'var(--on-accent)';
+      let s = getComputedStyle(probe); if (ratio(lum(s.color),lum(s.backgroundColor)) < 4.5) return 'primary';
+      probe.style.color = 'var(--line-strong)'; probe.style.backgroundColor = 'var(--surface)';
+      s = getComputedStyle(probe); if (ratio(lum(s.color),lum(s.backgroundColor)) < 3) return 'control border';
+    }
+    return true;
+  } finally { probe.remove(); if(old === null) root.removeAttribute('data-theme'); else root.dataset.theme=old; }`],
   ["Libraries compare modes, used-by jumps and escaped panel", "", `
     const P = proj(), sheet = P.sheets.find(s => s.svg); if (!sheet) return "skip";
     P.objects = [{kind: "symbol", ref: "U1", lib: "Parts:X", sheet: sheet.path, pos: [10, 10], side: "head"}];
