@@ -2989,3 +2989,189 @@ with tempfile.TemporaryDirectory() as t:
                 if contents == 'not json': assert "::warning::review/issues.json is not JSON" in stdout.getvalue()
     finally: os.chdir(_cwd)
 print("ok issues cmd_summary opt-in and malformed data")
+
+
+# Normalized board scenes: stable identity and exact micrometre geometry.
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from kicad_review import board_geometry, geometry_um
+GEOMETRY_FIXTURE = '''(kicad_pcb (version 20260206)
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "GND")
+ (segment (start 1 2) (end 3 2) (width .25) (layer "F.Cu") (net 1) (uuid tr))
+ (via (at 4 5) (size .8) (drill .4) (layers "F.Cu" "B.Cu") (net 1) (uuid vi))
+ (footprint "Test:X" (layer "B.Cu") (at 10 20 90) (uuid fp)
+  (property "Reference" "J1")
+  (pad "1" thru_hole oval (at 2 0 90) (size 2 1) (drill oval .8 .4)
+   (layers "*.Cu" "*.Mask") (net 1 "GND") (uuid pa))
+  (pad "1" smd roundrect (at 0 2 90) (size 1 1) (roundrect_rratio .25)
+   (layers "B.Cu") (net 1 "GND") (uuid pb))))'''
+def scene_from_text(text):
+    with TemporaryDirectory() as d:
+        p = Path(d) / "test.kicad_pcb"
+        p.write_text(text)
+        return board_geometry(p)
+s = scene_from_text(GEOMETRY_FIXTURE)
+assert (s["version"], s["units"]) == (1, "um")
+assert geometry_um("-0.0005") == -1
+assert geometry_um("1.2345") == 1235
+assert s["nets"] == [{"id": 0, "name": ""}, {"id": 1, "name": "GND"}]
+assert [l["id"] for l in s["layers"]] == [0, 2, 44]  # never assume old KiCad IDs
+by_id = {o["uuid"]: o for o in s["objects"]}
+assert by_id["tr"]["geometry"]["segments"] == [[1000,2000,3000,2000,250]]
+assert by_id["pa"]["geometry"]["primitive"]["center"] == [10000,18000]
+assert by_id["pb"]["geometry"]["primitive"]["center"] == [12000,20000]
+assert by_id["pa"]["changeUuid"] == by_id["pb"]["changeUuid"] == "fp"
+assert by_id["pa"]["ref"] == "J1" and by_id["pa"]["net"] == 1
+assert by_id["pa"]["geometry"]["primitive"]["angle"] == 90000
+assert by_id["pa"]["geometry"]["drill"]["size"] == [800,400]
+assert by_id["pb"]["geometry"]["primitive"]["radius"] == 250
+assert all(l in {x["name"] for x in s["layers"]} for o in s["objects"] for l in o["layers"])
+assert len({o["uuid"] for o in s["objects"]}) == len(s["objects"])
+from kicad_review import geometry_arc
+arc = geometry_arc((1,0),(0,1),(-1,0),".2")
+assert arc[0][:2] == [1000,0] and arc[-1][2:4] == [-1000,0]
+assert max(max(x[1],x[3]) for x in arc) == 1000
+without_ids = GEOMETRY_FIXTURE.replace('(uuid pa)','').replace('(uuid pb)','')
+a = scene_from_text(without_ids)
+ids = [o["uuid"] for o in a["objects"] if o["kind"] == "pad"]
+assert ids == ["fp/pad:1:1", "fp/pad:1:2"]
+modern = GEOMETRY_FIXTURE.replace('(net 1 "GND")','(net "GND")').replace('(net 1)', '(net "GND")')
+assert len([n for n in scene_from_text(modern)["nets"] if n["name"] == "GND"]) == 1
+for bad in ("NaN", "Infinity", "3000000"):
+    try:
+        geometry_um(bad)
+        raise AssertionError(bad)
+    except ValueError:
+        pass
+print("ok board scene identity, units, pad transforms, nets and arcs")
+
+# Empty and metadata-only boards stay complete; unsupported visible drawables fall back.
+empty_scene = scene_from_text('(kicad_pcb (version 20260206) (general (thickness 1.6)))')
+assert empty_scene['complete'] and empty_scene['bounds'] == [0, 0, 0, 0]
+assert empty_scene['objects'] == [] and empty_scene['nets'] == [{'id': 0, 'name': ''}]
+assert s['complete'] and s['warnings'] == []
+assert by_id['tr']['box'] == [875, 1875, 3125, 2125]
+assert by_id['vi']['box'] == [3600, 4600, 4400, 5400]
+assert by_id['fp']['geometry'] == {} and by_id['fp']['box'] == [9500, 17000, 12500, 20500]
+assert by_id['pa']['side'] == by_id['pb']['side'] == 'back'
+unknown = scene_from_text(GEOMETRY_FIXTURE[:-1] + '(gr_curve (uuid curve) (layer "F.Cu")))')
+assert not unknown['complete']
+assert unknown['warnings'] == [{'uuid': 'curve', 'kind': 'gr_curve', 'reason': 'board drawable not yet supported'}]
+assert scene_from_text(GEOMETRY_FIXTURE[:-1] + '(gr_curve (uuid curve) hide))')['complete']
+
+# Copper ordering comes from canonical names, not numeric enums or layer declaration order.
+span_fixture = '''(kicad_pcb
+ (layers (0 "F.Cu" signal hide) (2 "B.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal)
+ (1 "F.Mask" user) (3 "B.Mask" user) (13 "F.Paste" user))
+ (via (at 0 0) (size 1) (drill .4) (layers "F.Cu" "B.Cu") (uuid through))
+ (via blind (at 2 0) (size 1) (drill .4) (layers "In1.Cu" "B.Cu") (uuid blind))
+ (footprint "Test" (uuid parent) (layer "F.Cu") (at 0 0)
+  (fp_text reference "R9" (hide yes))
+  (pad "1" smd rect (uuid margin) (at 0 0) (size 2 1)
+   (layers "F.Cu" "F.Mask" "F.Paste") (solder_mask_margin .1)
+   (solder_paste_margin -.05) (solder_paste_margin_ratio -.1))
+  (pad "2" np_thru_hole circle (uuid hole) (at 4 0) (size 1 1) (drill .8) (layers "*.Cu" "*.Mask"))))'''
+span = scene_from_text(span_fixture)
+span_ids = {o['uuid']: o for o in span['objects']}
+assert span_ids['through']['layers'] == ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+assert span_ids['blind']['layers'] == ['In1.Cu', 'In2.Cu', 'B.Cu']
+assert all(layer['enabled'] for layer in span['layers'])
+assert span_ids['hole']['layers'] == ['F.Mask', 'B.Mask']
+assert not span_ids['hole']['geometry']['drill']['plated']
+assert span_ids['margin']['ref'] == 'R9'
+assert span_ids['margin']['geometry']['layerPrimitives']['F.Mask']['size'] == [2200, 1200]
+assert span_ids['margin']['geometry']['layerPrimitives']['F.Paste']['size'] == [1500, 700]
+
+# Numeric unknown nets stay numeric; mixed modern names receive deterministic IDs.
+mixed = scene_from_text(GEOMETRY_FIXTURE.replace('(net 1 "GND")', '(net 1 "GND") (net "Z") (net "A")', 1).replace('(net 1) (uuid tr)', '(net 8) (uuid tr)'))
+assert mixed['nets'] == [{'id': 0, 'name': ''}, {'id': 1, 'name': 'GND'}, {'id': 8, 'name': 'Net 8'}, {'id': 9, 'name': 'A'}, {'id': 10, 'name': 'Z'}]
+assert next(o for o in mixed['objects'] if o['uuid'] == 'tr')['net'] == 8
+assert mixed['complete'] and mixed['warnings'][0]['kind'] == 'net'
+zone_named = scene_from_text('(kicad_pcb (zone (uuid z) (net 7) (net_name "Earth")))')
+assert zone_named['nets'] == [{'id': 0, 'name': ''}, {'id': 7, 'name': 'Earth'}]
+
+# Drill offsets rotate once with the world pad angle. Board setup is the last margin fallback.
+offset = scene_from_text(GEOMETRY_FIXTURE.replace('(drill oval .8 .4)', '(drill oval .8 .4 (offset .2 .1))'))
+assert next(o for o in offset['objects'] if o['uuid'] == 'pa')['geometry']['drill']['center'] == [10100, 17800]
+setup_margin = scene_from_text(span_fixture.replace('(via (at 0 0)', '(setup (pad_to_mask_clearance .3)) (via (at 0 0)').replace('(solder_mask_margin .1)', ''))
+assert next(o for o in setup_margin['objects'] if o['uuid'] == 'margin')['geometry']['layerPrimitives']['F.Mask']['size'] == [2600, 1600]
+print('ok board scene bounds, copper spans, NPTH, margins and mixed net syntax')
+
+# Custom pads retain their anchor and transformed primitives, never a replacement rectangle.
+custom_fixture = '''(kicad_pcb (layers (0 "F.Cu" signal))
+ (footprint "Custom" (layer "F.Cu") (uuid custom-fp) (at 10 20 90)
+  (property "Reference" "J2")
+  (pad "1" smd custom (uuid custom) (at 2 0 90) (size .2 .2) (layers "F.Cu")
+   (options (anchor circle))
+   (primitives
+    (gr_line (start 0 0) (end 1 0) (width .2))
+    (gr_poly (pts (xy 0 0) (xy 1 0) (xy 0 1)) (width .1) (fill yes))))))'''
+custom_scene = scene_from_text(custom_fixture)
+custom_pad = next(o for o in custom_scene['objects'] if o['uuid'] == 'custom')
+assert custom_scene['complete']
+assert custom_pad['geometry']['primitive']['shape'] == 'circle'
+assert custom_pad['geometry']['segments'][0] == [10000, 18000, 10000, 17000, 200]
+assert custom_pad['geometry']['rings'] == [[[10000, 18000], [10000, 17000], [11000, 18000]]]
+assert custom_pad['box'] == [9900, 16900, 11050, 18100]
+unsupported_custom = scene_from_text(custom_fixture.replace('(gr_line (start 0 0) (end 1 0) (width .2))', '(gr_curve (width .2))'))
+assert not unsupported_custom['complete']
+assert unsupported_custom['warnings'][0] == {'uuid': 'custom', 'kind': 'pad', 'reason': 'unsupported custom primitive gr_curve'}
+
+# Ordinary pad shapes, tented masks, footprint overrides and hidden parent inheritance.
+for shape in ('circle', 'rect', 'oval', 'roundrect', 'trapezoid'):
+    pad_scene = scene_from_text(span_fixture.replace('smd rect', 'smd ' + shape))
+    assert next(o for o in pad_scene['objects'] if o['uuid'] == 'margin')['geometry']['primitive']['shape'] == shape
+trapezoid = scene_from_text(span_fixture.replace('smd rect', 'smd trapezoid').replace('(uuid margin)', '(uuid margin) (rect_delta .2 .4)'))
+assert next(o for o in trapezoid['objects'] if o['uuid'] == 'margin')['geometry']['primitive']['delta'] == [200, 400]
+tented = scene_from_text(span_fixture.replace('(uuid hole)', '(uuid hole) (tenting (front yes) (back no))'))
+assert next(o for o in tented['objects'] if o['uuid'] == 'hole')['layers'] == ['B.Mask']
+fp_margin = scene_from_text(span_fixture.replace('(uuid parent)', '(uuid parent) (solder_mask_margin .4)').replace('(solder_mask_margin .1)', ''))
+assert next(o for o in fp_margin['objects'] if o['uuid'] == 'margin')['geometry']['layerPrimitives']['F.Mask']['size'] == [2800, 1800]
+hidden_parent = scene_from_text(GEOMETRY_FIXTURE.replace('(uuid fp)', '(uuid fp) (hide yes)'))
+assert all(o['hidden'] for o in hidden_parent['objects'] if o['changeUuid'] == 'fp')
+assert hidden_parent['bounds'] == [875, 1875, 4400, 5400]
+conditional = scene_from_text(span_fixture.replace('(uuid margin)', '(uuid margin) (remove_unused_layers) (keep_end_layers)'))
+assert not conditional['complete'] and 'requires connectivity' in conditional['warnings'][0]['reason']
+
+# Numerical guards apply to parsed geometry too, including reflected and rotated pad positions.
+from kicad_review import geometry_point, pcb_objects
+assert geometry_point(('-0.0005', '0.0005')) == [-1, 1]
+assert geometry_point(('0.0005', '0.0005'), ('0', '0', '90')) == [1, -1]
+assert geometry_arc((0, 0), (1, 0), (2, 0), '.1') == [[0, 0, 2000, 0, 100]]
+assert geometry_arc((1, 0), (0, -1), (-1, 0), '.2')[0][3] < 0
+for bad in ('NaN', 'Infinity', '3000000', '-.25'):
+    try:
+        scene_from_text(GEOMETRY_FIXTURE.replace('(width .25)', '(width ' + bad + ')'))
+        raise AssertionError('invalid track width accepted: ' + bad)
+    except ValueError:
+        pass
+try:
+    geometry_arc((2000000, 0), (-2000000, 0), (0, -2000000), '.1')
+    raise AssertionError('arc budget not enforced')
+except ValueError as error:
+    assert 'budget' in str(error)
+with TemporaryDirectory() as d:
+    board = Path(d) / 'identity.kicad_pcb'
+    board.write_text(GEOMETRY_FIXTURE)
+    semantic_before = pcb_objects(board)
+    identity_scene = board_geometry(board)
+    assert pcb_objects(board) == semantic_before
+    assert all(o['changeUuid'] in semantic_before for o in identity_scene['objects'])
+print('ok board custom pads, shape variants, visibility, margins, numeric guards and semantic identity')
+
+# Unsupported conditional/offset geometry is explicit SVG fallback, never guessed copper.
+hidden_text = scene_from_text(GEOMETRY_FIXTURE.replace('(property "Reference" "J1")', '(property "Reference" "J1" (effects (hide yes)))'))
+assert hidden_text['complete']
+hidden_custom = scene_from_text(custom_fixture.replace('(uuid custom-fp)', '(uuid custom-fp) (hide yes)').replace('(gr_line (start 0 0) (end 1 0) (width .2))', '(gr_curve (width .2))'))
+assert hidden_custom['complete'] and hidden_custom['bounds'] == [0, 0, 0, 0]
+custom_mask = scene_from_text(custom_fixture.replace('(0 "F.Cu" signal)', '(0 "F.Cu" signal) (1 "F.Mask" user)').replace('(layers "F.Cu")', '(layers "F.Cu" "F.Mask") (solder_mask_margin .1)'))
+assert not custom_mask['complete'] and 'offset not yet supported' in custom_mask['warnings'][0]['reason']
+try:
+    scene_from_text(GEOMETRY_FIXTURE.replace('(start 1 2)', '(start 2000000 2)'))
+    raise AssertionError('out-of-range stroked bbox accepted')
+except ValueError:
+    pass
+print('ok board fallback warnings, hidden effects and stroked extent limits')
+
+assert scene_from_text(GEOMETRY_FIXTURE.replace('(uuid fp)', '(uuid fp) (fp_metadata "opaque")'))["complete"]
