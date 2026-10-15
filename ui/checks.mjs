@@ -1369,4 +1369,24 @@ export const CHECKS = [
     S.v='board'; const old=S.v; key(document.body,'ArrowUp',{altKey:true});
     return S.v===old || 'board changed';
   `],
+  ["board scene stale decode does not replace current view", "v=board&x=10&y=20&z=5", `
+    const old = loadBoardScene;
+    let release;
+    loadBoardScene = async key => { await new Promise(r => release = r); return old(key); };
+    const a = draw();
+    const sheet = proj().sheets.find(s => s.svg);
+    if (!sheet) { loadBoardScene = old; release?.(); await a; return "skip"; }
+    S.v = "sheet:" + sheet.path; const b = draw(); release?.();
+    await Promise.all([a, b]); loadBoardScene = old;
+    return S.v.startsWith("sheet:") && !document.querySelector(".board-gl");`],
+  ["board scene loader decodes cached scenes and rejects bad blobs", "v=board", `
+    const gz = async text => { const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(buf))); };
+    D.blobs.sceneOk = await gz(JSON.stringify({version: 1, units: "um", complete: true, warnings: [], bounds: [0, 0, 1, 1], layers: [], nets: [{id: 0, name: ""}], objects: []}));
+    D.blobs.sceneBad = await gz("{not json");
+    D.blobs.sceneShape = await gz('{"version":2}');
+    const fails = [];
+    for (const k of ["sceneBad", "sceneShape"]) { try { await loadBoardScene(k); } catch { fails.push(k); } }
+    const scene = await loadBoardScene("sceneOk");
+    return scene.version === 1 && await loadBoardScene("sceneOk") === scene && fails.length === 2
+      && !boardSceneCache.has("sceneBad") && !boardSceneCache.has("sceneShape") && await loadBoardScene(null) === null || "loader";`],
 ];

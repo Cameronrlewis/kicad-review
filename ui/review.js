@@ -225,6 +225,18 @@ async function svgText(id) {
   }
   return cache[id];
 }
+const boardView = {scenes: null, renderers: [], appearance: null, generation: 0};
+const boardSceneCache = new Map();
+// Scene blobs reuse svgText's gzip decode; the text is JSON, never given to the SVG loader.
+async function loadBoardScene(key) {
+  if (!key) return null;
+  if (!boardSceneCache.has(key)) boardSceneCache.set(key, (async () => {
+    const scene = JSON.parse(await svgText(key));
+    BoardGL.validateScene(scene);
+    return scene;
+  })().catch(error => { boardSceneCache.delete(key); throw error; }));
+  return boardSceneCache.get(key);
+}
 const HIDE_LAYERS = /Fab|Courtyard|CrtYd|Paste|Adhes|Mask|Margin|User|Drawings|Dwgs|Comments|Cmts|Eco/i;
 function layersOn() {
   const p = proj();
@@ -304,7 +316,14 @@ async function draw() {
     await window.Review3D.show(stage, proj(), S);
     return;
   }
-  window.Review3D?.dispose(); if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
+  window.Review3D?.dispose();
+  let scenes = null;
+  const geo = S.v === "board" && view && proj().board.geometry;
+  if (geo) try { scenes = {base: await loadBoardScene(geo.base), head: await loadBoardScene(geo.head)}; }
+    catch (error) { console.warn("Board scene unavailable; showing SVG:", error); }
+  if (my !== gen) return;   // a newer draw owns the stage
+  boardView.scenes = scenes; boardView.generation = my;
+  if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
   else await MODES[S.m](stage, view);
   if (my !== gen) return;
   $("#stage").replaceWith(stage);

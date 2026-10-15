@@ -3322,3 +3322,43 @@ no_ids = scene_from_text(DRAW_FIXTURE.replace('(uuid fp)', '(uuid fp)' + FP_DRAW
 assert len({o['uuid'] for o in no_ids['objects']}) == len(no_ids['objects'])
 assert {o['uuid'] for o in no_ids['objects']} >= {'fp/fp_line:1', 'fp/fp_text:1', 'fp/property:1', 'fp/property:2'}
 print('ok board cubic depth fallback, concave fill paths and stable drawable child IDs')
+
+# Board scenes are embedded as deduplicated gzip blobs; absence or corruption never breaks the report.
+import gzip, base64, contextlib
+from kicad_review import add_blob
+gblobs = {}
+graw = json.dumps(s, separators=(',', ':'), sort_keys=True)
+gkey = add_blob(gblobs, graw)
+assert add_blob(gblobs, graw) == gkey and len(gblobs) == 1
+assert json.loads(gzip.decompress(base64.b64decode(gblobs[gkey]))) == s
+gpage = inline_page('window.REVIEW_DATA = {"projects":[],"blobs":{}};')
+for asset in ('kicad-colors.js', 'board-gl.js'):
+    assert f'src="{asset}"' not in gpage
+assert 'KicadColors' in gpage and 'BoardGL' in gpage
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side in ("base", "head"):
+            write(t, {f"review/G/{side}/erc.json": '{"sheets": []}'})
+        pr = {"dir": "G", "name": "G", "status": "modified"}
+        patch("kicad_review.project_checks", return_value=[]).start()
+        gb = {}
+        assert "geometry" not in kr.build_project(pr, gb, kr.DEFAULT_SETTINGS)["board"] and not gb
+        write(t, {"base/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        gb = {}
+        geo = kr.build_project(pr, gb, kr.DEFAULT_SETTINGS)["board"]["geometry"]
+        assert geo["head"] is None and json.loads(gzip.decompress(base64.b64decode(gb[geo["base"]])))["version"] == 1
+        write(t, {"head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        os.remove("base/G/G.kicad_pcb")
+        geo = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]["geometry"]
+        assert geo["base"] is None and geo["head"]
+        write(t, {"head/G/G.kicad_pcb": "(kicad_pcb (layers (x y z)))"})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            bad = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
+        assert "geometry" not in bad and "geometry unavailable" in err.getvalue()
+    finally:
+        patch.stopall()
+        os.chdir(old_cwd)
+print('ok board scene blobs, added/removed/no/corrupt geometry')
