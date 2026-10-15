@@ -62,5 +62,84 @@
     ...inner.map((_,i)=>`In${i+1}.Cu`),
     "B.Cu","B.Mask","B.SilkS","B.Paste","B.Adhes","B.CrtYd","B.Fab",
     "drawingSheet","grid"];
-  globalThis.KicadColors = {layers,objects,appearanceOrder,drawPriority};
+  // Theme paths: common/settings/color_settings.cpp:55-101,124-243.
+  // Existing renderer tables retain byte RGB; canonical theme data uses unit RGBA.
+  const unit = rgba => rgba.map((v,i) => i < 3 ? v/255 : v);
+  const layerThemeKeys = {};
+  for (const layer of appearanceOrder) {
+    let key;
+    if (layer.endsWith('.Cu')) key = 'copper.' + layer.split('.')[0].toLowerCase();
+    else if (layer.startsWith('User.')) key = 'user_' + layer.slice(5);
+    else key = layer.toLowerCase().replace('.', '_');
+    layerThemeKeys[layer] = 'board.' + key;
+  }
+  const themeDefaults = {};
+  for (const [layer,key] of Object.entries(layerThemeKeys)) themeDefaults[key] = unit(layers[layer]);
+  const objectThemeKeys = {
+    anchor:'anchor', lockedShadow:'locked_shadow', conflictsShadow:'conflicts_shadow',
+    auxItems:'aux_items', background:'background', cursor:'cursor', drcError:'drc_error',
+    drcWarning:'drc_warning', drcExclusion:'drc_exclusion', grid:'grid', gridAxes:'grid_axes',
+    platedHoles:'pad_plated_hole', nonPlatedHoles:'plated_hole', ratsnest:'ratsnest',
+    selection:'selection', viaHoles:'via_hole', viaHolewalls:'via_hole_walls',
+    drawingSheet:'worksheet', pageLimits:'page_limits', boardArea:'outline_area',
+    netnames:'track_net_names', padNetnames:'pad_net_names', viaNetnames:'via_net_names', points:'points'
+  };
+  for (const [name,key] of Object.entries(objectThemeKeys)) themeDefaults['board.'+key] = unit(objects[name]);
+  // Numeric schematic defaults: builtin_color_themes.h:31-90 (portable shadow variant).
+  const schematic = {
+    "anchor":[0,0,255,1],
+    "aux_items":[0,0,0,1],
+    "background":[245,244,239,1],
+    "hovered":[0,0,255,1],
+    "brightened":[255,0,255,1],
+    "bus":[0,0,132,1],
+    "bus_junction":[0,0,132,1],
+    "component_body":[255,255,194,1],
+    "component_outline":[132,0,0,1],
+    "cursor":[15,15,15,1],
+    "dnp_marker":[220,9,13,0.85],
+    "excluded_from_sim":[194,194,194,0.95],
+    "erc_error":[230,9,13,0.8],
+    "erc_warning":[209,146,0,0.8],
+    "erc_exclusion":[194,194,194,0.8],
+    "fields":[132,0,132,1],
+    "grid":[181,181,181,1],
+    "grid_axes":[0,0,132,1],
+    "hidden":[194,194,194,1],
+    "junction":[0,150,0,1],
+    "label_global":[132,0,0,1],
+    "label_hier":[114,86,0,1],
+    "label_local":[15,15,15,1],
+    "netclass_flag":[72,72,72,1],
+    "drag_net_collision":[230,9,13,0.8],
+    "rule_area":[255,0,0,1],
+    "no_connect":[0,0,132,1],
+    "note":[0,0,194,1],
+    "private_note":[72,72,255,1],
+    "note_background":[0,0,0,0],
+    "pin":[132,0,0,1],
+    "pin_name":[0,100,100,1],
+    "pin_number":[169,0,0,1],
+    "reference":[0,100,100,1],
+    "sheet":[132,0,0,1],
+    "sheet_background":[255,255,255,0],
+    "sheet_filename":[114,86,0,1],
+    "sheet_fields":[132,0,132,1],
+    "sheet_label":[0,100,100,1],
+    "sheet_name":[0,100,100,1],
+    "value":[0,100,100,1],
+    "wire":[0,150,0,1],
+    "worksheet":[132,0,0,1],
+    "page_limits":[181,181,181,1],
+    "op_voltages":[132,0,50,1],
+    "op_currents":[224,0,12,1],
+    "shadow":[102,178.5,255,0.8]
+  };
+  const schematicThemeKeys = {};
+  for (const [name,rgba] of Object.entries(schematic)) {
+    schematicThemeKeys[name] = 'schematic.' + name;
+    themeDefaults['schematic.' + name] = unit(rgba);
+  }
+  globalThis.KicadColors = {layers,objects,appearanceOrder,drawPriority,
+    themeDefaults,layerThemeKeys,schematicThemeKeys};
 })();
