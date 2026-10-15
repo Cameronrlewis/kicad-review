@@ -80,6 +80,13 @@ assert "http://" not in html and "https://fonts" not in html
 assert 'src="theme.js"' not in html
 assert "kr.theme" in html and "window.KRTheme" in html
 assert html.index("kr.theme") < html.index("<style>")
+assert '<!-- KR_ICONS -->' not in html
+assert 'id="kr-zoom-in-dark"' in html and 'id="kr-theme"' in html
+assert 'href="icons/' not in html and 'src="icons/' not in html
+assert 'CC-BY-SA-4.0' in html
+for name in ('zoom_in.svg', 'zoom_out.svg', 'zoom_fit_in_page.svg'):
+    assert name in open('ui/icons/LICENSE', encoding='utf-8').read()
+assert 'builtin_color_themes.h:160' in open('NOTICE', encoding='utf-8').read()
 assert "data-theme-toggle" in html
 print("ok")
 

@@ -2077,7 +2077,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
   const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
   const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
-    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '');
+    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
   assert.equal(createHash('sha256').update(current).digest('hex'), '82be67bc0030511bc6cca251252770b78a742053b98f7e08d74ba0e027824daa');
   const restore = shareCreationFetch();
@@ -2928,4 +2928,10 @@ test('every frame carries early shared theme script and a labeled toggle',()=>{
     assert.ok(html.indexOf('kr.theme') < html.indexOf('<style>'));
     assert.match(html,/aria-label="Switch to light theme"/);
   }
+});
+
+test('site embeds sprite and theme icon without external asset URLs',()=>{
+  const html=signedOutPage();
+  assert.match(html,/id="kr-theme"/); assert.match(html,/href="#kr-theme"/);
+  assert.ok(!html.includes('href="icons/'));
 });

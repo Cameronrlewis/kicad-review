@@ -93,3 +93,9 @@
   --sch-ink-006464:#006464; --sch-ink-a90000:#a90000;
   --sch-ink-840032:#840032; --sch-ink-e0000c:#e0000c;
 }
+
+.icon { width:var(--icon-size); height:var(--icon-size); flex:none; vertical-align:middle; }
+.icon-light { display:none; }
+:root[data-theme="light"] .icon-light { display:inline-block; }
+:root[data-theme="light"] .icon-dark { display:none; }
+.theme-toggle { display:inline-flex; align-items:center; gap:var(--sp-1); white-space:nowrap; }

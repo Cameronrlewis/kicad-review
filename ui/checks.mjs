@@ -1437,4 +1437,20 @@ export const CHECKS = [
       r.dispose(); r.dispose();
       return failures.length ? failures.join() : true;
     } finally { canvas.remove(); }`],
+  ["Stage 1 icon references resolve in-file in both themes", "", `
+  const old=KRTheme.get();
+  try {
+    for(const theme of ['dark','light']) {
+      KRTheme.set(theme);
+      for(const use of document.querySelectorAll('button use')) {
+        if(!document.querySelector(use.getAttribute('href'))) return 'unresolved '+use.getAttribute('href');
+      }
+      const b=document.querySelector('#zoombar [data-z="1.25"]');
+      const icons=[...b.querySelectorAll('svg')].filter(s=>getComputedStyle(s).display!=='none');
+      if(icons.length!==1 || !icons[0].querySelector('use').getAttribute('href').endsWith(theme)) return 'palette';
+      const box=icons[0].getBBox(); if(!box.width || !box.height) return 'empty icon';
+      if(!b.getAttribute('aria-label') || !b.title) return 'unlabeled';
+    }
+    return true;
+  } finally { KRTheme.set(old); }`],
 ];

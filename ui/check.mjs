@@ -1,7 +1,7 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
 // Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark] [--width N]
 import { spawn } from "node:child_process";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CHECKS } from "./checks.mjs";
@@ -50,6 +50,8 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   await send("Page.navigate", { url: `file://${page}#${hash}` });
   const ready = await evaluate("new Promise((r, reject) => { const deadline = performance.now() + 10000, t = () => window.reviewReady ? r(true) : performance.now() > deadline ? reject(new Error('reviewReady timed out')) : setTimeout(t, 50); t(); })");
   if (ready.exceptionDetails || errors.length) return [`FAIL startup ${name} -> ${ready.exceptionDetails?.exception?.description || errors.join(' | ')}`, true];
+  // The raw dev template has no inlined sprite (inline_page adds it); inject it so icons resolve.
+  await evaluate(`document.getElementById("kr-icons") || document.body.insertAdjacentHTML("afterbegin", ${JSON.stringify(readFileSync(new URL("./icons/sprite.svg", import.meta.url), "utf8"))})`);
   if (name === "3D camera movement is linked and leaving disposes" && await evaluate("!!window.Review3D?.state?.cameras?.length").then(r => r.result?.value)) {
     const r = (await evaluate(`(()=>{const r=document.querySelector('#stage canvas').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2,before:window.Review3D.state.cameras.map(c=>c.position.toArray())}})()`)).result.value;
     await send("Input.dispatchMouseEvent", { type: "mousePressed", x: r.x, y: r.y, button: "left", clickCount: 1 });
