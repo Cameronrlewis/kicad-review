@@ -96,13 +96,13 @@
       label.dataset.action=action; label.dataset.glyph=style.glyph; label.dataset.dash=style.dash;
       label.textContent = `${style.glyph} ${style.word}`;
       label.style.setProperty('--mark-color',`rgb(${color.join(',')})`);
-      label.style.setProperty('--mark-backing',M.contrast(color,[9,12,16])>=4.5?'#090c10':'#fff');
+      label.style.setProperty('--mark-backing',`rgb(${M.pickHalo(color).join(',')})`);
       return label;
     }
     for (const action of Object.keys(M.styles)) legend.append(labelFor(action,'board-mark-key'));
     hud.append(legend);
     const clips = state.m === 'wipe' ? clipRects(pane.canvas.width,pane.canvas.height,state.wipe) : null;
-    function effect(action, alpha, clip, selection=false) {
+    function effect(action, alpha, clip, selection=false, hatch=false) {
       const p = pane.markProgram, t = pane.targets[0];
       gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,t.width,t.height);
       gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST); gl.colorMask(true,true,true,true);
@@ -114,13 +114,14 @@
       gl.uniform1f(gl.getUniformLocation(p,'dpr'),globalThis.devicePixelRatio || 1);
       gl.uniform1f(gl.getUniformLocation(p,'groupAlpha'),alpha);
       gl.uniform3fv(gl.getUniformLocation(p,'markColor'),selection?[.9,.94,1]:palette[action].map(v=>v/255));
+      gl.uniform3fv(gl.getUniformLocation(p,'haloColor'),selection?[0,0,0]:M.pickHalo(palette[action]).map(v=>v/255));
       gl.uniform1i(gl.getUniformLocation(p,'action'),selection?0:Object.keys(M.styles).indexOf(action));
-      gl.uniform1i(gl.getUniformLocation(p,'style'),!selection && look.markStyle==='recolour'?1:0);
+      gl.uniform1i(gl.getUniformLocation(p,'style'),hatch?1:0);
       gl.drawArrays(gl.TRIANGLES,0,3); gl.disable(gl.SCISSOR_TEST);
     }
     for (const side of pane.sides) {
       const scene = pane.scenes[side]; if (!scene) continue;
-      const alpha = state.m==='blend' && side==='head' ? state.blend : 1;
+      const alpha = 1;
       if (!alpha) continue;
       const group = document.createElement('div'); group.className='board-mark-group'; group.style.opacity=alpha;
       if (clips) {
@@ -134,7 +135,8 @@
           if (actionFor(o,actions)!==action) return false; visible.add(o); return true;
         }});
         if (!visible.size) continue;
-        if (look.markStyle!=='recolour' || action==='removed') effect(action,alpha,clips?.[side]);
+        if (look.markStyle==='recolour' && action==='removed') effect(action,alpha,clips?.[side],false,true);
+        effect(action,alpha,clips?.[side]);
         const identities = new Set();
         for (const object of visible) for (const id of object.changeIds || []) {
           if (actions.get(id)!==action || identities.has(id)) continue;

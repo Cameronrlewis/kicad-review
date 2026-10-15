@@ -14,13 +14,14 @@
   function pickColor(action,bg) {
     return candidates[action].reduce((best,c)=>contrast(c,bg)>contrast(best,bg)?c:best);
   }
+  const pickHalo = color => contrast(color,[0,0,0])>=contrast(color,[255,255,255])?[0,0,0]:[255,255,255];
   const fragmentSource = `#version 300 es
 precision highp float;
 in vec2 uv;out vec4 outColor;
 uniform sampler2D maskImage;
 uniform vec2 size;
 uniform float dpr,groupAlpha;
-uniform vec3 markColor;
+uniform vec3 markColor,haloColor;
 uniform int action,style;
 float coverage(vec2 p){
   if(any(lessThan(p,vec2(0)))||any(greaterThan(p,vec2(1))))return 0.;
@@ -41,11 +42,11 @@ void main(){
     (length(mod(css,vec2(6.))-vec2(3.))<1.5?1.:0.);
   if(style==1){
     if(action!=1||own<.5||mod(css.x+css.y,8.)>2.)discard;
-    outColor=vec4(vec3(.035,.045,.06),.85*groupAlpha);return;
+    outColor=vec4(haloColor,groupAlpha);return;
   }
   if(halo<.5)discard;
-  outColor=vec4(vec3(.035,.045,.06),groupAlpha);
+  outColor=vec4(haloColor,groupAlpha);
   if(core>.5&&pattern>.5)outColor=vec4(markColor,groupAlpha);
 }`;
-  window.BoardMarks = {styles,contrast,pickColor,fragmentSource};
+  window.BoardMarks = {styles,contrast,pickColor,pickHalo,fragmentSource};
 })();

@@ -219,6 +219,15 @@ function applyAppearance(snapshot) {
   for (const root of appearanceSchematics) setSchematicAppearance(root, resolved);
   for (const vp of document.querySelectorAll('#stage .vp.board')) vp.style.background = cssAppearance(resolved.boardBackground);
   for (const vp of document.querySelectorAll('#stage .vp.sheet')) vp.style.background = cssAppearance(resolved.schematicBackground);
+  for (const vp of document.querySelectorAll('#stage .vp')) {
+    const sheet=vp.classList.contains('sheet');
+    const palette=sheet?resolved.marks.schematic:KrAppearance.markPalette(S.m==='overlay'?[1,1,1,1]:resolved.boardBackground);
+    vp.style.setProperty('--sch-background',cssAppearance(resolved.schematicBackground));
+    for(const [action,mark] of Object.entries(palette)) {
+      vp.style.setProperty('--mark-'+action,cssAppearance(mark.color));
+      vp.style.setProperty('--halo-'+action,cssAppearance(mark.halo));
+    }
+  }
 }
 const boardAppearance = () => Appearance.get();
 // A layer eye keeps the l= hash list in step, so links and the Appearance dock agree.
@@ -847,10 +856,28 @@ function afterDraw(view) {
       const b = rowBox(r, side); if (!b) continue;
       const m = document.createElement("div");
       m.className = `marker ${r.action || "violation"}${r.sel ? " sel" : ""}`;
-      m.dataset.action = r.action || "violation"; m.dataset.glyph = r.sel ? "◎" : (GLYPH[r.action] || "!");
+      m.dataset.action = r.action || "violation";
+      const semantic=BoardMarks.styles[r.action];
+      m.dataset.glyph = r.sel ? "◎" : (semantic?.glyph || "!");
+      m.dataset.dash = r.sel ? "solid" : (semantic?.dash || "dotted");
+      m.dataset.label = r.sel ? "◎" : semantic ? `${semantic.glyph} ${semantic.word}` : "!";
+      m.setAttribute('role','img');
+      m.setAttribute('aria-label',r.sel ? 'Selected '+(r.ref||r.id) : (semantic?.word||'Violation')+' '+(r.ref||r.id));
       Object.assign(m.style, { left: `${b[0] * PX}px`, top: `${b[1] * PX}px`, width: `${(b[2] - b[0]) * PX}px`, height: `${(b[3] - b[1]) * PX}px` });
       w.appendChild(m);
     }
+  }
+  // Legends live outside the transformed/tinted revision stacks, like the marks.
+  for(const vp of document.querySelectorAll('#stage .vp')) {
+    vp.querySelector(':scope > .diff-mark-legend')?.remove();
+    if(vp.querySelector('.board-marks')) continue;
+    const legend=document.createElement('div'); legend.className='diff-mark-legend';
+    for(const [action,style] of Object.entries(BoardMarks.styles)) {
+      const key=document.createElement('span'); key.dataset.action=action;
+      key.dataset.glyph=style.glyph; key.dataset.dash=style.dash;
+      key.textContent=style.glyph+' '+style.word; legend.append(key);
+    }
+    vp.append(legend);
   }
   drawPins();
 }
