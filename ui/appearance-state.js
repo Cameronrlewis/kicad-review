@@ -94,7 +94,9 @@ function parseTheme(text) {
     const num = (v, lo, hi) => Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : undefined;
     for (const group of ["layers","objects","nets"]) if (plain(input[group])) for (const [name, s] of Object.entries(input[group])) {
       if (!plain(s) || name === "__proto__" || (group !== "nets" && !Object.hasOwn(out[group], name))) continue;
+      if (group === "nets" && (name.length > 200 || (!Object.hasOwn(out.nets, name) && Object.keys(out.nets).length >= 5000))) continue;
       const t = Object.hasOwn(out[group], name) ? out[group][name] : (out[group][name] = {});
+      if (group === "nets" && s.color === null) delete t.color;   // "Use layer colour"
       if (typeof s.visible === "boolean") t.visible = s.visible;
       const o = num(s.opacity, 0, 1); if (o !== undefined && group !== "nets") t.opacity = o;
       if (Array.isArray(s.color) && s.color.length === 4 && s.color.every(Number.isFinite))
@@ -205,6 +207,7 @@ function createStore({viewerId,storage=()=>window.localStorage}) {
       if(own(next.objectOpacity,key)&&own(style,'opacity')&&!own(partial.objectOpacity||{},key)) next.objectOpacity={...next.objectOpacity,[key]:style.opacity};
     }
     for(const net of Object.keys(partial.nets||{})) {
+      if(partial.nets[net]?.color===null) { next.netColors={...next.netColors}; delete next.netColors[net]; continue; }
       const style=Object.hasOwn(legacy.nets,net)&&legacy.nets[net];
       if(style?.color&&!own(partial.netColors||{},net)) next.netColors={...next.netColors,[net]:style.color.map((v,i)=>i<3?v/255:v)};
     }
