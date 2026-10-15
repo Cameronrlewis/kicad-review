@@ -186,12 +186,6 @@
             if (!vp.clientWidth || !vp.clientHeight || !(state.z > 0)) continue;
             const dpr = globalThis.devicePixelRatio || 1, width = Math.round(vp.clientWidth*dpr), height = Math.round(vp.clientHeight*dpr);
             renderer.setCamera({...state,width:vp.clientWidth,height:vp.clientHeight,dpr}); renderer.setAppearance(look);
-            // Side is already one scene per canvas: no offscreen copy or compositor needed.
-            if (sideMode) {
-              renderer.setScene(pane.scenes[pane.sides[0]],pane.sides[0]);
-              renderer.draw({background});
-              continue;
-            }
             if (!pane.targets || pane.targets[0].width !== width || pane.targets[0].height !== height) {
               pane.targets?.forEach(t=>deleteTarget(gl,t)); pane.targets = [];
               pane.targets.push(target(gl,width,height)); pane.targets.push(target(gl,width,height));
