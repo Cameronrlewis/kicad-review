@@ -2135,6 +2135,7 @@ export const CHECKS = [
     if(boardDiff.pick(pane.vp,e,null)) return 'hidden net hit';
     look={...look,nets:{},layers:{...look.layers,'F.Cu':{visible:false,opacity:0}}}; boardDiff.render();
     if(boardDiff.pick(pane.vp,e,null)) return 'hidden layer hit';
+    look=glAppearance(); S.m='overlay'; S.s='p5-head'; markSelected(); boardDiff.render();
     return true;
   `],
   ["board geometry mouse input selects and pin Thermal", "v=board&m=side", `
@@ -2190,6 +2191,9 @@ export const CHECKS = [
     const anchor=geometryAnchor({object,side:'base',point:[158.5,77.5]});
     const restored=JSON.parse(JSON.stringify(anchor)), resolved=resolveAnchor(restored);
     if(resolved.detached || resolved.side!=='base') return 'removed geometry failed re-anchor';
+    const controller=boardDiff; boardDiff=null;
+    try { if(resolveAnchor(restored).detached) return 'removed leaf anchor depends on mounted board'; }
+    finally { boardDiff=controller; }
     S.s=row.id; S.wipe=1; apply();
     acceptThreads([{id:'thermal-removed',resolved:false,anchor:restored,comments:[]}]);
     let pin=pane.hud.querySelector('.pin'); if(!pin) return 'removed pin absent';
@@ -2205,5 +2209,69 @@ export const CHECKS = [
     if(document.querySelector('#stage .pin')) return 'hidden layer pin remains';
     Appearance.patch({layers:{[anchor.layer]:layers[anchor.layer]}}); await draw(); drawPins();
     return !!document.querySelector('#stage .pin') || 'pin did not recover';
+  `],
+  ["board geometry moved selection and revision pin lifecycle", "v=board&m=side", `
+    boardDiff?.dispose(); document.querySelector('#stage').replaceChildren();
+    const object=(uuid,x,ids=[])=>({uuid,changeUuid:uuid,kind:'pad',ref:null,changeIds:ids,box:[x-1000,9000,x+1000,11000],
+      geometry:{primitive:{shape:'circle',center:[x,10000],size:[2000,2000],angle:0}},
+      layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false});
+    const scene=objects=>({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,24000,20000],
+      layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects});
+    const scenes={base:scene([object('p5-moved',6000,['p5-move']),object('p5-unchanged',12000)]),
+      head:scene([object('p5-moved',18000,['p5-move']),object('p5-unchanged',12000),object('p5-added',21000,['p5-add'])])};
+    proj().changes.push({id:'p5-move',kind:'pad',action:'modified',where:{board:true}},
+      {id:'p5-add',kind:'pad',action:'added',where:{board:true}});
+    Object.assign(S,{x:12,y:10,z:20,s:null,m:'side'}); renderPanel();
+    boardDiff=BoardDiff.mount({stage:document.querySelector('#stage'),scenes,changes:proj().changes,state:S,appearance:glAppearance,attachPanZoom});
+    boardDiff.scenes=scenes; boardDiff.render();
+    const eventAt=(pane,p)=>{const r=pane.vp.getBoundingClientRect(),q=pane.renderer.project(p);return{clientX:r.left+q[0],clientY:r.top+q[1]};};
+    const uploads=boardDiff.panes.map(p=>p.renderer.stats.uploads);
+    for(const [side,x] of [['base',6],['head',18]]) {
+      const pane=boardDiff.panes.find(p=>p.sides.includes(side)), hit=boardDiff.pick(pane.vp,eventAt(pane,[x,10]),null);
+      if(hit?.id!=='p5-move' || hit.side!==side) return 'moved '+side+' hit';
+      pickAt(pane.vp,eventAt(pane,[x,10])); if(S.s!=='p5-move') return 'moved row selection';
+    }
+    if(boardDiff.panes.some((p,i)=>p.renderer.stats.uploads!==uploads[i])) return 'selection rebuilt scene buffers';
+    const anchor=object=>geometryAnchor({object,side:'head',point:[12,10]});
+    (proj().objects ||= []).push({uuid:'p5-rotated',kind:'footprint',ref:'p5-R',side:'head',pos:[12,10,90],pos_before:[12,10,0]});
+    const rotated={...anchor(scenes.head.objects[1]),uuid:'p5-rotated',kind:'footprint',ref:'p5-R'};
+    acceptThreads([...['p5-moved','p5-unchanged','p5-added'].map((uuid,i)=>({id:'p5-thread-'+i,resolved:false,
+      anchor:anchor(scenes.head.objects.find(o=>o.uuid===uuid)),comments:[]})),
+      {id:'p5-rotation',resolved:false,anchor:rotated,comments:[]}]);
+    const pins=(pane,id)=>[...pane.hud.querySelectorAll('.pin')].filter(p=>p.dataset.thread===id);
+    const base=boardDiff.panes[0],head=boardDiff.panes[1];
+    if(pins(base,'p5-thread-0').length!==1 || pins(head,'p5-thread-0').length!==1) return 'moved pins missing';
+    for(const [pane,x] of [[base,6],[head,18]]) {
+      const p=pins(pane,'p5-thread-0')[0], q=pane.renderer.project([x,10]);
+      if(Math.abs(parseFloat(p.style.left)-q[0])>.1) return 'moved before/head projection';
+    }
+    if(pins(base,'p5-thread-1').length!==1 || pins(head,'p5-thread-1').length!==1 || pins(base,'p5-thread-2').length) return 'unchanged/added Side policy';
+    const movedAnchor=S.threads[0].anchor;
+    S.m='overlay'; boardDiff.dispose(); document.querySelector('#stage').replaceChildren();
+    boardDiff=BoardDiff.mount({stage:document.querySelector('#stage'),scenes,changes:proj().changes,state:S,appearance:glAppearance,attachPanZoom});
+    boardDiff.scenes=scenes; apply();
+    const pane=boardDiff.panes[0];
+    if(pins(pane,'p5-thread-0').length!==2 || pins(pane,'p5-thread-1').length!==1) return 'overlay pin deduplication';
+    if(pins(pane,'p5-rotation').length!==1) return 'rotation-only pins must deduplicate at the same XY';
+    S.m='blend'; S.blend=0; apply();
+    if(pins(pane,'p5-thread-2').length || pins(pane,'p5-thread-0').length!==1) return 'zero head alpha pins';
+    S.m='wipe'; S.wipe=.5; apply();
+    if(pins(pane,'p5-thread-0').length!==2) return 'moved pins on both Wipe sides';
+    const unchanged=geometryAnchor({object:scenes.head.objects[1],side:'head',point:[12,10]});
+    if(unchanged.uuid!=='p5-unchanged' || unchanged.target!=='object') return 'unchanged leaf identity';
+    scenes.head.objects.splice(0,1); scenes.base.objects.splice(0,1); S.t='threads'; drawPins(); renderPanel();
+    return !pins(pane,'p5-thread-0').length && !!document.querySelector('#panel .threads-detached')
+      && !!resolveAnchor(movedAnchor).detached || 'detached thread lost';
+  `],
+  ["board address preserves inactive 3D keys and explicit selection camera", "", `
+    const row=proj().changes.find(c=>c.where?.board);
+    const q=new URLSearchParams('p=0&v=board&m=wipe&x=10&y=20&z=5&t=changes&l=F_Cu&c=1,2,3,4,5,6&h=silk');
+    q.set('s',row.id);
+    await applyState(decodeState(q.toString()));
+    if(S.x!==10 || S.y!==20 || S.z!==5 || S.s!==row.id) return 'explicit camera recentered';
+    const back=new URLSearchParams(encodeState());
+    for(const [key,value] of q) if(key!=='t' && back.get(key)!==value) return 'lost address key '+key;
+    await applyState({...decodeState(q.toString()),m:'semantic'});
+    return S.m==='semantic' && document.querySelector('#modes [data-mode="semantic"]').textContent.includes('Changes only');
   `],
 ];

@@ -833,6 +833,7 @@ function afterDraw(view) {
       w.appendChild(m);
     }
   }
+  refreshAppearance();
   drawPins();
 }
 function drawPins() {
@@ -851,7 +852,7 @@ function drawPins() {
         if (!boardDiff.sidesAt(pane.vp,p).includes(side)) continue;
         const look=glAppearance(), layer=t.anchor.layer;
         if (layer && (look.layers?.[layer]?.visible === false || look.layers?.[layer]?.opacity === 0)) continue;
-        const key=boardDiff.panes.indexOf(pane)+":"+t.id+":"+p.join(",");
+        const key=boardDiff.panes.indexOf(pane)+":"+t.id+":"+p.slice(0,2).join(",");
         if (seen.has(key)) continue; seen.add(key);
       }
       const kind = t.issue ? "issue" : t.resolved ? "resolved" : t.anchor.severity === "blocking" ? "blocking" : "comment";
@@ -1257,8 +1258,8 @@ function encodeState(s = S) {
   if (s.s) q.set("s", s.s);
   if (s.t && s.t !== "changes") q.set("t", s.t);
   if (s.layers) q.set("l", s.layers.join(","));
-  if (s.v === "3d" && Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
-  if (s.v === "3d" && s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
+  if (Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
+  if (s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
