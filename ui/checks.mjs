@@ -1151,4 +1151,46 @@ export const CHECKS = [
     const text = waiverSnippet({waiver_key:key, description:'x\\r\\n' + String.fromCharCode(0, 127) + '<b>x</b>'}, 'erc');
     const match = text.split("\\n").find(l => l.startsWith("match = ")).slice(8);
     return JSON.parse(match) === key && !/[\\u0000-\\u0008\\u000b-\\u001f\\u007f]/.test(text) && text.includes('# x  ') || text;`],
+  ["SCH6 hierarchy page order boundaries legacy and escaped labels", "", `
+    const p = proj(), source = p.sheets.find(s => s.svg);
+    if (!source) throw Error('fixture needs a schematic');
+    p.sheets = [
+      {...source, path:'/', parent:null, name:'Root', page:'1'},
+      {...source, path:'/ten/', parent:'/', name:'Ten', page:'10'},
+      {...source, path:'/two/', parent:'/', name:'<b>Two</b>', page:'2'},
+      {...source, path:'/two/sub/', parent:'/two/', name:'Sub', page:'3'},
+      {...source, path:'/a10/', parent:'/', name:'A10', page:'A10'},
+      {...source, path:'/a2/', parent:'/', name:'A2', page:'A2'},
+      {...source, path:'/old/', parent:'/', name:'Legacy', page:undefined}
+    ];
+    S.v = 'sheet:/two/sub/'; renderNav();
+    const text = document.querySelector('#nav').textContent;
+    if (!text.includes('<b>Two</b> (page 2)') || document.querySelector('#nav .name b')) return 'label escaping';
+    if (orderedSheets().map(s=>sheetNumber(s)).join(',') !== '1,2,3,7,10,A2,A10') return 'page order';
+    navigateSheet('parent'); if (S.v !== 'sheet:/two/') return 'parent';
+    navigateSheet(-1); if (S.v !== 'sheet:/') return 'previous';
+    navigateSheet(-1); if (S.v !== 'sheet:/') return 'first boundary';
+    S.v = 'sheet:/a10/'; renderNav(); navigateSheet(1);
+    if (S.v !== 'sheet:/a10/') return 'last boundary';
+    const ten=p.sheets.find(s=>s.path==='/ten/'), two=p.sheets.find(s=>s.path==='/two/');
+    ten.page='2';
+    if(compareSheetPages(ten,two)>=0) return 'duplicate-page traversal tie';
+    const row = document.querySelector('#nav [data-view="sheet:/a10/"]');
+    return row?.getAttribute('aria-current') === 'true'
+      && parseInt(getComputedStyle(row.querySelector('.name')).fontWeight) >= 600
+      && text.includes('Legacy (page 7)') || 'active/legacy';
+  `],
+  ["SCH6 sheet keys leave editors and board keys alone", "", `
+    const p=proj(), source=p.sheets.find(s=>s.svg);
+    p.sheets=[{...source,path:'/',parent:null,page:'1'},
+              {...source,path:'/c/',parent:'/',page:'2'}];
+    S.v='sheet:/'; renderNav();
+    const key=(target,key,extra={})=>target.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...extra}));
+    key(document.body,'PageDown'); if(S.v!=='sheet:/c/') return 'next key';
+    key(document.body,'ArrowUp',{altKey:true}); if(S.v!=='sheet:/') return 'parent key';
+    const input=document.createElement('div'); input.contentEditable='true'; document.body.append(input);
+    key(input,'PageDown'); input.remove(); if(S.v!=='sheet:/') return 'editor stolen';
+    S.v='board'; const old=S.v; key(document.body,'ArrowUp',{altKey:true});
+    return S.v===old || 'board changed';
+  `],
 ];

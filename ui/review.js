@@ -125,19 +125,39 @@ function renderHeader() {
     <span class="verdict ${v.failing ? "fail" : "pass"}">${v.failing ? `✕ ${v.failing} check${v.failing > 1 ? "s" : ""} failing` : "✓ checks passing"}${v.newErrors ? ` · ${v.newErrors} new error${v.newErrors > 1 ? "s" : ""}` : ""}</span>
     ${L.run ? link(L.run, "Workflow run") : ""}`;
 }
+function sheetNumber(sheet) {
+  return sheet.page == null || !String(sheet.page).trim()
+    ? String(proj().sheets.indexOf(sheet) + 1) : String(sheet.page);
+}
+function compareSheetPages(a, b) {
+  const x = sheetNumber(a), y = sheetNumber(b), integer = s => /^[+-]?\d+$/.test(s);
+  let order;
+  if (integer(x) && integer(y)) order = x === y ? 0 : (BigInt(x) < BigInt(y) ? -1 : BigInt(x) > BigInt(y) ? 1 : 0);
+  else if (integer(x) !== integer(y)) order = integer(x) ? -1 : 1;
+  else order = x.localeCompare(y, "en", { numeric: true, sensitivity: "variant" });
+  return order || proj().sheets.indexOf(a) - proj().sheets.indexOf(b);
+}
+function orderedSheets() { return [...proj().sheets].sort(compareSheetPages); }
+function navigateSheet(direction) {
+  if (!String(S.v).startsWith("sheet:")) return;
+  const pages = orderedSheets(), i = pages.findIndex(s => `sheet:${s.path}` === S.v);
+  if (i < 0) return;
+  const page = direction === "parent" ? pages.find(s => s.path === pages[i].parent) : pages[i + direction];
+  if (page) select(`sheet:${page.path}`);
+}
 function renderNav() {
   const p = proj();
-  const kids = parent => p.sheets.filter(s => s.parent === parent);
+  const kids = parent => p.sheets.filter(s => s.parent === parent).sort(compareSheetPages);
   const sheetItems = (parent, depth) => kids(parent).map(s => {
     const view = `sheet:${s.path}`;
     return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}"
-      aria-current="${S.v === view}"><span class="name" title="${esc(s.name)}">${s.status === "unchanged" ? "" : "● "}${esc(s.name)}</span>${chips(counts(p, view))}</button>
+      aria-current="${S.v === view}"><span class="name" title="${esc(s.name)}">${s.status === "unchanged" ? "" : "● "}${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${chips(counts(p, view))}</button>
       ${kids(s.path).length ? `<ul>${sheetItems(s.path, depth + 1)}</ul>` : ""}</li>`;
   }).join("");
   $("#nav").innerHTML = `
     <label class="projsel">Project <select id="proj">${D.projects.map((q, i) =>
       `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label>
-    <h3>Schematic</h3><ul class="tree">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
+    <h3>Schematic</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
     <h3>Board</h3><ul class="tree">${p.board.layers.length || p.board.changed
       ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
           <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
@@ -807,6 +827,11 @@ function step(dir) {
   goTo(next); document.querySelector(`#panel [data-id="${next}"]`)?.scrollIntoView({ block: "nearest" });
 }
 document.addEventListener("keydown", e => {
+  if (e.target.closest?.('input,select,textarea,[contenteditable]:not([contenteditable="false"]),dialog[open]')) return;
+  if (String(S.v).startsWith("sheet:") && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+    const parent = e.altKey && e.key === "ArrowUp", next = !e.altKey && e.key === "PageDown", previous = !e.altKey && e.key === "PageUp";
+    if (parent || next || previous) { e.preventDefault(); navigateSheet(parent ? "parent" : next ? 1 : -1); return; }
+  }
   if (e.target.closest?.("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const arrow = e.key === "ArrowDown" || e.key === "ArrowUp";
   if (arrow && e.target.closest?.("#panel, button, [role=slider]")) return;   // leave arrows to scrolling and widgets
