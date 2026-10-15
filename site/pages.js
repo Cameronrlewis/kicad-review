@@ -11,6 +11,19 @@ export function escapeHtml(value) {
 const e = escapeHtml;
 const repoPath = (owner, repo) => `/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 const link = (href, label, className = '') => `<a${className ? ` class="${className}"` : ''} href="${e(href)}">${e(label)}</a>`;
+export function siteBadge(value, label) {
+  const states = {
+    pass: ['✓', 'passing'], fail: ['✕', 'failing'], new: ['+', 'New'],
+    error: ['✕', 'Error'], removed: ['−', 'Removed'], modified: ['~', 'Modified'],
+    waived: ['○', 'Waived'], notrun: ['·', 'not recorded'],
+  };
+  const key = Object.hasOwn(states, value) ? value : 'notrun';
+  const [glyph, word] = states[key];
+  return `<span class="status status-${key}">${glyph} ${e(label ?? word)}</span>`;
+}
+export function siteTable(headings, rows, label) {
+  return `<div class="table-scroll"><table class="table" aria-label="${e(label)}"><thead><tr>${headings.map(h => `<th scope="col">${e(h)}</th>`).join('')}</tr></thead><tbody>${rows || `<tr><td colspan="${headings.length}" class="muted">No items</td></tr>`}</tbody></table></div>`;
+}
 
 const HISTORY_KINDS = [['all', 'All'], ['checks', 'Checks'], ['review', 'Reviews'], ['thread', 'Threads'], ['commit', 'Commits']];
 export function historyPage({ user, owner, repo, pull, title, events, filter }) {
