@@ -261,7 +261,7 @@ export function runPage({ user, owner, repo, running, status, githubUrl, base, h
     return frame({ title: crumb, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: crumb }], body: `<main class="page"><section class="card empty"><h1>This review has expired</h1><p class="notice notice-warn">Reviews are kept for 90 days by GitHub. Generate it again to see it.</p><div class="page-actions">${regenerate}<a class="btn" href="${e(path)}">Back to reviews</a></div></section></main>` });
   }
   const progress = progressStages(status, jobs).map((stage) => {
-    const symbol = stage.state === 'done' ? '✓' : stage.state === 'active' ? `● <span class="spinner" aria-hidden="true"></span>` : stage.state === 'failed' ? '✕' : '○';
+    const symbol = stage.state === 'done' ? '✓' : stage.state === 'active' ? `<span class="spinner" aria-hidden="true"></span>` : stage.state === 'failed' ? '✕' : '○';
     const word = stage.state === 'active' ? 'in progress' : stage.state === 'todo' ? 'waiting' : stage.state;
     return `<li class="${stage.state}">${symbol} ${e(stage.name)} <span class="step-state">· ${word}</span></li>`;
   }).join('');
