@@ -850,10 +850,16 @@ export const CHECKS = [
     return location.hash.includes("m=overlay") || location.hash;`],
   ["clicking the drawing records the selection in the address", "p=1&v=board", `
     await new Promise(r => setTimeout(r, 1200));
-    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
-    zoomTo(r.box); await new Promise(res => setTimeout(res, 300));
-    const vp = document.querySelector("#stage .vp"), b = vp.getBoundingClientRect();
-    pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
+    const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified");
+    zoomTo(boardDiff?.bounds(r.id,'head') || r.box); await new Promise(res => setTimeout(res, 300));
+    ${BOARD_POINT_PROBE}
+    if(boardDiff) {
+      const point=occupied({id:r.id}); if(!point) return 'no occupied change geometry';
+      pickAt(point.pane.vp,point.event);
+    } else {
+      const vp = document.querySelector("#stage .vp"), b = vp.getBoundingClientRect();
+      pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
+    }
     await new Promise(res => setTimeout(res, 1200));
     return location.hash.includes("s=" + r.id) || location.hash;`],
   ["inherited object keys are not modes", "p=1&v=board&m=toString", `
@@ -2924,5 +2930,21 @@ export const CHECKS = [
       return boardDiff===current && boardView.note===null && boardView.failed!==S.p
         || 'stale decode failure changed newer project status';
     } finally {loadBoardScene=original;release?.();}
+  `],
+  ["board fresh project restores after real context loss", "v=board&m=semantic", `
+    if(!proj().board.geometry) { ${BOARD_LIFECYCLE_FIXTURE} }
+    S.m='semantic'; await draw(); fit();
+    const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m]), old=boardDiff;
+    if(!old) return 'no initial geometry';
+    const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
+    if(!ext) throw Error('WebGL context-loss extension unavailable');
+    ext.loseContext();
+    for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack svg')) return 'did not fall back';
+    const next=structuredClone(proj()); next.dir+='-restored'; next.name+=' restored'; D.projects.push(next);
+    S.p=D.projects.length-1; await draw();
+    return !!boardDiff && boardDiff!==old && boardView.failed===null && old.panes.every(p=>p.renderer.stats.disposed)
+      && boardDiff.panes.every(p=>p.renderer.stats.uploads>0&&!p.renderer.gl.isContextLost())
+      && JSON.stringify([S.x,S.y,S.z,S.s,S.m])===before || 'fresh project did not restore state';
   `],
 ];
