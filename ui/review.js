@@ -248,6 +248,7 @@ function viewport(stage, label, kind) {
 }
 let gen = 0;
 async function draw() {
+  resetCoordinates();
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   if (S.v === '3d') {
@@ -287,6 +288,18 @@ function gesture() {           // composite as a bitmap while moving, re-rasteri
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
 function setT(t) { Object.assign(S, t); apply(); saveHash(); }
+function resetCoordinates() {
+  for (const node of document.querySelectorAll("#statusbar [data-coordinate]")) node.textContent = "—";
+}
+function updateCoordinates(vp, event) {
+  if (!placed() || !vp.isConnected || S.v === "3d") { resetCoordinates(); return; }
+  const r = vp.getBoundingClientRect();
+  const values = { x: S.x + (event.clientX - r.left - r.width / 2) / S.z, y: S.y + (event.clientY - r.top - r.height / 2) / S.z };
+  for (const key of ["x", "y"]) {
+    const node = document.querySelector("#statusbar [data-coordinate=" + key + "]");
+    if (node) node.textContent = Number.isFinite(values[key]) ? (Math.abs(values[key]) < .0005 ? 0 : values[key]).toFixed(3) : "—";
+  }
+}
 function attachPanZoom(vp) {
   vp.addEventListener("wheel", e => {
     e.preventDefault(); if (!placed()) return;   // not fitted yet (a redraw is pending)
@@ -305,6 +318,9 @@ function attachPanZoom(vp) {
     vp.addEventListener("pointerup", ev => { vp.removeEventListener("pointermove", mv);
       if (moved < 4) pickAt(vp, ev); }, { once: true });
   });
+  vp.addEventListener("pointermove", e => updateCoordinates(vp, e));
+  vp.addEventListener("pointerleave", resetCoordinates);
+  vp.addEventListener("pointercancel", resetCoordinates);
   vp.addEventListener("contextmenu", e => { if (!THREADS_ON || !placed()) return; e.preventDefault(); proposePin(vp, e); });
 }
 function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
@@ -752,6 +768,19 @@ function renderPanel() {
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
     <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
   for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
+  const tabs = [...document.querySelectorAll("#panel [role=tab]")];
+  for (const tab of tabs) {
+    tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
+    tab.addEventListener("keydown", event => {
+      const i = tabs.indexOf(tab), key = event.key;
+      const target = key === "Home" ? tabs[0] : key === "End" ? tabs.at(-1) : key === "ArrowRight" ? tabs[(i + 1) % tabs.length] : key === "ArrowLeft" ? tabs[(i + tabs.length - 1) % tabs.length] : null;
+      if (!target) return;
+      event.preventDefault(); const name = target.dataset.tab;
+      target.click();
+      const next = document.querySelector('#panel [data-tab="' + name + '"]');
+      next?.focus(); next?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };

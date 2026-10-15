@@ -1,5 +1,5 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
-// Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark]
+// Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark] [--width N]
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,13 +9,14 @@ import { CHECKS } from "./checks.mjs";
 const args = process.argv.slice(2);
 const opt = k => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : null; };
 const dark = args.includes("--dark"); if (dark) args.splice(args.indexOf("--dark"), 1);
+const width = Number(opt("--width") || 1920);
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
 const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), filter = args[0] || "";
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
 const port = Number(process.env.CHECK_PORT || 9334);
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const proc = spawn(chrome, ["--headless=new", "--no-sandbox", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
-  "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--window-size=1920,1080", "about:blank"], { stdio: "ignore" });
+  "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--window-size=${width},1080`, "about:blank"], { stdio: "ignore" });
 process.on("exit", () => proc.kill());
 process.on("uncaughtException", e => { console.error("FAIL startup -> " + e.message); process.exit(1); });
 const timeout = Number(process.env.CHECK_TIMEOUT || 15000);
@@ -31,7 +32,7 @@ ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pe
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
-await send("Emulation.setDeviceMetricsOverride", { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
+await send("Emulation.setDeviceMetricsOverride", { width, height: 1080, deviceScaleFactor: 1, mobile: false });
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 let failed = 0;

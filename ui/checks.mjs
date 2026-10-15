@@ -1,5 +1,36 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["Stage 1 dock tabs remain readable and reachable at 1600", "", `
+    const P=proj();
+    P.parts ||= {lines:[],supplier:{skipped:true}};
+    const line=P.parts.lines[0] || {problems:[]}; P.parts.lines=Array(999).fill(line);
+    S.threads=[]; S.issues=[]; renderPanel();
+    const panel=document.querySelector('#panel').getBoundingClientRect();
+    const tabs=[...document.querySelectorAll('#panel [role=tab]')];
+    if(tabs.length!==4) return 'missing tabs';
+    for(const b of tabs) {
+      const r=b.getBoundingClientRect();
+      if(r.left<panel.left || r.right>panel.right+.5 || b.scrollWidth>b.clientWidth+1) return b.textContent;
+    }
+    const checks=tabs.find(t=>t.dataset.tab==='checks'); checks.focus();
+    checks.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
+    const last=document.querySelector('#panel [data-tab="threads"]');
+    const good=document.activeElement===last && last.getAttribute('aria-selected')==='true';
+    return good && document.documentElement.scrollWidth<=innerWidth || 'keyboard/overflow';`],
+  ["Stage 1 X Y map each pane and reset outside drawing", "v=board", `
+    await draw(); setT({x:-12.125,y:34.375,z:8});
+    const viewports=[...document.querySelectorAll('#stage .vp')];
+    if(viewports.length!==2) return 'side fixture';
+    for(const vp of viewports) {
+      const r=vp.getBoundingClientRect();
+      updateCoordinates(vp,{clientX:r.left+r.width/2+10,clientY:r.top+r.height/2-6});
+      if(document.querySelector('[data-coordinate=x]').textContent!=='-10.875' ||
+         document.querySelector('[data-coordinate=y]').textContent!=='33.625') return 'mapping';
+    }
+    const hash=location.hash; resetCoordinates();
+    if(document.querySelector('[data-coordinate=x]').textContent!=='—') return 'stale';
+    await draw();
+    return document.querySelector('[data-coordinate=y]').textContent==='—' && location.hash===hash;`],
   ["Libraries compare modes, used-by jumps and escaped panel", "", `
     const P = proj(), sheet = P.sheets.find(s => s.svg); if (!sheet) return "skip";
     P.objects = [{kind: "symbol", ref: "U1", lib: "Parts:X", sheet: sheet.path, pos: [10, 10], side: "head"}];
