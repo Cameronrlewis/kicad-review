@@ -1806,7 +1806,7 @@ export const CHECKS = [
     if(!boardDiff || boardDiff.panes.length!==('${mode}'==='side'?2:1)) return 'missing compositor';
     if('${mode}'==='semantic') {
       const renderer=boardDiff.panes[0].renderer, draw=renderer.draw, calls=[];
-      renderer.draw=function(options){calls.push(options);return draw.call(this,options);};
+      renderer.draw=function(options){if(!options.mask) calls.push(options);return draw.call(this,options);};
       try {boardDiff.render();} finally {renderer.draw=draw;}
       let changed=0,context=0;
       for(const scene of boardView.scenes) for(const o of scene.objects) {
@@ -2023,4 +2023,84 @@ export const CHECKS = [
       return true;
     } finally {c.dispose();stage.remove();}
   `],
+  ["board marks geometry pixels and CSS widths", "v=board", `
+    const stage=document.createElement('main');
+    stage.style.cssText='position:fixed;left:0;top:0;width:800px;height:600px;display:flex;z-index:9999'; document.body.append(stage);
+    const object=(id,x,y,action)=>({kind:'pad',uuid:id,changeUuid:id,ref:id,changeIds:action?[id]:[],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
+      box:[x-2000,y-2000,x+2000,y+2000],geometry:{primitive:{shape:'circle',center:[x,y],size:[4000,4000],angle:0},drill:{center:[x,y],size:[2000,2000],angle:0}}});
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,16000,12000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],
+      objects:[object('a',4000,4000,'added'),object('u',12000,4000),object('r',12000,8000,'removed'),object('m',4000,8000,'modified')]};
+    const changes=[{id:'a',action:'added'},{id:'r',action:'removed'},{id:'m',action:'modified'}];
+    const state={m:'wipe',x:8,y:6,z:50,wipe:1,blend:.5};
+    const look=KrAppearance.resolve(KrAppearance.defaults()); look.grid.visible=false;
+    let lost=null;
+    const c=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes,state,appearance:()=>look,onLost:e=>lost=e.message});
+    const descriptor=Object.getOwnPropertyDescriptor(window,'devicePixelRatio');
+    const near=(a,b,t=3)=>a.slice(0,3).every((v,i)=>Math.abs(v-b[i])<=t);
+    try {
+      const pane=c.panes[0], read=(x,y)=>Array.from(c.readPixel(0,x,y));
+      const project=p=>pane.renderer.project(p);
+      for (const dpr of [1,2]) for (const z of [5,50]) {
+        Object.defineProperty(window,'devicePixelRatio',{configurable:true,value:dpr}); state.z=z; look.markStyle='outline'; c.render();
+        if(lost) return 'mark render failed '+lost;
+        const a=project([4,4]),u=project([12,4]);
+        const fill=read(u[0]+1.5*z,u[1]), kept=read(a[0]+1.5*z,a[1]);
+        if(!near(fill,kept)) return 'outline changed KiCad fill '+JSON.stringify({z,dpr,fill,kept});
+        const color=BoardMarks.pickColor('added',look.boardBackground.slice(0,3).map(v=>v*255));
+        // Exact radial section through exterior and drill boundary: dark halo then colour core.
+        for (const radius of [z,2*z]) {
+          const samples=[]; for(let i=-2*dpr;i<=2*dpr;i++) samples.push(read(a[0]+radius+i/dpr,a[1]));
+          const core=samples.filter(p=>near(p,color)).length;
+          const dark=samples.filter(p=>near(p,[9,11,15],4)).length;
+          if(Math.abs(core-2*dpr)>1 || Math.abs(dark-2*dpr)>1) return 'CSS widths '+JSON.stringify({z,dpr,radius,core,dark,samples,a,width:pane.canvas.width,height:pane.canvas.height,css:[pane.vp.clientWidth,pane.vp.clientHeight]});
+        }
+      }
+      Object.defineProperty(window,'devicePixelRatio',{configurable:true,value:1}); state.z=50;
+      look.markStyle='recolour'; c.render();
+      const a=project([4,4]), u=project([12,4]), r=project([12,8]);
+      const expected=BoardMarks.pickColor('added',look.boardBackground.slice(0,3).map(v=>v*255));
+      if(!near(read(a[0]+75,a[1]),expected)) return 'added not recoloured '+read(a[0]+75,a[1]);
+      if(near(read(u[0]+75,u[1]),expected)) return 'unchanged neighbour recoloured';
+      const pixels=Array.from({length:8},(_,i)=>read(r[0]+70+i,r[1]));
+      const luma=p=>p[0]+p[1]+p[2];
+      if(Math.max(...pixels.map(luma))-Math.min(...pixels.map(luma))<50) return 'removed hatch absent '+JSON.stringify(pixels);
+      for(const action of ['added','removed','modified']) {
+        const label=pane.hud.querySelector('.board-mark-label.'+action);
+        if(!label || !label.textContent.includes(BoardMarks.styles[action].word) || label.dataset.dash!==BoardMarks.styles[action].dash) return 'missing visible word / glyph / dash '+action;
+      }
+      const uploads=c.panes.map(p=>p.renderer.stats.uploads).join();
+      for(const mode of ['overlay','wipe','blend']) {state.m=mode; state.wipe=.5; c.render(); if(lost) return lost;}
+      for(const bg of [[0,1,0,1],[.49,.49,.49,1]]) {
+        look.boardBackground=bg; state.m='wipe'; state.wipe=1; c.render();
+        const color=BoardMarks.pickColor('added',bg.slice(0,3).map(v=>v*255));
+        if(!near(read(a[0]+75,a[1]),color)) return 'imported-background palette';
+        if(pane.markHud.querySelector('.board-mark-key.added').style.getPropertyValue('--mark-color')!=='rgb('+color.join(',')+')') return 'legend palette differs';
+      }
+      delete look.colors['board.via_hole'];
+      state.m='overlay'; c.render();
+      if(!near(read(a[0],a[1]),[255,255,255])) return 'overlay recolour drill background '+read(a[0],a[1]);
+      if(!near(read(a[0]+75,a[1]),BoardMarks.pickColor('added',[255,255,255]))) return 'overlay palette not white';
+      state.s='a'; c.render();
+      if(!pane.markHud.querySelector('.board-mark-label.added')) return 'selection erased action glyph';
+      if(c.panes.map(p=>p.renderer.stats.uploads).join()!==uploads) return 'mark changes uploaded geometry';
+      return true;
+    } finally { if(descriptor) Object.defineProperty(window,'devicePixelRatio',descriptor); else delete window.devicePixelRatio; c.dispose(); stage.remove(); }
+  `],
+  ...['outline','recolour'].map(style=>['board marks Thermal proof '+style,'v=board&m=side',`
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.base || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'side',x:158.5,y:75.4,z:65});
+    Appearance.patch({markStyle:'${style}'}); boardDiff.render();
+    if(boardView.note || !boardDiff || boardDiff.panes.length!==2) return 'no retained geometry';
+    const expected=proj().changes.filter(c=>c.where?.board);
+    for(const row of expected) {
+      const sides=row.action==='modified'?['base','head']:[row.action==='removed'?'base':'head'];
+      for(const side of sides) {
+        const pane=boardDiff.panes.find(p=>p.sides.includes(side));
+        const label=pane.markHud.querySelector('[data-id="'+row.id+'"]');
+        if(!label || !label.textContent.includes(BoardMarks.styles[row.action].word)) return 'missing '+side+' '+row.action+' label';
+      }
+    }
+    return true;
+  `]),
 ];
