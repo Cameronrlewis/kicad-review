@@ -1640,4 +1640,52 @@ export const CHECKS = [
       snapshot.getContext('2d').drawImage(canvas,0,0); canvas.replaceWith(snapshot);
       return true;
     } finally { renderer.dispose(); }`],
+  ["board keys units grid contrast and editing focus", "v=board", `
+    Appearance.reset(); const key=(key,extra={})=>document.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...extra}));
+    const before=S.z; key('F1'); if(S.z<before*1.3) return 'F1 zoom'; key('F2');
+    key('h'); if(Appearance.get().contrast!=='dim') return 'H dim'; key('h'); if(Appearance.get().contrast!=='hide') return 'H hide'; key('h');
+    key('PageDown'); if(Appearance.get().activeLayer!=='B.Cu') return 'bottom'; key('PageUp'); if(Appearance.get().activeLayer!=='F.Cu') return 'top';
+    key('u',{ctrlKey:true}); if(Appearance.get().units!=='mil') return 'units';
+    Appearance.patch({grid:{size:1.27}}); const g=Appearance.get().grid.size; key('n'); key('N',{shiftKey:true}); if(Math.abs(Appearance.get().grid.size-g)>1e-9) return 'grid inverse';
+    const input=document.querySelector('#zoombar .goto'); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.blur();
+    const z=S.z; key('+',{ctrlKey:true,shiftKey:true}); if(S.z<z*1.3) return 'ctrl shift zoom';
+    const copy=new KeyboardEvent('keydown',{key:'c',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(copy); if(copy.defaultPrevented) return 'copy consumed';
+    key('?'); if(!document.querySelector('#shortcuts[open]')) return 'sheet'; document.querySelector('#shortcuts').close(); Appearance.reset(); return true;`],
+  ["board pointer cancellation flip status and wheel anchor", "v=board", `
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect();
+    const event=(type,x,y,button=0)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:y,button,pointerId:1,bubbles:true}));
+    for(const button of [0,1,2]) { setT({x:10,y:20,z:8}); event('pointerdown',r.left+40,r.top+40,button); event('pointermove',r.left+80,r.top+40,button); event('pointercancel',r.left+80,r.top+40,button); if(S.x!==5) return 'pan '+button; event('pointermove',r.left+100,r.top+40,button); if(S.x!==5) return 'cancel '+button; }
+    Appearance.patch({flip:true}); await new Promise(r=>setTimeout(r,100)); const v=document.querySelector('#stage .vp'), q=v.getBoundingClientRect(), e={clientX:q.left+q.width/2+16,clientY:q.top+q.height/2};
+    setT({x:10,y:20,z:8}); updateCoordinates(v,e); if(toWorld(v,e)[0]!==8 || document.querySelector('[data-coordinate=x]').textContent!=='8.000') return 'flip coordinate';
+    for(const z of [.1,8,50000]) for(const deltaMode of [0,1,2]) for(const deltaY of [-100000,100000]) {
+      setT({x:10,y:20,z}); const wheel=new WheelEvent('wheel',{...e,deltaY,deltaMode,cancelable:true}), before=toWorld(v,wheel); v.dispatchEvent(wheel); const after=toWorld(v,wheel);
+      if(S.z<.1||S.z>50000||Math.hypot(before[0]-after[0],before[1]-after[1])>.001) return 'anchor '+JSON.stringify({z,deltaMode,deltaY,before,after,actual:S.z});
+    }
+    Appearance.reset(); return true;`],
+  ["board status units keys and pin round trip", "v=board", `
+    Appearance.reset(); await new Promise(r=>setTimeout(r,80)); let vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect();
+    setT({x:25.4,y:50.8,z:8}); const e={clientX:r.left+r.width/2,clientY:r.top+r.height/2}; updateCoordinates(vp,e);
+    Appearance.patch({units:'mil'}); await new Promise(r=>setTimeout(r,80)); if(document.querySelector('[data-coordinate=x]').textContent!=='1000.000') return 'mil';
+    Appearance.patch({units:'in'}); await new Promise(r=>setTimeout(r,80)); if(document.querySelector('[data-coordinate=y]').textContent!=='2.000') return 'in';
+    Appearance.patch({units:'mm'}); await new Promise(r=>setTimeout(r,80)); vp=document.querySelector('#stage .vp'); const key=(key,extra={})=>document.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...extra}));
+    key('{'); if(Math.abs(Appearance.get().layers['F.Cu'].opacity-.9)>1e-9) return 'opacity'; key('}');
+    updateCoordinates(vp,{clientX:e.clientX+16,clientY:e.clientY}); const point=boardCursor.world.slice(), z=S.z; key('F4'); if(S.x!==point[0]||S.y!==point[1]||S.z!==z) return 'F4';
+    const old=proposePin, on=THREADS_ON; let pins=[]; proposePin=(v,event)=>pins.push(toWorld(v,event)); THREADS_ON=true;
+    try {
+      const pointer=(type,x,button=2)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:e.clientY,button,pointerId:2,bubbles:true}));
+      pointer('pointerdown',e.clientX); pointer('pointerup',e.clientX+2); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+2,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'right pin';
+      const p=pins[0], screen=BoardGL.worldToScreen(p,{...boardCamera(vp),width:r.width,height:r.height}); if(Math.abs(screen[0]-(Math.trunc(e.clientX+2)-r.left))>1e-6) return 'pin roundtrip';
+      pointer('pointerdown',e.clientX); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'early context pinned'; pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'drag pinned';
+      pointer('pointerdown',e.clientX); pointer('lostpointercapture',e.clientX); const x=S.x; pointer('pointermove',e.clientX+40); if(S.x!==x) return 'lost capture';
+    } finally { proposePin=old; THREADS_ON=on; }
+    const tiny=document.createElement('div'); document.body.append(tiny); const before={x:S.x,y:S.y,z:S.z}; zoomBoardAt(tiny,0,0,2); tiny.remove(); if(S.z!==before.z||S.x!==before.x) return 'zero size';
+    document.querySelector('#zoombar [data-act=fit]').focus(); const focus=document.activeElement; key('?'); document.querySelector('#shortcuts').close(); if(document.activeElement!==focus) return 'focus restore';
+    Appearance.reset(); return true;`],
+  ["board navigation Thermal evidence", "v=board", `
+    Appearance.reset(); Appearance.patch({grid:{visible:true,size:1}}); await new Promise(r=>setTimeout(r,150)); fit();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6});
+    return document.querySelector('[data-coordinate=x]').textContent!=='—' && document.querySelector('[data-grid]').textContent==='1.000';`],
+  ["board shortcut sheet Thermal evidence", "v=board", `
+    Appearance.patch({grid:{visible:true,size:1},units:'mm'}); await new Promise(r=>setTimeout(r,150)); fit();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); showShortcuts(); return document.querySelector('#shortcuts').open;`],
 ];
