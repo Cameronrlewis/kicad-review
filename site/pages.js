@@ -250,7 +250,7 @@ export function runPage({ user, owner, repo, running, status, githubUrl, base, h
   const recorded = revisions(base, head);
   const crumb = state === 'generating' ? 'Generating review' : state === 'nothing' ? 'Nothing to review' : state === 'failed' ? 'Review failed' : 'This review has expired';
   if (state === 'nothing') {
-    return frame({ title: crumb, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: crumb }], body: `<main class="page"><section class="card empty"><h1>Nothing to review</h1><p class="notice notice-info">No KiCad files changed between these revisions.</p><p><a class="btn btn-primary" href="${e(`${path}/commits`)}">Compare other commits</a> <a class="btn" href="${e(path)}">Back to reviews</a></p></section></main>` });
+    return frame({ title: crumb, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: crumb }], body: `<main class="page"><section class="card empty"><h1>Nothing to review</h1><p class="notice notice-info">No KiCad files changed between these revisions.</p><div class="page-actions"><a class="btn btn-primary" href="${e(`${path}/commits`)}">Compare other commits</a><a class="btn" href="${e(path)}">Back to reviews</a></div></section></main>` });
   }
   if (state === 'failed') {
     const message = failedStage && failedStep ? `The run stopped at ${failedStage} (${failedStep}).` : 'The run stopped before the report was ready.';
@@ -266,7 +266,7 @@ export function runPage({ user, owner, repo, running, status, githubUrl, base, h
     return `<li class="${stage.state}">${symbol} ${e(stage.name)} <span class="step-state">· ${word}</span></li>`;
   }).join('');
   const lead = recorded ? `<span class="mono">${e(recorded.base.slice(0, 7))} → ${e(recorded.head.slice(0, 7))}</span>, started ${e(shortAgo(startedAt))}` : `Revisions: not recorded, started ${e(shortAgo(startedAt))}`;
-  const revisionLine = recorded ? `Revisions: <span class="mono">${e(recorded.base)} → ${e(recorded.head)}</span>` : 'Revisions: not recorded';
+  const revisionLine = recorded ? `Revisions: <span class="mono"><span title="${e(recorded.base)}">${e(recorded.base.slice(0, 7))}</span> → <span title="${e(recorded.head)}">${e(recorded.head.slice(0, 7))}</span></span>` : 'Revisions: not recorded';
   const github = githubUrl ? `<p><a href="${e(githubUrl)}">Follow the run on GitHub ↗</a></p>` : '';
   return frame({ title: 'Generating review', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: crumb }], meta: running ? '<meta http-equiv="refresh" content="5">' : '', body: `<main class="page"><div class="page-head"><div><h1>Generating review</h1><p class="lead">${lead}</p></div></div><section class="card"><ul class="steps" aria-label="Review stages">${progress}</ul><p class="muted" role="status" aria-live="polite">Elapsed time: ${e(elapsedTime(startedAt))}</p><p>Usually takes about 2 minutes. You can leave this page. The finished review appears under Reviews.</p><p>${revisionLine}</p>${github}</section></main>` });
 }

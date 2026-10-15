@@ -11,7 +11,7 @@ export function fixturePages() {
   const a = 'a'.repeat(40), b = 'b'.repeat(40);
   const item = { id: 123, branch: 'move-R16', base: a.slice(0, 7), head: b.slice(0, 7), result: 'pass', createdAt: '2026-10-14T10:00:00Z', date: '2026-10-14', pdf: true };
   const review = pages.reviewPage({ ...common, id: 123, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 99, pull: 7, share: true, pdf: true });
-  const run = { ...common, base: a, head: b, startedAt: '2026-10-14T10:00:00Z', githubUrl: 'https://github.com/demo/Thermal_Camera/actions/runs/99' };
+  const run = { ...common, base: a, head: b, startedAt: new Date(Date.now() - 90_000).toISOString(), githubUrl: 'https://github.com/demo/Thermal_Camera/actions/runs/99' };
   return {
     signin: pages.signedOutPage(),
     'signin-ended': pages.signedOutPage({ sessionEnded: true }),
@@ -52,8 +52,14 @@ async function main() {
     const url = new URL(req.url, 'http://localhost');
     res.setHeader('Cache-Control', 'no-store');
     if (url.pathname.endsWith('/raw')) { res.setHeader('Content-Type', 'text/html'); res.end(report); return; }
-    if (url.pathname.endsWith('/readiness')) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ head: 'b'.repeat(40), decisions: [{ login: 'Ada', state: 'APPROVED', stale: false }], requested: [], blocking: 0, open: 1 })); return; }
-    if (url.pathname.endsWith('/threads') || url.pathname.endsWith('/issues')) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ threads: [], issues: [] })); return; }
+    if (url.pathname.startsWith('/r/') && url.pathname.endsWith('/readiness')) {
+      // The readiness fixture shows stale and unknown rows; every other page shows the ready path.
+      const stale = (req.headers.referer || '').includes('/readiness?');
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(stale ? { head: 'c'.repeat(40), decisions: [{ login: 'Ada', state: 'APPROVED', stale: true }], requested: [], blocking: null, open: null } : { head: 'b'.repeat(40), decisions: [{ login: 'Ada', state: 'APPROVED', stale: false }], requested: [], blocking: 0, open: 1 }));
+      return;
+    }
+    if (url.pathname.startsWith('/r/') && (url.pathname.endsWith('/threads') || url.pathname.endsWith('/issues'))) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ threads: [], issues: [] })); return; }
     const name = url.pathname.slice(1); const theme = url.searchParams.get('theme') === 'light' ? 'light' : 'dark';
     const html = fixtures[name];
     if (!html) { res.writeHead(404); res.end('Unknown fixture'); return; }
