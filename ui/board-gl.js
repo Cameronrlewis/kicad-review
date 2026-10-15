@@ -486,7 +486,7 @@ void main() {
               const retained = selected >= 0 && object.net !== 0 && scene.nets[selected]?.id !== object.net ? .2 : 1;
               const rgb = !drill && netColor ? netColor.slice(0,3) : color.slice(0,3);
               const normal = {color:rgb.map((v,i)=>background[i]+(v-background[i])*factor*retained), opacity:alpha};
-              const style = options.override ? options.override(object,normal) : options.mask ? {color:[1,1,1],opacity:1} : normal;
+              const style = options.override && !drill ? options.override(object,normal) : options.mask ? {color:[1,1,1],opacity:1} : normal;
               // Drills subtract from masks; they never become independent hit targets.
               gl.uniform1i(u.customEnabled,1);
               gl.uniform4fv(u.customStyle,options.mask && drill ? [0,0,0,1] : [...style.color,style.opacity]);

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 const context = vm.createContext({window: {}, console});
+vm.runInContext(readFileSync(new URL('./board-marks.js', import.meta.url), 'utf8'), context);
 vm.runInContext(readFileSync(new URL('./board-diff.js', import.meta.url), 'utf8'), context);
 const B = context.window.BoardDiff;
 test('aggregate identities never collapse to reference alone', () => {
@@ -46,4 +47,13 @@ test('mode weights preserve changes and exact clips', () => {
     assert.equal(r.base[2],r.head[0]);
     assert.equal(r.head[0]+r.head[2],801*dpr);
   }
+});
+
+const M = context.window.BoardMarks;
+test('each action passes 3:1 on arbitrary backgrounds and has non-colour marks', () => {
+  const backgrounds = [[0,16,35],[244,246,248],[255,255,255],[125,125,125],[0,255,0], ...Array.from({length:256},(_,i)=>[i,i,i])];
+  for (const bg of backgrounds) for (const action of ['added','removed','modified'])
+    assert.ok(M.contrast(M.pickColor(action,bg),bg)>=3,`${action} on ${bg}`);
+  assert.equal(M.styles.added.glyph,'+'); assert.equal(M.styles.removed.glyph,'−'); assert.equal(M.styles.modified.glyph,'~');
+  assert.equal(new Set(Object.values(M.styles).map(s=>s.dash)).size,3);
 });
