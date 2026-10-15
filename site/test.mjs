@@ -7,7 +7,7 @@ import { reportCsp, frameCsp } from './csp.js';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { historyEvents, HISTORY_QUERY } from './history.js';
-import { historyPage } from './pages.js';
+import { historyPage, frame, siteBadge, siteTable } from './pages.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -2934,4 +2934,16 @@ test('site embeds sprite and theme icon without external asset URLs',()=>{
   const html=signedOutPage();
   assert.match(html,/id="kr-theme"/); assert.match(html,/href="#kr-theme"/);
   assert.ok(!html.includes('href="icons/'));
+});
+
+test('S2 shell and primitives have dense accessible contracts', () => {
+  const html = frame({ title: '<x>', body: '<main>Body</main>' });
+  assert.match(html, /data-theme-toggle/);
+  assert.match(html, /<header class="top">/);
+  assert.match(html, /--toolbar-h/);
+  assert.match(html, /--input-border/);
+  assert.match(siteBadge('removed', '<bad>'), /−[^<]*&lt;bad&gt;/);
+  assert.match(siteBadge('modified'), /status-modified/);
+  assert.match(siteTable(['Name'], '<tr><td>R16</td></tr>', 'Parts'), /aria-label="Parts"/);
+  assert.match(siteTable(['<b>'], '', 'Empty'), /&lt;b&gt;/);
 });
