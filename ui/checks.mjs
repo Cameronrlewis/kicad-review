@@ -1482,7 +1482,7 @@ export const CHECKS = [
       if (boardView.renderers.some(r => r.stats.disposed)) return "disposed current scene";
       const canvas = document.querySelector(".board-gl");
       canvas.dispatchEvent(new Event("webglcontextlost",{cancelable:true}));
-      await new Promise(r => setTimeout(r,100));
+      for(let i=0;i<100 && !document.querySelector("#stage .stack .layer");i++) await new Promise(r=>setTimeout(r,50));
       if (document.querySelector(".board-gl") || !document.querySelector(".stack .layer")) return "no SVG fallback";
       if (!document.querySelector("#statusbar .status-message").textContent.includes("WebGL unavailable")) return "no status note";
       return S.x === 12 && S.y === 22 && S.z === 6 || "camera lost " + [S.x,S.y,S.z];
@@ -1623,7 +1623,7 @@ export const CHECKS = [
       S.m='side'; await draw();
       const canvas=document.querySelector('.board-gl');
       canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
-      await new Promise(r=>setTimeout(r,100));
+      for(let i=0;i<100 && !document.querySelector('#stage .stack .layer');i++) await new Promise(r=>setTimeout(r,50));
       if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'context loss cleanup';
       boardView.failed=null; await draw();
       if(!appearanceBoards.size) return 'no recovered renderer';
