@@ -1628,6 +1628,14 @@ export const CHECKS = [
       boardView.failed=null; await draw();
       if(!appearanceBoards.size) return 'no recovered renderer';
       for(const board of appearanceBoards) if(board.appearance.colors['board.copper.f'][3]!==.5) return 'recovered stale';
+      const create=BoardGL.create;
+      try {
+        disposeBoardRenderers(); BoardGL.create=()=>null; boardView.failed=null; await draw();
+        if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'forced fallback failed';
+        const copper=[...document.querySelectorAll('.stack .layer')].find(l=>canon(l.dataset.layer)==='F.Cu');
+        if(!copper || !copper.innerHTML.includes('#010203') || Math.abs(Number(copper.style.opacity)-.2)>1e-8) return 'forced fallback stale';
+      } finally {BoardGL.create=create; boardView.failed=null;}
+      await draw();
       return true;
     } finally {store.set(before); S.m='side';}
   `],

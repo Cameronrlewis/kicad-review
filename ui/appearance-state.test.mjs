@@ -282,3 +282,26 @@ test('resolved backgrounds are opaque; board compatibility edits share the canon
   assert.equal(store.get().objectOpacity.zones,.2);
   assert.equal(store.get().layers['F.Cu'].visible,false);
 });
+
+
+test('public Appearance facade switches scoped backing stores without accumulating subscribers', () => {
+  ctx.structuredClone=structuredClone;
+  const saved=new Map();
+  ctx.localStorage={getItem:k=>saved.get(k)??null,setItem:(k,v)=>saved.set(k,v)};
+  vm.runInContext(source('./appearance.js'),ctx);
+  const facade=ctx.Appearance;
+  facade.configure([], 'project-a');
+  let notices=0; const off=facade.subscribe(()=>notices++);
+  facade.patch({flip:true});
+  facade.import(theme({schematic:{wire:'#123456'}}));
+  facade.configure([], 'project-b');
+  assert.equal(facade.get().flip,false);
+  facade.patch({contrast:'dim'});
+  facade.configure([], 'project-a');
+  assert.equal(ctx.Appearance,facade);
+  assert.equal(facade.get().flip,true);
+  assert.deepEqual(plain(facade.get().colors['schematic.wire']),[18/255,52/255,86/255,1]);
+  facade.patch({flip:false}); off(); facade.patch({flip:true});
+  assert.equal(notices,4);
+  assert.equal(Object.keys(JSON.parse(saved.get('kr.appearance.v1')).viewers).length,2);
+});
