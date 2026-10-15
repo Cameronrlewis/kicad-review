@@ -29,6 +29,7 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
                padding: var(--space-1) 8px var(--space-1) calc(8px + var(--depth, 0) * 14px); background: transparent; color: inherit;
                border: 0; border-left: 2px solid transparent; font: inherit; cursor: pointer; }
 .tree button[aria-current=true] { background: var(--surface-2); border-left-color: var(--accent); }
+.tree button[aria-current=true] .name { font-weight: 600; }
 .tree button:hover { background: var(--surface-2); }
 [data-status=unchanged] { color: var(--muted); }
 .counts { display: inline-flex; gap: var(--space-1); }
