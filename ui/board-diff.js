@@ -265,6 +265,8 @@
         for (const pane of panes) {
           const gl = pane.renderer.gl;
           pane.targets?.forEach(t=>deleteTarget(gl,t)); gl.deleteProgram(pane.program); gl.deleteProgram(pane.markProgram); gl.deleteVertexArray(pane.vao); pane.renderer.dispose();
+          // Release the context too: removed canvases can outlive many mode/project switches.
+          gl.getExtension('WEBGL_lose_context')?.loseContext();
         }
       }
     };

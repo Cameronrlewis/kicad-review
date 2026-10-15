@@ -478,7 +478,7 @@ async function draw() {
   if (boardView.failed !== null && boardView.failed !== S.p) boardView.failed = boardView.note = null;
   if (boardView.failed !== S.p) boardView.note = null;
   if (geo) try { scenes = [await loadBoardScene(geo.base), await loadBoardScene(geo.head)]; }
-    catch (error) { console.warn("Board scene unavailable; showing SVG:", error); boardView.note = "Geometry unsupported — showing SVG"; }
+    catch (error) { if (my === gen) { console.warn("Board scene unavailable; showing SVG:", error); boardView.note = "Geometry unsupported — showing SVG"; } }
   if (my !== gen) return;   // a newer draw owns the stage
   boardView.scenes = scenes; boardView.generation = my;
   if (boardView.project !== S.p) {
