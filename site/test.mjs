@@ -375,7 +375,7 @@ test('unsafe next is ignored and login text is HTML escaped', async () => {
     const home = await call('/', { headers: { Cookie: `s=${cookieValue(callback, 's')}` } });
     const body = await home.text();
     assert.match(body, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-    assert.doesNotMatch(body, /<script>/);
+    assert.doesNotMatch(body, /<script>alert/);
   } finally { restore(); }
 });
 
@@ -1073,7 +1073,7 @@ function commitsScript() {
   const bar = { querySelector: () => status, querySelectorAll: () => [node(), node()] };
   const document = { createElement: node, querySelector: (selector) => ({ '.compare-form': form, '.compare-bar': bar, '[name=branch]': branch, '[name=tag]': tag, '#tag': tag })[selector] };
   const page = commitsPage({ owner: 'owner', repo: 'repo', branch: 'main', branches: ['main', 'dev'], tag: 'v1', tags: [{ name: 'v1' }], commits: [] });
-  runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document });
+  runInNewContext([...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1], { document });
   return { branch, tag, row };
 }
 
@@ -2075,7 +2075,9 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
 });
 test('missing share secrets keep existing review HTML byte-identical and guest routes inactive', async () => {
   const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
-  const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>');
+  const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
+    // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
+    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '');
   // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
   assert.equal(createHash('sha256').update(current).digest('hex'), '82be67bc0030511bc6cca251252770b78a742053b98f7e08d74ba0e027824daa');
   const restore = shareCreationFetch();
@@ -2916,4 +2918,14 @@ test('missing artifact points readers to the updated PR comment', async () => {
     assert.equal(response.status, 404);
     assert.match(await response.text(), /Open the review from the pull request comment/);
   } finally { restore(); }
+});
+
+test('every frame carries early shared theme script and a labeled toggle',()=>{
+  for(const html of [signedOutPage(),homePage({user:'cam',repositories:[]}),
+    messagePage({title:'Error',message:'Unavailable'})]) {
+    assert.match(html,/data-theme-toggle/);
+    assert.match(html,/kr\.theme/);
+    assert.ok(html.indexOf('kr.theme') < html.indexOf('<style>'));
+    assert.match(html,/aria-label="Switch to light theme"/);
+  }
 });

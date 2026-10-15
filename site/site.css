@@ -65,3 +65,6 @@ a.card:hover { border-color: var(--accent); }
 .readiness p { margin: 0; }
 .readiness ul { display: flex; flex-wrap: wrap; gap: var(--space-3); list-style: none; margin: 0; padding: 0; }
 .readiness .ok { color: var(--added); } .readiness .bad { color: var(--removed); font-weight: 600; } .readiness .wait { color: var(--muted); }
+
+.top > .theme-toggle { margin-left:auto; flex:none; }
+.top > .theme-toggle + .account { margin-left: 0; }

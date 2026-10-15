@@ -77,6 +77,10 @@ html = inline_page("window.REVIEW_DATA = {\"version\": 1};")
 assert 'href="tokens.css"' not in html and 'href="review.css"' not in html and 'src="review.js"' not in html and 'src="sample/' not in html
 assert "window.REVIEW_DATA = {\"version\": 1};" in html and "<style>" in html
 assert "http://" not in html and "https://fonts" not in html
+assert 'src="theme.js"' not in html
+assert "kr.theme" in html and "window.KRTheme" in html
+assert html.index("kr.theme") < html.index("<style>")
+assert "data-theme-toggle" in html
 print("ok")
 
 # Comment: direct link to the single HTML file plus a gh one-liner.

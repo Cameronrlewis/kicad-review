@@ -8,6 +8,11 @@ keep_names = false
 type = "Text"
 globs = ["**/*.css"]
 
+[[rules]]
+type = "Text"
+globs = ["**/ui/theme.js", "**/ui/icons/sprite.svg"]
+fallthrough = true
+
 # Set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and SESSION_KEY with
 # npx wrangler secret put NAME; never commit those secrets.
 [vars]
