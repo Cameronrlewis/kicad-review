@@ -1688,4 +1688,66 @@ export const CHECKS = [
   ["board shortcut sheet Thermal evidence", "v=board", `
     Appearance.patch({grid:{visible:true,size:1},units:'mm'}); await new Promise(r=>setTimeout(r,150)); fit();
     const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); showShortcuts(); return document.querySelector('#shortcuts').open;`],
+["SCH6 physical grid negative camera units DPR and viewport coordinates", "", `
+  const sheet=proj().sheets.find(s=>s.svg); S.v='sheet:'+sheet.path; S.m='side'; await draw();
+  S.x=-2.54; S.y=5.08; S.z=10; S.units='mm'; S.grid=true; apply();
+  for(const vp of document.querySelectorAll('#stage .vp.sheet')) {
+    const r=vp.getBoundingClientRect();
+    const p=schematicPoint(vp,{clientX:r.left+r.width/2+25.4,clientY:r.top+r.height/2-12.7});
+    if(Math.abs(p.x)>1e-8 || Math.abs(p.y-3.81)>1e-8) return JSON.stringify(p);
+    const canvas=vp.querySelector('.sch-grid');
+    if(!canvas || canvas.width!==Math.round(vp.clientWidth*devicePixelRatio)
+      || canvas.compareDocumentPosition(vp.querySelector('.world'))!==Node.DOCUMENT_POSITION_FOLLOWING) return 'canvas geometry/order';
+  }
+  const a=schematicGridPlan(100,100); if(Math.abs(a.step-12.7)>1e-8) return a;
+  S.z=.001; const tiny=schematicGridPlan(1920,1080);
+  if(tiny.step<4 || !Number.isFinite(tiny.x) || Math.ceil(1920/tiny.step)*Math.ceil(1080/tiny.step)>140000) return 'unbounded';
+  S.z=10; const before=[S.x,S.y,S.z];
+  schematicCursor={x:25.4,y:-1.27}; updateSchematicStatus();
+  if(!document.querySelector('[data-sch-coordinates]').textContent.includes('25.400')) return 'mm';
+  document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'u',ctrlKey:true,bubbles:true,cancelable:true}));
+  return S.units==='mil' && document.querySelector('[data-sch-coordinates]').textContent.includes('1000.000')
+    && document.querySelector('[data-sch-grid]').textContent.includes('50')
+    && JSON.stringify(before)===JSON.stringify([S.x,S.y,S.z]);
+`],
+  ["SCH6 physical grid resize toggle theme and keyboard lifecycle", "", `
+    S.v='sheet:'+proj().sheets.find(s=>s.svg).path; S.m='side'; await draw();
+    S.x=-123.45; S.y=987.65; S.z=10; S.grid=true; S.units='mm'; apply();
+    const vp=document.querySelector('#stage .vp.sheet'), canvas=vp.querySelector('.sch-grid');
+    const alpha=()=>canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((v,i)=>i%4===3&&v);
+    if(!alpha() || canvas.closest('.stack') || canvas.getAttribute('aria-hidden')!=='true') return 'grid ink/layer';
+    S.grid=false; apply(); if(alpha() || document.querySelector('[data-sch-grid]').textContent!=='grid off') return 'off';
+    S.grid=true; const oldDpr=Object.getOwnPropertyDescriptor(window,'devicePixelRatio');
+    try {
+      Object.defineProperty(window,'devicePixelRatio',{configurable:true,value:2}); apply();
+      if(canvas.width!==Math.round(vp.clientWidth*2)||canvas.height!==Math.round(vp.clientHeight*2)) return 'DPR';
+    } finally { if(oldDpr) Object.defineProperty(window,'devicePixelRatio',oldDpr); else delete window.devicePixelRatio; }
+    const plan=schematicGridPlan(7680,4320);
+    if(Math.ceil(7680/plan.step)*Math.ceil(4320/plan.step)>140000 || Math.abs(plan.step/(1.27*S.z)-Math.round(plan.step/(1.27*S.z)))>1e-8) return 'budget/lattice';
+    vp.style.width='320px'; await new Promise(r=>setTimeout(r,100));
+    if(canvas.width!==Math.round(vp.clientWidth*devicePixelRatio)) return 'resize';
+    const matrix=new DOMMatrix(vp.querySelector('.world').style.transform);
+    if(Math.abs(matrix.e-(vp.clientWidth/2-S.x*S.z))>1e-6) return 'resize camera';
+    const r=vp.getBoundingClientRect(); vp.dispatchEvent(new PointerEvent('pointermove',{clientX:r.left+r.width/2,clientY:r.top+r.height/2}));
+    await new Promise(requestAnimationFrame); if(document.querySelector('[data-coordinate=x]').textContent!=='-123.450') return 'pointer';
+    const camera=encodeState(), units=S.units, key=target=>target.dispatchEvent(new KeyboardEvent('keydown',{key:'u',ctrlKey:true,bubbles:true,cancelable:true}));
+    const input=document.createElement('input');document.body.append(input); key(input); input.remove();
+    const dialog=document.querySelector('#shortcuts'); dialog.showModal(); key(dialog); dialog.close();
+    if(S.units!==units) return 'editor/dialog'; key(document.body);
+    if(S.units!=='mil'||encodeState()!==camera) return 'units camera/hash';
+    document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'n',bubbles:true}));
+    if(document.querySelector('[data-sch-grid]').textContent!=='grid 50.000') return 'fixed schematic lattice';
+    KRTheme.set(KRTheme.get()==='dark'?'light':'dark'); if(!alpha()) return 'theme';
+    vp.dispatchEvent(new PointerEvent('pointerleave')); if(schematicCursor!==null||document.querySelector('[data-coordinate=x]').textContent!=='—') return 'leave';
+    const oldCanvas=canvas; await draw(); if(oldCanvas.isConnected||schematicCursor!==null) return 'draw lifecycle';
+    S.v='board'; await draw(); if(document.querySelector('.sch-grid,[data-sch-coordinates],[data-sch-grid]')) return 'schematic only';
+    return true;`],
+  ["SCH6 grid Thermal evidence fit", "", `
+    S.v='sheet:'+proj().sheets.find(s=>s.svg).path; S.m='side'; S.units='mm'; S.grid=true; await draw(); fit();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y];
+    updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); return !!vp.querySelector('.sch-grid');`],
+  ["SCH6 grid Thermal evidence close", "", `
+    S.v='sheet:'+proj().sheets.find(s=>s.svg).path; S.m='side'; S.units='mil'; S.grid=true; await draw(); fit(); S.z=10; apply();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y];
+    updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); return !!vp.querySelector('.sch-grid');`],
 ];
