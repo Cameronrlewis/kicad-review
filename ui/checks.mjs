@@ -1632,8 +1632,8 @@ export const CHECKS = [
       try {
         disposeBoardRenderers(); BoardGL.create=()=>null; boardView.failed=null; await draw();
         if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'forced fallback failed';
-        const copper=[...document.querySelectorAll('.stack .layer')].find(l=>canon(l.dataset.layer)==='F.Cu');
-        if(!copper || !copper.innerHTML.includes('#010203') || Math.abs(Number(copper.style.opacity)-.2)>1e-8) return 'forced fallback stale';
+        const copper=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
+        if(!copper.some(l=>l.innerHTML.includes('#010203')) || copper.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'forced fallback stale';
       } finally {BoardGL.create=create; boardView.failed=null;}
       await draw();
       return true;
