@@ -1609,7 +1609,7 @@ export const CHECKS = [
       const pointer=(type,x,button=2)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:e.clientY,button,pointerId:2,bubbles:true}));
       pointer('pointerdown',e.clientX); pointer('pointerup',e.clientX+2); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+2,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'right pin';
       const p=pins[0], screen=BoardGL.worldToScreen(p,{...boardCamera(vp),width:r.width,height:r.height}); if(Math.abs(screen[0]-(Math.trunc(e.clientX+2)-r.left))>1e-6) return 'pin roundtrip';
-      pointer('pointerdown',e.clientX); pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'drag pinned';
+      pointer('pointerdown',e.clientX); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'early context pinned'; pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'drag pinned';
       pointer('pointerdown',e.clientX); pointer('lostpointercapture',e.clientX); const x=S.x; pointer('pointermove',e.clientX+40); if(S.x!==x) return 'lost capture';
     } finally { proposePin=old; THREADS_ON=on; }
     const tiny=document.createElement('div'); document.body.append(tiny); const before={x:S.x,y:S.y,z:S.z}; zoomBoardAt(tiny,0,0,2); tiny.remove(); if(S.z!==before.z||S.x!==before.x) return 'zero size';
@@ -1617,9 +1617,9 @@ export const CHECKS = [
     Appearance.reset(); return true;`],
   ["board navigation Thermal evidence", "v=board", `
     Appearance.reset(); Appearance.patch({grid:{visible:true,size:1}}); await new Promise(r=>setTimeout(r,150)); fit();
-    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6});
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6});
     return document.querySelector('[data-coordinate=x]').textContent!=='—' && document.querySelector('[data-grid]').textContent==='1.000';`],
   ["board shortcut sheet Thermal evidence", "v=board", `
     Appearance.patch({grid:{visible:true,size:1},units:'mm'}); await new Promise(r=>setTimeout(r,150)); fit();
-    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); showShortcuts(); return document.querySelector('#shortcuts').open;`],
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); showShortcuts(); return document.querySelector('#shortcuts').open;`],
 ];

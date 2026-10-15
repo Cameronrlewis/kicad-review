@@ -514,10 +514,10 @@ function attachPanZoom(vp) {
     const rate = window.KRBoardWheelProfile === "mac-rotation" ? BOARD_WHEEL_MAC_ROTATION_RATE/100 : BOARD_WHEEL_PIXEL_RATE;
     zoomBoardAt(vp,e.clientX,e.clientY,Math.exp(Math.max(-20,Math.min(20,-pixels*rate))));
   }, { passive:false });
-  let active = null, suppressContext = false, cursorFrame = 0, cursorEvent;
+  let active = null, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
   vp.addEventListener("pointerdown", e => {
     if (![0,1,2].includes(e.button) || !placed() || active) return;
-    suppressContext = false; deltaAnchor = toWorld(vp,e);
+    suppressContext = false; pendingContext = null; deltaAnchor = toWorld(vp,e);
     active = {id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0};
     // Synthetic browser checks have no active native pointer; real input gets capture.
     try { vp.setPointerCapture(e.pointerId); } catch {}
@@ -537,6 +537,8 @@ function attachPanZoom(vp) {
     const a=active; active=null; suppressContext = a.moved >= 4;
     if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId);
     if (e.type === "pointerup" && a.moved < 4 && a.button === 0) pickAt(vp,e);
+    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext && THREADS_ON) proposePin(vp,pendingContext);
+    pendingContext = null;
     if (e.type !== "pointerup") { suppressContext=false; if(cursorFrame) cancelAnimationFrame(cursorFrame); cursorFrame=0; resetCoordinates(); }
   };
   for (const type of ["pointerup","pointercancel","lostpointercapture"]) vp.addEventListener(type,end);
@@ -544,7 +546,8 @@ function attachPanZoom(vp) {
   vp.addEventListener("auxclick", e => { if (suppressContext || e.button===1) e.preventDefault(); });
   vp.addEventListener("contextmenu", e => {
     if (suppressContext || active?.moved >= 4) { e.preventDefault(); return; }
-    if (!THREADS_ON || !placed()) return; e.preventDefault(); proposePin(vp,e);
+    if (!THREADS_ON || !placed()) return; e.preventDefault();
+    if (active) pendingContext=e; else proposePin(vp,e);
   });
 }
 function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
