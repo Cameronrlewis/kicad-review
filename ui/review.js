@@ -644,7 +644,7 @@ const BOARD_GRID_MM = [5,2.5,2,1,.5,.25,.2,.1,.05,.025,.02,.01];
 const BOARD_GRID_MIL = [1000,500,250,200,100,50,25,20,10,5,2,1].map(n => n*.0254);
 // Deliberately configurable for measured device calibration (Task 10), not a platform sniff.
 const BOARD_WHEEL_PIXEL_RATE = .0015, BOARD_WHEEL_MAC_ROTATION_RATE = .01;
-let boardCursor = null, deltaAnchor = null;
+let boardCursor = null, deltaAnchor = null, anchorKey = "";
 function resetCoordinates() {
   for (const node of document.querySelectorAll("#statusbar [data-coordinate]")) node.textContent = "—";
   boardCursor = null; schematicCursor = null;
@@ -654,12 +654,14 @@ function updateStatus() {
   const sheet = String(S.v).startsWith("sheet:");
   const a = Appearance.get(), units = S.v === "board" ? a.units : sheet ? S.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
   const fmt = n => Number.isFinite(n) ? (Math.abs(n/divisor) < .0005 ? 0 : n/divisor).toFixed(3) : "—";
-  const selected = proj().changes.find(c => c.id === S.s && onView(c,S.v));
-  const box = selected && rowBox(selected, selected.action === "removed" ? "base" : "head");
-  const anchor = selected?.pos || (box && [(box[0]+box[2])/2,(box[1]+box[3])/2]) || deltaAnchor;
+  const key = JSON.stringify([S.p,S.v]);   // click origin belongs to one drawing; never survives a view change
+  if (anchorKey !== key) { anchorKey = key; deltaAnchor = null; }
+  const anchor = deltaAnchor;
   const p = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world, dx = p && anchor ? p[0]-anchor[0] : NaN, dy = p && anchor ? p[1]-anchor[1] : NaN;
   const values = {x:p?.[0], y:p?.[1], dx, dy, dist:Math.hypot(dx,dy)};
   for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); if (node) node.textContent = fmt(value); }
+  const rows = [...document.querySelectorAll("#panel .card[data-id]")], at = rows.findIndex(e => e.dataset.id === S.s);
+  const change = $("#statusbar [data-change]"); if (change) change.textContent = `${at < 0 ? 0 : at+1}/${rows.length}`;
   const zoom = $("#statusbar [data-zoom]"); if (zoom) zoom.textContent = placed() ? S.z.toFixed(2) : "—";
   const unit = $("#statusbar [data-units]"); if (unit) unit.textContent = units;
   const coords = $("#statusbar .status-coordinates"); coords?.toggleAttribute("data-sch-coordinates", sheet);
@@ -701,7 +703,7 @@ function attachPanZoom(vp) {
   let active = null, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
   vp.addEventListener("pointerdown", e => {
     if (![0,1,2].includes(e.button) || !placed() || active) return;
-    suppressContext = false; pendingContext = null; deltaAnchor = toWorld(vp,e);
+    suppressContext = false; pendingContext = null;
     active = {id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0};
     // Synthetic browser checks have no active native pointer; real input gets capture.
     try { vp.setPointerCapture(e.pointerId); } catch {}
@@ -720,6 +722,10 @@ function attachPanZoom(vp) {
     if (!active || active.id !== e.pointerId) return;
     const a=active; active=null; suppressContext = a.moved >= 4;
     if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId);
+    if (e.type === "pointerup" && a.moved < 4 && [0,2].includes(a.button)) {   // a click, not a pan, sets the measurement origin
+      anchorKey = JSON.stringify([S.p,S.v]);
+      deltaAnchor = String(S.v).startsWith("sheet:") ? (p => [p.x,p.y])(schematicPoint(vp,e)) : toWorld(vp,e); updateStatus();
+    }
     if (e.type === "pointerup" && a.moved < 4 && a.button === 0) pickAt(vp,e);
     if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext && THREADS_ON) proposePin(vp,pendingContext);
     pendingContext = null;
@@ -911,7 +917,7 @@ function pickAt(vp, e) {
   const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
-function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); }
+function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
@@ -1309,8 +1315,11 @@ function boardKey(e) {
   return true;
 }
 function showShortcuts() { const dialog=$("#shortcuts"); if(!dialog.open) dialog.showModal(); }
+new MutationObserver(updateStatus).observe($("#panel"), {childList:true, subtree:true});   // change n/N follows any list rebuild or filter
+$("#shortcuts-open").onclick=showShortcuts;
 $("#shortcuts [data-close]").onclick=()=>$("#shortcuts").close();
 document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && $("#shortcuts").open) { e.preventDefault(); $("#shortcuts").close(); return; }
   if (e.target.closest?.('input,select,textarea,[contenteditable]:not([contenteditable="false"]),dialog[open]')) return;
   if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key === "?") { e.preventDefault(); showShortcuts(); return; }
   if (String(S.v).startsWith("sheet:") && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "u") {

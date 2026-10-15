@@ -341,3 +341,6 @@ body.shot #toolbar { display:none; }
 .marker.sel::after { left:auto;right:0;top:0; }
 
 .marker:not(.sel) { z-index:5; }
+#statusbar #shortcuts-open { flex:none; min-width:20px; height:18px; padding:0 4px; font:inherit; color:var(--text); background:transparent; border:1px solid var(--line); border-radius:2px; cursor:pointer; }
+#statusbar #shortcuts-open:hover { background:var(--surface-2, var(--line)); }
+#statusbar #shortcuts-open:focus-visible { outline:2px solid var(--accent, currentColor); outline-offset:1px; }
