@@ -284,7 +284,7 @@ function appearanceCtx() {
 }
 function mountAppearance() {
   const root = $("#appearance-root"); if (!root) return;
-  appearanceUI = Appearance.mount(root, { ...appearanceCtx(), getState: Appearance.get, onChange: changeBoardAppearance, onReset: () => Appearance.reset(), unavailable: UNAVAILABLE });
+  appearanceUI = Appearance.mount(root, { ...appearanceCtx(), getState: Appearance.get, onChange: changeBoardAppearance, unavailable: UNAVAILABLE });
 }
 function refreshAppearance() { if (appearanceUI && S.t === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
 function syncMarkStyles() {
@@ -1210,7 +1210,7 @@ function renderPanel() {
     <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   for (const t of document.querySelectorAll("#panel-tabs [role=tab]")) t.onclick = () => { if (t.disabled) return; S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
   const tabs = [...document.querySelectorAll("#panel-tabs [role=tab]:not(:disabled)")];
-  appearanceUI = null; if (S.t === "appearance") mountAppearance();
+  appearanceUI?.dispose(); appearanceUI = null; if (S.t === "appearance") mountAppearance();
   for (const tab of tabs) {
     tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
     tab.addEventListener("keydown", event => {
