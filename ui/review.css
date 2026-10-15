@@ -241,6 +241,15 @@ body { height:100dvh; overflow:hidden; grid-template-rows:auto 32px minmax(0,1fr
 #zoombar .copyfield { width:180px; }
 #zoombar .sep { flex:0 0 8px; }
 #zoombar .muted { white-space:nowrap; }
+#modes { gap:0; }
+#modes [data-mode] { border-radius:0; margin-left:-1px; }
+#modes [data-mode]:first-child { border-radius:3px 0 0 3px; margin-left:0; }
+#modes [data-mode]:last-of-type { border-radius:0 3px 3px 0; }
+#modes [aria-checked="true"] { position:relative; z-index:1; border-color:var(--accent); }
+#modes .blend { margin-left:var(--space-3); }
+#toolbar button:focus-visible, #toolbar input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+#change-nav { gap:2px; }
+#change-nav .pct { min-width:36px; text-align:center; font:11px var(--font-mono); font-variant-numeric:tabular-nums; color:var(--text); white-space:nowrap; }
 #toolbar [data-dock] { display:none; }
 #nav { padding:8px 0; }
 #nav h3 { padding:0 8px; }

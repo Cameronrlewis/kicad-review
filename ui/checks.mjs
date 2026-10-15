@@ -2868,4 +2868,25 @@ export const CHECKS = [
         &&getComputedStyle(stage.querySelector('.vp.sheet')).backgroundColor==='rgb(245, 244, 239)';
     } finally {sheet.svg=svg; p.sheets.pop(); p.checks.pop(); KRTheme.set(theme);}
   `],
+  ["chrome toolbar modes keep legacy IDs and radio focus", "", `
+  const bs = [...document.querySelectorAll('#modes [data-mode]')];
+  if (bs.map(b => b.textContent.trim()).join('|') !== 'Side|Overlay|Wipe|Blend|Changes only') return 'labels';
+  if (bs.filter(b => b.tabIndex === 0).length !== 1) return 'roving';
+  const overlay = bs.find(b => b.dataset.mode === 'overlay'); overlay.focus(); overlay.click();
+  const o2 = document.querySelector('#modes [data-mode=overlay]'); o2.focus();
+  o2.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}));
+  const a = document.activeElement;
+  return S.m === 'wipe' && a.dataset.mode === 'wipe' && a.getAttribute('aria-checked') === 'true'
+    && document.querySelector('#toolbar #zoombar') !== null
+    && !document.querySelector('#zoombar').textContent.includes('j / k')
+    && document.querySelector('#zoombar .goto').getAttribute('aria-label') === 'Go to saved review position'
+    && /^(\u2013|\\d+) \\/ \\d+$/.test(document.querySelector('#change-count').textContent)
+    && !!document.querySelector('[data-mark-style]');`],
+  ["chrome toolbar change counter follows step", "", `
+  const n = document.querySelectorAll('#panel .card[data-id]').length;
+  if (!n) return 'no cards';
+  if (document.querySelector('#change-count').textContent.split(' / ')[1] !== String(n)) return 'total ' + document.querySelector('#change-count').textContent;
+  document.querySelector('#change-nav [data-step="1"]').click();
+  await new Promise(r => setTimeout(r, 50));
+  return /^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) || document.querySelector('#change-count').textContent;`],
 ];
