@@ -385,6 +385,11 @@ void main() {
         });
       }
       if (typeof ResizeObserver === "function") { observer = new ResizeObserver(scheduleDraw); observer.observe(canvas); }
+      function layerRGBA(layer,kind,net) {
+        const key=globalThis.KicadColors.layerThemeKeys[layer];
+        const color=appearance.netColors?.[net] || appearance.colors?.[key] || rgba(appearance.layers?.[layer]?.color || globalThis.KicadColors.layers[layer] || [194,194,194,1]);
+        return [...color.slice(0,3),color[3]*(appearance.layerOpacity?.[layer]??appearance.layers?.[layer]?.opacity??1)*(appearance.objectOpacity?.[kind]??1)];
+      }
       function draw(options = {}) {
         if (disposed || !scene) return false;
         if (options.camera) camera = {...camera,...options.camera};
@@ -428,7 +433,7 @@ void main() {
           scene.nets.forEach((n,i)=>{
             const style = appearance.nets?.[n.name];
             if (style?.visible === false) data[i*4+3] = -1;
-            else if (style?.color) data.set(rgba(style.color),i*4);
+            else if (appearance.netColors?.[n.name] || style?.color) data.set(appearance.netColors?.[n.name] || rgba(style.color),i*4);
           });
           gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,Math.max(1,scene.nets.length),1,0,gl.RGBA,gl.FLOAT,data); stats.textureUploads++; netDirty=false;
         }
@@ -445,8 +450,7 @@ void main() {
           const factor = drill ? 1 : layerFactor(b.layer,appearance);
           if (!factor) continue;
           const {program,u} = capsule ? capsuleProgram : meshProgram;
-          const color = b.pass === "hole" ? background : b.pass === "wall" ? (appearance.colors?.['board.via_hole_walls'] || rgba(globalThis.KicadColors.objects.viaHolewalls)) : rgba(appearance.layers?.[b.layer]?.color || globalThis.KicadColors.layers[b.layer] || [194,194,194,1]);
-          if (!drill) color[3] *= appearance.layers?.[b.layer]?.opacity ?? 1;
+          const color = b.pass === "hole" ? (appearance.colors?.['board.via_hole'] || background) : b.pass === "wall" ? (appearance.colors?.['board.via_hole_walls'] || rgba(globalThis.KicadColors.objects.viaHolewalls)) : layerRGBA(b.layer,null,null);
           gl.useProgram(program);
           gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.layerOpacity,appearance.layers?.[b.layer]?.opacity??1); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
           gl.bindVertexArray(b.vao);
@@ -470,11 +474,7 @@ void main() {
       const api = {
         stats, setScene, setCamera(next) { camera = {...next}; },
         get appearance() { return structuredClone(appearance); },
-        layerRGBA(layer,kind,net) {
-          const key=globalThis.KicadColors.layerThemeKeys[layer];
-          const color=appearance.netColors?.[net] || appearance.colors?.[key] || rgba(appearance.layers?.[layer]?.color || globalThis.KicadColors.layers[layer] || [194,194,194,1]);
-          return [...color.slice(0,3),color[3]*(appearance.layerOpacity?.[layer]??appearance.layers?.[layer]?.opacity??1)*(appearance.objectOpacity?.[kind]??1)];
-        },
+        layerRGBA,
         setAppearance(state) { appearance = structuredClone(state || {}); netDirty = true; scheduleDraw(); },
         draw, dispose,
         readPixel(x,y) {
