@@ -1009,7 +1009,7 @@ export const CHECKS = [
   parts.changes.push({action:'footprint',refs:['R1'],before:{...parts.lines[0],footprint:'R_0402'},after:parts.lines[0]}); renderPanel();
   if (!document.querySelector('.parts-footprint')?.textContent.includes('R_0402 → R_0603')) return 'footprint change';
   delete REVIEW_DATA.projects[0].parts; renderPanel();
-  return !document.querySelector('[data-tab=parts]') && S.t === 'changes';
+  return document.querySelector('[data-tab=parts]').disabled && S.t === 'changes';
 `],
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;
@@ -1145,7 +1145,7 @@ export const CHECKS = [
       && base.view === "sheet:/b/" && base.side === "base" && baseAny.view === "sheet:/a/" && baseUuid.pos[0] === 20 || JSON.stringify({head, any, base, baseAny, baseUuid});`],
   ["Threads tab and pins appear only with thread data", "", `
     const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
-    if (document.querySelector('#panel [data-tab="threads"]')) return "tab shown offline";
+    if (!document.querySelector('#panel [data-tab="threads"]').disabled) return "tab enabled offline";
     const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
     P.objects = [{ uuid: "u-5", kind: "footprint", ref: "Q1", side: "head", pos: [x, y, 0], box: b, layer: "F.Cu" }];
     acceptThreads([{ id: "T1", resolved: false, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", uuid: "u-5", kind: "footprint", ref: "Q1", x, y, side: "head", commit: D.head, severity: "blocking" }, comments: [{ author: "alice", body: "<img src=x onerror=alert(1)> too close", createdAt: "2026-10-12T10:00:00Z" }] },
@@ -1168,7 +1168,7 @@ export const CHECKS = [
     S.threads = null; renderPanel();
     window.dispatchEvent(new MessageEvent("message", { source: window, data: { kicadReviewThreads: [] } }));
     await new Promise(r => setTimeout(r, 50));
-    if (S.threads !== null || document.querySelector('#panel [data-tab="threads"]')) return "accepted offline";
+    if (S.threads !== null || !document.querySelector('#panel [data-tab="threads"]').disabled) return "accepted offline";
     const ignored = handleParentMessage({ source: {}, data: { kicadReviewThreads: [] } }, true);
     if (ignored !== false || S.threads !== null) return "accepted non-parent";
     const accepted = handleParentMessage({ source: parent, data: { kicadReviewThreads: [] } }, true);
@@ -1370,9 +1370,11 @@ export const CHECKS = [
     return S.v===old || 'board changed';
   `],
   ["board scene stale decode does not replace current view", "v=board&x=10&y=20&z=5", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject>=0) {S.p=geometryProject; await draw();}
     const old = loadBoardScene;
-    let release;
-    loadBoardScene = async key => { await new Promise(r => release = r); return old(key); };
+    let release; const blocked = new Promise(r => release = r);
+    loadBoardScene = async key => { await blocked; return old(key); };
     const a = draw();
     const sheet = proj().sheets.find(s => s.svg);
     if (!sheet) { loadBoardScene = old; release?.(); await a; return "skip"; }
@@ -1482,7 +1484,7 @@ export const CHECKS = [
       if (boardView.renderers.some(r => r.stats.disposed)) return "disposed current scene";
       const canvas = document.querySelector(".board-gl");
       canvas.dispatchEvent(new Event("webglcontextlost",{cancelable:true}));
-      await new Promise(r => setTimeout(r,100));
+      for(let i=0;i<100 && !document.querySelector("#stage .stack .layer");i++) await new Promise(r=>setTimeout(r,50));
       if (document.querySelector(".board-gl") || !document.querySelector(".stack .layer")) return "no SVG fallback";
       if (!document.querySelector("#statusbar .status-message").textContent.includes("WebGL unavailable")) return "no status note";
       return S.x === 12 && S.y === 22 && S.z === 6 || "camera lost " + [S.x,S.y,S.z];
@@ -1515,6 +1517,8 @@ export const CHECKS = [
     } finally { BoardGL.create = create; p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.m = "side"; }`],
   ["board flip adapters mirror camera, overlays and pointer", "v=board&x=10&y=20&z=5", `
     const p = proj(); if (!p.board?.changed) return "skip";
+    const geometry=p.board.geometry; delete p.board.geometry;
+    try {
     S.v = "board"; S.m = "side"; await draw();
     const vp0 = document.querySelector("#stage .vp"), r0 = vp0.getBoundingClientRect(), e = {clientX: r0.left + r0.width / 2 + 100, clientY: r0.top + r0.height / 2 + 50};
     const plain = toWorld(vp0, e);
@@ -1531,7 +1535,8 @@ export const CHECKS = [
       if (location.hash.includes("flip")) return "flip leaked into the hash";
     } finally { Appearance.patch({flip:false}); }
     await new Promise(r => setTimeout(r, 100));
-    return !document.querySelector("#stage .world").style.transform.includes("scale(-");`],
+    return !document.querySelector("#stage .world").style.transform.includes("scale(-");
+    } finally {p.board.geometry=geometry;} `],
   ["board Appearance store get patch subscribe reset and validation", "", `
     const A = window.Appearance, before = JSON.stringify(A.get());
     let calls = 0; const off = A.subscribe(() => calls++);
@@ -1542,7 +1547,7 @@ export const CHECKS = [
       A.patch({contrast:"bad", flip:"yes", grid:{size:-1}, layers:{"F.Cu":{opacity:NaN,color:[1,2,3]},"__proto__":{visible:false},"Nope":{visible:false}}, objects:{tracks:{opacity:9}}, nets:{"__proto__":{visible:false},"<img>":{visible:false}}});
       const t = A.get();
       if (t.contrast !== "dim" || t.flip !== false || t.grid.size !== 2 || t.layers["F.Cu"].opacity !== .4 || t.layers.Nope || t.objects.tracks.opacity !== 1 || ({}).visible !== undefined || !t.nets["<img>"]) return "validation " + JSON.stringify(t.layers["F.Cu"]);
-      if (JSON.parse(localStorage.getItem("kr.appearance.v1")).contrast !== "dim") return "not persisted";
+      if (!Object.values(JSON.parse(localStorage.getItem("kr.appearance.v1")).viewers).some(s=>s.contrast === "dim")) return "not persisted";
       const throwing = Storage.prototype.setItem; Storage.prototype.setItem = () => { throw new Error("blocked"); };
       try { A.patch({contrast:"hide"}); } finally { Storage.prototype.setItem = throwing; }
       if (A.get().contrast !== "hide") return "blocked storage";
@@ -1562,7 +1567,7 @@ export const CHECKS = [
     S.v='board'; S.m='side'; await draw(); fit();
     return Number.isFinite(S.x) && Number.isFinite(S.y) && Number.isFinite(S.z) && S.z>0;`],
   ["Wipe Blend board SVG respect Appearance layer eyes", "v=board", `
-    const before=Appearance.get();
+    const before=Appearance.get(), geometry=proj().board.geometry; delete proj().board.geometry;
     try {
       for(const m of ['wipe','blend']) {
         S.v='board'; S.m=m; await draw();
@@ -1573,7 +1578,126 @@ export const CHECKS = [
         Appearance.patch({layers:{[name]:before.layers[name]}});
       }
       return true;
-    } finally { Appearance.patch(before); }`],
+    } finally { proj().board.geometry=geometry; Appearance.patch(before); }`],
+  ["Themes share colours across board and lazy schematic", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
+    await new Promise(r=>setTimeout(r,250));
+    const store=appearanceStore(), before=store.get(), hash=location.hash;
+    const original=WebGL2RenderingContext.prototype.bufferData, sub=WebGL2RenderingContext.prototype.bufferSubData;
+    let uploads=0;
+    try {
+      if(store!==Appearance) return 'second store';
+      await draw();
+      if(!appearanceBoards.size) return 'no live board';
+      WebGL2RenderingContext.prototype.bufferData=function(...args){uploads++;return original.apply(this,args)};
+      WebGL2RenderingContext.prototype.bufferSubData=function(...args){uploads++;return sub.apply(this,args)};
+      store.import(JSON.stringify({meta:{version:5},board:{background:'#fafafa',copper:{f:'rgba(1,2,3,.5)'}},schematic:{background:'#fff',wire:'#123456'}}));
+      store.patch({layerOpacity:{'F.Cu':.4},objectOpacity:{zones:.2}});
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      for(const board of appearanceBoards) {
+        if(board.appearance.colors['board.copper.f'][0]!==1/255) return 'board stale';
+        if(Math.abs(board.layerRGBA('F.Cu','zones','')[3]-.04)>1e-8) return 'alpha multiplied twice';
+      }
+      store.reset(); store.import(JSON.stringify({meta:{version:5},schematic:{wire:'#123456'}}));
+      if(uploads) return 'theme uploaded geometry '+uploads;
+      WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
+      const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
+      S.v='sheet:'+sheet.path; await draw();
+      if(!appearanceSchematics.size||appearanceBoards.size) return 'stale lifecycle';
+      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('18,52,86')) return 'wire stale';
+      store.patch({colors:{'schematic.wire':[1,0,0,1]}});
+      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('255,0,0')) return 'mounted wire stale';
+      S.v='board'; await draw();
+      if(appearanceSchematics.size || !appearanceBoards.size) return 'stale schematic after board mount';
+      return location.hash===hash || 'appearance changed deep link';
+    } finally {
+      WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
+      store.set(before);
+    }`],
+  ["Themes fallback modes and context recovery retain snapshot", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
+    const store=appearanceStore(), before=store.get();
+    try {
+      store.import(JSON.stringify({meta:{version:5},board:{background:'#121a24',copper:{f:'rgba(1,2,3,.5)'}}}));
+      store.patch({layerOpacity:{'F.Cu':.4}});
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await draw();
+        if(!appearanceBoards.size) return 'fixture needs supported geometry '+mode;
+        for(const board of appearanceBoards) {
+          if(board.appearance.colors['board.copper.f'][0]!==1/255) return 'compositor stale '+mode;
+          if(Math.abs(board.layerRGBA('F.Cu','zones','')[3]-.2*store.get().objectOpacity.zones)>1e-8) return 'compositor alpha '+mode;
+        }
+        boardView.failed=S.p; await draw();
+        if(appearanceBoards.size) return 'stale board in fallback '+mode;
+        const layers=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
+        if(!layers.length || layers.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'fallback alpha '+mode;
+        if(!layers.some(l=>l.innerHTML.includes('#010203'))) return 'fallback RGB '+mode;
+        boardView.failed=null;
+      }
+      S.m='side'; await draw();
+      const canvas=document.querySelector('.board-gl');
+      canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+      for(let i=0;i<100 && !document.querySelector('#stage .stack .layer');i++) await new Promise(r=>setTimeout(r,50));
+      if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'context loss cleanup';
+      canvas.dispatchEvent(new Event('webglcontextrestored'));
+      for(let i=0;i<100 && !appearanceBoards.size;i++) await new Promise(r=>setTimeout(r,50));
+      if(!appearanceBoards.size) return 'no recovered renderer';
+      for(const board of appearanceBoards) if(board.appearance.colors['board.copper.f'][3]!==.5) return 'recovered stale';
+      const create=BoardGL.create;
+      try {
+        disposeBoardRenderers(); BoardGL.create=()=>null; boardView.failed=null; await draw();
+        if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'forced fallback failed';
+        const copper=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
+        if(!copper.some(l=>l.innerHTML.includes('#010203')) || copper.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'forced fallback stale';
+      } finally {BoardGL.create=create; boardView.failed=null;}
+      await draw();
+      return true;
+    } finally {store.set(before); S.m='side';}
+  `],
+  ["Themes board snapshot", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
+    S.v='board'; S.m='side'; await draw();
+    return appearanceBoards.size===2 || 'fixture needs both live revisions';
+  `],
+  ["Themes schematic snapshot", "v=board", `
+    const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    S.p=geometryProject; S.x=S.y=S.z=null; await draw();
+    const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
+    S.v='sheet:'+sheet.path; S.m='side'; await draw();
+    return appearanceSchematics.size===2 && !appearanceBoards.size || 'incorrect mounted resources';
+  `],
+  ["Themes actual uniforms multiply alpha once and upload no geometry", "", `
+    const canvas=document.createElement('canvas');
+    canvas.style.cssText='position:fixed;width:200px;height:200px;left:0;top:0'; document.body.append(canvas);
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,2000,2000],
+      layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:1,name:'N'}],
+      objects:[{kind:'track',uuid:'t',changeUuid:'t',layers:['F.Cu'],net:1,category:'tracks',side:null,hidden:false,box:[0,500,2000,1500],geometry:{segments:[[0,1000,2000,1000,1000]]}}]};
+    const r=BoardGL.create(canvas,{scene}); if(!r) {canvas.remove();return 'WebGL unavailable';}
+    try {
+      const state=KrAppearance.defaults(); state.colors['board.background']=[0,0,0,1];
+      state.colors['board.copper.f']=[1,0,0,.5]; state.layerOpacity['F.Cu']=.4; state.objectOpacity.tracks=.2;
+      r.setCamera({x:1,y:1,z:100,width:200,height:200,dpr:1});
+      r.setAppearance(KrAppearance.resolve(state)); r.draw(); const uploads=r.stats.uploads;
+      const close=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=1);
+      if(!close(r.readPixel(100,100).slice(0,3),[10,0,0])) return 'layer/object alpha '+r.readPixel(100,100);
+      state.netColors.N=[0,1,0,.5]; r.setAppearance(KrAppearance.resolve(state)); r.draw();
+      if(!close(r.readPixel(100,100).slice(0,3),[0,10,0])) return 'net alpha squared '+r.readPixel(100,100);
+      r.draw({filter:()=>true});
+      if(!close(r.readPixel(100,100).slice(0,3),[0,10,0])) return 'filtered net alpha squared '+r.readPixel(100,100);
+      r.draw({filter:()=>true,override:(object,normal)=>normal});
+      if(!close(r.readPixel(100,100).slice(0,3),[0,10,0])) return 'override net alpha squared '+r.readPixel(100,100);
+      state.netColors.N[3]=0; r.setAppearance(KrAppearance.resolve(state)); r.draw();
+      if(!close(r.readPixel(100,100).slice(0,3),[0,0,0])) return 'zero-alpha net ignored';
+      return r.stats.uploads===uploads || 'theme uploaded geometry';
+    } finally {r.dispose();canvas.remove();}
+  `],
   ["board geometry contract", "v=board", `
     const panel = document.createElement('section');
     panel.style.cssText = 'position:fixed;inset:100px 350px auto;z-index:9999;padding:20px;background:var(--bg);color:var(--text);border:1px solid currentColor';
@@ -1690,7 +1814,7 @@ export const CHECKS = [
         if(JSON.stringify(o.changeIds)!==JSON.stringify(expected.map(r=>r.id))) return 'wrong Thermal change IDs '+o.uuid;
         if(expected.length) changed++; else context++;
       }
-      if(!changed || !context || calls.length!==3) return 'missing changed/context draws';
+      if(!changed || !context || calls.length!==3) return 'missing changed/context draws '+JSON.stringify({changed,context,calls:calls.length});
       for(const options of calls) {
         const contextPass=!!options.override;
         for(const scene of boardView.scenes) for(const o of scene.objects) {
@@ -1701,4 +1825,150 @@ export const CHECKS = [
     }
     return boardDiff.panes.every(p=>p.renderer.stats.uploads>0 && !p.renderer.stats.disposed);
   `]),
+  ["board keys units grid contrast and editing focus", "v=board", `
+    Appearance.reset(); const key=(key,extra={})=>document.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...extra}));
+    const before=S.z; key('F1'); if(S.z<before*1.3) return 'F1 zoom'; key('F2');
+    key('h'); if(Appearance.get().contrast!=='dim') return 'H dim'; key('h'); if(Appearance.get().contrast!=='hide') return 'H hide'; key('h');
+    key('PageDown'); if(Appearance.get().activeLayer!=='B.Cu') return 'bottom'; key('PageUp'); if(Appearance.get().activeLayer!=='F.Cu') return 'top';
+    key('u',{ctrlKey:true}); if(Appearance.get().units!=='mil') return 'units';
+    Appearance.patch({grid:{size:1.27}}); const g=Appearance.get().grid.size; key('n'); key('N',{shiftKey:true}); if(Math.abs(Appearance.get().grid.size-g)>1e-9) return 'grid inverse';
+    const input=document.querySelector('#zoombar .goto'); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.blur();
+    const z=S.z; key('+',{ctrlKey:true,shiftKey:true}); if(S.z<z*1.3) return 'ctrl shift zoom';
+    const copy=new KeyboardEvent('keydown',{key:'c',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(copy); if(copy.defaultPrevented) return 'copy consumed';
+    key('?'); if(!document.querySelector('#shortcuts[open]')) return 'sheet'; document.querySelector('#shortcuts').close(); Appearance.reset(); return true;`],
+  ["board pointer cancellation flip status and wheel anchor", "v=board", `
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect();
+    const event=(type,x,y,button=0)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:y,button,pointerId:1,bubbles:true}));
+    for(const button of [0,1,2]) { setT({x:10,y:20,z:8}); event('pointerdown',r.left+40,r.top+40,button); event('pointermove',r.left+80,r.top+40,button); event('pointercancel',r.left+80,r.top+40,button); if(S.x!==5) return 'pan '+button; event('pointermove',r.left+100,r.top+40,button); if(S.x!==5) return 'cancel '+button; }
+    Appearance.patch({flip:true}); await new Promise(r=>setTimeout(r,100)); const v=document.querySelector('#stage .vp'), q=v.getBoundingClientRect(), e={clientX:q.left+q.width/2+16,clientY:q.top+q.height/2};
+    setT({x:10,y:20,z:8}); updateCoordinates(v,e); if(toWorld(v,e)[0]!==8 || document.querySelector('[data-coordinate=x]').textContent!=='8.000') return 'flip coordinate';
+    for(const z of [.1,8,50000]) for(const deltaMode of [0,1,2]) for(const deltaY of [-100000,100000]) {
+      setT({x:10,y:20,z}); const wheel=new WheelEvent('wheel',{...e,deltaY,deltaMode,cancelable:true}), before=toWorld(v,wheel); v.dispatchEvent(wheel); const after=toWorld(v,wheel);
+      if(S.z<.1||S.z>50000||Math.hypot(before[0]-after[0],before[1]-after[1])>.001) return 'anchor '+JSON.stringify({z,deltaMode,deltaY,before,after,actual:S.z});
+    }
+    Appearance.reset(); return true;`],
+  ["board status units keys and pin round trip", "v=board", `
+    Appearance.reset(); await new Promise(r=>setTimeout(r,80)); let vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect();
+    setT({x:25.4,y:50.8,z:8}); const e={clientX:r.left+r.width/2,clientY:r.top+r.height/2}; updateCoordinates(vp,e);
+    Appearance.patch({units:'mil'}); await new Promise(r=>setTimeout(r,80)); if(document.querySelector('[data-coordinate=x]').textContent!=='1000.000') return 'mil';
+    Appearance.patch({units:'in'}); await new Promise(r=>setTimeout(r,80)); if(document.querySelector('[data-coordinate=y]').textContent!=='2.000') return 'in';
+    Appearance.patch({units:'mm'}); await new Promise(r=>setTimeout(r,80)); vp=document.querySelector('#stage .vp'); const key=(key,extra={})=>document.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...extra}));
+    key('{'); if(Math.abs(Appearance.get().layers['F.Cu'].opacity-.9)>1e-9) return 'opacity'; key('}');
+    updateCoordinates(vp,{clientX:e.clientX+16,clientY:e.clientY}); const point=boardCursor.world.slice(), z=S.z; key('F4'); if(S.x!==point[0]||S.y!==point[1]||S.z!==z) return 'F4';
+    const old=proposePin, on=THREADS_ON; let pins=[]; proposePin=(v,event)=>pins.push(toWorld(v,event)); THREADS_ON=true;
+    try {
+      const pointer=(type,x,button=2)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:e.clientY,button,pointerId:2,bubbles:true}));
+      pointer('pointerdown',e.clientX); pointer('pointerup',e.clientX+2); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+2,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'right pin';
+      const p=pins[0], screen=BoardGL.worldToScreen(p,{...boardCamera(vp),width:r.width,height:r.height}); if(Math.abs(screen[0]-(Math.trunc(e.clientX+2)-r.left))>1e-6) return 'pin roundtrip';
+      pointer('pointerdown',e.clientX); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'early context pinned'; pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'drag pinned';
+      pointer('pointerdown',e.clientX); pointer('lostpointercapture',e.clientX); const x=S.x; pointer('pointermove',e.clientX+40); if(S.x!==x) return 'lost capture';
+    } finally { proposePin=old; THREADS_ON=on; }
+    const tiny=document.createElement('div'); document.body.append(tiny); const before={x:S.x,y:S.y,z:S.z}; zoomBoardAt(tiny,0,0,2); tiny.remove(); if(S.z!==before.z||S.x!==before.x) return 'zero size';
+    document.querySelector('#zoombar [data-act=fit]').focus(); const focus=document.activeElement; key('?'); document.querySelector('#shortcuts').close(); if(document.activeElement!==focus) return 'focus restore';
+    Appearance.reset(); return true;`],
+  ["board navigation Thermal evidence", "v=board", `
+    Appearance.reset(); Appearance.patch({grid:{visible:true,size:1}}); await new Promise(r=>setTimeout(r,150)); fit();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6});
+    return document.querySelector('[data-coordinate=x]').textContent!=='—' && document.querySelector('[data-grid]').textContent==='1.000';`],
+  ["board shortcut sheet Thermal evidence", "v=board", `
+    Appearance.patch({grid:{visible:true,size:1},units:'mm'}); await new Promise(r=>setTimeout(r,150)); fit();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); showShortcuts(); return document.querySelector('#shortcuts').open;`],
+["SCH6 physical grid negative camera units DPR and viewport coordinates", "", `
+  const sheet=proj().sheets.find(s=>s.svg); S.v='sheet:'+sheet.path; S.m='side'; await draw();
+  S.x=-2.54; S.y=5.08; S.z=10; S.units='mm'; S.grid=true; apply();
+  for(const vp of document.querySelectorAll('#stage .vp.sheet')) {
+    const r=vp.getBoundingClientRect();
+    const p=schematicPoint(vp,{clientX:r.left+r.width/2+25.4,clientY:r.top+r.height/2-12.7});
+    if(Math.abs(p.x)>1e-8 || Math.abs(p.y-3.81)>1e-8) return JSON.stringify(p);
+    const canvas=vp.querySelector('.sch-grid');
+    if(!canvas || canvas.width!==Math.round(vp.clientWidth*devicePixelRatio)
+      || canvas.compareDocumentPosition(vp.querySelector('.world'))!==Node.DOCUMENT_POSITION_FOLLOWING) return 'canvas geometry/order';
+  }
+  const a=schematicGridPlan(100,100); if(Math.abs(a.step-12.7)>1e-8) return a;
+  S.z=.001; const tiny=schematicGridPlan(1920,1080);
+  if(tiny.step<4 || !Number.isFinite(tiny.x) || Math.ceil(1920/tiny.step)*Math.ceil(1080/tiny.step)>140000) return 'unbounded';
+  S.z=10; const before=[S.x,S.y,S.z];
+  schematicCursor={x:25.4,y:-1.27}; updateSchematicStatus();
+  if(!document.querySelector('[data-sch-coordinates]').textContent.includes('25.400')) return 'mm';
+  document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'u',ctrlKey:true,bubbles:true,cancelable:true}));
+  return S.units==='mil' && document.querySelector('[data-sch-coordinates]').textContent.includes('1000.000')
+    && document.querySelector('[data-sch-grid]').textContent.includes('50')
+    && JSON.stringify(before)===JSON.stringify([S.x,S.y,S.z]);
+`],
+  ["SCH6 physical grid resize toggle theme and keyboard lifecycle", "", `
+    S.v='sheet:'+proj().sheets.find(s=>s.svg).path; S.m='side'; await draw();
+    S.x=-123.45; S.y=987.65; S.z=10; S.grid=true; S.units='mm'; apply();
+    const vp=document.querySelector('#stage .vp.sheet'), canvas=vp.querySelector('.sch-grid');
+    const alpha=()=>canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((v,i)=>i%4===3&&v);
+    if(!alpha() || canvas.closest('.stack') || canvas.getAttribute('aria-hidden')!=='true') return 'grid ink/layer';
+    S.grid=false; apply(); if(alpha() || document.querySelector('[data-sch-grid]').textContent!=='grid off') return 'off';
+    S.grid=true; const oldDpr=Object.getOwnPropertyDescriptor(window,'devicePixelRatio');
+    try {
+      Object.defineProperty(window,'devicePixelRatio',{configurable:true,value:2}); apply();
+      if(canvas.width!==Math.round(vp.clientWidth*2)||canvas.height!==Math.round(vp.clientHeight*2)) return 'DPR';
+    } finally { if(oldDpr) Object.defineProperty(window,'devicePixelRatio',oldDpr); else delete window.devicePixelRatio; }
+    const plan=schematicGridPlan(7680,4320);
+    if(Math.ceil(7680/plan.step)*Math.ceil(4320/plan.step)>140000 || Math.abs(plan.step/(1.27*S.z)-Math.round(plan.step/(1.27*S.z)))>1e-8) return 'budget/lattice';
+    vp.style.width='320px'; await new Promise(r=>setTimeout(r,100));
+    if(canvas.width!==Math.round(vp.clientWidth*devicePixelRatio)) return 'resize';
+    const matrix=new DOMMatrix(vp.querySelector('.world').style.transform);
+    if(Math.abs(matrix.e-(vp.clientWidth/2-S.x*S.z))>1e-6) return 'resize camera';
+    const r=vp.getBoundingClientRect(); vp.dispatchEvent(new PointerEvent('pointermove',{clientX:r.left+r.width/2,clientY:r.top+r.height/2}));
+    await new Promise(requestAnimationFrame); if(document.querySelector('[data-coordinate=x]').textContent!=='-123.450') return 'pointer';
+    const camera=encodeState(), units=S.units, key=target=>target.dispatchEvent(new KeyboardEvent('keydown',{key:'u',ctrlKey:true,bubbles:true,cancelable:true}));
+    const input=document.createElement('input');document.body.append(input); key(input); input.remove();
+    const dialog=document.querySelector('#shortcuts'); dialog.showModal(); key(dialog); dialog.close();
+    if(S.units!==units) return 'editor/dialog'; key(document.body);
+    if(S.units!=='mil'||encodeState()!==camera) return 'units camera/hash';
+    document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'n',bubbles:true}));
+    if(document.querySelector('[data-sch-grid]').textContent!=='grid 50.000') return 'fixed schematic lattice';
+    KRTheme.set(KRTheme.get()==='dark'?'light':'dark'); if(!alpha()) return 'theme';
+    vp.dispatchEvent(new PointerEvent('pointerleave')); if(schematicCursor!==null||document.querySelector('[data-coordinate=x]').textContent!=='—') return 'leave';
+    const oldCanvas=canvas; await draw(); if(oldCanvas.isConnected||schematicCursor!==null) return 'draw lifecycle';
+    S.v='board'; await draw(); if(document.querySelector('.sch-grid,[data-sch-coordinates],[data-sch-grid]')) return 'schematic only';
+    return true;`],
+  ["SCH6 grid Thermal evidence fit", "", `
+    S.v='sheet:'+proj().sheets.find(s=>s.svg).path; S.m='side'; S.units='mm'; S.grid=true; await draw(); fit();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y];
+    updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); return !!vp.querySelector('.sch-grid');`],
+  ["SCH6 grid Thermal evidence close", "", `
+    S.v='sheet:'+proj().sheets.find(s=>s.svg).path; S.m='side'; S.units='mil'; S.grid=true; await draw(); fit(); S.z=10; apply();
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y];
+    updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); return !!vp.querySelector('.sch-grid');`],
+  ["chrome docks preserve space at 1600px", "", `
+  document.documentElement.style.width = "1600px"; document.body.style.width = "1600px";
+  renderPanel();
+  const app = document.querySelector("#app"), stage = document.querySelector("#stage");
+  const tabs = [...document.querySelectorAll("#panel-tabs [data-tab]")];
+  const bounds = document.querySelector("#panel-tabs")?.getBoundingClientRect();
+  return app.getBoundingClientRect().width <= 1600 && stage.clientWidth >= 600 &&
+    tabs.map(t => t.dataset.tab).join(",") === "changes,checks,parts,threads" &&
+    tabs.every(t => { const r=t.getBoundingClientRect(); return r.left >= bounds.left && r.right <= bounds.right + 1; })
+    || "dock tabs clipped or canvas squeezed";`],
+  ["chrome absent Parts and Threads stay explained", "", `
+  delete proj().parts; S.threads = null; S.issues = null; S.t = "changes";
+  renderPanel();
+  return ["parts", "threads"].every(name => {
+    const b = document.querySelector('#panel [data-tab="' + name + '"]');
+    return b?.disabled && !!b.title;
+  }) && document.querySelector("#panel-body") !== null;`],
+  ["chrome navigator escapes long project and sheet names", "", `
+  proj().name = "<img src=x onerror=alert(1)>" + "Long".repeat(40);
+  proj().sheets[0].name = "<script>bad</script>" + "Long".repeat(40);
+  renderNav();
+  const nav = document.querySelector("#nav");
+  return !nav.querySelector("img,script") && nav.scrollWidth <= nav.clientWidth + 1
+    && !!nav.querySelector("#proj") && !!nav.querySelector("[data-view]");`],
+  ["Themes compositor resolved background", "v=board", `
+    const stage=document.createElement('main'); stage.style.cssText='position:fixed;left:0;top:0;width:400px;height:200px;display:flex;z-index:9999'; document.body.append(stage);
+    const state={m:'wipe',x:0,y:0,z:10,wipe:.5,blend:.5};
+    const look=KrAppearance.resolve(KrAppearance.defaults()); look.boardBackground=[.2,.4,.6,1]; look.grid.visible=false;
+    const c=BoardDiff.mount({stage,scenes:{base:null,head:null},changes:[],state,appearance:()=>look});
+    try {
+      c.render();
+      const pixel=Array.from(c.readPixel(0,100,100));
+      if(pixel.some((v,i)=>Math.abs(v-[51,102,153,255][i])>1)) return 'resolved background '+pixel;
+      return true;
+    } finally {c.dispose();stage.remove();}
+  `],
 ];

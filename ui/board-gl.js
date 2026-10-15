@@ -218,6 +218,7 @@ flat in int netIndex;
 flat in int categoryIndex;
 flat in int sideIndex;
 uniform vec4 layerColor;
+uniform float layerOpacity;
 uniform vec3 backgroundColor;
 uniform float contrastFactor;
 uniform sampler2D netStyle;
@@ -239,12 +240,13 @@ void main() {
  float coverage=mode==1 ? 1.0 : mode==3 ? texture(atlas,localPoint).a : 1.0-smoothstep(-aa,aa,d);
  vec4 ns=texelFetch(netStyle,ivec2(netIndex,0),0);
  float opacity=categoryOpacity[categoryIndex]*sideVisible[sideIndex];
- if(ns.a<0.0 || coverage==0.0 || opacity==0.0) discard;
- vec3 rgb=ns.a>0.0 && drillPass==0 ? ns.rgb : layerColor.rgb;
+ if(ns.a==-1.0 || coverage==0.0 || opacity==0.0) discard;
+ bool netColor=ns.a>=0.0 && drillPass==0;
+ vec3 rgb=netColor ? ns.rgb : layerColor.rgb;
  float retained=selectedNet>=0 && netIndex!=selectedNet && netIndex!=zeroNet ? 0.2 : 1.0;
  if(drillPass==0) rgb=mix(backgroundColor,rgb,contrastFactor*retained);
  outColor=customEnabled ? vec4(customStyle.rgb,customStyle.a*coverage)
-   : vec4(rgb,layerColor.a*opacity*coverage*(ns.a>0.0 ? ns.a : 1.0));
+   : vec4(rgb,(netColor ? ns.a*layerOpacity : layerColor.a)*opacity*coverage);
 }`;
   // Fullscreen dot grid: world position is rebuilt per fragment so it never swims with pan.
   const gridVertexSource = `#version 300 es
@@ -289,7 +291,7 @@ void main() {
     function lost(event) { event.preventDefault(); failure(new Error("Board WebGL context lost")); }
     canvas.addEventListener("webglcontextlost", lost);
     try {
-      const names = ["cameraCenter","viewportSize","zoom","mirrorX","layerColor","backgroundColor","contrastFactor","netStyle","atlas","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass","customEnabled","customStyle"];
+      const names = ["cameraCenter","viewportSize","zoom","mirrorX","layerColor","layerOpacity","backgroundColor","contrastFactor","netStyle","atlas","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass","customEnabled","customStyle"];
       function link(vertex, fragment, list) {
         const program = own("Program",gl.createProgram());
         for (const [type,source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]) {
@@ -385,7 +387,7 @@ void main() {
       }
       // Resize observation: one coalesced rAF draw, never a permanent loop; zero-sized docks keep the last valid camera.
       function scheduleDraw() {
-        if (frame || disposed) return;
+        if (opts.manual || frame || disposed) return;
         frame = requestAnimationFrame(() => {
           frame = 0;
           const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -393,6 +395,11 @@ void main() {
         });
       }
       if (!opts.manual && typeof ResizeObserver === "function") { observer = new ResizeObserver(scheduleDraw); observer.observe(canvas); }
+      function layerRGBA(layer,kind,net) {
+        const key=globalThis.KicadColors.layerThemeKeys[layer];
+        const color=(net==null?null:appearance.netColors?.[net]) || appearance.colors?.[key] || rgba(appearance.layers?.[layer]?.color || globalThis.KicadColors.layers[layer] || [194,194,194,1]);
+        return [...color.slice(0,3),color[3]*(appearance.layerOpacity?.[layer]??appearance.layers?.[layer]?.opacity??1)*(appearance.objectOpacity?.[kind]??1)];
+      }
       function draw(options = {}) {
         if (disposed) return false;
         if (options.camera) camera = {...camera,...options.camera};
@@ -406,7 +413,7 @@ void main() {
         gl.disable(gl.SCISSOR_TEST);
         gl.viewport(0,0,bw,bh); gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST);
         gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA); gl.colorMask(true,true,true,true); gl.stencilMask(0xff);
-        const background = options.background || rgba(appearance.background || globalThis.KicadColors.objects.background);
+        const background = options.background || appearance.boardBackground || rgba(appearance.background || globalThis.KicadColors.objects.background);
         if (options.clear !== false) { gl.clearColor(...(options.mask ? [0,0,0,1] : background)); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT); }
         if (!scene) return true;
         const origin = [(scene.bounds[0]/2+scene.bounds[2]/2)/1000,(scene.bounds[1]/2+scene.bounds[3]/2)/1000];
@@ -430,15 +437,16 @@ void main() {
           gl.useProgram(program); gl.bindVertexArray(gridVao);
           gl.uniform2f(u.viewportSize,width,height); gl.uniform2f(u.phase,((cx%g)+g)%g,((cy%g)+g)%g);
           gl.uniform1f(u.zoom,z); gl.uniform1f(u.mirrorX,mirror); gl.uniform1f(u.spacing,g); gl.uniform1f(u.dpr,dpr);
-          gl.uniform4fv(u.color,rgba(globalThis.KicadColors.objects.grid));
+          gl.uniform4fv(u.color,appearance.colors?.['board.grid'] || rgba(globalThis.KicadColors.objects.grid));
           gl.drawArrays(gl.TRIANGLES,0,6); stats.draws++;
         }
         if (netDirty) {
           const data = new Float32Array(Math.max(1,scene.nets.length)*4);
+          for(let i=0;i<scene.nets.length;i++) data[i*4+3]=-2;
           scene.nets.forEach((n,i)=>{
             const style = appearance.nets?.[n.name];
             if (style?.visible === false) data[i*4+3] = -1;
-            else if (style?.color) data.set(rgba(style.color),i*4);
+            else if (appearance.netColors?.[n.name] || style?.color) data.set(appearance.netColors?.[n.name] || rgba(style.color),i*4);
           });
           gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,Math.max(1,scene.nets.length),1,0,gl.RGBA,gl.FLOAT,data); stats.textureUploads++; netDirty=false;
         }
@@ -456,25 +464,27 @@ void main() {
           const factor = drill ? 1 : layerFactor(b.layer,appearance);
           if (!factor) continue;
           const {program,u} = capsule ? capsuleProgram : meshProgram;
-          const color = b.pass === "hole" ? background : b.pass === "wall" ? rgba(globalThis.KicadColors.objects.viaHolewalls) : rgba(appearance.layers?.[b.layer]?.color || globalThis.KicadColors.layers[b.layer] || [194,194,194,1]);
-          if (!drill) color[3] *= appearance.layers?.[b.layer]?.opacity ?? 1;
+          const color = b.pass === "hole" ? (appearance.colors?.['board.via_hole'] || background) : b.pass === "wall" ? (appearance.colors?.['board.via_hole_walls'] || rgba(globalThis.KicadColors.objects.viaHolewalls)) : layerRGBA(b.layer,null,null);
           gl.useProgram(program);
-          gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
+          gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.layerOpacity,appearance.layers?.[b.layer]?.opacity??1); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
           gl.bindVertexArray(b.vao);
           if (options.mask || options.filter || options.override) {
             for (const range of b.ranges) {
               const object = scene.objects[range.objectIndex];
               // Resolve effective visibility BEFORE callbacks. An override cannot revive hidden geometry.
-              const net = appearance.nets?.[scene.nets.find(n=>n.id===object.net)?.name];
+              const netName = scene.nets.find(n=>n.id===object.net)?.name;
+              const net = appearance.nets?.[netName];
+              const netColor = appearance.netColors?.[netName] || (net?.color ? rgba(net.color) : null);
               const layer = drill ? object.layers.find(l=>layerFactor(l,appearance)>0 && (appearance.layers?.[l]?.opacity ?? 1)>0) : b.layer;
               const layerStyle = appearance.layers?.[layer];
-              const alpha = (layerStyle?.opacity ?? 1) * (layerStyle?.color?.[3] ?? globalThis.KicadColors.layers[layer]?.[3] ?? 1) * (appearance.objects?.[object.category]?.opacity ?? 1) * (net?.color?.[3] ?? 1);
+              const base = drill ? layerRGBA(layer,null,null) : color;
+              const alpha = (netColor ? netColor[3] * (appearance.layerOpacity?.[layer] ?? layerStyle?.opacity ?? 1) : base[3]) * (appearance.objects?.[object.category]?.opacity ?? 1);
               if (object.hidden || !layer || !layerFactor(layer,appearance) || alpha <= 0 || net?.visible === false || appearance.objects?.[object.category]?.visible === false ||
                   object.side && appearance.objects?.[object.side+"Footprints"]?.visible === false ||
                   options.mask && object.pickable === false || options.filter && !options.filter(object)) continue;
               if (drill && appearance.activeLayer?.endsWith(".Cu") && !range.layers.includes(appearance.activeLayer)) continue;
               const retained = selected >= 0 && object.net !== 0 && scene.nets[selected]?.id !== object.net ? .2 : 1;
-              const rgb = net?.color ? rgba(net.color).slice(0,3) : color.slice(0,3);
+              const rgb = !drill && netColor ? netColor.slice(0,3) : color.slice(0,3);
               const normal = {color:rgb.map((v,i)=>background[i]+(v-background[i])*factor*retained), opacity:alpha};
               const style = options.override ? options.override(object,normal) : options.mask ? {color:[1,1,1],opacity:1} : normal;
               // Drills subtract from masks; they never become independent hit targets.
@@ -534,7 +544,9 @@ void main() {
       }
       const api = {
         gl, stats, setScene, setCamera(next) { camera = {...next}; },
-        setAppearance(state) { appearance = structuredClone(state || {}); netDirty = true; },
+        get appearance() { return structuredClone(appearance); },
+        layerRGBA,
+        setAppearance(state) { appearance = structuredClone(state || {}); netDirty = true; scheduleDraw(); },
         draw, dispose, hitTest,
         worldToScreen(point) { return worldToScreen(point,projectionCamera()); },
         screenToWorld(point) { return screenToWorld(point,projectionCamera()); },

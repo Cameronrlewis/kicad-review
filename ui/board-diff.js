@@ -95,7 +95,7 @@
         if (disposed) return;
         try {
           const look = getAppearance(), bg = look.background || [0,16,35,1];
-          const background = [bg[0]/255,bg[1]/255,bg[2]/255,bg[3] ?? 1];
+          const background = look.boardBackground || [bg[0]/255,bg[1]/255,bg[2]/255,bg[3] ?? 1];
           for (const pane of panes) {
             const {vp,canvas,renderer} = pane, {gl} = renderer;
             if (!vp.clientWidth || !vp.clientHeight || !(state.z > 0)) continue;
@@ -152,6 +152,7 @@
         const label = document.createElement('span'); label.className = 'tag';
         label.textContent = sideMode ? (sides[0] === 'base' ? 'Base' : 'Head') + (!scenes[sides[0]] ? ' — not present' : '')
           : state.m === 'overlay' ? 'Base (red) · Head (green) · both (black)' : state.m === 'semantic' ? 'Changes only' : 'Base under Head';
+        if (!sideMode && state.m === 'overlay') label.innerHTML = '<i class="sw del"></i>Base (red) · <i class="sw add"></i>Head (green) · <i class="sw both"></i>both (black)';
         vp.append(label); stage.append(vp); attachPanZoom?.(vp);
         const renderer = BoardGL.create(canvas,{retained:true,manual:true,onFailure:onLost});
         if (!renderer) throw Error('WebGL2 unavailable');

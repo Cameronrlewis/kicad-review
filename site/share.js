@@ -141,7 +141,7 @@ function downloadUrl(value) {
   } catch { return null; }
 }
 export async function serveShare(request, env, token, raw, deps) {
-  const missing = () => guestResponse(deps, 'Not found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  const missing = () => guestResponse(deps, deps.sharedNotFoundPage(), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': deps.frameCsp } });
   if (!shareEnabled(env)) return missing();
   try {
     const c = await verifyShare(token, env);
