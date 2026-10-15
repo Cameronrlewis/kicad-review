@@ -2070,6 +2070,18 @@ export const CHECKS = [
       }
       const uploads=c.panes.map(p=>p.renderer.stats.uploads).join();
       for(const mode of ['overlay','wipe','blend']) {state.m=mode; state.wipe=.5; c.render(); if(lost) return lost;}
+      for(const bg of [[0,1,0,1],[.49,.49,.49,1]]) {
+        look.boardBackground=bg; state.m='wipe'; state.wipe=1; c.render();
+        const color=BoardMarks.pickColor('added',bg.slice(0,3).map(v=>v*255));
+        if(!near(read(a[0]+75,a[1]),color)) return 'imported-background palette';
+        if(pane.markHud.querySelector('.board-mark-key.added').style.getPropertyValue('--mark-color')!=='rgb('+color.join(',')+')') return 'legend palette differs';
+      }
+      delete look.colors['board.via_hole'];
+      state.m='overlay'; c.render();
+      if(!near(read(a[0],a[1]),[255,255,255])) return 'overlay recolour drill background '+read(a[0],a[1]);
+      if(!near(read(a[0]+75,a[1]),BoardMarks.pickColor('added',[255,255,255]))) return 'overlay palette not white';
+      state.s='a'; c.render();
+      if(!pane.markHud.querySelector('.board-mark-label.added')) return 'selection erased action glyph';
       if(c.panes.map(p=>p.renderer.stats.uploads).join()!==uploads) return 'mark changes uploaded geometry';
       return true;
     } finally { if(descriptor) Object.defineProperty(window,'devicePixelRatio',descriptor); else delete window.devicePixelRatio; c.dispose(); stage.remove(); }

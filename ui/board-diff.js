@@ -204,7 +204,7 @@
             } else composite(pane,mode === 'overlay' ? 1 : 0,mode === 'blend' ? state.blend : 1);
             if (mode==='overlay' && look.markStyle==='recolour') for (const side of pane.sides) {
               renderer.setScene(pane.scenes[side],side);
-              renderer.draw({clear:false,grid:false,filter:o=>!!actionFor(o,actions),override:(o,normal)=>({...normal,color:window.BoardMarks.pickColor(actionFor(o,actions),[255,255,255]).map(v=>v/255)})});
+              renderer.draw({clear:false,grid:false,background:[1,1,1,1],filter:o=>!!actionFor(o,actions),override:(o,normal)=>({...normal,color:window.BoardMarks.pickColor(actionFor(o,actions),[255,255,255]).map(v=>v/255)})});
             }
             marks(pane,state,look,actions,mode==='overlay'?[255,255,255]:background.slice(0,3).map(v=>v*255));
           }
