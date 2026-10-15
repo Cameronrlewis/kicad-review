@@ -306,3 +306,6 @@ body.shot #toolbar { display:none; }
 .appearance-row .mark { color:var(--modified); font-size:12px; }
 .appearance-row:has(.mark) { grid-template-columns:24px 24px minmax(0,1fr) 12px 80px; }
 .appearance-options .btn { width:100%; }
+#panel-tabs:has([data-tab=appearance]) [role=tab] { padding:0 4px; }
+.appearance-options label.check { border:0; background:none; padding:0; margin:0; }
+.appearance-row.object-row input[type=range] { opacity:1; } .appearance-row.object-row input[type=range]:disabled { opacity:.35; }
