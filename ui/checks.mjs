@@ -1563,4 +1563,53 @@ export const CHECKS = [
       }
       return true;
     } finally { Appearance.patch(before); }`],
+  ["board geometry contract", "v=board", `
+    const panel = document.createElement('section');
+    panel.style.cssText = 'position:fixed;inset:100px 350px auto;z-index:9999;padding:20px;background:var(--bg);color:var(--text);border:1px solid currentColor';
+    const title = document.createElement('h2'); title.textContent = 'Retained geometry picking contract';
+    const caption = document.createElement('p');
+    caption.textContent = 'Pad / parent c1: hole (10,10) misses; annulus (11.5,10) hits; empty corner (8,8) misses. Zone hole also misses.';
+    const canvas = document.createElement('canvas'); canvas.style.cssText = 'width:600px;height:360px';
+    panel.append(title, caption, canvas); document.body.append(panel);
+    const object = (uuid, kind, geometry, box, changeIds=['c1']) => ({uuid, changeUuid:'parent', kind, geometry, box, changeIds, parentKey:'parent', ref:'U1', layers:['F.Cu'],net:0,category:kind==='zone'?'zones':'pads',side:'front',hidden:false});
+    const pad = object('pad','pad',{primitive:{shape:'circle',center:[10000,10000],size:[4000,4000],angle:0},drill:{center:[10000,10000],size:[2000,2000],angle:0}},[8000,8000,12000,12000]);
+    const zone = object('zone','zone',{rings:[[[14000,8000],[18000,8000],[18000,12000],[14000,12000]],[[15000,9000],[17000,9000],[17000,11000],[15000,11000]]]},[14000,8000,18000,12000],['c2']);
+    const parent = object('parent','footprint',{},[7000,7000,13000,13000]);
+    const scene = {version:1,units:'um',complete:true,warnings:[],bounds:[6000,6000,20000,14000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[parent,pad,zone]};
+    const renderer = BoardGL.create(canvas,{scene}); if (!renderer) return 'no WebGL2';
+    const camera = {x:13,y:10,z:40,width:600,height:360,dpr:1};
+    let appearance = {layers:{'F.Cu':{visible:true,opacity:1}},objects:{},nets:{},grid:{visible:true,size:1}};
+    renderer.setCamera(camera); renderer.setAppearance(appearance); renderer.draw();
+    try {
+      const hits = point => renderer.hitTest(renderer.worldToScreen(point));
+      if (hits([10,10]).length || hits([8,8]).length) return 'hole or empty footprint bbox hit';
+      const annulus = hits([11.5,10]);
+      if (annulus.length!==1 || annulus[0].uuid!=='pad' || annulus[0].changeIds.join(',')!=='c1') return 'missing child / parent identity';
+      if (hits([16,10]).length || hits([14.5,10])[0]?.uuid!=='zone') return 'zone hole parity';
+      const uploads = renderer.stats.uploads;
+      renderer.draw({mask:true,filter:o=>o.uuid==='pad',override:()=>({color:[1,1,1],opacity:1})});
+      let [sx,sy] = renderer.worldToScreen([11.5,10]);
+      if (renderer.readPixel(Math.floor(sx),359-Math.floor(sy))[0]<240) return 'mask override';
+      [sx,sy] = renderer.worldToScreen([10,10]);
+      if (renderer.readPixel(Math.floor(sx),359-Math.floor(sy))[0]>0) return 'mask includes drill';
+      for (const state of [
+        {...appearance,layers:{'F.Cu':{visible:false}}},
+        {...appearance,layers:{'F.Cu':{opacity:0}}},
+        {...appearance,objects:{pads:{visible:false}}},
+        {...appearance,nets:{'':{visible:false}}}
+      ]) {
+        renderer.setAppearance(state);
+        if (hits([11.5,10]).length) return 'invisible geometry hit';
+        renderer.draw({mask:true,filter:o=>o.uuid==='pad',override:()=>({color:[1,1,1],opacity:1})});
+        [sx,sy] = renderer.worldToScreen([11.5,10]);
+        if (renderer.readPixel(Math.floor(sx),359-Math.floor(sy))[0]) return 'override resurrected hidden geometry';
+      }
+      renderer.setAppearance({...appearance,flip:true});
+      const point=[11.5,10], back=renderer.screenToWorld(renderer.worldToScreen(point));
+      if (Math.abs(back[0]-point[0])>1e-9 || hits(point)[0]?.uuid!=='pad') return 'flip projection';
+      renderer.setAppearance(appearance); renderer.draw();
+      if (renderer.stats.uploads!==uploads) return 'contract rebuilt buffers';
+      caption.textContent += ' All assertions passed. Hidden layers, objects, nets, zero opacity and flip verified.';
+      return true;
+    } finally { renderer.dispose(); }`],
 ];
