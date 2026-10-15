@@ -332,3 +332,5 @@ body.shot #toolbar { display:none; }
 
 .marker.sel { border-color:transparent;box-shadow:none;outline:calc(2px / var(--k,1)) solid var(--accent);outline-offset:calc(3px / var(--k,1)); }
 .marker.sel::after { left:auto;right:0;top:0; }
+
+.marker:not(.sel) { z-index:5; }
