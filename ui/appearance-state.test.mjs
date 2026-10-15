@@ -92,7 +92,10 @@ test('defaults and validated snapshots are complete and detached, including spec
   candidate.layerOpacity['In30.Cu'] = .4;
   candidate.netColors = JSON.parse('{"__proto__":[1,0,0,1],"constructor":[0,1,0,1]}');
   const validated = A.validateState(candidate);
-  assert.deepEqual(plain(validated), plain(candidate));
+  for(const key of ['colors','layerOpacity','objectOpacity','netColors','markStyle'])
+    assert.deepEqual(plain(validated[key]), plain(candidate[key]));
+  assert.equal(validated.layers['In30.Cu'].opacity,.4);
+  assert.deepEqual(plain(validated.nets.__proto__.color),[255,0,0,1]);
   candidate.colors['board.background'][0] = 1;
   candidate.netColors.__proto__[0] = 0;
   assert.equal(validated.colors['board.background'][0], 0);
@@ -263,4 +266,19 @@ test('special viewer names are own keys; writes preserve other viewers and exclu
     assert.equal(A.createStore({viewerId,storage:()=>disk}).get().markStyle,'recolour');
   }
   assert.equal(disk.getItem('kr.theme'),'light');
+});
+
+
+test('resolved backgrounds are opaque; board compatibility edits share the canonical palette', () => {
+  const store=A.createStore({viewerId:'bridge',storage:()=>({getItem:()=>null,setItem(){}})});
+  store.import(theme({board:{background:'rgba(255,255,255,.5)',copper:{f:'rgba(1,2,3,.5)'}}}));
+  const resolved=A.resolve(store.get());
+  assert.deepEqual(plain(resolved.boardBackground), [.5,(1+16/255)/2,(1+35/255)/2,1]);
+  assert.equal(store.get().colors['board.background'][3],.5);
+  assert.deepEqual(plain(resolved.layers['F.Cu'].color),[1,2,3,.5]);
+  store.patch({layers:{'F.Cu':{color:[12,34,56,.4],opacity:.3,visible:false}},objects:{zones:{opacity:.2}}});
+  assert.deepEqual(plain(store.get().colors['board.copper.f']),[12/255,34/255,56/255,.4]);
+  assert.equal(store.get().layerOpacity['F.Cu'],.3);
+  assert.equal(store.get().objectOpacity.zones,.2);
+  assert.equal(store.get().layers['F.Cu'].visible,false);
 });

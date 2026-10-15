@@ -1574,4 +1574,35 @@ export const CHECKS = [
       }
       return true;
     } finally { Appearance.patch(before); }`],
+  ["Themes share colours across board and lazy schematic", "v=board", `
+    const store=appearanceStore(), before=store.get(), hash=location.hash;
+    const original=WebGL2RenderingContext.prototype.bufferData, sub=WebGL2RenderingContext.prototype.bufferSubData;
+    let uploads=0;
+    try {
+      if(store!==Appearance) return 'second store';
+      await draw();
+      if(!appearanceBoards.size) return 'no live board';
+      WebGL2RenderingContext.prototype.bufferData=function(...args){uploads++;return original.apply(this,args)};
+      WebGL2RenderingContext.prototype.bufferSubData=function(...args){uploads++;return sub.apply(this,args)};
+      store.import(JSON.stringify({meta:{version:5},board:{background:'#fafafa',copper:{f:'rgba(1,2,3,.5)'}},schematic:{background:'#fff',wire:'#123456'}}));
+      store.patch({layerOpacity:{'F.Cu':.4},objectOpacity:{zones:.2}});
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      for(const board of appearanceBoards) {
+        if(board.appearance.colors['board.copper.f'][0]!==1/255) return 'board stale';
+        if(Math.abs(board.layerRGBA('F.Cu','zones','')[3]-.04)>1e-8) return 'alpha multiplied twice';
+      }
+      store.reset(); store.import(JSON.stringify({meta:{version:5},schematic:{wire:'#123456'}}));
+      if(uploads) return 'theme uploaded geometry '+uploads;
+      WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
+      const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
+      S.v='sheet:'+sheet.path; await draw();
+      if(!appearanceSchematics.size||appearanceBoards.size) return 'stale lifecycle';
+      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('18,52,86')) return 'wire stale';
+      store.patch({colors:{'schematic.wire':[1,0,0,1]}});
+      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('255,0,0')) return 'mounted wire stale';
+      return location.hash===hash || 'appearance changed deep link';
+    } finally {
+      WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
+      store.set(before);
+    }`],
 ];
