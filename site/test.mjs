@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
+import { fixturePages } from './proof.mjs';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { historyEvents, HISTORY_QUERY } from './history.js';
@@ -1177,7 +1178,7 @@ test('run page validates revisions and only refreshes while running', () => {
   const running = runPage({ ...common, running: true, base: base, head, startedAt: '2026-10-07T10:00:00Z' });
   assert.match(running, /http-equiv="refresh" content="5"/);
   assert.match(running, /deadbee → cafebab/);
-  assert.match(running, /Revisions: <span class="mono">deadbee/);
+  assert.match(running, /Revisions: <span class="mono"><span title="deadbeef[0-9a-f]*">deadbee<\/span> → <span title="cafebabe[0-9a-f]*">cafebab<\/span>/);
   const invalid = runPage({ ...common, running: true, base: '<bad>', head });
   assert.match(invalid, /Revisions: not recorded/);
   const finished = runPage({ ...common, running: false, status: 'completed', base, head });
@@ -3125,4 +3126,19 @@ test('S2 share copy and duplicate-submit handlers', async () => {
   await dup.el['share-form'].onsubmit({ preventDefault() {} });
   assert.equal(posts, 1); release(); await first;
   const third = dup.el['share-form'].onsubmit({ preventDefault() {} }); assert.equal(posts, 2); fail = false; release(); await third;
+});
+
+test('S2 complete screen inventory has labelled pages and no external UI assets', () => {
+  const fixtures = fixturePages();
+  assert.equal(Object.keys(fixtures).length, 23);
+  for (const [name, html] of Object.entries(fixtures)) {
+    assert.match(html, /<html\b[^>]*\blang="en"/, name);
+    assert.match(html, /<title>[^<]+<\/title>/, name);
+    assert.match(html, /data-theme-toggle/, name);
+    assert.match(html, /<main\b/, name);
+    assert.doesNotMatch(html, /<script[^>]+src=|<link[^>]+rel="stylesheet"|fonts\.googleapis/, name);
+  }
+  assert.match(fixtures['shared-invalid'], /Shared review unavailable/);
+  assert.match(fixtures.repositories, /aria-label="Repositories"/);
+  assert.match(fixtures.reviews, /aria-label="Reviews"/);
 });
