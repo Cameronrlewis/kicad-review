@@ -329,3 +329,6 @@ body.shot #toolbar { display:none; }
 .diff-mark-legend > span,.board-mark-legend .board-mark-key { color:var(--text);background:var(--surface);font:600 11px/14px var(--font-mono);border:1px solid currentColor;padding:0 2px; }
 .diff-mark-legend [data-dash="dashed"] { border-style:dashed; }
 .diff-mark-legend [data-dash="dotted"] { border-style:dotted; }
+
+.marker.sel { border-color:transparent;box-shadow:none;outline:calc(2px / var(--k,1)) solid var(--accent);outline-offset:calc(3px / var(--k,1)); }
+.marker.sel::after { left:auto;right:0;top:0; }

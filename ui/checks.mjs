@@ -2107,7 +2107,7 @@ export const CHECKS = [
     const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
     if(p<0) return 'fixture needs both geometry revisions';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
-    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Classic reference subset\"},\"board\":{\"background\":\"rgb(0, 0, 0)\",\"copper\":{\"f\":\"rgb(132, 0, 0)\",\"b\":\"rgb(0, 132, 0)\",\"in1\":\"rgb(132, 132, 0)\"}},\"schematic\":{\"background\":\"rgb(255, 255, 255)\",\"wire\":\"rgb(0, 132, 0)\",\"component_outline\":\"rgb(132, 0, 0)\",\"component_body\":\"rgb(255, 255, 194)\"}}\n");
+    Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Classic reference subset"}, "board": {"background": "rgb(0, 0, 0)", "copper": {"f": "rgb(132, 0, 0)", "b": "rgb(0, 132, 0)", "in1": "rgb(132, 132, 0)"}}, "schematic": {"background": "rgb(255, 255, 255)", "wire": "rgb(0, 132, 0)", "component_outline": "rgb(132, 0, 0)", "component_body": "rgb(255, 255, 194)"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
     S.v="board"==='board'?'board':'sheet:'+sheet.path;
     const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
@@ -2129,20 +2129,29 @@ export const CHECKS = [
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
-          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[0-9.]+/g).slice(0,3).map(Number);
           if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
           if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
         }
       }
     }
-    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
-    return true;
+    S.m='side'; Appearance.patch({markStyle:'outline'});
+    if(changed) {
+      const b=rowBox(changed,'head');
+      if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
+    }
+    await draw();
+    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+      const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
+      return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
+    });
+    return visible || 'no visible mark in screenshot';
 `],
   ["Themes marks classic schematic","v=board",`
     const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
     if(p<0) return 'fixture needs both geometry revisions';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
-    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Classic reference subset\"},\"board\":{\"background\":\"rgb(0, 0, 0)\",\"copper\":{\"f\":\"rgb(132, 0, 0)\",\"b\":\"rgb(0, 132, 0)\",\"in1\":\"rgb(132, 132, 0)\"}},\"schematic\":{\"background\":\"rgb(255, 255, 255)\",\"wire\":\"rgb(0, 132, 0)\",\"component_outline\":\"rgb(132, 0, 0)\",\"component_body\":\"rgb(255, 255, 194)\"}}\n");
+    Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Classic reference subset"}, "board": {"background": "rgb(0, 0, 0)", "copper": {"f": "rgb(132, 0, 0)", "b": "rgb(0, 132, 0)", "in1": "rgb(132, 132, 0)"}}, "schematic": {"background": "rgb(255, 255, 255)", "wire": "rgb(0, 132, 0)", "component_outline": "rgb(132, 0, 0)", "component_body": "rgb(255, 255, 194)"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
     S.v="schematic"==='board'?'board':'sheet:'+sheet.path;
     const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
@@ -2164,20 +2173,29 @@ export const CHECKS = [
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
-          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[0-9.]+/g).slice(0,3).map(Number);
           if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
           if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
         }
       }
     }
-    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
-    return true;
+    S.m='side'; Appearance.patch({markStyle:'outline'});
+    if(changed) {
+      const b=rowBox(changed,'head');
+      if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
+    }
+    await draw();
+    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+      const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
+      return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
+    });
+    return visible || 'no visible mark in screenshot';
 `],
   ["Themes marks extreme-light board","v=board",`
     const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
     if(p<0) return 'fixture needs both geometry revisions';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
-    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Extreme light contrast stress\"},\"board\":{\"background\":\"rgba(255, 255, 255, 0.98)\",\"copper\":{\"f\":\"#ffffff\",\"b\":\"#fffffe\",\"in30\":\"rgba(255, 255, 255, 0)\"},\"grid\":\"#ffffff\",\"f_silks\":\"#ffffff\"},\"schematic\":{\"background\":\"#ffffff\",\"wire\":\"#ffffff\",\"component_outline\":\"#ffffff\",\"component_body\":\"#ffffff\",\"worksheet\":\"#ffffff\"}}\n");
+    Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Extreme light contrast stress"}, "board": {"background": "rgba(255, 255, 255, 0.98)", "copper": {"f": "#ffffff", "b": "#fffffe", "in30": "rgba(255, 255, 255, 0)"}, "grid": "#ffffff", "f_silks": "#ffffff"}, "schematic": {"background": "#ffffff", "wire": "#ffffff", "component_outline": "#ffffff", "component_body": "#ffffff", "worksheet": "#ffffff"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
     S.v="board"==='board'?'board':'sheet:'+sheet.path;
     const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
@@ -2199,20 +2217,29 @@ export const CHECKS = [
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
-          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[0-9.]+/g).slice(0,3).map(Number);
           if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
           if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
         }
       }
     }
-    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
-    return true;
+    S.m='side'; Appearance.patch({markStyle:'outline'});
+    if(changed) {
+      const b=rowBox(changed,'head');
+      if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
+    }
+    await draw();
+    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+      const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
+      return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
+    });
+    return visible || 'no visible mark in screenshot';
 `],
   ["Themes marks extreme-light schematic","v=board",`
     const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
     if(p<0) return 'fixture needs both geometry revisions';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
-    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Extreme light contrast stress\"},\"board\":{\"background\":\"rgba(255, 255, 255, 0.98)\",\"copper\":{\"f\":\"#ffffff\",\"b\":\"#fffffe\",\"in30\":\"rgba(255, 255, 255, 0)\"},\"grid\":\"#ffffff\",\"f_silks\":\"#ffffff\"},\"schematic\":{\"background\":\"#ffffff\",\"wire\":\"#ffffff\",\"component_outline\":\"#ffffff\",\"component_body\":\"#ffffff\",\"worksheet\":\"#ffffff\"}}\n");
+    Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Extreme light contrast stress"}, "board": {"background": "rgba(255, 255, 255, 0.98)", "copper": {"f": "#ffffff", "b": "#fffffe", "in30": "rgba(255, 255, 255, 0)"}, "grid": "#ffffff", "f_silks": "#ffffff"}, "schematic": {"background": "#ffffff", "wire": "#ffffff", "component_outline": "#ffffff", "component_body": "#ffffff", "worksheet": "#ffffff"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
     S.v="schematic"==='board'?'board':'sheet:'+sheet.path;
     const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
@@ -2234,13 +2261,22 @@ export const CHECKS = [
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
-          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[0-9.]+/g).slice(0,3).map(Number);
           if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
           if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
         }
       }
     }
-    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
-    return true;
+    S.m='side'; Appearance.patch({markStyle:'outline'});
+    if(changed) {
+      const b=rowBox(changed,'head');
+      if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
+    }
+    await draw();
+    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+      const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
+      return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
+    });
+    return visible || 'no visible mark in screenshot';
 `],
 ];
