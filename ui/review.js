@@ -224,6 +224,33 @@ function currentView(v = S.v) {   // null when the view has no render (unchanged
   const pg = p.sheets.find(s => `sheet:${s.path}` === v);
   return pg && pg.svg ? { kind: "sheet", size: pg.size, layers: [{ name: "sheet", changed: true, svg: pg.svg }] } : null;
 }
+// KiCad 10, builtin_color_themes.h:31–81; data provenance in NOTICE.
+const SCH_PAINTS = new Set([
+  '000000','000084','ffffc2','840000','840084','b5b5b5','c2c2c2',
+  '009600','725600','0f0f0f','484848','ff0000','0000c2','4848ff',
+  '006464','a90000','840032','e0000c'
+]);
+function schematicPaint(value) {
+  const hex = value.trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(hex) && SCH_PAINTS.has(hex.slice(1))
+    ? `var(--sch-ink-${hex.slice(1)}, ${hex})` : value;
+}
+function themeSchematic(svg) {
+  for (const el of [svg, ...svg.querySelectorAll('[style],[fill],[stroke]')]) {
+    if (el.hasAttribute('style')) {
+      el.setAttribute('style', el.getAttribute('style').replace(
+        /(^|;)\s*(fill|stroke)\s*:\s*(#[0-9a-f]{6})(\s*(?:!important)?\s*)(?=;|$)/gi,
+        (all, separator, property, value, suffix) =>
+          `${separator}${property}:${schematicPaint(value)}${suffix}`));
+    }
+    for (const property of ['fill', 'stroke']) {
+      if (el.hasAttribute(property)) {
+        el.setAttribute(property, schematicPaint(el.getAttribute(property)));
+      }
+    }
+  }
+}
+
 async function stack(side, view) {
   const st = document.createElement("div");
   st.className = `stack ${side}`;
@@ -234,6 +261,7 @@ async function stack(side, view) {
     const d = document.createElement("div");
     d.className = "layer"; d.dataset.layer = l.name;
     d.innerHTML = t.slice(t.indexOf("<svg"));
+    if (view.kind === 'sheet') themeSchematic(d.querySelector('svg'));
     st.appendChild(d);
   }
   return st;

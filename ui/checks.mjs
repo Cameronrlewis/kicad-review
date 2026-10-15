@@ -1,5 +1,58 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
+    const id = '__sch6_palette_probe__';
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
+    cache[id] = source;
+    const view = {kind:'sheet', size:[10,10], layers:[{name:'probe', svg:{base:id,head:id}}]};
+    try {
+      const sheet = await stack('head', view);
+      const svg = sheet.querySelector('svg'), path = svg.querySelector('path');
+      if (svg.style.stroke !== 'var(--sch-ink-a90000, #a90000)'
+        || path.style.getPropertyPriority('fill') !== 'important'
+        || !path.getAttribute('style').includes('var(--sch-ink-009600')) return false;
+      const themed = svg.outerHTML; themeSchematic(svg);
+      if (svg.outerHTML !== themed) return false;
+      document.documentElement.style.setProperty('--sch-ink-009600', '#135724');
+      for (const kind of ['board','lib']) {
+        const other = await stack('head', {...view, kind});
+        if (other.querySelector('svg').outerHTML.includes('--sch-ink-')) return false;
+      }
+      const pixels = await raster('head', view, 10, 10);
+      return await svgText(id) === source && pixels[0] === 0 && pixels[1] === 150
+        && pixels[2] === 0 && pixels[3] === 255
+        && schematicPaint('#A90000') === schematicPaint('#a90000')
+        && schematicPaint('#F5F4EF') === '#F5F4EF';
+    } finally {
+      delete cache[id]; document.documentElement.style.removeProperty('--sch-ink-009600');
+    }
+  `],
+["SCH6 exact paints preserve opacity unknown colours and geometry", "", `
+  const host = document.createElement('div');
+  host.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><g style="stroke:#009600;fill:none;stroke-opacity:.4"><path d="M1 1L9 9" fill="#FFFFC2"/><text opacity="0" stroke-opacity="0">Hidden</text></g><path fill="#123456" stroke="none"/><path style="fill:rgb(0,150,0);stroke:#009601"/></svg>';
+  const svg = host.firstChild, before = svg.querySelector('path').getAttribute('d');
+  document.body.append(host);
+  try {
+    themeSchematic(svg);
+    const g = svg.querySelector('g'), unknown = svg.querySelectorAll('path')[1];
+    document.documentElement.style.setProperty('--sch-ink-009600', '#135724');
+    const first = getComputedStyle(svg.querySelector('path')).stroke;
+    document.documentElement.style.setProperty('--sch-ink-009600', '#246813');
+    const second = getComputedStyle(svg.querySelector('path')).stroke;
+    return first === 'rgb(19, 87, 36)' && second === 'rgb(36, 104, 19)'
+      && g.style.fill === 'none' && g.style.strokeOpacity === '0.4'
+      && svg.querySelector('text').getAttribute('opacity') === '0'
+      && unknown.getAttribute('fill') === '#123456'
+      && unknown.getAttribute('stroke') === 'none'
+      && svg.querySelector('path').getAttribute('d') === before
+      && schematicPaint('rgb(0,150,0)') === 'rgb(0,150,0)'
+      && schematicPaint('#009601') === '#009601'
+      && schematicPaint('#009600') === schematicPaint('#009600'.toLowerCase());
+  } finally {
+    document.documentElement.style.removeProperty('--sch-ink-009600'); host.remove();
+  }
+`],
+
   ["Stage 1 dock tabs remain readable and reachable at 1600", "", `
     const P=proj();
     P.parts ||= {lines:[],supplier:{skipped:true}};
