@@ -16,6 +16,10 @@ function acceptThreads(list) {
   if (S.wantThreads) S.t = "threads";
   S.wantThreads = false;
   if (S.v) { renderPanel(); drawPins(); }
+  // Geometry-only leaf anchors must also resolve when a reload opens a sheet.
+  const keys=[...new Set(S.threads.filter(t=>t.anchor.target==='object' && t.anchor.sheet==null)
+    .flatMap(t=>['base','head'].map(side=>D.projects.find(p=>p.dir===t.anchor.project)?.board?.geometry?.[side])).filter(Boolean))];
+  if (keys.length) Promise.all(keys.map(loadBoardScene)).then(()=>{if(S.v){renderPanel();drawPins();}}).catch(()=>{});
 }
 function validIssue(i) {
   if (!i || !Number.isSafeInteger(i.number) || i.number <= 0 || i.state !== "open"
@@ -292,13 +296,14 @@ Appearance.subscribe(snapshot => {
     }
   }
 });
-const boardSceneCache = new Map();
+const boardSceneCache = new Map(), decodedBoardScenes = new Map();
 // Scene blobs reuse svgText's gzip decode; the text is JSON, never given to the SVG loader.
 async function loadBoardScene(key) {
   if (!key) return null;
   if (!boardSceneCache.has(key)) boardSceneCache.set(key, (async () => {
     const scene = JSON.parse(await svgText(key));
     BoardGL.validateScene(scene);
+    decodedBoardScenes.set(key,scene);
     return scene;
   })().catch(error => { boardSceneCache.delete(key); throw error; }));
   return boardSceneCache.get(key);
@@ -933,8 +938,8 @@ function resolveAnchor(a) {
     if (a.commit !== D.head && a.commit !== D.base && P.changes.some(r => viewOf(r) === view && (inside(rowBox(r, "head")) || inside(rowBox(r, "base"))))) notes.push(`this area changed since ${short(a.commit)}`);
     return { view, side: a.side === "base" ? "base" : "head", pos: [a.x, a.y], notes };
   }
-  if (a.sheet == null && P === proj() && boardDiff && !(P.objects || []).some(o=>o.uuid===a.uuid && o.sheet==null)) {
-    const match=side=>boardDiff.scenes[side]?.objects.find(o=>o.uuid===a.uuid);
+  if (a.sheet == null && !(P.objects || []).some(o=>o.uuid===a.uuid && o.sheet==null)) {
+    const match=side=>(decodedBoardScenes.get(P.board?.geometry?.[side]) || (P===proj() && boardDiff?.scenes[side]))?.objects.find(o=>o.uuid===a.uuid);
     const head=match('head'), base=match('base');
     const position=o=>{const b=BoardDiff.objectBounds(o); return o.anchor || (b && [(b[0]+b[2])/2,(b[1]+b[3])/2]);};
     if (head && position(head)) return {view:'board',side:'head',pos:position(head),pos_before:base && position(base),added:!base,notes};

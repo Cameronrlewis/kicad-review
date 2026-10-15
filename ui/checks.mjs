@@ -2143,6 +2143,8 @@ export const CHECKS = [
       if(window.__boardPins.length<2 || window.__boardPins.some(a=>a.target!=='object' || !a.uuid)) return 'right click / placing did not anchor geometry';
       const anchor=window.__boardPins[0], resolved=resolveAnchor(JSON.parse(JSON.stringify(anchor)));
       if(resolved.detached) return resolved.detached;
+      const controller=boardDiff; boardDiff=null;
+      try { if(resolveAnchor(anchor).detached) return 'geometry anchor depends on mounted board'; } finally { boardDiff=controller; }
       acceptThreads([{id:'thermal-geometry',resolved:false,anchor,comments:[{body:'Geometry anchored on Thermal board',author:'Review',created_at:'2026-10-15'}]}]);
       drawPins();
       if(!document.querySelector('#stage .pin[data-thread="thermal-geometry"]')) return 'retained pin absent';
