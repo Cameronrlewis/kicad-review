@@ -293,18 +293,20 @@ function mountAppearance() {
 }
 function refreshAppearance() { if (appearanceUI && S.t === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
 function syncMarkStyles() {
-  const available = S.v === "board" && !!boardDiff && boardView.useGL;
-  for (const b of document.querySelectorAll('[data-mark-style]')) {
+  const sheet = currentView()?.kind === "sheet";
+  const available = sheet || S.v === "board" && !!boardDiff && boardView.useGL;
+  for (const b of document.querySelectorAll('button[data-mark-style]')) {
     const selected = b.dataset.markStyle === Appearance.get().markStyle;
     b.disabled = !available;
     b.setAttribute('aria-checked', String(selected));
     b.tabIndex = selected ? 0 : -1;
-    b.title = available ? 'Change geometry mark style' : 'Geometry mark styles require WebGL board data';
+    b.title = sheet ? 'Schematic recolour uses changed regions; exported paths have no object IDs'
+      : available ? 'Change geometry mark style' : 'Geometry mark styles require WebGL board data';
   }
   const msg = $('#statusbar .status-message');
   if (msg && S.v === 'board') msg.textContent = available ? 'Ready' : [boardView.note, 'Geometry mark styles require WebGL board data'].filter(Boolean).join(' — ');
 }
-for (const b of document.querySelectorAll('[data-mark-style]')) {
+for (const b of document.querySelectorAll('button[data-mark-style]')) {
   b.onclick = () => Appearance.patch({markStyle:b.dataset.markStyle});
   b.onkeydown = e => {
     if (!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return;
@@ -319,6 +321,10 @@ Appearance.subscribe(snapshot => {
   applyAppearance(snapshot);
   refreshAppearance();
   updateStatus();
+  if (currentView()?.kind === "sheet") {
+    for (const m of document.querySelectorAll("#stage .vp.sheet .marker")) m.remove();
+    afterDraw(currentView());
+  }
   if (S.v === "board") {
     if (boardView.renderers.length) apply();
     else {
@@ -773,7 +779,7 @@ function sceneBox() {   // retained scene bounds (um -> mm); null when the view 
   const live = boardView.scenes.filter(sc => sc && sc.objects.length), b = (live.length ? live : boardView.scenes.filter(Boolean)).map(sc => sc.bounds.map(n => n / 1000));
   return [Math.min(...b.map(x => x[0])), Math.min(...b.map(x => x[1])), Math.max(...b.map(x => x[2])), Math.max(...b.map(x => x[3]))];
 }
-function fit() { const v = currentView(); zoomTo(sceneBox() || contentBox() || (v && [0, 0, v.size[0], v.size[1]]), 2); }
+function fit() { const v = currentView(); zoomTo(v?.kind === "sheet" ? [0, 0, ...v.size] : sceneBox() || contentBox() || (v && [0, 0, ...v.size]), 2); }
 
 const MODE_NAMES = { side: "Side by side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Changes only" };
 S.blend = 0.5; S.wipe = 0.5;
@@ -854,6 +860,7 @@ function hitTest(rows, x, y, after = null, side = "head") {
   return hits[(i + 1) % hits.length];
 }
 function markersFor(view) {
+  if (view.kind === "sheet") return proj().changes.filter(r => onView(r, S.v));
   return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" || r.action === "modified" && MARKED.has(r.kind)));
 }
 function afterDraw(view) {
@@ -863,7 +870,10 @@ function afterDraw(view) {
   const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
   for (const w of document.querySelectorAll("#stage .world")) {
     const side = sideOf(w);
-    const rows = markersFor(view).concat(sel && onView(sel, S.v) ? [{ ...sel, sel: true }] : []);
+    const marked = [...markersFor(view)];
+    const rows = view.kind === "sheet"
+      ? [...new Map(marked.concat(sel && onView(sel, S.v) ? [sel] : []).map(r => [r.id, {...r, sel:r.id === S.s}])).values()]
+      : marked.concat(sel && onView(sel, S.v) ? [{ ...sel, sel: true }] : []);
     for (const r of rows) {
       const b = rowBox(r, side); if (!b) continue;
       const m = document.createElement("div");
@@ -875,6 +885,16 @@ function afterDraw(view) {
       m.dataset.label = r.sel ? "◎" : semantic ? `${semantic.glyph} ${semantic.word}` : "!";
       m.setAttribute('role','img');
       m.setAttribute('aria-label',r.sel ? 'Selected '+(r.ref||r.id) : (semantic?.word||'Violation')+' '+(r.ref||r.id));
+      if (view.kind === "sheet") {
+        m.dataset.glyph = BoardMarks.styles[r.action]?.glyph || "!";
+        m.dataset.markStyle = Appearance.get().markStyle;
+        const word = `${r.action || "finding"} ${r.ref || r.kind || ""}`.trim();
+        m.setAttribute("aria-label", word);
+        const label = document.createElement("span"); label.className = "sch-mark-label"; label.textContent = word;
+        m.append(label);
+        const schMark = KrAppearance.resolve(Appearance.get()).marks.schematic[r.action];
+        if (schMark) m.style.setProperty("--sch-mark", cssAppearance(schMark.color));
+      }
       Object.assign(m.style, { left: `${b[0] * PX}px`, top: `${b[1] * PX}px`, width: `${(b[2] - b[0]) * PX}px`, height: `${(b[3] - b[1]) * PX}px` });
       w.appendChild(m);
     }
