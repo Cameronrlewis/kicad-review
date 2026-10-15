@@ -2495,12 +2495,13 @@ def inline_page(data_js):
     page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
+    page = page.replace('<script src="theme.js"></script>', f"<script>\n{read('theme.js')}</script>")
     prefix = ""
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
-    if re.search(r'''(?:href|src)=(["'])(?:tokens\.css|review\.css|sample/review-data\.js|review\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
+    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
 

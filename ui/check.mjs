@@ -27,7 +27,7 @@ if (!tab) { console.error(`FAIL startup -> Chrome did not start on port ${port}`
 const ws = new WebSocket(tab.webSocketDebuggerUrl); await Promise.race([new Promise(r => ws.onopen = r), new Promise((_, reject) => setTimeout(() => reject(new Error("WebSocket open timed out")), timeout).unref())]);
 let id = 0; const pend = {}, errors = [];
 ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
-  if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate("window.__themeFlipped()")); }
+  if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate(`window.KRTheme.set(${JSON.stringify(m.params.payload)}); window.__themeFlipped()`)); }
   if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text); };
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 await send("Runtime.enable");
@@ -35,6 +35,8 @@ await send("Runtime.addBinding", { name:"__flipTheme" });
 await send("Emulation.setDeviceMetricsOverride", { width, height: 1080, deviceScaleFactor: 1, mobile: false });
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
+await send("Page.enable");
+await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem('kr.theme',${JSON.stringify(dark ? 'dark' : 'light')})}catch{}` });
 let failed = 0;
 for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
   console.log(`RUN ${name}`);

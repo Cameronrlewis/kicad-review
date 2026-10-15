@@ -1,4 +1,5 @@
 import tokens from '../ui/tokens.css';
+import theme from '../ui/theme.js';
 import site from './site.css';
 import { readinessClient } from './readiness-client.js';
 import { threadsClient } from './threads-client.js';
@@ -29,7 +30,7 @@ export function historyPage({ user, owner, repo, pull, title, events, filter }) 
 export function frame({ title, user, crumbs = [], body, meta = '', navigation = true }) {
   const trail = crumbs.map((crumb, index) => `<span>${index < crumbs.length - 1 && crumb.href ? link(crumb.href, crumb.label) : e(crumb.label)}</span>`).join('');
   const account = user ? `<div class="account"><span>Signed in as ${e(user)}</span><form method="post" action="/logout"><button class="btn btn-ghost">Sign out</button></form></div>` : '';
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title>${meta}<style>${tokens}\n${site}</style></head><body><header class="top">${navigation ? '<a class="product" href="/">KiCad review</a>' : '<span class="product">KiCad review</span>'}${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}${account}</header>${body}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title>${meta}<script>${theme}</script><style>${tokens}\n${site}</style></head><body><header class="top">${navigation ? '<a class="product" href="/">KiCad review</a>' : '<span class="product">KiCad review</span>'}${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}<button type="button" class="btn theme-toggle" data-theme-toggle aria-label="Switch to light theme" title="Switch to light theme" aria-pressed="true">Theme</button>${account}</header>${body}</body></html>`;
 }
 
 export function signedOutPage({ sessionEnded = false } = {}) {
