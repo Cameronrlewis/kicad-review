@@ -33,7 +33,7 @@ export function historyPage({ user, owner, repo, pull, title, events, filter }) 
   const shown = filter === 'all' ? events : events.filter(ev => ev.kind === filter);
   const rows = shown.map(ev => {
     const safe = String(ev.href || '').startsWith(`${path}/a/`) && /^\d+$/.test(String(ev.href).slice(`${path}/a/`.length));
-    return `<li class="hist"><time datetime="${e(ev.time)}">${e(String(ev.time).replace('T', ' ').slice(0, 16))} UTC</time> <span class="hist-kind">${e(ev.kind)}</span> ${safe ? link(ev.href, ev.text) : e(ev.text)} <span class="muted">${e(ev.who)}</span></li>`;
+    return `<li class="hist" data-kind="${e(ev.kind)}"><span class="history-node" aria-hidden="true"></span><time datetime="${e(ev.time)}">${e(String(ev.time).replace('T', ' ').slice(0, 16))} UTC</time> <span class="hist-kind">${e(ev.kind)}</span> ${safe ? link(ev.href, ev.text) : e(ev.text)} <span class="muted">${e(ev.who)}</span></li>`;
   }).join('');
   return frame({ title: `History #${pull}`, user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: `#${pull} history` }],
     body: `<main class="page"><div class="page-head"><div><h1>${e(title)}</h1><p class="lead">Everything that happened in this pull request's review, newest first.</p></div></div>
@@ -79,24 +79,25 @@ export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'a
     .map(([value, label]) => `<a class="filter-chip" href="${path}?filter=${value}${view === 'milestones' ? '&amp;view=milestones' : ''}"${filter === value ? ' aria-current="page"' : ''}>${label} ${counts[value] || 0}</a>`).join('')
     + ` <a class="filter-chip" href="${path}?view=milestones&amp;filter=${e(filter)}"${view === 'milestones' ? ' aria-current="page"' : ''}>Milestones</a>`
     + (view === 'milestones' ? ` <a class="filter-chip" href="${path}?filter=${e(filter)}">List</a>` : '');
+  const table = rows => siteTable(['Review', 'Revisions', 'Result', 'Updated', 'Open'], rows, 'Reviews');
   const card = (item) => {
     const branch = item.manual ? 'Manual comparison' : item.branch;
-    const label = item.label ? `<span class="muted">${e(item.label)}</span>` : '';
-    const revision = item.legacy
-      ? '<p class="muted">Revisions not recorded (older report)</p>'
-      : `<div class="revpath"><span class="muted">BASE</span><code>${e(item.base)}</code><span class="muted">↓</span><span class="muted">HEAD</span><code>${e(item.head)}</code></div>`;
-    return `<article class="review-card"><div><h2>${e(branch)}</h2>${label}${item.pull ? `<p class="muted">PR #${e(item.pull.number)} (${e(item.pull.merged ? 'merged' : item.pull.state)})</p>` : ''}<p class="muted">${e(relativeTime(item.createdAt))} · ${e(item.date)}</p></div><div><p class="revision-label muted">Revision path</p>${revision}</div><div class="review-result">${status(item.result)}${link(`${path}/a/${encodeURIComponent(item.id)}${item.pdf ? '?pdf=1' : ''}`, 'Open review →', 'btn')}</div></article>`;
+    const revision = item.legacy ? 'Revisions not recorded (older report)' : `${item.base} → ${item.head}`;
+    const pr = item.pull ? `<span class="muted">PR #${e(item.pull.number)} (${e(item.pull.merged ? 'merged' : item.pull.state)})</span>` : '';
+    return `<tr class="review-card"><td class="review-list-title">${e(branch)} ${item.label ? `<span class="muted">${e(item.label)}</span>` : ''} ${pr}</td><td class="mono">${e(revision)}</td><td>${status(item.result)}</td><td class="mono" title="${e(item.createdAt)}">${e(relativeTime(item.createdAt))} · ${e(item.date)}</td><td>${link(`${path}/a/${encodeURIComponent(item.id)}${item.pdf ? '?pdf=1' : ''}`, 'Open review →')}</td></tr>`;
   };
   const cards = items.map(card).join('');
-  let content = cards ? `<section class="review-list">${cards}</section>` : `<section class="card empty"><h2>No reviews yet</h2><p>Reviews appear after a push or pull request that changes KiCad files, or after a comparison started here.</p>${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</section>`;
+  let content = cards ? table(cards) : `<section class="card empty"><h2>No reviews yet</h2><p>Reviews appear after a push or pull request that changes KiCad files, or after a comparison started here.</p>${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</section>`;
   if (view === 'milestones') {
     if (groups === null) content = `<p class="notice notice-info">${e("Milestones need the app's Pull requests permission.")}</p>`;
     else if (groups.length) content = groups.map(group => {
       const safeUrl = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/milestone\/\d+$/.test(group.url || '');
-      return `<section><h2>${safeUrl ? link(group.url, group.title) : e(group.title)}</h2><p class="muted">${e(group.open)} open · ${e(group.merged)} merged</p><div class="review-list">${group.items.map(card).join('')}</div></section>`;
+      const total = group.open + group.merged;
+      const progress = `<p class="milestone-progress"><progress max="${Math.max(1, total)}" value="${group.merged}" aria-label="Merged pull requests"></progress><span class="mono">${group.merged}/${total}</span><span class="muted">merged of open or merged · ${e(group.open)} open · ${e(group.merged)} merged</span></p>`;
+      return `<section><h2>${safeUrl ? link(group.url, group.title) : e(group.title)}</h2>${progress}${table(group.items.map(card).join(''))}</section>`;
     }).join('');
   }
-  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
+  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page page-wide"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
 }
 
 export function commitsPage({ user, owner, repo, branch, branches, tag = '', tags = [], commits, base = '', head = '', notice = null, files = [], swap = false }) {
@@ -281,13 +282,7 @@ export function messagePage({ title, message, code, details = [], links = [], us
   return frame({ title, user, crumbs, body: `<main class="page message-page"><section class="card message-card">${codeLine}<h1 class="message-head"><span class="message-symbol message-symbol-${e(kind)}" aria-hidden="true">${status.symbol}</span><span>${e(title)} <span class="message-kind">${status.word}</span></span></h1><p>${e(message)}</p>${detailList}${actions}</section></main>` });
 }
 
-function status(value) {
-  if (value === 'pass') return '<span class="status status-pass">✓ passing</span>';
-  if (value === 'fail') return '<span class="status status-fail">✕ failing</span>';
-  if (value === 'new') return '<span class="status status-new">New</span>';
-  if (value === 'error') return '<span class="status status-error">⚠ Error</span>';
-  return '<span class="status status-notrun">— not recorded</span>';
-}
+function status(value) { return siteBadge(value); }
 
 function reportFrameScript(raw) {
   return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); iframe.addEventListener('load', () => { fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) loading.hidden = true; if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;

@@ -768,7 +768,7 @@ test('review cards parse, escape, and list artifacts once', async () => {
     assert.equal(artifactCalls, 1);
     assert.match(body, /class="review-card"/); assert.match(body, /deadbee/); assert.match(body, /cafebad/);
     assert.match(body, /✓ passing/); assert.match(body, /branch push/);
-    assert.match(body, /Revisions not recorded \(older report\)/); assert.match(body, /— not recorded/);
+    assert.match(body, /Revisions not recorded \(older report\)/); assert.match(body, /· not recorded/);
     assert.doesNotMatch(body, /Not run/); assert.doesNotMatch(body, /1234567/); assert.doesNotMatch(body, />\?<\//); assert.match(body, /&lt;b&gt;x/);
     assert.doesNotMatch(body, /kicad-review-bad/); assert.doesNotMatch(body, /bbbbbbb/);
   } finally { restore(); }
@@ -2968,4 +2968,24 @@ test('S2 repositories use a compact safe table and explicit empty state', () => 
   assert.doesNotMatch(html, /<h2><r>/);
   assert.match(homePage({ user: 'u', repositories: [] }), /No repositories granted/);
   assert.match(signedOutPage({ sessionEnded: true }), /role="status"/);
+});
+
+// Task p2-t3
+test('S2 review tables retain manual legacy and milestone semantics', () => {
+  const item = { id: 9, branch: '<branch>', manual: true, legacy: true, result: 'new', createdAt: 'bad', date: 'today', pdf: true };
+  const html = reviewsPage({ user: 'u', owner: 'o', repo: 'r', items: [item], counts: {}, view: 'milestones', groups: [{ title: '<M>', url: 'javascript:bad', open: 0, merged: 0, items: [item] }] });
+  assert.match(html, /aria-label="Reviews"/);
+  assert.match(html, /Manual comparison/);
+  assert.match(html, /Revisions not recorded \(older report\)/);
+  assert.match(html, /\/a\/9\?pdf=1/);
+  assert.match(html, /&lt;M&gt;/);
+  assert.match(html, /0\/0/);
+  assert.doesNotMatch(html, /javascript:bad/);
+});
+test('S2 timeline identifies event types without colour', () => {
+  for (const kind of ['commit', 'thread', 'review', 'checks']) {
+    const html = historyPage({ owner: 'o', repo: 'r', pull: 7, title: 'R16', filter: 'all', events: [{ kind, text: '<event>', who: 'Ada', time: '2026-10-14T10:00:00Z' }] });
+    assert.match(html, new RegExp(`data-kind="${kind}"`));
+    assert.match(html, /&lt;event&gt;/);
+  }
 });
