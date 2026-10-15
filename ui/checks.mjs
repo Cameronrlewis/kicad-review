@@ -1521,7 +1521,7 @@ export const CHECKS = [
     } finally { Appearance.patch({flip:false}); }
     await new Promise(r => setTimeout(r, 100));
     return !document.querySelector("#stage .world").style.transform.includes("scale(-");`],
-  ["Appearance store get patch subscribe reset and validation", "", `
+  ["board Appearance store get patch subscribe reset and validation", "", `
     const A = window.Appearance, before = JSON.stringify(A.get());
     let calls = 0; const off = A.subscribe(() => calls++);
     try {
@@ -1538,4 +1538,29 @@ export const CHECKS = [
       A.reset();
       return JSON.stringify(A.get()) === before && A.defaults(["F.Cu"]).objects.zones.opacity === .6 && A.normalize(null).contrast === "normal" && calls === 4 || "reset " + calls;
     } finally { off(); A.reset(); }`],
+  ["board layer paint preserves custom colours and store snapshots", "v=board", `
+    const d=document.createElement('div'); d.innerHTML='<svg><path fill="none" stroke="rgb(200,52,52)" style="opacity:.3"/><path fill="#123456" stroke="#c83434"/></svg>';
+    recolorLayer(d,{color:[1,2,3,1],opacity:.5},KicadColors.layers['F.Cu']);
+    const [a,b]=d.querySelectorAll('path');
+    if(a.getAttribute('fill')!=='none' || a.getAttribute('stroke')!=='#010203' || a.style.opacity!=='.3' && a.style.opacity!=='0.3') return 'layer paint';
+    if(b.getAttribute('fill')!=='#123456' || b.getAttribute('stroke')!=='#010203') return 'custom paint overwritten';
+    const look=Appearance.get(), old=look.flip; look.flip=!old;
+    if(Appearance.get().flip!==old) { Appearance.patch({flip:old}); return 'mutable snapshot'; }
+    return true;`],
+  ["Fit board keeps a finite shared camera", "v=board", `
+    S.v='board'; S.m='side'; await draw(); fit();
+    return Number.isFinite(S.x) && Number.isFinite(S.y) && Number.isFinite(S.z) && S.z>0;`],
+  ["Wipe Blend board SVG respect Appearance layer eyes", "v=board", `
+    const before=Appearance.get();
+    try {
+      for(const m of ['wipe','blend']) {
+        S.v='board'; S.m=m; await draw();
+        const layer=document.querySelector('.stack .layer'); if(!layer) return 'no SVG '+m;
+        const name=canon(layer.dataset.layer);
+        Appearance.patch({layers:{[name]:{visible:false}}}); await draw();
+        if([...document.querySelectorAll('.stack .layer')].some(l=>canon(l.dataset.layer)===name)) return 'eye ignored '+m;
+        Appearance.patch({layers:{[name]:before.layers[name]}});
+      }
+      return true;
+    } finally { Appearance.patch(before); }`],
 ];

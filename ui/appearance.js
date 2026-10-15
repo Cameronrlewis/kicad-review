@@ -42,17 +42,19 @@
     }
     return out;
   }
-  let state, listeners = new Set();
+  let state, layerNames = names(), listeners = new Set();
   const read = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; } };
   const write = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
-  const notify = () => { for (const fn of [...listeners]) fn(state); return state; };
+  const snapshot = () => structuredClone(state);
+  const notify = () => { for (const fn of [...listeners]) fn(snapshot()); return snapshot(); };
   state = merge(defaults(), read());
   state.selectedNet = null;   // transient
   globalThis.Appearance = {
     OBJECT_ROWS, defaults, normalize: (input, layerNames) => merge(defaults(layerNames), input),
-    get: () => state,
+    get: snapshot,
+    configure(boardLayers) { layerNames = [...new Set([...names(), ...boardLayers])]; state = merge(defaults(layerNames), read()); state.selectedNet = null; return snapshot(); },
     patch(partial) { state = merge(state, partial); write(); return notify(); },
-    reset() { state = defaults(); write(); return notify(); },
+    reset() { state = defaults(layerNames); write(); return notify(); },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
   };
 })();

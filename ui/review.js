@@ -234,7 +234,7 @@ function boardCamera(vp) {
   return {x: S.x, y: S.y, z: S.z, width: vp.clientWidth, height: vp.clientHeight, dpr: devicePixelRatio || 1, flip: flipOn()};
 }
 function disposeBoardRenderers() {
-  for (const r of boardView.renderers) r.dispose();
+  for (const r of new Set([...boardView.renderers, ...boardView.panes.filter(Boolean).map(p => p.renderer)])) r.dispose();
   boardView.renderers = []; boardView.panes = [];
 }
 // Appearance plus the report's own layer eyes (the l= hash): a layer shows only when both allow it.
@@ -311,13 +311,18 @@ function themeSchematic(svg) {
   }
 }
 
-// SVG fallback: map every non-none paint to the configured layer colour (only when it differs from the KiCad default);
+// SVG fallback: replace only the original layer RGB; retain custom object/diff paint and none;
 // existing inline opacity stays, the colour's alpha and the layer opacity become the layer's own opacity.
 function recolorLayer(div, look, original) {
   const [r, g, b, a] = look.color, hex = "#" + [r, g, b].map(n => n.toString(16).padStart(2, "0")).join("");
   const same = original && look.color.every((v, i) => v === original[i]);
   if (!same) {
-    const paint = v => /^\s*(none|transparent|currentcolor|inherit|url\()/i.test(v) ? v : hex;
+    const source = original && "#" + original.slice(0, 3).map(n => n.toString(16).padStart(2, "0")).join("");
+    const paint = v => {
+      let rgb = v.trim().toLowerCase().replace(/\s/g, "");
+      if (/^#[0-9a-f]{3}$/.test(rgb)) rgb = "#" + [...rgb.slice(1)].map(c => c + c).join("");
+      return rgb === source || original && rgb === `rgb(${original.slice(0, 3).join(",")})` ? hex : v;
+    };
     for (const el of [div.querySelector("svg"), ...div.querySelectorAll("[style],[fill],[stroke]")]) {
       for (const prop of ["fill", "stroke"]) if (el.hasAttribute(prop)) el.setAttribute(prop, paint(el.getAttribute(prop)));
       if (el.hasAttribute("style")) el.setAttribute("style", el.getAttribute("style").replace(/(^|;)\s*(fill|stroke)\s*:\s*([^;]+)/gi, (all, sep, prop, value) => `${sep}${prop}:${paint(value)}`));
@@ -365,15 +370,21 @@ async function draw() {
   let scenes = null;
   const geo = S.v === "board" && view && proj().board.geometry;
   if (boardView.failed !== null && boardView.failed !== S.p) boardView.failed = boardView.note = null;
+  if (boardView.failed !== S.p) boardView.note = null;
   if (geo) try { scenes = [await loadBoardScene(geo.base), await loadBoardScene(geo.head)]; }
     catch (error) { console.warn("Board scene unavailable; showing SVG:", error); boardView.note = "Geometry unsupported — showing SVG"; }
   if (my !== gen) return;   // a newer draw owns the stage
   boardView.scenes = scenes; boardView.generation = my;
+  if (boardView.project !== S.p) {
+    boardView.project = S.p;
+    Appearance.configure([...new Set([...(scenes || []).filter(Boolean).flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...(proj().board?.layers || []).map(l => canon(l.name))])]);
+  }
   if (scenes && scenes.some(sc => sc && !sc.complete)) { boardView.note = "Geometry unsupported — showing SVG"; boardView.useGL = false; }
   else boardView.useGL = !!scenes && S.m === "side" && boardView.failed !== S.p;
   if (!boardView.useGL) disposeBoardRenderers();
   if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
   else await MODES[S.m](stage, view);
+  if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
   const msg = $("#statusbar .status-message");
@@ -391,7 +402,7 @@ function glPane(stage, view, i) {
   const scene = boardView.scenes[i], side = i ? "head" : "base";
   const vp = viewport(stage, i ? "Head" : "Base", view.kind).parentElement;
   vp.dataset.side = side;
-  if (!scene) { boardView.panes[i] = null; vp.querySelector(".tag").textContent += " — not present"; return true; }
+  if (!scene) { boardView.panes[i]?.renderer.dispose(); boardView.panes[i] = null; vp.querySelector(".tag").textContent += " — not present"; return true; }
   let pane = boardView.panes[i];
   if (!(pane && pane.scene === scene && !pane.renderer.stats.disposed)) {
     pane?.renderer.dispose();
