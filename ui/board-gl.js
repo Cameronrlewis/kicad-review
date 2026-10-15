@@ -2,7 +2,10 @@
 // create(canvas,{scene?,revision?,onFailure?}) -> renderer|null.
 // setScene uploads geometry; setCamera({x,y,z,width,height,dpr}) never does.
 // All drawing settings, including flip, enter ONLY through setAppearance(state).
-// draw({camera?}) paints the retained scene; readPixel uses backing-pixel GL coordinates.
+// draw({camera?,mask?,filter?,override?}) reuses retained ranges. Callbacks receive scene objects.
+// hitTest([xCSS,yCSS]) returns visible leaf geometry with retained changeIds; no bbox targets.
+// Renderer worldToScreen/screenToWorld use its current camera and Appearance flip.
+// readPixel uses backing-pixel GL coordinates.
 // appearance.grid = {visible, size(mm)} draws a dot grid (absent = off); camera {x,y,z,width,height,dpr} z is CSS px/mm.
 (() => {
   "use strict";
@@ -225,6 +228,8 @@ uniform int zeroNet;
 uniform float categoryOpacity[8];
 uniform float sideVisible[3];
 uniform int drillPass;
+uniform bool customEnabled;
+uniform vec4 customStyle;
 out vec4 outColor;
 void main() {
  int mode=int(shape.w);
@@ -240,7 +245,8 @@ void main() {
  vec3 rgb=netColor ? ns.rgb : layerColor.rgb;
  float retained=selectedNet>=0 && netIndex!=selectedNet && netIndex!=zeroNet ? 0.2 : 1.0;
  if(drillPass==0) rgb=mix(backgroundColor,rgb,contrastFactor*retained);
- outColor=vec4(rgb,(netColor ? ns.a*layerOpacity : layerColor.a)*opacity*coverage);
+ outColor=customEnabled ? vec4(customStyle.rgb,customStyle.a*coverage)
+   : vec4(rgb,(netColor ? ns.a*layerOpacity : layerColor.a)*opacity*coverage);
 }`;
   // Fullscreen dot grid: world position is rebuilt per fragment so it never swims with pan.
   const gridVertexSource = `#version 300 es
@@ -284,7 +290,7 @@ void main() {
     function lost(event) { event.preventDefault(); failure(new Error("Board WebGL context lost")); }
     canvas.addEventListener("webglcontextlost", lost);
     try {
-      const names = ["cameraCenter","viewportSize","zoom","mirrorX","layerColor","layerOpacity","backgroundColor","contrastFactor","netStyle","atlas","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass"];
+      const names = ["cameraCenter","viewportSize","zoom","mirrorX","layerColor","layerOpacity","backgroundColor","contrastFactor","netStyle","atlas","selectedNet","zeroNet","categoryOpacity[0]","sideVisible[0]","drillPass","customEnabled","customStyle"];
       function link(vertex, fragment, list) {
         const program = own("Program",gl.createProgram());
         for (const [type,source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]) {
@@ -402,7 +408,7 @@ void main() {
         gl.viewport(0,0,bw,bh); gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST);
         gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.colorMask(true,true,true,true); gl.stencilMask(0xff);
         const background = appearance.boardBackground || rgba(globalThis.KicadColors.objects.background);
-        gl.clearColor(...background); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+        gl.clearColor(...(options.mask ? [0,0,0,1] : background)); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
         const origin = [(scene.bounds[0]/2+scene.bounds[2]/2)/1000,(scene.bounds[1]/2+scene.bounds[3]/2)/1000];
         const mirror = appearance.flip ? -1 : 1, selected = scene.nets.findIndex(n=>n.name===appearance.selectedNet);
         const opacity = categories.map(c=>appearance.objects?.[c]?.visible===false ? 0 : appearance.objects?.[c]?.opacity ?? 1);
@@ -416,10 +422,10 @@ void main() {
           gl.uniform2f(u.cameraCenter,(camera.x ?? origin[0])-origin[0],(camera.y ?? origin[1])-origin[1]);
           gl.uniform1fv(u["categoryOpacity[0]"],opacity); gl.uniform1fv(u["sideVisible[0]"],sideVisible);
           gl.uniform1i(u.selectedNet,selected); gl.uniform1i(u.zeroNet,scene.nets.findIndex(n=>n.id===0));
-          gl.uniform1i(u.netStyle,0); gl.uniform1i(u.atlas,1);
+          gl.uniform1i(u.netStyle,0); gl.uniform1i(u.atlas,1); gl.uniform1i(u.customEnabled,0);
         }
         const grid = appearance.grid;
-        if (grid?.visible && grid.size > 0 && grid.size*z >= 4) {
+        if (!options.mask && grid?.visible && grid.size > 0 && grid.size*z >= 4) {
           const {program,u} = gridProgram, cx = camera.x ?? origin[0], cy = camera.y ?? origin[1], g = grid.size;
           gl.useProgram(program); gl.bindVertexArray(gridVao);
           gl.uniform2f(u.viewportSize,width,height); gl.uniform2f(u.phase,((cx%g)+g)%g,((cy%g)+g)%g);
@@ -446,6 +452,7 @@ void main() {
           return priority.indexOf(b.layer)-priority.indexOf(a.layer) || (within[a.pass] ?? 1)-(within[b.pass] ?? 1);
         });
         for (const b of ordered) {
+          if (options.mask && b.pass === "wall") continue;
           const drill = b.pass === "wall" || b.pass === "hole", capsule = drill || b.pass === "copper";
           const factor = drill ? 1 : layerFactor(b.layer,appearance);
           if (!factor) continue;
@@ -454,7 +461,37 @@ void main() {
           gl.useProgram(program);
           gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.layerOpacity,appearance.layers?.[b.layer]?.opacity??1); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
           gl.bindVertexArray(b.vao);
-          if (drill) {
+          if (options.mask || options.filter || options.override) {
+            for (const range of b.ranges) {
+              const object = scene.objects[range.objectIndex];
+              // Resolve effective visibility BEFORE callbacks. An override cannot revive hidden geometry.
+              const netName = scene.nets.find(n=>n.id===object.net)?.name;
+              const net = appearance.nets?.[netName];
+              const netColor = appearance.netColors?.[netName] || (net?.color ? rgba(net.color) : null);
+              const layer = drill ? object.layers.find(l=>layerFactor(l,appearance)>0 && (appearance.layers?.[l]?.opacity ?? 1)>0) : b.layer;
+              const layerStyle = appearance.layers?.[layer];
+              const base = drill ? layerRGBA(layer,null,null) : color;
+              const alpha = (netColor ? netColor[3] * (appearance.layerOpacity?.[layer] ?? layerStyle?.opacity ?? 1) : base[3]) * (appearance.objects?.[object.category]?.opacity ?? 1);
+              if (object.hidden || !layer || !layerFactor(layer,appearance) || alpha <= 0 || net?.visible === false || appearance.objects?.[object.category]?.visible === false ||
+                  object.side && appearance.objects?.[object.side+"Footprints"]?.visible === false ||
+                  options.mask && object.pickable === false || options.filter && !options.filter(object)) continue;
+              if (drill && appearance.activeLayer?.endsWith(".Cu") && !range.layers.includes(appearance.activeLayer)) continue;
+              const retained = selected >= 0 && object.net !== 0 && scene.nets[selected]?.id !== object.net ? .2 : 1;
+              const rgb = !drill && netColor ? netColor.slice(0,3) : color.slice(0,3);
+              const normal = {color:rgb.map((v,i)=>background[i]+(v-background[i])*factor*retained), opacity:alpha};
+              const style = options.override ? options.override(object,normal) : options.mask ? {color:[1,1,1],opacity:1} : normal;
+              // Drills subtract from masks; they never become independent hit targets.
+              gl.uniform1i(u.customEnabled,1);
+              gl.uniform4fv(u.customStyle,options.mask && drill ? [0,0,0,1] : [...style.color,style.opacity]);
+              if (capsule) {
+                gl.bindBuffer(gl.ARRAY_BUFFER,b.buffer);
+                for (const [loc,size,offset] of [[1,4,0],[2,1,4],[3,1,5],[4,1,6],[5,1,7],[6,1,8]]) gl.vertexAttribPointer(loc,size,gl.FLOAT,false,36,range.start*36+offset*4);
+                gl.drawArraysInstanced(gl.TRIANGLES,0,6,range.count); stats.draws++;
+              } else if (b.pass === "fill") drawFill(range);
+              else { gl.drawArrays(gl.TRIANGLES,range.first,range.count); stats.draws++; }
+            }
+            gl.uniform1i(u.customEnabled,0);
+          } else if (drill) {
             // Blind/buried drills exist only in their physical copper span. Explicit
             // layer eyes still apply before the high-contrast Edge.Cuts exception.
             for (const range of b.ranges) {
@@ -464,19 +501,48 @@ void main() {
               for (const [loc,size,offset] of [[1,4,0],[2,1,4],[3,1,5],[4,1,6],[5,1,7],[6,1,8]]) gl.vertexAttribPointer(loc,size,gl.FLOAT,false,36,range.start*36+offset*4);
               gl.drawArraysInstanced(gl.TRIANGLES,0,6,range.count); stats.draws++;
             }
-          } else if (capsule) { gl.drawArraysInstanced(gl.TRIANGLES,0,6,b.instances.length/9); stats.draws++; }
+          } else if (capsule) {
+            gl.bindBuffer(gl.ARRAY_BUFFER,b.buffer);
+            for (const [loc,size,offset] of [[1,4,0],[2,1,4],[3,1,5],[4,1,6],[5,1,7],[6,1,8]]) gl.vertexAttribPointer(loc,size,gl.FLOAT,false,36,offset*4);
+            gl.drawArraysInstanced(gl.TRIANGLES,0,6,b.instances.length/9); stats.draws++;
+          }
           else if (b.pass === "fill") for (const r of b.ranges) drawFill(r);
           else { gl.drawArrays(gl.TRIANGLES,0,b.mesh.length/MESH); stats.draws++; }
         }
         gl.bindVertexArray(null);
         return true;
       }
+      const projectionCamera = () => ({...camera,flip:!!appearance.flip});
+      function hitTest(point) {
+        if (disposed || !scene) return [];
+        const [x,y] = Array.isArray(point) ? point : [point.x,point.y];
+        const c = projectionCamera();
+        if (![x,y].every(Number.isFinite) || x<0 || y<0 || x>=c.width || y>=c.height) return [];
+        const [wx,wy] = screenToWorld([x,y],c), hits = [];
+        // ponytail: bbox-pruned per-leaf mask readback reuses exact retained shaders/holes.
+        // Replace with a single ID target only if profiling large-board clicks warrants it.
+        try {
+          for (const object of scene.objects) {
+            const [x0,y0,x1,y1] = object.box.map(n=>n/1000);
+            if (object.hidden || object.pickable === false || wx<x0 || wx>x1 || wy<y0 || wy>y1) continue;
+            draw({mask:true,filter:o=>o===object});
+            const dpr = c.dpr ?? globalThis.devicePixelRatio ?? 1;
+            if (api.readPixel(Math.floor(x*dpr),canvas.height-1-Math.floor(y*dpr))[0]>127) hits.push(object);
+          }
+        } finally { draw(); }
+        const priority = globalThis.KicadColors.drawPriority;
+        const front = o => Math.max(...o.layers.filter(l=>layerFactor(l,appearance)>0).map(l=>l===appearance.activeLayer ? priority.length+1 : priority.length-priority.indexOf(l)));
+        const area = o => (o.box[2]-o.box[0])*(o.box[3]-o.box[1]);
+        return hits.sort((a,b)=>front(b)-front(a) || area(a)-area(b) || a.uuid.localeCompare(b.uuid));
+      }
       const api = {
         stats, setScene, setCamera(next) { camera = {...next}; },
         get appearance() { return structuredClone(appearance); },
         layerRGBA,
         setAppearance(state) { appearance = structuredClone(state || {}); netDirty = true; scheduleDraw(); },
-        draw, dispose,
+        draw, dispose, hitTest,
+        worldToScreen(point) { return worldToScreen(point,projectionCamera()); },
+        screenToWorld(point) { return screenToWorld(point,projectionCamera()); },
         readPixel(x,y) {
           const pixel = new Uint8Array(4);
           if (!disposed) gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);

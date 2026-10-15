@@ -7,6 +7,7 @@ S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing =
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
 S.issues = null;
+S.units = "mm"; S.grid = true;
 const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
@@ -260,9 +261,14 @@ function boardFallback(note) {   // one route to SVG per project; a later projec
 }
 Appearance.subscribe(snapshot => {
   applyAppearance(snapshot);
+  updateStatus();
   if (S.v === "board") {
     if (boardView.renderers.length) apply();
-    else draw(); // fallback always starts from cached original SVG, never recolours a recolour
+    else {
+      // Redraw from cached original SVG, never recolour a recolour.
+      const cursor = boardCursor;
+      draw().then(() => { const vp = $("#stage .vp"); if (cursor && vp) updateCoordinates(vp,cursor); });
+    }
   }
 });
 const boardSceneCache = new Map();
@@ -385,12 +391,19 @@ function viewport(stage, label, kind) {
   vp.innerHTML = `<div class="world"></div>${label ? `<span class="tag">${label}</span>` : ""}`;
   attachPanZoom(vp);
   stage.appendChild(vp);
-  return vp.firstChild;
+  const world = vp.querySelector(".world");
+  if (kind === "sheet") {
+    const canvas = document.createElement("canvas");
+    canvas.className = "sch-grid"; canvas.setAttribute("aria-hidden", "true");
+    vp.prepend(canvas);
+  }
+  return world;
 }
 let gen = 0;
 async function draw() {
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
   Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
+  schematicResize.disconnect();
   resetCoordinates();
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
@@ -428,6 +441,7 @@ async function draw() {
   const msg = $("#statusbar .status-message");
   if (msg) msg.textContent = S.v === "board" && boardView.note && S.m === "side" ? boardView.note : "Ready";
   if (view && !placed()) fit(); else apply(); afterDraw(view);
+  for (const vp of document.querySelectorAll("#stage .vp.sheet")) schematicResize.observe(vp);
 }
 function boardDiagnostics(stage) {   // text only: warning objects are never parsed as HTML
   const warnings = (boardView.scenes || []).flatMap((sc, i) => sc ? sc.warnings.map(w => `${i ? "Head" : "Base"}: ${w?.kind ? [w.kind, w.uuid, w.reason].join(" ") : String(w)}`) : []);
@@ -490,57 +504,158 @@ function apply() {
   if (!vp || !placed()) return;
   const W = vp.clientWidth, H = vp.clientHeight, k = S.z / PX, f = flipOn() ? -1 : 1;
   for (const w of document.querySelectorAll("#stage .world")) {
-    w.style.transform = `translate(${W / 2 - f * S.x * S.z}px, ${H / 2 - S.y * S.z}px) scale(${f * k}, ${k})`;
+    const width = w.parentElement.classList.contains("sheet") ? w.parentElement.clientWidth : W;
+    const height = w.parentElement.classList.contains("sheet") ? w.parentElement.clientHeight : H;
+    w.style.transform = `translate(${width / 2 - f * S.x * S.z}px, ${height / 2 - S.y * S.z}px) scale(${f * k}, ${k})`;
     w.parentElement.classList.toggle("flip", f < 0);
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   onApply();
   for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
+  drawSchematicGrids(); updateSchematicStatus();
 }
+// KiCad 10: eeschema/eeschema_settings.cpp:705-706 defaults to 50 mil (index 1);
+// common/settings/app_settings.cpp:603-609 defines that lattice: 50 mil = 1.27 mm.
+const SCHEMATIC_GRID_MM = 1.27;
+let schematicCursor = null;
+function schematicPoint(vp, event) {
+  const r = vp.getBoundingClientRect();
+  return {x:S.x+(event.clientX-r.left-r.width/2)/S.z,
+    y:S.y+(event.clientY-r.top-r.height/2)/S.z};
+}
+function schematicGridPlan(width, height) {
+  const physical = SCHEMATIC_GRID_MM*S.z;
+  let stride = Math.max(1, Math.ceil(4/physical));
+  // Omit dots only on the physical lattice; bound work even on very large displays.
+  while (Math.ceil(width/(physical*stride))*Math.ceil(height/(physical*stride)) > 140000) stride++;
+  const step = physical*stride, mod = v => ((v%step)+step)%step;
+  return {step, x:mod(width/2-S.x*S.z), y:mod(height/2-S.y*S.z)};
+}
+function drawSchematicGrids() {
+  if (!placed()) return;
+  for (const canvas of document.querySelectorAll("#stage .sch-grid")) {
+    const vp = canvas.parentElement, w = vp.clientWidth, h = vp.clientHeight, dpr = devicePixelRatio || 1;
+    const width = Math.round(w*dpr), height = Math.round(h*dpr);
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+    if (S.grid === false || !w || !h) continue;
+    const {step,x,y} = schematicGridPlan(w,h);
+    ctx.fillStyle = getComputedStyle(vp).getPropertyValue("--sch-ink-b5b5b5").trim() || "#b5b5b5";
+    ctx.beginPath();
+    for (let px=x; px<w; px+=step) for (let py=y; py<h; py+=step) ctx.rect(Math.round(px),Math.round(py),1,1);
+    ctx.fill();
+  }
+}
+function updateSchematicStatus() { updateStatus(); }
+const schematicResize = new ResizeObserver(() => apply());
+window.addEventListener("kr-theme-change", drawSchematicGrids);
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
   gesturing = true; clearTimeout(settle);
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
-function setT(t) { Object.assign(S, t); apply(); saveHash(); }
+function setT(t) { if (S.v === "board" && Number.isFinite(t.z)) t.z = clampBoardZoom(t.z); Object.assign(S, t); apply(); updateStatus(); saveHash(); }
+// KiCad source 3e051f88: common/view/view.cpp:241 (50000 maximum; .1 minimum is
+// the review px/mm contract, not KiCad's .2 internal scale). common/tool/common_tools.cpp:256-260 (1.3 step).
+const clampBoardZoom = z => Math.max(.1, Math.min(50000, z));
+// common/settings/app_settings.cpp:649-671. Review adds metric 2 and .02 per the navigation spec.
+const BOARD_GRID_MM = [5,2.5,2,1,.5,.25,.2,.1,.05,.025,.02,.01];
+const BOARD_GRID_MIL = [1000,500,250,200,100,50,25,20,10,5,2,1].map(n => n*.0254);
+// Deliberately configurable for measured device calibration (Task 10), not a platform sniff.
+const BOARD_WHEEL_PIXEL_RATE = .0015, BOARD_WHEEL_MAC_ROTATION_RATE = .01;
+let boardCursor = null, deltaAnchor = null;
 function resetCoordinates() {
   for (const node of document.querySelectorAll("#statusbar [data-coordinate]")) node.textContent = "—";
+  boardCursor = null; schematicCursor = null;
+  updateStatus();
+}
+function updateStatus() {
+  const sheet = String(S.v).startsWith("sheet:");
+  const a = Appearance.get(), units = S.v === "board" ? a.units : sheet ? S.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
+  const fmt = n => Number.isFinite(n) ? (Math.abs(n/divisor) < .0005 ? 0 : n/divisor).toFixed(3) : "—";
+  const selected = proj().changes.find(c => c.id === S.s && onView(c,S.v));
+  const box = selected && rowBox(selected, selected.action === "removed" ? "base" : "head");
+  const anchor = selected?.pos || (box && [(box[0]+box[2])/2,(box[1]+box[3])/2]) || deltaAnchor;
+  const p = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world, dx = p && anchor ? p[0]-anchor[0] : NaN, dy = p && anchor ? p[1]-anchor[1] : NaN;
+  const values = {x:p?.[0], y:p?.[1], dx, dy, dist:Math.hypot(dx,dy)};
+  for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); if (node) node.textContent = fmt(value); }
+  const zoom = $("#statusbar [data-zoom]"); if (zoom) zoom.textContent = placed() ? S.z.toFixed(2) : "—";
+  const unit = $("#statusbar [data-units]"); if (unit) unit.textContent = units;
+  const coords = $("#statusbar .status-coordinates"); coords?.toggleAttribute("data-sch-coordinates", sheet);
+  const grid = $("#statusbar [data-grid]");
+  if (grid) {
+    grid.parentElement.toggleAttribute("data-sch-grid", sheet);
+    grid.textContent = S.v === "board" ? fmt(a.grid.size) : sheet ? S.grid === false ? "off" : fmt(SCHEMATIC_GRID_MM) : "—";
+  }
 }
 function updateCoordinates(vp, event) {
-  if (!placed() || !vp.isConnected || S.v === "3d") { resetCoordinates(); return; }
-  const [wx, wy] = toWorld(vp, event), values = { x: wx, y: wy };
-  for (const key of ["x", "y"]) {
-    const node = document.querySelector("#statusbar [data-coordinate=" + key + "]");
-    if (node) node.textContent = Number.isFinite(values[key]) ? (Math.abs(values[key]) < .0005 ? 0 : values[key]).toFixed(3) : "—";
+  if (!placed() || !vp.isConnected || S.v === "3d" || !vp.clientWidth || !vp.clientHeight) { resetCoordinates(); return; }
+  boardCursor = {vp, clientX:event.clientX, clientY:event.clientY, world:toWorld(vp,event)};
+  if (String(S.v).startsWith("sheet:")) schematicCursor = schematicPoint(vp,event);
+  const r = vp.getBoundingClientRect();
+  for (const pane of document.querySelectorAll("#stage .vp")) {
+    pane.style.setProperty("--cursor-x", `${event.clientX-r.left}px`); pane.style.setProperty("--cursor-y", `${event.clientY-r.top}px`);
+    pane.classList.toggle("board-cursor", S.v === "board");
   }
+  updateStatus();
 }
 function toWorld(vp, e) {   // the one inverse camera adapter: pointer -> drawing mm (flip-aware)
   const r = vp.getBoundingClientRect();
   return BoardGL.screenToWorld([e.clientX - r.left, e.clientY - r.top], {x: S.x, y: S.y, z: S.z, width: r.width, height: r.height, flip: flipOn()});
 }
+function zoomBoardAt(vp, clientX, clientY, factor) {
+  const r = vp.getBoundingClientRect(); if (!r.width || !r.height || !placed()) return;
+  const e = {clientX,clientY}, before = toWorld(vp,e), z = clampBoardZoom(S.z*factor), f = z/S.z;
+  setT({z, x:before[0]-(before[0]-S.x)/f, y:before[1]-(before[1]-S.y)/f});
+  updateCoordinates(vp,e);
+}
 function attachPanZoom(vp) {
   vp.addEventListener("wheel", e => {
-    e.preventDefault(); if (!placed()) return;   // not fitted yet (a redraw is pending)
-    gesture();
-    const f = Math.exp(-e.deltaY * 0.0015), [wx, wy] = toWorld(vp, e);   // keep the point under the cursor fixed
-    setT({ z: S.z * f, x: wx - (wx - S.x) / f, y: wy - (wy - S.y) / f });
-  }, { passive: false });
+    const r = vp.getBoundingClientRect(); if (!placed() || !r.width || !r.height) return;
+    e.preventDefault(); gesture();
+    const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? r.height : 1);
+    const rate = window.KRBoardWheelProfile === "mac-rotation" ? BOARD_WHEEL_MAC_ROTATION_RATE/100 : BOARD_WHEEL_PIXEL_RATE;
+    zoomBoardAt(vp,e.clientX,e.clientY,Math.exp(Math.max(-20,Math.min(20,-pixels*rate))));
+  }, { passive:false });
+  let active = null, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
   vp.addEventListener("pointerdown", e => {
-    if (e.button !== 0 || !placed()) return;
-    vp.setPointerCapture(e.pointerId);
-    let lx = e.clientX, ly = e.clientY, moved = 0;
-    const mv = ev => { gesture(); moved += Math.abs(ev.clientX - lx) + Math.abs(ev.clientY - ly);
-      setT({ x: S.x - (flipOn() ? -1 : 1) * (ev.clientX - lx) / S.z, y: S.y - (ev.clientY - ly) / S.z }); lx = ev.clientX; ly = ev.clientY; };
-    vp.addEventListener("pointermove", mv);
-    vp.addEventListener("pointerup", ev => { vp.removeEventListener("pointermove", mv);
-      if (moved < 4) pickAt(vp, ev); }, { once: true });
+    if (![0,1,2].includes(e.button) || !placed() || active) return;
+    suppressContext = false; pendingContext = null; deltaAnchor = toWorld(vp,e);
+    active = {id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0};
+    // Synthetic browser checks have no active native pointer; real input gets capture.
+    try { vp.setPointerCapture(e.pointerId); } catch {}
+    if (e.button === 1) e.preventDefault();
   });
-  vp.addEventListener("pointermove", e => updateCoordinates(vp, e));
-  vp.addEventListener("pointerleave", resetCoordinates);
-  vp.addEventListener("pointercancel", resetCoordinates);
-  vp.addEventListener("contextmenu", e => { if (!THREADS_ON || !placed()) return; e.preventDefault(); proposePin(vp, e); });
+  vp.addEventListener("pointermove", e => {
+    if (active && active.id === e.pointerId) {
+      const a = active; a.moved = Math.max(a.moved, Math.hypot(e.clientX-a.x,e.clientY-a.y));
+      if (a.moved >= 4) { gesture(); setT({x:S.x-(flipOn()?-1:1)*(e.clientX-a.lx)/S.z,y:S.y-(e.clientY-a.ly)/S.z}); }
+      a.lx=e.clientX; a.ly=e.clientY;
+    }
+    cursorEvent=e;
+    if (!cursorFrame) cursorFrame=requestAnimationFrame(() => { cursorFrame=0; updateCoordinates(vp,cursorEvent); });
+  });
+  const end = e => {
+    if (!active || active.id !== e.pointerId) return;
+    const a=active; active=null; suppressContext = a.moved >= 4;
+    if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId);
+    if (e.type === "pointerup" && a.moved < 4 && a.button === 0) pickAt(vp,e);
+    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext && THREADS_ON) proposePin(vp,pendingContext);
+    pendingContext = null;
+    if (e.type !== "pointerup") { suppressContext=false; if(cursorFrame) cancelAnimationFrame(cursorFrame); cursorFrame=0; resetCoordinates(); }
+  };
+  for (const type of ["pointerup","pointercancel","lostpointercapture"]) vp.addEventListener(type,end);
+  vp.addEventListener("pointerleave", () => { resetCoordinates(); for(const pane of document.querySelectorAll("#stage .vp")) pane.classList.remove("board-cursor"); });
+  vp.addEventListener("auxclick", e => { if (suppressContext || e.button===1) e.preventDefault(); });
+  vp.addEventListener("contextmenu", e => {
+    if (suppressContext || active?.moved >= 4) { e.preventDefault(); return; }
+    if (!THREADS_ON || !placed()) return; e.preventDefault();
+    if (active) pendingContext=e; else proposePin(vp,e);
+  });
 }
 function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
   const v = currentView();
@@ -1059,8 +1174,46 @@ function step(dir) {
   if (S.t === "threads") { openThread(next); document.querySelector(`#panel [data-thread="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }); return; }
   goTo(next); document.querySelector(`#panel [data-id="${next}"]`)?.scrollIntoView({ block: "nearest" });
 }
+// Hotkeys: KiCad common/tool/actions.cpp:717-767,809-815,1043-1057,1150-1155,1212-1218;
+// pcbnew/tools/pcb_actions.cpp:1869-1877,2125-2150,2160-2180. Browser Ctrl variants are explicit.
+function boardKey(e) {
+  if (S.v !== "board" || e.metaKey || e.altKey) return false;
+  const key=e.key, a=Appearance.get();
+  if (e.ctrlKey && !["0","=","+","-","u","U"].includes(key)) return false;
+  if (e.ctrlKey && e.shiftKey && key!=="+" && key!=="=") return false;
+  if (key==="Home" && !e.ctrlKey || key==="0" && e.ctrlKey) fit();
+  else if ((!e.ctrlKey && ["F1","F2"].includes(key)) || e.ctrlKey && ["=","+","-"].includes(key)) {
+    const up=key==="F1" || key==="=" || key==="+", step=Math.log(S.z)/Math.log(1.3);
+    const z=Math.pow(1.3,up ? Math.ceil(step+1-1e-10) : Math.floor(step-1+1e-10));
+    const vp=boardCursor?.vp.isConnected ? boardCursor.vp : $("#stage .vp"), r=vp?.getBoundingClientRect();
+    if(r) zoomBoardAt(vp,boardCursor?.clientX ?? r.left+r.width/2,boardCursor?.clientY ?? r.top+r.height/2,z/S.z);
+  } else if (e.ctrlKey && key.toLowerCase()==="u") Appearance.patch({units:({mm:"mil",mil:"in",in:"mm"})[a.units]});
+  else if (e.ctrlKey) return false;
+  else if (key==="F4") { if(boardCursor) setT({x:boardCursor.world[0],y:boardCursor.world[1]}); }
+  else if (["PageUp","PageDown","+","-"].includes(key)) {
+    const sceneLayers=boardView.scenes?.filter(Boolean).flatMap(s=>s.layers.filter(l=>l.enabled).map(l=>l.name));
+    const layers=KicadColors.appearanceOrder.filter(n=>a.layers[n] && (!sceneLayers?.length || sceneLayers.includes(n)));
+    const layer=key==="PageUp" ? "F.Cu" : key==="PageDown" ? "B.Cu" : layers[(Math.max(0,layers.indexOf(a.activeLayer))+(key==="+"?1:-1)+layers.length)%layers.length];
+    if(layers.includes(layer)) Appearance.patch({activeLayer:layer});
+  } else if (key.toLowerCase()==="h" && !e.shiftKey) Appearance.patch({contrast:({normal:"dim",dim:"hide",hide:"normal"})[a.contrast]});
+  else if (key.toLowerCase()==="n") {
+    const grids=a.units==="mm" ? BOARD_GRID_MM : BOARD_GRID_MIL;
+    let i=grids.findIndex(n=>Math.abs(n-a.grid.size)<1e-9);
+    if(i<0) i=grids.reduce((best,n,j)=>Math.abs(n-a.grid.size)<Math.abs(grids[best]-a.grid.size)?j:best,0);
+    Appearance.patch({grid:{size:grids[(i+(e.shiftKey?-1:1)+grids.length)%grids.length],visible:true}});
+  } else if (["{","}"].includes(key)) { if(a.layers[a.activeLayer]) Appearance.patch({layers:{[a.activeLayer]:{opacity:a.layers[a.activeLayer].opacity+(key==="}"?.1:-.1)}}}); }
+  else return false;
+  return true;
+}
+function showShortcuts() { const dialog=$("#shortcuts"); if(!dialog.open) dialog.showModal(); }
+$("#shortcuts [data-close]").onclick=()=>$("#shortcuts").close();
 document.addEventListener("keydown", e => {
   if (e.target.closest?.('input,select,textarea,[contenteditable]:not([contenteditable="false"]),dialog[open]')) return;
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key === "?") { e.preventDefault(); showShortcuts(); return; }
+  if (String(S.v).startsWith("sheet:") && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "u") {
+    e.preventDefault(); S.units = S.units === "mm" ? "mil" : "mm"; updateSchematicStatus(); return;
+  }
+  if (boardKey(e)) { e.preventDefault(); return; }
   if (String(S.v).startsWith("sheet:") && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
     const parent = e.altKey && e.key === "ArrowUp", next = !e.altKey && e.key === "PageDown", previous = !e.altKey && e.key === "PageUp";
     if (parent || next || previous) { e.preventDefault(); navigateSheet(parent ? "parent" : next ? 1 : -1); return; }
