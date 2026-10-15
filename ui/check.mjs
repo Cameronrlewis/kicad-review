@@ -125,5 +125,8 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   finally { clearTimeout(timer); if (startupScript) await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); }
 }
 if (shot) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
-ws.close(); proc.kill();
+ws.close();
+const exited = new Promise(resolve => proc.exitCode !== null || proc.signalCode !== null ? resolve() : proc.once('exit', resolve));
+proc.kill();
+await Promise.race([exited, sleep(5000).then(() => proc.kill('SIGKILL'))]);
 process.exit(failed ? 1 : 0);

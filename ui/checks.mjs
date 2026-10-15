@@ -580,7 +580,6 @@ export const CHECKS = [
     return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
     const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified");
-    if(proj().board.geometry) {S.m='semantic';await draw();}
     document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
     const ready = () => {
       const box=boardDiff?.bounds(r.id,'head') || r.box;
@@ -2946,5 +2945,17 @@ export const CHECKS = [
     return !!boardDiff && boardDiff!==old && boardView.failed===null && old.panes.every(p=>p.renderer.stats.disposed)
       && boardDiff.panes.every(p=>p.renderer.stats.uploads>0&&!p.renderer.gl.isContextLost())
       && JSON.stringify([S.x,S.y,S.z,S.s,S.m])===before || 'fresh project did not restore state';
+  `],
+  ["board target allocation failure uses SVG without state loss", "v=board", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    const old=boardDiff, pane=old.panes[0], gl=pane.renderer.gl, create=gl.createTexture;
+    const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m]);
+    try {
+      pane.targets[0].width=-1; gl.createTexture=()=>null; old.render();
+      for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
+      return !boardDiff && !!document.querySelector('#stage .stack svg') && boardView.failed===S.p
+        && old.panes.every(p=>p.renderer.stats.disposed) && JSON.stringify([S.x,S.y,S.z,S.s,S.m])===before
+        || 'allocation failure did not preserve SVG state';
+    } finally {gl.createTexture=create;}
   `],
 ];
