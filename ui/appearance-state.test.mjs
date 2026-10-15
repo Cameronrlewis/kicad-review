@@ -7,6 +7,7 @@ const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
 const ctx = vm.createContext({console});
 ctx.window = ctx;
 vm.runInContext(source('./kicad-colors.js'), ctx);
+vm.runInContext(source('./board-marks.js'), ctx);
 vm.runInContext(source('./appearance-state.js'), ctx);
 const A = ctx.KrAppearance;
 const plain = x => JSON.parse(JSON.stringify(x));
@@ -304,4 +305,31 @@ test('public Appearance facade switches scoped backing stores without accumulati
   facade.patch({flip:false}); off(); facade.patch({flip:true});
   assert.equal(notices,4);
   assert.equal(Object.keys(JSON.parse(saved.get('kr.appearance.v1')).viewers).length,2);
+});
+
+// Both renderers consume the same opaque, semantic palette.
+test('marks meet 3:1 for imported themes and arbitrary backgrounds', () => {
+  for(const file of ['./fixtures/themes/classic.json','./fixtures/themes/extreme-light.json']) {
+    const state=A.defaults(); state.colors=A.parseTheme(source(file));
+    const r=A.resolve(state);
+    for(const type of ['board','schematic']) {
+      const bg=r[type+'Background']; assert.equal(bg[3],1);
+      const p=r.marks[type];
+      for(const action of ['added','removed','modified']) {
+        assert.ok(A.contrast(p[action].color,bg)>=3, file+':'+type+':'+action);
+        assert.ok(A.contrast(p[action].color,p[action].halo)>=3);
+        assert.equal(p[action].color[3],1); assert.equal(p[action].halo[3],1);
+        assert.equal(p[action].glyph,({added:'+',removed:'−',modified:'~'})[action]);
+        assert.equal(p[action].word,({added:'Added',removed:'Removed',modified:'Modified'})[action]);
+      }
+      assert.deepEqual(plain(p.removed.dash),[6,4]);
+      assert.deepEqual(plain(p.modified.dash),[2,3]); assert.equal(p.removed.hatch,true);
+    }
+  }
+  const backgrounds=Array.from({length:256},(_,i)=>[i/255,i/255,i/255,1]);
+  backgrounds.push([1,0,0,1],[0,1,0,1],[0,0,1,1],[0,1,1,1],[1,0,1,1]);
+  for(const bg of backgrounds) for(const mark of Object.values(A.markPalette(bg))) {
+    assert.ok(A.contrast(mark.color,bg)>=3,JSON.stringify(bg));
+    assert.ok(A.contrast(mark.color,mark.halo)>=3);
+  }
 });

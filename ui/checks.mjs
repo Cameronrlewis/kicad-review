@@ -2051,7 +2051,7 @@ export const CHECKS = [
         for (const radius of [z,2*z]) {
           const samples=[]; for(let i=-2*dpr;i<=2*dpr;i++) samples.push(read(a[0]+radius+i/dpr,a[1]));
           const core=samples.filter(p=>near(p,color)).length;
-          const dark=samples.filter(p=>near(p,[9,11,15],4)).length;
+          const dark=samples.filter(p=>near(p,BoardMarks.pickHalo(color),4)).length;
           if(Math.abs(core-2*dpr)>1 || Math.abs(dark-2*dpr)>1) return 'CSS widths '+JSON.stringify({z,dpr,radius,core,dark,samples,a,width:pane.canvas.width,height:pane.canvas.height,css:[pane.vp.clientWidth,pane.vp.clientHeight]});
         }
       }
@@ -2103,4 +2103,144 @@ export const CHECKS = [
     }
     return true;
   `]),
+  ["Themes marks classic board","v=board",`
+    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(p<0) return 'fixture needs both geometry revisions';
+    S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
+    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Classic reference subset\"},\"board\":{\"background\":\"rgb(0, 0, 0)\",\"copper\":{\"f\":\"rgb(132, 0, 0)\",\"b\":\"rgb(0, 132, 0)\",\"in1\":\"rgb(132, 132, 0)\"}},\"schematic\":{\"background\":\"rgb(255, 255, 255)\",\"wire\":\"rgb(0, 132, 0)\",\"component_outline\":\"rgb(132, 0, 0)\",\"component_body\":\"rgb(255, 255, 194)\"}}\n");
+    const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
+    S.v="board"==='board'?'board':'sheet:'+sheet.path;
+    const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
+    for(const style of ['outline','recolour']) for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; S.blend=.15; S.wipe=.5; Appearance.patch({markStyle:style}); await draw();
+      const palette=KrAppearance.resolve(Appearance.get()).marks["board"];
+      for(const [action,mark] of Object.entries(palette)) {
+        const legend=document.querySelector('#stage '+("board"==='board'?'.board-mark-key':'.diff-mark-legend > span')+'[data-action="'+action+'"]');
+        if(!legend||!legend.textContent.includes(mark.word)||legend.dataset.glyph!==mark.glyph||legend.dataset.dash!==BoardMarks.styles[action].dash) return mode+':missing semantics '+action;
+      }
+      if("board"==='board') {
+        if(!boardDiff) return 'board compositor missing';
+        for(const label of document.querySelectorAll('.board-mark-label')) {
+          if(getComputedStyle(label.closest('.board-mark-group')).opacity!=='1') return 'blended mark';
+          if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
+        }
+      } else {
+        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        if(!markers.length) return 'no schematic markers';
+        for(const m of markers) {
+          const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
+          if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
+        }
+      }
+    }
+    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
+    return true;
+`],
+  ["Themes marks classic schematic","v=board",`
+    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(p<0) return 'fixture needs both geometry revisions';
+    S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
+    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Classic reference subset\"},\"board\":{\"background\":\"rgb(0, 0, 0)\",\"copper\":{\"f\":\"rgb(132, 0, 0)\",\"b\":\"rgb(0, 132, 0)\",\"in1\":\"rgb(132, 132, 0)\"}},\"schematic\":{\"background\":\"rgb(255, 255, 255)\",\"wire\":\"rgb(0, 132, 0)\",\"component_outline\":\"rgb(132, 0, 0)\",\"component_body\":\"rgb(255, 255, 194)\"}}\n");
+    const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
+    S.v="schematic"==='board'?'board':'sheet:'+sheet.path;
+    const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
+    for(const style of ['outline','recolour']) for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; S.blend=.15; S.wipe=.5; Appearance.patch({markStyle:style}); await draw();
+      const palette=KrAppearance.resolve(Appearance.get()).marks["schematic"];
+      for(const [action,mark] of Object.entries(palette)) {
+        const legend=document.querySelector('#stage '+("schematic"==='board'?'.board-mark-key':'.diff-mark-legend > span')+'[data-action="'+action+'"]');
+        if(!legend||!legend.textContent.includes(mark.word)||legend.dataset.glyph!==mark.glyph||legend.dataset.dash!==BoardMarks.styles[action].dash) return mode+':missing semantics '+action;
+      }
+      if("schematic"==='board') {
+        if(!boardDiff) return 'board compositor missing';
+        for(const label of document.querySelectorAll('.board-mark-label')) {
+          if(getComputedStyle(label.closest('.board-mark-group')).opacity!=='1') return 'blended mark';
+          if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
+        }
+      } else {
+        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        if(!markers.length) return 'no schematic markers';
+        for(const m of markers) {
+          const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
+          if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
+        }
+      }
+    }
+    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
+    return true;
+`],
+  ["Themes marks extreme-light board","v=board",`
+    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(p<0) return 'fixture needs both geometry revisions';
+    S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
+    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Extreme light contrast stress\"},\"board\":{\"background\":\"rgba(255, 255, 255, 0.98)\",\"copper\":{\"f\":\"#ffffff\",\"b\":\"#fffffe\",\"in30\":\"rgba(255, 255, 255, 0)\"},\"grid\":\"#ffffff\",\"f_silks\":\"#ffffff\"},\"schematic\":{\"background\":\"#ffffff\",\"wire\":\"#ffffff\",\"component_outline\":\"#ffffff\",\"component_body\":\"#ffffff\",\"worksheet\":\"#ffffff\"}}\n");
+    const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
+    S.v="board"==='board'?'board':'sheet:'+sheet.path;
+    const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
+    for(const style of ['outline','recolour']) for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; S.blend=.15; S.wipe=.5; Appearance.patch({markStyle:style}); await draw();
+      const palette=KrAppearance.resolve(Appearance.get()).marks["board"];
+      for(const [action,mark] of Object.entries(palette)) {
+        const legend=document.querySelector('#stage '+("board"==='board'?'.board-mark-key':'.diff-mark-legend > span')+'[data-action="'+action+'"]');
+        if(!legend||!legend.textContent.includes(mark.word)||legend.dataset.glyph!==mark.glyph||legend.dataset.dash!==BoardMarks.styles[action].dash) return mode+':missing semantics '+action;
+      }
+      if("board"==='board') {
+        if(!boardDiff) return 'board compositor missing';
+        for(const label of document.querySelectorAll('.board-mark-label')) {
+          if(getComputedStyle(label.closest('.board-mark-group')).opacity!=='1') return 'blended mark';
+          if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
+        }
+      } else {
+        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        if(!markers.length) return 'no schematic markers';
+        for(const m of markers) {
+          const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
+          if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
+        }
+      }
+    }
+    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
+    return true;
+`],
+  ["Themes marks extreme-light schematic","v=board",`
+    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
+    if(p<0) return 'fixture needs both geometry revisions';
+    S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
+    Appearance.import("{\"meta\":{\"version\":5,\"name\":\"Extreme light contrast stress\"},\"board\":{\"background\":\"rgba(255, 255, 255, 0.98)\",\"copper\":{\"f\":\"#ffffff\",\"b\":\"#fffffe\",\"in30\":\"rgba(255, 255, 255, 0)\"},\"grid\":\"#ffffff\",\"f_silks\":\"#ffffff\"},\"schematic\":{\"background\":\"#ffffff\",\"wire\":\"#ffffff\",\"component_outline\":\"#ffffff\",\"component_body\":\"#ffffff\",\"worksheet\":\"#ffffff\"}}\n");
+    const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
+    S.v="schematic"==='board'?'board':'sheet:'+sheet.path;
+    const changed=proj().changes.find(r=>onView(r,S.v)); S.s=changed?.id||null;
+    for(const style of ['outline','recolour']) for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; S.blend=.15; S.wipe=.5; Appearance.patch({markStyle:style}); await draw();
+      const palette=KrAppearance.resolve(Appearance.get()).marks["schematic"];
+      for(const [action,mark] of Object.entries(palette)) {
+        const legend=document.querySelector('#stage '+("schematic"==='board'?'.board-mark-key':'.diff-mark-legend > span')+'[data-action="'+action+'"]');
+        if(!legend||!legend.textContent.includes(mark.word)||legend.dataset.glyph!==mark.glyph||legend.dataset.dash!==BoardMarks.styles[action].dash) return mode+':missing semantics '+action;
+      }
+      if("schematic"==='board') {
+        if(!boardDiff) return 'board compositor missing';
+        for(const label of document.querySelectorAll('.board-mark-label')) {
+          if(getComputedStyle(label.closest('.board-mark-group')).opacity!=='1') return 'blended mark';
+          if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
+        }
+      } else {
+        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        if(!markers.length) return 'no schematic markers';
+        for(const m of markers) {
+          const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
+          const css=getComputedStyle(m), rgb=css.borderColor.match(/[\d.]+/g).slice(0,3).map(Number);
+          if(!rgb.every((v,i)=>Math.abs(v-mark.color[i]*255)<1)) return 'schematic palette mismatch '+action;
+          if(m.dataset.glyph!==mark.glyph||m.dataset.dash!==BoardMarks.styles[action].dash||!m.getAttribute('aria-label').includes(mark.word)) return 'schematic semantics '+action;
+        }
+      }
+    }
+    S.m='side'; Appearance.patch({markStyle:'outline'}); await draw();
+    return true;
+`],
 ];

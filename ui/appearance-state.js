@@ -228,11 +228,24 @@ function createStore({viewerId,storage=()=>window.localStorage}) {
     subscribe(listener) { listeners.add(listener); return ()=>listeners.delete(listener); }
   };
 }
+// BoardMarks owns candidate selection and WCAG contrast; this adapter uses RGBA units.
+const contrast = (a,b) => window.BoardMarks.contrast(a.slice(0,3).map(v=>v*255),b.slice(0,3).map(v=>v*255));
+function markPalette(background) {
+  const M=window.BoardMarks;
+  return Object.fromEntries(Object.entries(M.styles).map(([action,style])=>{
+    const color=M.pickColor(action,background.slice(0,3).map(v=>v*255)).map(v=>v/255).concat(1);
+    const halo=M.pickHalo(color.slice(0,3).map(v=>v*255)).map(v=>v/255).concat(1);
+    return [action,{color,halo,glyph:style.glyph,word:style.word,
+      dash:action==='removed'?[6,4]:action==='modified'?[2,3]:[],hatch:action==='removed'}];
+  }));
+}
 function resolve(state) {
   const value=validateState(state);
   const over=(fg,bg)=>fg.slice(0,3).map((v,i)=>v*fg[3]+bg[i]*(1-fg[3])).concat(1);
-  return {...value,boardBackground:over(value.colors['board.background'],DEFAULTS['board.background']),
-    schematicBackground:over(value.colors['schematic.background'],DEFAULTS['schematic.background'])};
+  const boardBackground=over(value.colors['board.background'],DEFAULTS['board.background']);
+  const schematicBackground=over(value.colors['schematic.background'],DEFAULTS['schematic.background']);
+  return {...value,boardBackground,schematicBackground,
+    marks:{board:markPalette(boardBackground),schematic:markPalette(schematicBackground)}};
 }
-window.KrAppearance = {resolve, OBJECT_ROWS, boardDefaults, normalizeBoard:(input,layerNames)=>merge(boardDefaults(layerNames),input), parseColor, parseTheme, defaults, validateState, createStore, ThemeImportError};
+window.KrAppearance = {resolve, contrast, markPalette, OBJECT_ROWS, boardDefaults, normalizeBoard:(input,layerNames)=>merge(boardDefaults(layerNames),input), parseColor, parseTheme, defaults, validateState, createStore, ThemeImportError};
 })();
