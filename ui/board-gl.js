@@ -387,7 +387,7 @@ void main() {
       if (typeof ResizeObserver === "function") { observer = new ResizeObserver(scheduleDraw); observer.observe(canvas); }
       function layerRGBA(layer,kind,net) {
         const key=globalThis.KicadColors.layerThemeKeys[layer];
-        const color=appearance.netColors?.[net] || appearance.colors?.[key] || rgba(appearance.layers?.[layer]?.color || globalThis.KicadColors.layers[layer] || [194,194,194,1]);
+        const color=(net==null?null:appearance.netColors?.[net]) || appearance.colors?.[key] || rgba(appearance.layers?.[layer]?.color || globalThis.KicadColors.layers[layer] || [194,194,194,1]);
         return [...color.slice(0,3),color[3]*(appearance.layerOpacity?.[layer]??appearance.layers?.[layer]?.opacity??1)*(appearance.objectOpacity?.[kind]??1)];
       }
       function draw(options = {}) {

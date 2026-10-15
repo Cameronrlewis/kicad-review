@@ -1640,4 +1640,25 @@ export const CHECKS = [
     S.v='sheet:'+sheet.path; S.m='side'; await draw();
     return appearanceSchematics.size===2 && !appearanceBoards.size || 'incorrect mounted resources';
   `],
+  ["Themes actual uniforms multiply alpha once and upload no geometry", "", `
+    const canvas=document.createElement('canvas');
+    canvas.style.cssText='position:fixed;width:200px;height:200px;left:0;top:0'; document.body.append(canvas);
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,2000,2000],
+      layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:1,name:'N'}],
+      objects:[{kind:'track',uuid:'t',changeUuid:'t',layers:['F.Cu'],net:1,category:'tracks',side:null,hidden:false,box:[0,500,2000,1500],geometry:{segments:[[0,1000,2000,1000,1000]]}}]};
+    const r=BoardGL.create(canvas,{scene}); if(!r) {canvas.remove();return 'WebGL unavailable';}
+    try {
+      const state=KrAppearance.defaults(); state.colors['board.background']=[0,0,0,1];
+      state.colors['board.copper.f']=[1,0,0,.5]; state.layerOpacity['F.Cu']=.4; state.objectOpacity.tracks=.2;
+      r.setCamera({x:1,y:1,z:100,width:200,height:200,dpr:1});
+      r.setAppearance(KrAppearance.resolve(state)); r.draw(); const uploads=r.stats.uploads;
+      const close=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=1);
+      if(!close(r.readPixel(100,100).slice(0,3),[10,0,0])) return 'layer/object alpha '+r.readPixel(100,100);
+      state.netColors.N=[0,1,0,.5]; r.setAppearance(KrAppearance.resolve(state)); r.draw();
+      if(!close(r.readPixel(100,100).slice(0,3),[0,10,0])) return 'net alpha squared '+r.readPixel(100,100);
+      state.netColors.N[3]=0; r.setAppearance(KrAppearance.resolve(state)); r.draw();
+      if(!close(r.readPixel(100,100).slice(0,3),[0,0,0])) return 'zero-alpha net ignored';
+      return r.stats.uploads===uploads || 'theme uploaded geometry';
+    } finally {r.dispose();canvas.remove();}
+  `],
 ];
