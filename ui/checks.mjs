@@ -2825,7 +2825,10 @@ export const CHECKS = [
     return S.m==='semantic' && document.querySelector('#modes [data-mode="semantic"]').textContent.includes('Changes only');
   `],
   ["board context loss retains state and requires explicit retry", "v=board", `
-    ${BOARD_LIFECYCLE_FIXTURE}
+    const realGeometry=!!proj().board.geometry;
+    if(!realGeometry) { ${BOARD_LIFECYCLE_FIXTURE} }
+    else {S.m='overlay';await draw();fit();}
+    renderModes();
     if(!boardDiff) return 'missing compositor';
     S.s=proj().changes.find(c=>c.where?.board)?.id || null; S.layers=['F_Cu'];
     const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m,S.layers]), old=boardDiff;
