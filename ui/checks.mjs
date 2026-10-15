@@ -1605,4 +1605,39 @@ export const CHECKS = [
       WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
       store.set(before);
     }`],
+  ["Themes fallback modes and context recovery retain snapshot", "v=board", `
+    const store=appearanceStore(), before=store.get();
+    try {
+      store.import(JSON.stringify({meta:{version:5},board:{background:'#121a24',copper:{f:'rgba(1,2,3,.5)'}}}));
+      store.patch({layerOpacity:{'F.Cu':.4}});
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await draw();
+        if(mode==='side' && !appearanceBoards.size) return 'fixture needs supported geometry';
+        if(mode!=='side') {
+          if(appearanceBoards.size) return 'stale board in '+mode;
+          const layers=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
+          if(!layers.length || layers.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'fallback alpha '+mode;
+          if(!layers.some(l=>l.innerHTML.includes('#010203'))) return 'fallback RGB '+mode;
+        }
+      }
+      S.m='side'; await draw();
+      const canvas=document.querySelector('.board-gl');
+      canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+      await new Promise(r=>setTimeout(r,100));
+      if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'context loss cleanup';
+      boardView.failed=null; await draw();
+      if(!appearanceBoards.size) return 'no recovered renderer';
+      for(const board of appearanceBoards) if(board.appearance.colors['board.copper.f'][3]!==.5) return 'recovered stale';
+      return true;
+    } finally {store.set(before); S.m='side';}
+  `],
+  ["Themes board snapshot", "v=board", `
+    S.v='board'; S.m='side'; await draw();
+    return appearanceBoards.size===2 || 'fixture needs both live revisions';
+  `],
+  ["Themes schematic snapshot", "v=board", `
+    const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
+    S.v='sheet:'+sheet.path; S.m='side'; await draw();
+    return appearanceSchematics.size===2 && !appearanceBoards.size || 'incorrect mounted resources';
+  `],
 ];

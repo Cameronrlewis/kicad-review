@@ -192,6 +192,7 @@ function createStore({viewerId,storage=()=>window.localStorage}) {
       }
     }
     const legacy=merge(state,partial);
+    for(const key of ['activeLayer','selectedNet','contrast','units','flip','grid']) next[key]=legacy[key];
     for(const layer of Object.keys(partial.layers||{})) {
       const style=legacy.layers[layer]; if(!style) continue;
       const key=window.KicadColors.layerThemeKeys[layer];
