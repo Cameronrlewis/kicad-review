@@ -96,5 +96,63 @@ function validateState(value) {
   out.markStyle=value.markStyle;
   return out;
 }
-window.KrAppearance = {parseColor, parseTheme, defaults, validateState};
+const STORAGE_KEY='kr.appearance.v1';
+function readEnvelope(storage) {
+  const empty=()=>({version:1,viewers:Object.create(null)});
+  try {
+    const raw=storage().getItem(STORAGE_KEY);
+    if(!raw||raw.length>4194304) return empty();
+    const doc=JSON.parse(raw);
+    if(!object(doc)||doc.version!==1||!object(doc.viewers)) return empty();
+    const envelope=empty();
+    for(const [id,value] of Object.entries(doc.viewers)) {
+      try { envelope.viewers[id]=validateState(value); }
+      catch { /* A corrupt viewer must not poison other projects. */ }
+    }
+    return envelope;
+  } catch { return empty(); }
+}
+class ThemeImportError extends Error {
+  constructor(message) { super(message); this.name='ThemeImportError'; }
+}
+function createStore({viewerId,storage=()=>window.localStorage}) {
+  let state=readEnvelope(storage).viewers[viewerId]||defaults();
+  const listeners=new Set();
+  function get() { return clone(state); }
+  function set(next) {
+    const candidate=validateState(next);
+    state=candidate;
+    try {
+      // Read again so another viewer's intervening edits survive this write.
+      const envelope=readEnvelope(storage);
+      envelope.viewers[viewerId]=candidate;
+      storage().setItem(STORAGE_KEY,JSON.stringify(envelope));
+    } catch { /* Session edits still work when persistence is blocked. */ }
+    for(const listener of listeners) listener(clone(candidate));
+    return get();
+  }
+  function patch(partial) {
+    if(!object(partial)) throw new Error('Invalid appearance patch.');
+    const next={...state,...partial};
+    for(const key of ['colors','layerOpacity','objectOpacity','netColors']) {
+      if(own(partial,key)) {
+        if(!object(partial[key])) throw new Error('Invalid appearance patch.');
+        next[key]={...state[key],...partial[key]};
+      }
+    }
+    return set(next);
+  }
+  return {
+    get, set, patch,
+    import(text) {
+      let colors;
+      try { colors=parseTheme(text); }
+      catch(error) { throw new ThemeImportError(error.message); }
+      return set({...state,colors});
+    },
+    reset:()=>set(defaults()),
+    subscribe(listener) { listeners.add(listener); return ()=>listeners.delete(listener); }
+  };
+}
+window.KrAppearance = {parseColor, parseTheme, defaults, validateState, createStore, ThemeImportError};
 })();
