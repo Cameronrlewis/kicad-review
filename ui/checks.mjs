@@ -2204,9 +2204,13 @@ export const CHECKS = [
     }
     const svg={...sheet.svg};
     try { for(const missing of ['base','head']) {
-      sheet.svg={base:svg.base||svg.head,head:svg.head||svg.base,[missing]:null}; S.m='semantic'; await draw();
-      const stack=document.querySelector('#stage .stack.'+(missing==='base'?'head':'base'));
-      if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return missing+' hid survivor';
+      sheet.svg={base:svg.base||svg.head,head:svg.head||svg.base,[missing]:null};
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await draw();
+        const stack=document.querySelector('#stage .stack.'+(missing==='base'?'head':'base'));
+        if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' '+missing+' hid survivor';
+        if(!document.querySelector('#stage .marker.sel')||!document.querySelector('#stage .sch-grid')) return mode+' '+missing+' lost selection/grid';
+      }
     }} finally {sheet.svg=svg;}
     return true;
   `],
@@ -2271,4 +2275,43 @@ export const CHECKS = [
     S.grid=true; Appearance.patch({markStyle:'recolour'}); renderNav(); renderModes(); renderPanel(); await draw(); fit();
     return !!document.querySelector('#stage .vp.sheet svg')&&!!document.querySelector('#stage .marker.sel');
   `]),
+  ["SCH6 removed-only schematic fixture preserves region cues in every mode", "", `
+    const p=proj(), sheet=p.sheets.find(s=>s.svg?.base||s.svg?.head);
+    if(!sheet) return 'schematic required';
+    S.v='sheet:'+sheet.path; S.grid=true;
+    // A removed-sheet fixture, not a claim that the Thermal value edit removed this sheet.
+    sheet.svg={base:sheet.svg.base||sheet.svg.head,head:null};
+    p.changes=[{id:'sch6-removed-sheet',action:'removed',kind:'sheet',ref:sheet.name,
+      where:{sheet:sheet.path},box:[0,0,...sheet.size]}];
+    S.s='sch6-removed-sheet'; Appearance.patch({markStyle:'recolour'});
+    for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; renderNav(); renderModes(); renderPanel(); await draw(); fit();
+      const stack=document.querySelector('#stage .stack.base'), mark=document.querySelector('#stage .marker.sel.removed');
+      if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' survivor';
+      if(!mark||mark.dataset.glyph!=='−'||getComputedStyle(mark).borderTopStyle!=='dashed'
+        ||!mark.querySelector('.sch-mark-label')?.textContent.includes('removed')) return mode+' removed cues';
+    }
+    return true;
+  `],
+  ["SCH6 rapid theme mode and sheet changes preserve selected findings", "", `
+    const p=proj(), sheet=p.sheets.find(s=>s.svg), svg=sheet.svg, theme=KRTheme.get();
+    const other={...sheet,path:'/__sch6_other__/'};
+    p.sheets.push(other);
+    p.checks.push({title:'SCH6',violations:[{id:'sch6-finding',kind:'symbol',ref:'U1',
+      where:{sheet:sheet.path},pos:[20,20]}]});
+    sheet.svg={base:null,head:svg.head||svg.base};
+    try {
+      const pending=[];
+      for(const [i,mode] of ['side','overlay','wipe','blend','semantic'].entries()) {
+        KRTheme.set(i%2?'light':'dark');
+        S.v='sheet:'+(i%2?other.path:sheet.path); S.m=mode; S.s='sch6-finding';
+        pending.push(draw());
+      }
+      await Promise.all(pending);
+      const stage=document.querySelector('#stage'), m=stage.querySelector('.marker.sel.violation');
+      return stage.classList.contains('mode-semantic')&&!!stage.querySelector('.stack.head svg')
+        &&!!m&&m.dataset.glyph==='!'&&m.getAttribute('aria-label')==='finding U1'
+        &&getComputedStyle(stage.querySelector('.vp.sheet')).backgroundColor==='rgb(245, 244, 239)';
+    } finally {sheet.svg=svg; p.sheets.pop(); p.checks.pop(); KRTheme.set(theme);}
+  `],
 ];
