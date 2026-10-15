@@ -1482,7 +1482,7 @@ export const CHECKS = [
       if (boardView.renderers.some(r => r.stats.disposed)) return "disposed current scene";
       const canvas = document.querySelector(".board-gl");
       canvas.dispatchEvent(new Event("webglcontextlost",{cancelable:true}));
-      await new Promise(r => setTimeout(r,100));
+      for(let i=0;i<100 && !document.querySelector("#stage .stack .layer");i++) await new Promise(r=>setTimeout(r,50));
       if (document.querySelector(".board-gl") || !document.querySelector(".stack .layer")) return "no SVG fallback";
       if (!document.querySelector("#statusbar .status-message").textContent.includes("WebGL unavailable")) return "no status note";
       return S.x === 12 && S.y === 22 && S.z === 6 || "camera lost " + [S.x,S.y,S.z];
@@ -1542,7 +1542,7 @@ export const CHECKS = [
       A.patch({contrast:"bad", flip:"yes", grid:{size:-1}, layers:{"F.Cu":{opacity:NaN,color:[1,2,3]},"__proto__":{visible:false},"Nope":{visible:false}}, objects:{tracks:{opacity:9}}, nets:{"__proto__":{visible:false},"<img>":{visible:false}}});
       const t = A.get();
       if (t.contrast !== "dim" || t.flip !== false || t.grid.size !== 2 || t.layers["F.Cu"].opacity !== .4 || t.layers.Nope || t.objects.tracks.opacity !== 1 || ({}).visible !== undefined || !t.nets["<img>"]) return "validation " + JSON.stringify(t.layers["F.Cu"]);
-      if (JSON.parse(localStorage.getItem("kr.appearance.v1")).contrast !== "dim") return "not persisted";
+      if (!Object.values(JSON.parse(localStorage.getItem("kr.appearance.v1")).viewers).some(s=>s.contrast === "dim")) return "not persisted";
       const throwing = Storage.prototype.setItem; Storage.prototype.setItem = () => { throw new Error("blocked"); };
       try { A.patch({contrast:"hide"}); } finally { Storage.prototype.setItem = throwing; }
       if (A.get().contrast !== "hide") return "blocked storage";
@@ -1574,6 +1574,106 @@ export const CHECKS = [
       }
       return true;
     } finally { Appearance.patch(before); }`],
+  ["Themes share colours across board and lazy schematic", "v=board", `
+    const store=appearanceStore(), before=store.get(), hash=location.hash;
+    const original=WebGL2RenderingContext.prototype.bufferData, sub=WebGL2RenderingContext.prototype.bufferSubData;
+    let uploads=0;
+    try {
+      if(store!==Appearance) return 'second store';
+      await draw();
+      if(!appearanceBoards.size) return 'no live board';
+      WebGL2RenderingContext.prototype.bufferData=function(...args){uploads++;return original.apply(this,args)};
+      WebGL2RenderingContext.prototype.bufferSubData=function(...args){uploads++;return sub.apply(this,args)};
+      store.import(JSON.stringify({meta:{version:5},board:{background:'#fafafa',copper:{f:'rgba(1,2,3,.5)'}},schematic:{background:'#fff',wire:'#123456'}}));
+      store.patch({layerOpacity:{'F.Cu':.4},objectOpacity:{zones:.2}});
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      for(const board of appearanceBoards) {
+        if(board.appearance.colors['board.copper.f'][0]!==1/255) return 'board stale';
+        if(Math.abs(board.layerRGBA('F.Cu','zones','')[3]-.04)>1e-8) return 'alpha multiplied twice';
+      }
+      store.reset(); store.import(JSON.stringify({meta:{version:5},schematic:{wire:'#123456'}}));
+      if(uploads) return 'theme uploaded geometry '+uploads;
+      WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
+      const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
+      S.v='sheet:'+sheet.path; await draw();
+      if(!appearanceSchematics.size||appearanceBoards.size) return 'stale lifecycle';
+      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('18,52,86')) return 'wire stale';
+      store.patch({colors:{'schematic.wire':[1,0,0,1]}});
+      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('255,0,0')) return 'mounted wire stale';
+      return location.hash===hash || 'appearance changed deep link';
+    } finally {
+      WebGL2RenderingContext.prototype.bufferData=original; WebGL2RenderingContext.prototype.bufferSubData=sub;
+      store.set(before);
+    }`],
+  ["Themes fallback modes and context recovery retain snapshot", "v=board", `
+    const store=appearanceStore(), before=store.get();
+    try {
+      store.import(JSON.stringify({meta:{version:5},board:{background:'#121a24',copper:{f:'rgba(1,2,3,.5)'}}}));
+      store.patch({layerOpacity:{'F.Cu':.4}});
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await draw();
+        if(mode==='side' && !appearanceBoards.size) return 'fixture needs supported geometry';
+        if(mode!=='side') {
+          if(appearanceBoards.size) return 'stale board in '+mode;
+          const layers=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
+          if(!layers.length || layers.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'fallback alpha '+mode;
+          if(!layers.some(l=>l.innerHTML.includes('#010203'))) return 'fallback RGB '+mode;
+        }
+      }
+      S.m='side'; await draw();
+      const canvas=document.querySelector('.board-gl');
+      canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+      for(let i=0;i<100 && !document.querySelector('#stage .stack .layer');i++) await new Promise(r=>setTimeout(r,50));
+      if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'context loss cleanup';
+      canvas.dispatchEvent(new Event('webglcontextrestored'));
+      for(let i=0;i<100 && !appearanceBoards.size;i++) await new Promise(r=>setTimeout(r,50));
+      if(!appearanceBoards.size) return 'no recovered renderer';
+      for(const board of appearanceBoards) if(board.appearance.colors['board.copper.f'][3]!==.5) return 'recovered stale';
+      const create=BoardGL.create;
+      try {
+        disposeBoardRenderers(); BoardGL.create=()=>null; boardView.failed=null; await draw();
+        if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'forced fallback failed';
+        const copper=[...document.querySelectorAll('.stack .layer')].filter(l=>canon(l.dataset.layer)==='F.Cu');
+        if(!copper.some(l=>l.innerHTML.includes('#010203')) || copper.some(l=>Math.abs(Number(l.style.opacity)-.2)>1e-8)) return 'forced fallback stale';
+      } finally {BoardGL.create=create; boardView.failed=null;}
+      await draw();
+      return true;
+    } finally {store.set(before); S.m='side';}
+  `],
+  ["Themes board snapshot", "v=board", `
+    S.v='board'; S.m='side'; await draw();
+    return appearanceBoards.size===2 || 'fixture needs both live revisions';
+  `],
+  ["Themes schematic snapshot", "v=board", `
+    const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
+    S.v='sheet:'+sheet.path; S.m='side'; await draw();
+    return appearanceSchematics.size===2 && !appearanceBoards.size || 'incorrect mounted resources';
+  `],
+  ["Themes actual uniforms multiply alpha once and upload no geometry", "", `
+    const canvas=document.createElement('canvas');
+    canvas.style.cssText='position:fixed;width:200px;height:200px;left:0;top:0'; document.body.append(canvas);
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,2000,2000],
+      layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:1,name:'N'}],
+      objects:[{kind:'track',uuid:'t',changeUuid:'t',layers:['F.Cu'],net:1,category:'tracks',side:null,hidden:false,box:[0,500,2000,1500],geometry:{segments:[[0,1000,2000,1000,1000]]}}]};
+    const r=BoardGL.create(canvas,{scene}); if(!r) {canvas.remove();return 'WebGL unavailable';}
+    try {
+      const state=KrAppearance.defaults(); state.colors['board.background']=[0,0,0,1];
+      state.colors['board.copper.f']=[1,0,0,.5]; state.layerOpacity['F.Cu']=.4; state.objectOpacity.tracks=.2;
+      r.setCamera({x:1,y:1,z:100,width:200,height:200,dpr:1});
+      r.setAppearance(KrAppearance.resolve(state)); r.draw(); const uploads=r.stats.uploads;
+      const close=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=1);
+      if(!close(r.readPixel(100,100).slice(0,3),[10,0,0])) return 'layer/object alpha '+r.readPixel(100,100);
+      state.netColors.N=[0,1,0,.5]; r.setAppearance(KrAppearance.resolve(state)); r.draw();
+      if(!close(r.readPixel(100,100).slice(0,3),[0,10,0])) return 'net alpha squared '+r.readPixel(100,100);
+      r.draw({filter:()=>true});
+      if(!close(r.readPixel(100,100).slice(0,3),[0,10,0])) return 'filtered net alpha squared '+r.readPixel(100,100);
+      r.draw({filter:()=>true,override:(object,normal)=>normal});
+      if(!close(r.readPixel(100,100).slice(0,3),[0,10,0])) return 'override net alpha squared '+r.readPixel(100,100);
+      state.netColors.N[3]=0; r.setAppearance(KrAppearance.resolve(state)); r.draw();
+      if(!close(r.readPixel(100,100).slice(0,3),[0,0,0])) return 'zero-alpha net ignored';
+      return r.stats.uploads===uploads || 'theme uploaded geometry';
+    } finally {r.dispose();canvas.remove();}
+  `],
   ["board geometry contract", "v=board", `
     const panel = document.createElement('section');
     panel.style.cssText = 'position:fixed;inset:100px 350px auto;z-index:9999;padding:20px;background:var(--bg);color:var(--text);border:1px solid currentColor';

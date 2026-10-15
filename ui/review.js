@@ -227,6 +227,15 @@ async function svgText(id) {
   return cache[id];
 }
 const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
+const appearanceBoards = new Set(), appearanceSchematics = new Set();
+const appearanceStore = () => Appearance;
+function applyAppearance(snapshot) {
+  const resolved = KrAppearance.resolve(snapshot);
+  for (const board of appearanceBoards) board.setAppearance(glAppearance(resolved));
+  for (const root of appearanceSchematics) setSchematicAppearance(root, resolved);
+  for (const vp of document.querySelectorAll('#stage .vp.board')) vp.style.background = cssAppearance(resolved.boardBackground);
+  for (const vp of document.querySelectorAll('#stage .vp.sheet')) vp.style.background = cssAppearance(resolved.schematicBackground);
+}
 const boardAppearance = () => Appearance.get();
 const changeBoardAppearance = p => Appearance.patch(p);
 const canon = name => name.replace("_", ".");   // SVG layer file names (F_Cu) -> KiCad names (F.Cu)
@@ -239,8 +248,8 @@ function disposeBoardRenderers() {
   boardView.renderers = []; boardView.panes = [];
 }
 // Appearance plus the report's own layer eyes (the l= hash): a layer shows only when both allow it.
-function glAppearance() {
-  const a = structuredClone(Appearance.get());
+function glAppearance(snapshot = KrAppearance.resolve(Appearance.get())) {
+  const a = structuredClone(snapshot);
   for (const [name, l] of Object.entries(a.layers)) l.visible = l.visible && (S.layers ? S.layers.map(canon).includes(name) : !HIDE_LAYERS.test(name));
   return a;
 }
@@ -250,13 +259,16 @@ function boardFallback(note) {   // one route to SVG per project; a later projec
   disposeBoardRenderers();
   if (S.v === "board") draw();
 }
-Appearance.subscribe(() => {
+Appearance.subscribe(snapshot => {
+  applyAppearance(snapshot);
   updateStatus();
-  if (S.v !== "board") return;
-  if (boardView.renderers.length) { for (const r of boardView.renderers) r.setAppearance(glAppearance()); apply(); }
-  else {
-    const cursor = boardCursor;
-    draw().then(() => { const vp = $("#stage .vp"); if(cursor && vp) updateCoordinates(vp,cursor); });
+  if (S.v === "board") {
+    if (boardView.renderers.length) apply();
+    else {
+      // Redraw from cached original SVG, never recolour a recolour.
+      const cursor = boardCursor;
+      draw().then(() => { const vp = $("#stage .vp"); if (cursor && vp) updateCoordinates(vp,cursor); });
+    }
   }
 });
 const boardSceneCache = new Map();
@@ -299,6 +311,24 @@ function schematicPaint(value) {
   const hex = value.trim().toLowerCase();
   return /^#[0-9a-f]{6}$/.test(hex) && SCH_PAINTS.has(hex.slice(1))
     ? `var(--sch-ink-${hex.slice(1)}, ${hex})` : value;
+}
+const cssAppearance = rgba => `rgba(${rgba.slice(0,3).map(v=>Math.round(v*255)).join(',')},${rgba[3]})`;
+// Exported paths sharing a source RGB cannot be distinguished semantically.
+// Deterministic Stage 6 mapping: outline includes pins/worksheet; bus includes no-connect;
+// pin names include references/value; junction shares wire. Never classify rendered paint.
+const SCH_THEME_KEYS = {
+  '000000':'schematic.background','000084':'schematic.bus',
+  'ffffc2':'schematic.component_body','840000':'schematic.component_outline',
+  '840084':'schematic.fields','b5b5b5':'schematic.grid','c2c2c2':'schematic.hidden',
+  '009600':'schematic.wire','725600':'schematic.label_hier','0f0f0f':'schematic.label_local',
+  '484848':'schematic.netclass_flag','ff0000':'schematic.rule_area','0000c2':'schematic.note',
+  '4848ff':'schematic.private_note','006464':'schematic.pin_name','a90000':'schematic.pin_number',
+  '840032':'schematic.op_voltages','e0000c':'schematic.op_currents'
+};
+function setSchematicAppearance(svg, appearance) {
+  for (const [hex,key] of Object.entries(SCH_THEME_KEYS))
+    svg.style.setProperty('--sch-ink-'+hex, cssAppearance(appearance.colors[key]));
+  svg.style.setProperty('--sch-background', cssAppearance(appearance.schematicBackground));
 }
 function themeSchematic(svg) {
   for (const el of [svg, ...svg.querySelectorAll('[style],[fill],[stroke]')]) {
@@ -346,7 +376,10 @@ async function stack(side, view) {
     const d = document.createElement("div");
     d.className = "layer"; d.dataset.layer = l.name;
     d.innerHTML = t.slice(t.indexOf("<svg"));
-    if (view.kind === 'sheet') themeSchematic(d.querySelector('svg'));
+    if (view.kind === 'sheet') {
+      const svg = d.querySelector('svg'); themeSchematic(svg); svg.dataset.appearanceSchematic = '';
+      setSchematicAppearance(svg, KrAppearance.resolve(Appearance.get()));
+    }
     if (look[canon(l.name)]) recolorLayer(d, look[canon(l.name)], KicadColors.layers[canon(l.name)]);
     st.appendChild(d);
   }
@@ -368,12 +401,15 @@ function viewport(stage, label, kind) {
 }
 let gen = 0;
 async function draw() {
+  // Bind before any lazy mount; the facade remains window.Appearance for every project.
+  Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
   schematicResize.disconnect();
   resetCoordinates();
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   if (S.v === '3d') {
     disposeBoardRenderers();
+    appearanceSchematics.clear();
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
     await window.Review3D.show(stage, proj(), S);
     return;
@@ -389,7 +425,7 @@ async function draw() {
   boardView.scenes = scenes; boardView.generation = my;
   if (boardView.project !== S.p) {
     boardView.project = S.p;
-    Appearance.configure([...new Set([...(scenes || []).filter(Boolean).flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...(proj().board?.layers || []).map(l => canon(l.name))])]);
+    Appearance.configure([...new Set([...(scenes || []).filter(Boolean).flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...(proj().board?.layers || []).map(l => canon(l.name))])], JSON.stringify([D.repo || location.pathname, proj().dir]));
   }
   if (scenes && scenes.some(sc => sc && !sc.complete)) { boardView.note = "Geometry unsupported — showing SVG"; boardView.useGL = false; }
   else boardView.useGL = !!scenes && S.m === "side" && boardView.failed !== S.p;
@@ -399,6 +435,9 @@ async function draw() {
   if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
+  appearanceSchematics.clear();
+  for (const svg of stage.querySelectorAll('svg[data-appearance-schematic]')) appearanceSchematics.add(svg);
+  applyAppearance(Appearance.get());
   const msg = $("#statusbar .status-message");
   if (msg) msg.textContent = S.v === "board" && boardView.note && S.m === "side" ? boardView.note : "Ready";
   if (view && !placed()) fit(); else apply(); afterDraw(view);
@@ -423,6 +462,17 @@ function glPane(stage, view, i) {
     canvas.className = "board-gl"; canvas.setAttribute("aria-label", `${side} board`);
     const renderer = BoardGL.create(canvas, {scene, revision: side, onFailure: () => boardFallback("WebGL unavailable — showing SVG")});
     if (!renderer) return false;
+    appearanceBoards.add(renderer);
+    const project = S.p;
+    // Stage 4 disposes a lost renderer and shows SVG. Restore by mounting fresh
+    // geometry through the existing path, which reads the latest store snapshot.
+    canvas.addEventListener('webglcontextrestored', () => {
+      if (S.p === project && S.v === 'board' && boardView.failed === project) {
+        boardView.failed = null; draw();
+      }
+    }, {once:true});
+    const dispose = renderer.dispose;
+    renderer.dispose = () => { appearanceBoards.delete(renderer); dispose(); };
     pane = boardView.panes[i] = {canvas, renderer, scene};
   }
   vp.insertBefore(pane.canvas, vp.firstChild);

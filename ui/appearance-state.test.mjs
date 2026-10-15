@@ -92,7 +92,10 @@ test('defaults and validated snapshots are complete and detached, including spec
   candidate.layerOpacity['In30.Cu'] = .4;
   candidate.netColors = JSON.parse('{"__proto__":[1,0,0,1],"constructor":[0,1,0,1]}');
   const validated = A.validateState(candidate);
-  assert.deepEqual(plain(validated), plain(candidate));
+  for(const key of ['colors','layerOpacity','objectOpacity','netColors','markStyle'])
+    assert.deepEqual(plain(validated[key]), plain(candidate[key]));
+  assert.equal(validated.layers['In30.Cu'].opacity,.4);
+  assert.deepEqual(plain(validated.nets.__proto__.color),[255,0,0,1]);
   candidate.colors['board.background'][0] = 1;
   candidate.netColors.__proto__[0] = 0;
   assert.equal(validated.colors['board.background'][0], 0);
@@ -263,4 +266,42 @@ test('special viewer names are own keys; writes preserve other viewers and exclu
     assert.equal(A.createStore({viewerId,storage:()=>disk}).get().markStyle,'recolour');
   }
   assert.equal(disk.getItem('kr.theme'),'light');
+});
+
+
+test('resolved backgrounds are opaque; board compatibility edits share the canonical palette', () => {
+  const store=A.createStore({viewerId:'bridge',storage:()=>({getItem:()=>null,setItem(){}})});
+  store.import(theme({board:{background:'rgba(255,255,255,.5)',copper:{f:'rgba(1,2,3,.5)'}}}));
+  const resolved=A.resolve(store.get());
+  assert.deepEqual(plain(resolved.boardBackground), [.5,(1+16/255)/2,(1+35/255)/2,1]);
+  assert.equal(store.get().colors['board.background'][3],.5);
+  assert.deepEqual(plain(resolved.layers['F.Cu'].color),[1,2,3,.5]);
+  store.patch({layers:{'F.Cu':{color:[12,34,56,.4],opacity:.3,visible:false}},objects:{zones:{opacity:.2}}});
+  assert.deepEqual(plain(store.get().colors['board.copper.f']),[12/255,34/255,56/255,.4]);
+  assert.equal(store.get().layerOpacity['F.Cu'],.3);
+  assert.equal(store.get().objectOpacity.zones,.2);
+  assert.equal(store.get().layers['F.Cu'].visible,false);
+});
+
+
+test('public Appearance facade switches scoped backing stores without accumulating subscribers', () => {
+  ctx.structuredClone=structuredClone;
+  const saved=new Map();
+  ctx.localStorage={getItem:k=>saved.get(k)??null,setItem:(k,v)=>saved.set(k,v)};
+  vm.runInContext(source('./appearance.js'),ctx);
+  const facade=ctx.Appearance;
+  facade.configure([], 'project-a');
+  let notices=0; const off=facade.subscribe(()=>notices++);
+  facade.patch({flip:true});
+  facade.import(theme({schematic:{wire:'#123456'}}));
+  facade.configure([], 'project-b');
+  assert.equal(facade.get().flip,false);
+  facade.patch({contrast:'dim'});
+  facade.configure([], 'project-a');
+  assert.equal(ctx.Appearance,facade);
+  assert.equal(facade.get().flip,true);
+  assert.deepEqual(plain(facade.get().colors['schematic.wire']),[18/255,52/255,86/255,1]);
+  facade.patch({flip:false}); off(); facade.patch({flip:true});
+  assert.equal(notices,4);
+  assert.equal(Object.keys(JSON.parse(saved.get('kr.appearance.v1')).viewers).length,2);
 });
