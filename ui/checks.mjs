@@ -1453,4 +1453,89 @@ export const CHECKS = [
     }
     return true;
   } finally { KRTheme.set(old); }`],
+  ["board WebGL cameras fallback and context loss", "v=board&x=10&y=20&z=5", `
+    const p = proj(); if (!p.board?.changed) return "skip";
+    const gz = async text => { const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(buf))); };
+    const scene = {version:1,units:"um",complete:true,warnings:[{uuid:"u<img src=x onerror=alert(1)>",kind:"track",reason:"r"}],bounds:[0,0,8000,5000],layers:[{id:0,name:"F.Cu",type:"signal",enabled:true}],nets:[{id:0,name:""}],
+      objects:[{kind:"track",uuid:"t",changeUuid:"t",layers:["F.Cu"],net:0,category:"tracks",side:null,hidden:false,box:[750,750,6250,1250],geometry:{segments:[[1000,1000,6000,1000,500]]}}]};
+    D.blobs.glA = await gz(JSON.stringify(scene)); D.blobs.glB = await gz(JSON.stringify(scene));
+    const saved = p.board.geometry;
+    try {
+      p.board.geometry = {base:"glA", head:"glB"}; boardView.failed = null; S.m = "side"; S.v = "board"; await draw();
+      if (boardView.renderers.length !== 2) return "expected two supported revision canvases";
+      if (document.querySelectorAll(".vp > .board-gl").length !== 2 || document.querySelector(".stack .layer")) return "canvases not in viewports";
+      if (document.querySelector(".board-diag img") || !document.querySelector(".board-diag pre").textContent.includes("<img")) return "diagnostics not literal text";
+      const first = boardView.renderers[0]; await draw();
+      if (boardView.renderers[0] !== first || first.stats.disposed) return "renderer not retained across draw";
+      setT({x:12,y:22,z:6});
+      if (boardView.renderers.some(r => r.stats.disposed)) return "disposed current scene";
+      const canvas = document.querySelector(".board-gl");
+      canvas.dispatchEvent(new Event("webglcontextlost",{cancelable:true}));
+      await new Promise(r => setTimeout(r,100));
+      if (document.querySelector(".board-gl") || !document.querySelector(".stack .layer")) return "no SVG fallback";
+      if (!document.querySelector("#statusbar .status-message").textContent.includes("WebGL unavailable")) return "no status note";
+      return S.x === 12 && S.y === 22 && S.z === 6 || "camera lost " + [S.x,S.y,S.z];
+    } finally { p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.m = "side"; }`],
+  ["board WebGL missing context, bad scenes, added-only and SVG modes", "v=board", `
+    const p = proj(); if (!p.board?.changed) return "skip";
+    const gz = async text => { const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(buf))); };
+    const scene = c => ({version:1,units:"um",complete:c,warnings:[],bounds:[0,0,8000,5000],layers:[{id:0,name:"F.Cu",type:"signal",enabled:true}],nets:[{id:0,name:""}],objects:[]});
+    D.blobs.glOk = await gz(JSON.stringify(scene(true))); D.blobs.glPart = await gz(JSON.stringify(scene(false))); D.blobs.glBad = await gz("{nope");
+    const saved = p.board.geometry, create = BoardGL.create, status = () => document.querySelector("#statusbar .status-message").textContent;
+    const svgOk = () => !!document.querySelector(".stack .layer") && !document.querySelector(".board-gl");
+    try {
+      S.v = "board"; S.m = "side";
+      delete p.board.geometry;
+      for (const m of ["side","overlay","wipe","blend","semantic"]) { S.m = m; await draw(); if (!svgOk()) return "no geometry " + m; }
+      S.m = "side"; p.board.geometry = {base:"glOk", head:"glOk"};
+      BoardGL.create = () => null; boardView.failed = null; await draw();
+      if (!svgOk() || !status().includes("WebGL unavailable")) return "missing WebGL2 " + status();
+      BoardGL.create = create; boardView.failed = null;
+      for (const [key, g] of [["corrupt", {base:"glBad", head:"glOk"}], ["incomplete", {base:"glOk", head:"glPart"}]]) {
+        p.board.geometry = g; await draw();
+        if (!svgOk() || !status().includes("Geometry unsupported")) return key + " " + status();
+      }
+      for (const g of [{base:null, head:"glOk"}, {base:"glOk", head:null}]) {
+        p.board.geometry = g; await draw();
+        if (boardView.renderers.length !== 1 || document.querySelectorAll(".vp .tag")[g.base ? 1 : 0].textContent.indexOf("not present") < 0) return "one-sided " + JSON.stringify(g);
+      }
+      for (const m of ["overlay","wipe","blend","semantic"]) { p.board.geometry = {base:"glOk", head:"glOk"}; S.m = m; await draw(); if (!svgOk() || boardView.renderers.length) return "mode " + m; }
+      return true;
+    } finally { BoardGL.create = create; p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.m = "side"; }`],
+  ["board flip adapters mirror camera, overlays and pointer", "v=board&x=10&y=20&z=5", `
+    const p = proj(); if (!p.board?.changed) return "skip";
+    S.v = "board"; S.m = "side"; await draw();
+    const vp0 = document.querySelector("#stage .vp"), r0 = vp0.getBoundingClientRect(), e = {clientX: r0.left + r0.width / 2 + 100, clientY: r0.top + r0.height / 2 + 50};
+    const plain = toWorld(vp0, e);
+    Appearance.patch({flip:true});
+    try {
+      await new Promise(r => setTimeout(r, 50));
+      const vp = document.querySelector("#stage .vp"), r = vp.getBoundingClientRect(), flipped = toWorld(vp, e);
+      if (Math.abs(flipped[0] - (S.x - (plain[0] - S.x))) > 1e-6 || flipped[1] !== plain[1]) return "inverse " + [plain, flipped];
+      const back = BoardGL.worldToScreen(flipped, {x:S.x,y:S.y,z:S.z,width:r.width,height:r.height,flip:true});
+      if (Math.abs(back[0] - (e.clientX - r.left)) > 1e-6) return "forward";
+      const w = document.querySelector("#stage .world");
+      if (!w.style.transform.includes("scale(-") || !vp.classList.contains("flip")) return "world not mirrored " + w.style.transform;
+      if (S.x !== 10 || S.y !== 20 || S.z !== 5) return "flip changed the camera";
+      if (location.hash.includes("flip")) return "flip leaked into the hash";
+    } finally { Appearance.patch({flip:false}); }
+    await new Promise(r => setTimeout(r, 100));
+    return !document.querySelector("#stage .world").style.transform.includes("scale(-");`],
+  ["Appearance store get patch subscribe reset and validation", "", `
+    const A = window.Appearance, before = JSON.stringify(A.get());
+    let calls = 0; const off = A.subscribe(() => calls++);
+    try {
+      A.patch({contrast:"dim", grid:{visible:true,size:2}, layers:{"F.Cu":{color:[1,2,3,.5],opacity:.4}}});
+      const s = A.get();
+      if (s.contrast !== "dim" || !s.grid.visible || s.grid.size !== 2 || s.layers["F.Cu"].opacity !== .4 || s.layers["F.Cu"].color[3] !== .5 || calls !== 1) return "patch";
+      A.patch({contrast:"bad", flip:"yes", grid:{size:-1}, layers:{"F.Cu":{opacity:NaN,color:[1,2,3]},"__proto__":{visible:false},"Nope":{visible:false}}, objects:{tracks:{opacity:9}}, nets:{"__proto__":{visible:false},"<img>":{visible:false}}});
+      const t = A.get();
+      if (t.contrast !== "dim" || t.flip !== false || t.grid.size !== 2 || t.layers["F.Cu"].opacity !== .4 || t.layers.Nope || t.objects.tracks.opacity !== 1 || ({}).visible !== undefined || !t.nets["<img>"]) return "validation " + JSON.stringify(t.layers["F.Cu"]);
+      if (JSON.parse(localStorage.getItem("kr.appearance.v1")).contrast !== "dim") return "not persisted";
+      const throwing = Storage.prototype.setItem; Storage.prototype.setItem = () => { throw new Error("blocked"); };
+      try { A.patch({contrast:"hide"}); } finally { Storage.prototype.setItem = throwing; }
+      if (A.get().contrast !== "hide") return "blocked storage";
+      A.reset();
+      return JSON.stringify(A.get()) === before && A.defaults(["F.Cu"]).objects.zones.opacity === .6 && A.normalize(null).contrast === "normal" && calls === 4 || "reset " + calls;
+    } finally { off(); A.reset(); }`],
 ];

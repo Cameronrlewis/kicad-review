@@ -194,3 +194,12 @@ body.shot { grid-template-rows:minmax(0,1fr); }
 .report-head #hdr { flex:1; min-width:0; border-bottom:0; }
 .report-head .theme-toggle { flex:none; margin:0 var(--sp-2); }
 body.shot .report-head { display:none; }
+
+/* WebGL board (Stage 4): the canvas sits under the .world overlay; it is never CSS-transformed. */
+.vp > .board-gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.vp.board.flip .marker::after { transform: scaleX(-1); transform-origin: 0 100%; }
+.vp.board.flip .pin { transform: translate(-50%, -100%) scale(calc(-1 / var(--k, 1)), calc(1 / var(--k, 1))); }
+#stage { position: relative; }
+.board-diag { position: absolute; left: 8px; bottom: 8px; z-index: 8; max-width: 60%; background: var(--surface); color: var(--text);
+  border: 1px solid var(--line-strong); border-radius: 4px; font-size: 12px; padding: 2px 8px; }
+.board-diag pre { margin: 4px 0; max-height: 160px; overflow: auto; white-space: pre-wrap; }

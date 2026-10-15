@@ -50,9 +50,8 @@ function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON) {
 }
 addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
-  const r = vp.getBoundingClientRect();
-  const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
-  const anchor = anchorAt(x, y, vp.querySelector(".stack.head") ? "head" : "base");
+  const [x, y] = toWorld(vp, e);
+  const anchor = anchorAt(x, y, sideOf(vp));
   if (anchor && anchor.file) parent.postMessage({ kicadReviewPin: anchor }, "*");
 }
 const shownThreads = () => (S.threads || []).filter(t => (S.threadFilter.status === "all" || (S.threadFilter.status === "resolved") === t.resolved)
@@ -66,6 +65,7 @@ function openThread(id) {
   show();
 }
 const proj = () => D.projects[S.p];
+const sideOf = node => { const vp = node.closest(".vp") || node; return vp.dataset.side || (vp.querySelector(".stack.head") ? "head" : "base"); };
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const GLYPH = { added: "＋", removed: "−", modified: "≡" };
 const GROUPS3D = [["bodies", "Component bodies"], ["top", "Top side"], ["bottom", "Bottom side"], ["silk", "Silkscreen"], ["mask", "Soldermask"], ["board", "Board"]];
@@ -225,7 +225,35 @@ async function svgText(id) {
   }
   return cache[id];
 }
-const boardView = {scenes: null, renderers: [], appearance: null, generation: 0};
+const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
+const boardAppearance = () => Appearance.get();
+const changeBoardAppearance = p => Appearance.patch(p);
+const canon = name => name.replace("_", ".");   // SVG layer file names (F_Cu) -> KiCad names (F.Cu)
+const flipOn = () => S.v === "board" && !!Appearance.get().flip;
+function boardCamera(vp) {
+  return {x: S.x, y: S.y, z: S.z, width: vp.clientWidth, height: vp.clientHeight, dpr: devicePixelRatio || 1, flip: flipOn()};
+}
+function disposeBoardRenderers() {
+  for (const r of boardView.renderers) r.dispose();
+  boardView.renderers = []; boardView.panes = [];
+}
+// Appearance plus the report's own layer eyes (the l= hash): a layer shows only when both allow it.
+function glAppearance() {
+  const a = structuredClone(Appearance.get());
+  for (const [name, l] of Object.entries(a.layers)) l.visible = l.visible && (S.layers ? S.layers.map(canon).includes(name) : !HIDE_LAYERS.test(name));
+  return a;
+}
+function boardFallback(note) {   // one route to SVG per project; a later project navigation may try WebGL again
+  if (boardView.failed === S.p) return;
+  boardView.failed = S.p; boardView.note = note;
+  disposeBoardRenderers();
+  if (S.v === "board") draw();
+}
+Appearance.subscribe(() => {
+  if (S.v !== "board") return;
+  if (boardView.renderers.length) { for (const r of boardView.renderers) r.setAppearance(glAppearance()); apply(); }
+  else draw();
+});
 const boardSceneCache = new Map();
 // Scene blobs reuse svgText's gzip decode; the text is JSON, never given to the SVG loader.
 async function loadBoardScene(key) {
@@ -283,17 +311,33 @@ function themeSchematic(svg) {
   }
 }
 
+// SVG fallback: map every non-none paint to the configured layer colour (only when it differs from the KiCad default);
+// existing inline opacity stays, the colour's alpha and the layer opacity become the layer's own opacity.
+function recolorLayer(div, look, original) {
+  const [r, g, b, a] = look.color, hex = "#" + [r, g, b].map(n => n.toString(16).padStart(2, "0")).join("");
+  const same = original && look.color.every((v, i) => v === original[i]);
+  if (!same) {
+    const paint = v => /^\s*(none|transparent|currentcolor|inherit|url\()/i.test(v) ? v : hex;
+    for (const el of [div.querySelector("svg"), ...div.querySelectorAll("[style],[fill],[stroke]")]) {
+      for (const prop of ["fill", "stroke"]) if (el.hasAttribute(prop)) el.setAttribute(prop, paint(el.getAttribute(prop)));
+      if (el.hasAttribute("style")) el.setAttribute("style", el.getAttribute("style").replace(/(^|;)\s*(fill|stroke)\s*:\s*([^;]+)/gi, (all, sep, prop, value) => `${sep}${prop}:${paint(value)}`));
+    }
+  }
+  if (a * look.opacity !== 1) div.style.opacity = a * look.opacity;
+}
 async function stack(side, view) {
   const st = document.createElement("div");
   st.className = `stack ${side}`;
   st.style.width = `${view.size[0] * PX}px`; st.style.height = `${view.size[1] * PX}px`;
+  const look = view.kind === "board" ? Appearance.get().layers : {};
   for (const l of view.layers) {
     const t = await svgText(l.svg[side]);
-    if (!t) continue;
+    if (!t || look[canon(l.name)]?.visible === false) continue;
     const d = document.createElement("div");
     d.className = "layer"; d.dataset.layer = l.name;
     d.innerHTML = t.slice(t.indexOf("<svg"));
     if (view.kind === 'sheet') themeSchematic(d.querySelector('svg'));
+    if (look[canon(l.name)]) recolorLayer(d, look[canon(l.name)], KicadColors.layers[canon(l.name)]);
     st.appendChild(d);
   }
   return st;
@@ -312,6 +356,7 @@ async function draw() {
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   if (S.v === '3d') {
+    disposeBoardRenderers();
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
     await window.Review3D.show(stage, proj(), S);
     return;
@@ -319,17 +364,60 @@ async function draw() {
   window.Review3D?.dispose();
   let scenes = null;
   const geo = S.v === "board" && view && proj().board.geometry;
-  if (geo) try { scenes = {base: await loadBoardScene(geo.base), head: await loadBoardScene(geo.head)}; }
-    catch (error) { console.warn("Board scene unavailable; showing SVG:", error); }
+  if (boardView.failed !== null && boardView.failed !== S.p) boardView.failed = boardView.note = null;
+  if (geo) try { scenes = [await loadBoardScene(geo.base), await loadBoardScene(geo.head)]; }
+    catch (error) { console.warn("Board scene unavailable; showing SVG:", error); boardView.note = "Geometry unsupported — showing SVG"; }
   if (my !== gen) return;   // a newer draw owns the stage
   boardView.scenes = scenes; boardView.generation = my;
+  if (scenes && scenes.some(sc => sc && !sc.complete)) { boardView.note = "Geometry unsupported — showing SVG"; boardView.useGL = false; }
+  else boardView.useGL = !!scenes && S.m === "side" && boardView.failed !== S.p;
+  if (!boardView.useGL) disposeBoardRenderers();
   if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
   else await MODES[S.m](stage, view);
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
+  const msg = $("#statusbar .status-message");
+  if (msg) msg.textContent = S.v === "board" && boardView.note && S.m === "side" ? boardView.note : "Ready";
   if (view && !placed()) fit(); else apply(); afterDraw(view);
 }
+function boardDiagnostics(stage) {   // text only: warning objects are never parsed as HTML
+  const warnings = (boardView.scenes || []).flatMap((sc, i) => sc ? sc.warnings.map(w => `${i ? "Head" : "Base"}: ${w?.kind ? [w.kind, w.uuid, w.reason].join(" ") : String(w)}`) : []);
+  if (!warnings.length) return;
+  const d = document.createElement("details"), sum = document.createElement("summary"), pre = document.createElement("pre");
+  d.className = "board-diag"; sum.textContent = `Geometry warnings (${warnings.length})`; pre.textContent = warnings.join("\n");
+  d.append(sum, pre); stage.appendChild(d);
+}
+function glPane(stage, view, i) {
+  const scene = boardView.scenes[i], side = i ? "head" : "base";
+  const vp = viewport(stage, i ? "Head" : "Base", view.kind).parentElement;
+  vp.dataset.side = side;
+  if (!scene) { boardView.panes[i] = null; vp.querySelector(".tag").textContent += " — not present"; return true; }
+  let pane = boardView.panes[i];
+  if (!(pane && pane.scene === scene && !pane.renderer.stats.disposed)) {
+    pane?.renderer.dispose();
+    const canvas = document.createElement("canvas");
+    canvas.className = "board-gl"; canvas.setAttribute("aria-label", `${side} board`);
+    const renderer = BoardGL.create(canvas, {scene, revision: side, onFailure: () => boardFallback("WebGL unavailable — showing SVG")});
+    if (!renderer) return false;
+    pane = boardView.panes[i] = {canvas, renderer, scene};
+  }
+  vp.insertBefore(pane.canvas, vp.firstChild);
+  pane.renderer.setAppearance(glAppearance());
+  return true;
+}
+async function drawSideGL(stage, view) {
+  const ok = [0, 1].every(i => glPane(stage, view, i));
+  if (!ok) {
+    boardView.failed = S.p; boardView.note = "WebGL unavailable — showing SVG";
+    disposeBoardRenderers(); stage.replaceChildren(); boardView.useGL = false;
+    return false;
+  }
+  boardView.renderers = boardView.panes.filter(Boolean).map(p => p.renderer);
+  boardDiagnostics(stage);
+  return true;
+}
 async function drawSide(stage, view) {
+  if (boardView.useGL && await drawSideGL(stage, view)) return;
   viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
   viewport(stage, "Head", view.kind).appendChild(await stack("head", view));
 }
@@ -340,12 +428,14 @@ const placed = () => S.z > 0 && Number.isFinite(S.x) && Number.isFinite(S.y);   
 function apply() {
   const vp = document.querySelector("#stage .vp");
   if (!vp || !placed()) return;
-  const W = vp.clientWidth, H = vp.clientHeight, k = S.z / PX;
+  const W = vp.clientWidth, H = vp.clientHeight, k = S.z / PX, f = flipOn() ? -1 : 1;
   for (const w of document.querySelectorAll("#stage .world")) {
-    w.style.transform = `translate(${W / 2 - S.x * S.z}px, ${H / 2 - S.y * S.z}px) scale(${k})`;
+    w.style.transform = `translate(${W / 2 - f * S.x * S.z}px, ${H / 2 - S.y * S.z}px) scale(${f * k}, ${k})`;
+    w.parentElement.classList.toggle("flip", f < 0);
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   onApply();
+  for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
 }
 let settle, gesturing = false;
@@ -360,27 +450,29 @@ function resetCoordinates() {
 }
 function updateCoordinates(vp, event) {
   if (!placed() || !vp.isConnected || S.v === "3d") { resetCoordinates(); return; }
-  const r = vp.getBoundingClientRect();
-  const values = { x: S.x + (event.clientX - r.left - r.width / 2) / S.z, y: S.y + (event.clientY - r.top - r.height / 2) / S.z };
+  const [wx, wy] = toWorld(vp, event), values = { x: wx, y: wy };
   for (const key of ["x", "y"]) {
     const node = document.querySelector("#statusbar [data-coordinate=" + key + "]");
     if (node) node.textContent = Number.isFinite(values[key]) ? (Math.abs(values[key]) < .0005 ? 0 : values[key]).toFixed(3) : "—";
   }
 }
+function toWorld(vp, e) {   // the one inverse camera adapter: pointer -> drawing mm (flip-aware)
+  const r = vp.getBoundingClientRect();
+  return BoardGL.screenToWorld([e.clientX - r.left, e.clientY - r.top], {x: S.x, y: S.y, z: S.z, width: r.width, height: r.height, flip: flipOn()});
+}
 function attachPanZoom(vp) {
   vp.addEventListener("wheel", e => {
     e.preventDefault(); if (!placed()) return;   // not fitted yet (a redraw is pending)
     gesture();
-    const r = vp.getBoundingClientRect(), f = Math.exp(-e.deltaY * 0.0015);
-    const mx = (e.clientX - r.left - r.width / 2) / S.z, my = (e.clientY - r.top - r.height / 2) / S.z;
-    setT({ z: S.z * f, x: S.x + mx - mx / f, y: S.y + my - my / f });
+    const f = Math.exp(-e.deltaY * 0.0015), [wx, wy] = toWorld(vp, e);   // keep the point under the cursor fixed
+    setT({ z: S.z * f, x: wx - (wx - S.x) / f, y: wy - (wy - S.y) / f });
   }, { passive: false });
   vp.addEventListener("pointerdown", e => {
     if (e.button !== 0 || !placed()) return;
     vp.setPointerCapture(e.pointerId);
     let lx = e.clientX, ly = e.clientY, moved = 0;
     const mv = ev => { gesture(); moved += Math.abs(ev.clientX - lx) + Math.abs(ev.clientY - ly);
-      setT({ x: S.x - (ev.clientX - lx) / S.z, y: S.y - (ev.clientY - ly) / S.z }); lx = ev.clientX; ly = ev.clientY; };
+      setT({ x: S.x - (flipOn() ? -1 : 1) * (ev.clientX - lx) / S.z, y: S.y - (ev.clientY - ly) / S.z }); lx = ev.clientX; ly = ev.clientY; };
     vp.addEventListener("pointermove", mv);
     vp.addEventListener("pointerup", ev => { vp.removeEventListener("pointermove", mv);
       if (moved < 4) pickAt(vp, ev); }, { once: true });
@@ -412,7 +504,12 @@ function zoomTo(box, pad = 8) {
   const w = Math.max(box[2] - box[0] + 2 * pad, 20), h = Math.max(box[3] - box[1] + 2 * pad, 20);
   setT({ z: Math.min(vp.clientWidth / w, vp.clientHeight / h), x: (box[0] + box[2]) / 2, y: (box[1] + box[3]) / 2 });
 }
-function fit() { const v = currentView(); zoomTo(contentBox() || (v && [0, 0, v.size[0], v.size[1]]), 2); }
+function sceneBox() {   // retained scene bounds (um -> mm); null when the view is SVG
+  if (!boardView.renderers.length) return null;
+  const live = boardView.scenes.filter(sc => sc && sc.objects.length), b = (live.length ? live : boardView.scenes.filter(Boolean)).map(sc => sc.bounds.map(n => n / 1000));
+  return [Math.min(...b.map(x => x[0])), Math.min(...b.map(x => x[1])), Math.max(...b.map(x => x[2])), Math.max(...b.map(x => x[3]))];
+}
+function fit() { const v = currentView(); zoomTo(sceneBox() || contentBox() || (v && [0, 0, v.size[0], v.size[1]]), 2); }
 
 const MODE_NAMES = { side: "Side by side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Semantic" };
 S.blend = 0.5; S.wipe = 0.5;
@@ -448,10 +545,11 @@ MODES.semantic = (stage, view) => oneWorld(stage, view, "Changes only");
 function onApply() {
   const vp = document.querySelector("#stage.mode-wipe .vp");
   if (!vp) return;
-  const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, tx = W / 2 - S.x * S.z;
+  const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, head = vp.querySelector(".stack.head");
   vp.querySelector(".divider").style.left = `${x}px`;
   vp.querySelector(".divider").setAttribute("aria-valuenow", Math.round(S.wipe * 100));
-  vp.querySelector(".stack.head").style.clipPath = `inset(0 0 0 ${Math.max(0, (x - tx) / k)}px)`;
+  if (flipOn()) { const u = (W / 2 + S.x * S.z - x) / k; head.style.clipPath = `inset(0 ${Math.max(0, parseFloat(head.style.width) - u)}px 0 0)`; }   // mirrored: Head is the right of the divider = lower x
+  else head.style.clipPath = `inset(0 0 0 ${Math.max(0, (x - (W / 2 - S.x * S.z)) / k)}px)`;
 }
 function toggleBlend3D() {
   window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend;
@@ -493,7 +591,7 @@ function afterDraw(view) {
   if (!view) return;
   const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
   for (const w of document.querySelectorAll("#stage .world")) {
-    const side = w.querySelector(".stack.head") ? "head" : "base";
+    const side = sideOf(w);
     const rows = markersFor(view).concat(sel && onView(sel, S.v) ? [{ ...sel, sel: true }] : []);
     for (const r of rows) {
       const b = rowBox(r, side); if (!b) continue;
@@ -510,7 +608,7 @@ function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
   for (const pin of document.querySelectorAll("#stage .pin")) pin.remove();
   for (const w of document.querySelectorAll("#stage .world")) {
-    const side = w.querySelector(".stack.head") ? "head" : "base";
+    const side = sideOf(w);
     for (const t of [...shownThreads(), ...(S.issues || []).filter(i => i.anchor.project === proj().dir).map(i => ({ ...i, id: `issue-${i.number}`, issue: true }))]) {
       const r = resolveAnchor(t.anchor);
       if (r.detached || r.view !== S.v) continue;
@@ -530,10 +628,9 @@ function drawPins() {
 }
 function pickAt(vp, e) {
   if (S.placing) { stopPlacing(); proposePin(vp, e); return; }
-  const r = vp.getBoundingClientRect();
-  const x = S.x + (e.clientX - r.left - r.width / 2) / S.z, y = S.y + (e.clientY - r.top - r.height / 2) / S.z;
+  const [x, y] = toWorld(vp, e);
   const rows = proj().changes.filter(c => onView(c, S.v));
-  const side = vp.querySelector(".stack.head") ? "head" : "base";
+  const side = sideOf(vp);
   const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
 }
