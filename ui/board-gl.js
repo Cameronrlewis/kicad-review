@@ -328,7 +328,7 @@ void main() {
         stats.textureUploads++; atlasReady = true;
       }
       function setScene(next, revision = "head") {
-        if (disposed) return;
+        if (disposed || (opts.retained && scene === next)) return;
         if (!next) { scene = null; batches = []; netDirty = true; return; }
         if (opts.retained && retained.has(next)) { scene = next; batches = retained.get(next); netDirty = true; return; }
         const cpu = buildBatches(next, revision);
@@ -546,7 +546,11 @@ void main() {
         gl, stats, setScene, setCamera(next) { camera = {...next}; },
         get appearance() { return structuredClone(appearance); },
         layerRGBA,
-        setAppearance(state) { appearance = structuredClone(state || {}); netDirty = true; scheduleDraw(); },
+        setAppearance(state) {
+          const next = state || {};
+          if (JSON.stringify([appearance.nets,appearance.netColors]) !== JSON.stringify([next.nets,next.netColors])) netDirty = true;
+          appearance = structuredClone(next); scheduleDraw();
+        },
         draw, dispose, hitTest,
         worldToScreen(point) { return worldToScreen(point,projectionCamera()); },
         screenToWorld(point) { return screenToWorld(point,projectionCamera()); },

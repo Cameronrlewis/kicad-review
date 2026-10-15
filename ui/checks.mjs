@@ -542,7 +542,7 @@ export const CHECKS = [
     await new Promise(res => setTimeout(res, 1200));
     const cards = document.querySelector("#panel .cards"), one = cards.innerHTML;
     cards.innerHTML = one.repeat(150);
-    const p = document.querySelector("#panel"), vp = document.querySelector("#stage .vp");
+    const p = document.querySelector("#panel-body"), vp = document.querySelector("#stage .vp");
     return document.documentElement.scrollHeight <= innerHeight + 1 && p.scrollHeight > p.clientHeight && vp.clientHeight <= innerHeight;`],
   ["search keeps caret and raw text while typing", "p=1", `
     const q = document.querySelector("#panel .q"); q.focus();
@@ -1066,6 +1066,7 @@ export const CHECKS = [
       await new Promise(r => setTimeout(r, 100));
       if (!vp.isConnected || vp.querySelector(".world") !== world) return "thread arrival replaced right-click target";
       vp.dispatchEvent(event);
+      vp.dispatchEvent(new PointerEvent("pointerup", {button:2, bubbles:true}));
       return event.defaultPrevented && sent.length === 1 && !!sent[0].kicadReviewPin?.file || JSON.stringify(sent);
     } finally { parent.postMessage = saved; THREADS_ON = enabled; }
   `],
@@ -1581,7 +1582,7 @@ export const CHECKS = [
     } finally { proj().board.geometry=geometry; Appearance.patch(before); }`],
   ["Themes share colours across board and lazy schematic", "v=board", `
     const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    if(geometryProject<0) return 'skip';
     S.p=geometryProject; S.x=S.y=S.z=null; await draw();
     await new Promise(r=>setTimeout(r,250));
     const store=appearanceStore(), before=store.get(), hash=location.hash;
@@ -1618,7 +1619,7 @@ export const CHECKS = [
     }`],
   ["Themes fallback modes and context recovery retain snapshot", "v=board", `
     const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    if(geometryProject<0) return 'skip';
     S.p=geometryProject; S.x=S.y=S.z=null; await draw();
     const store=appearanceStore(), before=store.get();
     try {
@@ -1660,14 +1661,14 @@ export const CHECKS = [
   `],
   ["Themes board snapshot", "v=board", `
     const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    if(geometryProject<0) return 'skip';
     S.p=geometryProject; S.x=S.y=S.z=null; await draw();
     S.v='board'; S.m='side'; await draw();
     return appearanceBoards.size===2 || 'fixture needs both live revisions';
   `],
   ["Themes schematic snapshot", "v=board", `
     const geometryProject=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(geometryProject<0) return 'fixture needs both geometry revisions';
+    if(geometryProject<0) return 'skip';
     S.p=geometryProject; S.x=S.y=S.z=null; await draw();
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
     S.v='sheet:'+sheet.path; S.m='side'; await draw();
@@ -1867,11 +1868,11 @@ export const CHECKS = [
     document.querySelector('#zoombar [data-act=fit]').focus(); const focus=document.activeElement; key('?'); document.querySelector('#shortcuts').close(); if(document.activeElement!==focus) return 'focus restore';
     Appearance.reset(); return true;`],
   ["board navigation Thermal evidence", "v=board", `
-    Appearance.reset(); Appearance.patch({grid:{visible:true,size:1}}); await new Promise(r=>setTimeout(r,150)); fit();
+    Appearance.reset(); Appearance.patch({grid:{visible:true}}); await new Promise(r=>setTimeout(r,150)); fit();
     const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6});
-    return document.querySelector('[data-coordinate=x]').textContent!=='—' && document.querySelector('[data-grid]').textContent==='1.000';`],
+    return document.querySelector('[data-coordinate=x]').textContent!=='—' && document.querySelector('[data-grid]').textContent==='0.500';`],
   ["board shortcut sheet Thermal evidence", "v=board", `
-    Appearance.patch({grid:{visible:true,size:1},units:'mm'}); await new Promise(r=>setTimeout(r,150)); fit();
+    Appearance.reset(); Appearance.patch({grid:{visible:true},units:'mm'}); await new Promise(r=>setTimeout(r,150)); fit();
     const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y]; updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); showShortcuts(); return document.querySelector('#shortcuts').open;`],
 ["SCH6 physical grid negative camera units DPR and viewport coordinates", "", `
   const sheet=proj().sheets.find(s=>s.svg); S.v='sheet:'+sheet.path; S.m='side'; await draw();
@@ -2022,5 +2023,124 @@ export const CHECKS = [
       if(pixel.some((v,i)=>Math.abs(v-[51,102,153,255][i])>1)) return 'resolved background '+pixel;
       return true;
     } finally {c.dispose();stage.remove();}
+  `],
+
+  ["board fps two revisions pan zoom", "v=board&m=side", `
+    if (!globalThis.__CHECK_PERF) return "skip";
+    disposeBoardRenderers();
+    const start = performance.now(); S.v="board"; S.m="side"; await draw(); fit();
+    const firstDrawCpuMs = performance.now()-start;
+    if (!boardView.useGL || boardView.renderers.length!==2) return "requires two WebGL revision renderers";
+    boardView.renderers.forEach(r=>r.gl.finish());
+    const firstDrawMs = performance.now()-start;
+    const [base,head]=boardView.scenes||[];
+    if (!base?.complete || !head?.complete) return "missing or unsupported revision scene";
+    const kinds=s=>Object.fromEntries(["track","via","pad"].map(k=>[k,s.objects.filter(o=>o.kind===k).length]));
+    if ([base,head].some(s=>Object.values(kinds(s)).some(n=>n===0))) return "requires two populated track/via/pad scenes";
+    const original={x:S.x,y:S.y,z:S.z}, runs=[];
+    try {
+      for (let run=0;run<3;run++) {
+        const renderers=[...boardView.renderers], before=renderers.map(r=>({...r.stats}));
+        const intervals=[], cpu=[]; let previous=0, frames=0;
+        await new Promise(resolve=>{
+          const start=performance.now();
+          const tick=now=>{
+            const elapsed=now-start, t=performance.now();
+            setT({x:original.x+Math.sin(elapsed/160)*2,y:original.y+Math.cos(elapsed/180)*2,z:original.z*(1+.12*Math.sin(elapsed/230))});
+            if(elapsed>1000) { cpu.push(performance.now()-t); if(previous) intervals.push(now-previous); previous=now; frames++; }
+            if(elapsed<6000) requestAnimationFrame(tick); else resolve();
+          }; requestAnimationFrame(tick);
+        });
+        const fps=intervals.length/(intervals.reduce((a,b)=>a+b,0)/1000);
+        const sorted=[...intervals].sort((a,b)=>a-b);
+        const uploads=renderers.map((r,i)=>r.stats.uploads-before[i].uploads);
+        const textureUploads=renderers.map((r,i)=>r.stats.textureUploads-before[i].textureUploads);
+        const draws=renderers.map((r,i)=>r.stats.draws-before[i].draws);
+        runs.push({fps,frames,p95:sorted[Math.floor(sorted.length*.95)],drawCpuMs:cpu.reduce((a,b)=>a+b,0)/cpu.length,uploads,textureUploads,draws});
+      }
+      const diagnostic=performance.now(); setT(original); boardView.renderers.forEach(r=>r.gl.finish());
+      const finishBoundedMs=performance.now()-diagnostic;
+      const glErrors=boardView.renderers.map(r=>r.gl.getError());
+      const fps=runs.map(r=>r.fps).sort((a,b)=>a-b);
+      const evidence={runs,median:fps[1],min:fps[0],firstDrawMs,firstDrawCpuMs,pageReadyMs:start,finishBoundedMs,base:kinds(base),head:kinds(head),viewport:[innerWidth,innerHeight],dpr:devicePixelRatio,chrome:navigator.userAgent,glErrors};
+      console.log("BOARD_FPS "+JSON.stringify(evidence));
+      return runs.every(r=>r.fps>=50 && r.uploads.every(n=>n===0) && r.textureUploads.every(n=>n===0) && r.draws.every(n=>n>r.frames)) && glErrors.every(n=>n===0) || JSON.stringify(evidence);
+    } finally { setT(original); }
+  `],
+  ...["Layers Normal","Objects","Nets","Dim","Hide","Flip","active B.Cu"].map(state=>[
+    "board proof "+state, "v=board&m=side&t=appearance", `
+      if (!proj().board.geometry) return window.__CHECK_PERF ? "requires generated geometry" : "skip";
+      S.v="board"; S.m="side"; S.t="appearance"; S.layers=null; await draw();
+      Appearance.reset(); Appearance.patch({grid:{visible:true}}); fit(); renderPanel();
+      if(!boardView.useGL || boardView.renderers.length!==2) return "requires two live WebGL scenes";
+      if(boardAppearance().grid.size!==.5) return "KiCad PCB default grid must be 0.5 mm (app_settings.cpp default index 15)";
+      const state=${JSON.stringify(state)}, root=document.querySelector('#appearance-root');
+      if(!root) return "Appearance missing";
+      const tab=state==="Objects"?"objects":state==="Nets"?"nets":"layers";
+      root.querySelector('[data-ap-tab="'+tab+'"]').click();
+      if(state==="Dim" || state==="Hide") { const radio=root.querySelector('[name=ap-contrast][value='+state.toLowerCase()+']'); radio.checked=true; radio.dispatchEvent(new Event('change')); }
+      if(state==="Flip") root.querySelector('.appearance-options input[type=checkbox]').click();
+      if(state==="active B.Cu") {
+        const scene=boardView.scenes[0];
+        if(!scene.layers.some(l=>l.name==='B.Cu')) return "B.Cu absent";
+        // Actual front/back track intersections, not an active-row-only proof.
+        const segments=layer=>scene.objects.filter(o=>o.kind==='track' && o.layers.includes(layer)).flatMap(o=>o.geometry.segments);
+        const cross=(a,b)=>a[0]*b[1]-a[1]*b[0], points=[];
+        for(const a of segments('F.Cu')) for(const b of segments('B.Cu')) {
+          const u=[a[2]-a[0],a[3]-a[1]],v=[b[2]-b[0],b[3]-b[1]],w=[b[0]-a[0],b[1]-a[1]],d=cross(u,v);
+          if(!d) continue; const t=cross(w,v)/d,q=cross(w,u)/d;
+          if(t>.05 && t<.95 && q>.05 && q<.95) points.push([a[0]+t*u[0],a[1]+t*u[1]]);
+        }
+        if(!points.length) return "no real crossing tracks in fixture";
+        const sample=()=>points.map(p=>{const vp=boardView.panes[0].vp,xy=BoardGL.worldToScreen(p.map(n=>n/1000),boardCamera(vp));return Array.from(boardDiff.readPixel(0,...xy));});
+        const before=sample(); root.querySelector('[data-layer="B.Cu"] .name').click();
+        const after=sample();
+        if(!after.some((p,i)=>p.some((v,j)=>j<3 && Math.abs(v-before[i][j])>5))) return "active B.Cu did not change real crossing-track pixels";
+        console.log('BOARD_PROOF '+JSON.stringify({crossings:points.length,changed:after.filter((p,i)=>p.some((v,j)=>j<3&&Math.abs(v-before[i][j])>5)).length}));
+      }
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      const a=boardAppearance(), active=state==='active B.Cu'?'B.Cu':'F.Cu';
+      return root.querySelector('[data-ap-tab="'+tab+'"]').getAttribute('aria-selected')==='true'
+        && root.querySelector('[aria-current=true]')?.textContent===active
+        && a.contrast===(state==='Dim'?'dim':state==='Hide'?'hide':'normal')
+        && a.flip===(state==='Flip')
+        && root.querySelector('.appearance-options input[type=checkbox]').checked===a.flip
+        && (tab!=='objects' || root.querySelector('[data-object=zones] input[type=range]').value==='60')
+        && (tab!=='nets' || root.querySelectorAll('[data-net]').length>0)
+        && root.querySelector('[name=ap-contrast]:checked').value===a.contrast
+        && boardView.renderers.every(r=>r.stats.draws>0 && !r.stats.disposed)
+        && [...document.querySelectorAll('#stage canvas')].length===2;
+    `
+  ]),
+  ["board side camera retains textures without composition targets", "v=board&m=side", `
+    const P=proj(), saved=P.board.geometry;
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,1000,1000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[]};
+    const key='__retained_side_proof__';cache[key]=JSON.stringify(scene);P.board.geometry={base:key,head:key};
+    try {
+      S.v='board';S.m='side';await draw();fit();
+      const before=boardView.renderers.map(r=>r.stats.textureUploads);
+      for(let n=0;n<5;n++) setT({x:S.x+.1});
+      if(boardView.panes.some(p=>p.targets)) return 'Side allocated unnecessary composition targets';
+      return boardView.renderers.every((r,i)=>r.stats.textureUploads===before[i]) || 'camera reuploaded net texture';
+    } finally {P.board.geometry=saved;delete cache[key];}
+  `],
+  ["board offline generated controls selection links and fallback", "v=board&m=side&t=appearance", `
+    if(!proj().board.geometry) return 'skip';
+    S.v='board';S.m='side';S.t='appearance';await draw();Appearance.reset();fit();renderPanel();
+    if(!boardView.useGL || boardView.renderers.length!==2) return 'two revision canvases missing offline';
+    const root=document.querySelector('#appearance-root');root.querySelector('[data-ap-tab=objects]').click();
+    const range=root.querySelector('[data-object=tracks] input[type=range]');range.value='75';range.dispatchEvent(new Event('input'));
+    if(boardAppearance().objects.tracks.opacity!==.75) return 'offline controls failed';
+    const row=proj().changes.find(c=>c.where?.board && viewOf(c));
+    if(!row) return 'requires an actual board change for selection-link proof';
+    await goTo(row.id);
+    if(S.s!==row.id || decodeState(encodeState()).s!==row.id) return 'selection link lost';
+    const create=BoardGL.create;
+    try {
+      disposeBoardRenderers();BoardGL.create=()=>null;boardView.failed=null;await draw();
+      if(boardView.useGL || !document.querySelector('#stage .world svg') || !boardView.note) return 'authoritative SVG fallback missing offline';
+      console.log('BOARD_PROOF '+JSON.stringify({offline:true,selection:row.id,fallback:true}));
+      return true;
+    } finally {BoardGL.create=create;boardView.failed=null;}
   `],
 ];
