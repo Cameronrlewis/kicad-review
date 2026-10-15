@@ -267,16 +267,17 @@ export function runPage({ user, owner, repo, running, status, githubUrl, base, h
   return frame({ title: 'Generating review', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: crumb }], meta: running ? '<meta http-equiv="refresh" content="5">' : '', body: `<main class="page"><div class="page-head"><div><h1>Generating review</h1><p class="lead">${lead}</p></div></div><section class="card"><ul class="steps">${progress}</ul><p class="muted">Elapsed time: ${e(elapsedTime(startedAt))}</p><p>Usually takes about 2 minutes. You can leave this page. The finished review appears under Reviews.</p><p>${revisionLine}</p>${github}</section></main>` });
 }
 
-export function messagePage({ title, message, details = [], links = [], user, owner, repo, kind = 'error' }) {
+export function messagePage({ title, message, code, details = [], links = [], user, owner, repo, kind = 'error' }) {
   const crumbs = owner && repo ? [{ href: '/', label: 'Repositories' }, { href: repoPath(owner, repo), label: `${owner}/${repo}` }, { label: title }] : [{ label: title }];
   const status = {
     error: { symbol: '✕', word: 'Error' },
     warn: { symbol: '!', word: 'Warning' },
     info: { symbol: 'i', word: 'Information' },
   }[kind] || { symbol: '✕', word: 'Error' };
-  const detailList = details.length ? `<ul class="message-details muted">${details.map((detail) => `<li>${e(detail)}</li>`).join('')}</ul>` : '';
+  const detailList = details.length ? `<details class="message-diagnostics"><summary>Details</summary><ul class="message-details muted mono">${details.map((detail) => `<li>${e(detail)}</li>`).join('')}</ul></details>` : '';
+  const codeLine = Number.isInteger(code) && code >= 400 && code <= 599 ? `<p class="message-code mono muted">${code}</p>` : '';
   const actions = links.length ? `<p class="message-actions">${links.map((item, index) => link(item.href, item.label, index === 0 ? 'btn btn-primary' : 'btn')).join(' ')}</p>` : '';
-  return frame({ title, user, crumbs, body: `<main class="page message-page"><section class="card message-card"><h1 class="message-head"><span class="message-symbol message-symbol-${e(kind)}" aria-hidden="true">${status.symbol}</span><span>${e(title)} <span class="message-kind">${status.word}</span></span></h1><p>${e(message)}</p>${detailList}${actions}</section></main>` });
+  return frame({ title, user, crumbs, body: `<main class="page message-page"><section class="card message-card">${codeLine}<h1 class="message-head"><span class="message-symbol message-symbol-${e(kind)}" aria-hidden="true">${status.symbol}</span><span>${e(title)} <span class="message-kind">${status.word}</span></span></h1><p>${e(message)}</p>${detailList}${actions}</section></main>` });
 }
 
 function status(value) {
