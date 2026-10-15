@@ -1,0 +1,7 @@
+# KiCad colour and layer data
+
+PCB default colour values and layer ordering data are derived from KiCad 10,
+KiCad contributors, source revision 3e051f88. No KiCad implementation source is included.
+
+Data references: common/settings/builtin_color_themes.h,
+pcbnew/widgets/appearance_controls.cpp, and pcbnew/pcb_draw_panel_gal.cpp.
