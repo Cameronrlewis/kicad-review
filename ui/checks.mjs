@@ -1,3 +1,15 @@
+const BOARD_LIFECYCLE_FIXTURE = `
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],
+      layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],
+      objects:[{kind:'track',uuid:'lifecycle',changeUuid:'lifecycle',layers:['F.Cu'],net:0,category:'tracks',side:null,hidden:false,
+        box:[1000,1000,9000,3000],geometry:{segments:[[2000,2000,8000,2000,1000]]}}]};
+    const bytes=new Uint8Array(await new Response(new Blob([JSON.stringify(scene)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.lifecycle=btoa(String.fromCharCode(...bytes));
+    proj().board.geometry={base:'lifecycle',head:'lifecycle'};
+    boardView.failed=null; Object.assign(S,{v:'board',m:'overlay',x:5,y:5,z:20});
+    await draw();
+`;
+
 const MARK_STYLE_FIXTURE = `
     // The template may lack retained board data; enable the real toolbar against a retained fixture.
     const object={kind:'pad',uuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
@@ -2742,4 +2754,45 @@ export const CHECKS = [
     await applyState({...decodeState(q.toString()),m:'semantic'});
     return S.m==='semantic' && document.querySelector('#modes [data-mode="semantic"]').textContent.includes('Changes only');
   `],
+  ["board context loss retains state and requires explicit retry", "v=board", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    if(!boardDiff) return 'missing compositor';
+    S.s=proj().changes.find(c=>c.where?.board)?.id || null; S.layers=['F_Cu'];
+    const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m,S.layers]), old=boardDiff;
+    const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
+    if(!ext) throw Error('WebGL context-loss extension unavailable');
+    ext.loseContext();
+    for(let n=0;n<100 && !document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack svg') || !old.panes.every(p=>p.renderer.stats.disposed)) return 'context loss did not dispose and fall back';
+    if(JSON.stringify([S.x,S.y,S.z,S.s,S.m,S.layers])!==before) return 'state lost';
+    if(!/WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent)) return 'missing fallback notice';
+    for(let n=0;n<3;n++) await draw();
+    if(boardDiff || boardView.failed!==S.p) return 'lost context remounted without retry';
+    return true;
+  `],
+  ["board stale failure cannot replace newer project", "v=board", `
+    const mount=BoardDiff.mount; let stale;
+    BoardDiff.mount=options=>{ stale=options.onLost; return mount(options); };
+    try { ${BOARD_LIFECYCLE_FIXTURE} } finally { BoardDiff.mount=mount; }
+    if(!boardDiff || !stale) return 'missing live board';
+    const old=boardDiff;
+    const next=structuredClone(proj()); next.dir+='-lifecycle'; next.name+=' lifecycle'; D.projects.push(next);
+    S.p=D.projects.length-1; await draw();
+    const current=boardDiff;
+    if(!current || current===old || !old.panes.every(p=>p.renderer.stats.disposed)) return 'project did not replace old controller';
+    stale(Error('late old-project context loss'));
+    await new Promise(r=>setTimeout(r,100));
+    return boardDiff===current && boardView.failed!==S.p && current.panes.every(p=>!p.renderer.stats.disposed)
+      || 'stale callback destroyed current board';
+  `],
+  ["board startup without WebGL2 keeps SVG modes and state", "v=board&x=5&y=5&z=20", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; await draw();
+      if(boardDiff || !document.querySelector('#stage .stack svg')) return 'no SVG '+mode;
+      if(S.x!==5 || S.y!==5 || S.z!==20) return 'camera lost '+mode;
+    }
+    return window.__webglAcquisitions>0 && /WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent);
+  `, {beforeStartup:`window.__webglAcquisitions=0; const getContext=HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext=function(type,...args){if(type==='webgl2'){window.__webglAcquisitions++;return null;}return getContext.call(this,type,...args);};`}],
 ];

@@ -489,12 +489,17 @@ async function draw() {
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
   if (boardView.useGL) {
     appearanceSchematics.clear();
-    if (boardDiff && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { if (!placed()) fit(); else apply(); afterDraw(view); return; }
+    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { if (!placed()) fit(); else apply(); afterDraw(view); return; }
     disposeBoardRenderers();
     $("#stage").replaceWith(stage);
     try {
-      boardDiff = BoardDiff.mount({stage,scenes:{base:scenes[0],head:scenes[1]},changes:proj().changes,state:S,appearance:glAppearance,onLost:()=>boardFallback("WebGL unavailable — showing SVG"),attachPanZoom});
-      boardDiff.mode = S.m; boardDiff.scenes = {base:scenes[0],head:scenes[1]};
+      const project = S.p;
+      let mounted;
+      mounted = BoardDiff.mount({stage,scenes:{base:scenes[0],head:scenes[1]},changes:proj().changes,state:S,appearance:glAppearance,onLost:()=>{
+        if (boardDiff === mounted && S.p === project) boardFallback("WebGL unavailable — showing SVG");
+      },attachPanZoom});
+      boardDiff = mounted;
+      boardDiff.project = project; boardDiff.mode = S.m; boardDiff.scenes = {base:scenes[0],head:scenes[1]};
       boardView.panes = boardDiff.panes; boardView.renderers = boardDiff.panes.map(p=>p.renderer);
       for (const {renderer, canvas} of boardDiff.panes) trackAppearanceBoard(renderer, canvas);
       if (S.m === "wipe") addDivider(stage.querySelector(".vp"));
