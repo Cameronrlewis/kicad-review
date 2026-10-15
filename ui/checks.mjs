@@ -1,5 +1,57 @@
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["board uniform retained primitives and drill pixels", "", `
+    if (!window.BoardGL) return "missing BoardGL";
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "position:fixed;left:300px;top:180px;width:800px;height:500px;z-index:9999";
+    canvas.setAttribute("aria-label", "Synthetic retained PCB tracks and via drill holes");
+    document.body.append(canvas);
+    const scene = {version:1,units:"um",complete:true,warnings:[],bounds:[0,0,8000,5000],
+      layers:[{id:0,name:"F.Cu",type:"signal",enabled:true},{id:2,name:"B.Cu",type:"signal",enabled:true}],
+      nets:[{id:0,name:""},{id:900001,name:"GND"}],objects:[
+        {kind:"track",uuid:"track",changeUuid:"track",layers:["F.Cu"],net:900001,category:"tracks",side:null,hidden:false,box:[750,750,6250,1250],geometry:{segments:[[1000,1000,6000,1000,500]]}},
+        {kind:"track",uuid:"disc",changeUuid:"disc",layers:["F.Cu"],net:0,category:"tracks",side:null,hidden:false,box:[6500,500,7500,1500],geometry:{segments:[[7000,1000,7000,1000,1000]]}},
+        {kind:"via",uuid:"via",changeUuid:"via",layers:["F.Cu","B.Cu"],net:900001,category:"vias",side:null,hidden:false,box:[2500,2500,3500,3500],geometry:{primitive:{shape:"circle",center:[3000,3000],size:[1000,1000],angle:0},drill:{center:[3000,3000],size:[500,500],angle:0,plated:true}}},
+        {kind:"pad",uuid:"slot",changeUuid:"fp",layers:["F.Cu","B.Cu"],net:900001,category:"pads",side:"back",hidden:false,box:[4500,2500,5500,3500],geometry:{primitive:{shape:"circle",center:[5000,3000],size:[1000,1000],angle:0},drill:{center:[5000,3000],size:[700,300],angle:0,plated:true}}}
+      ]};
+    const failures = [];
+    const r = BoardGL.create(canvas,{scene,onFailure:e=>failures.push(e.message)});
+    if (!r) return "WebGL2/stencil unavailable: " + failures;
+    r.setCamera({x:4,y:2.5,z:100,width:800,height:500,dpr:1});
+    const gl = canvas.getContext("webgl2"), pixel = (x,y) => {const p=new Uint8Array(4);gl.readPixels(Math.round(x*100),Math.round(500-y*100),1,1,gl.RGBA,gl.UNSIGNED_BYTE,p);return Array.from(p).slice(0,3);};
+    const equal = (p,q) => p.every((v,i)=>Math.abs(v-q[i])<=2);
+    const bg = [0,16,35], copper = [200,52,52];
+    const state = {activeLayer:"F.Cu",layers:{"F.Cu":{color:[200,52,52,1],visible:true}},objects:{tracks:{opacity:1}},nets:{}};
+    r.setAppearance(state); r.draw();
+    const uploads = r.stats.uploads;
+    const initial=[pixel(3,1),pixel(.85,1),pixel(.7,1),pixel(7,1),pixel(3,3),pixel(3.4,3),pixel(3.275,3),pixel(5.2,3)];
+    if (!initial.every((p,i)=>equal(p,[copper,copper,bg,copper,bg,copper,[236,236,236],bg][i]))) return "initial pixels " + JSON.stringify(initial);
+    r.draw();
+    state.layers["F.Cu"].color = [20,220,80,.8]; state.objects.tracks.opacity = .5;
+    r.setAppearance(state); r.draw();
+    if (!equal(pixel(3,1),[8,98,53]) || r.stats.uploads!==uploads) return "uniform update uploaded or wrong RGB " + pixel(3,1);
+    state.objects.tracks.opacity=1; state.layers["F.Cu"].color=[200,52,52,1];
+    state.nets.GND={color:[40,100,240,.5]}; r.setAppearance(state); r.draw();
+    if (!equal(pixel(3,1),[20,58,138])) return "net override alpha " + pixel(3,1);
+    state.nets.GND={visible:false}; r.setAppearance(state); r.draw();
+    if (!equal(pixel(3,1),bg) || !equal(pixel(3.4,3),bg)) return "hidden net";
+    state.nets={}; state.selectedNet="GND"; r.setAppearance(state); r.draw();
+    if (!equal(pixel(7,1),copper)) return "net zero was dimmed";
+    state.objects.backFootprints={visible:false}; r.setAppearance(state); r.draw();
+    if (!equal(pixel(5,3),bg) || !equal(pixel(5.4,3),bg)) return "footprint side gate";
+    state.flip=true; r.setAppearance(state); r.draw();
+    if (!equal(pixel(1,1.4),copper)) return "appearance flip";
+    state.flip=false; state.layers["F.Cu"].visible=false; r.setAppearance(state); r.draw();
+    if (!equal(pixel(3,1),bg)) return "layer eye";
+    state.layers["F.Cu"].visible=true; r.setAppearance(state);
+    r.setCamera({x:3,y:1,z:120,width:800,height:500,dpr:1}); r.draw();
+    if (!equal(r.readPixel(400,250).slice(0,3),copper)) return "retained camera";
+    r.setCamera({x:4,y:2.5,z:100,width:800,height:500,dpr:1});
+    if (r.stats.uploads!==uploads || gl.getError()!==gl.NO_ERROR || failures.length) return "GPU errors/uploads";
+    state.objects.backFootprints={visible:true}; state.selectedNet=null;
+    r.setAppearance(state); r.draw();
+    window.__boardSynthetic = {renderer:r,canvas};
+    return true;`],
   ["Libraries compare modes, used-by jumps and escaped panel", "", `
     const P = proj(), sheet = P.sheets.find(s => s.svg); if (!sheet) return "skip";
     P.objects = [{kind: "symbol", ref: "U1", lib: "Parts:X", sheet: sheet.path, pos: [10, 10], side: "head"}];
