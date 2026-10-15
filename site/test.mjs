@@ -2989,3 +2989,21 @@ test('S2 timeline identifies event types without colour', () => {
     assert.match(html, /&lt;event&gt;/);
   }
 });
+
+test('S2 compare carries non-colour A B labels and safe source metadata', () => {
+  const html = commitsPage({ owner: 'o', repo: 'r', branch: '<main>', branches: ['<main>'], commits: [{ sha: 'a'.repeat(40), message: '<script>', author: '<Ada>', date: 'today' }] });
+  assert.match(html, /Base <span class="compare-letter" aria-hidden="true">A<\/span>/);
+  assert.match(html, /Head <span class="compare-letter" aria-hidden="true">B<\/span>/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;Ada&gt;/);
+  assert.match(html, /aria-label="Commit revisions"/);
+});
+test('S2 progress announces current state and keeps recoverable outcomes', () => {
+  const args = { owner: 'o', repo: 'r', base: 'a'.repeat(40), head: 'b'.repeat(40) };
+  assert.match(runPage({ ...args, status: 'queued', running: true }), /aria-label="Review stages"/);
+  for (const state of ['failed', 'expired', 'nothing']) {
+    const html = runPage({ ...args, state });
+    assert.match(html, /Back to reviews/);
+    assert.doesNotMatch(html, /http-equiv="refresh"/);
+  }
+});
