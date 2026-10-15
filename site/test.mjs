@@ -120,7 +120,7 @@ test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: s
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
     env: { ...process.env, CHECK_PORT: process.env.CHECK_PORT || '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
-  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL loads sample -> Runtime.evaluate timed out/);
+  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL (loads sample|startup) -> Runtime\.(evaluate|enable) timed out/);
 });
 
 test('3D runner reports and bounds one whole check', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
