@@ -2187,4 +2187,88 @@ export const CHECKS = [
     Appearance.patch({markStyle:'${style}'});
     return document.querySelector('[data-mark-style="${style}"]').getAttribute('aria-checked')==='true';
   `]),
+  ["SCH6 comparison modes preserve selection paper grid and one-sided revisions", "", `
+    const p=proj(), sheet=p.sheets.find(s=>s.svg);
+    S.v='sheet:'+sheet.path; S.grid=true;
+    const row=p.changes.find(r=>onView(r,S.v)&&rowBox(r,'head'));
+    if(!row) return 'sample needs schematic change';
+    for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; S.s=row.id; await draw(); fit();
+      if(!document.querySelector('#stage .vp.sheet .layer svg')) return mode+' SVG';
+      if(!document.querySelector('#stage .marker.sel')) return mode+' selection';
+      if(getComputedStyle(document.querySelector('#stage .vp.sheet')).backgroundColor!=='rgb(245, 244, 239)') return mode+' paper';
+      if(!document.querySelector('#stage .sch-grid')) return mode+' grid';
+      if(S.x!==sheet.size[0]/2 || S.y!==sheet.size[1]/2) return mode+' full-page fit';
+      const hash=encodeState(); await applyState(decodeState('#'+hash));
+      if(S.s!==row.id||S.v!=='sheet:'+sheet.path) return mode+' address';
+    }
+    const svg={...sheet.svg};
+    try { for(const missing of ['base','head']) {
+      sheet.svg={base:svg.base||svg.head,head:svg.head||svg.base,[missing]:null}; S.m='semantic'; await draw();
+      const stack=document.querySelector('#stage .stack.'+(missing==='base'?'head':'base'));
+      if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return missing+' hid survivor';
+    }} finally {sheet.svg=svg;}
+    return true;
+  `],
+  ["SCH6 source raster is independent of active schematic palette", "", `
+    const sheet=proj().sheets.find(s=>s.svg); S.v='sheet:'+sheet.path;
+    const view=currentView(), a=await raster('head',view,200,150);
+    document.documentElement.style.setProperty('--sch-ink-009600','#ff00ff');
+    try {const b=await raster('head',view,200,150);return a.some(v=>v!==0)&&a.every((v,i)=>v===b[i]);}
+    finally {document.documentElement.style.removeProperty('--sch-ink-009600');}
+  `],
+  ["SCH6 marks retain action cues selection and live Appearance styles", "", `
+    const p=proj(), sheet=p.sheets.find(s=>s.svg); S.v='sheet:'+sheet.path; S.m='side';
+    p.changes=['added','removed','modified'].map((action,i)=>({id:'sch6-'+i,action,kind:i===2?'wire':'symbol',ref:'U'+i,where:{sheet:sheet.path},pos:[20+10*i,20],box:[18+10*i,18,22+10*i,22]}));
+    S.s='sch6-1'; await draw();
+    for(const style of ['outline','recolour']) {
+      Appearance.patch({markStyle:style});
+      for(const [action,glyph,line] of [['added','+','solid'],['removed','−','dashed'],['modified','~','dotted']]) {
+        const m=document.querySelector('#stage .marker.'+action), css=m&&getComputedStyle(m);
+        if(!m||m.dataset.glyph!==glyph||!m.getAttribute('aria-label')?.includes(action)||css.borderTopStyle!==line) return style+' '+action+' cues';
+        if(m.dataset.markStyle!==style||!m.querySelector('.sch-mark-label')?.textContent.includes(action)) return style+' '+action+' word/style';
+        if(css.pointerEvents!=='none') return 'marker intercepts pins';
+        if(style==='recolour'&&css.backgroundColor==='rgba(0, 0, 0, 0)'&&css.backgroundImage==='none') return action+' no tint';
+      }
+      for(const w of document.querySelectorAll('#stage .world')) if(w.querySelectorAll('.marker.sel').length!==1||w.querySelectorAll('.marker.removed').length!==1) return 'duplicate selection';
+      const button=document.querySelector('button[data-mark-style="recolour"]');
+      if(button.disabled||!button.title.includes('no object IDs')) return 'schematic mark control';
+    }
+    return true;
+  `],
+  ["SCH6 sheet pins selection linking and rapid draws preserve addresses", "", `
+    const p=proj(), sheet=p.sheets.find(s=>s.svg), v='sheet:'+sheet.path;
+    const row=p.changes.find(r=>r.where?.sheet===sheet.path&&rowBox(r,'head'));
+    if(!row) return 'sheet change required';
+    await goTo(row.id);
+    if(S.v!==v||S.s!==row.id) return 'list linking';
+    const b=rowBox(row,'head'), x=(b[0]+b[2])/2, y=(b[1]+b[3])/2;
+    const anchor={v:1,project:p.dir,file:(p.dir?p.dir+'/':'')+sheet.file,sheet:sheet.path,layer:null,target:'point',uuid:null,kind:null,ref:null,x,y,side:'head',commit:D.head,severity:'comment'};
+    S.threads=[{id:'sch6-pin',resolved:false,anchor,comments:[]}];
+    for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; await draw();
+      const pin=document.querySelector('#stage .pin[data-thread="sch6-pin"]');
+      if(!pin||getComputedStyle(pin).pointerEvents==='none'||resolveAnchor(anchor).view!==v) return mode+' pin';
+      const vp=pin.closest('.vp'), r=vp.getBoundingClientRect();
+      const cx=r.left+r.width/2+(x-S.x)*S.z, cy=r.top+r.height/2+(y-S.y)*S.z;
+      S.s=null; pickAt(vp,{clientX:cx,clientY:cy}); await draw();
+      if(S.s!==row.id) return mode+' picking';
+      const hash=encodeState(); await applyState(decodeState('#'+hash));
+      if(S.s!==row.id||S.v!==v||!document.querySelector('.marker.sel')) return mode+' hash';
+    }
+    const pending=[];
+    for(const mode of ['side','overlay','wipe','blend','semantic']) {S.m=mode; pending.push(draw());}
+    await Promise.all(pending);
+    return document.querySelector('#stage').classList.contains('mode-semantic')&&!!document.querySelector('#stage .pin[data-thread="sch6-pin"]');
+  `],
+  ...['side','overlay','wipe','blend','semantic'].map(mode=>['SCH6 Thermal schematic mode proof '+mode,'',`
+    const index=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(index<0) return 'skip';
+    S.p=index;
+    const sheet=proj().sheets.find(s=>s.svg&&proj().changes.some(r=>r.where?.sheet===s.path&&rowBox(r,'head')));
+    if(!sheet) return 'Thermal real schematic change required';
+    S.v='sheet:'+sheet.path; S.m='${mode}'; S.s=proj().changes.find(r=>r.where?.sheet===sheet.path&&rowBox(r,'head')).id;
+    S.grid=true; Appearance.patch({markStyle:'recolour'}); renderNav(); renderModes(); renderPanel(); await draw(); fit();
+    return !!document.querySelector('#stage .vp.sheet svg')&&!!document.querySelector('#stage .marker.sel');
+  `]),
 ];

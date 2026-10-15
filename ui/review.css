@@ -327,3 +327,19 @@ body.shot #toolbar { display:none; }
 .mark-styles { display:flex; align-items:center; gap:var(--space-1); white-space:nowrap; }
 .mark-styles > span { color:var(--muted); }
 #toolbar .mark-styles button[aria-checked="true"] { border-color:var(--accent); box-shadow:inset 0 -2px var(--accent); font-weight:600; }
+
+/* Schematic comparisons retain the exported paper and region-level action cues. */
+.mode-overlay .vp.sheet .world { background: transparent; }
+.vp.sheet .marker { border-color: var(--sch-mark, #b3201f); --marker-halo: #f5f4ef; --marker-core: #0f0f0f; }
+.vp.sheet .marker.modified { border-style: dotted; border-width: calc(2px / var(--k, 1)); }
+.vp.sheet .marker.sel { outline: calc(2px / var(--k, 1)) solid #0f0f0f; outline-offset: calc(3px / var(--k, 1)); }
+.vp.sheet .marker.sel.added { border-style: solid; }
+.vp.sheet .marker.sel.removed { border-style: dashed; }
+.vp.sheet .marker.sel.modified { border-style: dotted; }
+.sch-mark-label { position: absolute; left: 0; top: 100%; white-space: nowrap;
+  font: 11px var(--font-mono); transform: scale(calc(1 / var(--k, 1))); transform-origin: 0 0;
+  color: #0f0f0f; background: #f5f4ef; padding: 0 2px; }
+.vp.sheet .marker[data-mark-style="recolour"] { background: color-mix(in srgb, var(--sch-mark, #b3201f) 12%, transparent); }
+.vp.sheet .marker[data-mark-style="recolour"].removed {
+  background: repeating-linear-gradient(135deg, transparent 0 4px, color-mix(in srgb, var(--sch-mark) 22%, transparent) 4px 6px);
+}
