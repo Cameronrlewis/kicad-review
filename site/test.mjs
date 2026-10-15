@@ -2079,7 +2079,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '82be67bc0030511bc6cca251252770b78a742053b98f7e08d74ba0e027824daa');
+  assert.equal(createHash('sha256').update(current).digest('hex'), 'f5e97ce34a509a6592d41467e78a770e27e486c72d73a3f85200d4c2b34e92cf');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -2946,4 +2946,61 @@ test('S2 shell and primitives have dense accessible contracts', () => {
   assert.match(siteBadge('modified'), /status-modified/);
   assert.match(siteTable(['Name'], '<tr><td>R16</td></tr>', 'Parts'), /aria-label="Parts"/);
   assert.match(siteTable(['<b>'], '', 'Empty'), /&lt;b&gt;/);
+});
+
+test('S2 thread dialogs have names labels and keyboard hint', () => {
+  const html = reviewPage({ owner: 'o', repo: 'r', id: 9, pull: 7, name: 'kicad-review.html' });
+  assert.match(html, /id="thread-composer" class="thread-dialog" aria-labelledby="thread-composer-title"/);
+  assert.match(html, /id="thread-view" class="thread-dialog" aria-labelledby="thread-view-title"/);
+  assert.match(html, /id="thread-composer-title"/);
+  assert.match(html, /Ctrl\+Enter/);
+  assert.match(html, /<label>Text<textarea name="text"/);
+  assert.match(html, /data-act="issue" hidden/);
+});
+test('S2 readiness uses bordered states even when unknown', async () => {
+  const panel = { children: [], replaceChildren(...items) { this.children = items; } };
+  const node = () => ({ children: [], append(...items) { this.children.push(...items); } });
+  await runInNewContext(`(${readinessClient.toString()})({readiness:'/ready',reviewHead:null})`, {
+    document: { getElementById: () => panel, createElement: node, addEventListener() {} },
+    fetch: async () => new Response(JSON.stringify({ head: 'b'.repeat(40), decisions: [], requested: [], blocking: null, open: null })),
+  });
+  assert.equal(panel.children[0].children[0].className, 'wait');
+  assert.match(panel.children[0].children[0].textContent, /waiting.*freshness unknown/);
+  assert.match(panel.children[0].children[2].textContent, /could not be read/);
+});
+
+test('S2 thread keyboard respects composition disabled state and native close', () => {
+  const submits = [], events = {}, nodes = {};
+  const element = () => ({ disabled: false, listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } });
+  function dialog() {
+    const children = {};
+    return { open: true, querySelector(s) {
+      const node = children[s] ||= element();
+      if (s === 'form') {
+        node.querySelector = selector => children[selector] ||= element();
+        node.requestSubmit = button => submits.push(button);
+      }
+      return node;
+    }, close() { this.open = false; } };
+  }
+  const composer = dialog(), view = dialog();
+  Object.assign(nodes, { 'review-report': { contentWindow: {} }, 'thread-composer': composer, 'thread-view': view, 'thread-notice': {} });
+  runInNewContext(`(${threadsClient.toString()})({})`, {
+    document: { getElementById: id => nodes[id] },
+    addEventListener(type, fn) { events[type] = fn; },
+    fetch() { assert.fail('keyboard or close must not fetch directly'); },
+  });
+  const key = view.querySelector('textarea').listeners.keydown;
+  let prevented = 0;
+  const event = { key: 'Enter', ctrlKey: true, preventDefault() { prevented++; } };
+  key({ ...event, isComposing: true }); key({ ...event, shiftKey: true });
+  assert.equal(submits.length, 0);
+  key(event);
+  assert.equal(submits.length, 1);
+  assert.equal(submits[0], view.querySelector('form').querySelector('[data-act=reply]'));
+  submits[0].disabled = true; key(event); assert.equal(submits.length, 1);
+  composer.querySelector('[data-act=close]').listeners.click();
+  view.querySelector('[data-act=close]').listeners.click();
+  assert.equal(composer.open, false); assert.equal(view.open, false);
+  assert.equal(prevented, 2);
 });

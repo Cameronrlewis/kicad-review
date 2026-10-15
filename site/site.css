@@ -102,3 +102,24 @@ a.card:hover { border-color: var(--accent); }
 
 .top > .theme-toggle { margin-left:auto; flex:none; }
 .top > .theme-toggle + .account { margin-left: 0; }
+
+/* Task 6: readiness and thread dialogs */
+.readiness { flex-basis: 100%; max-height: 124px; overflow: auto; border-top: 1px solid var(--line); }
+.readiness p { margin: var(--sp-1) 0; }
+.readiness ul { display: grid; gap: 0; list-style: none; margin: 0; padding: 0; }
+.readiness li { display: flex; align-items: center; min-height: var(--h-md, 28px); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--line); overflow-wrap: anywhere; }
+.readiness .ok { color: var(--added); background: var(--added-bg); }
+.readiness .bad { color: var(--removed); background: var(--removed-bg); border-color: var(--removed); font-weight: 600; }
+.readiness .wait { color: var(--muted); border-style: dotted; }
+.thread-dialog { width: var(--dialog-w); max-width: 92vw; }
+.thread-dialog label { display: block; font-size: var(--fs-sm); }
+.thread-dialog textarea { display: block; width: 100%; margin-top: var(--sp-1); font: inherit; }
+.thread-dialog textarea[rows="5"] { min-height: 96px; }
+.thread-dialog fieldset { border: 0; padding: 0; margin: var(--sp-3) 0; }
+.thread-dialog fieldset label { display: inline-block; }
+.thread-target { overflow-wrap: anywhere; color: var(--muted); }
+.thread-comments { max-height: 40dvh; overflow: auto; padding-left: var(--sp-4); }
+.thread-comments p { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--sp-1) 0 var(--sp-3); }
+.thread-dialog [role=status] { min-height: 1.4em; overflow-wrap: anywhere; }
+.thread-shortcut { font-size: var(--fs-xs); }
+.dialog-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; margin-bottom: 0; }
