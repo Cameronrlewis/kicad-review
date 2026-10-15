@@ -1625,7 +1625,8 @@ export const CHECKS = [
       canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
       for(let i=0;i<100 && !document.querySelector('#stage .stack .layer');i++) await new Promise(r=>setTimeout(r,50));
       if(appearanceBoards.size || !document.querySelector('.stack .layer')) return 'context loss cleanup';
-      boardView.failed=null; await draw();
+      canvas.dispatchEvent(new Event('webglcontextrestored'));
+      for(let i=0;i<100 && !appearanceBoards.size;i++) await new Promise(r=>setTimeout(r,50));
       if(!appearanceBoards.size) return 'no recovered renderer';
       for(const board of appearanceBoards) if(board.appearance.colors['board.copper.f'][3]!==.5) return 'recovered stale';
       const create=BoardGL.create;

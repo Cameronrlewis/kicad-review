@@ -449,6 +449,14 @@ function glPane(stage, view, i) {
     const renderer = BoardGL.create(canvas, {scene, revision: side, onFailure: () => boardFallback("WebGL unavailable — showing SVG")});
     if (!renderer) return false;
     appearanceBoards.add(renderer);
+    const project = S.p;
+    // Stage 4 disposes a lost renderer and shows SVG. Restore by mounting fresh
+    // geometry through the existing path, which reads the latest store snapshot.
+    canvas.addEventListener('webglcontextrestored', () => {
+      if (S.p === project && S.v === 'board' && boardView.failed === project) {
+        boardView.failed = null; draw();
+      }
+    }, {once:true});
     const dispose = renderer.dispose;
     renderer.dispose = () => { appearanceBoards.delete(renderer); dispose(); };
     pane = boardView.panes[i] = {canvas, renderer, scene};
