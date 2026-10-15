@@ -838,6 +838,7 @@ function markersFor(view) {
 function afterDraw(view) {
   syncMarkStyles();
   if (!view) return;
+  refreshAppearance();
   const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
   for (const w of document.querySelectorAll("#stage .world")) {
     const side = sideOf(w);

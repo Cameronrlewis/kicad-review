@@ -1,5 +1,5 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
-// Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark] [--width N]
+// Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark] [--width N] [--dpr N] [--offline]
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +10,9 @@ const args = process.argv.slice(2);
 const opt = k => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : null; };
 const dark = args.includes("--dark"); if (dark) args.splice(args.indexOf("--dark"), 1);
 const width = Number(opt("--width") || 1920);
+const dpr = Number(opt("--dpr") || 1);
+const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
+const perf = process.env.CHECK_PERF === "1";
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
 const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), filter = args[0] || "";
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
@@ -28,14 +31,25 @@ const ws = new WebSocket(tab.webSocketDebuggerUrl); await Promise.race([new Prom
 let id = 0; const pend = {}, errors = [];
 ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
   if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate(`window.KRTheme.set(${JSON.stringify(m.params.payload)}); window.__themeFlipped()`)); }
+  if (m.method === "Runtime.consoleAPICalled") {
+    const text = m.params.args.map(a => a.value ?? "").join(" ");
+    if (/^BOARD_(FPS|PROOF) /.test(text)) console.log(text);
+  }
+  if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url)) errors.push("external request: " + m.params.request.url);
   if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text); };
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
-await send("Emulation.setDeviceMetricsOverride", { width, height: 1080, deviceScaleFactor: 1, mobile: false });
+await send("Emulation.setDeviceMetricsOverride", { width, height: 1080, deviceScaleFactor: dpr, mobile: false });
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 await send("Page.enable");
+if (offline) {
+  await send("Network.enable");
+  await send("Network.setBlockedURLs", { urls:["http://*", "https://*"] });
+  await send("Network.emulateNetworkConditions", { offline:true, latency:0, downloadThroughput:0, uploadThroughput:0 });
+}
+await send("Page.addScriptToEvaluateOnNewDocument", {source:`window.__CHECK_PERF=${perf};`});
 await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem('kr.theme',${JSON.stringify(dark ? 'dark' : 'light')})}catch{}` });
 const iconSprite = readFileSync(new URL("./icons/sprite.svg", import.meta.url), "utf8");
 let failed = 0;
