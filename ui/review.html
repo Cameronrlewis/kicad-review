@@ -11,13 +11,20 @@
 <body>
 <!-- KR_ICONS -->
 <div class="report-head"><header id="hdr"></header><button type="button" class="btn theme-toggle" data-theme-toggle aria-label="Switch to light theme" title="Switch to light theme" aria-pressed="true"><svg class="icon" aria-hidden="true" focusable="false"><use href="#kr-theme"></use></svg><span>Theme</span></button></div>
-<div id="modes" role="toolbar" aria-label="Comparison mode"></div>
+<div id="toolbar" role="toolbar" aria-label="Review tools">
+  <button type="button" data-dock="nav" aria-controls="nav" aria-expanded="false" title="Projects, sheets and layers">Navigator</button>
+  <div id="modes" role="group" aria-label="Comparison mode"></div>
+  <div id="change-nav" role="group" aria-label="Change navigation"><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)">&lsaquo;</button><button type="button" data-step="1" aria-label="Next change" title="Next change (j)">&rsaquo;</button></div>
+  <div id="zoombar" role="group" aria-label="View"></div>
+  <span class="tb-spacer"></span>
+  <button type="button" id="mark-style" disabled title="Mark styles become available with the board diff renderer">Marks: Outline</button>
+  <button type="button" data-dock="panel" aria-controls="panel" aria-expanded="false" title="Changes, checks, parts and threads">Inspector</button>
+</div>
 <div id="app">
   <nav id="nav" aria-label="Projects, sheets and layers"></nav>
   <main id="stage" aria-label="Drawing"></main>
-  <aside id="panel" aria-label="Changes and checks"></aside>
+  <aside id="panel" aria-label="Review inspector"></aside>
 </div>
-<div id="zoombar" role="toolbar" aria-label="View"></div>
 <dialog id="shortcuts" aria-labelledby="shortcuts-title"><h2 id="shortcuts-title">Keyboard shortcuts</h2>
 <dl><dt>Home / Ctrl+0 / f</dt><dd>Fit drawing, keep selection</dd><dt>F1 / Ctrl+= / Ctrl+Shift+=</dt><dd>Zoom in at cursor</dd><dt>F2 / Ctrl+−</dt><dd>Zoom out at cursor</dd><dt>F4</dt><dd>Center on cursor</dd><dt>PageUp / PageDown</dt><dd>Front / back copper (board); previous / next sheet (schematic)</dd><dt>+ / −</dt><dd>Next / previous enabled board layer</dd><dt>H</dt><dd>Inactive layers: normal / dim / hide</dd><dt>Ctrl+U</dt><dd>Units: mm / mil / in</dd><dt>N / Shift+N</dt><dd>Finer / coarser grid</dd><dt>{ / }</dt><dd>Decrease / increase active layer opacity</dd><dt>j / k / ↓ / ↑</dt><dd>Next / previous change</dd><dt>c / Right click</dt><dd>Place thread pin (when enabled)</dd><dt>Esc</dt><dd>Cancel pin / clear selection; close this sheet</dd><dt>b</dt><dd>Toggle 3D blend</dd><dt>Alt+↑</dt><dd>Parent schematic sheet</dd><dt>?</dt><dd>Show shortcuts</dd><dt>Left / middle / right drag</dt><dd>Pan linked views; wheel zooms at cursor</dd></dl>
 <button type="button" data-close autofocus>Close</button></dialog>

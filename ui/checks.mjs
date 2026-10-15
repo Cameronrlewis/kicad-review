@@ -1009,7 +1009,7 @@ export const CHECKS = [
   parts.changes.push({action:'footprint',refs:['R1'],before:{...parts.lines[0],footprint:'R_0402'},after:parts.lines[0]}); renderPanel();
   if (!document.querySelector('.parts-footprint')?.textContent.includes('R_0402 → R_0603')) return 'footprint change';
   delete REVIEW_DATA.projects[0].parts; renderPanel();
-  return !document.querySelector('[data-tab=parts]') && S.t === 'changes';
+  return document.querySelector('[data-tab=parts]').disabled && S.t === 'changes';
 `],
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;
@@ -1145,7 +1145,7 @@ export const CHECKS = [
       && base.view === "sheet:/b/" && base.side === "base" && baseAny.view === "sheet:/a/" && baseUuid.pos[0] === 20 || JSON.stringify({head, any, base, baseAny, baseUuid});`],
   ["Threads tab and pins appear only with thread data", "", `
     const P = proj(), row = P.changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
-    if (document.querySelector('#panel [data-tab="threads"]')) return "tab shown offline";
+    if (!document.querySelector('#panel [data-tab="threads"]').disabled) return "tab enabled offline";
     const b = rowBox(row, "head"), x = (b[0] + b[2]) / 2, y = (b[1] + b[3]) / 2;
     P.objects = [{ uuid: "u-5", kind: "footprint", ref: "Q1", side: "head", pos: [x, y, 0], box: b, layer: "F.Cu" }];
     acceptThreads([{ id: "T1", resolved: false, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: "F.Cu", target: "object", uuid: "u-5", kind: "footprint", ref: "Q1", x, y, side: "head", commit: D.head, severity: "blocking" }, comments: [{ author: "alice", body: "<img src=x onerror=alert(1)> too close", createdAt: "2026-10-12T10:00:00Z" }] },
@@ -1168,7 +1168,7 @@ export const CHECKS = [
     S.threads = null; renderPanel();
     window.dispatchEvent(new MessageEvent("message", { source: window, data: { kicadReviewThreads: [] } }));
     await new Promise(r => setTimeout(r, 50));
-    if (S.threads !== null || document.querySelector('#panel [data-tab="threads"]')) return "accepted offline";
+    if (S.threads !== null || !document.querySelector('#panel [data-tab="threads"]').disabled) return "accepted offline";
     const ignored = handleParentMessage({ source: {}, data: { kicadReviewThreads: [] } }, true);
     if (ignored !== false || S.threads !== null) return "accepted non-parent";
     const accepted = handleParentMessage({ source: parent, data: { kicadReviewThreads: [] } }, true);
@@ -1850,4 +1850,28 @@ export const CHECKS = [
     S.v='sheet:'+proj().sheets.find(s=>s.svg).path; S.m='side'; S.units='mil'; S.grid=true; await draw(); fit(); S.z=10; apply();
     const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect(); deltaAnchor=[S.x,S.y];
     updateCoordinates(vp,{clientX:r.left+r.width*.6,clientY:r.top+r.height*.6}); return !!vp.querySelector('.sch-grid');`],
+  ["chrome docks preserve space at 1600px", "", `
+  document.documentElement.style.width = "1600px"; document.body.style.width = "1600px";
+  renderPanel();
+  const app = document.querySelector("#app"), stage = document.querySelector("#stage");
+  const tabs = [...document.querySelectorAll("#panel-tabs [data-tab]")];
+  const bounds = document.querySelector("#panel-tabs")?.getBoundingClientRect();
+  return app.getBoundingClientRect().width <= 1600 && stage.clientWidth >= 600 &&
+    tabs.map(t => t.dataset.tab).join(",") === "changes,checks,parts,threads" &&
+    tabs.every(t => { const r=t.getBoundingClientRect(); return r.left >= bounds.left && r.right <= bounds.right + 1; })
+    || "dock tabs clipped or canvas squeezed";`],
+  ["chrome absent Parts and Threads stay explained", "", `
+  delete proj().parts; S.threads = null; S.issues = null; S.t = "changes";
+  renderPanel();
+  return ["parts", "threads"].every(name => {
+    const b = document.querySelector('#panel [data-tab="' + name + '"]');
+    return b?.disabled && !!b.title;
+  }) && document.querySelector("#panel-body") !== null;`],
+  ["chrome navigator escapes long project and sheet names", "", `
+  proj().name = "<img src=x onerror=alert(1)>" + "Long".repeat(40);
+  proj().sheets[0].name = "<script>bad</script>" + "Long".repeat(40);
+  renderNav();
+  const nav = document.querySelector("#nav");
+  return !nav.querySelector("img,script") && nav.scrollWidth <= nav.clientWidth + 1
+    && !!nav.querySelector("#proj") && !!nav.querySelector("[data-view]");`],
 ];

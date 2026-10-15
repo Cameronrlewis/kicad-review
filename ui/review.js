@@ -156,9 +156,9 @@ function renderNav() {
       ${kids(s.path).length ? `<ul>${sheetItems(s.path, depth + 1)}</ul>` : ""}</li>`;
   }).join("");
   $("#nav").innerHTML = `
-    <label class="projsel">Project <select id="proj">${D.projects.map((q, i) =>
+    <h3>Projects</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project">${D.projects.map((q, i) =>
       `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label>
-    <h3>Schematic</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
+    <h3>Sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
     <h3>Board</h3><ul class="tree">${p.board.layers.length || p.board.changed
       ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
           <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
@@ -1093,11 +1093,11 @@ function renderPanel() {
   if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
-  $("#panel").innerHTML = `<div role="tablist">
-      <button role="tab" data-tab="changes" aria-selected="${S.t === "changes"}">Changes ${p.changes.length}</button>
-      <button role="tab" data-tab="checks" aria-selected="${S.t === "checks"}">Checks</button>
-      ${p.parts ? `<button role="tab" data-tab="parts" aria-selected="${S.t === "parts"}">Parts ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}</button>` : ""}
-      ${S.threads || S.issues ? `<button role="tab" data-tab="threads" aria-selected="${S.t === "threads"}">Threads ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}</button>` : ""}</div>` +
+  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${S.t === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
+  const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
+  const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
+  // Stage 4 Appearance tab goes first in #panel-tabs.
+  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
     (S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
@@ -1105,9 +1105,9 @@ function renderPanel() {
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
-    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}`);
-  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
-  const tabs = [...document.querySelectorAll("#panel [role=tab]")];
+    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
+  for (const t of document.querySelectorAll("#panel [role=tab]")) t.onclick = () => { if (t.disabled) return; S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
+  const tabs = [...document.querySelectorAll("#panel [role=tab]:not(:disabled)")];
   for (const tab of tabs) {
     tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
     tab.addEventListener("keydown", event => {
@@ -1255,6 +1255,16 @@ function renderZoombar() {
   $("#zoombar .goto").onchange = e => { applyGoTo(e.target.value); e.target.value = ""; };
 }
 renderZoombar();
+function setDock(name, open) {
+  document.getElementById(name).classList.toggle("dock-open", open);
+  document.querySelector(`[data-dock="${name}"]`).setAttribute("aria-expanded", String(open));
+}
+for (const b of document.querySelectorAll("[data-dock]")) b.onclick = () => {
+  const open = b.getAttribute("aria-expanded") !== "true";
+  setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
+  setDock(b.dataset.dock, open);
+};
+for (const b of document.querySelectorAll("#change-nav [data-step]")) b.onclick = () => step(+b.dataset.step);
 
 // Changed regions: rasterise both sides, compare pixels on a grid, merge touching cells into boxes.
 async function raster(side, view, W, H) {
