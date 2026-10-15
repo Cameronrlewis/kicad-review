@@ -17,7 +17,9 @@
   <div id="change-nav" role="group" aria-label="Change navigation"><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)">&lsaquo;</button><button type="button" data-step="1" aria-label="Next change" title="Next change (j)">&rsaquo;</button></div>
   <div id="zoombar" role="group" aria-label="View"></div>
   <span class="tb-spacer"></span>
-  <button type="button" id="mark-style" disabled title="Mark styles become available with the board diff renderer">Marks: Outline</button>
+  <div class="mark-styles" role="radiogroup" aria-label="Change mark style">
+    <span>Marks</span><button type="button" id="mark-style" data-mark-style="outline" role="radio" aria-checked="true" disabled>Outline</button><button type="button" data-mark-style="recolour" role="radio" aria-checked="false" tabindex="-1" disabled>Recolour</button>
+  </div>
   <button type="button" data-dock="panel" aria-controls="panel" aria-expanded="false" title="Changes, checks, parts and threads">Inspector</button>
 </div>
 <div id="app">

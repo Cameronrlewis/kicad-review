@@ -305,3 +305,16 @@ test('public Appearance facade switches scoped backing stores without accumulati
   assert.equal(notices,4);
   assert.equal(Object.keys(JSON.parse(saved.get('kr.appearance.v1')).viewers).length,2);
 });
+
+
+test('invalid stored mark style falls back without discarding valid appearance', () => {
+  for (const style of ['rainbow', undefined]) {
+    const state=plain(A.defaults()); state.markStyle=style;
+    state.layerOpacity['F.Cu']=.35; state.netColors.GND=[.2,.3,.4,1];
+    const disk={getItem:()=>JSON.stringify({version:1,viewers:{board:state}})};
+    const restored=A.createStore({viewerId:'board',storage:()=>disk}).get();
+    assert.equal(restored.markStyle,'outline');
+    assert.equal(restored.layerOpacity['F.Cu'],.35);
+    assert.deepEqual(plain(restored.netColors.GND),[.2,.3,.4,1]);
+  }
+});

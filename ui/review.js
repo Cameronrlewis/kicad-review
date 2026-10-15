@@ -278,7 +278,30 @@ function mountAppearance() {
   appearanceUI = Appearance.mount(root, { ...appearanceCtx(), getState: Appearance.get, onChange: changeBoardAppearance, onReset: () => Appearance.reset(), unavailable: UNAVAILABLE });
 }
 function refreshAppearance() { if (appearanceUI && S.t === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
+function syncMarkStyles() {
+  const available = S.v === "board" && !!boardDiff && boardView.useGL;
+  for (const b of document.querySelectorAll('[data-mark-style]')) {
+    const selected = b.dataset.markStyle === Appearance.get().markStyle;
+    b.disabled = !available;
+    b.setAttribute('aria-checked', String(selected));
+    b.tabIndex = selected ? 0 : -1;
+    b.title = available ? 'Change geometry mark style' : 'Geometry mark styles require WebGL board data';
+  }
+  const msg = $('#statusbar .status-message');
+  if (msg && S.v === 'board') msg.textContent = available ? 'Ready' : [boardView.note, 'Geometry mark styles require WebGL board data'].filter(Boolean).join(' — ');
+}
+for (const b of document.querySelectorAll('[data-mark-style]')) {
+  b.onclick = () => Appearance.patch({markStyle:b.dataset.markStyle});
+  b.onkeydown = e => {
+    if (!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return;
+    e.preventDefault();
+    const next = e.key === 'Home' ? 'outline' : e.key === 'End' ? 'recolour' : b.dataset.markStyle === 'outline' ? 'recolour' : 'outline';
+    Appearance.patch({markStyle:next});
+    document.querySelector(`[data-mark-style="${next}"]`).focus();
+  };
+}
 Appearance.subscribe(snapshot => {
+  syncMarkStyles();
   applyAppearance(snapshot);
   refreshAppearance();
   updateStatus();
@@ -813,6 +836,7 @@ function markersFor(view) {
   return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" || r.action === "modified" && MARKED.has(r.kind)));
 }
 function afterDraw(view) {
+  syncMarkStyles();
   if (!view) return;
   const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
   for (const w of document.querySelectorAll("#stage .world")) {
