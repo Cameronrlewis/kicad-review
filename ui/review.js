@@ -763,7 +763,7 @@ function sceneBox() {   // retained scene bounds (um -> mm); null when the view 
 }
 function fit() { const v = currentView(); zoomTo(sceneBox() || contentBox() || (v && [0, 0, v.size[0], v.size[1]]), 2); }
 
-const MODE_NAMES = { side: "Side by side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Changes only" };
+const MODE_NAMES = { side: "Side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Changes only" };
 S.blend = 0.5; S.wipe = 0.5;
 async function oneWorld(stage, view, label) {
   const w = viewport(stage, label, view.kind);
@@ -817,9 +817,16 @@ function renderModes() {
   const focus = document.activeElement?.dataset.mode;
   const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
-    `<button data-mode="${m}" aria-pressed="${S.m === m}" ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${is3d && m === "semantic" ? "Changes only" : n}</button>`).join("")
+    `<button data-mode="${m}" role="radio" aria-checked="${S.m === m}" tabindex="${S.m === m ? 0 : -1}" aria-pressed="${S.m === m}" ${m === "side" ? 'title="Side by side"' : ""} ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${is3d && m === "semantic" ? "Changes only" : n}</button>`).join("")
     + (S.m === "blend" ? (is3d ? `<label class="blend"><span>Base</span><input type="range" aria-label="Base to Head blend" min="0" max="100" value="${Math.round(S.blend * 100)}"><span>Head</span></label><button data-3d-blend-toggle>${S.blend < .5 ? "Show head" : "Show base"}</button>` : `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>`) : "");
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { if (b.getAttribute("aria-disabled") === "true") return; S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
+  for (const b of document.querySelectorAll("#modes [data-mode]")) b.onkeydown = e => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    const bs = [...document.querySelectorAll('#modes [data-mode]:not([aria-disabled=true])')], i = bs.indexOf(b);
+    const n = e.key === "Home" ? 0 : e.key === "End" ? bs.length - 1 : (i + (e.key === "ArrowRight" ? 1 : -1) + bs.length) % bs.length;
+    bs[n].focus(); bs[n].click();
+  };
   const r = document.querySelector("#modes input[type=range]");
   const blendButton = $("#modes [data-3d-blend-toggle]"), buttonText = () => { if (blendButton) blendButton.textContent = S.blend < .5 ? "Show head" : "Show base"; };
   if (r) r.oninput = () => { S.blend = r.value / 100; if (is3d) window.Review3D?.setBlend(S.blend); else if (boardDiff) apply(); else { const h = document.querySelector("#stage .stack.head"); if (h) h.style.opacity = S.blend; } buttonText(); };
@@ -1269,9 +1276,20 @@ function encodeState(s = S) {
 }
 let hashTimer;
 function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); }, 200); }
-function step(dir) {
+function stepIds() {
   const sel = S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : S.t === "threads" ? "#panel .thread-card[data-thread]" : "#panel .card[data-id]";
-  const ids = [...document.querySelectorAll(sel)].map(e => e.dataset.id || e.dataset.thread);
+  return [...document.querySelectorAll(sel)].map(e => e.dataset.id || e.dataset.thread);
+}
+function renderChangeCount() {
+  const ids = stepIds(), i = ids.indexOf(S.t === "threads" ? S.thread : S.s), c = $("#change-count");
+  if (!c) return;
+  c.textContent = `${i < 0 ? "–" : i + 1} / ${ids.length}`;
+  for (const b of document.querySelectorAll("#change-nav [data-step]")) b.disabled = !ids.length;
+}
+new MutationObserver(renderChangeCount).observe($("#panel"), { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-selected"] });
+renderChangeCount();
+function step(dir) {
+  const ids = stepIds();
   if (!ids.length) return;
   const i = ids.indexOf(S.t === "threads" ? S.thread : S.s), next = ids[i < 0 ? (dir > 0 ? 0 : ids.length - 1) : (i + dir + ids.length) % ids.length];
   if (S.t === "threads") { openThread(next); document.querySelector(`#panel [data-thread="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }); return; }
@@ -1340,8 +1358,8 @@ function renderZoombar() {
   if (S.v === '3d' && window.Review3D) { window.Review3D.cameraBar(); return; }
   const icon = name => ['light','dark'].map(theme=>`<svg class="icon icon-${theme}" aria-hidden="true" focusable="false"><use href="#kr-${name}-${theme}"></use></svg>`).join('');
   $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out" title="Zoom out">${icon('zoom-out')}</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in" title="Zoom in">${icon('zoom-in')}</button>
-    <button data-act="fit" aria-label="Fit drawing (f)" title="Fit drawing (f)">${icon('fit')}<span>Fit</span></button><span class="sep"></span><span class="muted">j / k: next / previous</span>
-    <button data-act="copy">Copy link</button><input class="goto" placeholder="Go to… paste a link">`;
+    <button data-act="fit" aria-label="Fit drawing (f)" title="Fit drawing (f)">${icon('fit')}<span>Fit</span></button>
+    <button data-act="copy" title="Copy current review link">Copy link</button><input class="goto" aria-label="Go to saved review position" placeholder="Go to… paste a link">`;
   for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => { if (placed()) setT({ z: S.z * +b.dataset.z }); };
   $("#zoombar [data-act=fit]").onclick = fit;
   $("#zoombar [data-act=copy]").onclick = async e => {
