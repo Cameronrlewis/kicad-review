@@ -301,7 +301,7 @@ test('home shows the session-ended notice only when a stale cookie was sent', as
   assert.doesNotMatch(await signedOut.text(), /You were signed out\. Sign in again to continue\./);
   const response = await call('/', { headers: { Cookie: 's=stale' } });
   const body = await response.text();
-  assert.match(body, /class="notice notice-info">You were signed out\. Sign in again to continue\./);
+  assert.match(body, /class="notice notice-info" role="status">You were signed out\. Sign in again to continue\./);
   assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
 });
 
@@ -738,13 +738,13 @@ test('repository cards show escaped details, visibility, update time, and two ac
       pushed_at: '2025-02-03T04:05:00Z',
     }],
   });
-  assert.match(body, /class="card"/);
+  assert.match(body, /aria-label="Repositories"/);
   assert.match(body, /&lt;owner&gt;/);
   assert.match(body, /&lt;board&gt;/);
   assert.match(body, /private/);
-  assert.match(body, /updated .* ago/);
+  assert.match(body, /\d+ \w+ ago/);
   assert.match(body, /title="2025-02-03T04:05:00Z"/);
-  assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E"[^>]*>Reviews<\/a>/);
+  assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E"[^>]*>&lt;owner&gt;\/&lt;board&gt;<\/a>/);
   assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E\/commits"[^>]*>Compare commits<\/a>/);
 });
 
@@ -2956,4 +2956,16 @@ test('S2 message page shows status and safe collapsible diagnostics', () => {
   assert.match(html, /&lt;script&gt;/);
   assert.match(html, /href="\/r\/o\/r"/);
   assert.doesNotMatch(messagePage({ title: 'Missing', message: 'No details' }), /<details class="message-diagnostics"/);
+});
+
+test('S2 repositories use a compact safe table and explicit empty state', () => {
+  const html = homePage({ user: 'u', repositories: [{ owner: { login: 'o' }, name: '<r>', private: true, default_branch: 'main', pushed_at: 'invalid' }] });
+  assert.match(html, /aria-label="Repositories"/);
+  assert.match(html, /&lt;r&gt;/);
+  assert.match(html, /\/r\/o\/%3Cr%3E\/commits/);
+  assert.match(html, /unknown time/);
+  assert.match(html, /<code>main<\/code>/);
+  assert.doesNotMatch(html, /<h2><r>/);
+  assert.match(homePage({ user: 'u', repositories: [] }), /No repositories granted/);
+  assert.match(signedOutPage({ sessionEnded: true }), /role="status"/);
 });

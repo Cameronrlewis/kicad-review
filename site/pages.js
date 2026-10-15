@@ -48,8 +48,8 @@ export function frame({ title, user, crumbs = [], body, meta = '', navigation = 
 }
 
 export function signedOutPage({ sessionEnded = false } = {}) {
-  const notice = sessionEnded ? '<p class="notice notice-info">You were signed out. Sign in again to continue.</p>' : '';
-  return frame({ title: 'Repositories', body: `<main class="page signed-out-page"><section class="card signed-out-card"><h1>KiCad review</h1><p>See what changed on the schematic and board in each commit or pull request, with ERC and DRC results.</p>${notice}<p>${link('/login', 'Sign in with GitHub', 'btn btn-primary')}</p><div class="signed-out-permissions"><p>When you sign in, GitHub asks you to allow this app to:</p><ul><li>Verify your GitHub identity</li><li>Know which resources you can access</li><li>Act on your behalf (only within what you can already do)</li></ul><p>It reads only repositories you already have access to.</p></div></section></main>` });
+  const notice = sessionEnded ? '<p class="notice notice-info" role="status">You were signed out. Sign in again to continue.</p>' : '';
+  return frame({ title: 'Repositories', body: `<main class="page signed-out-page"><section class="card signed-out-card"><h1>KiCad review</h1><p class="signed-out-intro">See what changed on the schematic and board in each commit or pull request, with ERC and DRC results.</p>${notice}<p>${link('/login', 'Sign in with GitHub', 'btn btn-primary')}</p><div class="signed-out-permissions"><p>When you sign in, GitHub asks you to allow this app to:</p><ul><li>Verify your GitHub identity</li><li>Know which resources you can access</li><li>Act on your behalf (only within what you can already do)</li></ul><p>It reads only repositories you already have access to.</p></div></section></main>` });
 }
 
 function relativeTime(value) {
@@ -65,11 +65,12 @@ function relativeTime(value) {
 }
 
 export function homePage({ user, repositories }) {
-  const body = repositories.length ? `<section class="cards">${repositories.map((repo) => {
+  const rows = repositories.map((repo) => {
     const path = repoPath(repo.owner.login, repo.name);
-    return `<article class="card"><p class="muted">${e(repo.owner.login)}</p><h2>${e(repo.name)}</h2><p><span class="badge">${repo.private ? 'private' : 'public'}</span></p><p class="muted" title="${e(repo.pushed_at)}">updated ${e(relativeTime(repo.pushed_at))}</p><p class="card-actions">${link(path, 'Reviews', 'btn btn-primary')} ${link(`${path}/commits`, 'Compare commits', 'btn')}</p></article>`;
-  }).join('')}</section>` : `<section class="card empty"><h2>No repositories yet</h2><p>An owner or admin installs the KiCad review GitHub App on the repositories you can open.</p><p class="muted">Signed in as ${e(user)}</p></section>`;
-  return frame({ title: 'Repositories', user, crumbs: [{ label: 'Repositories' }], body: `<main class="page"><div class="page-head"><div><h1>Repositories</h1><p class="lead">Repositories you can open. Each one needs the KiCad review GitHub App installed.</p></div></div>${body}</main>` });
+    return `<tr><td>${link(path, `${repo.owner.login}/${repo.name}`)}</td><td><span class="badge">${repo.private ? 'private' : 'public'}</span></td><td><code>${e(repo.default_branch || 'not recorded')}</code></td><td class="mono" title="${e(repo.pushed_at)}">${e(relativeTime(repo.pushed_at))}</td><td>${link(`${path}/commits`, 'Compare commits')}</td></tr>`;
+  }).join('');
+  const empty = `<section class="card repository-empty"><h2>No repositories granted</h2><p>No repositories yet. An owner or admin installs the KiCad review GitHub App on the repositories you can open.</p><p class="muted">Signed in as ${e(user)}</p></section>`;
+  return frame({ title: 'Repositories', user, crumbs: [{ label: 'Repositories' }], body: `<main class="page page-wide"><div class="page-head"><div><h1>Repositories</h1><p class="lead">Repositories you can open. Each one needs the KiCad review GitHub App installed.</p></div></div>${rows ? siteTable(['Repository', 'Visibility', 'Default branch', 'Updated', 'Compare'], rows, 'Repositories') : empty}</main>` });
 }
 
 export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'all', started, view = 'list', groups = null }) {
