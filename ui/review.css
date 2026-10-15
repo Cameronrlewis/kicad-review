@@ -173,3 +173,18 @@ body.placing #stage { cursor: crosshair; }
 .waive { font: inherit; font-size: 12px; background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0 var(--space-2); }
 .waiver-snippet { margin: var(--space-1) var(--space-2); padding: var(--space-2); background: var(--surface-2); border-radius: var(--radius); font: 12px/1.4 var(--font-mono); white-space: pre-wrap; user-select: all; }
 .waiver-help { padding: 0 var(--space-2); font-size: 12px; }
+
+/* Stage 1 task 4: dock tabs wrap instead of clipping; drawing X/Y status bar */
+:root { --statusbar-h: 24px; --tab-h: 28px; }
+body { grid-template-rows: auto var(--bar-h) minmax(0,1fr) auto var(--statusbar-h); }
+#app { grid-template-columns: var(--nav-w) minmax(0,1fr) var(--panel-w); }
+#app:has([data-tab=parts][aria-selected=true]) { grid-template-columns: var(--nav-w) minmax(240px, 1fr) minmax(var(--panel-w), 55%); }
+#panel > [role=tablist] { display:flex; flex-wrap:wrap; align-items:stretch; gap:0; width:100%; box-sizing:border-box; background:var(--panel-head-bg, var(--surface-2)); }
+#panel > [role=tablist] > [role=tab] { box-sizing:border-box; flex:0 0 auto; min-height:var(--tab-h); max-width:100%; padding:0 var(--space-2); border-radius:0; font-size:12px; white-space:normal; overflow-wrap:anywhere; border:0; border-bottom:2px solid transparent; }
+#panel > [role=tablist] > [role=tab][aria-selected=true] { background:var(--panel-bg, var(--surface)); color:var(--text); border-bottom-color:var(--tab-underline, var(--accent)); font-weight:600; }
+#panel > [role=tablist] > [role=tab]:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+#statusbar { display:flex; align-items:center; gap:var(--space-3); box-sizing:border-box; min-width:0; height:var(--statusbar-h); padding:0 var(--space-2); background:var(--statusbar-bg, var(--surface)); color:var(--muted); border-top:1px solid var(--line); font:11px/1.4 var(--font-mono); font-variant-numeric:tabular-nums; }
+#statusbar [data-coordinate] { display:inline-block; min-width:8ch; color:var(--text); text-align:right; }
+#statusbar .status-message { margin-left:auto; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+body.shot #statusbar { display:none; }
+body.shot { grid-template-rows:minmax(0,1fr); }

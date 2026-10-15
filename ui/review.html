@@ -16,6 +16,7 @@
   <aside id="panel" aria-label="Changes and checks"></aside>
 </div>
 <div id="zoombar" role="toolbar" aria-label="View"></div>
+<footer id="statusbar" aria-label="Drawing status"><span>X <span data-coordinate="x">—</span></span><span>Y <span data-coordinate="y">—</span></span><span>mm</span><span class="status-message" role="status" aria-live="polite">Ready</span></footer>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <!-- Keep each drawing's alpha, replace its colour: removed = red, added = green. Multiplied together, unchanged ink turns black. -->
   <filter id="tint-del" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .85  0 0 0 0 .1  0 0 0 0 .15  0 0 0 1 0"/></filter>
