@@ -3057,7 +3057,7 @@ assert by_id['fp']['geometry'] == {} and by_id['fp']['box'] == [9500, 17000, 125
 assert by_id['pa']['side'] == by_id['pb']['side'] == 'back'
 unknown = scene_from_text(GEOMETRY_FIXTURE[:-1] + '(gr_curve (uuid curve) (layer "F.Cu")))')
 assert not unknown['complete']
-assert unknown['warnings'] == [{'uuid': 'curve', 'kind': 'gr_curve', 'reason': 'board drawable not yet supported'}]
+assert unknown['warnings'] == [{'uuid': 'curve', 'kind': 'gr_curve', 'reason': 'cubic requires four control points'}]
 assert scene_from_text(GEOMETRY_FIXTURE[:-1] + '(gr_curve (uuid curve) hide))')['complete']
 
 # Copper ordering comes from canonical names, not numeric enums or layer declaration order.
@@ -3175,3 +3175,146 @@ except ValueError:
 print('ok board fallback warnings, hidden effects and stroked extent limits')
 
 assert scene_from_text(GEOMETRY_FIXTURE.replace('(uuid fp)', '(uuid fp) (fp_metadata "opaque")'))["complete"]
+
+# Stored zone paths retain slit bridges, holes and independent islands verbatim.
+DRAW_FIXTURE = GEOMETRY_FIXTURE.replace('(44 "Edge.Cuts" user)', '(44 "Edge.Cuts" user) (37 "F.SilkS" user) (36 "B.SilkS" user) (40 "Dwgs.User" user)')
+EXTRA = '''
+(zone (net 1) (layer "F.Cu") (uuid zone)
+ (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+ (filled_polygon (layer "F.Cu")
+  (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10) (xy 0 0)
+       (xy 2 2) (xy 2 8) (xy 8 8) (xy 8 2) (xy 2 2) (xy 0 0)))
+ (filled_polygon (layer "F.Cu") (pts (xy 20 0) (xy 21 0) (xy 21 1)))
+ (filled_polygon (layer "B.Cu") (pts (xy 30 0) (xy 31 0) (xy 31 1))))
+(gr_line (start -1 -1) (end 11 -1) (stroke (width .05) (type default))
+ (layer "Edge.Cuts") (uuid edge))
+(gr_text "<& Board" (at 5 6 30) (layer "F.SilkS") (uuid text) unlocked
+ (effects (font (size 1 2) (thickness .15) bold italic) (justify left top mirror)))
+'''
+ss = scene_from_text(DRAW_FIXTURE[:-1] + EXTRA + ')')
+u = {o['uuid']: o for o in ss['objects']}
+zones = [o for o in ss['objects'] if o['changeUuid'] == 'zone']
+assert ss['complete'], ss['warnings']
+assert len(zones) == 3 and len({o['uuid'] for o in zones}) == 3
+assert [o['layers'] for o in zones] == [['F.Cu'], ['F.Cu'], ['B.Cu']]
+assert zones[0]['geometry']['rings'][0] == [[0,0],[10000,0],[10000,10000],[0,10000],[0,0],[2000,2000],[2000,8000],[8000,8000],[8000,2000],[2000,2000],[0,0]]
+assert zones[1]['geometry']['rings'] == [[[20000,0],[21000,0],[21000,1000]]]
+assert u['edge']['geometry']['segments'] == [[-1000,-1000,11000,-1000,50]]
+t = u['text']['geometry']['text']
+assert t == {'value': '<& Board', 'at': [5000,6000], 'size': [2000,1000], 'angle': 30000,
+             'thickness': 150, 'justify': ['left','top'], 'mirror': True, 'italic': True, 'bold': True, 'unlocked': True}
+assert u['text']['box'] is not None
+unfilled = EXTRA[:EXTRA.index('(gr_line')].replace('filled_polygon', 'not_a_fill')
+zz = scene_from_text(DRAW_FIXTURE[:-1] + unfilled + ')')
+zo = next(o for o in zz['objects'] if o['changeUuid'] == 'zone')
+assert zz['complete'] and zo['geometry']['rings'] == [] and len(zo['geometry']['segments']) == 4
+assert any('no stored fill; showing outline' in w['reason'] for w in zz['warnings'])
+keepout = scene_from_text(DRAW_FIXTURE[:-1] + EXTRA[:EXTRA.index('(gr_line')].replace('(uuid zone)', '(uuid zone) (keepout (tracks not_allowed))') + ')')
+assert keepout['complete'] and all(o['geometry']['rings'] == [] for o in keepout['objects'] if o['changeUuid'] == 'zone')
+print('ok board stored zone topology, islands, layers, keepouts and unfilled outlines')
+
+SHAPES = '''
+(gr_rect (start 0 0) (end 2 1) (stroke (width .1)) (fill none) (layer "F.SilkS") (uuid rect))
+(gr_rect (start 3 0) (end 5 1) (width .2) (fill solid) (layer "F.SilkS") (uuid solid))
+(gr_circle (center 0 0) (end 1 0) (stroke (width .1)) (fill solid) (layer "F.SilkS") (uuid circle))
+(gr_arc (start 1 0) (mid 0 1) (end -1 0) (width .1) (layer "F.SilkS") (uuid arc-shape))
+(gr_poly (pts (xy 0 0) (xy 2 0) (xy 1 1)) (width .1) (fill none) (layer "F.SilkS") (uuid poly))
+(gr_curve (pts (xy 0 0) (xy 0 2) (xy 2 2) (xy 2 0)) (stroke (width .1)) (layer "F.SilkS") (uuid curve-ok))
+'''
+shape_scene = scene_from_text(DRAW_FIXTURE[:-1] + SHAPES + ')')
+assert shape_scene['complete'], shape_scene['warnings']
+shapes = {o['uuid']: o for o in shape_scene['objects']}
+assert len(shapes['rect']['geometry']['segments']) == 4 and shapes['rect']['geometry']['rings'] == []
+assert shapes['solid']['geometry']['rings'] == [[[3000,0],[5000,0],[5000,1000],[3000,1000]]]
+assert len(shapes['circle']['geometry']['segments']) > 32 and len(shapes['circle']['geometry']['rings']) == 1
+assert shapes['arc-shape']['geometry']['segments'][0][:2] == [1000,0]
+assert len(shapes['poly']['geometry']['segments']) == 3 and shapes['poly']['geometry']['rings'] == []
+curve = shapes['curve-ok']['geometry']['segments']
+assert len(curve) > 16 and curve[0][:2] == [0,0] and curve[-1][2:4] == [2000,0]
+assert all(a[2:4] == b[:2] for a,b in zip(curve,curve[1:]))
+# Collinear controls beyond the chord must subdivide, not collapse a retracing curve.
+retraced = scene_from_text(DRAW_FIXTURE[:-1] + SHAPES[SHAPES.index('(gr_curve'):].replace('(xy 0 2) (xy 2 2)', '(xy 5 0) (xy -3 0)') + ')')
+assert len(next(o for o in retraced['objects'] if o['uuid'] == 'curve-ok')['geometry']['segments']) > 1
+print('ok board graphics shapes, fills, circle/arc and bounded cubic flattening')
+
+FP_DRAW = '''
+ (fp_line (start 1 0) (end 2 0) (stroke (width .1)) (layer "B.SilkS") (uuid fp-line))
+ (fp_text user "${REFERENCE}/${VALUE}" (at 1 0 90) (layer "B.SilkS") (uuid fp-label)
+  (effects (font (size 1 1)) (justify right bottom mirror)))
+ (property "Value" "Connector" (at 0 1 90) (layer "B.SilkS") (uuid value-label) (effects (font (size 1 1))))
+ (property "Reference" "J1" (at 0 0 90) (layer "B.SilkS") hide (uuid hidden-property) (effects (font (size 1 1))))
+'''
+fp_scene = scene_from_text(DRAW_FIXTURE.replace('(uuid fp)', '(uuid fp)' + FP_DRAW))
+fpo = {o['uuid']: o for o in fp_scene['objects']}
+assert fp_scene['complete'], fp_scene['warnings']
+assert fpo['fp-line']['geometry']['segments'] == [[10000,19000,10000,18000,100]]
+assert fpo['fp-label']['geometry']['text']['at'] == [10000,19000]
+assert fpo['fp-label']['geometry']['text']['angle'] == 90000  # already board-frame, not doubled
+assert fpo['fp-label']['geometry']['text']['value'] == 'J1/Connector'
+assert fpo['fp-label']['changeUuid'] == 'fp' and fpo['fp-label']['side'] == 'back'
+assert fpo['hidden-property']['hidden']
+for hide in ('hide', '(hide yes)', '(effects (hide yes))'):
+    hidden_scene = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "SECRET" (at 0 0) (layer "F.SilkS") ' + hide + ' (uuid hidden) (effects (font (size 1 1))))' + ')')
+    assert hidden_scene['complete'] and next(o for o in hidden_scene['objects'] if o['uuid'] == 'hidden')['hidden']
+for unsupported in ('dimension', 'table', 'gr_text_box', 'image'):
+    ss = scene_from_text(DRAW_FIXTURE[:-1] + '(' + unsupported + ' (layer "Dwgs.User") (uuid unsupported))' + ')')
+    assert not ss['complete'] and any(w['kind'] == unsupported for w in ss['warnings'])
+for label in ('${UNKNOWN}', '~{rich}', '^{rich}'):
+    ss = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "' + label + '" (at 0 0) (layer "F.SilkS") (effects (font (size 1 1))))' + ')')
+    assert not ss['complete'], label
+font_scene = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "Label" (at 0 0) (layer "F.SilkS") (effects (font (face "Embedded") (size 1 1))))' + ')')
+assert not font_scene['complete'] and any('font' in w['reason'] for w in font_scene['warnings'])
+print('ok board text metadata, hidden properties, footprint transforms and explicit SVG fallbacks')
+
+# Guard pathological flattening and new/legacy text flags without silent geometry loss.
+for huge_shape in (
+    '(gr_circle (center 0 0) (end 2000000 0) (width .1) (layer "F.Cu") (uuid huge))',
+    '(gr_curve (pts (xy -2000000 -2000000) (xy -2000000 2000000) (xy 2000000 -2000000) (xy 2000000 2000000)) (layer "F.Cu") (uuid huge))',
+):
+    huge_scene = scene_from_text(DRAW_FIXTURE[:-1] + huge_shape + ')')
+    assert not huge_scene['complete'] and any('budget' in w['reason'] for w in huge_scene['warnings'])
+    assert next(o for o in huge_scene['objects'] if o['uuid'] == 'huge')['geometry'] == {}
+# Numeric error bound against a sampled cubic before integer rounding.
+from kicad_review import geometry_cubic
+import math
+flattened = geometry_cubic([[0,0], [0,2], [2,2], [2,0]])
+for i in range(1001):
+    t = i / 1000
+    p = [6*t*t - 4*t*t*t, 6*t*(1-t)]
+    def chord_distance(a, b):
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        u = max(0, min(1, ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / (dx*dx + dy*dy)))
+        return math.hypot(p[0]-a[0]-u*dx, p[1]-a[1]-u*dy)
+    assert min(chord_distance(a,b) for a,b in zip(flattened,flattened[1:])) <= .001
+flags = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "Flags" (at 1 2 45 unlocked) (layer "F.SilkS") (uuid flags) (effects (font (size 1 2) (bold yes) (italic no))))' + ')')
+flag_text = next(o for o in flags['objects'] if o['uuid'] == 'flags')['geometry']['text']
+assert flag_text['size'] == [2000,1000] and flag_text['unlocked'] and flag_text['bold'] and not flag_text['italic']
+for unsupported_text in ('(layer "F.SilkS" knockout) (effects (font (size 1 1)))', '(layer "F.SilkS") (effects (font (size 1 1) (line_spacing 2)))'):
+    assert not scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "Special" (at 0 0) ' + unsupported_text + '))')['complete']
+for shape in ('gr_line', 'gr_arc', 'gr_circle', 'gr_rect', 'gr_poly', 'gr_curve'):
+    # Board and footprint use exactly the same shape kernel and transform once.
+    from kicad_review import geometry_shape, parse_sexpr, geometry_point
+    node = next(n for n in parse_sexpr('(kicad_pcb ' + SHAPES + ')')[1:] if n[0] == shape) if shape != 'gr_line' else parse_sexpr('(gr_line (start 1 0) (end 2 0) (width .1))')
+    local_shape = geometry_shape(node)
+    node[0] = shape.replace('gr_', 'fp_')
+    world_shape = geometry_shape(node, [10,20,90])
+    for a,b in zip(local_shape['segments'], world_shape['segments']):
+        expected = [*geometry_point([a[0]/1000,a[1]/1000], [10,20,90]), *geometry_point([a[2]/1000,a[3]/1000], [10,20,90]), a[4]]
+        # Cubics transform unrounded points, so a half-um tie can differ from
+        # transforming an already rounded local coordinate by one um.
+        assert all(abs(x-y) <= (1 if shape == 'gr_curve' else 0) for x,y in zip(b,expected))
+print('ok board flattening budgets, cubic error bound, graphic transforms and text flag variants')
+
+# Force the depth guard deterministically; it must choose SVG, not a truncated path.
+from unittest.mock import patch
+with patch('kicad_review.math.hypot', return_value=1):
+    limited = scene_from_text(DRAW_FIXTURE[:-1] + SHAPES[SHAPES.index('(gr_curve'):] + ')')
+assert not limited['complete'] and any('depth limit' in w['reason'] for w in limited['warnings'])
+assert next(o for o in limited['objects'] if o['uuid'] == 'curve-ok')['geometry'] == {}
+concave = scene_from_text(DRAW_FIXTURE[:-1] + '(zone (uuid concave) (layer "F.Cu") (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 1 1) (xy 1 4) (xy 0 4))))' + ')')
+assert concave['complete'] and next(o for o in concave['objects'] if o['changeUuid'] == 'concave')['geometry']['rings'] == [[[0,0],[4000,0],[4000,1000],[1000,1000],[1000,4000],[0,4000]]]
+# New child IDs without file UUIDs are deterministic and never alias another child.
+no_ids = scene_from_text(DRAW_FIXTURE.replace('(uuid fp)', '(uuid fp)' + FP_DRAW.replace('(uuid fp-line)', '').replace('(uuid fp-label)', '').replace('(uuid value-label)', '').replace('(uuid hidden-property)', '')))
+assert len({o['uuid'] for o in no_ids['objects']}) == len(no_ids['objects'])
+assert {o['uuid'] for o in no_ids['objects']} >= {'fp/fp_line:1', 'fp/fp_text:1', 'fp/property:1', 'fp/property:2'}
+print('ok board cubic depth fallback, concave fill paths and stable drawable child IDs')

@@ -619,6 +619,98 @@ def geometry_arc(start, middle, end, width):
     return [[*p, *q, w] for p, q in zip(pts, pts[1:])]
 
 
+class GeometryFallback(ValueError):
+    """A drawable needs authoritative SVG instead of an incomplete approximation."""
+
+
+def geometry_cubic(points):
+    """Flatten a cubic in mm with a 1 um control-to-chord error bound."""
+    if len(points) != 4:
+        raise GeometryFallback("cubic requires four control points")
+    for point in points:
+        geometry_point(point)
+    result = [points[0]]
+
+    def distance(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        t = max(0, min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy))) if dx or dy else 0
+        return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+    def subdivide(a, b, c, d, depth):
+        if max(distance(b, a, d), distance(c, a, d)) <= .001:
+            if len(result) > 65536:
+                raise GeometryFallback("cubic exceeds geometry budget")
+            result.append(d)
+            return
+        if depth == 24:
+            raise GeometryFallback("cubic subdivision depth limit")
+        ab, bc, cd = [[(p[i] + q[i]) / 2 for i in (0, 1)] for p, q in ((a, b), (b, c), (c, d))]
+        abc, bcd = [[(p[i] + q[i]) / 2 for i in (0, 1)] for p, q in ((ab, bc), (bc, cd))]
+        mid = [(abc[i] + bcd[i]) / 2 for i in (0, 1)]
+        subdivide(a, ab, abc, mid, depth + 1)
+        subdivide(mid, bcd, cd, d, depth + 1)
+
+    subdivide(*[[float(v) for v in p] for p in points], 0)
+    return result
+
+
+def geometry_shape(node, footprint_at=None):
+    """Shared board/footprint graphic dispatch; only filled shapes have rings."""
+    kind = node[0][3:]
+    width = val(find(node, "stroke"), "width", val(node, "width", "0"))
+    w = geometry_um(width)
+    if w < 0:
+        raise ValueError("negative geometry size")
+    def point(key):
+        p = find(node, key)
+        if not p or len(p) < 3:
+            raise GeometryFallback(f"{node[0]} missing {key}")
+        geometry_point(p[1:3])
+        return p[1:3]
+    def world(p):
+        return geometry_point(p, footprint_at)
+    closed = kind in ("rect", "circle", "poly")
+    if kind == "line":
+        pts = [world(point("start")), world(point("end"))]
+    elif kind in ("arc", "circle"):
+        if kind == "arc":
+            arcs = [(point("start"), point("mid"), point("end"))]
+        else:
+            c, e = [[float(v) for v in point(key)] for key in ("center", "end")]
+            dx, dy = e[0] - c[0], e[1] - c[1]
+            opposite = [c[0] - dx, c[1] - dy]
+            arcs = [(e, [c[0] - dy, c[1] + dx], opposite), (opposite, [c[0] + dy, c[1] - dx], e)]
+        try:
+            segments = [s for a, b, c in arcs for s in geometry_arc(a, b, c, width)]
+        except ValueError as error:
+            if "budget" in str(error):
+                raise GeometryFallback(str(error)) from error
+            raise
+        if len(segments) > 65536:
+            raise GeometryFallback("circle exceeds geometry budget")
+        pts = [world([s[0] / 1000, s[1] / 1000]) for s in segments]
+        if not closed:
+            pts.append(world([v / 1000 for v in segments[-1][2:4]]))
+    elif kind == "rect":
+        a, b = point("start"), point("end")
+        pts = [world(p) for p in (a, [b[0], a[1]], b, [a[0], b[1]])]
+    elif kind in ("poly", "curve"):
+        path = find(node, "pts") or []
+        if any(isinstance(p, list) and p[0] != "xy" for p in path[1:]):
+            raise GeometryFallback("unsupported graphic path points")
+        points = [p[1:3] for p in findall(path, "xy")]
+        if kind == "curve":
+            points = geometry_cubic(points)
+        elif len(points) < 3:
+            raise GeometryFallback("polygon requires at least three points")
+        pts = [world(p) for p in points]
+    else:
+        raise GeometryFallback(f"unsupported graphic {node[0]}")
+    filled = closed and val(node, "fill", "none") in ("yes", "solid")
+    segments = [[*a, *b, w] for a, b in zip(pts, pts[1:] + (pts[:1] if closed else []))] if w or not filled else []
+    return {"segments": segments, "rings": [pts] if filled else []}
+
+
 def geometry_box(geometry):
     """Integer bbox of normalized drawable geometry (not a filled footprint box)."""
     boxes = []
@@ -630,6 +722,24 @@ def geometry_box(geometry):
         if ring:
             xs, ys = zip(*ring)
             boxes.append([min(xs), min(ys), max(xs), max(ys)])
+    if "text" in geometry:
+        # System-monospace atlas approximation, not KiCad stroke-font metrics.
+        text = geometry["text"]
+        lines = text["value"].split("\n")
+        w = max(map(len, lines), default=0) * text["size"][0]
+        h = len(lines) * text["size"][1]
+        justify = text["justify"]
+        left = 0 if "left" in justify else (-w if "right" in justify else -w / 2)
+        top = 0 if "top" in justify else (-h if "bottom" in justify else -h / 2)
+        t = math.radians(text["angle"] / 1000)
+        x, y = text["at"]
+        corners = [(px * (-1 if text["mirror"] else 1), py) for px, py in
+                   ((left, top), (left + w, top), (left + w, top + h), (left, top + h))]
+        xs = [x + px * math.cos(t) + py * math.sin(t) for px, py in corners]
+        ys = [y - px * math.sin(t) + py * math.cos(t) for px, py in corners]
+        r = text["thickness"] / 2
+        boxes.append([math.floor(min(xs) - r), math.floor(min(ys) - r),
+                      math.ceil(max(xs) + r), math.ceil(max(ys) + r)])
     primitives = [geometry["primitive"]] if "primitive" in geometry else []
     if "drill" in geometry:
         primitives.append({**geometry["drill"], "shape": "oval"})
@@ -672,7 +782,11 @@ def geometry_union(boxes):
 
 
 def board_geometry(pcb_path):
-    """Extract the revision scene without altering pcb_objects' diff identities."""
+    """Extract the revision scene without altering pcb_objects' diff identities.
+
+    Default text is metadata for a system-monospace glyph atlas, a visual
+    approximation, not KiCad stroke-font outlines. Named fonts require SVG.
+    """
     with open(pcb_path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())
     scene = {"version": 1, "units": "um", "complete": True, "warnings": [],
@@ -870,6 +984,82 @@ def board_geometry(pcb_path):
                 geometry["layerPrimitives"] = derived
         return geometry, ls
 
+    def drawable(node, uid, change, ref="", side=None, fp_at=None, fp=None, hide=False):
+        kind = node[0]
+        hide = hide or hidden(node)
+        ls = layers(node)
+        geometry = {}
+        if kind == "zone":
+            net = net_id(node)
+            paths = [pts for region in findall(node, "polygon") + findall(node, "filled_polygon")
+                     for pts in findall(region, "pts")]
+            if not hide and any(isinstance(p, list) and p[0] != "xy" for pts in paths for p in pts[1:]):
+                warn(uid, kind, "unsupported zone path points; using SVG")
+            outlines = [[geometry_point(p[1:3], fp_at) for p in findall(pts, "xy")]
+                        for polygon in findall(node, "polygon") for pts in findall(polygon, "pts")]
+            segments = [[*a, *b, 50] for ring in outlines for a, b in zip(ring, ring[1:] + ring[:1])]
+            fills = findall(node, "filled_polygon")
+            keepout = find(node, "keepout") is not None or val(node, "rule_area") == "yes"
+            if not fills or keepout:
+                if not fills and not keepout and not hide:
+                    warn(uid, kind, f"zone {uid}: no stored fill; showing outline", False)
+                return [emit("zone", uid, change, ref or nets[net], ls, net, side, "zones",
+                             {"segments": segments, "rings": []}, hide)]
+            records = []
+            counts = Counter()
+            for fill in fills:
+                fill_ls = layers(fill) if find(fill, "layer") else ls
+                rings = [[geometry_point(p[1:3], fp_at) for p in findall(pts, "xy")]
+                         for pts in findall(fill, "pts")]
+                if not rings or any(len(r) < 3 for r in rings):
+                    if not hide:
+                        warn(uid, kind, "invalid stored fill; using SVG")
+                    continue
+                # Each source region is independent. Do not join islands or cancel overlaps.
+                for layer in fill_ls:
+                    counts[layer] += 1
+                    child_uid = f"{uid}/fill:{layer}:{counts[layer]}"
+                    records.append(emit("zone", child_uid, change, ref or nets[net], [layer], net, side,
+                                        "zones", {"segments": [], "rings": rings}, hide))
+            return records
+        if kind in ("gr_text", "fp_text", "property"):
+            effects = find(node, "effects") or []
+            font = find(effects, "font") or []
+            value = node[2] if kind in ("property", "fp_text") else node[1]
+            if fp is not None:
+                substitutions = {"REFERENCE": ref, "VALUE": properties(fp).get("Value", next((t[2] for t in findall(fp, "fp_text") if t[1] == "value"), ""))}
+                value = re.sub(r"\$\{(REFERENCE|VALUE)\}", lambda m: substitutions[m[1]], value)
+            if not hide:
+                if "knockout" in (find(node, "layer") or []):
+                    warn(uid, kind, "knockout text requires SVG")
+                if find(font, "line_spacing") is not None:
+                    warn(uid, kind, "custom text line spacing requires SVG")
+                if "${" in value:
+                    warn(uid, kind, "unresolved text substitution; using SVG")
+                if re.search(r"[~^_]\{", value) or "\\" in value:
+                    warn(uid, kind, "unsupported rich text; using SVG")
+                if val(font, "face"):
+                    warn(uid, kind, "named outline font requires SVG")
+            position = [v for v in (find(node, "at") or ["at", "0", "0"])[1:] if v != "unlocked"]
+            justify = (find(effects, "justify") or [])[1:]
+            geometry = {"text": {"value": value, "at": geometry_point(position, fp_at),
+                                 "size": [positive(v) for v in (find(font, "size") or ["size", "1", "1"])[1:3]][::-1],  # file: height, width
+                                 # KiCad stores footprint text angles in the board frame.
+                                 "angle": geometry_um(position[2] if len(position) > 2 else 0),
+                                 "thickness": positive(val(font, "thickness", "0.15")),
+                                 "justify": [v for v in justify if v in ("left", "right", "top", "bottom")],
+                                 "mirror": "mirror" in justify,
+                                 "italic": "italic" in font or (find(font, "italic") is not None and val(font, "italic", "yes") != "no"),
+                                 "bold": "bold" in font or (find(font, "bold") is not None and val(font, "bold", "yes") != "no"),
+                                 "unlocked": "unlocked" in node or val(node, "unlocked") == "yes" or "unlocked" in (find(node, "at") or [])}}
+            return [emit("text", uid, change, ref, ls, 0, side, "text", geometry, hide)]
+        try:
+            geometry = geometry_shape(node, fp_at)
+        except GeometryFallback as error:
+            if not hide:
+                warn(uid, kind, str(error))
+        return [emit("shape", uid, change, ref, ls, 0, side, "graphics", geometry, hide)]
+
     for index, node in enumerate(root[1:]):
         if not isinstance(node, list) or not node:
             continue
@@ -903,13 +1093,15 @@ def board_geometry(pcb_path):
                     child_uid = val(child, "uuid") or val(child, "tstamp") or f"{uid}/pad:{child[1]}:{counts[child[1]]}"
                     geometry, ls = pad_geometry(child, node, fp_at, child_uid)
                     children.append(emit("pad", child_uid, uid, ref, ls, net_id(child), side, "pads", geometry, parent["hidden"] or hidden(child)))
-                elif child_kind in ("fp_text", "fp_text_box", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly", "fp_curve", "image", "zone") or (child_kind == "property" and find(child, "effects")):
-                    if not parent["hidden"] and not hidden(child):
-                        warn(val(child, "uuid", uid), child_kind, "footprint drawable not yet supported")
+                elif (child_kind in ("fp_text", "fp_text_box", "fp_line", "fp_arc", "fp_circle",
+                                      "fp_rect", "fp_poly", "fp_curve", "image", "zone", "dimension", "table")
+                      or (child_kind == "property" and all(find(child, key) for key in ("at", "layer", "effects")))):
+                    counts[child_kind] += 1
+                    child_uid = val(child, "uuid") or val(child, "tstamp") or f"{uid}/{child_kind}:{counts[child_kind]}"
+                    children += drawable(child, child_uid, uid, ref, side, fp_at, node, parent["hidden"])
             parent["box"] = geometry_union([c["box"] for c in children]) or [0, 0, 0, 0]
-        elif kind == "zone" or kind.startswith("gr_") or kind in ("dimension", "target", "image", "table"):
-            if not hidden(node):
-                warn(uid, kind, "board drawable not yet supported")
+        elif kind == "zone" or kind.startswith("gr_") or kind in ("dimension", "target", "image", "table", "text_box"):
+            drawable(node, uid, uid)
     scene["bounds"] = geometry_union([o["box"] for o in scene["objects"] if not o["hidden"] and o["kind"] != "footprint"]) or [0, 0, 0, 0]
     def check_numbers(value):
         if isinstance(value, dict):
