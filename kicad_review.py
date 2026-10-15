@@ -2423,6 +2423,17 @@ def build_project(p, blobs, settings, waivers=None):
         board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
+    geometry = {}
+    for side in ("base", "head"):
+        pcb = posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb")
+        geometry[side] = None
+        if os.path.isfile(pcb):
+            try:
+                geometry[side] = add_blob(blobs, json.dumps(board_geometry(pcb), separators=(",", ":"), sort_keys=True))
+            except (ValueError, IndexError, TypeError) as exc:
+                print(f"{pcb}: geometry unavailable; retaining SVG: {exc}", file=sys.stderr)
+    if any(geometry.values()):
+        board["geometry"] = geometry
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     parts = None
     if settings["parts"]["enabled"]:
