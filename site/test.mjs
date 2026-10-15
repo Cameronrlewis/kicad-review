@@ -2079,7 +2079,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '82be67bc0030511bc6cca251252770b78a742053b98f7e08d74ba0e027824daa');
+  assert.equal(createHash('sha256').update(current).digest('hex'), '2da1a8a35eda1aeef30078b8ff24463b295e5db82c7f87fd307b1ee13f1ae3c7');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -2946,4 +2946,16 @@ test('S2 shell and primitives have dense accessible contracts', () => {
   assert.match(siteBadge('modified'), /status-modified/);
   assert.match(siteTable(['Name'], '<tr><td>R16</td></tr>', 'Parts'), /aria-label="Parts"/);
   assert.match(siteTable(['<b>'], '', 'Empty'), /&lt;b&gt;/);
+});
+
+test('S2 wrapper themes the opaque sandbox without changing raw routes', () => {
+  const html = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 9, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' });
+  assert.match(html, /new MutationObserver/);
+  assert.match(html, /attributeFilter: \['data-theme'\]/);
+  assert.match(html, /postMessage\(\{ kicadReviewTheme: theme \}, '\*'\)/);
+  assert.match(html, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true\) \{ loading\.hidden = true; syncTheme/);
+  assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.doesNotMatch(html, /allow-same-origin|contentDocument/);
+  assert.match(html, /<nav class="wrapper-navigation" aria-label="Review navigation">/);
+  assert.match(html, /<\/nav><\/div><div class="review-stage">/);
 });
