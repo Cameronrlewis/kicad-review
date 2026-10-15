@@ -1109,13 +1109,14 @@ test('compare page renders every inline-script target and keeps Show in its pick
 test('generating review maps queued, rendering, and completed job steps', () => {
   const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', base: 'deadbeef', head: 'cafebabe', startedAt: '2026-10-07T10:00:00Z' };
   const queued = runPage({ ...common, running: true, status: 'queued', jobs: [] });
-  assert.match(queued, /● <span class="spinner"[^>]*><\/span> Waiting to start <span class="step-state">· in progress<\/span>/);
+  assert.match(queued, /<li class="active"><span class="spinner"[^>]*><\/span> Waiting to start <span class="step-state">· in progress<\/span>/);
   const rendering = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
     { name: 'Check out repository', status: 'completed', conclusion: 'success' },
     { name: 'Render board', status: 'in_progress', conclusion: null },
   ] }] });
   assert.match(rendering, /✓ Getting the files <span class="step-state">· done<\/span>/);
-  assert.match(rendering, /● <span class="spinner"/);
+  assert.match(rendering, /<li class="active"><span class="spinner"/);
+  assert.doesNotMatch(rendering, /[●○✓✕] <span class="spinner"|● /);
   const done = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
     { name: 'Check out', status: 'completed', conclusion: 'success' },
     { name: 'Render schematic', status: 'completed', conclusion: 'success' },
@@ -3141,4 +3142,16 @@ test('S2 complete screen inventory has labelled pages and no external UI assets'
   assert.match(fixtures['shared-invalid'], /Shared review unavailable/);
   assert.match(fixtures.repositories, /aria-label="Repositories"/);
   assert.match(fixtures.reviews, /aria-label="Reviews"/);
+});
+
+test('p2-gate: long content wraps and the active step shows one indicator', () => {
+  const css = readFileSync('site/site.css', 'utf8');
+  assert.match(css, /^body \{ overflow-wrap: anywhere; \}$/m);
+  assert.match(css, /^\.source-picker label \{ max-width: 100%; \}$/m);
+  assert.match(css, /^select \{ max-width: min\(100%, 40ch\)/m);
+  assert.match(css, /prefers-reduced-motion: reduce\) \{ \.spinner \{ animation: none; \} \}/);
+  const html = runPage({ user: 'u', owner: 'o', repo: 'r', base: 'a', head: 'b', startedAt: '2026-10-07T10:00:00Z', running: true, status: 'in_progress', jobs: [{ steps: [{ name: 'Render board', status: 'in_progress' }] }] });
+  const active = /<li class="active">(.*?)<\/li>/.exec(html)[1];
+  assert.equal((active.match(/class="spinner"/g) || []).length, 1);
+  assert.doesNotMatch(active, /[●○]/);
 });
