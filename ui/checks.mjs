@@ -1066,6 +1066,7 @@ export const CHECKS = [
       await new Promise(r => setTimeout(r, 100));
       if (!vp.isConnected || vp.querySelector(".world") !== world) return "thread arrival replaced right-click target";
       vp.dispatchEvent(event);
+      vp.dispatchEvent(new PointerEvent("pointerup", {button:2,bubbles:true,clientX:event.clientX,clientY:event.clientY}));
       return event.defaultPrevented && sent.length === 1 && !!sent[0].kicadReviewPin?.file || JSON.stringify(sent);
     } finally { parent.postMessage = saved; THREADS_ON = enabled; }
   `],
@@ -2120,14 +2121,87 @@ export const CHECKS = [
     pickAt(pane.vp,e);
     if(S.s!=='p5-head' || document.querySelector('#panel [aria-selected="true"][data-id]')?.dataset.id!==S.s) return 'geometry selection did not link row';
     pickAt(pane.vp,e); if(S.s!=='p5-base') return 'overlap did not cycle';
+    if(!boardDiff.hits(pane.vp,e).some(h=>h.object.uuid==='unchanged')) return 'unchanged object cannot anchor';
+    const saved=parent.postMessage, proposed=[]; parent.postMessage=data=>proposed.push(data.kicadReviewPin);
+    try { proposePin(pane.vp,eventAt([10,10])); } finally { parent.postMessage=saved; }
+    if(proposed[0]?.target!=='point' || proposed[0].x!==10 || proposed[0].y!==10) return 'hole did not produce mm point anchor';
     const hit=boardDiff.hits(pane.vp,e)[0], a=geometryAnchor(hit);
     if(a.target!=='object' || a.uuid!=='head') return 'geometry anchor identity';
     const hole=boardDiff.point(pane.vp,eventAt([10,10])); if(hole.side!=='head') return 'primary side';
     S.m='blend'; S.blend=0; boardDiff.render(); if(boardDiff.pick(pane.vp,e,null)?.side!=='base') return 'transparent head hit';
     S.m='wipe'; S.wipe=.6; boardDiff.render(); if(boardDiff.point(pane.vp,e).side!=='base') return 'wipe base routing';
     S.wipe=.4; boardDiff.render(); if(boardDiff.point(pane.vp,e).side!=='head') return 'wipe head routing';
-    look={...look,layers:{...look.layers,'F.Cu':{visible:false,opacity:0}}}; boardDiff.render();
+    look={...look,nets:{'':{visible:false}}}; boardDiff.render();
+    if(boardDiff.pick(pane.vp,e,null)) return 'hidden net hit';
+    look={...look,nets:{},layers:{...look.layers,'F.Cu':{visible:false,opacity:0}}}; boardDiff.render();
     if(boardDiff.pick(pane.vp,e,null)) return 'hidden layer hit';
     return true;
+  `],
+  ["board geometry mouse input selects and pin Thermal", "v=board&m=side", `
+    if(window.__boardInputDone) {
+      if(S.s!==window.__boardInput.id) return 'native pointer failed selection';
+      if(window.__boardPins.length<2 || window.__boardPins.some(a=>a.target!=='object' || !a.uuid)) return 'right click / placing did not anchor geometry';
+      const anchor=window.__boardPins[0], resolved=resolveAnchor(JSON.parse(JSON.stringify(anchor)));
+      if(resolved.detached) return resolved.detached;
+      acceptThreads([{id:'thermal-geometry',resolved:false,anchor,comments:[{body:'Geometry anchored on Thermal board',author:'Review',created_at:'2026-10-15'}]}]);
+      drawPins();
+      if(!document.querySelector('#stage .pin[data-thread="thermal-geometry"]')) return 'retained pin absent';
+      return true;
+    }
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'side',x:158.5,y:78.2,z:65});
+    const row=proj().changes.find(c=>c.where?.board); await goTo(row.id);
+    const pane=boardDiff.panes.find(p=>p.sides.includes('head')), r=pane.vp.getBoundingClientRect();
+    let event;
+    for(const object of pane.scenes.head.objects.filter(o=>o.changeIds.includes(row.id) && o.pickable!==false)) {
+      const b=BoardDiff.objectBounds(object); if(!b) continue;
+      for(const u of [.25,.5,.75]) for(const v of [.25,.5,.75]) {
+        const q=pane.renderer.project([b[0]+(b[2]-b[0])*u,b[1]+(b[3]-b[1])*v]);
+        const e={clientX:r.left+q[0],clientY:r.top+q[1]};
+        if(boardDiff.pick(pane.vp,e,null)?.id===row.id) {event=e;break;}
+      }
+      if(event) break;
+    }
+    if(!event) return 'no visible Thermal changed geometry';
+    THREADS_ON=true; window.__boardPins=[]; addEventListener('message',e=>{if(e.data?.kicadReviewPin) window.__boardPins.push(e.data.kicadReviewPin);});
+    window.__boardInput={x:event.clientX,y:event.clientY,id:row.id,camera:{x:S.x,y:S.y,z:S.z}}; S.s=null; markSelected(); boardDiff.render();
+    return true;
+  `],
+  ["board geometry selection Thermal proof", "v=board&m=side", `
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'side',x:158.5,y:78.2,z:65});
+    const row=proj().changes.find(c=>c.where?.board); await goTo(row.id);
+    if(S.s!==row.id || !boardDiff.bounds(row.id,'head')) return 'row did not frame geometry';
+    setT({x:158.5,y:77.5,z:55}); return true;
+  `],
+  ["board geometry pin flipped Wipe Thermal", "v=board&m=wipe", `
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p<0 || !D.projects[p].board.geometry?.head) return 'skip';
+    await applyState({p,v:'board',m:'wipe',x:158.5,y:77.5,z:55});
+    Appearance.patch({flip:true}); await draw();
+    const pane=boardDiff.panes[0], row=proj().changes.find(c=>c.where?.board && c.action==='removed');
+    if(!row) return 'fixture needs removed geometry';
+    const object=pane.scenes.base.objects.find(o=>o.changeIds.includes(row.id) && o.pickable!==false && o.kind!=='footprint');
+    if(!object) return 'fixture needs removed leaf';
+    const anchor=geometryAnchor({object,side:'base',point:[158.5,77.5]});
+    const restored=JSON.parse(JSON.stringify(anchor)), resolved=resolveAnchor(restored);
+    if(resolved.detached || resolved.side!=='base') return 'removed geometry failed re-anchor';
+    S.s=row.id; S.wipe=1; apply();
+    acceptThreads([{id:'thermal-removed',resolved:false,anchor:restored,comments:[]}]);
+    let pin=pane.hud.querySelector('.pin'); if(!pin) return 'removed pin absent';
+    const q=pane.renderer.project(resolved.pos);
+    if(Math.abs(parseFloat(pin.style.left)-q[0])>.1 || Math.abs(parseFloat(pin.style.top)-q[1])>.1) return 'flipped DPR pin projection';
+    S.wipe=0; apply(); if(pane.hud.querySelector('.pin')) return 'base pin visible on head Wipe';
+    S.wipe=1; apply();
+    const e=(()=>{const r=pane.vp.getBoundingClientRect();return{clientX:r.left+q[0],clientY:r.top+q[1]};})();
+    const point=boardDiff.point(pane.vp,e);
+    if(Math.hypot(point.point[0]-resolved.pos[0],point.point[1]-resolved.pos[1])>1e-7 || point.side!=='base') return 'flipped inverse';
+    const layers=Appearance.get().layers;
+    Appearance.patch({layers:{[anchor.layer]:{...layers[anchor.layer],visible:false}}}); await draw(); drawPins();
+    if(document.querySelector('#stage .pin')) return 'hidden layer pin remains';
+    Appearance.patch({layers:{[anchor.layer]:layers[anchor.layer]}}); await draw(); drawPins();
+    return !!document.querySelector('#stage .pin') || 'pin did not recover';
   `],
 ];

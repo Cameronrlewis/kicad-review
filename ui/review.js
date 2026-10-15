@@ -933,7 +933,7 @@ function resolveAnchor(a) {
     if (a.commit !== D.head && a.commit !== D.base && P.changes.some(r => viewOf(r) === view && (inside(rowBox(r, "head")) || inside(rowBox(r, "base"))))) notes.push(`this area changed since ${short(a.commit)}`);
     return { view, side: a.side === "base" ? "base" : "head", pos: [a.x, a.y], notes };
   }
-  if (a.sheet == null && P === proj() && boardDiff) {
+  if (a.sheet == null && P === proj() && boardDiff && !(P.objects || []).some(o=>o.uuid===a.uuid && o.sheet==null)) {
     const match=side=>boardDiff.scenes[side]?.objects.find(o=>o.uuid===a.uuid);
     const head=match('head'), base=match('base');
     const position=o=>{const b=BoardDiff.objectBounds(o); return o.anchor || (b && [(b[0]+b[2])/2,(b[1]+b[3])/2]);};
