@@ -1,3 +1,15 @@
+const MARK_STYLE_FIXTURE = `
+    // The template may lack retained board data; enable the real toolbar against a retained fixture.
+    const object={kind:'pad',uuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
+      box:[2000,2000,6000,6000],geometry:{primitive:{shape:'circle',center:[4000,4000],size:[4000,4000],angle:0}}};
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[object]};
+    disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
+    S.m='overlay'; S.x=5; S.y=5; S.z=40;
+    boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:[{id:'c0',action:'added'}],state:S,appearance:glAppearance});
+    boardView.scenes=[scene,scene]; boardView.useGL=true; boardView.panes=boardDiff.panes; boardView.renderers=boardDiff.panes.map(p=>p.renderer);
+    for(const p of boardDiff.panes) trackAppearanceBoard(p.renderer,p.canvas);
+    syncMarkStyles();
+`;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
   ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
@@ -2102,5 +2114,77 @@ export const CHECKS = [
       }
     }
     return true;
+  `]),
+  ["board mark style preserves appearance and focus", "v=board", `
+    const button=document.querySelector('[data-mark-style="recolour"]');
+    if(!button) return 'mark controls missing';
+    ${MARK_STYLE_FIXTURE}
+    Appearance.patch({layers:{'F.Cu':{opacity:.42}},nets:{GND:{visible:false}},objects:{zones:{opacity:.27}}});
+    const pick=a=>JSON.stringify({layers:a.layers,nets:a.nets,objects:a.objects,colors:a.colors,layerOpacity:a.layerOpacity});
+    const before=pick(Appearance.get()), uploads=boardView.renderers.map(r=>r.stats.uploads).join(',');
+    button.focus();button.click();
+    if(Appearance.get().markStyle!=='recolour'||document.activeElement!==button||pick(Appearance.get())!==before) return 'state or focus lost';
+    if(boardView.renderers.map(r=>r.stats.uploads).join(',')!==uploads) return 'geometry uploaded';
+    const raw=JSON.parse(localStorage.getItem('kr.appearance.v1'));
+    if(!Object.values(raw.viewers).some(v=>v.markStyle==='recolour')) return 'not persisted';
+    button.dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true}));
+    if(Appearance.get().markStyle!=='outline'||document.activeElement.dataset.markStyle!=='outline') return 'keyboard Home';
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
+    if(Appearance.get().markStyle!=='recolour'||document.activeElement!==button||button.getAttribute('aria-checked')!=='true') return 'keyboard Arrow';
+    Appearance.import(JSON.stringify({meta:{version:5},board:{background:'#001023'}}));
+    if(Appearance.get().markStyle!=='recolour') return 'theme import reset marks';
+    Appearance.reset(); if(Appearance.get().markStyle!=='outline') return 'reset';
+    button.click(); return true;
+  `],
+  ["board mark style survives reload and project changes", "v=board", `
+    ${MARK_STYLE_FIXTURE}
+    Appearance.patch({markStyle:'recolour',layerOpacity:{'F.Cu':.31},netColors:{GND:[.2,.3,.4,1]}});
+    const first=JSON.stringify([D.repo||location.pathname,proj().dir]);
+    Appearance.configure([], 'mark-style-second-project');
+    Appearance.patch({colors:{'board.copper.f':[.4,.5,.6,1]},objectOpacity:{zones:.23}});
+    Appearance.patch({markStyle:'recolour'});
+    if(Appearance.get().objectOpacity.zones!==.23||Appearance.get().colors['board.copper.f'][0]!==.4) return 'second project lost settings';
+    Appearance.configure([],first);
+    return Appearance.get().layerOpacity['F.Cu']===.31 && Appearance.get().markStyle==='recolour';
+  `, {afterReload:`
+    const a=Appearance.get();
+    if(a.markStyle!=='recolour'||a.layerOpacity['F.Cu']!==.31||a.netColors.GND?.[0]!==.2) return 'reload lost settings';
+    return document.querySelector('[data-mark-style="recolour"]').getAttribute('aria-checked')==='true';
+  `}],
+  ["board mark style blocked storage works from startup", "v=board", `
+    ${MARK_STYLE_FIXTURE}
+    if(Appearance.get().markStyle!=='outline') return 'blocked default';
+    const b=document.querySelector('[data-mark-style="recolour"]'); b.focus();b.click();
+    return Appearance.get().markStyle==='recolour' && document.activeElement===b;
+  `, {beforeStartup:`
+    Storage.prototype.getItem=Storage.prototype.setItem=function(){throw new DOMException('Blocked','SecurityError')};
+  `}],
+  ["board mark style corrupt JSON recovers on startup", "v=board", `
+    localStorage.setItem('kr.appearance.v1','{'); return true;
+  `, {afterReload:`
+    if(Appearance.get().markStyle!=='outline') return 'corrupt default';
+    ${MARK_STYLE_FIXTURE}
+    document.querySelector('[data-mark-style="recolour"]').click();
+    return Appearance.get().markStyle==='recolour';
+  `}],
+  ["board mark style unknown stored value preserves valid preferences", "v=board", `
+    Appearance.patch({markStyle:'recolour',layerOpacity:{'F.Cu':.37},objectOpacity:{zones:.24},netColors:{GND:[.2,.3,.4,1]}});
+    const raw=JSON.parse(localStorage.getItem('kr.appearance.v1'));
+    for(const value of Object.values(raw.viewers)) value.markStyle='rainbow';
+    localStorage.setItem('kr.appearance.v1',JSON.stringify(raw));return true;
+  `, {afterReload:`
+    const a=Appearance.get();
+    if(a.markStyle!=='outline'||a.layerOpacity['F.Cu']!==.37||a.objectOpacity.zones!==.24||a.netColors.GND?.[0]!==.2) return 'invalid mark style discarded preferences';
+    ${MARK_STYLE_FIXTURE}
+    document.querySelector('[data-mark-style="recolour"]').click();
+    return Appearance.get().markStyle==='recolour';
+  `}],
+  ...['outline','recolour'].map(style=>['board mark style toolbar proof '+style,'v=board&m=side',`
+    const p=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(p>=0 && D.projects[p].board.geometry?.base && D.projects[p].board.geometry?.head) {
+      await applyState({p,v:'board',m:'side',x:158.5,y:75.4,z:65});
+    } else { ${MARK_STYLE_FIXTURE} }
+    Appearance.patch({markStyle:'${style}'});
+    return document.querySelector('[data-mark-style="${style}"]').getAttribute('aria-checked')==='true';
   `]),
 ];

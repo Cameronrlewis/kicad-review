@@ -159,7 +159,7 @@ function readEnvelope(storage) {
     if(!object(doc)||doc.version!==1||!object(doc.viewers)) return empty();
     const envelope=empty();
     for(const [id,value] of Object.entries(doc.viewers)) {
-      try { envelope.viewers[id]=validateState(value); }
+      try { envelope.viewers[id]=validateState({...value,markStyle:value.markStyle === 'recolour' ? 'recolour' : 'outline'}); }
       catch { /* A corrupt viewer must not poison other projects. */ }
     }
     return envelope;

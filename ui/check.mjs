@@ -39,14 +39,15 @@ await send("Page.enable");
 await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem('kr.theme',${JSON.stringify(dark ? 'dark' : 'light')})}catch{}` });
 const iconSprite = readFileSync(new URL("./icons/sprite.svg", import.meta.url), "utf8");
 let failed = 0;
-for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
+for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].includes(filter))) {
   console.log(`RUN ${name}`);
-  let timer, body;
+  let timer, body, startupScript;
   try {
     body = (async () => {
   // The framing check tests final geometry, not the two-pane camera animation.
   await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });
   errors.length = 0;
+  if (lifecycle.beforeStartup) startupScript = (await send("Page.addScriptToEvaluateOnNewDocument", {source:lifecycle.beforeStartup})).result.identifier;
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);
   await send("Page.navigate", { url: `file://${page}#${hash}` });
   const ready = await evaluate("new Promise((r, reject) => { const deadline = performance.now() + 10000, t = () => window.reviewReady ? r(true) : performance.now() > deadline ? reject(new Error('reviewReady timed out')) : setTimeout(t, 50); t(); })");
@@ -66,7 +67,13 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
     if (q) for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: q.x, y: q.y, button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
     await sleep(300);
   }
-  const r = await evaluate(`(async () => { ${expr} })()`);
+  let r = await evaluate(`(async () => { ${expr} })()`);
+  if (r.result?.value === true && lifecycle.afterReload) {
+    await send("Page.reload");
+    await sleep(100);
+    const ready = await evaluate("new Promise((r,reject)=>{const deadline=performance.now()+10000;const poll=()=>window.reviewReady?r(true):performance.now()>deadline?reject(new Error('reload timed out')):setTimeout(poll,50);poll()})");
+    r = ready.exceptionDetails ? ready : await evaluate(`(async () => { ${lifecycle.afterReload} })()`);
+  }
   if (r.result?.value === "skip" && !errors.length) return ["SKIP " + name, noSkip];
   const ok = r.result?.value === true && !errors.length;
   return [`${ok ? "PASS" : "FAIL"} ${name}${ok ? "" : ` -> ${JSON.stringify(r.exceptionDetails?.exception?.description ?? r.exceptionDetails?.text ?? r.result?.value)} ${errors.join(" | ")}`}`, !ok];
@@ -74,7 +81,7 @@ for (const [name, hash, expr] of CHECKS.filter(c => c[0].includes(filter))) {
     const [line, bad] = await Promise.race([body, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), Number(process.env.CHECK_WALL_TIMEOUT || 60000)); })]);
     console.log(line); if (bad) failed++;
   } catch (e) { console.log(`FAIL ${name} -> ${e.message}`); failed++; await body.catch(() => {}); }
-  finally { clearTimeout(timer); }
+  finally { clearTimeout(timer); if (startupScript) await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); }
 }
 if (shot) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
 ws.close(); proc.kill();

@@ -322,3 +322,8 @@ body.shot #toolbar { display:none; }
 .board-mark-label.removed,.board-mark-key.removed {border-style:dashed;}
 .board-mark-label.modified,.board-mark-key.modified {border-style:dotted;}
 .board-mark-legend {position:absolute;bottom:8px;left:8px;display:flex;gap:6px;z-index:1;}
+
+/* Native radio buttons stay mounted while GPU mark passes update. */
+.mark-styles { display:flex; align-items:center; gap:var(--space-1); white-space:nowrap; }
+.mark-styles > span { color:var(--muted); }
+#toolbar .mark-styles button[aria-checked="true"] { border-color:var(--accent); box-shadow:inset 0 -2px var(--accent); font-weight:600; }
