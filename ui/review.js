@@ -881,8 +881,9 @@ function positionLink() {
 function applyGoTo(text) { const i = text.indexOf("#"); if (i >= 0) applyState(decodeState(text.slice(i))); }
 function renderZoombar() {
   if (S.v === '3d' && window.Review3D) { window.Review3D.cameraBar(); return; }
-  $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out">−</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in">+</button>
-    <button data-act="fit">Fit</button><span class="sep"></span><span class="muted">j / k: next / previous</span>
+  const icon = name => ['light','dark'].map(theme=>`<svg class="icon icon-${theme}" aria-hidden="true" focusable="false"><use href="#kr-${name}-${theme}"></use></svg>`).join('');
+  $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out" title="Zoom out">${icon('zoom-out')}</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in" title="Zoom in">${icon('zoom-in')}</button>
+    <button data-act="fit" aria-label="Fit drawing (f)" title="Fit drawing (f)">${icon('fit')}<span>Fit</span></button><span class="sep"></span><span class="muted">j / k: next / previous</span>
     <button data-act="copy">Copy link</button><input class="goto" placeholder="Go to… paste a link">`;
   for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => { if (placed()) setT({ z: S.z * +b.dataset.z }); };
   $("#zoombar [data-act=fit]").onclick = fit;

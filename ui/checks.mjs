@@ -1327,4 +1327,20 @@ export const CHECKS = [
     const text = waiverSnippet({waiver_key:key, description:'x\\r\\n' + String.fromCharCode(0, 127) + '<b>x</b>'}, 'erc');
     const match = text.split("\\n").find(l => l.startsWith("match = ")).slice(8);
     return JSON.parse(match) === key && !/[\\u0000-\\u0008\\u000b-\\u001f\\u007f]/.test(text) && text.includes('# x  ') || text;`],
+  ["Stage 1 icon references resolve in-file in both themes", "", `
+  const old=KRTheme.get();
+  try {
+    for(const theme of ['dark','light']) {
+      KRTheme.set(theme);
+      for(const use of document.querySelectorAll('button use')) {
+        if(!document.querySelector(use.getAttribute('href'))) return 'unresolved '+use.getAttribute('href');
+      }
+      const b=document.querySelector('#zoombar [data-z="1.25"]');
+      const icons=[...b.querySelectorAll('svg')].filter(s=>getComputedStyle(s).display!=='none');
+      if(icons.length!==1 || !icons[0].querySelector('use').getAttribute('href').endsWith(theme)) return 'palette';
+      const box=icons[0].getBBox(); if(!box.width || !box.height) return 'empty icon';
+      if(!b.getAttribute('aria-label') || !b.title) return 'unlabeled';
+    }
+    return true;
+  } finally { KRTheme.set(old); }`],
 ];

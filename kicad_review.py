@@ -2495,6 +2495,7 @@ def inline_page(data_js):
     page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
+    page = page.replace('<!-- KR_ICONS -->', read('icons/sprite.svg'))
     page = page.replace('<script src="theme.js"></script>', f"<script>\n{read('theme.js')}</script>")
     prefix = ""
     if has_3d:
