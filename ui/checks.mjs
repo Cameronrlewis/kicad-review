@@ -2483,4 +2483,66 @@ export const CHECKS = [
     });
     return visible || 'no visible mark in screenshot';
 `],
+  ["Themes invalid file applies nothing and same file can retry", "v=board&t=appearance", `
+  const store=appearanceStore(), original=store.get(), raw=localStorage.getItem('kr.appearance.v1');
+  const input=document.querySelector('[data-appearance-file]');
+  if(!input) return 'file input missing';
+  const error=document.querySelector('[data-appearance-error]');
+  async function choose(text,name='theme.json') {
+    const transfer=new DataTransfer();
+    transfer.items.add(new File([text],name,{type:'application/json'}));
+    input.files=transfer.files; input.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(r=>setTimeout(r,100));
+  }
+  try {
+    await choose(JSON.stringify({meta:{version:5},board:{background:'#fff',copper:{f:'bad'}}}));
+    if(JSON.stringify(store.get())!==JSON.stringify(original)) return 'partly applied';
+    if(localStorage.getItem('kr.appearance.v1')!==raw) return 'wrote invalid theme';
+    if(error.hidden||!error.textContent.includes('board.copper.f')) return 'missing inline error';
+    await choose(JSON.stringify({meta:{version:5},board:{background:'#fff'}}));
+    if(!error.textContent.startsWith('Imported')||store.get().colors['board.background'][0]!==1) return 'retry failed';
+    document.querySelector('[data-appearance-reset]').click();
+    return JSON.stringify(store.get())===JSON.stringify(KrAppearance.defaults()) || 'reset differs';
+  } finally {store.set(original);}
+`],
+  ["Themes import shows theme name", "v=board&t=appearance", `
+  const store=appearanceStore(), original=store.get(), raw=localStorage.getItem('kr.appearance.v1');
+  const input=document.querySelector('[data-appearance-file]');
+  if(!input) return 'file input missing';
+  const error=document.querySelector('[data-appearance-error]');
+  async function choose(text,name='theme.json') {
+    const transfer=new DataTransfer();
+    transfer.items.add(new File([text],name,{type:'application/json'}));
+    input.files=transfer.files; input.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(r=>setTimeout(r,100));
+  }
+  try {
+    await choose(JSON.stringify({meta:{version:5,name:'Classic <b>x</b>'},board:{background:'#000'}}));
+    if(error.hidden||error.textContent!=='Imported theme: Classic <b>x</b>'||error.querySelector('b')) return 'bad success text: '+error.textContent;
+    return true;
+  } finally {store.set(original);}
+`],
+  ["Themes late reads cannot overwrite reset, newer file or project switch", "v=board&t=appearance", `
+  const store=appearanceStore(), before=store.get(), orig=File.prototype.text, pending=[];
+  File.prototype.text=function(){return new Promise(resolve=>pending.push(resolve))};
+  const input=()=>document.querySelector('[data-appearance-file]');
+  const tick=()=>new Promise(r=>setTimeout(r,0));
+  const choose=()=>{
+    const data=new DataTransfer(); data.items.add(new File(['x'],'same.json'));
+    input().files=data.files; input().dispatchEvent(new Event('change',{bubbles:true}));
+  };
+  const payload=color=>JSON.stringify({meta:{version:5},board:{background:color}});
+  try {
+    choose(); choose();
+    pending[1](payload('#ffffff')); await tick();
+    pending[0](payload('#000000')); await tick();
+    if(store.get().colors['board.background'][0]!==1) return 'older file won';
+    choose(); document.querySelector('[data-appearance-reset]').click();
+    pending[2](payload('#ffffff')); await tick();
+    if(JSON.stringify(store.get())!==JSON.stringify(KrAppearance.defaults())) return 'late read defeated reset';
+    choose(); renderPanel();
+    pending[3](payload('#ffffff')); await tick();
+    return JSON.stringify(store.get())===JSON.stringify(KrAppearance.defaults()) || 'late read survived panel teardown';
+  } finally {File.prototype.text=orig;store.set(before)}
+`],
 ];

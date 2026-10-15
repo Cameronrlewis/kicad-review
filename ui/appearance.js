@@ -38,6 +38,40 @@
   const TABS = [["layers", "Layers"], ["objects", "Objects"], ["nets", "Nets"]];
   const MAX_NET_ROWS = 500;
 
+  // Import/reset controls. A request counter plus store identity makes late file reads, resets and project switches drop stale imports.
+  function mountPresets(host, getStore, onError = () => {}) {
+    const reset = h("button", {type:"button", class:"btn", "data-appearance-reset":""}, "Reset to KiCad defaults");
+    const open = h("button", {type:"button", class:"btn", "data-appearance-import":""}, "Import KiCad theme (.json)");
+    const input = h("input", {type:"file", accept:".json,application/json", hidden:true, "data-appearance-file":"", "aria-label":"KiCad colour theme file", "aria-describedby":"appearance-import-error"});
+    const msg = h("p", {id:"appearance-import-error", role:"alert", hidden:true, "data-appearance-error":""});
+    host.replaceChildren(reset, open, input, msg);
+    const controller = new AbortController(), options = {signal:controller.signal};
+    let sequence = 0;
+    const show = (text, ok) => {
+      msg.textContent = text; msg.hidden = !text; msg.classList.toggle("ok", !!ok);
+      msg.setAttribute("role", ok ? "status" : "alert"); input.setAttribute("aria-invalid", String(!!text && !ok));
+      if (text && !ok) onError(text);
+    };
+    open.addEventListener("click", () => input.click(), options);
+    reset.addEventListener("click", () => { sequence++; getStore().reset(); show(""); }, options);
+    input.addEventListener("change", async () => {
+      const file = input.files[0]; input.value = "";
+      if (!file) return;
+      const request = ++sequence, target = getStore();
+      try {
+        if (file.size > 1048576) throw new Error("Theme exceeds 1 MiB.");
+        const text = await file.text();
+        if (request !== sequence || target !== getStore()) return;
+        target.import(text);   // whole file validates before one store.set()
+        let name = ""; try { name = JSON.parse(text).meta?.name || ""; } catch {}
+        show(`Imported theme${typeof name === "string" && name ? ": " + name : ""}`, true);
+      } catch (reason) {
+        if (request !== sequence || target !== getStore()) return;
+        show("Theme not imported. " + reason.message);
+      }
+    }, options);
+    return () => { sequence++; controller.abort(); };
+  }
   // mount(root, {layers:[{name,title,visible}], nets:[name], getState, onChange(patch), onReset, fallback})
   // update(next) syncs values in place, so slider focus and drag survive every change.
   function mount(root, ctx) {
@@ -71,9 +105,9 @@
     });
     const contrastBox = h("fieldset", {class:"contrast"}, h("legend", {}, "Inactive layers (H):"), ...contrast.map(c => c[2]));
     const flip = h("input", {type:"checkbox"}); flip.onchange = () => ctx.onChange({flip:flip.checked});
-    const reset = h("button", {type:"button", class:"btn"}, "Reset to KiCad defaults"); reset.onclick = () => ctx.onReset();
+    const presets = h("div", {class:"presets"}); const stopPresets = mountPresets(presets, () => current);
     const options = h("div", {class:"appearance-options"}, h("h4", {}, "Layer Display Options"), contrastBox,
-      h("label", {class:"check"}, flip, " Flip board view"), h("div", {class:"presets"}, "Presets:", reset));
+      h("label", {class:"check"}, flip, " Flip board view"), presets);
     root.replaceChildren(tablist, ...Object.values(panels), note, options);
     root.classList.add("appearance");
 
@@ -146,11 +180,11 @@
       contrastBox.hidden = reduced; flip.checked = st.flip;
     }
     sync();
-    return {update(next) { live = {...ctx, ...next}; sync(); }, dispose() { root.replaceChildren(); root.classList.remove("appearance"); }};
+    return {update(next) { live = {...ctx, ...next}; sync(); }, dispose() { stopPresets(); root.replaceChildren(); root.classList.remove("appearance"); }};
   }
   configure();
   globalThis.Appearance = {
-    OBJECT_ROWS, defaults: KrAppearance.boardDefaults, mount,
+    OBJECT_ROWS, defaults: KrAppearance.boardDefaults, mount, mountPresets, store: () => current,
     normalize: KrAppearance.normalizeBoard, configure,
     get: () => current.get(), set: state => current.set(state), patch: partial => current.patch(partial),
     import: text => current.import(text), reset: () => current.reset(),
