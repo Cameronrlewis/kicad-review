@@ -7,6 +7,7 @@ S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing =
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
 S.issues = null;
+S.units = "mm"; S.grid = true;
 const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
@@ -357,10 +358,17 @@ function viewport(stage, label, kind) {
   vp.innerHTML = `<div class="world"></div>${label ? `<span class="tag">${label}</span>` : ""}`;
   attachPanZoom(vp);
   stage.appendChild(vp);
-  return vp.firstChild;
+  const world = vp.querySelector(".world");
+  if (kind === "sheet") {
+    const canvas = document.createElement("canvas");
+    canvas.className = "sch-grid"; canvas.setAttribute("aria-hidden", "true");
+    vp.prepend(canvas);
+  }
+  return world;
 }
 let gen = 0;
 async function draw() {
+  schematicResize.disconnect();
   resetCoordinates();
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
@@ -394,6 +402,7 @@ async function draw() {
   const msg = $("#statusbar .status-message");
   if (msg) msg.textContent = S.v === "board" && boardView.note && S.m === "side" ? boardView.note : "Ready";
   if (view && !placed()) fit(); else apply(); afterDraw(view);
+  for (const vp of document.querySelectorAll("#stage .vp.sheet")) schematicResize.observe(vp);
 }
 function boardDiagnostics(stage) {   // text only: warning objects are never parsed as HTML
   const warnings = (boardView.scenes || []).flatMap((sc, i) => sc ? sc.warnings.map(w => `${i ? "Head" : "Base"}: ${w?.kind ? [w.kind, w.uuid, w.reason].join(" ") : String(w)}`) : []);
@@ -445,14 +454,54 @@ function apply() {
   if (!vp || !placed()) return;
   const W = vp.clientWidth, H = vp.clientHeight, k = S.z / PX, f = flipOn() ? -1 : 1;
   for (const w of document.querySelectorAll("#stage .world")) {
-    w.style.transform = `translate(${W / 2 - f * S.x * S.z}px, ${H / 2 - S.y * S.z}px) scale(${f * k}, ${k})`;
+    const width = w.parentElement.classList.contains("sheet") ? w.parentElement.clientWidth : W;
+    const height = w.parentElement.classList.contains("sheet") ? w.parentElement.clientHeight : H;
+    w.style.transform = `translate(${width / 2 - f * S.x * S.z}px, ${height / 2 - S.y * S.z}px) scale(${f * k}, ${k})`;
     w.parentElement.classList.toggle("flip", f < 0);
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   onApply();
   for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
+  drawSchematicGrids(); updateSchematicStatus();
 }
+// KiCad 10: eeschema/eeschema_settings.cpp:705-706 defaults to 50 mil (index 1);
+// common/settings/app_settings.cpp:603-609 defines that lattice: 50 mil = 1.27 mm.
+const SCHEMATIC_GRID_MM = 1.27;
+let schematicCursor = null;
+function schematicPoint(vp, event) {
+  const r = vp.getBoundingClientRect();
+  return {x:S.x+(event.clientX-r.left-r.width/2)/S.z,
+    y:S.y+(event.clientY-r.top-r.height/2)/S.z};
+}
+function schematicGridPlan(width, height) {
+  const physical = SCHEMATIC_GRID_MM*S.z;
+  let stride = Math.max(1, Math.ceil(4/physical));
+  // Omit dots only on the physical lattice; bound work even on very large displays.
+  while (Math.ceil(width/(physical*stride))*Math.ceil(height/(physical*stride)) > 140000) stride++;
+  const step = physical*stride, mod = v => ((v%step)+step)%step;
+  return {step, x:mod(width/2-S.x*S.z), y:mod(height/2-S.y*S.z)};
+}
+function drawSchematicGrids() {
+  if (!placed()) return;
+  for (const canvas of document.querySelectorAll("#stage .sch-grid")) {
+    const vp = canvas.parentElement, w = vp.clientWidth, h = vp.clientHeight, dpr = devicePixelRatio || 1;
+    const width = Math.round(w*dpr), height = Math.round(h*dpr);
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
+    if (S.grid === false || !w || !h) continue;
+    const {step,x,y} = schematicGridPlan(w,h);
+    ctx.fillStyle = getComputedStyle(vp).getPropertyValue("--sch-ink-b5b5b5").trim() || "#b5b5b5";
+    ctx.beginPath();
+    for (let px=x; px<w; px+=step) for (let py=y; py<h; py+=step) ctx.rect(Math.round(px),Math.round(py),1,1);
+    ctx.fill();
+  }
+}
+function updateSchematicStatus() { updateStatus(); }
+const schematicResize = new ResizeObserver(() => apply());
+window.addEventListener("kr-theme-change", drawSchematicGrids);
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
@@ -471,24 +520,32 @@ const BOARD_WHEEL_PIXEL_RATE = .0015, BOARD_WHEEL_MAC_ROTATION_RATE = .01;
 let boardCursor = null, deltaAnchor = null;
 function resetCoordinates() {
   for (const node of document.querySelectorAll("#statusbar [data-coordinate]")) node.textContent = "—";
-  boardCursor = null;
+  boardCursor = null; schematicCursor = null;
+  updateStatus();
 }
 function updateStatus() {
-  const a = Appearance.get(), units = S.v === "board" ? a.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
+  const sheet = String(S.v).startsWith("sheet:");
+  const a = Appearance.get(), units = S.v === "board" ? a.units : sheet ? S.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
   const fmt = n => Number.isFinite(n) ? (Math.abs(n/divisor) < .0005 ? 0 : n/divisor).toFixed(3) : "—";
   const selected = proj().changes.find(c => c.id === S.s && onView(c,S.v));
   const box = selected && rowBox(selected, selected.action === "removed" ? "base" : "head");
   const anchor = selected?.pos || (box && [(box[0]+box[2])/2,(box[1]+box[3])/2]) || deltaAnchor;
-  const p = boardCursor?.world, dx = p && anchor ? p[0]-anchor[0] : NaN, dy = p && anchor ? p[1]-anchor[1] : NaN;
+  const p = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world, dx = p && anchor ? p[0]-anchor[0] : NaN, dy = p && anchor ? p[1]-anchor[1] : NaN;
   const values = {x:p?.[0], y:p?.[1], dx, dy, dist:Math.hypot(dx,dy)};
   for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); if (node) node.textContent = fmt(value); }
   const zoom = $("#statusbar [data-zoom]"); if (zoom) zoom.textContent = placed() ? S.z.toFixed(2) : "—";
   const unit = $("#statusbar [data-units]"); if (unit) unit.textContent = units;
-  const grid = $("#statusbar [data-grid]"); if (grid) grid.textContent = S.v === "board" ? fmt(a.grid.size) : "—";
+  const coords = $("#statusbar .status-coordinates"); coords?.toggleAttribute("data-sch-coordinates", sheet);
+  const grid = $("#statusbar [data-grid]");
+  if (grid) {
+    grid.parentElement.toggleAttribute("data-sch-grid", sheet);
+    grid.textContent = S.v === "board" ? fmt(a.grid.size) : sheet ? S.grid === false ? "off" : fmt(SCHEMATIC_GRID_MM) : "—";
+  }
 }
 function updateCoordinates(vp, event) {
   if (!placed() || !vp.isConnected || S.v === "3d" || !vp.clientWidth || !vp.clientHeight) { resetCoordinates(); return; }
   boardCursor = {vp, clientX:event.clientX, clientY:event.clientY, world:toWorld(vp,event)};
+  if (String(S.v).startsWith("sheet:")) schematicCursor = schematicPoint(vp,event);
   const r = vp.getBoundingClientRect();
   for (const pane of document.querySelectorAll("#stage .vp")) {
     pane.style.setProperty("--cursor-x", `${event.clientX-r.left}px`); pane.style.setProperty("--cursor-y", `${event.clientY-r.top}px`);
@@ -1103,6 +1160,9 @@ $("#shortcuts [data-close]").onclick=()=>$("#shortcuts").close();
 document.addEventListener("keydown", e => {
   if (e.target.closest?.('input,select,textarea,[contenteditable]:not([contenteditable="false"]),dialog[open]')) return;
   if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key === "?") { e.preventDefault(); showShortcuts(); return; }
+  if (String(S.v).startsWith("sheet:") && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "u") {
+    e.preventDefault(); S.units = S.units === "mm" ? "mil" : "mm"; updateSchematicStatus(); return;
+  }
   if (boardKey(e)) { e.preventDefault(); return; }
   if (String(S.v).startsWith("sheet:") && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
     const parent = e.altKey && e.key === "ArrowUp", next = !e.altKey && e.key === "PageDown", previous = !e.altKey && e.key === "PageUp";
