@@ -1574,4 +1574,26 @@ export const CHECKS = [
       }
       return true;
     } finally { Appearance.patch(before); }`],
+  ["board keys units grid contrast and editing focus", "v=board", `
+    Appearance.reset(); const key=(key,extra={})=>document.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...extra}));
+    const before=S.z; key('F1'); if(S.z<before*1.3) return 'F1 zoom'; key('F2');
+    key('h'); if(Appearance.get().contrast!=='dim') return 'H dim'; key('h'); if(Appearance.get().contrast!=='hide') return 'H hide'; key('h');
+    key('PageDown'); if(Appearance.get().activeLayer!=='B.Cu') return 'bottom'; key('PageUp'); if(Appearance.get().activeLayer!=='F.Cu') return 'top';
+    key('u',{ctrlKey:true}); if(Appearance.get().units!=='mil') return 'units';
+    Appearance.patch({grid:{size:1.27}}); const g=Appearance.get().grid.size; key('n'); key('N',{shiftKey:true}); if(Math.abs(Appearance.get().grid.size-g)>1e-9) return 'grid inverse';
+    const input=document.querySelector('#zoombar .goto'); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.blur();
+    const z=S.z; key('+',{ctrlKey:true,shiftKey:true}); if(S.z<z*1.3) return 'ctrl shift zoom';
+    const copy=new KeyboardEvent('keydown',{key:'c',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(copy); if(copy.defaultPrevented) return 'copy consumed';
+    key('?'); if(!document.querySelector('#shortcuts[open]')) return 'sheet'; document.querySelector('#shortcuts').close(); Appearance.reset(); return true;`],
+  ["board pointer cancellation flip status and wheel anchor", "v=board", `
+    const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect();
+    const event=(type,x,y,button=0)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:y,button,pointerId:1,bubbles:true}));
+    for(const button of [0,1,2]) { setT({x:10,y:20,z:8}); event('pointerdown',r.left+40,r.top+40,button); event('pointermove',r.left+80,r.top+40,button); event('pointercancel',r.left+80,r.top+40,button); if(S.x!==5) return 'pan '+button; event('pointermove',r.left+100,r.top+40,button); if(S.x!==5) return 'cancel '+button; }
+    Appearance.patch({flip:true}); await new Promise(r=>setTimeout(r,100)); const v=document.querySelector('#stage .vp'), q=v.getBoundingClientRect(), e={clientX:q.left+q.width/2+16,clientY:q.top+q.height/2};
+    setT({x:10,y:20,z:8}); updateCoordinates(v,e); if(toWorld(v,e)[0]!==8 || document.querySelector('[data-coordinate=x]').textContent!=='8.000') return 'flip coordinate';
+    for(const z of [.1,8,50000]) for(const deltaMode of [0,1,2]) for(const deltaY of [-100000,100000]) {
+      setT({x:10,y:20,z}); const wheel=new WheelEvent('wheel',{...e,deltaY,deltaMode,cancelable:true}), before=toWorld(v,wheel); v.dispatchEvent(wheel); const after=toWorld(v,wheel);
+      if(S.z<.1||S.z>50000||Math.hypot(before[0]-after[0],before[1]-after[1])>.001) return 'anchor '+JSON.stringify({z,deltaMode,deltaY,before,after,actual:S.z});
+    }
+    Appearance.reset(); return true;`],
 ];
