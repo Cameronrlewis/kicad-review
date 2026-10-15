@@ -400,8 +400,8 @@ void main() {
         if (canvas.height !== bh) canvas.height = bh;
         gl.viewport(0,0,bw,bh); gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST);
         gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.colorMask(true,true,true,true); gl.stencilMask(0xff);
-        const background = options.mask ? [0,0,0,1] : rgba(globalThis.KicadColors.objects.background);
-        gl.clearColor(...background); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+        const background = rgba(globalThis.KicadColors.objects.background);
+        gl.clearColor(...(options.mask ? [0,0,0,1] : background)); gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
         const origin = [(scene.bounds[0]/2+scene.bounds[2]/2)/1000,(scene.bounds[1]/2+scene.bounds[3]/2)/1000];
         const mirror = appearance.flip ? -1 : 1, selected = scene.nets.findIndex(n=>n.name===appearance.selectedNet);
         const opacity = categories.map(c=>appearance.objects?.[c]?.visible===false ? 0 : appearance.objects?.[c]?.opacity ?? 1);
@@ -461,7 +461,7 @@ void main() {
               const net = appearance.nets?.[scene.nets.find(n=>n.id===object.net)?.name];
               const layer = drill ? object.layers.find(l=>layerFactor(l,appearance)>0 && (appearance.layers?.[l]?.opacity ?? 1)>0) : b.layer;
               const layerStyle = appearance.layers?.[layer];
-              const alpha = (layerStyle?.opacity ?? 1) * (layerStyle?.color?.[3] ?? color[3]) * (appearance.objects?.[object.category]?.opacity ?? 1) * (net?.color?.[3] ?? 1);
+              const alpha = (layerStyle?.opacity ?? 1) * (layerStyle?.color?.[3] ?? globalThis.KicadColors.layers[layer]?.[3] ?? 1) * (appearance.objects?.[object.category]?.opacity ?? 1) * (net?.color?.[3] ?? 1);
               if (object.hidden || !layer || !layerFactor(layer,appearance) || alpha <= 0 || net?.visible === false || appearance.objects?.[object.category]?.visible === false ||
                   object.side && appearance.objects?.[object.side+"Footprints"]?.visible === false ||
                   options.mask && object.pickable === false || options.filter && !options.filter(object)) continue;

@@ -1598,6 +1598,16 @@ export const CHECKS = [
       if (annulus.length!==1 || annulus[0].uuid!=='pad' || annulus[0].changeIds.join(',')!=='c1') return 'missing child / parent identity';
       if (hits([16,10]).length || hits([14.5,10])[0]?.uuid!=='zone') return 'zone hole parity';
       const uploads = renderer.stats.uploads;
+      renderer.setAppearance({...appearance,layers:{'F.Cu':{opacity:.5}}});
+      let normal;
+      renderer.draw({filter:o=>o.uuid==='pad',override:(o,style)=>{normal ??= style;return style;}});
+      if (Math.abs(normal.opacity-.5)>1e-9) return 'callback multiplies layer opacity twice';
+      renderer.setAppearance({...appearance,activeLayer:'B.Cu',contrast:'dim'});
+      let drawnStyle, maskStyle;
+      renderer.draw({filter:o=>o.uuid==='pad',override:(o,style)=>{drawnStyle ??= style;return style;}});
+      renderer.draw({mask:true,filter:o=>o.uuid==='pad',override:(o,style)=>{maskStyle ??= style;return style;}});
+      if (JSON.stringify(drawnStyle)!==JSON.stringify(maskStyle)) return 'mask changes effective normal style';
+      renderer.setAppearance(appearance);
       renderer.draw({mask:true,filter:o=>o.uuid==='pad',override:()=>({color:[1,1,1],opacity:1})});
       let [sx,sy] = renderer.worldToScreen([11.5,10]);
       if (renderer.readPixel(Math.floor(sx),359-Math.floor(sy))[0]<240) return 'mask override';
@@ -1606,6 +1616,9 @@ export const CHECKS = [
       for (const state of [
         {...appearance,layers:{'F.Cu':{visible:false}}},
         {...appearance,layers:{'F.Cu':{opacity:0}}},
+        {...appearance,layers:{'F.Cu':{color:[200,52,52,0]}}},
+        {...appearance,objects:{pads:{opacity:0}}},
+        {...appearance,nets:{'':{color:[200,52,52,0]}}},
         {...appearance,objects:{pads:{visible:false}}},
         {...appearance,nets:{'':{visible:false}}}
       ]) {
@@ -1621,6 +1634,10 @@ export const CHECKS = [
       renderer.setAppearance(appearance); renderer.draw();
       if (renderer.stats.uploads!==uploads) return 'contract rebuilt buffers';
       caption.textContent += ' All assertions passed. Hidden layers, objects, nets, zero opacity and flip verified.';
+      // Preserve the verified fixture for --shot after releasing its GL resources.
+      const snapshot = document.createElement('canvas');
+      snapshot.width = canvas.width; snapshot.height = canvas.height; snapshot.style.cssText = canvas.style.cssText;
+      snapshot.getContext('2d').drawImage(canvas,0,0); canvas.replaceWith(snapshot);
       return true;
     } finally { renderer.dispose(); }`],
 ];
