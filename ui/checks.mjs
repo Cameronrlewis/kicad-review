@@ -754,7 +754,7 @@ export const CHECKS = [
   ["truncated navigator names carry the full name as a tooltip", "p=1", `
     REVIEW_DATA.projects[1].sheets[0].name = 'A "quoted" <very> long sheet name that will not fit the navigator width at all'; renderNav();
     const ns = [...document.querySelectorAll("#nav .tree .name")];
-    return ns.length === 2 && ns[0].title === REVIEW_DATA.projects[1].sheets[0].name && ns.every(n => n.title && n.textContent.endsWith(n.title));`],
+    return ns.length === 2 && ns[0].title.startsWith(REVIEW_DATA.projects[1].sheets[0].name) && ns.every(n => n.title && n.textContent.endsWith(n.title));`],
   ["mode switch updates the address", "p=1&v=board", `
     await new Promise(r => setTimeout(r, 800));
     document.querySelector('#modes [data-mode="overlay"]').click();
@@ -1453,6 +1453,17 @@ export const CHECKS = [
     }
     return true;
   } finally { KRTheme.set(old); }`],
+  ["Stage 1 offline asset closure and shell proof", "v=board", `
+  const external=[...document.querySelectorAll('script[src],link[rel=stylesheet][href],use[href]')]
+    .filter(el=>!(el.getAttribute('href')||'').startsWith('#'));
+  const embedded=!document.querySelector('script[src="review.js"]');
+  if(embedded && external.length) return external.map(el=>el.outerHTML).join(' ');
+  if(!document.querySelector('[data-theme-toggle]') || !document.querySelector('#statusbar')) return 'missing shell';
+  const old=KRTheme.get();
+  KRTheme.set('light'); const light=getComputedStyle(document.body).backgroundColor;
+  KRTheme.set('dark'); const dark=getComputedStyle(document.body).backgroundColor;
+  KRTheme.set(old);
+  return light==='rgb(228, 232, 237)' && dark==='rgb(20, 23, 28)';`],
   ["board WebGL cameras fallback and context loss", "v=board&x=10&y=20&z=5", `
     const p = proj(); if (!p.board?.changed) return "skip";
     const gz = async text => { const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(buf))); };

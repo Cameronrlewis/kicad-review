@@ -151,7 +151,7 @@ function renderNav() {
   const sheetItems = (parent, depth) => kids(parent).map(s => {
     const view = `sheet:${s.path}`;
     return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}"
-      aria-current="${S.v === view}"><span class="name" title="${esc(s.name)}">${s.status === "unchanged" ? "" : "● "}${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${chips(counts(p, view))}</button>
+      aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${s.status === "unchanged" ? "" : "● "}${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${chips(counts(p, view))}</button>
       ${kids(s.path).length ? `<ul>${sheetItems(s.path, depth + 1)}</ul>` : ""}</li>`;
   }).join("");
   $("#nav").innerHTML = `

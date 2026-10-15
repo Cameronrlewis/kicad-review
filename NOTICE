@@ -29,3 +29,8 @@ Six toolbar icon variants and their derived inline SVG symbols are reused under
 CC-BY-SA-4.0. Authors, source, modifications and complete license: ui/icons/LICENSE.
 Only this artwork is share-alike; application code and the repository's existing
 licensing are unchanged. The theme-control disc icon is original project artwork.
+
+KiCad colour values, theme key names and layer mappings are data derived from
+KiCad 10.0 (commit 3e051f88), common/settings/builtin_color_themes.h and
+color_settings.cpp, KiCad Contributors, https://www.kicad.org/.
+No KiCad program source is included.
