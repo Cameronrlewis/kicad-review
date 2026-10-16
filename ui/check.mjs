@@ -61,15 +61,26 @@ await send("Runtime.addBinding", { name:"__flipTheme" });
 await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: false });
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
-await send("Page.enable");
+await send("Page.enable"); await send("DOMStorage.enable");
 const visionResult = await send("Emulation.setEmulatedVisionDeficiency", { type: vision });
 if (visionResult.error) throw new Error(visionResult.error.message);
 await send("Page.addScriptToEvaluateOnNewDocument", { source:
   `window.__appearanceFixtureText=${JSON.stringify(fixtureText)};window.__appearanceMarkStyle=${JSON.stringify(markStyle)};` });
 // A reload destroys the old execution context. Retry only that navigation race,
 // never report exceptions or other protocol errors.
+// localStorage writes reach the browser process asynchronously; a reload that wins the race reads stale
+// settings (seen on CI runners). Wait until the browser-side copy matches the page before reloading.
+const storageFlushed = async () => {
+  const page = (await send("Runtime.evaluate", {expression:"JSON.stringify(Object.entries(localStorage).sort())", returnByValue:true})).result?.result?.value;
+  for (const end = Date.now() + 3000; Date.now() < end; await sleep(25)) {
+    const items = (await send("DOMStorage.getDOMStorageItems", {storageId:{securityOrigin:"file://", isLocalStorage:true}})).result?.entries;
+    if (!items) { await sleep(300); return; }   // no DOMStorage domain: fall back to a short settle
+    if (JSON.stringify(items.map(([k, v]) => [k, v]).sort()) === page) return;
+  }
+};
 const reloadReady = async () => {
   const previous = navigations, deadline = Date.now() + timeout;
+  await storageFlushed();
   await send("Page.reload");
   while (Date.now() < deadline) {
     if (navigations > previous) {
