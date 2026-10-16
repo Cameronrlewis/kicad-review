@@ -2081,7 +2081,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '23f9632852c0e715376c0237420c87f6cc0d6f336ce32e0654b62940c2f3f068');
+  assert.equal(createHash('sha256').update(current).digest('hex'), 'ca368f2e613de7c4f3dbc3afd7f6eeccf928c3ddc9dde2435db92b02c1857703');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -3072,11 +3072,13 @@ test('S2 thread keyboard respects composition disabled state and native close', 
   key(event);
   assert.equal(submits.length, 1);
   assert.equal(submits[0], view.querySelector('form').querySelector('[data-act=reply]'));
-  submits[0].disabled = true; key(event); assert.equal(submits.length, 1);
+  key({ key: 'Enter', metaKey: true, preventDefault() { prevented++; } }); // Cmd+Enter on macOS
+  assert.equal(submits.length, 2);
+  submits[0].disabled = true; key(event); assert.equal(submits.length, 2);
   composer.querySelector('[data-act=close]').listeners.click();
   view.querySelector('[data-act=close]').listeners.click();
   assert.equal(composer.open, false); assert.equal(view.open, false);
-  assert.equal(prevented, 2);
+  assert.equal(prevented, 3);
 });
 
 test('S2 share presents read-only access and copy control', () => {

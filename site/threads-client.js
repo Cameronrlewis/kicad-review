@@ -154,7 +154,7 @@ export function threadsClient(config) {
   for (const dialog of [composer, view]) dialog.querySelector('[data-act=close]').addEventListener('click', () => dialog.close());
   for (const dialog of [composer, view]) {
     dialog.querySelector('textarea').addEventListener('keydown', event => {
-      if (event.isComposing || event.key !== 'Enter' || !event.ctrlKey || event.shiftKey) return;
+      if (event.isComposing || event.key !== 'Enter' || !(event.ctrlKey || event.metaKey) || event.shiftKey) return;
       event.preventDefault();
       const form = dialog.querySelector('form');
       const button = dialog === composer ? form.querySelector('button:not([type=button])') : form.querySelector('[data-act=reply]');
