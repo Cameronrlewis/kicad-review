@@ -898,9 +898,11 @@ function afterDraw(view) {
       m.setAttribute('role','img');
       m.setAttribute('aria-label',r.sel ? 'Selected '+(r.ref||r.id) : (semantic?.word||'Violation')+' '+(r.ref||r.id));
       if (view.kind === "sheet") {
-        m.dataset.glyph = BoardMarks.styles[r.action]?.glyph || "!";
+        m.dataset.glyph = semantic?.glyph || "!";
+        m.dataset.dash = semantic?.dash || "dotted";
+        m.dataset.label = semantic ? `${semantic.glyph} ${semantic.word}` : "!";
         m.dataset.markStyle = Appearance.get().markStyle;
-        const word = `${r.action || "finding"} ${r.ref || r.kind || ""}`.trim();
+        const word = `${semantic?.word || r.action || "finding"} ${r.ref || r.kind || ""}`.trim();
         m.setAttribute("aria-label", word);
         const label = document.createElement("span"); label.className = "sch-mark-label"; label.textContent = word;
         m.append(label);

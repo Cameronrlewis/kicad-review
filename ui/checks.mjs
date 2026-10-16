@@ -590,6 +590,15 @@ export const CHECKS = [
       && selected
       && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true";
     }, until = performance.now() + 5000;
+    const p=D.projects.findIndex(p=>p.changes.some(r=>r.kind==='footprint'&&r.action==='modified'&&r.box));
+    if(p<0) return 'fixture requires a modified footprint';
+    await applyState({p,v:'board',t:'changes'});
+    const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified" && r.box);
+    const box=boardDiff?.bounds(r.id,'head')||r.box;
+    document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
+    const ready = () => S.s === r.id && S.v === "board" && S.x != null && Math.abs(S.x - (box[0] + box[2]) / 2) < 0.01
+      && (boardDiff ? document.querySelector('#stage .board-mark-label[data-id="'+r.id+'"]') !== null : document.querySelector("#stage .marker.sel") !== null)
+      && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true", until = performance.now() + 5000;
     while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
     return ready() || JSON.stringify({selected:S.s,x:S.x,box:boardDiff?.bounds(r.id,'head'),labels:[...document.querySelectorAll('.board-mark-label')].map(e=>e.dataset.id),color:boardDiff?.panes.map(p=>p.renderer.gl.getUniform(p.markProgram,p.renderer.gl.getUniformLocation(p.markProgram,'markColor')))});`],
   ["clicking the drawing selects the row", "p=1&v=board", `
@@ -874,8 +883,10 @@ export const CHECKS = [
     c.dispatchEvent(e); await new Promise(r => setTimeout(r, 300));
     return (S.s === null && !e.defaultPrevented) || JSON.stringify([S.s, e.defaultPrevented]);`],
   ["selecting a row does not rebuild the panel", "p=1", `
-    const list = document.querySelector("#panel .cards"), id = document.querySelector("#panel .card").dataset.id;
-    goTo(id); await new Promise(r => setTimeout(r, 1500));
+    const row=proj().changes.find(r=>onView(r,S.v)&&rowBox(r,'head'));
+    if(!row) return 'fixture requires a change on the current view';
+    const list = document.querySelector("#panel .cards"), id = row.id;
+    await goTo(id);
     return (list.isConnected && document.querySelector('#panel .card[data-id="' + id + '"]').getAttribute("aria-selected") === "true") || "rebuilt";`],
   ["a cancelled wipe drag stops tracking", "p=1&v=board&m=wipe", `
     await new Promise(r => setTimeout(r, 800));
@@ -2359,17 +2370,40 @@ export const CHECKS = [
         && [...document.querySelectorAll('#stage canvas')].length===2;
     `
   ]),
-  ["board side camera retains textures without composition targets", "v=board&m=side", `
+  ["board side camera retains textures and buffers", "v=board&m=side", `
     const P=proj(), saved=P.board.geometry;
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,1000,1000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[]};
     const key='__retained_side_proof__';cache[key]=JSON.stringify(scene);P.board.geometry={base:key,head:key};
     try {
       S.v='board';S.m='side';await draw();fit();
-      const before=boardView.renderers.map(r=>r.stats.textureUploads);
+      if(boardView.renderers.length!==2) return 'two retained renderers required';
+      const before=boardView.renderers.map(r=>({renderer:r,textures:r.stats.textureUploads,buffers:r.stats.uploads}));
       for(let n=0;n<5;n++) setT({x:S.x+.1});
-      if(boardView.panes.some(p=>p.targets)) return 'Side allocated unnecessary composition targets';
-      return boardView.renderers.every((r,i)=>r.stats.textureUploads===before[i]) || 'camera reuploaded net texture';
+      return boardView.renderers.every((r,i)=>r===before[i].renderer && r.stats.textureUploads===before[i].textures && r.stats.uploads===before[i].buffers) || 'camera replaced renderer or reuploaded textures or buffers';
     } finally {P.board.geometry=saved;delete cache[key];}
+  `],
+  ["board comparison cameras retain revision net textures", "v=board&m=side", `
+    const P=proj(), saved=P.board.geometry, keys=['__camera_base__','__camera_head__'];
+    if(!saved) {
+      for(const [i,key] of keys.entries()) cache[key]=JSON.stringify({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,4000,4000],
+        layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''},{id:1,name:i?'VCC':'GND'}],
+        objects:[{kind:'track',uuid:key,changeUuid:key,ref:'',layers:['F.Cu'],net:1,category:'tracks',side:null,hidden:false,
+          box:[0,0,4000,1000],geometry:{segments:[[500,500,3500,500,500]]}}]});
+      P.board.geometry={base:keys[0],head:keys[1]};
+    }
+    try { for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.v='board';S.m=mode;await draw();fit();
+      Appearance.patch({netColors:{GND:[.2,.4,.6,1]}});boardDiff.render();
+      const before=boardDiff.panes.map(p=>({renderer:p.renderer,targets:[...p.targets],textures:p.renderer.stats.textureUploads,buffers:p.renderer.stats.uploads}));
+      for(let n=0;n<5;n++) setT({x:S.x+.1,y:S.y-.1,z:S.z*1.01});
+      if(!boardDiff.panes.every((p,i)=>p.renderer===before[i].renderer
+        &&p.targets.every((t,j)=>t===before[i].targets[j])
+        &&p.renderer.stats.textureUploads===before[i].textures&&p.renderer.stats.uploads===before[i].buffers)) return mode+' camera uploaded or replaced resources';
+      Appearance.patch({netColors:{GND:[.6,.4,.2,1]}});boardDiff.render();
+      if(!boardDiff.panes.every((p,i)=>p.renderer.stats.textureUploads>before[i].textures)) return mode+' net appearance did not invalidate textures';
+    }
+    return true;
+    } finally {P.board.geometry=saved;for(const key of keys) delete cache[key];}
   `],
   ["board offline generated controls selection links and fallback", "v=board&m=side&t=appearance", `
     if(!proj().board.geometry) return 'skip';
@@ -2435,8 +2469,8 @@ export const CHECKS = [
     return visible || 'no visible mark in screenshot';
 `],
   ["Themes marks classic schematic","v=board",`
-    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(p<0) return 'fixture needs both geometry revisions';
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg));
+    if(p<0) return 'fixture needs a rendered schematic';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
     Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Classic reference subset"}, "board": {"background": "rgb(0, 0, 0)", "copper": {"f": "rgb(132, 0, 0)", "b": "rgb(0, 132, 0)", "in1": "rgb(132, 132, 0)"}}, "schematic": {"background": "rgb(255, 255, 255)", "wire": "rgb(0, 132, 0)", "component_outline": "rgb(132, 0, 0)", "component_body": "rgb(255, 255, 194)"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
@@ -2456,7 +2490,7 @@ export const CHECKS = [
           if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
         }
       } else {
-        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        const markers=[...document.querySelectorAll('.vp.sheet .marker')];
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
@@ -2472,7 +2506,7 @@ export const CHECKS = [
       if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
     }
     await draw();
-    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+    const visible=[...document.querySelectorAll('#stage .vp.sheet .marker,#stage .board-mark-label')].some(m=>{
       const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
       return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
     });
@@ -2523,8 +2557,8 @@ export const CHECKS = [
     return visible || 'no visible mark in screenshot';
 `],
   ["Themes marks extreme-light schematic","v=board",`
-    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(p<0) return 'fixture needs both geometry revisions';
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg));
+    if(p<0) return 'fixture needs a rendered schematic';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
     Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Extreme light contrast stress"}, "board": {"background": "rgba(255, 255, 255, 0.98)", "copper": {"f": "#ffffff", "b": "#fffffe", "in30": "rgba(255, 255, 255, 0)"}, "grid": "#ffffff", "f_silks": "#ffffff"}, "schematic": {"background": "#ffffff", "wire": "#ffffff", "component_outline": "#ffffff", "component_body": "#ffffff", "worksheet": "#ffffff"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
@@ -2544,7 +2578,7 @@ export const CHECKS = [
           if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
         }
       } else {
-        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        const markers=[...document.querySelectorAll('.vp.sheet .marker')];
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
@@ -2560,7 +2594,7 @@ export const CHECKS = [
       if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
     }
     await draw();
-    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+    const visible=[...document.querySelectorAll('#stage .vp.sheet .marker,#stage .board-mark-label')].some(m=>{
       const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
       return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
     });
@@ -2865,8 +2899,8 @@ export const CHECKS = [
       Appearance.patch({markStyle:style});
       for(const [action,glyph,line] of [['added','+','solid'],['removed','−','dashed'],['modified','~','dotted']]) {
         const m=document.querySelector('#stage .marker.'+action), css=m&&getComputedStyle(m);
-        if(!m||m.dataset.glyph!==glyph||!m.getAttribute('aria-label')?.includes(action)||css.borderTopStyle!==line) return style+' '+action+' cues';
-        if(m.dataset.markStyle!==style||!m.querySelector('.sch-mark-label')?.textContent.includes(action)) return style+' '+action+' word/style';
+        if(!m||m.dataset.glyph!==glyph||!m.getAttribute('aria-label')?.includes(BoardMarks.styles[action].word)||m.dataset.dash!==BoardMarks.styles[action].dash||css.borderTopStyle!==line) return style+' '+action+' cues';
+        if(m.dataset.markStyle!==style||!m.querySelector('.sch-mark-label')?.textContent.includes(BoardMarks.styles[action].word)) return style+' '+action+' word/style';
         if(css.pointerEvents!=='none') return 'marker intercepts pins';
         if(style==='recolour'&&css.backgroundColor==='rgba(0, 0, 0, 0)'&&css.backgroundImage==='none') return action+' no tint';
       }
@@ -2924,8 +2958,11 @@ export const CHECKS = [
       S.m=mode; renderNav(); renderModes(); renderPanel(); await draw(); fit();
       const stack=document.querySelector('#stage .stack.base'), mark=document.querySelector('#stage .marker.sel.removed');
       if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' survivor';
-      if(!mark||mark.dataset.glyph!=='−'||getComputedStyle(mark).borderTopStyle!=='dashed'
-        ||!mark.querySelector('.sch-mark-label')?.textContent.includes('removed')) return mode+' removed cues';
+      const semantic=BoardMarks.styles.removed;
+      if(!mark||mark.dataset.glyph!==semantic.glyph||getComputedStyle(mark).borderTopStyle!==semantic.dash
+        ||!mark.querySelector('.sch-mark-label')?.textContent.includes(semantic.word)
+        ||mark.dataset.label!==semantic.glyph+' '+semantic.word
+        ||getComputedStyle(mark,'::after').content!==JSON.stringify(mark.dataset.label)) return mode+' removed cues';
     }
     return true;
   `],
@@ -3214,4 +3251,35 @@ export const CHECKS = [
     toggle.focus();toggle.click();
     return KRTheme.get()!==before&&document.activeElement===toggle&&JSON.stringify(store.get().colors)===palette;
   `,{beforeStartup:`Storage.prototype.getItem=Storage.prototype.setItem=function(){throw new DOMException('Blocked','SecurityError')};`}],
+  ["SCH6 single selected change retains themed action cues", "", `
+    const p=proj(), saved=p.changes, sheet=p.sheets.find(s=>s.svg);
+    const snapshot=Appearance.get();
+    try {
+      S.v='sheet:'+sheet.path;
+      p.changes=[{id:'single-sch-mark',action:'modified',kind:'symbol',ref:'R7',where:{sheet:sheet.path},pos:[20,20],box:[18,18,22,22]}];
+      S.s='single-sch-mark';
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await draw();
+        for(const markStyle of ['outline','recolour']) {
+          Appearance.patch({markStyle,colors:{'schematic.background':[1,1,1,1]}});
+          const worlds=[...document.querySelectorAll('#stage .vp.sheet .world')];
+          if(!worlds.length) return mode+' no schematic worlds';
+          for(const world of worlds) {
+            const marks=world.querySelectorAll('.marker');
+            if(marks.length!==1) return mode+' selected change must have exactly one marker';
+            const m=marks[0], semantic=BoardMarks.styles.modified;
+            if(!m.classList.contains('sel')||m.dataset.action!=='modified') return mode+' selected action';
+            if(m.dataset.glyph!==semantic.glyph||m.dataset.dash!==semantic.dash
+              ||m.dataset.label!==semantic.glyph+' '+semantic.word
+              ||getComputedStyle(m,'::after').content!==JSON.stringify(m.dataset.label)) return mode+' action cues';
+            if(m.getAttribute('aria-label')!=='Modified R7'||m.querySelector('.sch-mark-label')?.textContent!=='Modified R7') return mode+' semantic word';
+            const color=KrAppearance.resolve(Appearance.get()).marks.schematic.modified.color;
+            const rgb=getComputedStyle(m).borderTopColor.match(/[0-9.]+/g).slice(0,3).map(Number);
+            if(!rgb.every((v,i)=>Math.abs(v-color[i]*255)<1)) return mode+' live palette';
+          }
+        }
+      }
+      return true;
+    } finally {p.changes=saved; Appearance.patch(snapshot);}
+  `],
 ];
