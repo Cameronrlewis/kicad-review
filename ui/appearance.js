@@ -70,7 +70,7 @@
         show("Theme not imported. " + reason.message);
       }
     }, options);
-    return () => { sequence++; controller.abort(); };
+    return Object.assign(() => { sequence++; controller.abort(); }, {cancelPending:() => { sequence++; }});
   }
   // mount(root, {layers:[{name,title,visible}], nets:[name], getState, onChange(patch), onReset, fallback})
   // update(next) syncs values in place, so slider focus and drag survive every change.
@@ -118,7 +118,8 @@
       const e = eye(`Show ${label}`, () => ctx.onChange({layers:{[name]:{visible:!ctx.visible(name)}}}));
       const act = h("button", {type:"button", class:"name"}, label); act.title = l.title || label; act.onclick = () => ctx.onChange({activeLayer:name});
       const a = range(`${label} alpha`, v => ctx.onChange({layers:{[name]:{color:[...ctx.getState().layers[name].color.slice(0, 3), v]}}}));
-      return {el:h("div", {class:"appearance-row", "data-layer":name}, c, e, act, ...(l.changed ? [h("span", {class:"mark", title:"changed in this review"}, "\u2261")] : []), a), c, e, act, a};
+      const value = h("output", {"aria-hidden":"true"});
+      return {el:h("div", {class:"appearance-row", "data-layer":name}, c, e, act, ...(l.changed ? [h("span", {class:"mark", title:"changed in this review"}, "~")] : []), h("span", {class:"appearance-alpha"}, a, value)), c, e, act, a, value};
     }
     function objectRow([id, label, opacity]) {
       const rowId = id, off = ctx.unavailable?.[id], isGrid = id === "grid";
@@ -148,10 +149,19 @@
       if (reduced && tab !== "layers") tab = "layers";
       tabEls.forEach((t, i) => { const id = TABS[i][0], on = id === tab; t.hidden = reduced && id !== "layers"; t.setAttribute("aria-selected", on); t.tabIndex = on ? 0 : -1; panels[id].hidden = !on; });
       note.hidden = !reduced; note.textContent = reduced ? (live.note || "Reduced controls: colour, alpha and visibility apply to this view.") : "";
-      fill(rows.layers, panels.layers.firstChild, live.layers, layerRow);
+      // bench-t4: label the KiCad layer families without rebuilding live controls on edits.
+      if (fill(rows.layers, panels.layers.firstChild, live.layers, layerRow)) {
+        let previous;
+        for (const l of live.layers) {
+          const group = /\.Cu$/.test(l.name) ? "Copper" : /\.(CrtYd|Fab)$/.test(l.name) ? "Courtyard & fabrication" : /^(User\.|Dwgs\.|Cmts\.|Eco)/.test(l.name) ? "User" : "Technical";
+          if (group !== previous) rows.layers.get(l.name).el.before(h("h4", {class:"appearance-group"}, group));
+          previous = group;
+        }
+      }
       for (const l of live.layers) {
         const r = rows.layers.get(l.name), s = st.layers[l.name]; if (!r || !s) continue;
         setIf(r.c, "value", hex(s.color)); setIf(r.a, "value", String(Math.round(s.color[3] * 100)));
+        r.value.textContent = `${Math.round(s.color[3] * 100)}%`;
         r.e.setAttribute("aria-pressed", String(live.visible(l.name)));
         const active = !reduced && st.activeLayer === l.name; r.act.setAttribute("aria-current", String(active));
         r.el.classList.toggle("off", !live.visible(l.name));
@@ -180,7 +190,7 @@
       contrastBox.hidden = reduced; flip.checked = st.flip;
     }
     sync();
-    return {update(next) { live = {...ctx, ...next}; sync(); }, dispose() { stopPresets(); root.replaceChildren(); root.classList.remove("appearance"); }};
+    return {cancelPendingImports:() => stopPresets.cancelPending(), update(next) { live = {...ctx, ...next}; sync(); }, dispose() { stopPresets(); root.replaceChildren(); root.classList.remove("appearance"); }};
   }
   configure();
   globalThis.Appearance = {

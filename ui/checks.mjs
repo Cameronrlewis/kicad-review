@@ -622,7 +622,7 @@ export const CHECKS = [
     renderNav();
     const a = document.querySelector('#nav [data-view="sheet:/"]'), b = document.querySelector('#nav [data-view="sheet:/copy/"]');
     const n = e => e.querySelector(".chip.added").textContent;
-    return a && b && n(b) === "＋1" && n(a) !== n(b) && document.querySelectorAll('#nav [data-view^="sheet:"]').length === 2;`],
+    return a && b && n(b).replace(/\\s/g, "") === "+1" && n(a) !== n(b) && document.querySelectorAll('#nav [data-view^="sheet:"]').length === 2;`],
   ["panel scrolls instead of stretching the page", "p=1", `
     await new Promise(res => setTimeout(res, 1200));
     const cards = document.querySelector("#panel .cards"), one = cards.innerHTML;
@@ -804,8 +804,10 @@ export const CHECKS = [
     return bad.length ? bad.join("; ") : true;`],
   ["added footprint card shows its footprint and layer", "p=0", `
     const r = REVIEW_DATA.projects[0].changes.find(r => r.kind === "footprint" && r.action === "added" && r.props.layer);
-    const t = document.querySelector('#panel .card[data-id="' + r.id + '"]').textContent;
-    return t.includes(r.props.footprint) && t.includes(r.props.layer) && /\\+\\d+ more/.test(t) && !t.includes("Datasheet");`],
+    // Bench: property dumps moved from the card to the bottom inspector.
+    document.querySelector('#panel .card[data-id="' + r.id + '"]').click(); await new Promise(res => setTimeout(res, 1500));
+    const t = document.querySelector('#inspector').textContent;
+    return t.includes(r.props.footprint) && t.includes(r.props.layer);`],
   ["address with selection and position keeps the position", "p=1&v=board&x=150&y=100&z=8&s=c600", `
     await new Promise(r => setTimeout(r, 1200));
     return (S.x === 150 && S.y === 100 && S.z === 8 && S.s === "c600" && document.querySelector("#stage .marker.sel") !== null) || JSON.stringify([S.x, S.z, S.s]);`],
@@ -3605,8 +3607,8 @@ export const CHECKS = [
     if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return mode+' overflow '+t.scrollWidth+'>'+t.clientWidth;
   }
   t.querySelector('[data-mode=side]').click(); fit();
-  const d=t.querySelector('[data-dock=nav]'); d.click(); const off=document.body.classList.contains('nav-off'); d.click();
-  return (innerWidth<900 || off && !document.body.classList.contains('nav-off')) || 'dock toggle';`],
+  const d=t.querySelector('[data-dock=nav]'); d.click(); const off=document.querySelector('#nav').classList.contains('left-collapsed'); d.click();
+  return (innerWidth<900 || off && !document.querySelector('#nav').classList.contains('left-collapsed')) || 'dock toggle';`],
   ["bench toolbar 3D camera presets fit all modes", "v=3d", `
     if (!window.Review3D) return 'skip';
     const t=document.querySelector('#toolbar');
@@ -3726,4 +3728,70 @@ export const CHECKS = [
     return !!document.querySelector('.checks-table');
   `],
 
+  // bench-t4: left module regression checks (append-only).
+  ["bench-t4 Project tree wraps names and searches sorts filters", "", `
+    const p=proj(), original=p.sheets.find(s=>s.svg); if(!original)return 'skip';
+    p.sheets=[{...original,path:'/',parent:null,name:'Root_project.kicad_sch',page:'1',status:'modified'},
+      {...original,path:'/z/',parent:'/',name:'Z_child_long_schematic_name.kicad_sch',page:'2',status:'added'},
+      {...original,path:'/a/',parent:'/',name:'A_child.kicad_sch',page:'3',status:'unchanged'}];
+    S.t='changes'; leftTab='project'; renderNav();
+    const q=s=>document.querySelector(s), fire=e=>e.dispatchEvent(new Event('change',{bubbles:true}));
+    const name=q('#nav [data-view="sheet:/z/"] .name');
+    if(name.title!=='Z_child_long_schematic_name.kicad_sch (page 2)' || getComputedStyle(name).whiteSpace!=='normal')return 'full name';
+    if(!q('#nav [data-view="sheet:/z/"]').style.getPropertyValue('--depth'))return 'hierarchy';
+    if(q('#nav .chip.modified').textContent.trim()[0]!=='~' || getComputedStyle(q('#nav .chip.removed')).borderTopStyle!=='dashed' || getComputedStyle(q('#nav .chip.modified')).borderRadius==='0px')return 'shape glyph';
+    q('#project-sort').value='name';fire(q('#project-sort'));
+    if([...document.querySelectorAll('#nav [data-view^="sheet:"]')].map(b=>b.dataset.view).join()!=='sheet:/,sheet:/a/,sheet:/z/')return 'sort';
+    q('#project-filter').value='added';fire(q('#project-filter'));
+    if(q('#nav [data-view="sheet:/a/"]') || !q('#nav [data-view="sheet:/z/"]'))return 'filter';
+    q('#project-search').value='no such sheet';q('#project-search').dispatchEvent(new Event('input',{bubbles:true}));
+    if(q('#nav [data-view^="sheet:"]') || document.activeElement.id!=='project-search')return 'search focus';
+    return true;
+  `],
+  ["bench-t4 Appearance belongs left and leaves review tabs available", "v=board&t=appearance", `
+    const q=s=>document.querySelector(s);
+    if(!q('#nav #appearance-root') || q('#panel #appearance-root') || q('#panel [data-tab="appearance"]'))return 'location';
+    if(q('#left-tab-appearance').getAttribute('aria-selected')!=='true' || q('#nav').classList.contains('left-collapsed'))return 'deep link';
+    if(!q('#appearance-root .appearance-group'))return 'groups';
+    q('#panel [data-tab="checks"]').click();
+    if(!q('#nav #appearance-root') || q('#panel [data-tab="checks"]').getAttribute('aria-selected')!=='true')return 'independent tabs';
+    q('#left-tab-project').click(); await new Promise(r=>setTimeout(r,250));
+    if(q('#appearance-root') || !q('#project-search') || !location.hash.includes('t=checks'))return 'project switch';
+    q('#left-tab-appearance').click(); await new Promise(r=>setTimeout(r,250));
+    if(!q('#nav #appearance-root') || !location.hash.includes('t=appearance'))return 'appearance link';
+    return !q('#nav').scrollWidth || q('#nav').scrollWidth<=q('#nav').clientWidth+1;
+  `],
+  ["bench-t4 left splitter collapse storage and keyboard", "", `
+    const q=s=>document.querySelector(s); setDock('nav',true);
+    const grip=q('#nav [role=separator]'), key=k=>grip.dispatchEvent(new KeyboardEvent('keydown',{key:k,bubbles:true,cancelable:true}));
+    key('End');if(grip.getAttribute('aria-valuenow')!=='520')return 'max';
+    key('Home');key('ArrowRight');
+    if(JSON.parse(localStorage.getItem('kr.bench.left')).width!==230 || q('#nav').getBoundingClientRect().width!==230)return 'width persistence';
+    const get=Storage.prototype.getItem,set=Storage.prototype.setItem;
+    try { Storage.prototype.getItem=()=>{throw Error('blocked')}; Storage.prototype.setItem=()=>{throw Error('blocked')}; key('ArrowRight');q('#nav .left-collapse').click(); }
+    finally {Storage.prototype.getItem=get;Storage.prototype.setItem=set;}
+    if(!q('#nav').classList.contains('left-collapsed') || q('[data-dock="nav"]').getAttribute('aria-expanded')!=='false')return 'collapse';
+    q('[data-dock="nav"]').click();
+    if(q('#nav').getBoundingClientRect().width!==240 || q('[data-dock="nav"]').getAttribute('aria-expanded')!=='true')return 'restore';
+    return document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t4 Project screenshot proof", "v=board&m=overlay", `
+    setDock('nav',true); leftWidth=262; syncLeftDock();
+    document.querySelector('#left-tab-project').click();
+    await new Promise(r=>setTimeout(r,400));
+    return document.querySelector('#nav').getBoundingClientRect().width===262 && document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t4 Appearance screenshot proof", "v=board&m=overlay&t=appearance", `
+    setDock('nav',true); leftWidth=262; syncLeftDock();
+    return !!document.querySelector('#nav #appearance-root') && document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t4 saved left dock restores on startup", "", `
+    const toggle=document.querySelector('[data-dock="nav"]');
+    if(!leftCollapsed || leftWidth!==337 || getComputedStyle(document.querySelector('#nav')).display!=='none')return 'stored state';
+    toggle.click();
+    return document.querySelector('#nav').getBoundingClientRect().width===337;
+  `, {beforeStartup:`try {localStorage.setItem('kr.bench.left',JSON.stringify({width:337,collapsed:true}));} catch {}`}],
+  ["bench-t4 blocked storage permits startup and deep link", "v=board&t=appearance", `
+    return !!document.querySelector('#nav #appearance-root') && leftWidth===262 && !leftCollapsed;
+  `, {beforeStartup:`Storage.prototype.getItem=Storage.prototype.setItem=()=>{throw new DOMException('Blocked','SecurityError')};`}],
 ];
