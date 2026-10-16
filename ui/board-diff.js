@@ -273,7 +273,9 @@
         const label = document.createElement('span'); label.className = 'tag';
         label.textContent = sideMode ? (sides[0] === 'base' ? 'Base' : 'Head') + (!scenes[sides[0]] ? ' — not present' : '')
           : state.m === 'overlay' ? 'Base (red) · Head (green) · both (black)' : state.m === 'semantic' ? 'Changes only' : 'Base under Head';
-        if (!sideMode && state.m === 'overlay') label.innerHTML = '<i class="sw del"></i>Base (red) · <i class="sw add"></i>Head (green) · <i class="sw both"></i>both (black)';
+        if (!sideMode && state.m === 'overlay') label.replaceChildren(...[['del','Base (red) · '],['add','Head (green) · '],['both','both (black)']].flatMap(([sw,text])=>{
+          const i = document.createElement('i'); i.className = 'sw '+sw; return [i, document.createTextNode(text)];
+        }));
         vp.append(label); stage.append(vp); attachPanZoom?.(vp);
         const renderer = BoardGL.create(canvas,{retained:true,manual:true,onFailure:onLost});
         if (!renderer) throw Error('WebGL2 unavailable');

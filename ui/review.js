@@ -206,11 +206,13 @@ function applyState(st) {
 
 const PX = 4;                       // CSS px per mm at z = PX
 const cache = {};
-async function svgText(id) {
-  if (!id) return null;
+// Cache the decode promise so concurrent draws of the same blob share one gzip stream.
+function svgText(id) {
+  if (!id) return Promise.resolve(null);
   if (!(id in cache)) {
     const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
-    cache[id] = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+    cache[id] = new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+    cache[id].catch(() => delete cache[id]);
   }
   return cache[id];
 }

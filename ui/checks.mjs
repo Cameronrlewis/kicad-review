@@ -3408,4 +3408,15 @@ export const CHECKS = [
         HTMLCanvasElement.prototype.getContext=getContext;setT(original);
       }
     `])),
+  ["review: concurrent drawing decodes share one gzip stream", "", `
+    const id=Object.keys(D.blobs).find(k=>!(k in cache)); if(!id) return 'skip';
+    const Real=window.DecompressionStream; let made=0;
+    window.DecompressionStream=class extends Real { constructor(...a){ super(...a); made++; } };
+    try { const [a,b]=await Promise.all([svgText(id),svgText(id)]); return a===b && made===1 || 'decoded '+made+' times'; }
+    finally { window.DecompressionStream=Real; }`],
+  ["review: overlay legend is built from text nodes", "v=board&m=overlay", `
+    await draw(); await new Promise(r=>requestAnimationFrame(r));
+    const label=[...document.querySelectorAll('#stage .vp > .tag')].find(e=>(e.textContent||'').includes('Base (red)'));
+    if(!label) return 'skip';
+    return label.querySelectorAll('i.sw').length===3 && label.textContent.includes('Head (green)') && label.textContent.includes('both (black)');`],
 ];
