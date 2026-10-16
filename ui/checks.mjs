@@ -2889,4 +2889,49 @@ export const CHECKS = [
   document.querySelector('#change-nav [data-step="1"]').click();
   await new Promise(r => setTimeout(r, 50));
   return /^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) || document.querySelector('#change-count').textContent;`],
+  ["SCH6 proof framed page", "v=sheet:/&m=side", `
+    await draw(); fit();
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const svg=document.querySelector('#stage .vp.sheet .layer svg');
+    return !!svg && svg.querySelectorAll('path').length>100 && currentView().kind==='sheet'
+      && svg.getBoundingClientRect().width>0;
+  `],
+  ["SCH6 proof live palette status and comparison controls", "v=sheet:/&m=side", `
+    await draw(); fit();
+    const svg=document.querySelector('#stage .vp.sheet .layer svg');
+    const wire=[...svg.querySelectorAll('[style]')].find(e=>e.style.stroke.includes('--sch-ink-009600'));
+    const frame=[...svg.querySelectorAll('[style]')].find(e=>e.style.stroke.includes('--sch-ink-840000'));
+    if(!wire||!frame) return 'KiCad wire/frame paints required';
+    const root=svg, original=root.style.getPropertyValue('--sch-ink-009600');
+    const frameColour=getComputedStyle(frame).stroke;
+    try {
+      root.style.setProperty('--sch-ink-009600','#135724');
+      if(getComputedStyle(wire).stroke!=='rgb(19, 87, 36)'||getComputedStyle(frame).stroke!==frameColour)
+        return 'loaded SVG palette';
+    } finally {
+      if(original) root.style.setProperty('--sch-ink-009600',original);
+      else root.style.removeProperty('--sch-ink-009600');
+    }
+    for(const vp of document.querySelectorAll('#stage .vp.sheet')) {
+      const r=vp.getBoundingClientRect();
+      updateCoordinates(vp,{clientX:r.left+r.width/2,clientY:r.top+r.height/2});
+      for(const e of document.querySelectorAll('[data-coordinate]')) {
+        const b=e.getBoundingClientRect(); if(b.left<0||b.right>innerWidth||b.bottom>innerHeight) return 'clipped coordinates';
+      }
+    }
+    S.m='wipe'; renderModes(); await draw();
+    const divider=document.querySelector('#stage .divider');
+    divider.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
+    if(S.wipe!==1||divider.getAttribute('aria-valuenow')!=='100') return 'wipe control';
+    S.m='blend'; renderModes(); await draw();
+    const slider=document.querySelector('#modes input[type=range]'); slider.value='25'; slider.dispatchEvent(new Event('input'));
+    if(S.blend!==.25||document.querySelector('#stage .stack.head').style.opacity!=='0.25') return 'blend control';
+    S.m='side'; S.grid=true; renderModes(); await draw(); fit();
+    const address=encodeState({...S,x:-12.345,y:67.89,z:10,s:'sch6-proof',t:'checks',
+      layers:['F.Cu'],camera3d:[1,2,3,4,5,6],hidden3d:['tracks']});
+    const query=new URLSearchParams(address);
+    if(['p','v','m','x','y','z','s','t','l','c','h'].some(key=>!query.has(key))
+      ||encodeState(decodeState('#'+address))!==address) return 'complete address round trip';
+    return true;
+  `],
 ];
