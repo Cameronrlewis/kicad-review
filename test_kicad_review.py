@@ -3412,3 +3412,12 @@ with TemporaryDirectory() as t:
     finally:
         os.chdir(old_cwd)
 print("ok production geometry typed change IDs, unchanged isolation and multi-project IDs")
+
+# SCH6: schematic rendering and styles ship inside the offline report.
+page = kr.inline_page('window.REVIEW_DATA={"version":1};')
+assert '--sch-paper:#f5f4ef' in page
+assert 'function themeSchematic(' in page
+assert 'function schematicGridPlan(' in page
+assert not re.search(r'<script[^>]+src=["\'](?!data:)', page)
+assert not re.search(r'<link[^>]+href=["\'](?:https?:|tokens\.css|review\.css)', page)
+print('ok SCH6 offline schematic assets')

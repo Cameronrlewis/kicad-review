@@ -242,6 +242,21 @@ To update KiCad, change `KICAD_IMAGE` in `review.yml` to a new tag and its diges
 
 Run the self-check with `python3 test_kicad_review.py`.
 
+## Schematic viewer
+
+Schematics retain KiCad's exported drawing sheet and title block. Paper stays
+warm white in both interface themes. The dot grid is 50 mil (1.27 mm), anchored
+to the drawing origin; distant views omit intermediate dots for legibility.
+Ctrl+U toggles schematic coordinates between mm and mil without moving the view.
+PageUp/PageDown visit the previous/next sheet by page number; Alt+Up visits the
+parent. The hierarchy shows Name (page n), with the active sheet in bold.
+
+Schematic colours use an exact-value map from KiCad's default SVG palette.
+Roles with the same exported RGB value stay linked. Unknown/custom export
+colours are preserved. Schematic diff outlines and recolour/hatch marks use
+changed bounding regions because CLI SVG paths do not carry object UUIDs.
+Existing reports without sheet renders still show the no-render message.
+
 ## Board viewer
 
 New reports can draw both board revisions with retained **WebGL2** geometry. The board
