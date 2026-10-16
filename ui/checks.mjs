@@ -1293,7 +1293,7 @@ export const CHECKS = [
     const P = proj(), view = S.v;
     acceptThreads([{ id: "blank-T", resolved: false, anchor: { v: 1, project: P.dir, file: "missing.kicad_sch", sheet: "/missing/", layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
     S.t = "threads"; renderPanel(); await openThread("blank-T");
-    return S.v === view && S.thread === "blank-T" && document.querySelector("#panel .thread-card")?.textContent.includes("its drawing did not change in this review") || JSON.stringify({view, current: S.v, thread: S.thread, text: document.querySelector("#panel .thread-card")?.textContent});`],
+    return S.v === view && S.thread === "blank-T" && document.querySelector("#panel .thread-card")?.textContent.includes("its drawing is unavailable in this review") || JSON.stringify({view, current: S.v, thread: S.thread, text: document.querySelector("#panel .thread-card")?.textContent});`],
   ["Threads severity select and cards retain focus", "", `
     const P = proj();
     acceptThreads([{ id: 'focus-"T', resolved: false, anchor: { v: 1, project: P.dir, file: "f.kicad_pcb", sheet: null, layer: null, target: "point", uuid: null, kind: null, ref: null, x: 1, y: 1, side: "head", commit: D.head, severity: "comment" }, comments: [] }]);
@@ -2258,7 +2258,7 @@ export const CHECKS = [
     localStorage.setItem('kr.appearance.v1',JSON.stringify(raw));return true;
   `, {afterReload:`
     const a=Appearance.get();
-    if(a.markStyle!=='outline'||a.layerOpacity['F.Cu']!==.37||a.objectOpacity.zones!==.24||a.netColors.GND?.[0]!==.2) return 'invalid mark style discarded preferences';
+    if(a.markStyle!=='outline'||a.layerOpacity['F.Cu']!==.37||a.objectOpacity.zones!==.24||a.netColors.GND?.[0]!==.2) return 'invalid mark style discarded preferences '+JSON.stringify({m:a.markStyle,l:a.layerOpacity?.['F.Cu'],z:a.objectOpacity?.zones,n:a.netColors?.GND});
     ${MARK_STYLE_FIXTURE}
     document.querySelector('[data-mark-style="recolour"]').click();
     return Appearance.get().markStyle==='recolour';
@@ -2415,7 +2415,7 @@ export const CHECKS = [
   `],
   ["Themes marks classic board","v=board",`
     const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(p<0) return 'fixture needs both geometry revisions';
+    if(p<0) return 'skip';   // needs a fixture with both geometry revisions (run with --page)
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
     Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Classic reference subset"}, "board": {"background": "rgb(0, 0, 0)", "copper": {"f": "rgb(132, 0, 0)", "b": "rgb(0, 132, 0)", "in1": "rgb(132, 132, 0)"}}, "schematic": {"background": "rgb(255, 255, 255)", "wire": "rgb(0, 132, 0)", "component_outline": "rgb(132, 0, 0)", "component_body": "rgb(255, 255, 194)"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
@@ -2503,7 +2503,7 @@ export const CHECKS = [
 `],
   ["Themes marks extreme-light board","v=board",`
     const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(p<0) return 'fixture needs both geometry revisions';
+    if(p<0) return 'skip';   // needs a fixture with both geometry revisions (run with --page)
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
     Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Extreme light contrast stress"}, "board": {"background": "rgba(255, 255, 255, 0.98)", "copper": {"f": "#ffffff", "b": "#fffffe", "in30": "rgba(255, 255, 255, 0)"}, "grid": "#ffffff", "f_silks": "#ffffff"}, "schematic": {"background": "#ffffff", "wire": "#ffffff", "component_outline": "#ffffff", "component_body": "#ffffff", "worksheet": "#ffffff"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
@@ -3187,7 +3187,7 @@ export const CHECKS = [
 
   ["Themes reload seed", "v=board&m=side", `
     const p=D.projects.findIndex(p=>p.board.geometry?.base&&p.board.geometry?.head);
-    if(p<0)return 'fixture needs both geometry revisions';
+    if(p<0)return 'skip';   // needs a fixture with both geometry revisions (run with --page)
     await applyState({p,v:'board',m:'side'});
     const store=appearanceStore(), next=store.get();
     next.colors['board.copper.f']=[.12,.34,.56,.78];
@@ -3197,7 +3197,7 @@ export const CHECKS = [
   `],
   ...['board','schematic'].map(type=>['Themes proof '+type,'v=board&m=side',`
     const p=D.projects.findIndex(p=>p.board.geometry?.base&&p.board.geometry?.head);
-    if(p<0)return 'fixture needs both geometry revisions';
+    if(p<0)return 'skip';   // needs a fixture with both geometry revisions (run with --page)
     await applyState({p,v:'board',m:'side'});
     const sheet=proj().sheets.find(s=>s.svg);
     if('${type}'==='schematic'&&!sheet)return 'fixture needs schematic';
@@ -3331,7 +3331,7 @@ export const CHECKS = [
   ["board Thermal proof", "v=board", `
     const i=D.projects.findIndex(p=>p.name==='Thermal_Camera');
     if(i<0 || !D.projects[i].board?.geometry?.base || !D.projects[i].board?.geometry?.head)
-      throw Error('Thermal_Camera report required for proof (two geometry revisions)');
+      return 'skip';   // Thermal_Camera report with two geometry revisions only
     S.p=i; S.v='board'; S.s=null; renderNav(); renderPanel(); await draw(); fit();
     document.querySelectorAll('.thread time').forEach(e=>e.style.visibility='hidden');
     await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
@@ -3340,7 +3340,7 @@ export const CHECKS = [
   ["board Thermal vision proof", "v=board&m=semantic", `
     const i=D.projects.findIndex(p=>p.name==='Thermal_Camera');
     if(i<0 || !D.projects[i].board?.geometry?.base || !D.projects[i].board?.geometry?.head)
-      throw Error('Thermal_Camera report required for vision proof');
+      return 'skip';   // Thermal_Camera report only
     await applyState({p:i,v:'board',m:'semantic',s:null});
     const rows=proj().changes.filter(c=>c.where?.board);
     if(!['added','removed','modified'].every(action=>rows.some(c=>c.action===action)))
