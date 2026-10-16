@@ -266,6 +266,9 @@ def restore_renders(args=None):
     """Use complete revision caches without starting/downloading the KiCad container."""
     det = json.loads(pathlib.Path("review/detect.json").read_text())
     settings = load_settings()
+    # Library drawings are selected by the compared pair, not the revision alone.
+    if settings["libraries"]["enabled"]:
+        raise SystemExit(1)
     entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
                for side in ("base", "head")
                if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]

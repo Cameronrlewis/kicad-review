@@ -3536,6 +3536,16 @@ with TemporaryDirectory() as t:
             kr.cmd_render(None)
             assert render.call_count == 2, "warm revision caches must skip all exports"
         assert pathlib.Path("review/G/base/drc.json").exists() and pathlib.Path("review/G/head/drc.json").exists()
+        # Library exports compare a pair of commits, unlike standalone board/sheet exports.
+        lib_settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+        lib_settings["libraries"]["enabled"] = True
+        with patch("kicad_review.load_settings", return_value=lib_settings):
+            kr.cache_renders()
+            try:
+                kr.restore_renders(None)
+                raise AssertionError("pair-dependent library exports must not be skipped")
+            except SystemExit as exc:
+                assert exc.code == 1
     finally:
         os.chdir(old_cwd)
 print("ok per-commit project render cache hits retain both revisions")

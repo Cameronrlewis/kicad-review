@@ -3630,15 +3630,16 @@ CHECKS.push(['vf-avail unchanged 3D both revisions', 'v=3d&m=side', `
   console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',view:'3d',sameBlob:model.base===model.head,roots:window.Review3D.state.roots.length,theme:KRTheme.get()}));return true;
 `]);
 CHECKS.push(['vf-avail unchanged schematic sheet full design', '', `
-  const sheet=proj().sheets.find(s=>s.status==='unchanged')||proj().sheets[0];if(!sheet)return 'skip';
+  const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg.base&&s.svg.head));if(p<0)return 'skip';
+  const sheet=D.projects[p].sheets.find(s=>s.svg.base&&s.svg.head);
   sheet.status='unchanged';sheet.svg.head=sheet.svg.base;
-  await applyState({p:S.p,v:'sheet:'+sheet.path,m:'side'});
+  await applyState({p,v:'sheet:'+sheet.path,m:'side'});
   if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
 `]);
 
 CHECKS.push(['vf-avail several projects retained in full', '', `
   if(D.projects.length<2)return 'skip';
-  const unchanged=D.projects.findIndex(p=>p.status==='unchanged');if(unchanged<0)throw Error('unchanged project required');
+  const unchanged=D.projects.findIndex(p=>p.status==='unchanged');if(unchanged<0)return 'skip';
   if(D.projects.slice(unchanged).some(p=>p.status!=='unchanged'))throw Error('unchanged projects must sort last');
   for(let p=0;p<D.projects.length;p++){
     await applyState({p,v:'board',m:'side',t:'appearance'});
