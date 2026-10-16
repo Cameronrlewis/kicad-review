@@ -1,3 +1,35 @@
+const BOARD_POINT_PROBE = `
+    const occupied=({id,layer}={})=>{
+      for(const pane of boardDiff.panes) for(const [side,scene] of Object.entries(pane.scenes)) {
+        if(!scene) continue;
+        pane.renderer.setScene(scene,side);
+        for(const object of scene.objects.filter(o=>(!id||o.changeIds?.includes(id))&&(!layer||o.layers.length===1&&o.layers[0]===layer))) {
+          const [x0,y0,x1,y1]=object.box.map(v=>v/1000);
+          for(const fx of [.5,.25,.75,.125,.875]) for(const fy of [.5,.25,.75,.125,.875]) {
+            const q=pane.renderer.project([x0+(x1-x0)*fx,y0+(y1-y0)*fy]);
+            if(pane.renderer.hitTest(q).some(o=>o===object)) {
+              const r=pane.vp.getBoundingClientRect();
+              boardDiff.render(); return {pane,object,screen:q,event:{clientX:r.left+q[0],clientY:r.top+q[1]}};
+            }
+          }
+        }
+      }
+      boardDiff.render(); return null;
+    };
+`;
+
+const BOARD_LIFECYCLE_FIXTURE = `
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],
+      layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],
+      objects:[{kind:'track',uuid:'lifecycle',changeUuid:'lifecycle',layers:['F.Cu'],net:0,category:'tracks',side:null,hidden:false,
+        box:[1000,1000,9000,3000],geometry:{segments:[[2000,2000,8000,2000,1000]]}}]};
+    const bytes=new Uint8Array(await new Response(new Blob([JSON.stringify(scene)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.lifecycle=btoa(String.fromCharCode(...bytes));
+    proj().board.geometry={base:'lifecycle',head:'lifecycle'};
+    boardView.failed=null; Object.assign(S,{v:'board',m:'overlay',x:5,y:5,z:20});
+    await draw();
+`;
+
 const MARK_STYLE_FIXTURE = `
     // The template may lack retained board data; enable the real toolbar against a retained fixture.
     const object={kind:'pad',uuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
@@ -463,6 +495,13 @@ export const CHECKS = [
   ["fit frames all drawn content in every pane", "p=1&v=board", `
     await new Promise(r => setTimeout(r, 2500));
     const bad = [];
+    if(boardDiff) {
+      return boardDiff.panes.every(p=>Object.values(p.scenes).filter(scene=>scene?.objects.length).every(scene=>{
+        const [x0,y0,x1,y1]=scene.bounds.map(n=>n/1000);
+        return [[x0,y0],[x1,y0],[x0,y1],[x1,y1]].map(q=>p.renderer.project(q))
+          .every(([x,y])=>x>=-1&&y>=-1&&x<=p.vp.clientWidth+1&&y<=p.vp.clientHeight+1);
+      }) && (Object.values(p.scenes).every(scene=>!scene?.objects.length) || p.renderer.stats.uploads>0));
+    }
     for (const vp of document.querySelectorAll("#stage .vp")) {
       const R = vp.getBoundingClientRect();
       for (const l of vp.querySelectorAll(".layer")) {
@@ -477,7 +516,8 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 800));
     return S.m === "${m}" && document.querySelector("#stage").classList.contains("mode-${m}")
       && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}"
-      && [...document.querySelectorAll('#stage svg path, #stage svg line, #stage svg rect, #stage svg circle, #stage svg polyline, #stage svg polygon, #stage svg text')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; });`]),
+      && (typeof boardDiff!=='undefined' && boardDiff ? boardDiff.panes.every((p,i)=>p.canvas.width>0&&p.canvas.height>0&&p.renderer.stats.draws>0&&boardDiff.readPixel(i,10,10).length===4)
+        : [...document.querySelectorAll('#stage svg path, #stage svg line, #stage svg rect, #stage svg circle, #stage svg polyline, #stage svg polygon, #stage svg text')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; }));`]),
   ["wipe divider exposes its current keyboard position", "m=wipe", `
     await new Promise(r => setTimeout(r, 800));
     const d = document.querySelector('#stage .divider[role="slider"]'), before = S.wipe;
@@ -494,6 +534,12 @@ export const CHECKS = [
   ["blend slider sets head opacity", "m=blend", `
     await new Promise(r => setTimeout(r, 800));
     const s = document.querySelector("#modes input[type=range]"); s.value = 20; s.dispatchEvent(new Event("input"));
+    if(boardDiff) {
+      boardDiff.render();
+      const gl=boardDiff.panes[0].renderer.gl;
+      const alpha=gl.getUniform(boardDiff.panes[0].program,gl.getUniformLocation(boardDiff.panes[0].program,'headAlpha'));
+      return S.blend===.2 && Math.abs(alpha-.2)<1e-6 && boardDiff.readPixel(0,10,10).length===4;
+    }
     return getComputedStyle(document.querySelector("#stage .stack.head")).opacity === "0.2";`],
   ["added project draws its one side in every mode", "p=0&m=overlay", `
     await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head svg").length > 0;`],
@@ -504,8 +550,18 @@ export const CHECKS = [
     return !!L && n >= want.length && m === want.filter(l => l.changed).length && document.querySelector("#layers").children.length === 0 || JSON.stringify([!!L, n, want.length, m, want.filter(l => l.changed).length, S.t, S.v]);`],
   ["toggling a layer removes it from the drawing", "p=1&v=board&t=appearance", `
     await new Promise(r => setTimeout(r, 800));
+    ${BOARD_POINT_PROBE}
+    const point=boardDiff?occupied({layer:'F.Cu'}):null;
+    if(boardDiff && !point) return 'no visible F.Cu geometry to test';
     const cb = document.querySelector('#appearance-root [data-layer="F.Cu"] .eye-btn'); cb.click();
     await new Promise(r => setTimeout(r, 800));
+    if(point) {
+      const {pane,object,screen}=point;
+      if(pane.renderer.hitTest(screen).some(o=>o===object)) return 'hidden layer remains hittable';
+      pane.renderer.draw({mask:true,filter:o=>o===object});
+      const pixel=boardDiff.readPixel(boardDiff.panes.indexOf(pane),...screen); boardDiff.render();
+      if(pixel[0]>0) return 'hidden layer still draws geometry';
+    }
     return !document.querySelector('#stage .layer[data-layer="F_Cu"]') && !S.layers.includes("F_Cu") && location.hash.includes("l=");`],
   ["layer list hidden for sheets", "", `return document.querySelector("#layers").children.length === 0;`],
   ["hitTest picks the smallest containing box, cycles on repeat", "", `
@@ -523,22 +579,41 @@ export const CHECKS = [
     const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
     return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
-    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
+    const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified");
     document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
-    const ready = () => S.s === r.id && S.v === "board" && S.x != null && Math.abs(S.x - (r.box[0] + r.box[2]) / 2) < 0.01
-      && document.querySelector("#stage .marker.sel") !== null
-      && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true", until = performance.now() + 5000;
+    const ready = () => {
+      const box=boardDiff?.bounds(r.id,'head') || r.box;
+      const selected=boardDiff ? [...document.querySelectorAll('.board-mark-label')].some(e=>e.dataset.id===r.id)
+        && boardDiff.panes.some(p=>Math.abs(p.renderer.gl.getUniform(p.markProgram,p.renderer.gl.getUniformLocation(p.markProgram,'markColor'))?.[0]-.9)<1e-5)
+        : document.querySelector("#stage .marker.sel") !== null;
+      return S.s === r.id && S.v === "board" && S.x != null && Math.abs(S.x - (box[0] + box[2]) / 2) < 0.01
+      && selected
+      && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true";
+    }, until = performance.now() + 5000;
     while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
-    return ready();`],
+    return ready() || JSON.stringify({selected:S.s,x:S.x,box:boardDiff?.bounds(r.id,'head'),labels:[...document.querySelectorAll('.board-mark-label')].map(e=>e.dataset.id),color:boardDiff?.panes.map(p=>p.renderer.gl.getUniform(p.markProgram,p.renderer.gl.getUniformLocation(p.markProgram,'markColor')))});`],
   ["clicking the drawing selects the row", "p=1&v=board", `
     await new Promise(res => setTimeout(res, 1200));
-    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
-    zoomTo(r.box); await new Promise(res => requestAnimationFrame(res));
+    const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified");
+    zoomTo(boardDiff?.bounds(r.id,'head') || r.box); await new Promise(res => requestAnimationFrame(res));
+    ${BOARD_POINT_PROBE}
+    if(boardDiff) {
+      const point=occupied({id:r.id}); if(!point) return 'no occupied change geometry';
+      pickAt(point.pane.vp,point.event);
+      return S.s===r.id && document.querySelector('#panel .card[aria-selected="true"]')?.dataset.id===r.id;
+    }
     const vp = document.querySelector("#stage .vp"), b = vp.getBoundingClientRect();
     pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
     return S.s === r.id && document.querySelector('#panel .card[aria-selected="true"]')?.dataset.id === r.id;`],
   ["markers differ by more than colour", "p=1&v=board&m=semantic", `
     await new Promise(res => setTimeout(res, 1200));
+    if(boardDiff) {
+      const marks=[...document.querySelectorAll('.board-mark-label')];
+      return marks.length>0 && marks.every(e=>{
+        const style=BoardMarks.styles[e.dataset.action];
+        return e.dataset.glyph===style.glyph && e.dataset.dash===style.dash && e.textContent.includes(style.word);
+      }) && new Set(marks.map(e=>e.dataset.action)).size===new Set(proj().changes.filter(r=>r.where?.board).map(r=>r.action)).size;
+    }
     const m = [...document.querySelectorAll("#stage .marker")];
     const styles = new Set(m.map(e => getComputedStyle(e).borderStyle + "|" + e.dataset.glyph));
     return m.length > 0 && m.every(e => e.dataset.glyph) && styles.size === new Set(m.map(e => e.dataset.action)).size;`],
@@ -774,10 +849,16 @@ export const CHECKS = [
     return location.hash.includes("m=overlay") || location.hash;`],
   ["clicking the drawing records the selection in the address", "p=1&v=board", `
     await new Promise(r => setTimeout(r, 1200));
-    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
-    zoomTo(r.box); await new Promise(res => setTimeout(res, 300));
-    const vp = document.querySelector("#stage .vp"), b = vp.getBoundingClientRect();
-    pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
+    const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified");
+    zoomTo(boardDiff?.bounds(r.id,'head') || r.box); await new Promise(res => setTimeout(res, 300));
+    ${BOARD_POINT_PROBE}
+    if(boardDiff) {
+      const point=occupied({id:r.id}); if(!point) return 'no occupied change geometry';
+      pickAt(point.pane.vp,point.event);
+    } else {
+      const vp = document.querySelector("#stage .vp"), b = vp.getBoundingClientRect();
+      pickAt(vp, { clientX: b.left + b.width / 2, clientY: b.top + b.height / 2 });
+    }
     await new Promise(res => setTimeout(res, 1200));
     return location.hash.includes("s=" + r.id) || location.hash;`],
   ["inherited object keys are not modes", "p=1&v=board&m=toString", `
@@ -1800,6 +1881,7 @@ export const CHECKS = [
       state.blend=1;c.render();if(!near(rgb([20,10]),[200,100,40]))return 'blend one';
       // Duplicate coincident head geometry must still receive group alpha only once.
       // Head buffer contains coincident geometry; alpha belongs to the complete revision.
+      state.blend=.2;c.render();if(!near(rgb([20,10]),[40,33,36]))return 'group alpha .2 '+rgb([20,10]);
       state.blend=.5;c.render();if(!near(rgb([20,10]),[100,58,38]))return 'group alpha '+rgb([20,10]);
       state.m='semantic';c.render();if(!near(rgb([10,10]),[200,100,40])||!near(rgb([20,10]),[200,100,40]))return 'semantic changes';
       if(!near(rgb([30,10]),[40,33,36]))return 'semantic context '+rgb([30,10]);
@@ -2889,4 +2971,141 @@ export const CHECKS = [
   document.querySelector('#change-nav [data-step="1"]').click();
   await new Promise(r => setTimeout(r, 50));
   return /^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) || document.querySelector('#change-count').textContent;`],
+  ["board context loss retains state and requires explicit retry", "v=board", `
+    const realGeometry=!!proj().board.geometry;
+    if(!realGeometry) { ${BOARD_LIFECYCLE_FIXTURE} }
+    else {S.m='overlay';await draw();fit();}
+    renderModes();
+    if(!boardDiff) return 'missing compositor';
+    S.s=proj().changes.find(c=>c.where?.board)?.id || null; S.layers=['F_Cu'];
+    const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m,S.layers]), old=boardDiff;
+    const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
+    if(!ext) throw Error('WebGL context-loss extension unavailable');
+    ext.loseContext();
+    for(let n=0;n<100 && !document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack svg') || !old.panes.every(p=>p.renderer.stats.disposed)) return 'context loss did not dispose and fall back';
+    if(JSON.stringify([S.x,S.y,S.z,S.s,S.m,S.layers])!==before) return 'state lost';
+    if(!/WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent)) return 'missing fallback notice';
+    for(let n=0;n<3;n++) await draw();
+    if(boardDiff || boardView.failed!==S.p) return 'lost context remounted without retry';
+    return true;
+  `],
+  ["board stale failure cannot replace newer project", "v=board", `
+    const mount=BoardDiff.mount; let stale;
+    BoardDiff.mount=options=>{ stale=options.onLost; return mount(options); };
+    try { ${BOARD_LIFECYCLE_FIXTURE} } finally { BoardDiff.mount=mount; }
+    if(!boardDiff || !stale) return 'missing live board';
+    const old=boardDiff;
+    const next=structuredClone(proj()); next.dir+='-lifecycle'; next.name+=' lifecycle'; D.projects.push(next);
+    S.p=D.projects.length-1; await draw();
+    const current=boardDiff;
+    if(!current || current===old || !old.panes.every(p=>p.renderer.stats.disposed)) return 'project did not replace old controller';
+    stale(Error('late old-project context loss'));
+    await new Promise(r=>setTimeout(r,100));
+    return boardDiff===current && boardView.failed!==S.p && current.panes.every(p=>!p.renderer.stats.disposed)
+      || 'stale callback destroyed current board';
+  `],
+  ["board startup without WebGL2 keeps SVG modes and state", "v=board&x=5&y=5&z=20", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.m=mode; await draw();
+      if(boardDiff || !document.querySelector('#stage .stack svg')) return 'no SVG '+mode;
+      if(S.x!==5 || S.y!==5 || S.z!==20) return 'camera lost '+mode;
+    }
+    return window.__webglAcquisitions>0 && /WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent);
+  `, {beforeStartup:`window.__webglAcquisitions=0; const getContext=HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext=function(type,...args){if(type==='webgl2'){window.__webglAcquisitions++;return null;}return getContext.call(this,type,...args);};`}],
+  ["board mode lifecycle releases GPU contexts and pending work", "v=board", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    for(let n=0;n<50;n++) {
+      const old=boardDiff, resources=old.panes.map(p=>({gl:p.renderer.gl,program:p.program,markProgram:p.markProgram,vao:p.vao,targets:[...(p.targets||[])]}));
+      S.m=['side','overlay','wipe','blend','semantic'][n%5]; await draw();
+      if(!boardDiff || boardDiff===old) return 'mode did not replace controller '+n;
+      for(const r of resources) {
+        if(r.gl.isProgram(r.program) || r.gl.isProgram(r.markProgram) || r.gl.isVertexArray(r.vao)
+          || r.targets.some(t=>r.gl.isTexture(t.texture)||r.gl.isFramebuffer(t.framebuffer)||r.gl.isRenderbuffer(t.stencil))) return 'GPU resources retained '+n;
+        if(!r.gl.isContextLost()) return 'disposed WebGL context still active '+n;
+      }
+      const draws=old.panes.map(p=>p.renderer.stats.draws);
+      old.render(); await new Promise(r=>requestAnimationFrame(r));
+      if(old.panes.some((p,i)=>p.renderer.stats.draws!==draws[i])) return 'disposed render scheduled '+n;
+      if(!boardDiff.panes.every(p=>p.canvas.isConnected&&!p.renderer.stats.disposed)) return 'active scene disposed '+n;
+    }
+    return true;
+  `],
+  ["board rapid project decode keeps only latest generation", "v=board", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    const original=loadBoardScene, old=boardDiff, first=S.p;
+    const next=structuredClone(proj()); next.dir+='-rapid'; next.name+=' rapid'; D.projects.push(next);
+    const latest=D.projects.length-1;
+    let release, pending=true;
+    loadBoardScene=async key=>{if(pending){pending=false;await new Promise(r=>release=r);}return original(key);};
+    try {
+      const stale=draw(); S.p=latest; await draw(); const current=boardDiff;
+      release(); await stale;
+      return S.p===latest && boardDiff===current && current!==old && current.project===latest
+        && old.panes.every(p=>p.renderer.stats.disposed) && document.querySelectorAll('#stage canvas.board-gl').length===current.panes.length
+        || 'stale decode replaced current project';
+    } finally {loadBoardScene=original;release?.();}
+  `],
+  ["board offline all modes and both mark styles draw content", "v=board", `
+    if(!proj().board.geometry) return 'skip';
+    Appearance.patch({grid:{visible:false}});
+    for(const markStyle of ['outline','recolour']) for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      Appearance.patch({markStyle}); S.m=mode; await draw(); fit();
+      if(!boardDiff || boardDiff.panes.length!==(mode==='side'?2:1)) return 'missing geometry '+mode;
+      const background=mode==='overlay'?[255,255,255]:[0,16,35];
+      for(let i=0;i<boardDiff.panes.length;i++) {
+        const pane=boardDiff.panes[i], gl=pane.renderer.gl;
+        const pixels=new Uint8Array(pane.canvas.width*pane.canvas.height*4);
+        gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.readPixels(0,0,pane.canvas.width,pane.canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+        let content=0;
+        for(let n=0;n<pixels.length;n+=4) if(background.some((c,j)=>Math.abs(pixels[n+j]-c)>10)) content++;
+        const populated=Object.values(pane.scenes).some(scene=>scene?.objects.length);
+        if(populated ? content<100 : content!==0) return 'wrong content pixels '+mode+' '+markStyle+' '+i;
+      }
+    }
+    return true;
+  `],
+  ["board stale decode failure cannot mark newer project", "v=board", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    const original=loadBoardScene;
+    const next=structuredClone(proj()); next.dir+='-decode-error'; next.name+=' decode error'; D.projects.push(next);
+    let release, pending=true;
+    loadBoardScene=async key=>{if(pending){pending=false;await new Promise(r=>release=r);throw Error('stale decode failure');}return original(key);};
+    try {
+      const stale=draw(); S.p=D.projects.length-1; await draw(); const current=boardDiff;
+      release(); await stale;
+      return boardDiff===current && boardView.note===null && boardView.failed!==S.p
+        || 'stale decode failure changed newer project status';
+    } finally {loadBoardScene=original;release?.();}
+  `],
+  ["board fresh project restores after real context loss", "v=board&m=semantic", `
+    if(!proj().board.geometry) { ${BOARD_LIFECYCLE_FIXTURE} }
+    S.m='semantic'; await draw(); fit();
+    const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m]), old=boardDiff;
+    if(!old) return 'no initial geometry';
+    const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
+    if(!ext) throw Error('WebGL context-loss extension unavailable');
+    ext.loseContext();
+    for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack svg')) return 'did not fall back';
+    const next=structuredClone(proj()); next.dir+='-restored'; next.name+=' restored'; D.projects.push(next);
+    S.p=D.projects.length-1; await draw();
+    return !!boardDiff && boardDiff!==old && boardView.failed===null && old.panes.every(p=>p.renderer.stats.disposed)
+      && boardDiff.panes.every(p=>p.renderer.stats.uploads>0&&!p.renderer.gl.isContextLost())
+      && JSON.stringify([S.x,S.y,S.z,S.s,S.m])===before || 'fresh project did not restore state';
+  `],
+  ["board target allocation failure uses SVG without state loss", "v=board", `
+    ${BOARD_LIFECYCLE_FIXTURE}
+    const old=boardDiff, pane=old.panes[0], gl=pane.renderer.gl, create=gl.createTexture;
+    const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m]);
+    try {
+      pane.targets[0].width=-1; gl.createTexture=()=>null; old.render();
+      for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
+      return !boardDiff && !!document.querySelector('#stage .stack svg') && boardView.failed===S.p
+        && old.panes.every(p=>p.renderer.stats.disposed) && JSON.stringify([S.x,S.y,S.z,S.s,S.m])===before
+        || 'allocation failure did not preserve SVG state';
+    } finally {gl.createTexture=create;}
+  `],
 ];
