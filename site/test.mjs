@@ -3157,3 +3157,73 @@ test('p2-gate: long content wraps and the active step shows one indicator', () =
   assert.equal((active.match(/class="spinner"/g) || []).length, 1);
   assert.doesNotMatch(active, /[●○]/);
 });
+
+// bench-t8 opening screens
+ test('bench-t8 start escapes every GitHub field and labels unverified readiness', () => {
+  const html = homePage({ user: '<user>', repositories: [{ name: '<repo>', owner: { login: '<owner>' }, runs: [{ name: '"<run>', conclusion: 'failure' }] }],
+    recent: [{ owner: '<owner>', repo: '<repo>', id: '1"', base: '<base>', head: '<head>', result: 'fail', createdAt: 'invalid', pull: { number: 1, title: '<script>alert(1)</script>' } }],
+    activity: [{ owner: '<owner>', repo: '<repo>', name: '<activity>', status: '<status>' }], errors: ['<failure>'] });
+  for (const field of ['user', 'repo', 'owner', 'base', 'head', 'activity', 'status', 'failure']) assert.ok(html.includes(`&lt;${field}&gt;`));
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /approval unknown/); assert.match(html, /Checks fail/);
+  assert.match(html, /id="bench-link"/); assert.doesNotMatch(html, /<activity>|<failure>|<head> →/);
+  // Validate inline navigation code independently of CSS / the theme script.
+  const code = html.match(/<script>\(\(\) => \{ const form = document.getElementById\('bench-link'\)[\s\S]*?<\/script>/)[0].slice(8, -9);
+  let submit, assigned;
+  const message = {};
+  const form = { addEventListener: (_, fn) => { submit = fn; }, querySelector: () => message, elements: { link: { value: 'https://evil.test/r/o/r/a/1' } } };
+  runInNewContext(code, { URL, document: { getElementById: () => form }, location: { origin: 'https://site.test', assign: value => { assigned = value; } } });
+  submit({ preventDefault() {} }); assert.equal(assigned, undefined); assert.match(message.textContent, /from this site/);
+  for (const value of ['/r/o/r/a/1?p=board#x=1', '/s/token.signature']) {
+    form.elements.link.value = value; submit({ preventDefault() {} }); assert.equal(assigned, value);
+  }
+ });
+
+test('bench-t8 start distinguishes empty repositories from API failure', async () => {
+  const html = homePage({ user: 'u', repositories: [] });
+  assert.match(html, /No recent reviews/); assert.match(html, /No repositories granted/);
+  assert.match(html, /No recent workflow activity/); assert.match(html, /0 recorded/);
+  const sealed = await signedIn();
+  const restore = mockFetch(async () => new Response('{}', { status: 503 }));
+  try {
+    const result = await call('/', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(result.status, 200); const body = await result.text();
+    assert.match(body, /Some GitHub data is unavailable/); assert.match(body, /Repository data could not be loaded/);
+    assert.doesNotMatch(body, /No repositories granted/); assert.ok(result.headers.get('Content-Security-Policy'));
+  } finally { restore(); }
+});
+
+test('bench-t8 start caps calls, deduplicates repositories and joins only recorded PRs', async () => {
+  const sealed = await signedIn(); const calls = [];
+  const restore = mockFetch(async url => {
+    calls.push(url);
+    if (url.endsWith('/user/installations')) return Response.json({ installations: Array.from({ length: 10 }, (_, id) => ({ id })) });
+    if (url.includes('/repositories?')) return Response.json({ repositories: Array.from({ length: 8 }, (_, i) => ({ owner: { login: 'Cameronrlewis' }, name: `repo${i}`, pushed_at: `2026-10-${10+i}T00:00:00Z` })) });
+    if (url.includes('/actions/artifacts?')) return Response.json({ artifacts: Array.from({ length: 30 }, (_, i) => ({ id: i, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', created_at: '2026-10-16T10:00:00Z', workflow_run: { id: 77, head_sha: 'b'.repeat(40), head_branch: 'topic' } })) });
+    if (url.includes('/actions/runs?')) return Response.json({ workflow_runs: [{ id: 77, pull_requests: [{ number: 8 }], name: 'Review workflow', conclusion: 'success', created_at: '2026-10-16T10:00:00Z' }] });
+    if (url.includes('/pulls?')) return Response.json([{ number: 8, title: 'Move R16', head: { sha: 'b'.repeat(40) } }]);
+    throw new Error(`Unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.equal(calls.length, 21); assert.equal(new Set(calls).size, calls.length);
+    assert.equal((body.match(/PR #8 · Move R16/g) || []).length, 20);
+    assert.match(body, /Latest commit · approval unknown/); assert.match(body, /first 5 app installations/);
+    assert.match(body, /repo0/); assert.ok(!calls.some(url => url.includes('/repo0/')));
+  } finally { restore(); }
+});
+
+test('bench-t8 retains available reports when run and PR APIs fail', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/user/installations')) return Response.json({ installations: [{ id: 1 }] });
+    if (url.includes('/repositories?')) return Response.json({ repositories: [{ owner: { login: 'Cameronrlewis' }, name: 'board' }] });
+    if (url.includes('/artifacts?')) return Response.json({ artifacts: [{ id: 12, name: 'kicad-review-aaaaaaa-bbbbbbb-fail.html' }] });
+    return new Response('{}', { status: 403 });
+  });
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /Some GitHub data is unavailable/); assert.match(body, /Checks fail/); assert.match(body, /Not checked · approval unknown/);
+    assert.match(body, /href="\/r\/Cameronrlewis\/board\/a\/12"/);
+  } finally { restore(); }
+});
