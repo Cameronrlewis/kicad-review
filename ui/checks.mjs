@@ -579,8 +579,8 @@ export const CHECKS = [
   ["modified card shows every changed property old and new", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
     // Bench: the old → new values live in the bottom inspector for the selected card.
-    document.querySelector('#panel .card[data-id="' + r.id + '"]').click(); await new Promise(res => setTimeout(res, 1500));
-    const text = document.querySelector('#inspector').textContent;
+    document.querySelector('#panel .card[data-id="' + r.id + '"]')?.click?.(); await new Promise(res => setTimeout(res, 1500));
+    const text = document.querySelector('#inspector')?.textContent || "";
     return r.changes.every(([k, a, b]) => text.includes(k) && text.includes(String(a ?? "—")) && text.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
     const p=D.projects.findIndex(p=>p.changes.some(r=>r.kind==='footprint'&&r.action==='modified'&&r.box));
