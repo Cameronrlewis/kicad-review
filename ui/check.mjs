@@ -71,11 +71,15 @@ await send("Page.addScriptToEvaluateOnNewDocument", { source:
 // settings (seen on CI runners). Wait until the browser-side copy matches the page before reloading.
 const storageFlushed = async () => {
   const page = (await send("Runtime.evaluate", {expression:"JSON.stringify(Object.entries(localStorage).sort())", returnByValue:true})).result?.result?.value;
+  const origin = (await send("Runtime.evaluate", {expression:"location.origin", returnByValue:true})).result?.result?.value;
+  let last;
   for (const end = Date.now() + 3000; Date.now() < end; await sleep(25)) {
-    const items = (await send("DOMStorage.getDOMStorageItems", {storageId:{securityOrigin:"file://", isLocalStorage:true}})).result?.entries;
-    if (!items) { await sleep(300); return; }   // no DOMStorage domain: fall back to a short settle
+    last = await send("DOMStorage.getDOMStorageItems", {storageId:{securityOrigin:"file://", isLocalStorage:true}});
+    const items = last.result?.entries;
+    if (!items) { console.log(`storage: DOMStorage unavailable (${origin}) ${JSON.stringify(last.error || last).slice(0, 200)}`); await sleep(300); return; }
     if (JSON.stringify(items.map(([k, v]) => [k, v]).sort()) === page) return;
   }
+  console.log(`storage: browser copy never matched page (${origin}) page ${page?.length} browser ${JSON.stringify(last?.result?.entries || []).length}`);
 };
 const reloadReady = async () => {
   const previous = navigations, deadline = Date.now() + timeout;
@@ -87,7 +91,7 @@ const reloadReady = async () => {
       if (response.error && !/Cannot find context|Execution context was destroyed/.test(response.error.message)) throw new Error(response.error.message);
       const r = response.result;
       if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
-      if (r?.result?.value === true) return;
+      if (r?.result?.value === true) { if (process.env.CI) console.log('storage after reload: ' + (await evaluate("JSON.stringify(Object.keys(localStorage).map(k=>k+':'+localStorage.getItem(k).length))")).result?.value); return; }
     }
     await sleep(50);
   }
