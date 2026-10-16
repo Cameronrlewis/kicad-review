@@ -579,17 +579,6 @@ export const CHECKS = [
     const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
     return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
-    const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified");
-    document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
-    const ready = () => {
-      const box=boardDiff?.bounds(r.id,'head') || r.box;
-      const selected=boardDiff ? [...document.querySelectorAll('.board-mark-label')].some(e=>e.dataset.id===r.id)
-        && boardDiff.panes.some(p=>Math.abs(p.renderer.gl.getUniform(p.markProgram,p.renderer.gl.getUniformLocation(p.markProgram,'markColor'))?.[0]-.9)<1e-5)
-        : document.querySelector("#stage .marker.sel") !== null;
-      return S.s === r.id && S.v === "board" && S.x != null && Math.abs(S.x - (box[0] + box[2]) / 2) < 0.01
-      && selected
-      && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true";
-    }, until = performance.now() + 5000;
     const p=D.projects.findIndex(p=>p.changes.some(r=>r.kind==='footprint'&&r.action==='modified'&&r.box));
     if(p<0) return 'fixture requires a modified footprint';
     await applyState({p,v:'board',t:'changes'});
