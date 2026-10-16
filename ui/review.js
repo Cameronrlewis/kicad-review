@@ -1,6 +1,8 @@
 "use strict";
 // KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see README, "Data format").
 const D = window.REVIEW_DATA;
+// bench-t2: never repeat the site frame inside its sandboxed report.
+document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
@@ -106,12 +108,21 @@ function renderLayers() {
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
-  $("#hdr").innerHTML = `<b>${esc(D.repo || "KiCad review")}</b>
-    <span class="revs">${link(L.base, short(D.base))} → ${link(L.head, short(D.head))}</span>
-    <span class="muted">${esc(D.reason)}</span>
-    ${L.review ? link(L.review, /\/pull\/(\d+)/.test(L.review) ? `PR #${L.review.match(/\/pull\/(\d+)/)[1]} ↗` : "Compare ↗") : ""}
-    <span class="verdict ${v.failing ? "fail" : "pass"}">${v.failing ? `✕ ${v.failing} check${v.failing > 1 ? "s" : ""} failing` : "✓ checks passing"}${v.newErrors ? ` · ${v.newErrors} new error${v.newErrors > 1 ? "s" : ""}` : ""}</span>
-    ${L.run ? link(L.run, "Workflow run") : ""}`;
+  const pr = /\/pull\/(\d+)/.exec(L.review || '');
+  $("#hdr").innerHTML = `<span>${esc(D.repo || 'Repository')}</span><span aria-hidden="true">›</span><span>${pr ? `PR #${pr[1]}` : 'Review'}</span>`;
+  $("#report-state").textContent = v.failing ? `✕ NEEDS WORK · ${v.failing} CHK · ${v.newErrors} NEW ERR` : '✓ CHECKS PASSING';
+  $("#report-review-bar").innerHTML = `<span class="bench-revision"><span class="bench-label">BASE</span> ${link(L.base, short(D.base))}</span><span aria-hidden="true">→</span><span class="bench-revision"><span class="bench-label">HEAD</span> ${link(L.head, short(D.head))}</span>${L.review ? link(L.review, pr ? `PR #${pr[1]} ↗` : 'Compare ↗') : ''}<span class="muted">Run result not recorded</span><details class="bench-menu bench-merge"><summary>MERGE · Unavailable</summary><div class="bench-popover"><ul>${['This review', 'GitHub approval', 'Blocking threads'].map(label => `<li>… ${label}: live data unavailable offline</li>`).join('')}</ul></div></details><details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${pr ? link(L.review + '/commits', 'History ↗') : '<button disabled title="No pull request recorded">History</button>'}<button disabled title="Open the online review to create a share link">Share…</button>${L.run ? link(L.run, 'Open run ↗') : '<button disabled title="Run not recorded">Open run</button>'}<button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved review position" placeholder="Paste a review link"></label><input class="copyfield" aria-label="Link to copy" readonly hidden></div></details>`;
+  $("#report-review-bar [data-act=copy]").onclick = async event => {
+    const button = event.currentTarget, value = positionLink();
+    button.closest('details').open = true;
+    try { await navigator.clipboard.writeText(value); button.textContent = 'Copied'; setTimeout(() => { button.textContent = 'Copy link'; }, 1500); }
+    catch {
+      let input = $("#report-review-bar .copyfield");
+      if (!input) { input = document.createElement('input'); input.className = 'copyfield'; input.readOnly = true; input.setAttribute('aria-label', 'Link to copy'); button.after(input); }
+      input.hidden = false; input.value = value; input.focus(); input.select();
+    }
+  };
+  $("#report-review-bar .goto").onchange = event => { applyGoTo(event.target.value); event.target.value = ''; };
 }
 function sheetNumber(sheet) {
   return sheet.page == null || !String(sheet.page).trim()

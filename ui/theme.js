@@ -9,7 +9,12 @@
       b.setAttribute('aria-label', label); b.setAttribute('title', label);
       b.setAttribute('aria-pressed', String(get() === 'dark'));
     }
+    for (const b of document.querySelectorAll('[data-theme-set]'))
+      if (b.dataset && b.dataset.themeSet) b.setAttribute('aria-pressed', String(b.dataset.themeSet === (mode === 'system' ? 'system' : get())));
   };
+  let mode;   // 'system' follows the OS; anything else is the explicit theme
+  const mq = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: light)') : null;
+  const sys = () => mq && mq.matches ? 'light' : 'dark';
   const send = () => {
     const message = {kicadReviewTheme:get()};
     if (parent !== window) parent.postMessage(message, '*');
@@ -23,15 +28,39 @@
     if (broadcast) send();
   };
   let stored;
-  try { stored = localStorage.getItem('kr.theme'); } catch {}
-  root.dataset.theme = valid(stored) ? stored : 'dark';
-  window.KRTheme = {get,set};
+  try { stored = localStorage.getItem('kr.theme'); mode = localStorage.getItem('kr.theme-mode') === 'system' ? 'system' : undefined; } catch {}
+  root.dataset.theme = mode === 'system' ? sys() : valid(stored) ? stored : 'dark';
+  const setMode = m => {
+    if (m !== 'system' && !valid(m)) return;
+    mode = m === 'system' ? 'system' : undefined;
+    try { localStorage.setItem('kr.theme-mode', m === 'system' ? 'system' : 'explicit'); } catch {}
+    set(m === 'system' ? sys() : m, {persist: m !== 'system'});
+  };
+  window.KRTheme = {get,set,setMode,mode:() => mode === 'system' ? 'system' : get()};
+  if (mq && mq.addEventListener) mq.addEventListener('change', () => { if (mode === 'system') set(sys(), {persist:false}); });
   document.addEventListener('click', event => {
-    if (event.target.closest('[data-theme-toggle]')) set(get() === 'dark' ? 'light' : 'dark');
+    const pick = event.target.closest('[data-theme-set]');
+    if (pick) setMode(pick.dataset.themeSet);
+    else if (event.target.closest('[data-theme-toggle]')) setMode(get() === 'dark' ? 'light' : 'dark');
+    for (const menu of document.querySelectorAll('.bench-menu[open]'))
+      if (!menu.contains(event.target)) menu.open = false;
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    const menus = document.querySelectorAll('.bench-menu[open]');
+    if (!menus.length) return;
+    for (const menu of menus) { menu.open = false; menu.querySelector('summary')?.focus(); }
+    event.preventDefault(); event.stopImmediatePropagation();
   });
   addEventListener('storage', event => {
-    if (event.key === 'kr.theme' || event.key === null)
-      set(valid(event.newValue) ? event.newValue : 'dark', {persist:false});
+    if (event.key === 'kr.theme-mode') {
+      mode = event.newValue === 'system' ? 'system' : undefined;
+      let stored; try { stored = localStorage.getItem('kr.theme'); } catch {}
+      set(mode === 'system' ? sys() : valid(stored) ? stored : 'dark', {persist:false});
+    } else if (event.key === 'kr.theme' || event.key === null) {
+      if (event.key === null) mode = undefined;
+      set(mode === 'system' ? sys() : valid(event.newValue) ? event.newValue : 'dark', {persist:false});
+    }
   });
   addEventListener('message', event => {
     const peer = parent !== window ? parent : frame()?.contentWindow;

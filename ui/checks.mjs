@@ -261,7 +261,7 @@ export const CHECKS = [
     const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
     await new Promise(r => setTimeout(r, 400));
     const hash = "#p=0&s=" + row.id;
-    if ("${path}" === "pasted") { krReview.goTo(hash); }
+    if ("${path}" === "pasted") { const input = document.querySelector("#report-review-bar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
     else location.hash = hash;
     const until = performance.now() + 5000, box = rowBox(row, "head");
     while ((S.v !== "board" || S.x == null || Math.abs(S.x - (box[0] + box[2]) / 2) >= .01) && performance.now() < until) await new Promise(r => setTimeout(r, 50));
@@ -740,8 +740,8 @@ export const CHECKS = [
     const ok = [undefined, { writeText: () => Promise.reject(new Error("denied")) }];
     for (const stub of ok) {
       Object.defineProperty(navigator, "clipboard", { value: stub, configurable: true });
-      copyLink(); await sleep(100);
-      const f = document.querySelector("input.copyfield[readonly]");
+      document.querySelector("#report-review-bar [data-act=copy]").click(); await sleep(100);
+      const f = document.querySelector("#report-review-bar input[readonly]");
       if (!f || f.value !== positionLink() || document.activeElement !== f || f.selectionStart !== 0 || f.selectionEnd !== f.value.length) return "bad " + (f && f.value);
       const rect = f.getBoundingClientRect(); if (rect.top < 0 || rect.bottom > innerHeight || rect.right > innerWidth || rect.width < 100) return "clipped copy fallback";
       f.remove();
@@ -749,11 +749,11 @@ export const CHECKS = [
     return true;`],
   ["copy link shows Copied when clipboard works", "p=1&v=board", `
     Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.resolve() }, configurable: true });
-    const b = document.querySelector("#statusbar .status-message"), was = b.textContent; copyLink();
+    const b = document.querySelector("#report-review-bar [data-act=copy]"); b.click();
     await new Promise(r => setTimeout(r, 100));
     const during = b.textContent;
     await new Promise(r => setTimeout(r, 1700));
-    return during.includes("Copied") && b.textContent === was;`],
+    return during.includes("Copied") && b.textContent === "Copy link";`],
   ["theme follows the system and keeps text contrast", "", `
     const lum = c => { const [r, g, b] = c.match(/\\d+/g).map(Number).map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
     const start = KRTheme.get(), seen = [], res = {};
@@ -767,7 +767,7 @@ export const CHECKS = [
       }
       document.addEventListener("kr-theme-change", e => seen.push(e.detail));
       KRTheme.set("dark", {persist:false});
-      const btn = document.querySelector("[data-theme-toggle]");
+      const btn = document.querySelector('[data-theme-set=dark]');
       return seen[0] === "dark" && !!btn && btn.getAttribute("aria-pressed") === "true" || JSON.stringify({seen, res});
     } finally { KRTheme.set(start, {persist:false}); }`],
   ["drawing background is KiCad's in both themes", "", `
@@ -1556,7 +1556,7 @@ export const CHECKS = [
     .filter(el=>!(el.getAttribute('href')||'').startsWith('#'));
   const embedded=!document.querySelector('script[src="review.js"]');
   if(embedded && external.length) return external.map(el=>el.outerHTML).join(' ');
-  if(!document.querySelector('[data-theme-toggle]') || !document.querySelector('#statusbar')) return 'missing shell';
+  if(!document.querySelector('[data-theme-set]') || !document.querySelector('#statusbar')) return 'missing shell';
   const old=KRTheme.get();
   KRTheme.set('light'); const light=getComputedStyle(document.body).backgroundColor;
   KRTheme.set('dark'); const dark=getComputedStyle(document.body).backgroundColor;
@@ -1929,7 +1929,7 @@ export const CHECKS = [
     key('PageDown'); if(Appearance.get().activeLayer!=='B.Cu') return 'bottom'; key('PageUp'); if(Appearance.get().activeLayer!=='F.Cu') return 'top';
     key('u',{ctrlKey:true}); if(Appearance.get().units!=='mil') return 'units';
     Appearance.patch({grid:{size:1.27}}); const g=Appearance.get().grid.size; key('n'); key('N',{shiftKey:true}); if(Math.abs(Appearance.get().grid.size-g)>1e-9) return 'grid inverse';
-    const input=document.createElement('input'); document.body.append(input); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.remove();
+    const input=document.querySelector('#report-review-bar .goto'); input.closest('details').open=true; input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.blur();
     const z=S.z; key('+',{ctrlKey:true,shiftKey:true}); if(S.z<z*1.3) return 'ctrl shift zoom';
     const copy=new KeyboardEvent('keydown',{key:'c',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(copy); if(copy.defaultPrevented) return 'copy consumed';
     key('?'); if(!document.querySelector('#shortcuts[open]')) return 'sheet'; document.querySelector('#shortcuts').close(); Appearance.reset(); return true;`],
@@ -2993,7 +2993,7 @@ export const CHECKS = [
   return S.m === 'wipe' && a.dataset.mode === 'wipe' && a.getAttribute('aria-checked') === 'true'
     && document.querySelector('#toolbar #zoombar') !== null
     && !document.querySelector('#zoombar').textContent.includes('j / k')
-    && typeof krReview.goTo === 'function' && typeof krReview.copyLink === 'function'
+    && document.querySelector('#report-review-bar .goto').getAttribute('aria-label') === 'Go to saved review position'
     && /^(\u2013|\\d+) \\/ \\d+$/.test(document.querySelector('#change-count').textContent)
     && !!document.querySelector('[data-mark-style]');`],
   ["chrome toolbar change counter follows step", "", `
@@ -3242,8 +3242,8 @@ export const CHECKS = [
     store.import(JSON.stringify({meta:{version:5},board:{background:'#ffffff'}}));
     if(store.get().colors['board.background'][0]!==1)return 'blocked import';
     store.reset();if(JSON.stringify(store.get())!==JSON.stringify(KrAppearance.defaults()))return 'blocked reset';
-    const toggle=document.querySelector('[data-theme-toggle]'),before=KRTheme.get(),palette=JSON.stringify(store.get().colors);
-    toggle.focus();toggle.click();
+    const toggle=document.querySelector('[data-theme-set='+(KRTheme.get()==='dark'?'light':'dark')+']'),before=KRTheme.get(),palette=JSON.stringify(store.get().colors);
+    toggle.closest('details').open=true; toggle.focus();toggle.click();
     return KRTheme.get()!==before&&document.activeElement===toggle&&JSON.stringify(store.get().colors)===palette;
   `,{beforeStartup:`Storage.prototype.getItem=Storage.prototype.setItem=function(){throw new DOMException('Blocked','SecurityError')};`}],
   ["SCH6 single selected change retains themed action cues", "", `
@@ -3294,12 +3294,12 @@ export const CHECKS = [
     await applyState({p:1,v:'board',m:mode}); fit();
     if (S.m!==mode || !document.querySelector('#stage svg')) return 'mode '+mode;
   }
-  const theme=KRTheme.get(); document.querySelector('[data-theme-toggle]').click();
+  const theme=KRTheme.get(); document.querySelector('[data-theme-set='+(theme==='dark'?'light':'dark')+']').click();
   if (KRTheme.get()===theme) return 'theme switch'; KRTheme.set(theme);
   Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});
-  copyLink();
+  document.querySelector('#report-review-bar [data-act=copy]').click();
   await new Promise(r=>setTimeout(r,100));
-  const field=document.querySelector('input.copyfield[readonly]');
+  const field=document.querySelector('#report-review-bar input[readonly]');
   if(!field || field.value!==positionLink() || document.activeElement!==field) return 'copy fallback';
   field.remove();
   const row=proj().changes.find(r=>viewOf(r)==='board');
@@ -3325,8 +3325,8 @@ export const CHECKS = [
   ["chrome desktop density matches the CAD shell contract", "p=1&v=board", `
   const height=selector=>document.querySelector(selector).getBoundingClientRect().height;
   const header=height('.report-head');
-  return (innerWidth<900 ? header>=32 : header===32) && height('#toolbar')===32
-    && height('#statusbar')===24 && height('[data-theme-toggle]')===24
+  return header===36 && height('#toolbar')===34
+    && height('#statusbar')===24 && height('.account summary')===24
     && height('#modes [data-mode]')===24 && height('#panel-tabs [role=tab]')===28
     || 'chrome heights '+JSON.stringify({header,toolbar:height('#toolbar'),status:height('#statusbar')});`],
   ["board Thermal proof", "v=board", `
@@ -3620,4 +3620,36 @@ export const CHECKS = [
     if(popup.top<t.getBoundingClientRect().bottom || popup.right>innerWidth) return 'clipped camera menu';
     menu.querySelector('[data-3d-camera=top]').click();
     return !menu.open && document.activeElement===menu.querySelector('summary');`],
+  ["bench-t2 single offline chrome and framed suppression", "#v=board", `
+    const visible = selector => [...document.querySelectorAll(selector)].filter(n => n.getBoundingClientRect().height > 0);
+    if (visible('.report-head').length !== 1 || visible('#report-review-bar').length !== 1) throw Error('duplicate or missing chrome');
+    if (document.querySelector('[data-theme-toggle]')) throw Error('duplicate Theme toggle');
+    if (document.querySelectorAll('[data-theme-set]').length !== 3) throw Error('missing theme choices');
+    if (document.querySelector('#zoombar [data-act=copy], #zoombar .goto')) throw Error('overflow controls still in toolbar');
+    document.documentElement.dataset.benchCheckTheme = KRTheme.get();
+    const menu = document.querySelector('.account'); menu.open = true;
+    const target = document.querySelector('[data-theme-set=light]'), box = target.getBoundingClientRect();
+    if (document.elementFromPoint(box.left+box.width/2,box.top+box.height/2) !== target) throw Error('theme menu clipped or covered');
+    document.querySelector('[data-theme-set=light]').click();
+    if (KRTheme.get() !== 'light') throw Error('light choice failed');
+    document.querySelector('[data-theme-set=system]').click();
+    if (KRTheme.mode() !== 'system') throw Error('system choice failed');
+    document.querySelector('[data-theme-set=dark]').click();
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+    if (menu.open) throw Error('Escape did not close menu');
+    KRTheme.set(document.documentElement.dataset.benchCheckTheme || 'dark');
+    if (document.documentElement.scrollWidth > innerWidth) throw Error('horizontal overflow');
+    const frame = document.createElement('iframe'); frame.setAttribute('sandbox','allow-scripts');
+    const result = new Promise((resolve,reject) => {
+      const timer = setTimeout(()=>reject(Error('framed chrome check timed out')),15000);
+      const receive = event => { if(event.source !== frame.contentWindow || !event.data?.benchChrome) return;
+        clearTimeout(timer); removeEventListener('message',receive); resolve(event.data.benchChrome); };
+      addEventListener('message',receive);
+    });
+    frame.srcdoc = document.documentElement.outerHTML + '<script>addEventListener("load",()=>parent.postMessage({benchChrome:[getComputedStyle(document.querySelector(".report-chrome")).display,getComputedStyle(document.querySelector("#toolbar")).display]},"*"))<\/script>';
+    frame.style.cssText='position:fixed;width:800px;height:600px;left:-2000px'; document.body.append(frame);
+    const rows = await result; frame.remove();
+    if(rows[0] !== 'none' || rows[1] === 'none') throw Error('framed report duplicated chrome or hid toolbar '+rows);
+    return true;
+  `],
 ];
