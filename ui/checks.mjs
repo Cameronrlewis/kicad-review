@@ -523,10 +523,14 @@ export const CHECKS = [
     const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
     return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
-    const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
+    const p=D.projects.findIndex(p=>p.changes.some(r=>r.kind==='footprint'&&r.action==='modified'&&r.box));
+    if(p<0) return 'fixture requires a modified footprint';
+    await applyState({p,v:'board',t:'changes'});
+    const r = proj().changes.find(r => r.kind === "footprint" && r.action === "modified" && r.box);
+    const box=boardDiff?.bounds(r.id,'head')||r.box;
     document.querySelector('#panel .card[data-id="' + r.id + '"]').click();
-    const ready = () => S.s === r.id && S.v === "board" && S.x != null && Math.abs(S.x - (r.box[0] + r.box[2]) / 2) < 0.01
-      && document.querySelector("#stage .marker.sel") !== null
+    const ready = () => S.s === r.id && S.v === "board" && S.x != null && Math.abs(S.x - (box[0] + box[2]) / 2) < 0.01
+      && (boardDiff ? document.querySelector('#stage .board-mark-label[data-id="'+r.id+'"]') !== null : document.querySelector("#stage .marker.sel") !== null)
       && document.querySelector('#panel .card[data-id="' + r.id + '"]').getAttribute("aria-selected") === "true", until = performance.now() + 5000;
     while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
     return ready();`],
@@ -793,8 +797,10 @@ export const CHECKS = [
     c.dispatchEvent(e); await new Promise(r => setTimeout(r, 300));
     return (S.s === null && !e.defaultPrevented) || JSON.stringify([S.s, e.defaultPrevented]);`],
   ["selecting a row does not rebuild the panel", "p=1", `
-    const list = document.querySelector("#panel .cards"), id = document.querySelector("#panel .card").dataset.id;
-    goTo(id); await new Promise(r => setTimeout(r, 1500));
+    const row=proj().changes.find(r=>onView(r,S.v)&&rowBox(r,'head'));
+    if(!row) return 'fixture requires a change on the current view';
+    const list = document.querySelector("#panel .cards"), id = row.id;
+    await goTo(id);
     return (list.isConnected && document.querySelector('#panel .card[data-id="' + id + '"]').getAttribute("aria-selected") === "true") || "rebuilt";`],
   ["a cancelled wipe drag stops tracking", "p=1&v=board&m=wipe", `
     await new Promise(r => setTimeout(r, 800));
