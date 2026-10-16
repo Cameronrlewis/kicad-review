@@ -211,7 +211,8 @@ body.shot .report-head { display:none; }
 #shortcuts dt { font-family:monospace; font-weight:600; }
 #shortcuts dd { margin:0; }
 #statusbar { font-variant-numeric:tabular-nums; }
-.vp.board-cursor::after { content:""; position:absolute; pointer-events:none; left:var(--cursor-x); top:var(--cursor-y); width:18px; height:18px; transform:translate(-50%,-50%); background:linear-gradient(#c2c2c2,#c2c2c2) center/1px 100% no-repeat,linear-gradient(#c2c2c2,#c2c2c2) center/100% 1px no-repeat; }
+.board-cross { display:none; position:absolute; left:0; top:0; pointer-events:none; width:18px; height:18px; background:linear-gradient(#c2c2c2,#c2c2c2) center/1px 100% no-repeat,linear-gradient(#c2c2c2,#c2c2c2) center/100% 1px no-repeat; }
+.vp.board-cursor > .board-cross { display:block; }
 @media(max-width:700px) { #shortcuts dl { grid-template-columns:1fr; } #shortcuts dd { margin-bottom:8px; } }
 
 #statusbar > span { white-space:nowrap; }
@@ -219,7 +220,7 @@ body.shot .report-head { display:none; }
 
 /* Schematic grid belongs to the viewport, never to a revision stack. */
 .vp.sheet { background:var(--sch-paper); }
-.sch-grid { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+.sch-grid { position:absolute; left:0; top:0; will-change:transform; width:100%; height:100%; pointer-events:none; }
 .vp.sheet .world { z-index:1; }
 .status-coordinates { display:flex; align-items:center; gap:var(--space-3); }
 [data-sch-coordinates], [data-sch-grid] { font-family:var(--font-mono); font-variant-numeric:tabular-nums; white-space:nowrap; }

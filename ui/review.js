@@ -620,7 +620,7 @@ function apply() {
   onApply();
   if (boardDiff) { boardDiff.render(); drawPins(); }
   else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
-  const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
+  setText($("#zoombar .pct"), Math.round(S.z / PX * 100) + "%");
   drawSchematicGrids(); updateSchematicStatus();
 }
 // KiCad 10: eeschema/eeschema_settings.cpp:705-706 defaults to 50 mil (index 1);
@@ -640,26 +640,29 @@ function schematicGridPlan(width, height) {
   const step = physical*stride, mod = v => ((v%step)+step)%step;
   return {step, x:mod(width/2-S.x*S.z), y:mod(height/2-S.y*S.z)};
 }
+// Dots are painted once per (size, dpr, step) into a canvas the size of the viewport; a pan only
+// moves that canvas by the lattice phase (an integer-px transform), so it costs no repaint.
 function drawSchematicGrids() {
   if (!placed()) return;
   for (const canvas of document.querySelectorAll("#stage .sch-grid")) {
     const vp = canvas.parentElement, w = vp.clientWidth, h = vp.clientHeight, dpr = devicePixelRatio || 1;
-    const width = Math.round(w*dpr), height = Math.round(h*dpr);
-    if (canvas.width !== width) canvas.width = width;
-    if (canvas.height !== height) canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
-    if (S.grid === false || !w || !h) continue;
-    const {step,x,y} = schematicGridPlan(w,h);
-    ctx.fillStyle = getComputedStyle(vp).getPropertyValue("--sch-ink-b5b5b5").trim() || "#b5b5b5";
-    ctx.beginPath();
-    for (let px=x; px<w; px+=step) for (let py=y; py<h; py+=step) ctx.rect(Math.round(px),Math.round(py),1,1);
-    ctx.fill();
+    if (S.grid === false || !w || !h) { if (canvas.dataset.key) { canvas.getContext("2d").clearRect(0,0,canvas.width,canvas.height); canvas.dataset.key = ""; } continue; }
+    const {step,x,y} = schematicGridPlan(w,h), key = [w,h,dpr,step].join();
+    if (canvas.dataset.key !== key) {
+      canvas.dataset.key = key; canvas.width = Math.round(w*dpr); canvas.height = Math.round(h*dpr);
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+      ctx.fillStyle = getComputedStyle(vp).getPropertyValue("--sch-ink-b5b5b5").trim() || "#b5b5b5";
+      ctx.beginPath();
+      for (let px=0; px<w; px+=step) for (let py=0; py<h; py+=step) ctx.rect(Math.round(px),Math.round(py),1,1);
+      ctx.fill();
+    }
+    canvas.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
   }
 }
 function updateSchematicStatus() { updateStatus(); }
 const schematicResize = new ResizeObserver(() => apply());
-window.addEventListener("kr-theme-change", drawSchematicGrids);
+window.addEventListener("kr-theme-change", () => { for (const c of document.querySelectorAll("#stage .sch-grid")) c.dataset.key = ""; drawSchematicGrids(); });
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
@@ -681,6 +684,7 @@ function resetCoordinates() {
   boardCursor = null; schematicCursor = null;
   updateStatus();
 }
+const setText = (node, text) => { if (node && node.textContent !== text) node.textContent = text; };   // an unchanged HUD value must not dirty layout
 function updateStatus() {
   const sheet = String(S.v).startsWith("sheet:");
   const a = Appearance.get(), units = S.v === "board" ? a.units : sheet ? S.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
@@ -690,26 +694,29 @@ function updateStatus() {
   const anchor = deltaAnchor;
   const p = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world, dx = p && anchor ? p[0]-anchor[0] : NaN, dy = p && anchor ? p[1]-anchor[1] : NaN;
   const values = {x:p?.[0], y:p?.[1], dx, dy, dist:Math.hypot(dx,dy)};
-  for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); if (node) node.textContent = fmt(value); }
+  for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); setText(node, fmt(value)); }
   const rows = [...document.querySelectorAll("#panel .card[data-id]")], at = rows.findIndex(e => e.dataset.id === S.s);
-  const change = $("#statusbar [data-change]"); if (change) change.textContent = `${at < 0 ? 0 : at+1}/${rows.length}`;
-  const zoom = $("#statusbar [data-zoom]"); if (zoom) zoom.textContent = placed() ? (S.z / PX).toFixed(2) : "—";
-  const unit = $("#statusbar [data-units]"); if (unit) unit.textContent = units;
+  const change = $("#statusbar [data-change]"); setText(change, `${at < 0 ? 0 : at+1}/${rows.length}`);
+  const zoom = $("#statusbar [data-zoom]"); setText(zoom, placed() ? (S.z / PX).toFixed(2) : "—");
+  const unit = $("#statusbar [data-units]"); setText(unit, units);
   const coords = $("#statusbar .status-coordinates"); coords?.toggleAttribute("data-sch-coordinates", sheet);
   const grid = $("#statusbar [data-grid]");
   if (grid) {
     grid.parentElement.toggleAttribute("data-sch-grid", sheet);
-    grid.textContent = S.v === "board" ? fmt(a.grid.size) : sheet ? S.grid === false ? "off" : fmt(SCHEMATIC_GRID_MM) : "—";
+    setText(grid, S.v === "board" ? fmt(a.grid.size) : sheet ? S.grid === false ? "off" : fmt(SCHEMATIC_GRID_MM) : "—");
   }
 }
 function updateCoordinates(vp, event) {
   if (!placed() || !vp.isConnected || S.v === "3d" || !vp.clientWidth || !vp.clientHeight) { resetCoordinates(); return; }
   boardCursor = {vp, clientX:event.clientX, clientY:event.clientY, world:toWorld(vp,event)};
   if (String(S.v).startsWith("sheet:")) schematicCursor = schematicPoint(vp,event);
-  const r = vp.getBoundingClientRect();
+  const r = vp.getBoundingClientRect(), board = S.v === "board";
   for (const pane of document.querySelectorAll("#stage .vp")) {
-    pane.style.setProperty("--cursor-x", `${event.clientX-r.left}px`); pane.style.setProperty("--cursor-y", `${event.clientY-r.top}px`);
-    pane.classList.toggle("board-cursor", S.v === "board");
+    pane.classList.toggle("board-cursor", board);
+    if (!board) continue;
+    // One small element moved by transform: a CSS variable on the pane would restyle every descendant.
+    const cross = pane.querySelector(":scope > .board-cross") || pane.appendChild(Object.assign(document.createElement("div"), {className:"board-cross"}));
+    cross.style.transform = `translate(${event.clientX-r.left-9}px,${event.clientY-r.top-9}px)`;
   }
   updateStatus();
 }
