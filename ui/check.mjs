@@ -1,5 +1,6 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
-// Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark] [--width N] [--dpr N] [--offline]
+// Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark|--theme dark|light] [--width N] [--dpr N] [--offline]
+// Theme proof: --persist-check --vision none|deuteranopia|protanopia|tritanopia --appearance-fixture theme.json --mark-style outline|recolour
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,7 +9,17 @@ import { CHECKS } from "./checks.mjs";
 
 const args = process.argv.slice(2);
 const opt = k => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : null; };
-const dark = args.includes("--dark"); if (dark) args.splice(args.indexOf("--dark"), 1);
+const legacyDark = args.includes("--dark"); if (legacyDark) args.splice(args.indexOf("--dark"), 1);
+const theme = opt("--theme") || (legacyDark ? "dark" : "light");
+if (!["dark", "light"].includes(theme)) throw new Error("Invalid theme");
+const dark = theme === "dark";
+const vision = opt("--vision") || "none";
+if (!["none", "deuteranopia", "protanopia", "tritanopia"].includes(vision)) throw new Error("Invalid vision type");
+const persistCheck = args.includes("--persist-check"); if (persistCheck) args.splice(args.indexOf("--persist-check"), 1);
+const fixturePath = opt("--appearance-fixture"), markStyle = opt("--mark-style") || "outline";
+if (!["outline", "recolour"].includes(markStyle)) throw new Error("Invalid mark style");
+const fixtureText = fixturePath ? readFileSync(resolve(fixturePath), "utf8") : null;
+if (fixtureText !== null && Buffer.byteLength(fixtureText, "utf8") > 1048576) throw new Error("Theme exceeds 1 MiB");
 const width = Number(opt("--width") || 1920);
 const dpr = Number(opt("--dpr") || 1);
 const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
@@ -28,8 +39,9 @@ let tab;
 for (let i = 0; i < 50 && !tab; i++) { await sleep(200); try { tab = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === "page"); } catch {} }
 if (!tab) { console.error(`FAIL startup -> Chrome did not start on port ${port}`); process.exit(1); }
 const ws = new WebSocket(tab.webSocketDebuggerUrl); await Promise.race([new Promise(r => ws.onopen = r), new Promise((_, reject) => setTimeout(() => reject(new Error("WebSocket open timed out")), timeout).unref())]);
-let id = 0; const pend = {}, errors = [];
+let id = 0, navigations = 0; const pend = {}, errors = [];
 ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
+  if (m.method === "Page.frameNavigated" && !m.params.frame.parentId) navigations++;
   if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate(`window.KRTheme.set(${JSON.stringify(m.params.payload)}); window.__themeFlipped()`)); }
   if (m.method === "Runtime.consoleAPICalled") {
     const text = m.params.args.map(a => a.value ?? "").join(" ");
@@ -44,6 +56,27 @@ await send("Emulation.setDeviceMetricsOverride", { width, height: 1080, deviceSc
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 await send("Page.enable");
+const visionResult = await send("Emulation.setEmulatedVisionDeficiency", { type: vision });
+if (visionResult.error) throw new Error(visionResult.error.message);
+await send("Page.addScriptToEvaluateOnNewDocument", { source:
+  `window.__appearanceFixtureText=${JSON.stringify(fixtureText)};window.__appearanceMarkStyle=${JSON.stringify(markStyle)};` });
+// A reload destroys the old execution context. Retry only that navigation race,
+// never report exceptions or other protocol errors.
+const reloadReady = async () => {
+  const previous = navigations, deadline = Date.now() + timeout;
+  await send("Page.reload");
+  while (Date.now() < deadline) {
+    if (navigations > previous) {
+      const response = await send("Runtime.evaluate", {expression:"window.reviewReady === true", returnByValue:true});
+      if (response.error && !/Cannot find context|Execution context was destroyed/.test(response.error.message)) throw new Error(response.error.message);
+      const r = response.result;
+      if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
+      if (r?.result?.value === true) return;
+    }
+    await sleep(50);
+  }
+  throw new Error("reload readiness timed out: " + JSON.stringify((await evaluate("({url:location.href,ready:window.reviewReady,state:document.readyState})")).result?.value) + " " + errors.join(' | '));
+};
 if (offline) {
   await send("Network.enable");
   await send("Network.setBlockedURLs", { urls:["http://*", "https://*"] });
@@ -56,7 +89,7 @@ let failed = 0;
 const readyTimeout = Math.max(1000, Number(process.env.CHECK_TIMEOUT || 15000) - 1000);
 for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].includes(filter))) {
   console.log(`RUN ${name}`);
-  let timer, body, startupScript;
+  let timer, body, startupScript, initialAppearance;
   try {
     body = (async () => {
   if (name === "board geometry pin flipped Wipe Thermal") await send("Emulation.setDeviceMetricsOverride", {width,height:1080,deviceScaleFactor:2,mobile:false});
@@ -109,12 +142,31 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
       await evaluate('window.__boardInputDone=true');
     } else if(prepare.exceptionDetails) throw Error(prepare.exceptionDetails.exception?.description);
   }
+  if (name === "Themes reload seed" && persistCheck) initialAppearance = (await evaluate("localStorage.getItem('kr.appearance.v1')")).result.value;
   let r = await evaluate(`(async () => { ${expr} })()`);
+  if (r.result?.value === true && name === "Themes reload seed" && persistCheck) {
+    const expected = (await evaluate("JSON.stringify(appearanceStore().get())")).result.value;
+    for (const view of ["board", "schematic"]) {
+      if (view === "schematic") {
+        const prepared = await evaluate("(async()=>{const sheet=proj().sheets.find(s=>s.svg);if(!sheet)throw Error('fixture needs schematic');await applyState({v:'sheet:'+sheet.path,m:'side'});return true})()");
+        if (prepared.exceptionDetails) throw new Error(prepared.exceptionDetails.exception?.description);
+      }
+      await reloadReady();
+      const restored = (await evaluate("JSON.stringify(appearanceStore().get())")).result?.value;
+      if (restored !== expected) {
+        const a=JSON.parse(expected), b=JSON.parse(restored);
+        throw new Error("Appearance did not survive " + view + " reload: " + Object.keys(a).filter(k=>JSON.stringify(a[k])!==JSON.stringify(b[k])).join(', '));
+      }
+      const rendered = await evaluate(`(()=>{
+        if(S.v==='board')return appearanceBoards.size===2&&[...appearanceBoards].every(b=>b.appearance.colors['board.copper.f'][0]===.12);
+        return appearanceSchematics.size===2&&[...appearanceSchematics].every(s=>s.style.getPropertyValue('--sch-ink-009600').includes('18,52,86'));
+      })()`);
+      if (rendered.result?.value !== true) throw new Error("Both revisions did not restore " + view + " palette");
+    }
+  }
   if (r.result?.value === true && lifecycle.afterReload) {
-    await send("Page.reload");
-    await sleep(100);
-    const ready = await evaluate(`new Promise((r,reject)=>{const deadline=performance.now()+${readyTimeout};const poll=()=>window.reviewReady?r(true):performance.now()>deadline?reject(new Error('reload timed out')):setTimeout(poll,50);poll()})`);
-    r = ready.exceptionDetails ? ready : await evaluate(`(async () => { ${lifecycle.afterReload} })()`);
+    await reloadReady();
+    r = await evaluate(`(async () => { ${lifecycle.afterReload} })()`);
   }
   if (r.result?.value === "skip" && !errors.length) return ["SKIP " + name, noSkip];
   const ok = r.result?.value === true && !errors.length;
@@ -123,7 +175,11 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
     const [line, bad] = await Promise.race([body, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), Number(process.env.CHECK_WALL_TIMEOUT || 60000)); })]);
     console.log(line); if (bad) failed++;
   } catch (e) { console.log(`FAIL ${name} -> ${e.message}`); failed++; await body.catch(() => {}); }
-  finally { clearTimeout(timer); if (startupScript) await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); }
+  finally {
+    clearTimeout(timer);
+    if (initialAppearance !== undefined) await evaluate(`localStorage.${initialAppearance === null ? "removeItem('kr.appearance.v1')" : `setItem('kr.appearance.v1',${JSON.stringify(initialAppearance)})`}`);
+    if (startupScript) await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript});
+  }
 }
 if (shot) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
 ws.close();

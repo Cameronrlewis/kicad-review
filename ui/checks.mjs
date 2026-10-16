@@ -3153,4 +3153,65 @@ export const CHECKS = [
       ||encodeState(decodeState('#'+address))!==address) return 'complete address round trip';
     return true;
   `],
+
+  ["Themes reload seed", "v=board&m=side", `
+    const p=D.projects.findIndex(p=>p.board.geometry?.base&&p.board.geometry?.head);
+    if(p<0)return 'fixture needs both geometry revisions';
+    await applyState({p,v:'board',m:'side'});
+    const store=appearanceStore(), next=store.get();
+    next.colors['board.copper.f']=[.12,.34,.56,.78];
+    next.colors['schematic.wire']=[18/255,52/255,86/255,1];
+    next.layerOpacity['F.Cu']=.37;next.objectOpacity.zones=.29;
+    next.markStyle='recolour';store.set(next);return true;
+  `],
+  ...['board','schematic'].map(type=>['Themes proof '+type,'v=board&m=side',`
+    const p=D.projects.findIndex(p=>p.board.geometry?.base&&p.board.geometry?.head);
+    if(p<0)return 'fixture needs both geometry revisions';
+    await applyState({p,v:'board',m:'side'});
+    const sheet=proj().sheets.find(s=>s.svg);
+    if('${type}'==='schematic'&&!sheet)return 'fixture needs schematic';
+    S.v='${type}'==='board'?'board':'sheet:'+sheet.path;
+    S.s=null;S.x=S.y=S.z=null;
+    const store=appearanceStore();
+    // Family runs also exercise defaults. Screenshot runs always supply a fixture.
+    if(typeof window.__appearanceFixtureText==='string')store.import(window.__appearanceFixtureText);
+    else store.reset();
+    store.patch({markStyle:window.__appearanceMarkStyle||'outline'});
+    await draw();fit();renderNav();renderModes();
+    const changed=proj().changes.find(r=>onView(r,S.v)&&rowBox(r,'head'));
+    if(!changed)return 'fixture needs actual changed objects';
+    const b=rowBox(changed,'head');
+    setT({x:(b[0]+b[2])/2,y:(b[1]+b[3])/2,z:'${type}'==='board'?65:18});
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    const resolved=KrAppearance.resolve(store.get()), bg=resolved['${type}'==='board'?'boardBackground':'schematicBackground'];
+    const marks=resolved.marks['${type}'];
+    for(const [action,mark] of Object.entries(marks)) {
+      if(mark.color[3]!==1||mark.halo[3]!==1||KrAppearance.contrast(mark.color,bg)<3)return 'low contrast '+action;
+      const legend=document.querySelector('#stage '+('${type}'==='board'?'.board-mark-key':'.diff-mark-legend > span')+'[data-action="'+action+'"]');
+      if(!legend||!legend.textContent.includes(mark.word)||legend.dataset.glyph!==mark.glyph||legend.dataset.dash!==BoardMarks.styles[action].dash)return 'missing legend '+action;
+      const box=legend.getBoundingClientRect();if(box.left<0||box.right>innerWidth||box.bottom>innerHeight)return 'clipped legend '+action;
+    }
+    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+      const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
+      return r.width>0&&r.height>0&&r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
+    });
+    return visible||'no visible actual change mark';
+  `]),
+  ["Themes invalid import error panel proof", "v=board&t=appearance", `
+    const input=document.querySelector('[data-appearance-file]'),store=appearanceStore(),before=JSON.stringify(store.get());
+    const transfer=new DataTransfer();transfer.items.add(new File(['{"meta":{"version":5},"board":{"background":"url(bad)"}}'],'invalid.json',{type:'application/json'}));
+    input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(r=>setTimeout(r,100));
+    const error=document.querySelector('[data-appearance-error]');
+    return !error.hidden&&error.textContent.includes('board.background')&&JSON.stringify(store.get())===before||'missing atomic inline error';
+  `],
+  ["Themes blocked storage import reset and chrome toggle", "v=board&t=appearance", `
+    const store=appearanceStore();
+    store.import(JSON.stringify({meta:{version:5},board:{background:'#ffffff'}}));
+    if(store.get().colors['board.background'][0]!==1)return 'blocked import';
+    store.reset();if(JSON.stringify(store.get())!==JSON.stringify(KrAppearance.defaults()))return 'blocked reset';
+    const toggle=document.querySelector('[data-theme-toggle]'),before=KRTheme.get(),palette=JSON.stringify(store.get().colors);
+    toggle.focus();toggle.click();
+    return KRTheme.get()!==before&&document.activeElement===toggle&&JSON.stringify(store.get().colors)===palette;
+  `,{beforeStartup:`Storage.prototype.getItem=Storage.prototype.setItem=function(){throw new DOMException('Blocked','SecurityError')};`}],
 ];
