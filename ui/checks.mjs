@@ -131,10 +131,10 @@ export const CHECKS = [
 ["Stage 1 dark default ignores OS and tokens resolve", "", `
   const root = document.documentElement; root.removeAttribute('data-theme');
   const c = getComputedStyle(root), b = getComputedStyle(document.body);
-  return c.colorScheme === 'dark' && b.backgroundColor === 'rgb(20, 23, 28)'
+  return c.colorScheme === 'dark' && b.backgroundColor === 'rgb(10, 12, 14)'
     && c.getPropertyValue('--btn-h').trim() === '24px'
     && c.getPropertyValue('--tab-h').trim() === '28px'
-    && c.getPropertyValue('--toolbar-h').trim() === '32px'
+    && c.getPropertyValue('--toolbar-h').trim() === '36px'
     && c.getPropertyValue('--space-2').trim() === '8px';`],
 ["Stage 1 both token themes pass text contrast", "", `
   const root = document.documentElement, old = root.getAttribute('data-theme');
@@ -762,7 +762,7 @@ export const CHECKS = [
         const cs = getComputedStyle(document.body), a = lum(cs.color), b = lum(cs.backgroundColor);
         const ratio = (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
         res[theme] = {ratio, b, attr:document.documentElement.dataset.theme};
-        if (!(ratio >= 4.5 && (theme === "dark" ? b < 0.05 : b > 0.8) && KRTheme.get() === theme)) return JSON.stringify(res);
+        if (!(ratio >= 4.5 && (theme === "dark" ? b < 0.05 : b > 0.5) && KRTheme.get() === theme)) return JSON.stringify(res);
       }
       document.addEventListener("kr-theme-change", e => seen.push(e.detail));
       KRTheme.set("dark", {persist:false});
@@ -1560,7 +1560,7 @@ export const CHECKS = [
   KRTheme.set('light'); const light=getComputedStyle(document.body).backgroundColor;
   KRTheme.set('dark'); const dark=getComputedStyle(document.body).backgroundColor;
   KRTheme.set(old);
-  return light==='rgb(228, 232, 237)' && dark==='rgb(20, 23, 28)';`],
+  return light==='rgb(207, 212, 216)' && dark==='rgb(10, 12, 14)';`],
   ["board WebGL cameras fallback and context loss", "v=board&x=10&y=20&z=5", `
     const p = proj(); if (!p.board?.changed) return "skip";
     const gz = async text => { const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(buf))); };

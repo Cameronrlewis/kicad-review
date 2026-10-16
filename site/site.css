@@ -1,10 +1,10 @@
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: var(--fs-md)/var(--lh-base) var(--font-ui); }
+body { margin: 0; background: var(--bg); color: var(--text); font: var(--fs-body)/var(--lh-base) var(--font-ui); font-variant-numeric: tabular-nums; }
 a { color: var(--accent); }
 a.btn { text-decoration: none; display: inline-block; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .top { height: var(--toolbar-h); display: flex; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-4); background: var(--toolbar-bg); border-bottom: 1px solid var(--line); min-width: 0; }
-.product { color: var(--text); font-weight: var(--fw-semibold); text-decoration: none; white-space: nowrap; }
+.product { color: var(--text); font: 700 var(--fs-md)/1 var(--font-cap); letter-spacing: .14em; text-transform: uppercase; text-decoration: none; white-space: nowrap; }
 .crumbs { display: flex; gap: var(--sp-2); min-width: 0; color: var(--muted); }
 .crumbs span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crumbs span + span::before { content: "/"; margin-right: var(--sp-2); }
@@ -27,7 +27,7 @@ h2 { font-size: var(--fs-lg); }
 .table-scroll { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); }
 .table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 .table th, .table td { height: var(--row-h); padding: var(--sp-0) var(--td-pad-x); text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
-.table th { height: var(--th-h); position: sticky; top: 0; background: var(--surface-2); color: var(--muted); font-size: var(--fs-xs); font-weight: var(--fw-semibold); border-bottom-color: var(--line-strong); }
+.table th { height: var(--th-h); position: sticky; top: 0; background: var(--surface-2); color: var(--muted); font: var(--fw-semibold) var(--fs-cap)/1 var(--font-cap); letter-spacing: var(--cap-track); text-transform: uppercase; border-bottom-color: var(--line); }
 .table tbody tr:hover { background: var(--row-hover); }
 .table .numeric { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .status { display: inline-flex; align-items: center; gap: var(--sp-1); min-height: var(--badge-h); white-space: nowrap; padding: 0 var(--sp-1); border: 1px solid currentColor; border-radius: var(--r-1); font: var(--fw-semibold) var(--fs-xs)/var(--lh-base) var(--font-mono); }

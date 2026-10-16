@@ -1,12 +1,12 @@
 /* Component */
 :root {
-  --nav-w: 260px; --panel-w: 380px; --bar-h: 40px;
+  --nav-w: 260px; --panel-w: 380px; --bar-h: var(--tbar-h);
   --chip-bg: var(--surface-2); --card-bg: var(--surface); --card-sel: var(--accent);
   --marker-halo: #ffffff; --marker-core: #000000;   /* change markers sit on KiCad colours: halo + core */
   --tint-del: #d91a26; --tint-add: #1a9933; --tint-both: #000000;   /* overlay filter colours (review.html #tint-*), same in both themes */
 }
 body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--bar-h) 1fr auto; background: var(--bg);
-       color: var(--text); font: 13px/1.4 var(--font-ui); }
+       color: var(--text); font: var(--fs-body)/var(--lh-base) var(--font-ui); font-variant-numeric: tabular-nums; }
 #app { display: grid; grid-template-columns: var(--nav-w) 1fr var(--panel-w); min-height: 0; }
 @media (max-width: 1500px) { :root { --nav-w: 220px; --panel-w: 320px; } }
 #hdr { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4);
@@ -17,7 +17,7 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .verdict.fail { color: var(--removed); }
 .verdict.pass { color: var(--added); }
 #nav { overflow: auto; background: var(--surface); border-right: 1px solid var(--line); padding: var(--space-2); }
-#nav h3, #layers h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: var(--space-3) 0 var(--space-1); }
+#nav h3, #layers h3 { font-family: var(--font-cap); font-size: var(--fs-cap); font-weight: 600; text-transform: uppercase; letter-spacing: var(--cap-track); color: var(--muted); margin: var(--space-3) 0 var(--space-1); }
 #layers h4 { font-size: 12px; font-weight: 500; margin: var(--space-2) 0 var(--space-1); color: var(--text); }
 #layers label { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) 8px; cursor: pointer; }
 #layers label:hover { background: var(--surface-2); border-radius: var(--radius); }
@@ -226,7 +226,7 @@ body.shot .report-head { display:none; }
 
 /* Stage 3 task 1: CAD dock shell. Header row, toolbar row, docks, status bar. */
 :root { --nav-w:220px; --panel-w:320px; }
-body { height:100dvh; overflow:hidden; grid-template-rows:auto 32px minmax(0,1fr) var(--statusbar-h); }
+body { height:100dvh; overflow:hidden; grid-template-rows:auto var(--bar-h) minmax(0,1fr) var(--statusbar-h); }
 #toolbar { display:flex; align-items:center; gap:var(--space-2); min-width:0; padding:0 8px; overflow-x:auto; background:var(--surface-2); border-bottom:1px solid var(--line); }
 #toolbar > *, #modes > *, #zoombar > * { flex-shrink:0; }
 #modes, #zoombar, #change-nav { display:flex; align-items:center; gap:4px; padding:0; border:0; background:transparent; }
