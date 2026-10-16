@@ -3388,6 +3388,15 @@ with TemporaryDirectory() as t:
         with contextlib.redirect_stderr(err):
             bad = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
         assert "geometry" not in bad and "geometry unavailable" in err.getvalue()
+        # An unchanged board embeds no geometry; any parser error falls back to SVG.
+        write(t, {"base/G/G.kicad_pcb": GEOMETRY_FIXTURE, "head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        same = {}
+        assert "geometry" not in kr.build_project(pr, same, kr.DEFAULT_SETTINGS)["board"] and not same
+        os.remove("base/G/G.kicad_pcb")
+        err = io.StringIO()
+        with patch("kicad_review.board_geometry", side_effect=KeyError("unexpected")), contextlib.redirect_stderr(err):
+            odd = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
+        assert "geometry" not in odd and "geometry unavailable" in err.getvalue()
     finally:
         patch.stopall()
         os.chdir(old_cwd)

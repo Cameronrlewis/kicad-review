@@ -3,6 +3,7 @@
 
 Standard library only. Subcommands are called from the reusable workflow.
 """
+import filecmp
 import argparse
 import datetime
 import http.client
@@ -2428,10 +2429,12 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
     geometry = {}
+    pcbs = {side: posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb") for side in ("base", "head")}
+    same_board = all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
     for side in ("base", "head"):
-        pcb = posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb")
+        pcb = pcbs[side]
         geometry[side] = None
-        if os.path.isfile(pcb):
+        if not same_board and os.path.isfile(pcb):
             try:
                 scene = board_geometry(pcb)
                 # Child pads, text and graphics use their owning footprint's UUID;
@@ -2445,8 +2448,8 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                     change_id = ids.get((kind, uid))
                     obj["changeIds"] = [change_id] if change_id else []
                 geometry[side] = add_blob(blobs, json.dumps(scene, separators=(",", ":"), sort_keys=True))
-            except (ValueError, IndexError, TypeError) as exc:
-                print(f"{pcb}: geometry unavailable; retaining SVG: {exc}", file=sys.stderr)
+            except Exception as exc:  # any unforeseen board construct falls back to SVG
+                print(f"{pcb}: geometry unavailable; retaining SVG: {exc!r}", file=sys.stderr)
     if any(geometry.values()):
         board["geometry"] = geometry
     parts = None
