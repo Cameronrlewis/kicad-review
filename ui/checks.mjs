@@ -3508,4 +3508,78 @@ export const CHECKS = [
     Appearance.patch({activeLayer:null,flip:false});check('F.Cu');
     return boardView.renderers.length===2 && uploads===boardView.renderers.map(r=>r.stats.uploads).join() && JSON.stringify(scene)===saved;
   `],
+  ["bench-t5 right dock resize collapse wide and table", "t=checks", `
+    const panel=document.getElementById('panel'), app=document.getElementById('app'), splitter=document.getElementById('right-splitter');
+    splitter.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
+    if (panel.getBoundingClientRect().width !== 700 || localStorage.getItem('kr.rightDockWidth') !== '700') return 'resize persistence';
+    document.querySelector('[data-panel-wide]').click();
+    if (panel.getBoundingClientRect().width !== 360) return 'restore narrow';
+    document.querySelector('[data-panel-table]').click();
+    if (!app.classList.contains('right-table') || panel.getBoundingClientRect().right > innerWidth || panel.getBoundingClientRect().width < innerWidth / 2) return 'table geometry';
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    if (app.classList.contains('right-table') || document.activeElement !== document.querySelector('[data-panel-table]')) return 'escape';
+    document.querySelector('[data-panel-close]').click();
+    if (!app.classList.contains('right-collapsed') || panel.getBoundingClientRect().width) return 'collapse';
+    document.querySelector('[data-dock=panel]').click();
+    return !app.classList.contains('right-collapsed') && panel.getBoundingClientRect().width === 360;
+  `],
+  ["bench-t5 compact references tags and narrow columns", "", `
+    const p=proj(); p.parts={lines:[{refs:['C1','C2','C3','C4','C5','C20'],value:'100nF',mpn:'',lcsc:'',problems:['missing_lcsc','missing_mpn']}],changes:[],supplier:null};
+    S.t='parts'; resizeRightDock(360); renderPanel();
+    const row=document.querySelector('.parts-row'), refs=row.querySelector('.parts-refs');
+    if(refs.textContent!=='C1–C5, C20' || refs.title!=='C1, C2, C3, C4, C5, C20') return 'ranges';
+    const tags=[...row.querySelectorAll('.problem-tag')];
+    if(tags.map(t=>t.textContent).join()!=='LCSC,MPN' || tags.some(t=>!t.title)) return 'tags';
+    if(row.offsetHeight>35 || getComputedStyle(row.children[4]).display!=='none') return 'narrow';
+    document.querySelector('[data-panel-wide]').click();
+    if(getComputedStyle(document.querySelector('.parts-row').children[4]).display==='none') return 'wide columns';
+    document.querySelector('[data-panel-table]').click();
+    document.querySelector('[data-panel-table]').click();
+    if(document.getElementById('app').classList.contains('right-table')) return 'close table';
+    document.querySelector('[data-panel-close]').click();
+    const stage=document.getElementById('stage').getBoundingClientRect();
+    return stage.right===innerWidth && document.documentElement.scrollWidth===innerWidth;
+  `],
+  ["bench-t5 changes and checks search sort group", "p=1&t=checks", `
+    const search=document.querySelector('[data-list-search=checks]');search.value='no-such-finding-123';search.dispatchEvent(new Event('input'));
+    if(document.querySelectorAll('.viol').length) return 'checks search';
+    document.querySelector('[data-list-search=checks]').value='';document.querySelector('[data-list-search=checks]').dispatchEvent(new Event('input'));
+    const group=document.querySelector('[data-list-group=checks]'); group.value='severity'; group.dispatchEvent(new Event('change'));
+    if(S.checks.group!=='severity') return 'checks grouping';
+    S.t='changes';renderPanel();
+    const sort=document.querySelector('[data-list-sort=changes]');sort.value='reference';sort.dispatchEvent(new Event('change'));
+    const cg=document.querySelector('[data-list-group=changes]');cg.value='kind';cg.dispatchEvent(new Event('change'));
+    const q=document.querySelector('[data-list-search=changes]');q.value='no-such-change-123';q.dispatchEvent(new Event('input'));
+    return S.filter.sort==='reference' && S.filter.group==='kind' && !document.querySelectorAll('.card').length;
+  `],
+  ["bench-t5 proof parts wide", "v=board&m=overlay&t=parts", `
+    if(!proj().parts) return 'skip';
+    resizeRightDock(700); renderPanel(); fit();
+    return document.querySelector('.parts-table') && document.documentElement.scrollWidth===innerWidth;
+  `],
+  ["bench-t5 proof checks", "v=board&m=overlay&t=checks", `
+    resizeRightDock(360);renderPanel(); fit();
+    return document.documentElement.scrollWidth===innerWidth;
+  `],
+
+  ["bench-t5 persisted dock width survives reload", "", `
+    resizeRightDock(480); return localStorage.getItem('kr.rightDockWidth')==='480';
+  `, {afterReload:`return document.getElementById('panel').getBoundingClientRect().width===480 && document.getElementById('right-splitter').getAttribute('aria-valuenow')==='480';`}],
+
+  ["bench-t5 full checks table retains findings", "p=1&t=checks", `
+    const count=document.querySelectorAll('.viol').length;
+    document.querySelector('[data-panel-table]').click();
+    if(!document.querySelector('.checks-table') || document.querySelectorAll('.checks-table tbody tr').length!==count || document.querySelectorAll('.checks-table .viol').length!==count) return 'table rows';
+    document.querySelector('[data-panel-table]').click();
+    return !document.querySelector('.checks-table') && document.querySelectorAll('.viol').length===count;
+  `],
+  ["bench-t5 proof parts narrow", "v=board&m=overlay&t=parts", `
+    if(!proj().parts) return 'skip'; resizeRightDock(360);renderPanel(); fit();
+    return document.querySelector('.parts-table').getBoundingClientRect().right<=innerWidth;
+  `],
+  ["bench-t5 table-view proof checks", "v=board&m=overlay&t=checks", `
+    resizeRightDock(360);renderPanel();document.querySelector('[data-panel-table]').click();
+    return !!document.querySelector('.checks-table');
+  `],
+
 ];

@@ -1078,9 +1078,15 @@ function inventoryHtml() {
   const place = o => o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet);
   const q = S.filter.q.toLowerCase(), objs = (proj().objects || []).map((o, i) => ({ o, i }))
     .filter(({ o }) => !q || [o.ref, o.value, o.footprint, place(o)].some(v => String(v ?? "").toLowerCase().includes(q)));
+  const f = S.filter, groupFor = o => f.group === "action" ? changeFor(o)?.action || "unchanged" : o.kind;
+  if (f.sort) objs.sort((a, b) => String(f.sort === "kind" ? a.o.kind : a.o.ref).localeCompare(String(f.sort === "kind" ? b.o.kind : b.o.ref), undefined, {numeric:true}));
+  if (f.group) objs.sort((a, b) => groupFor(a.o).localeCompare(groupFor(b.o)));
+  let previous;
   return (objs.slice(0, 1500).map(({ o, i }) => {
     const ch = changeFor(o), view = objView(o), drawn = !!currentView(view);
-    return `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
+    const group = groupFor(o), heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
+    previous = group;
+    return heading + `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
       ${ch ? `<span class="badge ${esc(ch.action)}">${GLYPH[ch.action] ?? ""} ${esc(ch.action)}</span>` : ""}
       <div class="prop"><span>value</span><span class="new wide">${esc(o.value ?? "—")}</span></div><div class="prop"><span>footprint</span><span class="new wide">${esc(o.footprint ?? "—")}</span></div>
       <div class="more muted">${esc(place(o))}${drawn ? "" : " · drawing unchanged: no render"}</div></button>`;
@@ -1103,9 +1109,18 @@ function bindInventory() {
 }
 function cardsHtml() {
   const f = S.filter, q = f.q.toLowerCase();
-  const rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
+  let rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
     && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
-  return (rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>')
+  if (f.sort === "reference") rows.sort((a, b) => String(a.ref).localeCompare(String(b.ref), undefined, {numeric:true}));
+  if (f.sort === "kind") rows.sort((a, b) => a.kind.localeCompare(b.kind));
+  if (f.group) rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
+  let previous;
+  return (rows.slice(0, 1500).map(r => {
+    const group = f.group ? r[f.group] : null;
+    const heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
+    previous = group;
+    return heading + card(r);
+  }).join("") || '<p class="muted">No changes match.</p>')
     + (rows.length > 1500 ? `<p class="muted">showing 1500 of ${rows.length}; narrow the filter to see the rest</p>` : "");
 }
 function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
@@ -1138,18 +1153,18 @@ function renderChecks() {
       <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
       <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
-  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived));
+  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
   const totalShown = shown.length;
   const groups = new Map();
   for (const v of shown) {
-    const key = `${v.check.name}\u0000${v.type}`;
-    if (!groups.has(key)) groups.set(key, { check: v.check, type: v.type, violations: [] });
+    const key = state.group === "severity" ? v.severity : state.group === "check" ? v.check.name : `${v.check.name}\u0000${v.type}`;
+    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? v.check.title : v.type, violations: [] });
     groups.get(key).violations.push(v);
   }
   const groupHtml = [...groups.values()].sort((a, b) => {
     const an = a.violations.some(v => v.new), bn = b.violations.some(v => v.new);
     const ae = a.violations.some(v => v.severity === "error"), be = b.violations.some(v => v.severity === "error");
-    return (bn - an) || (be - ae) || a.type.localeCompare(b.type);
+    return (state.sort === "rule" ? a.type.localeCompare(b.type) : (bn - an) || (be - ae) || a.type.localeCompare(b.type));
   }).map(g => {
     const vs = g.violations.sort((a, b) => (b.new - a.new) || ((a.severity === "error") ? -1 : 1) - ((b.severity === "error") ? -1 : 1));
     const newCount = vs.filter(v => v.new).length, errors = vs.some(v => v.severity === "error");
@@ -1159,7 +1174,7 @@ function renderChecks() {
         ${v.new ? '<span class="new-tag">NEW</span>' : ""}${v.waived ? '<span class="waived-tag">WAIVED</span><span class="waived-reason"></span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${v.waiver_key && !v.waived && ["erc", "drc", "parity"].includes(v.check.name) ? `<button class="waive" data-waive="${esc(v.id)}" aria-label="Waive ${esc(v.items.join(" · ") || v.description)}" aria-controls="waiver-${esc(v.id)}" aria-expanded="${S.waiveOpen === v.id}">Waive…</button>${S.waiveOpen === v.id ? `<pre class="waiver-snippet" id="waiver-${esc(v.id)}" data-waiver-snippet="${esc(v.id)}"></pre><p class="muted waiver-help">Add this to kicad-review-waivers.toml on the pull request's target branch through a pull request, fill in reason and by, then re-run this review.</p>` : ""}` : ""}${issueAnchor && !issueForAnchor(issueAnchor) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
-  return `<div class="checks-summary">${summary}</div><div class="filters checks-filters">
+  return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div><div class="filters checks-filters">
     <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
@@ -1191,11 +1206,10 @@ function digiKeyUrl(value) {
 }
 function coverageHtml(parts) {
   const c = parts.coverage; if (!c) return "";
-  const rows = Object.keys(c.head).map(f => {
+  return `<div class="bom-coverage" role="group" tabindex="0" aria-label="BOM coverage"><b>BOM</b>${Object.keys(c.head).map(f => {
     const [n, t] = c.head[f], d = c.base?.[f] ? n - c.base[f][0] : 0, pct = t ? Math.round(100 * n / t) : 100;
-    return `<tr${n < t ? ' class="short"' : ""}><th scope="row">${n < t ? '<span aria-hidden="true">⚠ </span><span class="sr-only">incomplete: </span>' : ""}${esc(f)}</th><td>${n} / ${t}</td><td>${pct}%</td><td>${d ? (d > 0 ? "+" : "") + d : ""}</td></tr>`;
-  }).join("");
-  return `<table class="bom-coverage"><caption>BOM coverage (this revision; change from base)</caption><thead><tr><th>Field</th><th>Parts</th><th>%</th><th>Δ</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<span class="coverage-item${/^(lcsc|mpn|order ready)$/i.test(f) ? " primary" : ""}${n < t ? ' short' : ''}" title="${esc(f)}: ${n} / ${t} (${pct}%) · change from base ${d > 0 ? '+' : ''}${d}"><span class="sr-only">${n < t ? 'incomplete: ' : ''}</span>${esc(f)} <b>${pct}%</b><span class="sr-only"> ${n} / ${t} ${d > 0 ? '+' : ''}${d}</span></span>`;
+  }).join("")}</div>`;
 }
 function fieldChangesHtml(parts) {
   const fc = parts.field_changes || [];
@@ -1209,12 +1223,12 @@ function renderParts() {
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
-  const shown = rows.filter(r => (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
-    .sort((a, b) => Number(blocking(b.line)) - Number(blocking(a.line)));
+  const shown = rows.filter(r => (!f.q || JSON.stringify(r.line).toLowerCase().includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
+    .sort((a, b) => f.sort === "reference" ? a.line.refs[0].localeCompare(b.line.refs[0], undefined, {numeric:true}) : Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
   const notLookedUp = [["no_mpn", "no MPN"], ["invalid_mpn", "invalid MPN"], ["run_limit", "run limit"]]
     .filter(([key]) => counts[key] > 0).map(([key, reason]) => `${esc(counts[key])} part${counts[key] === 1 ? "" : "s"} not looked up: ${reason}`).join(". ");
-  return `${coverageHtml(parts)}${parts.supplier ? `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>` : ""}
+  return `${dockListTools("parts", f)}${coverageHtml(parts)}${parts.supplier ? `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>` : ""}
     ${parts.supplier?.fetched_at ? '<p class="parts-attribution parts-age">Stock and price from DigiKey</p>' : ""}
     ${parts.supplier?.error ? `<p class="parts-lookup-error parts-age">DigiKey lookup unavailable: ${esc(parts.supplier.error)}</p>` : ""}
     ${notLookedUp ? `<p class="parts-not-looked-up parts-age">${notLookedUp}.</p>` : ""}
@@ -1243,7 +1257,7 @@ function renderParts() {
       const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
       const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn ? `<span class="parts-mpn"> ${esc(l.mpn)}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
@@ -1277,6 +1291,22 @@ function libInfoHtml(c) {
     <p>Used by: ${c.used_by.length ? c.used_by.map(ref => { const i = proj().objects?.findIndex(o => o.kind === c.kind && o.lib === `${c.lib}:${c.item}` && o.side === "head" && o.ref.split(" unit ")[0] === ref); return i >= 0 && currentView(objView(proj().objects[i])) ? `<button data-lib-object="${i}">${esc(ref)}</button>` : esc(ref); }).join(", ") : '<span class="muted">nothing in this project</span>'}</p></div>`;
 }
 
+// bench-t5: native dock controls, no dependencies.
+function referenceRanges(refs) {
+  const sorted = [...refs].sort((a, b) => a.localeCompare(b, undefined, {numeric:true})), out = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i], match = /^(.*?)(\d+)$/.exec(start);
+    let end = i;
+    if (match) while (end + 1 < sorted.length && sorted[end + 1] === match[1] + (+match[2] + end - i + 1)) end++;
+    out.push(end - i >= 2 ? `${start}–${sorted[end]}` : sorted.slice(i, end + 1).join(", "));
+    i = end;
+  }
+  return out.join(", ");
+}
+function dockListTools(name, state) {
+  const options = (values, current) => values.map(([v, label]) => `<option value="${v}" ${v === (current || "") ? "selected" : ""}>${label}</option>`).join("");
+  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "No groups"], ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
+}
 function renderPanel() {
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
@@ -1288,15 +1318,27 @@ function renderPanel() {
   const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${S.t === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${S.v === "board" && p.board.changed ? tab("appearance", "Appearance", true) : ""}${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
+  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="Toggle 700 px dock" aria-pressed="${!!S.panelWide}">700 px</button>${["parts", "checks"].includes(S.t) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${S.v === "board" && p.board.changed ? tab("appearance", "Appearance", true) : ""}${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
     (S.t === "appearance" ? '<div id="appearance-root"></div>' : S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
-    <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
+    ${dockListTools("changes", f)}
     ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
     <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
+  bindRightDock();
+  for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
+    const attribute = input.hasAttribute("data-list-search") ? "search" : input.hasAttribute("data-list-sort") ? "sort" : "group";
+    const name = input.getAttribute(`data-list-${attribute}`), state = name === "checks" ? S.checks : name === "parts" ? S.partsFilter : S.filter;
+    input[attribute === "search" ? "oninput" : "onchange"] = () => {
+      const start = input.selectionStart;
+      state[attribute === "search" ? "q" : attribute] = input.value;
+      renderPanel();
+      const next = document.querySelector(`[data-list-${attribute}="${name}"]`); next?.focus();
+      if (attribute === "search" && next?.type === "search") next.setSelectionRange(start, start);
+    };
+  }
   for (const t of document.querySelectorAll("#panel-tabs [role=tab]")) t.onclick = () => { if (t.disabled) return; S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
   const tabs = [...document.querySelectorAll("#panel-tabs [role=tab]:not(:disabled)")];
   appearanceUI?.dispose(); appearanceUI = null; if (S.t === "appearance") mountAppearance();
@@ -1462,12 +1504,16 @@ function renderZoombar() {
 }
 renderZoombar();
 function setDock(name, open) {
+  if (name === "panel") {
+    document.getElementById("app").classList.toggle("right-collapsed", !open);
+    if (!open) { S.panelTable = false; document.getElementById("app").classList.remove("right-table"); }
+  }
   document.getElementById(name).classList.toggle("dock-open", open);
   document.querySelector(`[data-dock="${name}"]`).setAttribute("aria-expanded", String(open));
 }
 for (const b of document.querySelectorAll("[data-dock]")) b.onclick = () => {
   const open = b.getAttribute("aria-expanded") !== "true";
-  setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
+  if (matchMedia("(max-width:899px)").matches) setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
   setDock(b.dataset.dock, open);
 };
 for (const b of document.querySelectorAll("#change-nav [data-step]")) b.onclick = () => step(+b.dataset.step);
@@ -1515,6 +1561,81 @@ async function computeRegions(view) {
   }
   return boxes.sort((p, q) => (q.x1 - q.x0) * (q.y1 - q.y0) - (p.x1 - p.x0) * (p.y1 - p.y0));
 }
+
+function bindRightDock() {
+  const app = document.getElementById("app"), panel = document.getElementById("panel");
+  if (!["parts", "checks"].includes(S.t)) S.panelTable = false;
+  app.classList.toggle("right-table", !!S.panelTable);
+  panel.classList.toggle("dock-wide", !!S.panelWide);
+  for (const cell of panel.querySelectorAll(".parts-table td")) if (!cell.title) cell.title = cell.textContent;
+  if (S.panelTable && S.t === "checks" && panel.querySelector(".checks-list")) {
+    const list = panel.querySelector(".checks-list"), findings = new Map(proj().checks.flatMap(c => c.violations.map(v => [v.id, {...v, check:c.title}])));
+    const table = document.createElement("table"); table.className = "checks-table";
+    table.innerHTML = '<thead><tr><th>State</th><th>Check / rule</th><th>Location / actions</th><th>Description</th></tr></thead>';
+    const body = table.createTBody();
+    for (const button of list.querySelectorAll(".viol")) {
+      const v = findings.get(button.dataset.id); if (!v) continue;
+      const row = body.insertRow();
+      row.insertCell().textContent = `${v.severity}${v.new ? " · NEW" : ""}${v.waived ? " · WAIVED" : ""}`;
+      row.insertCell().textContent = `${v.check} / ${v.type}`;
+      const cell = row.insertCell();
+      const actions = []; let next = button.nextElementSibling;
+      while (next && !next.matches(".viol")) { actions.push(next); next = next.nextElementSibling; }
+      cell.append(button, ...actions);
+      row.insertCell().textContent = v.description;
+    }
+    if (body.rows.length) list.replaceChildren(table);
+  }
+  panel.querySelector("[data-panel-close]").onclick = () => { setDock("panel", false); document.querySelector('[data-dock="panel"]')?.focus(); };
+  panel.querySelector("[data-panel-wide]").onclick = () => {
+    const wide = !S.panelWide;
+    resizeRightDock(wide ? 700 : 360);
+    renderPanel(); panel.querySelector("[data-panel-wide]")?.focus();
+  };
+  const coverage = panel.querySelector(".bom-coverage");
+  if (coverage) {
+    coverage.title = [...coverage.querySelectorAll(".coverage-item")].map(item => item.title).join("\n");
+    coverage.setAttribute("aria-label", "BOM coverage: " + coverage.title);
+  }
+  const table = panel.querySelector("[data-panel-table]");
+  if (table) table.onclick = () => { S.panelTable = !S.panelTable; renderPanel(); panel.querySelector("[data-panel-table]")?.focus(); };
+}
+let rightDockWidth = 360;
+try { rightDockWidth = Math.max(300, Math.min(700, +localStorage.getItem("kr.rightDockWidth") || 360)); } catch {}
+document.documentElement.style.setProperty("--panel-w", rightDockWidth + "px");
+const rightSplitter = document.createElement("div");
+rightSplitter.id = "right-splitter"; rightSplitter.tabIndex = 0;
+rightSplitter.setAttribute("role", "separator"); rightSplitter.setAttribute("aria-label", "Resize right dock");
+rightSplitter.setAttribute("aria-orientation", "vertical");
+document.getElementById("app").append(rightSplitter);
+function resizeRightDock(width, persist = true) {
+  rightDockWidth = Math.round(Math.max(300, Math.min(700, width)));
+  S.panelWide = rightDockWidth === 700;
+  document.documentElement.style.setProperty("--panel-w", rightDockWidth + "px");
+  rightSplitter.setAttribute("aria-valuenow", rightDockWidth);
+  rightSplitter.setAttribute("aria-valuemin", "300"); rightSplitter.setAttribute("aria-valuemax", "700");
+  document.getElementById("panel").classList.toggle("dock-wide", S.panelWide);
+  if (persist) try { localStorage.setItem("kr.rightDockWidth", rightDockWidth); } catch {}
+}
+resizeRightDock(rightDockWidth, false);
+rightSplitter.onpointerdown = event => {
+  if (event.button !== 0) return;
+  event.preventDefault(); rightSplitter.setPointerCapture(event.pointerId);
+  rightSplitter.onpointermove = e => resizeRightDock(document.getElementById("app").getBoundingClientRect().right - e.clientX);
+  rightSplitter.onpointerup = () => { rightSplitter.onpointermove = null; renderPanel(); };
+  rightSplitter.onpointercancel = () => { rightSplitter.onpointermove = null; };
+};
+rightSplitter.onkeydown = event => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault(); resizeRightDock(event.key === "Home" ? 300 : event.key === "End" ? 700 : rightDockWidth + (event.key === "ArrowLeft" ? 20 : -20)); renderPanel();
+};
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && S.panelTable) {
+    event.preventDefault(); event.stopImmediatePropagation(); S.panelTable = false; renderPanel();
+    document.querySelector("[data-panel-table]")?.focus();
+  }
+}, true);
+if (!matchMedia("(max-width:899px)").matches) document.querySelector('[data-dock="panel"]').setAttribute("aria-expanded", "true");
 
 renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");
