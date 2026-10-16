@@ -3312,7 +3312,8 @@ export const CHECKS = [
   document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
   if(dialog.open || S.s!==selected || !S.placing || document.activeElement!==opener) return 'modal close';
   THREADS_ON=threads; S.placing=false; document.body.classList.remove('placing');
-  return !performance.getEntriesByType('resource').some(e=>/^https?:/.test(e.name));`],
+  // The page's own files may come from the local check server.
+  return !performance.getEntriesByType('resource').some(e=>/^https?:/.test(e.name)&&!e.name.startsWith(location.origin+'/'));`],
   ["chrome status zoom is normalized against SVG camera scale", "p=1&v=board", `
   setT({x:100,y:100,z:8}); updateStatus();
   return document.querySelector('#statusbar [data-zoom]').textContent === '2.00'
