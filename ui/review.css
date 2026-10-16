@@ -369,3 +369,34 @@ body.shot #toolbar { display:none; }
 .vp.sheet .marker[data-mark-style="recolour"].removed {
   background: repeating-linear-gradient(135deg, transparent 0 4px, color-mix(in srgb, var(--sch-mark) 22%, transparent) 4px 6px);
 }
+
+/* bench-t6: bottom Inspector, independent of the right review dock. */
+#center { display:grid; grid-template-rows:minmax(0,1fr) 5px var(--inspector-size,176px); min-width:0; min-height:0; overflow:hidden; }
+#insp-split { background:var(--chassis); cursor:row-resize; touch-action:none; position:relative; }
+#insp-split::after { content:""; position:absolute; width:30px; height:1px; background:var(--tx2); left:calc(50% - 15px); top:2px; }
+#insp-split:hover, #insp-split:focus-visible { background:var(--acc-bg); outline:1px solid var(--acc); outline-offset:-1px; }
+#inspector { min-width:0; min-height:0; overflow:hidden; background:var(--panel); border-top:1px solid var(--line); display:flex; flex-direction:column; }
+.insp-head { display:flex; align-items:center; gap:8px; flex:none; height:27px; padding:0 8px; border-bottom:1px solid var(--hair); background:var(--module); min-width:0; }
+.insp-head::before { content:""; width:3px; height:12px; background:var(--acc); flex:none; }
+.insp-label, .insp-module h4 { font:600 10.5px var(--font-cap); text-transform:uppercase; letter-spacing:.11em; color:var(--tx2); }
+.insp-head strong { font:600 12px var(--font-mono); overflow-wrap:anywhere; min-width:0; }
+.insp-ticks { flex:1; min-width:10px; height:5px; background:repeating-linear-gradient(90deg,var(--line) 0 1px,transparent 1px 4px); }
+#insp-toggle { flex:none; min-width:24px; height:23px; padding:0 4px; }
+#insp-body { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); min-height:0; overflow:auto; flex:1; }
+#insp-body[hidden] { display:none; }
+.insp-module { padding:8px 10px; border-right:1px solid var(--hair); min-width:0; }
+.insp-module:last-child { border-right:0; }
+.insp-module h4 { margin:0 0 6px; }
+.insp-module dl { margin:0; display:grid; grid-template-columns:minmax(50px,.8fr) minmax(0,1.2fr); gap:3px 8px; font:11px/1.4 var(--font-mono); }
+.insp-module dt { color:var(--tx2); overflow-wrap:anywhere; }
+.insp-module dd { margin:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+#inspector del { color:var(--rem); text-decoration:line-through; }
+#inspector ins { color:var(--add); text-decoration:none; }
+.insp-arrow { color:var(--tx2); }
+.insp-empty { grid-column:1/-1; align-self:center; margin:16px; line-height:1.8; }
+body.shot #center { display:flex; } body.shot #center #stage { flex:1; } body.shot #inspector, body.shot #insp-split { display:none; }
+@media(max-width:1100px) { #insp-body { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+/* bench-t6: raw drawable geometry stays available without burying primary properties. */
+.insp-geometry { margin-top:8px; border-top:1px solid var(--hair); padding-top:4px; }
+.insp-geometry summary { cursor:pointer; color:var(--tx2); font:11px var(--font-mono); margin-bottom:4px; }
