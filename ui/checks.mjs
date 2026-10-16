@@ -3508,4 +3508,32 @@ export const CHECKS = [
     Appearance.patch({activeLayer:null,flip:false});check('F.Cu');
     return boardView.renderers.length===2 && uploads===boardView.renderers.map(r=>r.stats.uploads).join() && JSON.stringify(scene)===saved;
   `],
+  ['bench-t7 status and menus', 'v=board', `return (async()=>{
+    select('board'); await draw();
+    const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect();
+    updateCoordinates(vp,{clientX:r.left+r.width/2,clientY:r.top+r.height/2});
+    const x=document.querySelector('[data-coordinate=x]');
+    if(!Number.isFinite(Number(x.textContent)))throw Error('missing coordinate');
+    let writes=0;const observer=new MutationObserver(ms=>writes+=ms.length);observer.observe(document.querySelector('#statusbar'),{childList:true,subtree:true});
+    updateStatus();updateStatus();await Promise.resolve();observer.disconnect();if(writes)throw Error('unchanged readouts rewritten');
+    const before=x.textContent;resetCoordinates();if(x.textContent!==before||!x.closest('.off-canvas'))throw Error('last coordinate lost');
+    const units=document.querySelector('#status-units');units.value='mil';units.dispatchEvent(new Event('change'));if(Appearance.get().units!=='mil')throw Error('units menu disconnected');
+    canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});
+    if(document.querySelectorAll('.bench-context [role=menuitem]').length!==6)throw Error('missing canvas actions');
+    if(document.activeElement.textContent!=='Zoom to here')throw Error('menu not focused');
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));if(document.activeElement.textContent!=='Copy coordinates')throw Error('menu arrow navigation');
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(document.querySelector('.bench-context')||document.activeElement!==vp)throw Error('menu escape focus');
+    const snapshot=Appearance.get(),layer=snapshot.activeLayer;
+    canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});document.querySelectorAll('.bench-context button')[4].click();if(Appearance.get().layers[layer].visible)throw Error('hide layer action');
+    canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});document.querySelectorAll('.bench-context button')[5].click();if(Object.entries(Appearance.get().layers).some(([name,state])=>state.visible!==(name===layer)))throw Error('solo layer action');Appearance.patch(snapshot);
+    const row=document.querySelector('#panel .card[data-id]')||document.querySelector('#nav [data-view]');row.focus();row.dispatchEvent(new KeyboardEvent('keydown',{key:'F10',shiftKey:true,bubbles:true}));
+    if(!document.querySelector('.bench-context'))throw Error('keyboard row menu missing');closeBenchMenu();
+    showShortcuts();if(document.querySelectorAll('#shortcuts section').length!==3)throw Error('help groups missing');document.querySelector('#shortcuts [data-close]').click();
+    const btn=document.querySelector('#shortcuts-open');btn.blur();btn.focus();btn.dispatchEvent(new FocusEvent('focusin',{bubbles:true}));await new Promise(r=>setTimeout(r,500));if(document.querySelector('#bench-tooltip').hidden)throw Error('tooltip missing '+btn.outerHTML+' active '+document.activeElement.outerHTML);btn.blur();
+    Appearance.patch({units:'mm'});resetCoordinates();return true;
+  })()`],
+  ['bench-t7 proof 1440', 'v=board', `return (async()=>{select('board');await draw();resetCoordinates();return document.querySelector('#statusbar').scrollWidth<=innerWidth;})()`],
+  ['bench-t7 proof 1920', 'v=board', `return (async()=>{select('board');await draw();resetCoordinates();return document.querySelector('#statusbar').scrollWidth<=innerWidth;})()`],
+  ['bench-t7 help proof', 'v=board', `showShortcuts();return true;`],
+  ['bench-t7 context proof', 'v=board', `const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect();canvasMenu(vp,{clientX:r.left+100,clientY:r.top+160});return true;`],
 ];

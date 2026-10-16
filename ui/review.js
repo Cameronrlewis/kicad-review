@@ -663,32 +663,41 @@ const BOARD_GRID_MM = [5,2.5,2,1,.5,.25,.2,.1,.05,.025,.02,.01];
 const BOARD_GRID_MIL = [1000,500,250,200,100,50,25,20,10,5,2,1].map(n => n*.0254);
 // Deliberately configurable for measured device calibration (Task 10), not a platform sniff.
 const BOARD_WHEEL_PIXEL_RATE = .0015, BOARD_WHEEL_MAC_ROTATION_RATE = .01;
-let boardCursor = null, deltaAnchor = null, anchorKey = "";
+let boardCursor = null, deltaAnchor = null, anchorKey = "", lastPosition = null, lastPositionKey = "";
+// bench-t7: pointer updates must not churn unchanged readout text.
+function statusText(selector, value) { const node = $("#statusbar " + selector); if (node && node.textContent !== String(value)) node.textContent = value; }
 function resetCoordinates() {
-  for (const node of document.querySelectorAll("#statusbar [data-coordinate]")) node.textContent = "—";
   boardCursor = null; schematicCursor = null;
   updateStatus();
 }
 function updateStatus() {
   const sheet = String(S.v).startsWith("sheet:");
   const a = Appearance.get(), units = S.v === "board" ? a.units : sheet ? S.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
-  const fmt = n => Number.isFinite(n) ? (Math.abs(n/divisor) < .0005 ? 0 : n/divisor).toFixed(3) : "—";
-  const key = JSON.stringify([S.p,S.v]);   // click origin belongs to one drawing; never survives a view change
+  const fmt = n => Number.isFinite(n) ? (Math.abs(n/divisor) < .0005 ? 0 : n/divisor).toFixed(3) : "off canvas";
+  const key = JSON.stringify([S.p,S.v]);
   if (anchorKey !== key) { anchorKey = key; deltaAnchor = null; }
-  const anchor = deltaAnchor;
-  const p = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world, dx = p && anchor ? p[0]-anchor[0] : NaN, dy = p && anchor ? p[1]-anchor[1] : NaN;
-  const values = {x:p?.[0], y:p?.[1], dx, dy, dist:Math.hypot(dx,dy)};
-  for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); if (node) node.textContent = fmt(value); }
+  const current = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world;
+  if (current) { lastPosition = current; lastPositionKey = key; }
+  const p = current || (lastPositionKey === key ? lastPosition : null);
+  const dx = p && deltaAnchor ? p[0]-deltaAnchor[0] : 0, dy = p && deltaAnchor ? p[1]-deltaAnchor[1] : 0;
+  for (const [name,value] of Object.entries({x:p?.[0],y:p?.[1],dx,dy,dist:Math.hypot(dx,dy)})) statusText(`[data-coordinate=${name}]`,fmt(value));
+  const coords = $("#statusbar .status-coordinates");
+  coords?.classList.toggle("off-canvas",!current); coords?.toggleAttribute("data-sch-coordinates",sheet);
   const rows = [...document.querySelectorAll("#panel .card[data-id]")], at = rows.findIndex(e => e.dataset.id === S.s);
-  const change = $("#statusbar [data-change]"); if (change) change.textContent = `${at < 0 ? 0 : at+1}/${rows.length}`;
-  const zoom = $("#statusbar [data-zoom]"); if (zoom) zoom.textContent = placed() ? (S.z / PX).toFixed(2) : "—";
-  const unit = $("#statusbar [data-units]"); if (unit) unit.textContent = units;
-  const coords = $("#statusbar .status-coordinates"); coords?.toggleAttribute("data-sch-coordinates", sheet);
-  const grid = $("#statusbar [data-grid]");
-  if (grid) {
-    grid.parentElement.toggleAttribute("data-sch-grid", sheet);
-    grid.textContent = S.v === "board" ? fmt(a.grid.size) : sheet ? S.grid === false ? "off" : fmt(SCHEMATIC_GRID_MM) : "—";
-  }
+  statusText("[data-change]",`${at < 0 ? 0 : at+1}/${rows.length}`);
+  statusText("[data-zoom]",placed() ? `${(S.z / PX * 100).toFixed(0)}%` : "off canvas");
+  statusText("[data-units]",units);
+  if ($("#status-units").value !== units) $("#status-units").value = units;
+  const grid = $("#statusbar [data-grid]"); grid.parentElement.toggleAttribute("data-sch-grid",sheet);
+  statusText("[data-grid]",S.v === "board" ? `${fmt(a.grid.size)}${a.grid.visible ? "" : " off"}` : sheet && S.grid !== false ? fmt(SCHEMATIC_GRID_MM) : "off");
+  statusText("[data-active-layer]",S.v === "board" ? a.activeLayer || "no layer" : sheet ? "Schematic" : "no layer");
+  const color = a.layers[a.activeLayer]?.color;
+  const swatch = $("[data-layer-swatch]"), swatchColor = S.v === "board" && color ? `rgb(${color.slice(0,3).join(",")})` : "transparent";
+  if (swatch.dataset.color !== swatchColor) { swatch.style.background = swatchColor; swatch.dataset.color = swatchColor; }
+  const selected = proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
+  statusText("[data-selection]",selected ? selected.ref || selected.reference || selected.kind || selected.id : "Nothing selected");
+  statusText("[data-view-mode]",({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
+
 }
 function updateCoordinates(vp, event) {
   if (!placed() || !vp.isConnected || S.v === "3d" || !vp.clientWidth || !vp.clientHeight) { resetCoordinates(); return; }
@@ -712,6 +721,8 @@ function zoomBoardAt(vp, clientX, clientY, factor) {
   updateCoordinates(vp,e);
 }
 function attachPanZoom(vp) {
+  vp.tabIndex = 0;
+  vp.setAttribute("aria-label", "Drawing canvas; Shift+F10 for actions");
   vp.addEventListener("wheel", e => {
     const r = vp.getBoundingClientRect(); if (!placed() || !r.width || !r.height) return;
     e.preventDefault(); gesture();
@@ -746,7 +757,7 @@ function attachPanZoom(vp) {
       deltaAnchor = String(S.v).startsWith("sheet:") ? (p => [p.x,p.y])(schematicPoint(vp,e)) : toWorld(vp,e); updateStatus();
     }
     if (e.type === "pointerup" && a.moved < 4 && a.button === 0) pickAt(vp,e);
-    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext && THREADS_ON) proposePin(vp,pendingContext);
+    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext) canvasMenu(vp,pendingContext);
     pendingContext = null;
     if (e.type !== "pointerup") { suppressContext=false; if(cursorFrame) cancelAnimationFrame(cursorFrame); cursorFrame=0; resetCoordinates(); }
   };
@@ -755,8 +766,8 @@ function attachPanZoom(vp) {
   vp.addEventListener("auxclick", e => { if (suppressContext || e.button===1) e.preventDefault(); });
   vp.addEventListener("contextmenu", e => {
     if (suppressContext || active?.moved >= 4) { e.preventDefault(); return; }
-    if (!THREADS_ON || !placed()) return; e.preventDefault();
-    if (active) pendingContext=e; else proposePin(vp,e);
+    if (!placed()) return; e.preventDefault();
+    if (active) pendingContext=e; else canvasMenu(vp,e);
   });
 }
 function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
@@ -1408,6 +1419,75 @@ function boardKey(e) {
   else return false;
   return true;
 }
+// bench-t7: shared delayed tooltip helper; delegated so rebuilt controls work too.
+function installBenchTooltips() {
+  const tip=document.createElement('div'); tip.id='bench-tooltip'; tip.role='tooltip'; tip.hidden=true; document.body.append(tip);
+  let timer, target;
+  const hide=()=>{clearTimeout(timer);tip.hidden=true;if(target?.getAttribute('aria-describedby')===tip.id)target.removeAttribute('aria-describedby');target=null;};
+  const show=e=>{
+    const node=e.target.closest?.('#toolbar button, #toolbar [title], #statusbar button, #statusbar [title], #statusbar select');
+    if(!node || node===target)return;
+    hide(); const owner=node.closest('[title]') || node;
+    if(owner.title){owner.dataset.benchTip=owner.title;owner.removeAttribute('title');}
+    let text=node.dataset.benchTip || owner.dataset.benchTip || node.getAttribute('aria-label') || node.textContent.trim();
+    const hint=node.matches('[data-z]') ? (+node.dataset.z>1?'F1 / Ctrl+=':'F2 / Ctrl+−') : node.matches('[data-act=fit]') ? 'Home / Ctrl+0 / f' : node.matches('[data-step]') ? (+node.dataset.step>0?'j / ↓':'k / ↑') : '';
+    if(hint && !text.includes(hint))text+=' · '+hint;
+    if(!text)return;
+    target=node; timer=setTimeout(()=>{if(!target?.isConnected)return;tip.textContent=text;tip.hidden=false;node.setAttribute('aria-describedby',tip.id);const r=node.getBoundingClientRect();tip.style.left=Math.max(6,Math.min(innerWidth-tip.offsetWidth-6,r.left))+'px';tip.style.top=(r.bottom+tip.offsetHeight+12<innerHeight?r.bottom+6:r.top-tip.offsetHeight-6)+'px';},450);
+  };
+  document.addEventListener('pointerover',show);document.addEventListener('focusin',show);
+  document.addEventListener('pointerout',e=>{if(target && !target.contains(e.relatedTarget))hide();});document.addEventListener('focusout',hide);
+  document.addEventListener('pointerdown',hide);document.addEventListener('keydown',hide);window.addEventListener('blur',hide);
+}
+installBenchTooltips();
+$('#status-units').onchange=e=>{if(S.v==='board')Appearance.patch({units:e.target.value});else{S.units=e.target.value;updateStatus();}};
+let benchMenu=null, benchMenuOrigin=null;
+function closeBenchMenu(restore=true){if(!benchMenu)return;benchMenu.remove();benchMenu=null;if(restore && benchMenuOrigin?.isConnected)benchMenuOrigin.focus();}
+function showBenchMenu(items,x,y,origin){
+  closeBenchMenu(false);benchMenuOrigin=origin;const menu=document.createElement('div');menu.className='bench-context';menu.role='menu';menu.setAttribute('aria-label','Context actions');
+  for(const item of items){const b=document.createElement('button');b.type='button';b.role='menuitem';b.textContent=item.label;b.disabled=!!item.disabled;b.onclick=()=>{closeBenchMenu();item.run();};menu.append(b);}
+  document.body.append(menu);benchMenu=menu;menu.style.left=Math.max(4,Math.min(x,innerWidth-menu.offsetWidth-4))+'px';menu.style.top=Math.max(4,Math.min(y,innerHeight-menu.offsetHeight-4))+'px';menu.querySelector('button:not(:disabled)')?.focus();
+  menu.onkeydown=e=>{const buttons=[...menu.querySelectorAll('button:not(:disabled)')],i=buttons.indexOf(document.activeElement);if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){e.preventDefault();e.stopPropagation();buttons[e.key==='Home'?0:e.key==='End'?buttons.length-1:(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}else if(e.key==='Escape'||e.key==='Tab'){if(e.key==='Escape')e.preventDefault();e.stopPropagation();closeBenchMenu();}};
+}
+async function benchCopy(text){
+  try{await navigator.clipboard.writeText(text);statusText('.status-message','Copied');}
+  catch{const dialog=document.createElement('dialog');dialog.className='bench-copy';const label=document.createElement('label');label.textContent='Copy with Ctrl/Cmd+C';const field=document.createElement('input');field.readOnly=true;field.value=text;label.append(field);const close=document.createElement('button');close.textContent='Close';close.onclick=()=>dialog.close();dialog.append(label,close);document.body.append(dialog);dialog.onclose=()=>dialog.remove();dialog.showModal();field.select();}
+}
+function canvasMenu(vp,e){
+  const point=toWorld(vp,e),a=Appearance.get(),layer=a.activeLayer,board=S.v==='board',layerAvailable=board&&!!a.layers[layer];
+  showBenchMenu([
+    {label:'Zoom to here',run:()=>setT({x:point[0],y:point[1],z:S.z*1.3})},
+    {label:'Copy coordinates',run:()=>{const units=board?a.units:S.units,div=units==='mil'?.0254:units==='in'?25.4:1;benchCopy(`X ${(point[0]/div).toFixed(3)} Y ${(point[1]/div).toFixed(3)} ${units}`);}},
+    {label:'Comment here',disabled:!THREADS_ON,run:()=>proposePin(vp,e)},
+    {label:'Select object under cursor',run:()=>pickAt(vp,e)},
+    {label:`Hide layer${layerAvailable?' · '+layer:''}`,disabled:!layerAvailable,run:()=>Appearance.patch({layers:{[layer]:{visible:false}}})},
+    {label:'Show only this layer',disabled:!layerAvailable,run:()=>Appearance.patch({layers:Object.fromEntries(Object.keys(a.layers).map(name=>[name,{visible:name===layer}]))})}
+  ],e.clientX,e.clientY,vp);
+}
+const benchRowSelector='#panel .card[data-id], #panel .inv-row[data-obj], #panel .viol[data-id], #panel .parts-row, #panel .thread-card, #nav [data-view]';
+function rowMenu(row,x,y){
+  const id=row.dataset.id,change=proj().changes.find(c=>c.id===id),thread=S.threads?.find(t=>t.id===row.dataset.thread);
+  const ref=change?.ref || row.querySelector('.ref')?.textContent.trim() || row.querySelector('td:nth-child(2)')?.textContent.trim() || row.querySelector('.name')?.textContent.trim() || change?.kind || id || row.textContent.trim().slice(0,160);
+  const references=ref.split(',').map(s=>s.trim()),objectIndex=row.hasAttribute('data-obj')?+row.dataset.obj:(proj().objects || []).findIndex(o=>references.includes(o.ref)&&o.side==='head');
+  const object=proj().objects?.[objectIndex],view=change?viewOf(change):object?objView(object):row.dataset.view || S.v;
+  const file=thread?.anchor.file || (view?.startsWith('lib:')?proj().libraries?.[+view.slice(4)]?.file:viewFile(proj(),view));
+  let github=null;
+  try{const repo=new URL(D.repo);if(repo.origin==='https://github.com' && file)github=`${repo.href.replace(/\/$/,'')}/blob/${encodeURIComponent(D.head)}/${file.split('/').map(encodeURIComponent).join('/')}`;}catch{}
+  const go=()=>{if(id)goTo(id);else if(row.dataset.view)select(row.dataset.view);else if(objectIndex>=0)goToObject(objectIndex);else row.click();};
+  const canGo=row.getAttribute('aria-disabled')!=='true' && (id || row.dataset.view || row.dataset.thread || (object && currentView(objView(object))));
+  showBenchMenu([{label:'Go to',disabled:!canGo,run:go}, {label:'Copy reference',run:()=>benchCopy(ref)},...(github?[{label:'Open in GitHub',run:()=>window.open(github,'_blank','noopener,noreferrer')}]:[])],x,y,row);
+
+}
+document.addEventListener('contextmenu',e=>{const row=e.target.closest?.(benchRowSelector);if(row){e.preventDefault();rowMenu(row,e.clientX,e.clientY);}});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='ContextMenu' && !(e.shiftKey&&e.key==='F10'))return;
+  const row=e.target.closest?.(benchRowSelector),vp=e.target.closest?.('#stage .vp');if(!row&&!vp)return;e.preventDefault();e.stopImmediatePropagation();const r=(row||vp).getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;if(row)rowMenu(row,x,y);else if(placed())canvasMenu(vp,{clientX:x,clientY:y});
+},true);
+document.addEventListener('pointerdown',e=>{if(benchMenu&&!benchMenu.contains(e.target))closeBenchMenu(false);});
+window.addEventListener('resize',()=>closeBenchMenu(false));
+// Parts table rows are otherwise non-interactive; give their context actions a focus target.
+new MutationObserver(()=>{for(const row of document.querySelectorAll('#panel .parts-row'))if(!row.hasAttribute('tabindex'))row.tabIndex=0;}).observe($('#panel'),{childList:true,subtree:true});
+
 function showShortcuts() { const dialog=$("#shortcuts"); if(!dialog.open) dialog.showModal(); }
 new MutationObserver(updateStatus).observe($("#panel"), {childList:true, subtree:true});   // change n/N follows any list rebuild or filter
 $("#shortcuts-open").onclick=showShortcuts;
