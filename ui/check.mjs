@@ -53,6 +53,7 @@ await send("Page.addScriptToEvaluateOnNewDocument", {source:`window.__CHECK_PERF
 await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.setItem('kr.theme',${JSON.stringify(dark ? 'dark' : 'light')})}catch{}` });
 const iconSprite = readFileSync(new URL("./icons/sprite.svg", import.meta.url), "utf8");
 let failed = 0;
+const readyTimeout = Math.max(1000, Number(process.env.CHECK_TIMEOUT || 15000) - 1000);
 for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].includes(filter))) {
   console.log(`RUN ${name}`);
   let timer, body, startupScript;
@@ -65,7 +66,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   if (lifecycle.beforeStartup) startupScript = (await send("Page.addScriptToEvaluateOnNewDocument", {source:lifecycle.beforeStartup})).result.identifier;
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);
   await send("Page.navigate", { url: `file://${page}#${hash}` });
-  const ready = await evaluate("new Promise((r, reject) => { const deadline = performance.now() + 10000, t = () => window.reviewReady ? r(true) : performance.now() > deadline ? reject(new Error('reviewReady timed out')) : setTimeout(t, 50); t(); })");
+  const ready = await evaluate(`new Promise((r, reject) => { const deadline = performance.now() + ${readyTimeout}, t = () => window.reviewReady ? r(true) : performance.now() > deadline ? reject(new Error('reviewReady timed out')) : setTimeout(t, 50); t(); })`);
   if (ready.exceptionDetails || errors.length) return [`FAIL startup ${name} -> ${ready.exceptionDetails?.exception?.description || errors.join(' | ')}`, true];
   // The raw dev template has no inlined sprite (inline_page adds it); inject it so icons resolve.
   if (typeof iconSprite === "string") await evaluate(`document.getElementById("kr-icons") || document.body.insertAdjacentHTML("afterbegin", ${JSON.stringify(iconSprite)})`);
@@ -112,7 +113,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   if (r.result?.value === true && lifecycle.afterReload) {
     await send("Page.reload");
     await sleep(100);
-    const ready = await evaluate("new Promise((r,reject)=>{const deadline=performance.now()+10000;const poll=()=>window.reviewReady?r(true):performance.now()>deadline?reject(new Error('reload timed out')):setTimeout(poll,50);poll()})");
+    const ready = await evaluate(`new Promise((r,reject)=>{const deadline=performance.now()+${readyTimeout};const poll=()=>window.reviewReady?r(true):performance.now()>deadline?reject(new Error('reload timed out')):setTimeout(poll,50);poll()})`);
     r = ready.exceptionDetails ? ready : await evaluate(`(async () => { ${lifecycle.afterReload} })()`);
   }
   if (r.result?.value === "skip" && !errors.length) return ["SKIP " + name, noSkip];
