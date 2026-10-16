@@ -43,9 +43,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let tab;
 for (let i = 0; i < 50 && !tab; i++) { await sleep(200); try { tab = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === "page"); } catch {} }
 if (!tab) { console.error(`FAIL startup -> Chrome did not start on port ${port}`); process.exit(1); }
-const ws = new WebSocket(tab.webSocketDebuggerUrl); await Promise.race([new Promise(r => ws.onopen = r), new Promise((_, reject) => setTimeout(() => reject(new Error("WebSocket open timed out")), timeout).unref())]);
+let ws;
+async function openTab(target) {
+ws = new WebSocket(target.webSocketDebuggerUrl); await Promise.race([new Promise(r => ws.onopen = r), new Promise((_, reject) => setTimeout(() => reject(new Error("WebSocket open timed out")), timeout).unref())]);
+ws.onmessage = onMessage;
+}
 let id = 0, navigations = 0; const pend = {}, errors = [];
-ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
+const onMessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
   if (m.method === "Page.frameNavigated" && !m.params.frame.parentId) navigations++;
   if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate(`window.KRTheme.set(${JSON.stringify(m.params.payload)}); window.__themeFlipped()`)); }
   if (m.method === "Runtime.consoleAPICalled") {
@@ -55,16 +59,26 @@ ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pe
   if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url)) errors.push("external request: " + m.params.request.url);
   if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text); };
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
+const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
+async function setupTab() {
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
 await send("Emulation.setDeviceMetricsOverride", { width, height: 1080, deviceScaleFactor: dpr, mobile: false });
-const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 await send("Page.enable"); await send("DOMStorage.enable");
 const visionResult = await send("Emulation.setEmulatedVisionDeficiency", { type: vision });
 if (visionResult.error) throw new Error(visionResult.error.message);
 await send("Page.addScriptToEvaluateOnNewDocument", { source:
   `window.__appearanceFixtureText=${JSON.stringify(fixtureText)};window.__appearanceMarkStyle=${JSON.stringify(markStyle)};` });
+}
+await openTab(tab); await setupTab();
+// A check that blocks storage before startup leaves its renderer unable to persist on some Chrome builds
+// (CI): later pages in that tab silently lose localStorage writes. Give the next check a fresh tab.
+async function freshTab() {
+  const old = ws, next = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, {method:"PUT"})).json();
+  await openTab(next); await setupTab(); old.close();
+  await fetch(`http://127.0.0.1:${port}/json/close/${tab.id}`).catch(() => {}); tab = next;
+}
 // A reload destroys the old execution context. Retry only that navigation race,
 // never report exceptions or other protocol errors.
 // localStorage writes reach the browser process asynchronously; a reload that wins the race reads stale
@@ -91,7 +105,7 @@ const reloadReady = async () => {
       if (response.error && !/Cannot find context|Execution context was destroyed/.test(response.error.message)) throw new Error(response.error.message);
       const r = response.result;
       if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
-      if (r?.result?.value === true) { if (process.env.CI) console.log('storage after reload: ' + (await evaluate("JSON.stringify(Object.keys(localStorage).map(k=>k+':'+localStorage.getItem(k).length))")).result?.value); return; }
+      if (r?.result?.value === true) return;
     }
     await sleep(50);
   }
@@ -213,12 +227,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   finally {
     clearTimeout(timer);
     if (initialAppearance !== undefined) await evaluate(`localStorage.${initialAppearance === null ? "removeItem('kr.appearance.v1')" : `setItem('kr.appearance.v1',${JSON.stringify(initialAppearance)})`}`);
-    if (startupScript) {
-      const removed = await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript});
-      await send("Page.navigate", { url: "about:blank" }); await sleep(100);
-      const native = (await evaluate("String(Storage.prototype.setItem).includes('[native code]')")).result?.value;
-      if (process.env.CI || native !== true) console.log(`startup script ${startupScript} removed ${JSON.stringify(removed.error || 'ok')} storage native ${native}`);
-    }
+    if (startupScript) { await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); await freshTab(); }
   }
 }
 if (shot && !failed) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
