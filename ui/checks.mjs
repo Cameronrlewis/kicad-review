@@ -3585,3 +3585,53 @@ for (const mode of ['side','overlay','wipe','blend','semantic']) {
   CHECKS.push(['vf-opacity Thermal fps '+mode,source[1],source[2].replace("Appearance.patch({markStyle:'outline'});",
     "Appearance.patch({markStyle:'outline',layerOpacity:{'F.Cu':.5,'B.Cu':.5}});")]);
 }
+
+CHECKS.push(['vf-avail unchanged board full design and Appearance hash', 'v=board&t=appearance', `
+  proj().board.changed=false;proj().board.status='unchanged';
+  const state=valid({...S,v:'board',t:'appearance'});
+  if(state.v!=='board'||state.t!=='appearance')throw Error('unchanged board deep link rejected');
+  Object.assign(S,state);renderNav();renderPanel();await draw();
+  if(!currentView('board'))throw Error('unchanged board unavailable');
+  if(!document.querySelector('[data-view="board"]'))throw Error('unchanged board missing in navigator');
+  if(!document.querySelector('#appearance-root'))throw Error('Appearance unavailable');
+  if(!document.querySelector('#stage').textContent.includes('No layout changes'))throw Error('missing no-change notice');
+  for(const layer of proj().board.layers){if(!document.querySelector('#appearance-root [data-layer="'+canon(layer.name)+'"]'))throw Error('missing layer '+layer.name);}
+  if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('no board drawing');
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',layers:proj().board.layers.length,renderers:boardView.renderers.length,theme:KRTheme.get()}));return true;
+`]);
+
+CHECKS.push(['vf-avail unchanged board modes checks threads and full hash', 'v=board&t=appearance', `
+  if(proj().board.changed) return 'skip';
+  for(const mode of ['side','overlay','wipe','blend','semantic']) {
+    S.m=mode;await draw();
+    if(!document.querySelector('#stage .no-change-notice')||!currentView())throw Error('unchanged board unavailable in '+mode);
+    if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('full board missing in '+mode);
+  }
+  const violation=allViolations().find(v=>v.where?.board&&v.pos);
+  if(!violation)throw Error('real board finding required');
+  await applyState({p:S.p,v:'sheet:'+proj().sheets[0].path,t:'checks'});await goTo(violation.id);
+  if(S.v!=='board'||S.s!==violation.id||!currentView())throw Error('finding cannot open unchanged board');
+  const a=pointAnchor(violation.pos[0],violation.pos[1],'head');
+  acceptThreads([{id:'vf-avail-thread',resolved:false,anchor:a,comments:[]}]);
+  await applyState({p:S.p,v:'sheet:'+proj().sheets[0].path});await openThread('vf-avail-thread');
+  if(S.v!=='board'||!document.querySelector('#stage .pin'))throw Error('thread cannot open unchanged board');
+  const st={p:S.p,v:'board',m:'side',x:10,y:20,z:5,s:violation.id,t:'appearance',layers:[proj().board.layers[0].name],camera3d:[1,2,3,4,5,6],hidden3d:['silk']};
+  const got=valid(decodeState('#'+encodeState(st)));
+  for(const k of ['p','v','m','x','y','z','s','t','layers','camera3d','hidden3d'])if(JSON.stringify(st[k])!==JSON.stringify(got[k]))throw Error('hash lost '+k);
+  await applyState({p:S.p,v:'board',m:'side',t:'appearance'});return true;
+`]);
+CHECKS.push(['vf-avail unchanged 3D both revisions', 'v=3d&m=side', `
+  if(!proj().board.model3d) return 'skip';
+  const model=proj().board.model3d;
+  if(!model.base||!model.head)throw Error('missing model revision');
+  if(!document.querySelector('[data-view="3d"]'))throw Error('3D navigator unavailable');
+  if(!window.Review3D.state.firstFrame||window.Review3D.state.roots.filter(Boolean).length!==2||document.querySelectorAll('#stage canvas').length!==2)throw Error('both revisions must draw');
+  if(model.base===model.head&&!document.querySelector('#stage').textContent.includes('No 3D changes'))throw Error('missing 3D no-change notice');
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',view:'3d',sameBlob:model.base===model.head,roots:window.Review3D.state.roots.length,theme:KRTheme.get()}));return true;
+`]);
+CHECKS.push(['vf-avail unchanged schematic sheet full design', '', `
+  const sheet=proj().sheets.find(s=>s.status==='unchanged')||proj().sheets[0];if(!sheet)return 'skip';
+  sheet.status='unchanged';sheet.svg.head=sheet.svg.base;
+  await applyState({p:S.p,v:'sheet:'+sheet.path,m:'side'});
+  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
+`]);

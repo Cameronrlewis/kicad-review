@@ -133,6 +133,8 @@ function navigateSheet(direction) {
   const page = direction === "parent" ? pages.find(s => s.path === pages[i].parent) : pages[i + direction];
   if (page) select(`sheet:${page.path}`);
 }
+function boardAvailable(p = proj()) { return !!(p.board.layers.length || p.board.geometry?.base || p.board.geometry?.head); }
+function modelAvailable(p = proj()) { return !!(p.board.model3d?.enabled || p.board.model3d?.base || p.board.model3d?.head); }
 function renderNav() {
   const p = proj();
   const kids = parent => p.sheets.filter(s => s.parent === parent).sort(compareSheetPages);
@@ -146,11 +148,11 @@ function renderNav() {
     <h3>Projects</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project">${D.projects.map((q, i) =>
       `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label>
     <h3>Sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
-    <h3>Board</h3><ul class="tree">${p.board.layers.length || p.board.changed
+    <h3>Board</h3><ul class="tree">${boardAvailable(p)
       ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
           <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
-      : '<li class="muted">No board changes</li>'}
-      ${p.board.model3d && (p.board.model3d.base || p.board.model3d.head) ? `<li><button data-view='3d' aria-current="${S.v === '3d'}"><span class="name">3D view</span></button></li>` : ""}</ul>
+      : '<li class="muted">No board in either revision</li>'}
+      ${modelAvailable(p) ? `<li><button data-view='3d' aria-current="${S.v === '3d'}"><span class="name">3D view</span></button></li>` : ""}</ul>
     ${p.libraries?.length ? `<h3>Libraries</h3><ul class="tree">${p.libraries.map((c, i) => `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">● ${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span>${c.warnings.length ? ` <span aria-label="${c.warnings.length} warnings">⚠ ${c.warnings.length}</span>` : ""}</button></li>`).join("")}</ul>` : ""}
     <div id="layers"></div>`;
   $("#proj").onchange = e => openProject(+e.target.value);
@@ -159,7 +161,7 @@ function renderNav() {
 }
 function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
-  return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
+  return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
@@ -177,11 +179,11 @@ function decodeState(hash) {
 }
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
-  if ((st.v === "board" && p.board.changed) || (st.v === '3d' && p.board.model3d && (p.board.model3d.base || p.board.model3d.head)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
+  if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" && st.v === "board" && p.board.changed) out.t = st.t;
+  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" && st.v === "board" && boardAvailable(p)) out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -353,10 +355,10 @@ function layersOn() {
   const p = proj();
   return S.layers || p.board.layers.filter(l => !HIDE_LAYERS.test(l.name)).map(l => l.name);
 }
-function currentView(v = S.v) {   // null when the view has no render (unchanged board or sheet)
+function currentView(v = S.v) {   // Availability is independent of change status.
   const p = proj();
   if (v === "board") {
-    if (!p.board.changed) return null;
+    if (!boardAvailable(p)) return null;
     const on = new Set(layersOn());
     return { kind: "board", size: p.board.size, layers: p.board.layers.filter(l => on.has(l.name)) };
   }
@@ -497,7 +499,7 @@ async function draw() {
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
   if (boardView.useGL) {
     appearanceSchematics.clear();
-    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { if (!placed()) fit(); else apply(); afterDraw(view); return; }
+    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { noChangeNotice($("#stage")); if (!placed()) fit(); else apply(); afterDraw(view); return; }
     disposeBoardRenderers();
     $("#stage").replaceWith(stage);
     try {
@@ -512,6 +514,7 @@ async function draw() {
       for (const {renderer, canvas} of boardDiff.panes) trackAppearanceBoard(renderer, canvas);
       if (S.m === "wipe") addDivider(stage.querySelector(".vp"));
       boardDiagnostics(stage);
+      noChangeNotice(stage);
       if (!placed()) fit(); else apply();
       afterDraw(view);
       return;
@@ -521,9 +524,10 @@ async function draw() {
     }
   }
   if (!boardView.useGL) disposeBoardRenderers();
-  if (!view) stage.innerHTML = `<p class="empty">This drawing did not change, so it has no render. Its object changes are in the list.</p>`;
+  if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable in both revisions.</p>`;
   else await MODES[S.m](stage, view);
   if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
+  noChangeNotice(stage);
   if (my !== gen) return;
   $("#stage").replaceWith(stage);
   appearanceSchematics.clear();
@@ -534,6 +538,14 @@ async function draw() {
   if (view && !placed()) fit(); else apply(); afterDraw(view);
   for (const vp of document.querySelectorAll("#stage .vp.sheet")) schematicResize.observe(vp);
   refreshAppearance();
+}
+function noChangeNotice(stage) {
+  const text = S.v === "board" ? (!proj().board.changed && "No layout changes") :
+    proj().sheets.find(s => `sheet:${s.path}` === S.v)?.status === "unchanged" && "No schematic changes on this sheet";
+  if (!text || stage.querySelector('.no-change-notice')) return;
+  const notice = document.createElement("p"); notice.className = "no-change-notice"; notice.textContent = text;
+  notice.style.cssText = "position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:5;background:var(--surface);color:var(--text);padding:6px 12px;border:1px solid var(--line);pointer-events:none";
+  stage.appendChild(notice);
 }
 function boardDiagnostics(stage) {   // text only: warning objects are never parsed as HTML
   const warnings = (boardView.scenes || []).flatMap((sc, i) => sc ? sc.warnings.map(w => `${i ? "Head" : "Base"}: ${w?.kind ? [w.kind, w.uuid, w.reason].join(" ") : String(w)}`) : []);
@@ -1083,7 +1095,7 @@ function inventoryHtml() {
     return `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
       ${ch ? `<span class="badge ${esc(ch.action)}">${GLYPH[ch.action] ?? ""} ${esc(ch.action)}</span>` : ""}
       <div class="prop"><span>value</span><span class="new wide">${esc(o.value ?? "—")}</span></div><div class="prop"><span>footprint</span><span class="new wide">${esc(o.footprint ?? "—")}</span></div>
-      <div class="more muted">${esc(place(o))}${drawn ? "" : " · drawing unchanged: no render"}</div></button>`;
+      <div class="more muted">${esc(place(o))}${drawn ? "" : " · drawing unavailable"}</div></button>`;
   }).join("") || '<p class="muted">No parts match.</p>') + (objs.length > 1500 ? `<p class="muted">showing 1500 of ${objs.length}; narrow the search to see the rest</p>` : "");
 }
 function goToObject(i) {
@@ -1256,7 +1268,7 @@ function renderThreads() {
       <span class="thread-kind">${label(t)}</span> <span class="ref">${esc(t.anchor.ref || "point")}</span> <span class="muted">${esc(t.anchor.file)}</span>
       ${first ? `<span class="thread-text">${esc(first.author)}: ${esc(String(first.body).slice(0, 200))}</span>` : ""}
       ${t.comments.length > 1 ? `<span class="muted">${t.comments.length - 1} repl${t.comments.length === 2 ? "y" : "ies"}</span>` : ""}
-      ${!r.detached && !currentView(r.view) ? '<span class="thread-note">its drawing did not change in this review</span>' : ""}
+      ${!r.detached && !currentView(r.view) ? '<span class="thread-note">its drawing is unavailable in this review</span>' : ""}
       ${(r.notes || []).map(n => `<span class="thread-note">${esc(n)}</span>`).join("")}</button>`;
   };
   const issues = (S.issues || []).filter(i => i.anchor.project === proj().dir);
@@ -1269,7 +1281,6 @@ function renderThreads() {
   return (S.threads ? discussions : "") + (issues.length ? `<details class="issues-group" open><summary>Issues (${issues.length})</summary>${issues.map(i => `<a class="thread-card" data-issue="${i.number}" href="${esc(i.url)}" target="_blank" rel="noopener">#${i.number} ${esc(i.title)} <span class="muted">${esc(i.anchor.ref || "point")}</span></a>`).join("")}</details>` : "");
 }
 function libInfoHtml(c) {
-  // ponytail: unchanged drawings have no render; link those references when unchanged drawings are retained.
   return `<div class="lib-info"><p><b>${esc(c.lib)}:${esc(c.item)}</b> · ${esc(c.kind)} · ${esc(c.status)}${c.note ? ` · ${esc(c.note)}` : ""}</p>
     ${c.warnings.map(w => `<p class="lib-warn">${esc(w)}</p>`).join("")}
     ${c.pins_diff.length ? `<table class="field-changes"><caption>${c.kind === "symbol" ? "Pins" : "Pads"}</caption><thead><tr><th>#</th><th>Change</th><th>Base</th><th>Head</th></tr></thead><tbody>${c.pins_diff.map(d =>
@@ -1281,14 +1292,14 @@ function renderPanel() {
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
-  if (S.t === "appearance" && !(S.v === "board" && p.board.changed)) S.t = "changes";
+  if (S.t === "appearance" && !(S.v === "board" && boardAvailable(p))) S.t = "changes";
   if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${S.t === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${S.v === "board" && p.board.changed ? tab("appearance", "Appearance", true) : ""}${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
+  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${S.v === "board" && boardAvailable(p) ? tab("appearance", "Appearance", true) : ""}${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
     (S.t === "appearance" ? '<div id="appearance-root"></div>' : S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">

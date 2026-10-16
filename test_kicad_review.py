@@ -844,7 +844,10 @@ g("add", "-A"); g("commit", "-q", "-m", "delete shared")
 assert detect(commit("HEAD~1"), commit("HEAD")) == expected, "DR-S3: deleted shared sheet schedules all projects"
 write(t, {"notes.txt": "notes", "__MACOSX/._common.kicad_sch": "junk"})
 g("add", "-A"); g("commit", "-q", "-m", "unrelated")
-assert detect(commit("HEAD~1"), commit("HEAD")) == [], "DR-S3: unrelated files remain ignored"
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": d, "name": d, "status": "unchanged"} for d in ("A", "B")], "every review retains unchanged projects"
+write(t, {"B/B.kicad_sch": "(kicad_sch)"})
+g("add", "-A"); g("commit", "-q", "-m", "one project")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "B", "name": "B", "status": "modified"}, {"dir": "A", "name": "A", "status": "unchanged"}], "changed projects first, unchanged projects retained"
 os.chdir(here)
 print("ok DR-S3 unowned KiCad changes schedule all projects")
 
@@ -1290,7 +1293,7 @@ with tempfile.TemporaryDirectory() as t:
 print("ok notes section is replaced, not added twice")
 
 wf = pathlib.Path(".github/workflows/review.yml").read_text()
-detect_step = wf[wf.index("- name: Find changed KiCad projects"):wf.index("- name: Check out both")]
+detect_step = wf[wf.index("- name: Find all KiCad projects (changed first)"):wf.index("- name: Check out both")]
 assert "refs/tags" not in detect_step.splitlines()[2]
 assert "TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}" in detect_step
 fail_step = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
@@ -1325,7 +1328,7 @@ for settings_error in (SystemExit("invalid settings"), kicad_review.tomllib.TOML
     assert "::warning::" in output.getvalue()
 print("ok invalid tagged settings keep detection off")
 
-checkout_tools = wf[wf.index("- name: Check out review tools"):wf.index("- name: Find changed KiCad projects")]
+checkout_tools = wf[wf.index("- name: Check out review tools"):wf.index("- name: Find all KiCad projects (changed first)")]
 assert "id: tools" in checkout_tools
 assert "steps.tools.outcome == 'success'" in fab_step
 assert "steps.report.outcome" not in fab_step, "review failures must not suppress fabrication"
@@ -3388,10 +3391,14 @@ with TemporaryDirectory() as t:
         with contextlib.redirect_stderr(err):
             bad = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
         assert "geometry" not in bad and "geometry unavailable" in err.getvalue()
-        # An unchanged board embeds no geometry; any parser error falls back to SVG.
+        # Unchanged boards retain both revisions, parsing identical geometry once.
         write(t, {"base/G/G.kicad_pcb": GEOMETRY_FIXTURE, "head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
         same = {}
-        assert "geometry" not in kr.build_project(pr, same, kr.DEFAULT_SETTINGS)["board"] and not same
+        with patch("kicad_review.board_geometry", wraps=kr.board_geometry) as parse:
+            board = kr.build_project(pr, same, kr.DEFAULT_SETTINGS)["board"]
+        assert board["geometry"]["base"] == board["geometry"]["head"] and board["geometry"]["base"]
+        assert parse.call_count == 1
+        assert board["status"] == "unchanged"
         os.remove("base/G/G.kicad_pcb")
         err = io.StringIO()
         with patch("kicad_review.board_geometry", side_effect=KeyError("unexpected")), contextlib.redirect_stderr(err):
@@ -3465,3 +3472,68 @@ for count in (4, 6):
     assert "(setup" not in legacy
     assert scene_from_text(legacy)["copperStack"] == expected
 print("ok vf-order 4/6-layer explicit stackup and legacy physical order")
+
+# A schematic-only review still exports 3D once and retains every board layer.
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "G", "name": "G", "status": "modified"}
+        svg = '<svg width="20mm" height="10mm" viewBox="0 0 20 10"><g/></svg>'
+        for side in ("base", "head"):
+            write(t, {f"{side}/G/G.kicad_pcb": GEOMETRY_FIXTURE,
+                      f"review/G/{side}/pcb/G-F_Cu.svg": svg,
+                      f"review/G/{side}/pcb/G-B_Cu.svg": svg})
+        write(t, {"review/detect.json": json.dumps({"projects": [pr]}),
+                  "base/kicad-review.toml": "[3d]\nenabled = true\n"})
+        def fake_export(p, side, out):
+            write(t, {f"{out}/board.glb": "timestamped model", f"{out}/glb.log": ""})
+        with patch("kicad_review.render_side"), patch("kicad_review.export_glb", side_effect=fake_export) as export:
+            kr.cmd_render(None)
+        assert export.call_count == 1, "identical 3D inputs export once even when board unchanged"
+        assert pathlib.Path("review/G/base/board.glb").read_bytes() == pathlib.Path("review/G/head/board.glb").read_bytes()
+        with patch("kicad_review.project_checks", return_value=[]):
+            board = kr.build_project(pr, {}, kr.load_settings())["board"]
+        assert not board["changed"] and board["status"] == "unchanged"
+        assert len(board["layers"]) == 2 and board["size"] == [20.0, 10.0]
+        assert all(l["svg"]["base"] == l["svg"]["head"] and l["svg"]["base"] for l in board["layers"])
+        assert board["model3d"]["base"] == board["model3d"]["head"] and board["model3d"]["enabled"]
+        # A local model edit with identical PCB bytes needs separate exports.
+        write(t, {"base/G/body.step": "old model", "head/G/body.step": "new model"})
+        with patch("kicad_review.render_side"), patch("kicad_review.export_glb", side_effect=fake_export) as export:
+            kr.cmd_render(None)
+        assert export.call_count == 2, "model-only edits must not share an export"
+        for side in ("base", "head"):
+            os.remove(f"review/G/{side}/board.glb")
+            os.remove(f"review/G/{side}/glb.log")
+        with patch("kicad_review.project_checks", return_value=[]):
+            failed = kr.build_project(pr, {}, kr.load_settings())["board"]["model3d"]
+            disabled = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
+        assert failed["enabled"] and failed["base"] is None and failed["head"] is None
+        assert set(failed["errors"]) == {"base", "head"}
+        assert "model3d" not in disabled
+    finally:
+        os.chdir(old_cwd)
+print("ok unchanged board full SVG inventory, shared geometry and shared 3D")
+
+# Revision render caches avoid all KiCad exports on a warm run and track settings/tool identity.
+import shutil
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "G", "name": "G", "status": "unchanged"}
+        write(t, {"review/detect.json": json.dumps({"base": "1"*40, "head": "2"*40, "projects": [pr]}),
+                  "base/G/G.kicad_pcb": GEOMETRY_FIXTURE, "head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        def fake_render(src, name, out, **kw):
+            write(t, {f"{out}/drc.json": '{"violations": []}'})
+        with patch("kicad_review.render_side", side_effect=fake_render) as render:
+            kr.cmd_render(None)
+            assert render.call_count == 2
+            shutil.rmtree("review/G")
+            kr.cmd_render(None)
+            assert render.call_count == 2, "warm revision caches must skip all exports"
+        assert pathlib.Path("review/G/base/drc.json").exists() and pathlib.Path("review/G/head/drc.json").exists()
+    finally:
+        os.chdir(old_cwd)
+print("ok per-commit project render cache hits retain both revisions")
