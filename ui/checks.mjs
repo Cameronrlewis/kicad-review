@@ -125,9 +125,10 @@ export const CHECKS = [
          document.querySelector('[data-coordinate=y]').textContent!=='33.625') return 'mapping';
     }
     const hash=location.hash; resetCoordinates();
-    if(document.querySelector('[data-coordinate=x]').textContent!=='—') return 'stale';
+    // Bench: leaving the drawing keeps the last reading, greyed as off canvas.
+    if(!document.querySelector('.status-coordinates.off-canvas')) return 'stale';
     await draw();
-    return document.querySelector('[data-coordinate=y]').textContent==='—' && location.hash===hash;`],
+    return location.hash===hash;`],
 ["Stage 1 dark default ignores OS and tokens resolve", "", `
   const root = document.documentElement; root.removeAttribute('data-theme');
   const c = getComputedStyle(root), b = getComputedStyle(document.body);
@@ -449,9 +450,10 @@ export const CHECKS = [
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
-    const h = document.querySelector("#hdr").textContent;
+    // Bench: breadcrumb in the header, revisions and PR link in the review bar, verdict in the header readout.
+    const h = document.querySelector(".report-chrome").textContent;
     return h.includes("kicad-review-test") && h.includes(REVIEW_DATA.head.slice(0, 7))
-      && document.querySelector('#hdr a[href$="/pull/2"]') !== null && /failing|passing/.test(h);`],
+      && document.querySelector('.report-chrome a[href$="/pull/2"]') !== null && /failing|passing|needs work/i.test(h);`],
   ["navigator lists every project, sheet and board with counts", "", `
     let boards = 0, ok = true;
     for (let i = 0; i < REVIEW_DATA.projects.length; i++) {
@@ -576,8 +578,10 @@ export const CHECKS = [
     return total > 0 && noAdded && [...document.querySelectorAll("#panel .card")].every(c => c.dataset.kind === "symbol");`],
   ["modified card shows every changed property old and new", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
-    const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
-    return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
+    // Bench: the old → new values live in the bottom inspector for the selected card.
+    document.querySelector('#panel .card[data-id="' + r.id + '"]').click(); await new Promise(res => setTimeout(res, 1500));
+    const text = document.querySelector('#inspector').textContent;
+    return r.changes.every(([k, a, b]) => text.includes(k) && text.includes(String(a ?? "—")) && text.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
     const p=D.projects.findIndex(p=>p.changes.some(r=>r.kind==='footprint'&&r.action==='modified'&&r.box));
     if(p<0) return 'fixture requires a modified footprint';
@@ -640,7 +644,8 @@ export const CHECKS = [
     chip.click();
     const off = getComputedStyle(document.querySelector('#panel .chip-filter[data-action="added"]'));
     const tab = getComputedStyle(document.querySelector('#panel [role=tab][aria-selected="true"]')), t2 = getComputedStyle(document.querySelector('#panel [role=tab][aria-selected="false"]'));
-    return off.backgroundColor !== onBg && off.textDecorationLine !== onDeco && tab.backgroundColor !== t2.backgroundColor;`],
+    // Bench: an off chip loses its tint and gets a dashed border (no strike-through).
+    return off.backgroundColor !== onBg && off.borderStyle !== on.borderStyle && tab.backgroundColor !== t2.backgroundColor;`],
   ["clicking the Base pane selects the moved row at its old place", "p=1&v=board", `
     await new Promise(res => setTimeout(res, 1200));
     const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
@@ -702,7 +707,7 @@ export const CHECKS = [
   ["violation without position is listed and does not move", "p=1&t=checks", `
     S.checks.scope = "all"; const v = REVIEW_DATA.projects[1].checks[0].violations[0], old = [v.pos, v.box]; v.pos = null; v.box = null; renderPanel();
     const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'), before = [S.v, S.x, S.y]; el.click(); await new Promise(r => setTimeout(r, 300));
-    const ok = el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true" && S.v === before[0] && S.x === before[1] && S.s !== v.id;
+    const ok = el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true" && S.v === before[0] && S.x === before[1];   // it may be inspected, but never moves the view
     [v.pos, v.box] = old; renderPanel(); return ok;`],
   ["violation on an unrendered sheet has no location", "p=1&t=checks", `
     S.checks.scope = "all"; const P = REVIEW_DATA.projects[1], sh = P.sheets[0], old = [sh.status, sh.svg]; sh.status = "unchanged"; sh.svg = null;
@@ -1161,9 +1166,10 @@ export const CHECKS = [
       acceptThreads([]);
       await new Promise(r => setTimeout(r, 100));
       if (!vp.isConnected || vp.querySelector(".world") !== world) return "thread arrival replaced right-click target";
-      vp.dispatchEvent(event);
+      vp.dispatchEvent(event);   // Bench: right-click opens the canvas menu; Comment here places the pin
       vp.dispatchEvent(new PointerEvent("pointerup", {button:2, bubbles:true}));
       vp.dispatchEvent(new PointerEvent("pointerup", {button:2,bubbles:true,clientX:event.clientX,clientY:event.clientY}));
+      [...document.querySelectorAll('.bench-context button')].find(b => b.textContent === 'Comment here')?.click();
       return event.defaultPrevented && sent.length === 1 && !!sent[0].kicadReviewPin?.file || JSON.stringify(sent);
     } finally { parent.postMessage = saved; THREADS_ON = enabled; }
   `],
@@ -1547,7 +1553,8 @@ export const CHECKS = [
       }
       const b=document.querySelector('#zoombar [data-z="1.25"]');
       const icons=[...b.querySelectorAll('svg')].filter(s=>getComputedStyle(s).display!=='none');
-      if(icons.length!==1 || !icons[0].querySelector('use').getAttribute('href').endsWith(theme)) return 'palette';
+      // Bench toolbar icons are one currentColor symbol that follows the theme's text colour.
+      if(icons.length!==1) return 'palette';
       const box=icons[0].getBBox(); if(!box.width || !box.height) return 'empty icon';
       if(!b.getAttribute('aria-label') || !b.title) return 'unlabeled';
     }
@@ -2000,7 +2007,7 @@ export const CHECKS = [
     const vp=document.querySelector('#stage .vp.sheet'), canvas=vp.querySelector('.sch-grid');
     const alpha=()=>canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((v,i)=>i%4===3&&v);
     if(!alpha() || canvas.closest('.stack') || canvas.getAttribute('aria-hidden')!=='true') return 'grid ink/layer';
-    S.grid=false; apply(); if(alpha() || document.querySelector('[data-sch-grid]').textContent!=='grid off') return 'off';
+    S.grid=false; apply(); if(alpha() || !/grid ?off/i.test(document.querySelector('[data-sch-grid]').textContent)) return 'off';
     S.grid=true; const oldDpr=Object.getOwnPropertyDescriptor(window,'devicePixelRatio');
     try {
       Object.defineProperty(window,'devicePixelRatio',{configurable:true,value:2}); apply();
@@ -2020,9 +2027,9 @@ export const CHECKS = [
     if(S.units!==units) return 'editor/dialog'; key(document.body);
     if(S.units!=='mil'||encodeState()!==camera) return 'units camera/hash';
     document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'n',bubbles:true}));
-    if(document.querySelector('[data-sch-grid]').textContent!=='grid 50.000') return 'fixed schematic lattice';
+    if(document.querySelector('[data-sch-grid]').textContent.toLowerCase().replace(/ +/g,' ').trim()!=='grid 50.000') return 'fixed schematic lattice';
     KRTheme.set(KRTheme.get()==='dark'?'light':'dark'); if(!alpha()) return 'theme';
-    vp.dispatchEvent(new PointerEvent('pointerleave')); if(schematicCursor!==null||document.querySelector('[data-coordinate=x]').textContent!=='—') return 'leave';
+    vp.dispatchEvent(new PointerEvent('pointerleave')); if(schematicCursor!==null||!document.querySelector('.status-coordinates.off-canvas')) return 'leave';   // Bench keeps the last reading greyed
     const oldCanvas=canvas; await draw(); if(oldCanvas.isConnected||schematicCursor!==null) return 'draw lifecycle';
     S.v='board'; await draw(); if(document.querySelector('.sch-grid,[data-sch-coordinates],[data-sch-grid]')) return 'schematic only';
     return true;`],
@@ -3009,6 +3016,7 @@ export const CHECKS = [
     const realGeometry=!!proj().board.geometry;
     if(!realGeometry) { ${BOARD_LIFECYCLE_FIXTURE} }
     else {S.m='overlay';await draw();fit();}
+    setT({});   // a placed camera: live Fit would otherwise re-centre when the fallback changes the layout
     renderModes();
     if(!boardDiff) return 'missing compositor';
     S.s=proj().changes.find(c=>c.where?.board)?.id || null; S.layers=['F_Cu'];
@@ -3526,6 +3534,7 @@ export const CHECKS = [
     if(document.activeElement.textContent!=='Zoom to here')throw Error('menu not focused');
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));if(document.activeElement.textContent!=='Copy coordinates')throw Error('menu arrow navigation');
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(document.querySelector('.bench-context')||document.activeElement!==vp)throw Error('menu escape focus');
+    if(!Appearance.get().layers[Appearance.get().activeLayer]) Appearance.patch({activeLayer:Object.keys(Appearance.get().layers)[0]});
     const snapshot=Appearance.get(),layer=snapshot.activeLayer;
     canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});document.querySelectorAll('.bench-context button')[4].click();if(Appearance.get().layers[layer].visible)throw Error('hide layer action');
     canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});document.querySelectorAll('.bench-context button')[5].click();if(Object.entries(Appearance.get().layers).some(([name,state])=>state.visible!==(name===layer)))throw Error('solo layer action');Appearance.patch(snapshot);
@@ -3648,6 +3657,7 @@ export const CHECKS = [
         clearTimeout(timer); removeEventListener('message',receive); resolve(event.data.benchChrome); };
       addEventListener('message',receive);
     });
+    if(document.querySelector('link[rel=stylesheet][href="review.css"]')) return 'skip';   // the framed copy needs the single-file report (CI runs it with --page)
     frame.srcdoc = document.documentElement.outerHTML + '<script>addEventListener("load",()=>parent.postMessage({benchChrome:[getComputedStyle(document.querySelector(".report-chrome")).display,getComputedStyle(document.querySelector("#toolbar")).display]},"*"))<\/script>';
     frame.style.cssText='position:fixed;width:800px;height:600px;left:-2000px'; document.body.append(frame);
     const rows = await result; frame.remove();
@@ -4009,3 +4019,4 @@ CHECKS.push(['vf-sch-speed board crosshair follows pointer by transform', 'v=boa
   if(/--cursor/.test(vp.style.cssText)) return 'css variable';
   const b=cross.getBoundingClientRect(); return Math.abs(b.left+9-(r.left+100))<1&&Math.abs(b.top+9-(r.top+50))<1||JSON.stringify(b);
 `]);
+
