@@ -674,7 +674,7 @@ function updateStatus() {
   for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); if (node) node.textContent = fmt(value); }
   const rows = [...document.querySelectorAll("#panel .card[data-id]")], at = rows.findIndex(e => e.dataset.id === S.s);
   const change = $("#statusbar [data-change]"); if (change) change.textContent = `${at < 0 ? 0 : at+1}/${rows.length}`;
-  const zoom = $("#statusbar [data-zoom]"); if (zoom) zoom.textContent = placed() ? S.z.toFixed(2) : "—";
+  const zoom = $("#statusbar [data-zoom]"); if (zoom) zoom.textContent = placed() ? (S.z / PX).toFixed(2) : "—";
   const unit = $("#statusbar [data-units]"); if (unit) unit.textContent = units;
   const coords = $("#statusbar .status-coordinates"); coords?.toggleAttribute("data-sch-coordinates", sheet);
   const grid = $("#statusbar [data-grid]");

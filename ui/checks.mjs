@@ -2889,4 +2889,44 @@ export const CHECKS = [
   document.querySelector('#change-nav [data-step="1"]').click();
   await new Promise(r => setTimeout(r, 50));
   return /^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) || document.querySelector('#change-count').textContent;`],
+  ["chrome browser proof Thermal_Camera", "", `
+  const i=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+  if(i<0) return 'Thermal_Camera fixture required';
+  await applyState({p:i,v:'board',m:'side'}); fit(); updateStatus();
+  const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect();
+  vp.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,clientX:r.left+r.width/2+12,clientY:r.top+r.height/2+8}));
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return !!document.querySelector('#toolbar #zoombar') && !!document.querySelector('#panel-tabs')
+    && ['x','y'].every(axis=> /^-?\\d+\\.\\d+$/.test(document.querySelector('#statusbar [data-coordinate='+axis+']').textContent))
+    && !document.querySelector('#stage canvas') && !!document.querySelector('#stage svg');`],
+  ["chrome offline controls preserve SVG modes links theme and modal", "p=1&v=board", `
+  for (const mode of ['side','overlay','wipe','blend','semantic']) {
+    await applyState({p:1,v:'board',m:mode}); fit();
+    if (S.m!==mode || !document.querySelector('#stage svg')) return 'mode '+mode;
+  }
+  const theme=KRTheme.get(); document.querySelector('[data-theme-toggle]').click();
+  if (KRTheme.get()===theme) return 'theme switch'; KRTheme.set(theme);
+  Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});
+  document.querySelector('#zoombar [data-act=copy]').click();
+  await new Promise(r=>setTimeout(r,100));
+  const field=document.querySelector('#zoombar input[readonly]');
+  if(!field || field.value!==positionLink() || document.activeElement!==field) return 'copy fallback';
+  field.remove();
+  const row=proj().changes.find(r=>viewOf(r)==='board');
+  if(!row) return 'board change fixture required'; await goTo(row.id);
+  const threads=THREADS_ON; THREADS_ON=true;
+  document.dispatchEvent(new KeyboardEvent('keydown',{key:'c',bubbles:true}));
+  if(!S.placing) return 'pin placement did not start';
+  const selected=S.s, opener=document.querySelector('#shortcuts-open'); opener.focus(); opener.click();
+  const dialog=document.querySelector('#shortcuts');
+  if(!dialog.open || !dialog.contains(document.activeElement)) return 'modal focus';
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+  if(dialog.open || S.s!==selected || !S.placing || document.activeElement!==opener) return 'modal close';
+  THREADS_ON=threads; S.placing=false; document.body.classList.remove('placing');
+  return !performance.getEntriesByType('resource').some(e=>/^https?:/.test(e.name));`],
+  ["chrome status zoom is normalized against SVG camera scale", "p=1&v=board", `
+  setT({x:100,y:100,z:8}); updateStatus();
+  return document.querySelector('#statusbar [data-zoom]').textContent === '2.00'
+    || 'zoom should be S.z / PX, got '+document.querySelector('#statusbar [data-zoom]').textContent;`],
 ];
