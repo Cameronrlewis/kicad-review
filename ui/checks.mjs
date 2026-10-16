@@ -2242,7 +2242,7 @@ export const CHECKS = [
     return Appearance.get().layerOpacity['F.Cu']===.31 && Appearance.get().markStyle==='recolour';
   `, {afterReload:`
     const a=Appearance.get();
-    if(a.markStyle!=='recolour'||a.layerOpacity['F.Cu']!==.31||a.netColors.GND?.[0]!==.2) return 'reload lost settings';
+    if(a.markStyle!=='recolour'||a.layerOpacity['F.Cu']!==.31||a.netColors.GND?.[0]!==.2) return 'reload lost settings'+(()=>{try{const s=localStorage.getItem('kr.appearance.v1');return ' storage '+(s?s.length:'none')+' viewers '+(s?Object.keys(JSON.parse(s).viewers||{}).join('|').slice(0,300):'')+' total '+Object.keys(localStorage).reduce((n,k)=>n+(localStorage.getItem(k)||'').length,0)+' path '+location.pathname}catch(e){return ' storage error '+e.message}})();
     return document.querySelector('[data-mark-style="recolour"]').getAttribute('aria-checked')==='true';
   `}],
   ["board mark style blocked storage works from startup", "v=board", `
@@ -2268,7 +2268,7 @@ export const CHECKS = [
     localStorage.setItem('kr.appearance.v1',JSON.stringify(raw));return true;
   `, {afterReload:`
     const a=Appearance.get();
-    if(a.markStyle!=='outline'||a.layerOpacity['F.Cu']!==.37||a.objectOpacity.zones!==.24||a.netColors.GND?.[0]!==.2) return 'invalid mark style discarded preferences '+JSON.stringify({m:a.markStyle,l:a.layerOpacity?.['F.Cu'],z:a.objectOpacity?.zones,n:a.netColors?.GND});
+    if(a.markStyle!=='outline'||a.layerOpacity['F.Cu']!==.37||a.objectOpacity.zones!==.24||a.netColors.GND?.[0]!==.2) return 'invalid mark style discarded preferences '+JSON.stringify({m:a.markStyle,l:a.layerOpacity?.['F.Cu'],z:a.objectOpacity?.zones,n:a.netColors?.GND})+(()=>{try{const s=localStorage.getItem('kr.appearance.v1');return ' storage '+(s?s.length:'none')+' viewers '+(s?Object.keys(JSON.parse(s).viewers||{}).join('|').slice(0,300):'')+' total '+Object.keys(localStorage).reduce((n,k)=>n+(localStorage.getItem(k)||'').length,0)+' path '+location.pathname}catch(e){return ' storage error '+e.message}})();
     ${MARK_STYLE_FIXTURE}
     document.querySelector('[data-mark-style="recolour"]').click();
     return Appearance.get().markStyle==='recolour';
@@ -3863,7 +3863,7 @@ export const CHECKS = [
     console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',theme:KRTheme.get(),evidence,marks:'0%/100%, outline/recolour',reset:true}));return true;
   `, {afterReload:`
     const expected=JSON.parse(sessionStorage.getItem('vf-opacity-viewer')),actual=Appearance.get();
-    if(JSON.stringify(actual)!==JSON.stringify(expected))throw Error('reload lost per-viewer opacity/colour');
+    if(JSON.stringify(actual)!==JSON.stringify(expected))throw Error('reload lost per-viewer opacity/colour'+(()=>{try{const s=localStorage.getItem('kr.appearance.v1');return ' storage '+(s?s.length:'none')+' viewers '+(s?Object.keys(JSON.parse(s).viewers||{}).join('|').slice(0,300):'')+' total '+Object.keys(localStorage).reduce((n,k)=>n+(localStorage.getItem(k)||'').length,0)+' path '+location.pathname}catch(e){return ' storage error '+e.message}})());
     console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',reload:true,opacity:actual.layerOpacity['In2.Cu'],color:actual.layers['In2.Cu'].color}));return true;
   `}],
 
