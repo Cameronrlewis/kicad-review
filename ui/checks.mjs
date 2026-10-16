@@ -2795,6 +2795,7 @@ export const CHECKS = [
     return !!document.querySelector('#stage .pin') || 'pin did not recover';
   `],
   ["board geometry moved selection and revision pin lifecycle", "v=board&m=side", `
+    Appearance.reset();
     boardDiff?.dispose(); document.querySelector('#stage').replaceChildren();
     const object=(uuid,x,ids=[])=>({uuid,changeUuid:uuid,kind:'pad',ref:null,changeIds:ids,box:[x-1000,9000,x+1000,11000],
       geometry:{primitive:{shape:'circle',center:[x,10000],size:[2000,2000],angle:0}},
@@ -2803,6 +2804,10 @@ export const CHECKS = [
       layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects});
     const scenes={base:scene([object('p5-moved',6000,['p5-move']),object('p5-unchanged',12000)]),
       head:scene([object('p5-moved',18000,['p5-move']),object('p5-unchanged',12000),object('p5-added',21000,['p5-add'])])};
+    // Anchor resolution consults decoded revisions before the mounted compositor.
+    // Keep this synthetic fixture independent of an already-decoded real report.
+    proj().board.geometry={base:'p5-synthetic-base',head:'p5-synthetic-head'};
+    for(const side of ['base','head']) decodedBoardScenes.set(proj().board.geometry[side],scenes[side]);
     proj().changes.push({id:'p5-move',kind:'pad',action:'modified',where:{board:true}},
       {id:'p5-add',kind:'pad',action:'added',where:{board:true}});
     Object.assign(S,{x:12,y:10,z:20,s:null,m:'side'}); renderPanel();
@@ -3292,7 +3297,8 @@ export const CHECKS = [
   document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   return !!document.querySelector('#toolbar #zoombar') && !!document.querySelector('#panel-tabs')
     && ['x','y'].every(axis=> /^-?\\d+\\.\\d+$/.test(document.querySelector('#statusbar [data-coordinate='+axis+']').textContent))
-    && !document.querySelector('#stage canvas') && !!document.querySelector('#stage svg');`],
+    && (boardView.useGL ? boardDiff?.panes.length===2 && document.querySelectorAll('#stage canvas').length===2
+      : !document.querySelector('#stage canvas') && !!document.querySelector('#stage svg'));`],
   ["chrome offline controls preserve SVG modes links theme and modal", "p=1&v=board", `
   for (const mode of ['side','overlay','wipe','blend','semantic']) {
     await applyState({p:1,v:'board',m:mode}); fit();
@@ -3333,4 +3339,73 @@ export const CHECKS = [
     && height('#statusbar')===24 && height('[data-theme-toggle]')===24
     && height('#modes [data-mode]')===24 && height('#panel-tabs [role=tab]')===28
     || 'chrome heights '+JSON.stringify({header,toolbar:height('#toolbar'),status:height('#statusbar')});`],
+  ["board Thermal proof", "v=board", `
+    const i=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(i<0 || !D.projects[i].board?.geometry?.base || !D.projects[i].board?.geometry?.head)
+      throw Error('Thermal_Camera report required for proof (two geometry revisions)');
+    S.p=i; S.v='board'; S.s=null; renderNav(); renderPanel(); await draw(); fit();
+    document.querySelectorAll('.thread time').forEach(e=>e.style.visibility='hidden');
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    return !!boardDiff && boardDiff.panes.length>0 && boardView.useGL;
+  `],
+  ["board Thermal vision proof", "v=board&m=semantic", `
+    const i=D.projects.findIndex(p=>p.name==='Thermal_Camera');
+    if(i<0 || !D.projects[i].board?.geometry?.base || !D.projects[i].board?.geometry?.head)
+      throw Error('Thermal_Camera report required for vision proof');
+    await applyState({p:i,v:'board',m:'semantic',s:null});
+    const rows=proj().changes.filter(c=>c.where?.board);
+    if(!['added','removed','modified'].every(action=>rows.some(c=>c.action===action)))
+      throw Error('Three-action Thermal_Camera fixture required for vision proof');
+    const boxes=rows.flatMap(c=>['base','head'].map(side=>boardDiff.bounds(c.id,side))).filter(Boolean);
+    const b=[Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))];
+    const vp=boardDiff.panes[0].vp;
+    S.s=rows.find(c=>c.action==='modified').id;
+    renderPanel(); setT({x:(b[0]+b[2])/2,y:(b[1]+b[3])/2,z:Math.min(vp.clientWidth/Math.max(10,b[2]-b[0]+6),vp.clientHeight/Math.max(10,b[3]-b[1]+6))});
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    for(const [action,glyph,dash,word] of [['added','+','solid','Added'],['removed','−','dashed','Removed'],['modified','~','dotted','Modified']]) {
+      const labels=[...document.querySelectorAll('#stage .board-mark-label.'+action)];
+      if(!labels.some(e=>e.dataset.glyph===glyph && e.dataset.dash===dash && getComputedStyle(e).borderTopStyle===dash && e.textContent===glyph+' '+word)) return 'missing action encoding '+action;
+    }
+    return !!document.querySelector('#panel [data-id="'+S.s+'"][aria-selected="true"]');
+  `],
+  ...['outline','recolour'].flatMap(style=>['side','overlay','wipe','blend','semantic'].map(mode=>[
+    'board diff fps '+style+' '+mode, 'v=board', `
+      if(!window.__CHECK_PERF) return 'skip';
+      if(!proj().board?.geometry?.base || !proj().board?.geometry?.head) throw Error('Two geometry revisions required');
+      await applyState({v:'board',m:'${mode}',s:null});
+      Appearance.patch({markStyle:'${style}'}); fit(); boardDiff.render();
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      if(!boardView.useGL || !boardDiff?.panes.length) return 'WebGL compositor required';
+      if(!['base','head'].every(side=>boardDiff.panes.some(p=>p.scenes[side]?.objects?.length))) return 'Two populated retained revisions required';
+      const renderers=boardDiff.panes.map(p=>p.renderer), before=renderers.map(r=>({...r.stats}));
+      const original={x:S.x,y:S.y,z:S.z}, counts={bufferData:0,bufferSubData:0,createTexture:0,createFramebuffer:0,createRenderbuffer:0,createBuffer:0,contexts:0};
+      const proto=WebGL2RenderingContext.prototype, saved={};
+      for(const name of Object.keys(counts).filter(n=>n!=='contexts')) {
+        saved[name]=proto[name]; proto[name]=function(...args){counts[name]++;return saved[name].apply(this,args)};
+      }
+      const getContext=HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext=function(type,...args){if(type==='webgl2')counts.contexts++;return getContext.call(this,type,...args)};
+      const intervals=[]; let last=0, frames=0;
+      try {
+        await new Promise(resolve=>{
+          const start=performance.now();
+          const tick=now=>{
+            const elapsed=now-start;
+            setT({x:original.x+Math.sin(elapsed/160)*2,y:original.y+Math.cos(elapsed/180)*2,z:original.z*(1+.12*Math.sin(elapsed/230))});
+            if(elapsed>=1000){if(last)intervals.push(now-last);last=now;frames++;}
+            if(elapsed<4100)requestAnimationFrame(tick);else resolve();
+          };requestAnimationFrame(tick);
+        });
+        renderers.forEach(r=>r.gl.finish());
+        const sorted=[...intervals].sort((a,b)=>a-b), fps=1000/(intervals.reduce((a,b)=>a+b,0)/intervals.length);
+        const draws=renderers.map((r,i)=>r.stats.draws-before[i].draws), uploads=renderers.map((r,i)=>r.stats.uploads-before[i].uploads);
+        const gl=renderers[0].gl, ext=gl.getExtension('WEBGL_debug_renderer_info');
+        const evidence={project:proj().name,theme:KRTheme.get(),mode:'${mode}',style:'${style}',fps,median:sorted[Math.floor(sorted.length*.5)],p95:sorted[Math.floor(sorted.length*.95)],frames,duration:intervals.reduce((a,b)=>a+b,0),draws,uploads,counts,renderer:ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),glErrors:renderers.map(r=>r.gl.getError()),revisions:boardDiff.panes.map(p=>p.sides)};
+        console.log('BOARD_FPS '+JSON.stringify(evidence));
+        return fps>=50 && evidence.duration>=3000 && uploads.every(n=>n===0) && draws.every(n=>n>=frames) && Object.values(counts).every(n=>n===0) && evidence.glErrors.every(n=>n===0) || JSON.stringify(evidence);
+      } finally {
+        for(const [name,fn] of Object.entries(saved)) proto[name]=fn;
+        HTMLCanvasElement.prototype.getContext=getContext;setT(original);
+      }
+    `])),
 ];

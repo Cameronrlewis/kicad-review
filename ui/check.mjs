@@ -1,5 +1,6 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
 // Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark|--theme dark|light] [--width N] [--dpr N] [--offline]
+// --gpu uses Metal; --mode side|overlay|wipe|blend|semantic selects board proof mode.
 // Theme proof: --persist-check --vision none|deuteranopia|protanopia|tritanopia --appearance-fixture theme.json --mark-style outline|recolour
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
@@ -8,7 +9,7 @@ import { join, resolve } from "node:path";
 import { CHECKS } from "./checks.mjs";
 
 const args = process.argv.slice(2);
-const opt = k => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : null; };
+const opt = k => { const i = args.indexOf(k); if (i < 0) return null; if (!args[i + 1] || args[i + 1].startsWith('--')) throw Error('Missing value for ' + k); return args.splice(i, 2)[1]; };
 const legacyDark = args.includes("--dark"); if (legacyDark) args.splice(args.indexOf("--dark"), 1);
 const theme = opt("--theme") || (legacyDark ? "dark" : "light");
 if (!["dark", "light"].includes(theme)) throw new Error("Invalid theme");
@@ -20,17 +21,21 @@ const fixturePath = opt("--appearance-fixture"), markStyle = opt("--mark-style")
 if (!["outline", "recolour"].includes(markStyle)) throw new Error("Invalid mark style");
 const fixtureText = fixturePath ? readFileSync(resolve(fixturePath), "utf8") : null;
 if (fixtureText !== null && Buffer.byteLength(fixtureText, "utf8") > 1048576) throw new Error("Theme exceeds 1 MiB");
+const mode = opt("--mode");
+if (mode && !["side", "overlay", "wipe", "blend", "semantic"].includes(mode)) throw Error("Invalid mode");
+const gpu = args.includes("--gpu"); if (gpu) args.splice(args.indexOf("--gpu"), 1);
 const width = Number(opt("--width") || 1920);
 const dpr = Number(opt("--dpr") || 1);
 const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
 const perf = process.env.CHECK_PERF === "1";
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
 const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), filter = args[0] || "";
+if (args.length > 1 || args.some(a => a.startsWith("--"))) throw Error("Unknown arguments: " + args.join(" "));
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
 const port = Number(process.env.CHECK_PORT || 9334);
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const proc = spawn(chrome, ["--headless=new", "--no-sandbox", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
-  "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--window-size=${width},1080`, "about:blank"], { stdio: "ignore" });
+  ...(gpu ? ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"] : ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]), `--window-size=${width},1080`, "about:blank"], { stdio: "ignore" });
 process.on("exit", () => proc.kill());
 process.on("uncaughtException", e => { console.error("FAIL startup -> " + e.message); process.exit(1); });
 const timeout = Number(process.env.CHECK_TIMEOUT || 15000);
@@ -148,7 +153,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
     const expected = (await evaluate("JSON.stringify(appearanceStore().get())")).result.value;
     for (const view of ["board", "schematic"]) {
       if (view === "schematic") {
-        const prepared = await evaluate("(async()=>{const sheet=proj().sheets.find(s=>s.svg);if(!sheet)throw Error('fixture needs schematic');await applyState({v:'sheet:'+sheet.path,m:'side'});return true})()");
+        const prepared = await evaluate("(async()=>{const sheet=proj().sheets.find(s=>s.svg);if(!sheet)throw Error('fixture needs schematic');await applyState({...S,v:'sheet:'+sheet.path,m:'side'});history.replaceState(null,'','#'+encodeState());return true})()");
         if (prepared.exceptionDetails) throw new Error(prepared.exceptionDetails.exception?.description);
       }
       await reloadReady();
@@ -158,6 +163,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
         throw new Error("Appearance did not survive " + view + " reload: " + Object.keys(a).filter(k=>JSON.stringify(a[k])!==JSON.stringify(b[k])).join(', '));
       }
       const rendered = await evaluate(`(()=>{
+        if (${JSON.stringify(view)} === 'board' ? S.v !== 'board' : !S.v.startsWith('sheet:')) return false;
         if(S.v==='board')return appearanceBoards.size===2&&[...appearanceBoards].every(b=>b.appearance.colors['board.copper.f'][0]===.12);
         return appearanceSchematics.size===2&&[...appearanceSchematics].every(s=>s.style.getPropertyValue('--sch-ink-009600').includes('18,52,86'));
       })()`);
@@ -167,6 +173,20 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   if (r.result?.value === true && lifecycle.afterReload) {
     await reloadReady();
     r = await evaluate(`(async () => { ${lifecycle.afterReload} })()`);
+  }
+  if (r.result?.value === true && ["board Thermal proof", "board Thermal vision proof"].includes(name)) {
+    r = await evaluate(`(async()=>{
+      await applyState({...S,m:${JSON.stringify(mode)}||S.m});
+      Appearance.patch({markStyle:${JSON.stringify(markStyle)}}); boardDiff.render();
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      if (${JSON.stringify(name)} === 'board Thermal vision proof') {
+        for (const [action, style] of Object.entries(BoardMarks.styles)) {
+          const labels = [...document.querySelectorAll('#stage .board-mark-label.' + action)];
+          if (!labels.some(e => e.dataset.glyph === style.glyph && e.dataset.dash === style.dash && e.textContent === style.glyph + ' ' + style.word && getComputedStyle(e).borderTopStyle === style.dash)) return 'missing final action encoding ' + action;
+        }
+      }
+      return Appearance.get().markStyle===${JSON.stringify(markStyle)} && (!${JSON.stringify(mode)} || S.m===${JSON.stringify(mode)});
+    })()`);
   }
   if (r.result?.value === "skip" && !errors.length) return ["SKIP " + name, noSkip];
   const ok = r.result?.value === true && !errors.length;
@@ -181,7 +201,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
     if (startupScript) await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript});
   }
 }
-if (shot) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
+if (shot && !failed) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
 ws.close();
 const exited = new Promise(resolve => proc.exitCode !== null || proc.signalCode !== null ? resolve() : proc.once('exit', resolve));
 proc.kill();
