@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 const source = readFileSync(new URL('./theme.js', import.meta.url), 'utf8');
-function boot(value, blocked=false, child=false) {
+function boot(value, blocked=false, child=false, media=null) {
   const handlers = {}, posts = [], writes = [], attrs = {};
   const button = {setAttribute:(k,v)=>attrs[k]=v};
   const frame = {postMessage:(...args)=>posts.push(args)};
@@ -15,7 +15,7 @@ function boot(value, blocked=false, child=false) {
   const parent = child ? {postMessage:(...args)=>posts.push(args)} : window;
   const storage = {getItem:()=>{if(blocked)throw Error('denied'); return value;},
     setItem:(k,v)=>{if(blocked)throw Error('denied');writes.push([k,v]);}};
-  runInNewContext(source,{window,parent,document,localStorage:storage,
+  runInNewContext(source,{window,parent,document,localStorage:storage,matchMedia:media?()=>media:undefined,
     CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
     addEventListener:(k,fn)=>handlers[k]=fn});
   return {api:window.KRTheme,root,handlers,posts,writes,attrs,parent,frame};
@@ -46,4 +46,18 @@ test('wrapper synchronizes only actual frame, storage changes and ready events',
   x.handlers.message({source:x.frame,data:{kicadReviewReady:true}});assert.equal(x.posts.length,1);
   x.handlers.storage({key:'kr.theme',newValue:'dark'});assert.equal(x.api.get(),'dark');
   x.handlers.storage({key:'kr.theme',newValue:null});assert.equal(x.api.get(),'dark');
+});
+
+// bench-t2: System follows the OS until an explicit menu choice replaces it.
+test('System theme follows media changes and explicit choices stop following',()=>{
+  let change;
+  const media={matches:true,addEventListener:(type,fn)=>{change=fn;}};
+  const x=boot(null,false,false,media);
+  x.api.setMode('system');assert.equal(x.api.get(),'light');assert.equal(x.api.mode(),'system');
+  media.matches=false;change();assert.equal(x.api.get(),'dark');
+  x.api.setMode('light');media.matches=false;change();assert.equal(x.api.get(),'light');
+  assert.ok(x.writes.some(([key,value])=>key==='kr.theme-mode'&&value==='system'));
+  assert.ok(x.writes.some(([key,value])=>key==='kr.theme-mode'&&value==='explicit'));
+  x.handlers.storage({key:'kr.theme-mode',newValue:'system'});assert.equal(x.api.mode(),'system');
+  assert.equal(x.api.get(),'dark');
 });
