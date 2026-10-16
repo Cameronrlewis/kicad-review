@@ -346,3 +346,24 @@ test('marks meet 3:1 for imported themes and arbitrary backgrounds', () => {
     assert.ok(A.contrast(mark.color,mark.halo)>=3);
   }
 });
+
+test('vf-opacity every physical layer has independent persisted whole-layer opacity', () => {
+  const disk=memory(), storage=()=>disk;
+  const store=A.createStore({viewerId:'opacity',storage});
+  for (const name of Object.keys(ctx.KicadColors.layerThemeKeys)) {
+    const before=store.get().layers[name].color;
+    store.patch({layers:{[name]:{opacity:.5}}});
+    assert.equal(store.get().layerOpacity[name],.5,name);
+    assert.deepEqual(plain(store.get().layers[name].color),plain(before),name);
+  }
+  const saved=A.createStore({viewerId:'opacity',storage});
+  assert.deepEqual(plain(saved.get()),plain(store.get()));
+  assert.equal(A.createStore({viewerId:'other',storage}).get().layers['In2.Cu'].opacity,1);
+  saved.patch({layers:{'In2.Cu':{color:[255,105,180,1],opacity:0}}});
+  assert.equal(saved.get().layerOpacity['In2.Cu'],0);
+  saved.reset();
+  for (const [name,style] of Object.entries(saved.get().layers)) {
+    assert.equal(style.opacity,1,name);
+    assert.deepEqual(plain(style.color),plain(ctx.KicadColors.layers[name]),name);
+  }
+});

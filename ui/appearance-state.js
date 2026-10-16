@@ -105,6 +105,7 @@ function parseTheme(text) {
     return out;
   }
 
+// layerOpacity is whole-layer coverage, independent of RGBA theme paint alpha.
 function defaults() {
   return {...boardDefaults(),colors:clone(DEFAULTS),layerOpacity:{},netColors:{},
     objectOpacity:{tracks:1,vias:1,pads:1,zones:.6,shapes:1,images:.6},

@@ -113,11 +113,13 @@
 
     const range = (label, onInput) => { const r = h("input", {type:"range", min:0, max:100, step:1, "aria-label":label}); r.oninput = () => onInput(+r.value / 100); return r; };
     const colorInput = (label, onInput) => { const c = h("input", {type:"color", "aria-label":label}); c.oninput = () => onInput(rgb(c.value)); return c; };
+    // KiCad 10 pcbnew/widgets/appearance_controls.cpp:1678-1699: layer swatch, eye and name.
+    // Per-layer opacity extends that row as requested; it is not theme colour alpha.
     function layerRow(l) {
       const name = l.name, label = l.label || name, c = colorInput(`${label} colour`, v => ctx.onChange({layers:{[name]:{color:[...v, ctx.getState().layers[name].color[3]]}}}));
       const e = eye(`Show ${label}`, () => ctx.onChange({layers:{[name]:{visible:!ctx.visible(name)}}}));
       const act = h("button", {type:"button", class:"name"}, label); act.title = l.title || label; act.onclick = () => ctx.onChange({activeLayer:name});
-      const a = range(`${label} alpha`, v => ctx.onChange({layers:{[name]:{color:[...ctx.getState().layers[name].color.slice(0, 3), v]}}}));
+      const a = range(`${label} opacity`, v => ctx.onChange({layers:{[name]:{opacity:v}}}));
       return {el:h("div", {class:"appearance-row", "data-layer":name}, c, e, act, ...(l.changed ? [h("span", {class:"mark", title:"changed in this review"}, "\u2261")] : []), a), c, e, act, a};
     }
     function objectRow([id, label, opacity]) {
@@ -151,7 +153,8 @@
       fill(rows.layers, panels.layers.firstChild, live.layers, layerRow);
       for (const l of live.layers) {
         const r = rows.layers.get(l.name), s = st.layers[l.name]; if (!r || !s) continue;
-        setIf(r.c, "value", hex(s.color)); setIf(r.a, "value", String(Math.round(s.color[3] * 100)));
+        setIf(r.c, "value", hex(s.color)); setIf(r.a, "value", String(Math.round(s.opacity * 100)));
+        r.a.title = `${Math.round(s.opacity * 100)}% opacity`; r.a.setAttribute("aria-valuetext", `${Math.round(s.opacity * 100)}%`);
         r.e.setAttribute("aria-pressed", String(live.visible(l.name)));
         const active = !reduced && st.activeLayer === l.name; r.act.setAttribute("aria-current", String(active));
         r.el.classList.toggle("off", !live.visible(l.name));

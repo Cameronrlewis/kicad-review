@@ -140,7 +140,7 @@
       hud.append(group); renderer.setScene(scene,side);
       for (const action of Object.keys(M.styles)) {
         const visible = new Set();
-        renderer.draw({target:pane.targets[0],mask:true,filter:o=>{
+        renderer.draw({target:pane.targets[0],mask:true,marks:true,filter:o=>{
           if (actionFor(o,actions)!==action) return false; visible.add(o); return true;
         }});
         if (!visible.size) continue;
@@ -166,7 +166,7 @@
       const alpha=state.m==='blend' && side==='head'?state.blend:1;
       if (!alpha) continue;
       renderer.setScene(pane.scenes[side],side);
-      renderer.draw({target:pane.targets[0],mask:true,filter:o=>o.changeIds?.includes(state.s)});
+      renderer.draw({target:pane.targets[0],mask:true,marks:true,filter:o=>o.changeIds?.includes(state.s)});
       effect('added',alpha,clips?.[side],true);
     }
   }

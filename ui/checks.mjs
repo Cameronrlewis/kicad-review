@@ -3508,4 +3508,80 @@ export const CHECKS = [
     Appearance.patch({activeLayer:null,flip:false});check('F.Cu');
     return boardView.renderers.length===2 && uploads===boardView.renderers.map(r=>r.stats.uploads).join() && JSON.stringify(scene)===saved;
   `],
+  ["vf-opacity synthetic layer union UI persistence and marks", "v=board&t=appearance", `
+    const names=['F.Cu','In1.Cu','In2.Cu','B.Cu'];
+    const track=(id,layer,x0,x1,width=2000)=>({kind:'track',uuid:id,changeUuid:id,changeIds:layer==='In2.Cu'?['opacity-change']:[],layers:[layer],net:0,category:'tracks',side:null,hidden:false,
+      box:[x0,5000-width/2,x1,5000+width/2],geometry:{segments:[[x0,5000,x1,5000,width]]}});
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,20000,10000],copperStack:names,
+      layers:names.map((name,id)=>({id,name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
+      objects:[track('back','B.Cu',1000,19000,4000),track('inner','In1.Cu',1000,19000,4000),track('single','In2.Cu',2000,14000),track('overlap','In2.Cu',10000,18000)]};
+    cache.vfopacity=JSON.stringify(scene);proj().board.geometry={base:'vfopacity',head:'vfopacity'};
+    boardView.failed=null;Appearance.reset();Object.assign(S,{v:'board',m:'side',t:'appearance',x:10,y:5,z:40});renderPanel();await draw();
+    Appearance.patch({activeLayer:'In2.Cu'});
+    const row=document.querySelector('#appearance-root [data-layer="In2.Cu"]');if(!row)throw Error('missing In2.Cu row');
+    const color=row.querySelector('input[type=color]'),slider=row.querySelector('input[type=range]');
+    color.value='#ff69b4';color.dispatchEvent(new Event('input'));slider.value='50';slider.dispatchEvent(new Event('input'));
+    const pixel=(r,x,y=5)=>{r.draw();const q=r.worldToScreen([x,y]);return r.readPixel(Math.floor(q[0]*devicePixelRatio),r.gl.canvas.height-1-Math.floor(q[1]*devicePixelRatio));};
+    const close=(a,b)=>a.slice(0,3).every((v,i)=>Math.abs(v-b[i])<=2);
+    const expected=[255,105,180].map((v,i)=>(v+KicadColors.layers['In1.Cu'][i])/2);
+    const evidence=[];
+    for(const r of boardView.renderers){const single=pixel(r,6),overlap=pixel(r,12);evidence.push({single,overlap,expected});
+      if(!close(single,expected))throw Error('pink must blend with In1.Cu: '+JSON.stringify(evidence));
+      if(!close(single,overlap))throw Error('per-layer opacity double darkens overlap: '+JSON.stringify(evidence));}
+    // The layer pass must span batches and stencil fills, not just coincident capsules.
+    for(const kind of ['pad','graphic'])for(const r of boardView.renderers){
+      const variant=structuredClone(scene);
+      for(const o of variant.objects.filter(o=>o.layers[0]==='In2.Cu')){
+        const [x0,y0,x1,y1]=o.box;o.kind=kind;o.category=kind==='pad'?'pads':'filledShapes';
+        o.geometry=kind==='pad'?{primitive:{shape:'rect',center:[(x0+x1)/2,5000],size:[x1-x0,2000],angle:0}}:
+          {rings:[[[x0,y0],[x1,y0],[x1,y1],[x0,y1]]]};
+      }
+      r.setScene(variant);const single=pixel(r,6),overlap=pixel(r,12);
+      if(!close(single,expected)||!close(single,overlap))throw Error(kind+' union '+single+' / '+overlap);
+      if(r.gl.getError()!==r.gl.NO_ERROR)throw Error(kind+' layer-pass GL error');
+      r.setScene(scene);
+    }
+    if(Appearance.get().layerOpacity['In2.Cu']!==.5)throw Error('Layers slider must edit canonical layerOpacity');
+    if(slider.getAttribute('aria-label')!=='In2.Cu opacity')throw Error('opacity slider accessible name');
+    for(const name of names){const r=document.querySelector('#appearance-root [data-layer="'+name+'"]');if(!r?.querySelector('input[type=color]')||!r?.querySelector('input[type=range]'))throw Error('missing layer controls '+name);}
+    for(const r of document.querySelectorAll('#appearance-root [data-layer]')){const a=r.querySelector('input[type=range]');if(!a||a.min!=='0'||a.max!=='100'||getComputedStyle(a).opacity!=='1')throw Error('layer opacity slider must be visible, 0–100%: '+r.dataset.layer);}
+    // Mount real marks compositor on the same synthetic board, independent of report changes.
+    const host=document.createElement('div');host.style.cssText='display:flex;position:fixed;inset:180px 400px 180px 100px;z-index:999;background:var(--bg)';document.body.append(host);
+    const state={...S,m:'side',x:10,y:5,z:40,s:null};
+    const c=BoardDiff.mount({stage:host,scenes:{base:scene,head:scene},changes:[{id:'opacity-change',action:'modified'}],state,appearance:glAppearance});
+    for(const opacity of [0,1])for(const style of ['outline','recolour']){
+      Appearance.patch({layerOpacity:{'In2.Cu':opacity},markStyle:style});c.render();
+      if(!host.querySelector('.board-mark-label.modified'))throw Error('changed object mark missing at '+opacity+' '+style);
+      const pane=c.panes[0],edge=pane.renderer.worldToScreen([6,3.975]),mark=c.readPixel(0,...edge);
+      if(close(mark,KicadColors.layers['In1.Cu'])||close(mark,[255,105,180]))throw Error('GPU mark halo missing at '+opacity+' '+style+': '+mark);
+      const p=c.panes[0];p.renderer.setScene(scene,'head');p.renderer.setAppearance(glAppearance());p.renderer.draw({mask:true,marks:true,filter:o=>o.changeIds.includes('opacity-change')});
+      const q=p.renderer.worldToScreen([6,5]),rgba=p.renderer.readPixel(Math.floor(q[0]*devicePixelRatio),p.canvas.height-1-Math.floor(q[1]*devicePixelRatio));
+      if(rgba[0]<250)throw Error('mark mask faded at '+opacity+' '+style+': '+rgba);
+    }
+    c.dispose();host.remove();
+    document.querySelector('[data-appearance-reset]').click();
+    if(Appearance.get().layers['In2.Cu'].opacity!==1||!close(Appearance.get().layers['In2.Cu'].color,KicadColors.layers['In2.Cu']))throw Error('reset did not restore KiCad defaults');
+    color.value='#ff69b4';color.dispatchEvent(new Event('input'));slider.value='50';slider.dispatchEvent(new Event('input'));
+    Appearance.patch({activeLayer:'In2.Cu'});
+    sessionStorage.setItem('vf-opacity-viewer',JSON.stringify(Appearance.get()));boardDiff.render();
+    console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',theme:KRTheme.get(),evidence,marks:'0%/100%, outline/recolour',reset:true}));return true;
+  `, {afterReload:`
+    const expected=JSON.parse(sessionStorage.getItem('vf-opacity-viewer')),actual=Appearance.get();
+    if(JSON.stringify(actual)!==JSON.stringify(expected))throw Error('reload lost per-viewer opacity/colour');
+    console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',reload:true,opacity:actual.layerOpacity['In2.Cu'],color:actual.layers['In2.Cu'].color}));return true;
+  `}],
+
 ];
+
+// Reuse the pixel/UI regression without its reload so proof shots retain the synthetic board.
+for (const closeup of [false,true]) {
+  const body=CHECKS.find(c=>c[0]==='vf-opacity synthetic layer union UI persistence and marks')[2];
+  CHECKS.push(['vf-opacity proof '+(closeup?'overlap close-up':'board and Appearance row'),'v=board&t=appearance',body.replace('sessionStorage.setItem',
+    (closeup?"setT({x:12,y:5,z:100});":"")+"sessionStorage.setItem")]);
+}
+// Same retained-resource performance assertion, now exercising transparent copper layer passes.
+for (const mode of ['side','overlay','wipe','blend','semantic']) {
+  const source=CHECKS.find(c=>c[0]==='board diff fps outline '+mode);
+  CHECKS.push(['vf-opacity Thermal fps '+mode,source[1],source[2].replace("Appearance.patch({markStyle:'outline'});",
+    "Appearance.patch({markStyle:'outline',layerOpacity:{'F.Cu':.5,'B.Cu':.5}});")]);
+}

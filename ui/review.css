@@ -324,7 +324,7 @@ body.shot #toolbar { display:none; }
 .appearance-options .btn { width:100%; }
 #panel-tabs:has([data-tab=appearance]) [role=tab] { padding:0 4px; }
 .appearance-options label.check { border:0; background:none; padding:0; margin:0; }
-.appearance-row.object-row input[type=range] { opacity:1; } .appearance-row.object-row input[type=range]:disabled { opacity:.35; }
+.appearance-row[data-layer] input[type=range], .appearance-row.object-row input[type=range] { opacity:1; } .appearance-row.object-row input[type=range]:disabled { opacity:.35; }
 
 /* Geometry marks use CSS pixels, independently of camera zoom and board flip. */
 .board-marks {position:absolute;inset:0;pointer-events:none;}
