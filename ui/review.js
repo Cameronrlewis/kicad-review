@@ -133,29 +133,79 @@ function navigateSheet(direction) {
   const page = direction === "parent" ? pages.find(s => s.path === pages[i].parent) : pages[i + direction];
   if (page) select(`sheet:${page.path}`);
 }
+// bench-t4: the left dock owns navigation and Appearance; t=appearance remains shareable.
+let leftTab = "project", rightTab = "changes";
+const projectTools = {q:"", sort:"page", filter:"all"};
+let leftWidth = 262, leftCollapsed = false;
+try {
+  const saved = JSON.parse(localStorage.getItem("kr.bench.left") || "null");
+  if (Number.isFinite(saved?.width)) leftWidth = Math.max(220, Math.min(520, saved.width));
+  leftCollapsed = saved?.collapsed === true;
+} catch {} // file reports and blocked storage must remain usable
+function persistLeftDock() {
+  try { localStorage.setItem("kr.bench.left", JSON.stringify({width:leftWidth, collapsed:leftCollapsed})); } catch {}
+}
+function syncLeftDock() {
+  document.documentElement.style.setProperty("--nav-w", leftCollapsed ? "0px" : `${leftWidth}px`);
+  $("#nav").classList.toggle("left-collapsed", leftCollapsed);
+  const toggle = $('[data-dock="nav"]');
+  toggle?.setAttribute("aria-expanded", String(!leftCollapsed && (!matchMedia("(max-width:899px)").matches || $("#nav").classList.contains("dock-open"))));
+}
+function projectChips(c) {
+  return `<span class="counts">${["added", "removed", "modified"].map((a, i) => `<span class="chip ${a}" title="${c[a]} ${a}" aria-label="${c[a]} ${a}">${["+", "−", "~"][i]} ${c[a]}</span>`).join("")}</span>`;
+}
+const projectBoardSummaries = new WeakMap();
+function projectBoardSummary(loadedScene) {
+  const p = proj(), scene = loadedScene || (boardView.project === S.p ? boardView.scenes?.[1] || boardView.scenes?.[0] : null);
+  if (!scene && projectBoardSummaries.has(p)) return projectBoardSummaries.get(p);
+  const layers = scene?.layers || p.board.layers;
+  const copper = layers.filter(l => /(?:[._]Cu)$/.test(l.name) && l.enabled !== false).length;
+  const inventory = p.objects?.filter(o => o.kind === "footprint" && o.side === "head");
+  const footprints = scene ? scene.objects.filter(o => o.kind === "footprint").length : inventory?.length;
+  const summary = `${copper} copper layers · ${footprints == null ? "footprints unavailable" : `${footprints} footprints`}`;
+  if (scene) projectBoardSummaries.set(p,summary);
+  return summary;
+}
 function renderNav() {
   const p = proj();
-  const kids = parent => p.sheets.filter(s => s.parent === parent).sort(compareSheetPages);
+  if (S.t === "appearance") leftTab = "appearance";
+  appearanceUI?.dispose(); appearanceUI = null;
+  const kids = parent => p.sheets.filter(s => s.parent === parent).sort(projectTools.sort === "name" ? (a,b) => a.name.localeCompare(b.name, undefined, {numeric:true}) : compareSheetPages);
+  const matches = (name, status) => name.toLowerCase().includes(projectTools.q.toLowerCase()) && (projectTools.filter === "all" || (projectTools.filter === "changed" ? status !== "unchanged" : status === projectTools.filter));
   const sheetItems = (parent, depth) => kids(parent).map(s => {
-    const view = `sheet:${s.path}`;
-    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}"
-      aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${s.status === "unchanged" ? "" : "● "}${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${chips(counts(p, view))}</button>
-      ${kids(s.path).length ? `<ul>${sheetItems(s.path, depth + 1)}</ul>` : ""}</li>`;
+    const view = `sheet:${s.path}`, children = sheetItems(s.path, depth + 1);
+    if (!matches(s.name, s.status) && !children) return "";
+    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}" aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${projectChips(counts(p, view))}</button>${children ? `<ul>${children}</ul>` : ""}</li>`;
   }).join("");
-  $("#nav").innerHTML = `
-    <h3>Projects</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project">${D.projects.map((q, i) =>
-      `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label>
-    <h3>Sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
-    <h3>Board</h3><ul class="tree">${p.board.layers.length || p.board.changed
-      ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
-          <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
-      : '<li class="muted">No board changes</li>'}
-      ${p.board.model3d && (p.board.model3d.base || p.board.model3d.head) ? `<li><button data-view='3d' aria-current="${S.v === '3d'}"><span class="name">3D view</span></button></li>` : ""}</ul>
-    ${p.libraries?.length ? `<h3>Libraries</h3><ul class="tree">${p.libraries.map((c, i) => `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">● ${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span>${c.warnings.length ? ` <span aria-label="${c.warnings.length} warnings">⚠ ${c.warnings.length}</span>` : ""}</button></li>`).join("")}</ul>` : ""}
-    <div id="layers"></div>`;
-  $("#proj").onchange = e => openProject(+e.target.value);
-  for (const b of document.querySelectorAll("#nav [data-view]")) b.onclick = () => select(b.dataset.view);
-  renderLayers();
+  $("#nav").innerHTML = `<div class="left-tabs" role="tablist" aria-label="Left dock">${[["project","Project"],["appearance","Appearance"]].map(([id,label]) => `<button type="button" role="tab" id="left-tab-${id}" data-left-tab="${id}" ${id === "appearance" ? 'data-tab="appearance"' : ''} aria-controls="left-body" aria-selected="${leftTab === id}" tabindex="${leftTab === id ? 0 : -1}">${label}</button>`).join("")}<button type="button" class="left-collapse" aria-label="Collapse left dock" title="Collapse left dock">‹</button></div>
+    <div id="left-body" role="tabpanel" aria-labelledby="left-tab-${leftTab}">${leftTab === "appearance" ? '<div id="appearance-root"></div><div id="layers" hidden></div>' : `
+    <div class="project-tools"><input type="search" id="project-search" aria-label="Search project tree" placeholder="Search project…" value="${esc(projectTools.q)}"><div><select id="project-sort" aria-label="Sort project tree"><option value="page" ${projectTools.sort === "page" ? "selected" : ""}>Page order</option><option value="name" ${projectTools.sort === "name" ? "selected" : ""}>Name A–Z</option></select><select id="project-filter" aria-label="Filter project tree">${[["all","All items"],["changed","Changed"],["added","Added"],["removed","Removed"],["modified","Modified"]].map(([v,label]) => `<option value="${v}" ${projectTools.filter === v ? "selected" : ""}>${label}</option>`).join("")}</select></div></div>
+    <h3>Project</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project" title="${esc(p.name)}">${D.projects.map((q,i) => `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label><div class="project-name" title="${esc(p.name)}">${esc(p.name)}</div>
+    <h3>Schematic sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null,0) || '<li class="muted">No matching sheets</li>'}</ul>
+    <h3>Board</h3><ul class="tree">${(p.board.layers.length || p.board.changed) && matches(p.name + ".kicad_pcb", p.board.status || "unchanged") ? `<li><button data-view="board" data-status="${esc(p.board.status || "unchanged")}" aria-current="${S.v === "board"}"><span class="name" title="${esc(p.name)}.kicad_pcb">${esc(p.name)}.kicad_pcb</span>${projectChips(counts(p,"board"))}</button><div class="project-meta" data-board-summary>${projectBoardSummary()}</div></li>` : '<li class="muted">No matching board</li>'}
+    ${p.board.model3d && (p.board.model3d.base || p.board.model3d.head) && matches("3D model",p.board.status) ? `<li><button data-view="3d" aria-current="${S.v === "3d"}"><span class="name" title="${esc(p.name)} — 3D model">3D model</span></button></li>` : ""}</ul>
+    <h3>Libraries</h3><ul class="tree">${p.libraries?.map((c,i) => matches(c.item + " " + c.file,c.status) ? `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span></button></li>` : "").join("") || '<li class="muted">No library changes</li>'}</ul><div id="layers"></div>`}</div>
+    <div class="left-splitter" role="separator" tabindex="0" aria-label="Resize left dock" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="520" aria-valuenow="${leftWidth}"></div>`;
+  for (const tab of $("#nav").querySelectorAll("[data-left-tab]")) {
+    tab.onclick = () => { leftTab = tab.dataset.leftTab; S.t = leftTab === "appearance" ? "appearance" : rightTab; renderNav(); renderPanel(); saveHash(); $(`#left-tab-${leftTab}`).focus(); };
+    tab.onkeydown = e => { if (["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) { e.preventDefault(); $(`[data-left-tab="${e.key === "Home" ? "project" : e.key === "End" ? "appearance" : leftTab === "project" ? "appearance" : "project"}"]`).click(); } };
+  }
+  $("#nav .left-collapse").onclick = () => { setDock("nav",false); $('[data-dock="nav"]').focus(); };
+  if (leftTab === "appearance") mountAppearance();
+  else {
+    $("#proj").onchange = e => openProject(+e.target.value);
+    $("#project-search").oninput = e => { const pos=e.target.selectionStart; projectTools.q=e.target.value; renderNav(); $("#project-search").focus(); $("#project-search").setSelectionRange(pos,pos); };
+    for (const key of ["sort","filter"]) $(`#project-${key}`).onchange = e => { projectTools[key]=e.target.value; renderNav(); $(`#project-${key}`).focus(); };
+    for (const b of $("#nav").querySelectorAll("[data-view]")) b.onclick = () => select(b.dataset.view);
+    renderLayers();
+    const summary = $("[data-board-summary]"), geometry = p.board.geometry?.head || p.board.geometry?.base;
+    if (summary && geometry) loadBoardScene(geometry).then(scene => { if (scene && summary.isConnected && proj() === p) summary.textContent = projectBoardSummary(scene); }).catch(() => {});
+  }
+  const grip = $("#nav .left-splitter");
+  const resize = width => { leftWidth=Math.max(220,Math.min(520,width)); syncLeftDock(); grip.setAttribute("aria-valuenow",leftWidth); persistLeftDock(); };
+  grip.onkeydown = e => { if (["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) { e.preventDefault(); resize(e.key === "Home" ? 220 : e.key === "End" ? 520 : leftWidth + (e.key === "ArrowLeft" ? -10 : 10)); } };
+  grip.onpointerdown = e => { if (e.button !== 0) return; e.preventDefault(); grip.setPointerCapture(e.pointerId); const startWidth=leftWidth; grip.onpointermove = ev => resize(startWidth + ev.clientX - e.clientX); const end=()=> { grip.onpointermove=null; grip.onpointerup=null; grip.onpointercancel=null; }; grip.onpointerup=end; grip.onpointercancel=end; };
+  syncLeftDock();
 }
 function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
@@ -181,7 +231,7 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" && st.v === "board" && p.board.changed) out.t = st.t;
+  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -192,6 +242,7 @@ function valid(st) {   // drop anything that does not exist in this report
 }
 function applyState(st) {
   const v = valid(st);
+  if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
@@ -275,13 +326,14 @@ function boardFallback(note) {   // one route to SVG per project; a later projec
   disposeBoardRenderers();
   if (S.v === "board") draw();
 }
-// Appearance dock: Layers / Objects / Nets mounted into the panel's Appearance tab.
+// Appearance dock: Layers / Objects / Nets in the left Appearance tab.
 let appearanceUI = null;
 const UNAVAILABLE = Object.fromEntries(["images", "ratsnest", "drcMarkers", "drawingSheet", "values", "references"].map(k => [k, "Not present in this report"]));
 function appearanceCtx() {
   const scenes = (boardView.scenes || []).filter(Boolean), sides = (boardView.scenes || []).map(sc => new Set((sc?.layers || []).filter(l => l.enabled).map(l => l.name)));
   const present = new Set([...scenes.flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...proj().board.layers.map(l => canon(l.name))]);
-  const layers = Object.keys(Appearance.get().layers).filter(n => present.has(n)).map(name => ({ name, label: layerLabel(name), changed: !!proj().board.layers.find(x => canon(x.name) === name)?.changed,
+  const family = n => /\.Cu$/.test(n) ? 0 : /\.(CrtYd|Fab)$/.test(n) ? 2 : /^(User\.|Dwgs\.|Cmts\.|Eco)/.test(n) ? 3 : 1;
+  const layers = Object.keys(Appearance.get().layers).filter(n => present.has(n)).sort((a,b) => family(a) - family(b)).map(name => ({ name, label: layerLabel(name), changed: !!proj().board.layers.find(x => canon(x.name) === name)?.changed,
     title: sides.length === 2 && sides[0].has(name) !== sides[1].has(name) ? `${layerLabel(name)} (${sides[0].has(name) ? "base" : "head"} only)` : layerLabel(name) }));
   const shown = name => { const svg = proj().board.layers.find(x => canon(x.name) === name)?.name; return S.layers ? !svg || S.layers.includes(svg) : !svg || !HIDE_LAYERS.test(svg); };
   const fallback = !boardView.useGL;
@@ -293,7 +345,7 @@ function mountAppearance() {
   const root = $("#appearance-root"); if (!root) return;
   appearanceUI = Appearance.mount(root, { ...appearanceCtx(), getState: Appearance.get, onChange: changeBoardAppearance, unavailable: UNAVAILABLE });
 }
-function refreshAppearance() { if (appearanceUI && S.t === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
+function refreshAppearance() { const summary = $("[data-board-summary]"); if (summary) summary.textContent = projectBoardSummary(); if (appearanceUI && leftTab === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
 function syncMarkStyles() {
   const sheet = currentView()?.kind === "sheet";
   const available = sheet || S.v === "board" && !!boardDiff && boardView.useGL;
@@ -1278,18 +1330,22 @@ function libInfoHtml(c) {
 }
 
 function renderPanel() {
+  appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
-  if (S.t === "appearance" && !(S.v === "board" && p.board.changed)) S.t = "changes";
+  if (S.t === "appearance" && leftTab !== "appearance") renderNav();
   if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
+  if (S.t !== "appearance") rightTab = S.t;
+  if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = "changes";
+  const panelTab = rightTab;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
-  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${S.t === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
+  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${S.v === "board" && p.board.changed ? tab("appearance", "Appearance", true) : ""}${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
-    (S.t === "appearance" ? '<div id="appearance-root"></div>' : S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
+  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
+    (panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
     ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
@@ -1299,7 +1355,6 @@ function renderPanel() {
     <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   for (const t of document.querySelectorAll("#panel-tabs [role=tab]")) t.onclick = () => { if (t.disabled) return; S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
   const tabs = [...document.querySelectorAll("#panel-tabs [role=tab]:not(:disabled)")];
-  appearanceUI?.dispose(); appearanceUI = null; if (S.t === "appearance") mountAppearance();
   for (const tab of tabs) {
     tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
     tab.addEventListener("keydown", event => {
@@ -1320,7 +1375,7 @@ function renderPanel() {
   $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true, waived: true }); renderPanel(); });
   const wc = $("#panel [data-check-waived]"); if (wc) wc.onclick = () => { S.checks.waived = !S.checks.waived; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-waive]")) b.onclick = () => { S.waiveOpen = S.waiveOpen === b.dataset.waive ? null : b.dataset.waive; renderPanel(); };
-  if (S.t === "checks") for (const c of p.checks || []) for (const v of c.violations) {
+  if (panelTab === "checks") for (const c of p.checks || []) for (const v of c.violations) {
     if (!v.waived && S.waiveOpen !== v.id) continue;
     const reason = $(`#panel .viol[data-id="${CSS.escape(v.id)}"] .waived-reason`);
     if (reason) reason.textContent = `${v.waived.reason} · ${v.waived.by}${v.waived.until ? ` · until ${v.waived.until}` : " · permanent"}`;
@@ -1462,12 +1517,13 @@ function renderZoombar() {
 }
 renderZoombar();
 function setDock(name, open) {
+  if (name === "nav") { leftCollapsed = !open; syncLeftDock(); persistLeftDock(); }
   document.getElementById(name).classList.toggle("dock-open", open);
   document.querySelector(`[data-dock="${name}"]`).setAttribute("aria-expanded", String(open));
 }
 for (const b of document.querySelectorAll("[data-dock]")) b.onclick = () => {
   const open = b.getAttribute("aria-expanded") !== "true";
-  setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
+  if (matchMedia("(max-width:899px)").matches) setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
   setDock(b.dataset.dock, open);
 };
 for (const b of document.querySelectorAll("#change-nav [data-step]")) b.onclick = () => step(+b.dataset.step);
