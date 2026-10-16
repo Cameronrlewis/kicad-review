@@ -895,6 +895,7 @@ function afterDraw(view) {
       if (view.kind === "sheet") {
         m.dataset.glyph = semantic?.glyph || "!";
         m.dataset.dash = semantic?.dash || "dotted";
+        m.dataset.label = semantic ? `${semantic.glyph} ${semantic.word}` : "!";
         m.dataset.markStyle = Appearance.get().markStyle;
         const word = `${semantic?.word || r.action || "finding"} ${r.ref || r.kind || ""}`.trim();
         m.setAttribute("aria-label", word);

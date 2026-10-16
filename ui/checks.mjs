@@ -2865,8 +2865,11 @@ export const CHECKS = [
       S.m=mode; renderNav(); renderModes(); renderPanel(); await draw(); fit();
       const stack=document.querySelector('#stage .stack.base'), mark=document.querySelector('#stage .marker.sel.removed');
       if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' survivor';
-      if(!mark||mark.dataset.glyph!=='−'||getComputedStyle(mark).borderTopStyle!=='dashed'
-        ||!mark.querySelector('.sch-mark-label')?.textContent.includes('removed')) return mode+' removed cues';
+      const semantic=BoardMarks.styles.removed;
+      if(!mark||mark.dataset.glyph!==semantic.glyph||getComputedStyle(mark).borderTopStyle!==semantic.dash
+        ||!mark.querySelector('.sch-mark-label')?.textContent.includes(semantic.word)
+        ||mark.dataset.label!==semantic.glyph+' '+semantic.word
+        ||getComputedStyle(mark,'::after').content!==JSON.stringify(mark.dataset.label)) return mode+' removed cues';
     }
     return true;
   `],
@@ -2930,7 +2933,9 @@ export const CHECKS = [
             if(marks.length!==1) return mode+' selected change must have exactly one marker';
             const m=marks[0], semantic=BoardMarks.styles.modified;
             if(!m.classList.contains('sel')||m.dataset.action!=='modified') return mode+' selected action';
-            if(m.dataset.glyph!==semantic.glyph||m.dataset.dash!==semantic.dash) return mode+' action cues';
+            if(m.dataset.glyph!==semantic.glyph||m.dataset.dash!==semantic.dash
+              ||m.dataset.label!==semantic.glyph+' '+semantic.word
+              ||getComputedStyle(m,'::after').content!==JSON.stringify(m.dataset.label)) return mode+' action cues';
             if(m.getAttribute('aria-label')!=='Modified R7'||m.querySelector('.sch-mark-label')?.textContent!=='Modified R7') return mode+' semantic word';
             const color=KrAppearance.resolve(Appearance.get()).marks.schematic.modified.color;
             const rgb=getComputedStyle(m).borderTopColor.match(/[0-9.]+/g).slice(0,3).map(Number);
