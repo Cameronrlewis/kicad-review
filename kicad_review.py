@@ -4,6 +4,7 @@
 Standard library only. Subcommands are called from the reusable workflow.
 """
 import filecmp
+import shutil
 import argparse
 import datetime
 import http.client
@@ -129,8 +130,8 @@ def detect(base, head):
         for d in head_projects:
             by_project.setdefault(d, [])
     projects = []
-    for d in sorted(by_project):
-        status = "removed" if d not in head_projects else "added" if d not in base_projects or base_projects[d] != head_projects[d] else "modified"
+    for d in sorted(dirs, key=lambda d: (d not in by_project, d)):
+        status = "removed" if d not in head_projects else "added" if d not in base_projects or base_projects[d] != head_projects[d] else "modified" if d in by_project else "unchanged"
         pro = head_projects.get(d) or base_projects[d]
         projects.append({
             "dir": d,
@@ -225,6 +226,16 @@ def board_changed(p):
     return contents[0] != contents[1]
 
 
+def glb_inputs(p, side):
+    """Board plus repository model assets; model-only edits must not reuse old exports."""
+    pcb = pathlib.Path(board_path(p, side))
+    if not pcb.is_file():
+        return None
+    models = sorted(path for path in pathlib.Path(side).rglob("*")
+                    if path.is_file() and path.suffix.lower() in (".step", ".stp", ".wrl", ".glb", ".gz"))
+    return (pcb.read_bytes(), [(str(path.relative_to(side)), path.read_bytes()) for path in models])
+
+
 def export_glb(p, side, out):
     """Best-effort 3D export. Its output is useful evidence when a footprint model is absent."""
     pcb, log = board_path(p, side), f"{out}/glb.log"
@@ -242,19 +253,71 @@ def export_glb(p, side, out):
         print(f"{p['name']}: 3D export failed for {side}; see {log}")
 
 
+def render_cache(p, side, det, settings):
+    """Revision/project/tool/settings identity; outputs remain independent of report change IDs."""
+    revision = det.get(side) or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
+    return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
+
+
+def restore_renders(args=None):
+    """Use complete revision caches without starting/downloading the KiCad container."""
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    settings = load_settings()
+    # Library drawings are selected by the compared pair, not the revision alone.
+    if settings["libraries"]["enabled"]:
+        raise SystemExit(1)
+    entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
+               for side in ("base", "head")
+               if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
+    if any(not cache or not (cache / ".complete").is_file() for p, side, cache in entries):
+        raise SystemExit(1)
+    for p, side, cache in entries:
+        shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
+        print(f"{p['name']}: {side} render cache hit ({det[side]})")
+
+
+def cache_renders(args=None):
+    """Snapshot final outputs, including workflow-compressed GLBs."""
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    settings = load_settings()
+    for p in det["projects"]:
+        for side in ("base", "head"):
+            cache = render_cache(p, side, det, settings)
+            out = pathlib.Path(f"review/{project_id(p['dir'])}/{side}")
+            if cache and out.is_dir():
+                shutil.copytree(out, cache, dirs_exist_ok=True)
+                (cache / ".complete").write_text("complete")
+
+
 def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     settings = load_settings()
     for p in det["projects"]:
-        export_3d = settings["3d"]["enabled"] and board_changed(p)
+        export_3d = settings["3d"]["enabled"]
+        shared_3d = export_3d and glb_inputs(p, "base") == glb_inputs(p, "head")
         for side in ("base", "head"):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
+            cache = render_cache(p, side, det, settings)
+            if cache and (cache / ".complete").is_file():
+                shutil.copytree(cache, out, dirs_exist_ok=True)
+                print(f"{p['name']}: {side} render cache hit ({det[side]})")
+                continue
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
             if export_3d:
-                export_glb(p, side, out)
+                if side == "head" and shared_3d:
+                    os.makedirs(out, exist_ok=True)
+                    for name in ("board.glb", "glb.log"):
+                        source = f"review/{project_id(p['dir'])}/base/{name}"
+                        if os.path.isfile(source):
+                            shutil.copyfile(source, f"{out}/{name}")
+                else:
+                    export_glb(p, side, out)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
@@ -284,6 +347,8 @@ def cmd_render(args):
                             pathlib.Path(f"{dest}/{lib_slug(c)}.svg").write_bytes(made[0].read_bytes())
                         except OSError:
                             print(f"::warning::No drawing for library item {c['lib']}:{c['item']} ({side})")
+
+    cache_renders()
 
 
 TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
@@ -2418,17 +2483,16 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
         sheets.append(pg)
     layers, changed = [], False
-    names = sorted({posixpath.basename(f) for s in sides for f in os.listdir(f"{out}/{s}/pcb")}
-                   if any(os.path.isdir(f"{out}/{s}/pcb") for s in sides) else [])
+    names = sorted({f for s in sides if os.path.isdir(f"{out}/{s}/pcb") for f in os.listdir(f"{out}/{s}/pcb")})
     for f in names:
         b, h = (svg_body(f"{out}/{s}/pcb/{f}") for s in ("base", "head"))
         changed |= b != h
-        if any(t and has_drawing(t) for t in (b, h)):
+        if b is not None or h is not None:
             layers.append({"name": f[len(p["name"]) + 1: -4], "base": b, "head": h})
-    has = {s: any(l[s] for l in layers) for s in ("base", "head")}
+    has = {s: os.path.isfile(board_path(p, s)) for s in ("base", "head")}
     board = {"changed": changed, "layers": [],
-             "status": "added" if not has["base"] else "removed" if not has["head"] else "modified"}
-    if changed:
+             "status": "added" if not has["base"] else "removed" if not has["head"] else "modified" if changed else "unchanged"}
+    if layers:
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
         board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
@@ -2443,7 +2507,10 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
     for side in ("base", "head"):
         pcb = pcbs[side]
         geometry[side] = None
-        if not same_board and os.path.isfile(pcb):
+        if side == "head" and same_board:
+            geometry[side] = geometry["base"]
+            continue
+        if os.path.isfile(pcb):
             try:
                 scene = board_geometry(pcb)
                 # Child pads, text and graphics use their owning footprint's UUID;
@@ -2473,10 +2540,13 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
-        if any(os.path.exists(path) for path in (*models.values(), *logs.values())):
-            board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
-                                for side, path in models.items()}
-            board["no_model"] = model3d_missing(out, objs)
+        board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
+                            for side, path in models.items()}
+        board["model3d"].update({"enabled": True,
+                                 "changed": board["model3d"]["base"] != board["model3d"]["head"],
+                                 "errors": {side: "3D export unavailable" for side in ("base", "head")
+                                            if has[side] and not board["model3d"][side]}})
+        board["no_model"] = model3d_missing(out, objs)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None
@@ -3284,6 +3354,10 @@ def main():
     sub = ap.add_subparsers(required=True)
     p = sub.add_parser("detect", help="resolve base/head and list changed KiCad projects")
     p.set_defaults(func=cmd_detect)
+    p = sub.add_parser("restore-renders", help="restore complete revision caches without KiCad")
+    p.set_defaults(func=restore_renders)
+    p = sub.add_parser("cache-renders", help="snapshot rendered outputs after optional compression")
+    p.set_defaults(func=cache_renders)
     p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_render)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")

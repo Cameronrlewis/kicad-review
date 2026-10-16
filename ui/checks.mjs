@@ -3794,4 +3794,155 @@ export const CHECKS = [
   ["bench-t4 blocked storage permits startup and deep link", "v=board&t=appearance", `
     return !!document.querySelector('#nav #appearance-root') && leftWidth===262 && !leftCollapsed;
   `, {beforeStartup:`Storage.prototype.getItem=Storage.prototype.setItem=()=>{throw new DOMException('Blocked','SecurityError')};`}],
+  ["vf-opacity synthetic layer union UI persistence and marks", "v=board&t=appearance", `
+    const names=['F.Cu','In1.Cu','In2.Cu','B.Cu'];
+    const track=(id,layer,x0,x1,width=2000)=>({kind:'track',uuid:id,changeUuid:id,changeIds:layer==='In2.Cu'?['opacity-change']:[],layers:[layer],net:0,category:'tracks',side:null,hidden:false,
+      box:[x0,5000-width/2,x1,5000+width/2],geometry:{segments:[[x0,5000,x1,5000,width]]}});
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,20000,10000],copperStack:names,
+      layers:names.map((name,id)=>({id,name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
+      objects:[track('back','B.Cu',1000,19000,4000),track('inner','In1.Cu',1000,19000,4000),track('single','In2.Cu',2000,14000),track('overlap','In2.Cu',10000,18000)]};
+    cache.vfopacity=JSON.stringify(scene);proj().board.geometry={base:'vfopacity',head:'vfopacity'};
+    boardView.failed=null;Appearance.reset();Object.assign(S,{v:'board',m:'side',t:'appearance',x:10,y:5,z:40});renderPanel();await draw();
+    Appearance.patch({activeLayer:'In2.Cu'});
+    const row=document.querySelector('#appearance-root [data-layer="In2.Cu"]');if(!row)throw Error('missing In2.Cu row');
+    const color=row.querySelector('input[type=color]'),slider=row.querySelector('input[type=range]');
+    color.value='#ff69b4';color.dispatchEvent(new Event('input'));slider.value='50';slider.dispatchEvent(new Event('input'));
+    const pixel=(r,x,y=5)=>{r.draw();const q=r.worldToScreen([x,y]);return r.readPixel(Math.floor(q[0]*devicePixelRatio),r.gl.canvas.height-1-Math.floor(q[1]*devicePixelRatio));};
+    const close=(a,b)=>a.slice(0,3).every((v,i)=>Math.abs(v-b[i])<=2);
+    const expected=[255,105,180].map((v,i)=>(v+KicadColors.layers['In1.Cu'][i])/2);
+    const evidence=[];
+    for(const r of boardView.renderers){const single=pixel(r,6),overlap=pixel(r,12);evidence.push({single,overlap,expected});
+      if(!close(single,expected))throw Error('pink must blend with In1.Cu: '+JSON.stringify(evidence));
+      if(!close(single,overlap))throw Error('per-layer opacity double darkens overlap: '+JSON.stringify(evidence));}
+    // The layer pass must span batches and stencil fills, not just coincident capsules.
+    for(const kind of ['pad','graphic'])for(const r of boardView.renderers){
+      const variant=structuredClone(scene);
+      for(const o of variant.objects.filter(o=>o.layers[0]==='In2.Cu')){
+        const [x0,y0,x1,y1]=o.box;o.kind=kind;o.category=kind==='pad'?'pads':'filledShapes';
+        o.geometry=kind==='pad'?{primitive:{shape:'rect',center:[(x0+x1)/2,5000],size:[x1-x0,2000],angle:0}}:
+          {rings:[[[x0,y0],[x1,y0],[x1,y1],[x0,y1]]]};
+      }
+      r.setScene(variant);const single=pixel(r,6),overlap=pixel(r,12);
+      if(!close(single,expected)||!close(single,overlap))throw Error(kind+' union '+single+' / '+overlap);
+      if(r.gl.getError()!==r.gl.NO_ERROR)throw Error(kind+' layer-pass GL error');
+      r.setScene(scene);
+    }
+    if(Appearance.get().layerOpacity['In2.Cu']!==.5)throw Error('Layers slider must edit canonical layerOpacity');
+    if(slider.getAttribute('aria-label')!=='In2.Cu opacity')throw Error('opacity slider accessible name');
+    for(const name of names){const r=document.querySelector('#appearance-root [data-layer="'+name+'"]');if(!r?.querySelector('input[type=color]')||!r?.querySelector('input[type=range]'))throw Error('missing layer controls '+name);}
+    for(const r of document.querySelectorAll('#appearance-root [data-layer]')){const a=r.querySelector('input[type=range]');if(!a||a.min!=='0'||a.max!=='100'||getComputedStyle(a).opacity!=='1')throw Error('layer opacity slider must be visible, 0–100%: '+r.dataset.layer);}
+    // Mount real marks compositor on the same synthetic board, independent of report changes.
+    const host=document.createElement('div');host.style.cssText='display:flex;position:fixed;inset:180px 400px 180px 100px;z-index:999;background:var(--bg)';document.body.append(host);
+    const state={...S,m:'side',x:10,y:5,z:40,s:null};
+    const c=BoardDiff.mount({stage:host,scenes:{base:scene,head:scene},changes:[{id:'opacity-change',action:'modified'}],state,appearance:glAppearance});
+    for(const opacity of [0,1])for(const style of ['outline','recolour']){
+      Appearance.patch({layerOpacity:{'In2.Cu':opacity},markStyle:style});c.render();
+      if(!host.querySelector('.board-mark-label.modified'))throw Error('changed object mark missing at '+opacity+' '+style);
+      const pane=c.panes[0],edge=pane.renderer.worldToScreen([6,3.975]),mark=c.readPixel(0,...edge);
+      if(close(mark,KicadColors.layers['In1.Cu'])||close(mark,[255,105,180]))throw Error('GPU mark halo missing at '+opacity+' '+style+': '+mark);
+      const p=c.panes[0];p.renderer.setScene(scene,'head');p.renderer.setAppearance(glAppearance());p.renderer.draw({mask:true,marks:true,filter:o=>o.changeIds.includes('opacity-change')});
+      const q=p.renderer.worldToScreen([6,5]),rgba=p.renderer.readPixel(Math.floor(q[0]*devicePixelRatio),p.canvas.height-1-Math.floor(q[1]*devicePixelRatio));
+      if(rgba[0]<250)throw Error('mark mask faded at '+opacity+' '+style+': '+rgba);
+    }
+    c.dispose();host.remove();
+    document.querySelector('[data-appearance-reset]').click();
+    if(Appearance.get().layers['In2.Cu'].opacity!==1||!close(Appearance.get().layers['In2.Cu'].color,KicadColors.layers['In2.Cu']))throw Error('reset did not restore KiCad defaults');
+    color.value='#ff69b4';color.dispatchEvent(new Event('input'));slider.value='50';slider.dispatchEvent(new Event('input'));
+    Appearance.patch({activeLayer:'In2.Cu'});
+    sessionStorage.setItem('vf-opacity-viewer',JSON.stringify(Appearance.get()));boardDiff.render();
+    console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',theme:KRTheme.get(),evidence,marks:'0%/100%, outline/recolour',reset:true}));return true;
+  `, {afterReload:`
+    const expected=JSON.parse(sessionStorage.getItem('vf-opacity-viewer')),actual=Appearance.get();
+    if(JSON.stringify(actual)!==JSON.stringify(expected))throw Error('reload lost per-viewer opacity/colour');
+    console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',reload:true,opacity:actual.layerOpacity['In2.Cu'],color:actual.layers['In2.Cu'].color}));return true;
+  `}],
+
 ];
+
+// Reuse the pixel/UI regression without its reload so proof shots retain the synthetic board.
+for (const closeup of [false,true]) {
+  const body=CHECKS.find(c=>c[0]==='vf-opacity synthetic layer union UI persistence and marks')[2];
+  CHECKS.push(['vf-opacity proof '+(closeup?'overlap close-up':'board and Appearance row'),'v=board&t=appearance',body.replace('sessionStorage.setItem',
+    (closeup?"setT({x:12,y:5,z:100});":"")+"sessionStorage.setItem")]);
+}
+// Same retained-resource performance assertion, now exercising transparent copper layer passes.
+for (const mode of ['side','overlay','wipe','blend','semantic']) {
+  const source=CHECKS.find(c=>c[0]==='board diff fps outline '+mode);
+  CHECKS.push(['vf-opacity Thermal fps '+mode,source[1],source[2].replace("Appearance.patch({markStyle:'outline'});",
+    "Appearance.patch({markStyle:'outline',layerOpacity:{'F.Cu':.5,'B.Cu':.5}});")]);
+}
+
+CHECKS.push(['vf-avail unchanged board full design and Appearance hash', 'v=board&t=appearance', `
+  proj().board.changed=false;proj().board.status='unchanged';
+  const state=valid({...S,v:'board',t:'appearance'});
+  if(state.v!=='board'||state.t!=='appearance')throw Error('unchanged board deep link rejected');
+  Object.assign(S,state);renderNav();renderPanel();await draw();
+  if(!currentView('board'))throw Error('unchanged board unavailable');
+  document.querySelector('[data-left-tab=project]').click(); if(!document.querySelector('[data-view="board"]'))throw Error('unchanged board missing in navigator'); document.querySelector('[data-left-tab=appearance]').click();
+  if(!document.querySelector('#appearance-root'))throw Error('Appearance unavailable');
+  if(!document.querySelector('#stage').textContent.includes('No layout changes'))throw Error('missing no-change notice');
+  for(const layer of proj().board.layers){if(!document.querySelector('#appearance-root [data-layer="'+canon(layer.name)+'"]'))throw Error('missing layer '+layer.name);}
+  if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('no board drawing');
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',layers:proj().board.layers.length,renderers:boardView.renderers.length,theme:KRTheme.get()}));return true;
+`]);
+
+CHECKS.push(['vf-avail unchanged board modes checks threads and full hash', 'v=board&t=appearance', `
+  if(proj().board.changed) return 'skip';
+  for(const mode of ['side','overlay','wipe','blend','semantic']) {
+    S.m=mode;await draw();
+    if(!document.querySelector('#stage .no-change-notice')||!currentView())throw Error('unchanged board unavailable in '+mode);
+    if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('full board missing in '+mode);
+  }
+  const violation=allViolations().find(v=>v.where?.board&&v.pos);
+  if(!violation)throw Error('real board finding required');
+  await applyState({p:S.p,v:'sheet:'+proj().sheets[0].path,t:'checks'});await goTo(violation.id);
+  if(S.v!=='board'||S.s!==violation.id||!currentView())throw Error('finding cannot open unchanged board');
+  const a=pointAnchor(violation.pos[0],violation.pos[1],'head');
+  acceptThreads([{id:'vf-avail-thread',resolved:false,anchor:a,comments:[]}]);
+  await applyState({p:S.p,v:'sheet:'+proj().sheets[0].path});await openThread('vf-avail-thread');
+  if(S.v!=='board'||!document.querySelector('#stage .pin'))throw Error('thread cannot open unchanged board');
+  const st={p:S.p,v:'board',m:'side',x:10,y:20,z:5,s:violation.id,t:'appearance',layers:[proj().board.layers[0].name],camera3d:[1,2,3,4,5,6],hidden3d:['silk']};
+  const got=valid(decodeState('#'+encodeState(st)));
+  for(const k of ['p','v','m','x','y','z','s','t','layers','camera3d','hidden3d'])if(JSON.stringify(st[k])!==JSON.stringify(got[k]))throw Error('hash lost '+k);
+  await applyState({p:S.p,v:'board',m:'side',t:'appearance'});return true;
+`]);
+CHECKS.push(['vf-avail unchanged 3D both revisions', 'v=3d&m=side', `
+  if(!proj().board.model3d) return 'skip';
+  const model=proj().board.model3d;
+  if(!model.base||!model.head)throw Error('missing model revision');
+  if(!document.querySelector('[data-view="3d"]'))throw Error('3D navigator unavailable');
+  if(!window.Review3D.state.firstFrame||window.Review3D.state.roots.filter(Boolean).length!==2||document.querySelectorAll('#stage canvas').length!==2)throw Error('both revisions must draw');
+  if(model.base===model.head&&!document.querySelector('#stage').textContent.includes('No 3D changes'))throw Error('missing 3D no-change notice');
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',view:'3d',sameBlob:model.base===model.head,roots:window.Review3D.state.roots.length,theme:KRTheme.get()}));return true;
+`]);
+CHECKS.push(['vf-avail unchanged schematic sheet full design', '', `
+  const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg.base&&s.svg.head));if(p<0)return 'skip';
+  const sheet=D.projects[p].sheets.find(s=>s.svg.base&&s.svg.head);
+  sheet.status='unchanged';sheet.svg.head=sheet.svg.base;
+  await applyState({p,v:'sheet:'+sheet.path,m:'side'});
+  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
+`]);
+
+CHECKS.push(['vf-avail several projects retained in full', '', `
+  if(D.projects.length<2)return 'skip';
+  const unchanged=D.projects.findIndex(p=>p.status==='unchanged');if(unchanged<0)return 'skip';
+  if(D.projects.slice(unchanged).some(p=>p.status!=='unchanged'))throw Error('unchanged projects must sort last');
+  for(let p=0;p<D.projects.length;p++){
+    await applyState({p,v:'board',m:'side',t:'appearance'});
+    if(!currentView()||!document.querySelector('#appearance-root'))throw Error('project board unavailable '+p);
+    for(const sheet of proj().sheets){await applyState({p,v:'sheet:'+sheet.path,m:'side'});if(document.querySelectorAll('#stage svg').length!==2)throw Error('sheet revision unavailable '+sheet.path);}
+    if(modelAvailable()){await applyState({p,v:'3d',m:'side'});if(window.Review3D.state.roots.filter(Boolean).length!==2)throw Error('project 3D unavailable '+p);}
+  }
+  await applyState({p:unchanged,v:'board',m:'side',t:'appearance'});
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',projects:D.projects.map(p=>({name:p.name,status:p.status,sheets:p.sheets.length,layers:p.board.layers.length})),theme:KRTheme.get()}));return true;
+`]);
+CHECKS.push(['vf-avail board-only unchanged schematic proof', '', `
+  const p=D.projects.findIndex(p=>p.board.changed&&p.sheets.every(s=>s.status==='unchanged'));if(p<0)return 'skip';
+  await applyState({p,v:'sheet:'+D.projects[p].sheets[0].path,m:'side'});
+  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('board-only edit hid unchanged schematic');return true;
+`]);
+CHECKS.push(['vf-avail one-sheet change retains unchanged sibling proof', '', `
+  const p=D.projects.findIndex(p=>p.sheets.some(s=>s.status!=='unchanged')&&p.sheets.some(s=>s.status==='unchanged'));if(p<0)return 'skip';
+  await applyState({p,v:'sheet:'+D.projects[p].sheets.find(s=>s.status==='unchanged').path,m:'side'});
+  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
+`]);

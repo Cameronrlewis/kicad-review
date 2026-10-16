@@ -322,7 +322,7 @@ body.shot #toolbar { display:none; }
 .appearance-options .btn { width:100%; }
 #panel-tabs:has([data-tab=appearance]) [role=tab] { padding:0 4px; }
 .appearance-options label.check { border:0; background:none; padding:0; margin:0; }
-.appearance-row.object-row input[type=range] { opacity:1; } .appearance-row.object-row input[type=range]:disabled { opacity:.35; }
+.appearance-row[data-layer] input[type=range], .appearance-row.object-row input[type=range] { opacity:1; } .appearance-row.object-row input[type=range]:disabled { opacity:.35; }
 
 /* Geometry marks use CSS pixels, independently of camera zoom and board flip. */
 .board-marks {position:absolute;inset:0;pointer-events:none;}
@@ -615,8 +615,8 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 #nav .appearance-tabs { justify-content:flex-start; gap:0; padding:0; min-height:27px; border-bottom:1px solid var(--line); background:var(--surface-2); }
 #nav .appearance-tabs [role=tab] { padding:3px 10px; border:0; border-bottom:2px solid transparent; color:var(--muted); background:transparent; font:12px var(--font-ui); cursor:pointer; }
 #nav .appearance-tabs [role=tab][aria-selected=true] { border-bottom-color:var(--accent); color:var(--text); background:var(--surface); }
-#nav .appearance-row { grid-template-columns:22px 22px minmax(0,1fr) 54px; gap:2px; padding:0 5px; }
-#nav .appearance-row:has(.mark) { grid-template-columns:22px 22px minmax(0,1fr) 10px 54px; }
+#nav .appearance-row { grid-template-columns:22px 22px minmax(0,1fr) 92px; gap:2px; padding:0 5px; }
+#nav .appearance-row:has(.mark) { grid-template-columns:22px 22px minmax(0,1fr) 10px 92px; }
 #nav .appearance-row .name { white-space:normal; overflow-wrap:anywhere; line-height:1.4; text-overflow:clip; }
 #nav .appearance-row input[type=range] { opacity:1; }
 #nav .appearance-options { padding:7px 8px; }
@@ -629,11 +629,10 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 /* bench-t4: layer-family bezel labels */
 #nav .appearance-group { margin:3px 0; padding:3px 8px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); color:var(--muted); background:var(--surface-2); font:600 10.5px var(--font-cap); text-transform:uppercase; letter-spacing:.1em; }
 /* bench-t4: quiet alpha readouts; native sliders remain available on hover/focus */
-#nav .appearance-alpha { position:relative; display:flex; min-width:0; align-items:center; }
-#nav .appearance-alpha output { position:absolute; right:0; pointer-events:none; color:var(--muted); font:10.5px var(--font-mono); }
-#nav .appearance-alpha input[type=range] { opacity:0; }
-#nav .appearance-row:hover .appearance-alpha input, #nav .appearance-row:focus-within .appearance-alpha input { opacity:1; }
-#nav .appearance-row:hover .appearance-alpha output, #nav .appearance-row:focus-within .appearance-alpha output { visibility:hidden; }
+/* Owner: every layer shows its 0–100% opacity slider at all times, value beside it. */
+#nav .appearance-alpha { display:flex; min-width:0; align-items:center; gap:4px; }
+#nav .appearance-alpha input[type=range] { flex:1; min-width:0; opacity:1; }
+#nav .appearance-alpha output { flex:none; width:4ch; text-align:right; color:var(--muted); font:10.5px var(--font-mono); }
 #nav .appearance-row:has([aria-current=true]) { background:var(--surface-sel); box-shadow:inset 2px 0 var(--accent); }
 #nav .appearance-row[data-layer] .eye-btn { order:0; }
 #nav .appearance-row[data-layer] input[type=color] { order:1; }

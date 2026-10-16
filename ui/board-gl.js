@@ -308,6 +308,34 @@ void main() {
         return {program, u:Object.fromEntries(list.map(n=>[n,gl.getUniformLocation(program,n)]))};
       }
       const capsuleProgram = link(capsuleVertexSource,fragmentSource,names), meshProgram = link(meshVertexSource,fragmentSource,names);
+      // A single reusable transparent target isolates layer opacity from shape overlap.
+      const layerProgram = link(gridVertexSource, `#version 300 es
+precision highp float;
+uniform sampler2D image;
+uniform vec2 size;
+uniform float opacity;
+out vec4 outColor;
+void main(){ outColor=texture(image,gl_FragCoord.xy/size)*opacity; }
+`, ["image","size","opacity"]);
+      let layerTarget = null;
+      function ensureLayerTarget(width,height) {
+        if (!layerTarget) {
+          layerTarget = {texture:own("Texture",gl.createTexture()),framebuffer:own("Framebuffer",gl.createFramebuffer()),stencil:own("Renderbuffer",gl.createRenderbuffer())};
+          gl.bindTexture(gl.TEXTURE_2D,layerTarget.texture);
+          for (const name of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D,name,gl.NEAREST);
+          for (const name of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D,name,gl.CLAMP_TO_EDGE);
+        }
+        if (layerTarget.width===width && layerTarget.height===height) return;
+        gl.bindTexture(gl.TEXTURE_2D,layerTarget.texture);
+        gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,width,height,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER,layerTarget.framebuffer);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,layerTarget.texture,0);
+        gl.bindRenderbuffer(gl.RENDERBUFFER,layerTarget.stencil);
+        gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH24_STENCIL8,width,height);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_STENCIL_ATTACHMENT,gl.RENDERBUFFER,layerTarget.stencil);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw Error("Board layer framebuffer unavailable");
+        layerTarget.width=width; layerTarget.height=height;
+      }
       const gridProgram = link(gridVertexSource,gridFragmentSource,["viewportSize","phase","zoom","mirrorX","spacing","dpr","color"]);
       const quad = own("Buffer",gl.createBuffer());
       gl.bindBuffer(gl.ARRAY_BUFFER,quad); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1]),gl.STATIC_DRAW); stats.uploads++;
@@ -419,6 +447,8 @@ void main() {
         const bw = Math.max(1,Math.round(width*dpr)), bh = Math.max(1,Math.round(height*dpr));
         if (canvas.width !== bw) canvas.width = bw;
         if (canvas.height !== bh) canvas.height = bh;
+        const layerOpacity = layer => appearance.layerOpacity?.[layer] ?? appearance.layers?.[layer]?.opacity ?? 1;
+        if (!options.mask && scene && scene.layers.some(l=>layerOpacity(l.name)>0 && layerOpacity(l.name)<1)) ensureLayerTarget(bw,bh);
         gl.bindFramebuffer(gl.FRAMEBUFFER, options.target?.framebuffer ?? null);
         gl.disable(gl.SCISSOR_TEST);
         gl.viewport(0,0,bw,bh); gl.disable(gl.DEPTH_TEST); gl.disable(gl.STENCIL_TEST);
@@ -472,17 +502,39 @@ void main() {
           if ((a.layer===appearance.activeLayer)!==(b.layer===appearance.activeLayer)) return a.layer===appearance.activeLayer ? 1 : -1;
           return priority.indexOf(b.layer)-priority.indexOf(a.layer) || (within[a.pass] ?? 1)-(within[b.pass] ?? 1);
         });
+        let currentLayer = null, groupAlpha = 1;
+        const finishLayer = () => {
+          if (currentLayer===null || groupAlpha===1) return;
+          gl.bindFramebuffer(gl.FRAMEBUFFER,options.target?.framebuffer ?? null);
+          gl.useProgram(layerProgram.program); gl.bindVertexArray(gridVao);
+          gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,layerTarget.texture);
+          gl.uniform1i(layerProgram.u.image,2); gl.uniform2f(layerProgram.u.size,bw,bh); gl.uniform1f(layerProgram.u.opacity,groupAlpha);
+          // Target RGB is premultiplied by coverage; multiply opacity exactly once.
+          gl.blendFuncSeparate(gl.ONE,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+          gl.drawArrays(gl.TRIANGLES,0,6); stats.draws++;
+          gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+          gl.activeTexture(gl.TEXTURE0);
+        };
         for (const b of ordered) {
           if (options.mask && b.pass === "wall") continue;
           const drill = b.pass === "wall" || b.pass === "hole", capsule = drill || b.pass === "copper";
           if (options.mask) gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
           if (options.mask && drill) gl.blendFunc(gl.ZERO,gl.ONE_MINUS_SRC_ALPHA);
+          if (!options.mask && !drill && layerOpacity(b.layer)===0) continue;
+          const nextLayer = options.mask || drill ? null : b.layer;
+          if (currentLayer!==nextLayer) {
+            finishLayer(); currentLayer=nextLayer; groupAlpha=nextLayer===null ? 1 : layerOpacity(nextLayer);
+            if (groupAlpha!==1) {
+              gl.bindFramebuffer(gl.FRAMEBUFFER,layerTarget.framebuffer);
+              gl.clearColor(0,0,0,0); gl.stencilMask(0xff); gl.clear(gl.COLOR_BUFFER_BIT|gl.STENCIL_BUFFER_BIT);
+            }
+          }
           const factor = drill ? 1 : layerFactor(b.layer,appearance);
           if (!factor) continue;
           const {program,u} = capsule ? capsuleProgram : meshProgram;
           const color = b.pass === "hole" ? (appearance.colors?.['board.via_hole'] || background) : b.pass === "wall" ? (appearance.colors?.['board.via_hole_walls'] || rgba(globalThis.KicadColors.objects.viaHolewalls)) : layerRGBA(b.layer,null,null);
           gl.useProgram(program);
-          gl.uniform4fv(u.layerColor,color); gl.uniform1f(u.layerOpacity,appearance.layers?.[b.layer]?.opacity??1); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
+          gl.uniform4fv(u.layerColor,[...color.slice(0,3),color[3]/groupAlpha]); gl.uniform1f(u.layerOpacity,options.mask && options.marks ? 1 : layerOpacity(b.layer)/groupAlpha); gl.uniform1f(u.contrastFactor,factor); gl.uniform1i(u.drillPass,drill ? 1 : 0);
           gl.bindVertexArray(b.vao);
           if (options.mask || options.filter || options.override) {
             for (const range of b.ranges) {
@@ -491,10 +543,9 @@ void main() {
               const netName = scene.nets.find(n=>n.id===object.net)?.name;
               const net = appearance.nets?.[netName];
               const netColor = appearance.netColors?.[netName] || (net?.color ? rgba(net.color) : null);
-              const layer = drill ? object.layers.find(l=>layerFactor(l,appearance)>0 && (appearance.layers?.[l]?.opacity ?? 1)>0) : b.layer;
-              const layerStyle = appearance.layers?.[layer];
+              const layer = drill ? object.layers.find(l=>layerFactor(l,appearance)>0 && (options.marks || layerOpacity(l)>0)) : b.layer;
               const base = drill ? layerRGBA(layer,null,null) : color;
-              const alpha = (netColor ? netColor[3] * (appearance.layerOpacity?.[layer] ?? layerStyle?.opacity ?? 1) : base[3]) * (appearance.objects?.[object.category]?.opacity ?? 1);
+              const alpha = options.mask && options.marks ? 1 : (netColor ? netColor[3] * layerOpacity(layer) : base[3]) * (appearance.objects?.[object.category]?.opacity ?? 1);
               if (object.hidden || !layer || !layerFactor(layer,appearance) || alpha <= 0 || net?.visible === false || appearance.objects?.[object.category]?.visible === false ||
                   object.side && appearance.objects?.[object.side+"Footprints"]?.visible === false ||
                   options.mask && object.pickable === false || options.filter && !options.filter(object)) continue;
@@ -505,7 +556,7 @@ void main() {
               const style = options.override && !drill ? options.override(object,normal) : options.mask ? {color:[1,1,1],opacity:1} : normal;
               // Drills subtract from masks; they never become independent hit targets.
               gl.uniform1i(u.customEnabled,1);
-              gl.uniform4fv(u.customStyle,options.mask && drill ? [0,0,0,1] : [...style.color,style.opacity]);
+              gl.uniform4fv(u.customStyle,options.mask && drill ? [0,0,0,1] : [...style.color,style.opacity/groupAlpha]);
               if (capsule) {
                 gl.bindBuffer(gl.ARRAY_BUFFER,b.buffer);
                 for (const [loc,size,offset] of [[1,4,0],[2,1,4],[3,1,5],[4,1,6],[5,1,7],[6,1,8]]) gl.vertexAttribPointer(loc,size,gl.FLOAT,false,36,range.start*36+offset*4);
@@ -532,6 +583,7 @@ void main() {
           else if (b.pass === "fill") for (const r of b.ranges) drawFill(r);
           else { gl.drawArrays(gl.TRIANGLES,0,b.mesh.length/MESH); stats.draws++; }
         }
+        finishLayer();
         gl.bindVertexArray(null);
         return true;
       }

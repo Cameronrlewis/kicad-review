@@ -364,14 +364,20 @@ python3 -c "import re; h = open('kicad-review.html', encoding='utf-8').read(); o
 
 The workflow and the page share one contract, `window.REVIEW_DATA` (`version: 1`): `repo`; `links`
 (`review`, `base`, `head`, `run` — github.com URLs, empty outside Actions); `base`, `head`, `reason`;
-`settings`; `projects[]`, each with `sheets[]` (UUID `path`, `parent`, `status`, and for changed sheets
-`size` in mm and `svg.base`/`svg.head` blob ids), `board` (`changed`, `status`, `size`, `layers[]` with
+`settings`; `projects[]` (all projects, changed first and unchanged afterward), each with `sheets[]`
+(UUID `path`, `parent`, `status`, `size` in mm and `svg.base`/`svg.head` blob ids for every sheet), `board` (`changed`, `status`, `size`, `layers[]` with
 `changed` and blob ids), `changes[]` (`id`, `action`, `kind`, `ref`, `where`, `pos`, `pos_before`, `box`,
 and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `new`, `severity`, `pos`,
 `box`, `where`); and `blobs` (gzip + base64 SVG text, optional board-scene JSON, and opted-in GLB bytes). When `3d.enabled` is true
-and an export runs, `board.model3d` has base/head GLB blob ids (or `null`), `board.model3d_failed` marks
-failed exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
+on every review, `board.model3d` has base/head GLB blob ids (or `null`), `enabled`, `changed`, and
+an `errors` map for unavailable exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
 footprint`). Positions and boxes are drawing millimetres.
+
+Unchanged sheets, board layers (including blank layers), board geometry, and enabled 3D views remain
+available at both revisions. The viewer labels these views “No layout changes”, “No schematic changes
+on this sheet”, or “No 3D changes” without hiding the design. Identical board/model inputs share one
+GLB export, including its generated timestamp. Actions caches rendered outputs per commit, project,
+settings, KiCad image, and tool version; a complete warm hit avoids starting the KiCad container.
 
 Library review (`[libraries] enabled = true`) covers only library files inside the project folder. Nicknames come from the file name (`Parts.kicad_sym` or `Parts.pretty` means `Parts`); library tables and external libraries are not resolved. Footprint item names come from `.kicad_mod` file stems, including legacy KiCad `module` files; symbol item names come from their declarations without a library prefix. For placed-part usage, exact library IDs win. When a placed part's nickname is not a local library, its item name is matched only if exactly one local library across the compared revisions contains that item of the same kind. This supports renamed or global nicknames without guessing when names are ambiguous, including duplicates in unchanged local libraries. All symbol units contribute pins; the drawing shows unit 1. Pad removals or renumbering and symbol electrical-type changes warn when placed parts use the item.
 With waivers enabled, format v1 adds `violations[].waiver_key`, `violations[].waived` for matched findings, `checks[].waived` counts on waivable checks, and top-level `waivers` lists (`stale`, `expired`, `proposed`, `invalid`); these additive fields are absent when waivers are off.
