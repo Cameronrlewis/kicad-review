@@ -153,7 +153,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
     const expected = (await evaluate("JSON.stringify(appearanceStore().get())")).result.value;
     for (const view of ["board", "schematic"]) {
       if (view === "schematic") {
-        const prepared = await evaluate("(async()=>{const sheet=proj().sheets.find(s=>s.svg);if(!sheet)throw Error('fixture needs schematic');await applyState({v:'sheet:'+sheet.path,m:'side'});return true})()");
+        const prepared = await evaluate("(async()=>{const sheet=proj().sheets.find(s=>s.svg);if(!sheet)throw Error('fixture needs schematic');await applyState({...S,v:'sheet:'+sheet.path,m:'side'});history.replaceState(null,'','#'+encodeState());return true})()");
         if (prepared.exceptionDetails) throw new Error(prepared.exceptionDetails.exception?.description);
       }
       await reloadReady();
@@ -163,6 +163,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
         throw new Error("Appearance did not survive " + view + " reload: " + Object.keys(a).filter(k=>JSON.stringify(a[k])!==JSON.stringify(b[k])).join(', '));
       }
       const rendered = await evaluate(`(()=>{
+        if (${JSON.stringify(view)} === 'board' ? S.v !== 'board' : !S.v.startsWith('sheet:')) return false;
         if(S.v==='board')return appearanceBoards.size===2&&[...appearanceBoards].every(b=>b.appearance.colors['board.copper.f'][0]===.12);
         return appearanceSchematics.size===2&&[...appearanceSchematics].every(s=>s.style.getPropertyValue('--sch-ink-009600').includes('18,52,86'));
       })()`);
