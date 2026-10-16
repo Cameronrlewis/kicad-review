@@ -2277,16 +2277,16 @@ export const CHECKS = [
         && [...document.querySelectorAll('#stage canvas')].length===2;
     `
   ]),
-  ["board side camera retains textures without composition targets", "v=board&m=side", `
+  ["board side camera retains textures and buffers", "v=board&m=side", `
     const P=proj(), saved=P.board.geometry;
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,1000,1000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[]};
     const key='__retained_side_proof__';cache[key]=JSON.stringify(scene);P.board.geometry={base:key,head:key};
     try {
       S.v='board';S.m='side';await draw();fit();
-      const before=boardView.renderers.map(r=>r.stats.textureUploads);
+      if(boardView.renderers.length!==2) return 'two retained renderers required';
+      const before=boardView.renderers.map(r=>({renderer:r,textures:r.stats.textureUploads,buffers:r.stats.uploads}));
       for(let n=0;n<5;n++) setT({x:S.x+.1});
-      if(boardView.panes.some(p=>p.targets)) return 'Side allocated unnecessary composition targets';
-      return boardView.renderers.every((r,i)=>r.stats.textureUploads===before[i]) || 'camera reuploaded net texture';
+      return boardView.renderers.every((r,i)=>r===before[i].renderer && r.stats.textureUploads===before[i].textures && r.stats.uploads===before[i].buffers) || 'camera replaced renderer or reuploaded textures or buffers';
     } finally {P.board.geometry=saved;delete cache[key];}
   `],
   ["board offline generated controls selection links and fallback", "v=board&m=side&t=appearance", `
@@ -2353,8 +2353,8 @@ export const CHECKS = [
     return visible || 'no visible mark in screenshot';
 `],
   ["Themes marks classic schematic","v=board",`
-    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(p<0) return 'fixture needs both geometry revisions';
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg));
+    if(p<0) return 'fixture needs a rendered schematic';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
     Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Classic reference subset"}, "board": {"background": "rgb(0, 0, 0)", "copper": {"f": "rgb(132, 0, 0)", "b": "rgb(0, 132, 0)", "in1": "rgb(132, 132, 0)"}}, "schematic": {"background": "rgb(255, 255, 255)", "wire": "rgb(0, 132, 0)", "component_outline": "rgb(132, 0, 0)", "component_body": "rgb(255, 255, 194)"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
@@ -2374,7 +2374,7 @@ export const CHECKS = [
           if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
         }
       } else {
-        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        const markers=[...document.querySelectorAll('.vp.sheet .marker')];
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
@@ -2390,7 +2390,7 @@ export const CHECKS = [
       if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
     }
     await draw();
-    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+    const visible=[...document.querySelectorAll('#stage .vp.sheet .marker,#stage .board-mark-label')].some(m=>{
       const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
       return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
     });
@@ -2441,8 +2441,8 @@ export const CHECKS = [
     return visible || 'no visible mark in screenshot';
 `],
   ["Themes marks extreme-light schematic","v=board",`
-    const p=D.projects.findIndex(p=>p.board.geometry?.base && p.board.geometry?.head);
-    if(p<0) return 'fixture needs both geometry revisions';
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg));
+    if(p<0) return 'fixture needs a rendered schematic';
     S.p=p; S.v='board'; S.x=S.y=S.z=null; await draw();
     Appearance.import(JSON.stringify({"meta": {"version": 5, "name": "Extreme light contrast stress"}, "board": {"background": "rgba(255, 255, 255, 0.98)", "copper": {"f": "#ffffff", "b": "#fffffe", "in30": "rgba(255, 255, 255, 0)"}, "grid": "#ffffff", "f_silks": "#ffffff"}, "schematic": {"background": "#ffffff", "wire": "#ffffff", "component_outline": "#ffffff", "component_body": "#ffffff", "worksheet": "#ffffff"}}));
     const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'no schematic';
@@ -2462,7 +2462,7 @@ export const CHECKS = [
           if(!label.getAttribute('aria-label')?.includes(BoardMarks.styles[label.dataset.action].word)) return 'missing accessible word';
         }
       } else {
-        const markers=[...document.querySelectorAll('.marker:not(.sel)')];
+        const markers=[...document.querySelectorAll('.vp.sheet .marker')];
         if(!markers.length) return 'no schematic markers';
         for(const m of markers) {
           const action=m.dataset.action, mark=palette[action]; if(!mark) continue;
@@ -2478,7 +2478,7 @@ export const CHECKS = [
       if(b) { S.x=(b[0]+b[2])/2; S.y=(b[1]+b[3])/2; S.z=S.v==='board'?65:18; }
     }
     await draw();
-    const visible=[...document.querySelectorAll('#stage .marker:not(.sel),#stage .board-mark-label')].some(m=>{
+    const visible=[...document.querySelectorAll('#stage .vp.sheet .marker,#stage .board-mark-label')].some(m=>{
       const r=m.getBoundingClientRect(),vp=m.closest('.vp').getBoundingClientRect();
       return r.left<vp.right&&r.right>vp.left&&r.top<vp.bottom&&r.bottom>vp.top;
     });
@@ -2783,8 +2783,8 @@ export const CHECKS = [
       Appearance.patch({markStyle:style});
       for(const [action,glyph,line] of [['added','+','solid'],['removed','−','dashed'],['modified','~','dotted']]) {
         const m=document.querySelector('#stage .marker.'+action), css=m&&getComputedStyle(m);
-        if(!m||m.dataset.glyph!==glyph||!m.getAttribute('aria-label')?.includes(action)||css.borderTopStyle!==line) return style+' '+action+' cues';
-        if(m.dataset.markStyle!==style||!m.querySelector('.sch-mark-label')?.textContent.includes(action)) return style+' '+action+' word/style';
+        if(!m||m.dataset.glyph!==glyph||!m.getAttribute('aria-label')?.includes(BoardMarks.styles[action].word)||m.dataset.dash!==BoardMarks.styles[action].dash||css.borderTopStyle!==line) return style+' '+action+' cues';
+        if(m.dataset.markStyle!==style||!m.querySelector('.sch-mark-label')?.textContent.includes(BoardMarks.styles[action].word)) return style+' '+action+' word/style';
         if(css.pointerEvents!=='none') return 'marker intercepts pins';
         if(style==='recolour'&&css.backgroundColor==='rgba(0, 0, 0, 0)'&&css.backgroundImage==='none') return action+' no tint';
       }
@@ -2889,4 +2889,33 @@ export const CHECKS = [
   document.querySelector('#change-nav [data-step="1"]').click();
   await new Promise(r => setTimeout(r, 50));
   return /^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) || document.querySelector('#change-count').textContent;`],
+  ["SCH6 single selected change retains themed action cues", "", `
+    const p=proj(), saved=p.changes, sheet=p.sheets.find(s=>s.svg);
+    const snapshot=Appearance.get();
+    try {
+      S.v='sheet:'+sheet.path;
+      p.changes=[{id:'single-sch-mark',action:'modified',kind:'symbol',ref:'R7',where:{sheet:sheet.path},pos:[20,20],box:[18,18,22,22]}];
+      S.s='single-sch-mark';
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await draw();
+        for(const markStyle of ['outline','recolour']) {
+          Appearance.patch({markStyle,colors:{'schematic.background':[1,1,1,1]}});
+          const worlds=[...document.querySelectorAll('#stage .vp.sheet .world')];
+          if(!worlds.length) return mode+' no schematic worlds';
+          for(const world of worlds) {
+            const marks=world.querySelectorAll('.marker');
+            if(marks.length!==1) return mode+' selected change must have exactly one marker';
+            const m=marks[0], semantic=BoardMarks.styles.modified;
+            if(!m.classList.contains('sel')||m.dataset.action!=='modified') return mode+' selected action';
+            if(m.dataset.glyph!==semantic.glyph||m.dataset.dash!==semantic.dash) return mode+' action cues';
+            if(m.getAttribute('aria-label')!=='Modified R7'||m.querySelector('.sch-mark-label')?.textContent!=='Modified R7') return mode+' semantic word';
+            const color=KrAppearance.resolve(Appearance.get()).marks.schematic.modified.color;
+            const rgb=getComputedStyle(m).borderTopColor.match(/[0-9.]+/g).slice(0,3).map(Number);
+            if(!rgb.every((v,i)=>Math.abs(v-color[i]*255)<1)) return mode+' live palette';
+          }
+        }
+      }
+      return true;
+    } finally {p.changes=saved; Appearance.patch(snapshot);}
+  `],
 ];
