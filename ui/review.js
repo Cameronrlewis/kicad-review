@@ -729,7 +729,8 @@ function gesture() {           // composite as a bitmap while moving, re-rasteri
   gesturing = true; clearTimeout(settle);
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
-function setT(t) { if (S.v === "board" && Number.isFinite(t.z)) t.z = clampBoardZoom(t.z); Object.assign(S, t); apply(); updateStatus(); saveHash(); }
+let autoFit = false;   // see fit()
+function setT(t) { autoFit = false; if (S.v === "board" && Number.isFinite(t.z)) t.z = clampBoardZoom(t.z); Object.assign(S, t); apply(); updateStatus(); saveHash(); }
 // KiCad source 3e051f88: common/view/view.cpp:241 (50000 maximum; .1 minimum is
 // the review px/mm contract, not KiCad's .2 internal scale). common/tool/common_tools.cpp:256-260 (1.3 step).
 const clampBoardZoom = z => Math.max(.1, Math.min(50000, z));
@@ -872,7 +873,13 @@ function sceneBox() {   // retained scene bounds (um -> mm); null when the view 
   const live = boardView.scenes.filter(sc => sc && sc.objects.length), b = (live.length ? live : boardView.scenes.filter(Boolean)).map(sc => sc.bounds.map(n => n / 1000));
   return [Math.min(...b.map(x => x[0])), Math.min(...b.map(x => x[1])), Math.max(...b.map(x => x[2])), Math.max(...b.map(x => x[3]))];
 }
-function fit() { const v = currentView(); zoomTo(v?.kind === "sheet" ? [0, 0, ...v.size] : sceneBox() || contentBox() || (v && [0, 0, ...v.size]), 2); }
+// Fit stays live until the user pans or zooms: dock/inspector/window resizes re-centre the whole design in each pane.
+const vpKey = () => { const vp = document.querySelector("#stage .vp"); return vp ? vp.clientWidth + "x" + vp.clientHeight : ""; };
+let fitKey = "";
+function fit() { const v = currentView(); zoomTo(v?.kind === "sheet" ? [0, 0, ...v.size] : sceneBox() || contentBox() || (v && [0, 0, ...v.size]), 2); autoFit = true; fitKey = vpKey(); }
+{ let af = 0;   // #stage is replaced on redraw, so watch the surrounding boxes (centre column and inspector)
+  const ro = new ResizeObserver(() => { if (!autoFit) return; cancelAnimationFrame(af); af = requestAnimationFrame(() => { if (autoFit && placed() && vpKey() !== fitKey) fit(); }); });
+  for (const sel of ["#center", "#inspector"]) { const el = document.querySelector(sel); if (el) ro.observe(el); } }
 
 const MODE_NAMES = { side: "Side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Changes only" };
 const MODE_ICONS = { side: "side", overlay: "overlay", wipe: "wipe", blend: "blend", semantic: "delta" };
@@ -1414,7 +1421,7 @@ function renderPanel() {
   const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="Toggle 700 px dock" aria-pressed="${!!S.panelWide}">700 px</button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
+  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
     (panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     ${dockListTools("changes", f)}
@@ -1785,7 +1792,10 @@ function inspectorProperties() {
 function renderInspector() {
   const dock = $("#inspector"); if (!dock) return;
   const data = inspectorProperties(), title = data?.selected.ref || data?.selected.type || data?.selected.kind || "";
-  const value = v => v == null ? "—" : v === Object(v) ? JSON.stringify(v) : String(v);
+  const flat = v => Array.isArray(v) && v.every(x => x == null || x !== Object(x));
+  const value = v => v == null ? "—" : flat(v) ? v.join(", ") : v === Object(v) ? JSON.stringify(v) : String(v);
+  // Arrays of plain values (Nets, layers) read as a list, not raw JSON.
+  const html = (v, text) => flat(v) && v.length > 1 && v.every(x => typeof x === "string") ? `<ul class="insp-list">${v.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : esc(text);
   const groups = Array.from({length:4}, () => ({main:[], geometry:[]}));
   const order = ["ref", "value", "Value", "kind", "footprint", "Footprint", "uuid", "X (mm)", "Y (mm)", "Rotation (°)", "position", "layer", "layers"];
   const keys = data ? [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
@@ -1797,7 +1807,7 @@ function renderInspector() {
       : /^(ref|refs|value|kind|type|uuid|id|footprint|changeuuid|changeids)$/.test(leaf) ? 0 : 3;
     const a = value(data.base[key]), b = value(data.head[key]), changed = a !== b;
     const label = ({ref:"Reference", value:"Value", kind:"Type", footprint:"Footprint", uuid:"UUID"})[key] || key;
-    groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label)}</dt><dd>${changed ? `<del>${esc(a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${esc(b)}</ins>` : esc(b)}</dd>`);
+    groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label).replace(/\./g, ".<wbr>")}</dt><dd>${changed ? `<del>${html(data.base[key], a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${html(data.head[key], b)}</ins>` : html(data.head[key], b)}</dd>`);
   }
   dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
   $("#insp-toggle").onclick = () => { inspectorClosed = !inspectorClosed; inspectorLayout(); persistInspector(); renderInspector(); };

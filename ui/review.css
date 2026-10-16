@@ -649,3 +649,76 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 #nav .appearance-row .eye-btn { width:22px; height:22px; }
 #nav .appearance-row input[type=color] { height:18px; }
 #nav .appearance-group { margin:0; padding:2px 8px; }
+
+/* polish: one control family (24 px, hairline, inset field) across both docks, dark and light. */
+:is(#nav, #panel, #statusbar, .bench-popover) select {
+  -webkit-appearance:none; appearance:none; box-sizing:border-box; height:var(--h-sm); min-height:var(--h-sm); min-width:0; padding:0 22px 0 var(--sp-2);
+  font:var(--fs-sm) var(--font-ui); color:var(--tx); background-color:var(--inset); border:1px solid var(--line); border-radius:var(--r-2); cursor:pointer; text-overflow:ellipsis;
+  background-image:linear-gradient(45deg,transparent 50%,var(--tx2) 50%),linear-gradient(135deg,var(--tx2) 50%,transparent 50%);
+  background-position:calc(100% - 11px) 50%,calc(100% - 7px) 50%; background-size:4px 4px; background-repeat:no-repeat;
+}
+:is(#nav, #panel) :is(input[type=search], input[type=text], input:not([type])) { box-sizing:border-box; height:var(--h-sm); min-height:var(--h-sm); padding:0 var(--sp-2); font:var(--fs-sm) var(--font-ui); color:var(--tx); background:var(--inset); border:1px solid var(--line); border-radius:var(--r-2); }
+:is(#nav, #panel) :is(input, select)::placeholder { color:var(--tx2); }
+:is(#nav, #panel) :is(input, select):hover { border-color:var(--tx2); }
+:is(#nav, #panel) :is(input, select):focus-visible { border-color:var(--acc); outline:1px solid var(--acc); outline-offset:0; }
+#statusbar select { height:auto; min-height:0; padding:0 14px 0 0; background-color:transparent; border:0; background-position:calc(100% - 6px) 50%,calc(100% - 2px) 50%; }
+.dock-list-tools { gap:var(--sp-1); padding:var(--sp-2); background:var(--panel); }
+.dock-list-tools :is(input, select) { min-height:var(--h-sm); font:var(--fs-sm) var(--font-ui); background-color:var(--inset); }
+.dock-list-tools select { flex:1 1 0; }
+/* dock header: bezel caps label, quiet 20 px tools with icon + short label */
+.dock-actions { min-height:var(--h-lg); padding:0 var(--sp-2); background:var(--module); border-bottom:1px solid var(--line); }
+.dock-actions > span { font:var(--fw-semibold) var(--fs-cap)/1 var(--font-cap); letter-spacing:var(--cap-track); text-transform:uppercase; color:var(--tx2); }
+.dock-actions button { display:inline-flex; align-items:center; gap:var(--sp-1); height:var(--h-xs); padding:0 var(--sp-2); font:var(--fs-xs) var(--font-ui); color:var(--tx2); background:transparent; border:1px solid var(--hair); border-radius:var(--r-2); white-space:nowrap; }
+.dock-actions button:hover, .dock-actions button[aria-pressed=true] { color:var(--tx); border-color:var(--line); background:var(--inset); }
+.dock-actions button .i { width:12px; height:12px; }
+.dock-actions [data-panel-close] { width:var(--h-xs); padding:0; justify-content:center; font-size:14px; }
+/* tabs */
+#panel-tabs { flex-wrap:nowrap; background:var(--module); border-bottom:1px solid var(--line); }
+#panel-tabs [role=tab] { flex:1 1 auto; min-height:var(--h-md); height:var(--h-md); padding:0 var(--sp-2); font:var(--fw-semibold) var(--fs-sm) var(--font-ui); color:var(--tx2); background:transparent; border:0; border-top:2px solid transparent; border-radius:0; }
+#panel-tabs [role=tab][aria-selected=true] { color:var(--tx); background:var(--panel); border-top-color:var(--acc); }
+#panel-tabs [role=tab]:disabled { opacity:.45; }
+.left-tabs [role=tab] { min-height:var(--h-md); }
+/* filter chips -> Bench toggles: LED + tinted fill when on, hairline outline when off */
+#panel :is(.check-chip, .chip-filter, .dock-list-tools button) {
+  display:inline-flex; align-items:center; gap:var(--sp-1); height:var(--h-sm); padding:0 var(--sp-2); font:var(--fs-xs) var(--font-mono); font-variant-numeric:tabular-nums; text-decoration:none;
+  color:var(--tx2); background:transparent; border:1px solid var(--line); border-style:solid; border-radius:var(--r-2); cursor:pointer; white-space:nowrap;
+}
+#panel :is(.check-chip, .chip-filter, .dock-list-tools button):hover { color:var(--tx); background:var(--inset); }
+#panel :is(.check-chip, .chip-filter, .dock-list-tools button)[aria-pressed=true] { color:var(--tx); background:var(--acc-bg); border-color:var(--acc); }
+#panel .chip-filter[aria-pressed=false] { text-decoration:none; border-style:dashed; color:var(--tx2); background:transparent; }
+#panel .chip-filter.added[aria-pressed=true] { color:var(--add); background:var(--add-bg); border-color:var(--add); }
+#panel .chip-filter.removed[aria-pressed=true] { color:var(--rem); background:var(--rem-bg); border-color:var(--rem); }
+#panel .chip-filter.modified[aria-pressed=true] { color:var(--mod); background:var(--mod-bg); border-color:var(--mod); }
+#panel .filters, #panel .checks-filters { display:flex; flex-wrap:wrap; align-items:center; gap:var(--sp-1); padding:var(--sp-2); border-bottom:1px solid var(--hair); }
+#panel .filters select.kind, #panel .thread-severity { flex:0 0 auto; width:auto; min-width:96px; margin-left:auto; }
+#panel .inv-toggle { gap:0; }
+#panel .inv-toggle .check-chip { border-radius:0; }
+#panel .inv-toggle .check-chip:first-child { border-radius:var(--r-2) 0 0 var(--r-2); } #panel .inv-toggle .check-chip + .check-chip { margin-left:-1px; border-radius:0 var(--r-2) var(--r-2) 0; }
+#panel .inv-toggle .check-chip[aria-pressed=true] { position:relative; z-index:1; }
+/* cards: one row rhythm, hairline separators, amber edge when selected */
+#panel :is(.card, .thread-card, .check, .viol) { background:var(--panel); border-color:var(--hair); }
+#panel .card, #panel .thread-card { padding:var(--sp-2) var(--sp-3); }
+#panel .card:hover, #panel .thread-card:hover, #panel .check:hover, #panel .viol:hover { background:var(--module); }
+#panel :is(.card, .thread-card)[aria-selected=true] { background:var(--acc-bg); box-shadow:inset 2px 0 var(--acc); border-color:var(--hair); }
+#panel .check { border:1px solid var(--hair); border-radius:var(--r-2); background:var(--module); }
+#panel .check[aria-pressed=true] { border-color:var(--acc); box-shadow:none; background:var(--acc-bg); }
+#panel .checks-summary { margin:var(--sp-2); gap:var(--sp-1); }
+#panel .thread-hint { margin:0; padding:var(--sp-1) var(--sp-3); font-size:var(--fs-xs); }
+#panel-body > .muted:only-child, #panel .cards > .muted:only-child { margin:0; padding:var(--sp-5) var(--sp-3); text-align:center; font-size:var(--fs-sm); }
+/* inspector lists */
+.insp-list { display:flex; flex-wrap:wrap; gap:var(--sp-1); margin:0; padding:0; list-style:none; }
+.insp-list li { padding:0 var(--sp-1); font:var(--fs-xs) var(--font-mono); background:var(--inset); border:1px solid var(--hair); border-radius:var(--r-1); }
+.insp-list li:hover { border-color:var(--line); }
+/* left dock rhythm: same 8 px gutter and 24 px controls as the right dock */
+.project-tools { padding:var(--sp-2); background:var(--panel); }
+.project-tools input, .project-tools select, #nav #proj { height:var(--h-sm); }
+.project-tools > div { margin-top:var(--sp-1); gap:var(--sp-1); }
+#nav .projsel { margin-top:var(--sp-2); padding:0 var(--sp-2); }
+.project-name { padding:var(--sp-2) var(--sp-3); font-size:var(--fs-row); }
+#nav .tree button { padding-top:var(--sp-1); padding-bottom:var(--sp-1); }
+#nav .tree .name { line-height:1.35; }
+#nav #proj { padding:0 22px 0 var(--sp-2); background-color:var(--inset); background-image:linear-gradient(45deg,transparent 50%,var(--tx2) 50%),linear-gradient(135deg,var(--tx2) 50%,transparent 50%); background-position:calc(100% - 11px) 50%,calc(100% - 7px) 50%; background-size:4px 4px; background-repeat:no-repeat; font:var(--fs-sm) var(--font-ui); }
+#statusbar select { font:inherit; }
+#nav .tree .name { flex:1 1 150px; overflow-wrap:break-word; word-break:normal; }
+.insp-module dl { grid-template-columns:minmax(64px,.9fr) minmax(0,1.1fr); }
+.insp-module dt { overflow-wrap:break-word; }

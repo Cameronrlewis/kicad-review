@@ -3946,3 +3946,28 @@ CHECKS.push(['vf-avail one-sheet change retains unchanged sibling proof', '', `
   await applyState({p,v:'sheet:'+D.projects[p].sheets.find(s=>s.status==='unchanged').path,m:'side'});
   if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
 `]);
+CHECKS.push(['bench polish Fit stays centred after dock resize and Widen has a label', 'v=board', `
+  const w=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let i=0;i<40&&!(boardDiff&&boardDiff.scenes?.head);i++)await w(100);
+  if(!boardDiff?.scenes?.head)return 'skip';
+  const btn=document.querySelector('[data-panel-wide]');
+  if(!btn||/700 px/.test(btn.textContent)||!/Widen|Narrow/.test(btn.textContent)||!btn.querySelector('svg'))return 'widen label '+btn?.textContent;
+  fit();await w(200);
+  const ok=()=>{const vp=document.querySelector('#stage .vp'),b=sceneBox(),z=Math.min(vp.clientWidth/(b[2]-b[0]+4),vp.clientHeight/(b[3]-b[1]+4));
+    return Math.abs(S.z/z-1)<.02&&Math.abs(S.x-(b[0]+b[2])/2)<.5&&Math.abs(S.y-(b[1]+b[3])/2)<.5;};
+  if(!ok())return 'not fitted';
+  btn.click();await w(600);
+  if(!ok())return 'not refitted after widen';
+  setT({z:S.z*2});btn.click&&document.querySelector('[data-panel-wide]').click();await w(600);
+  return S.z>0&&autoFit===false;
+`]);
+CHECKS.push(['bench polish inspector shows nets as a list', 'v=board', `
+  const w=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let i=0;i<40&&!(boardDiff&&boardDiff.scenes?.head);i++)await w(100);
+  const sc=boardDiff?.scenes?.head;if(!sc)return 'skip';
+  let fp=null;
+  for(const o of sc.objects.filter(o=>o.kind==='footprint')){S.s=null;S.io=null;S.ig={side:'head',object:o};if(inspectorProperties()?.head?.Nets?.length>1){fp=o;break;}}
+  if(!fp)return 'skip';renderInspector();
+  const t=document.querySelector('#inspector').textContent;
+  return !/\\[\\s*"/.test(t)&&document.querySelectorAll('#inspector .insp-list li').length>1;
+`]);

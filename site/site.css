@@ -291,3 +291,11 @@ select { max-width: min(100%, 40ch); text-overflow: ellipsis; }
 
 /* bench-t2: unavailable online actions stay discoverable, never imply permission. */
 .bench-popover button:disabled { color:var(--muted); cursor:default; opacity:.7; background:none; }
+
+/* polish: Bench select and field family on the start, review-list and sign-in pages. */
+select { -webkit-appearance:none; appearance:none; height:var(--h-sm); padding:0 22px 0 var(--sp-2); cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--tx2) 50%),linear-gradient(135deg,var(--tx2) 50%,transparent 50%);
+  background-position:calc(100% - 11px) 50%,calc(100% - 7px) 50%; background-size:4px 4px; background-repeat:no-repeat; }
+input:hover, select:hover { border-color:var(--tx2); }
+input:focus-visible, select:focus-visible { border-color:var(--acc); outline:1px solid var(--acc); outline-offset:0; }
+.bench-search select { max-width:132px; font-size:var(--fs-sm); }
