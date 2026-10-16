@@ -186,8 +186,8 @@ body { grid-template-rows: auto var(--bar-h) minmax(0,1fr) auto var(--statusbar-
 body.shot #statusbar { display:none; }
 body.shot { grid-template-rows:minmax(0,1fr); }
 
-.report-head { display:flex; align-items:center; min-width:0; background:var(--surface); border-bottom:1px solid var(--line); }
-.report-head #hdr { flex:1; min-width:0; border-bottom:0; }
+.report-head { display:flex; align-items:center; min-width:0; min-height:32px; box-sizing:border-box; background:var(--surface); border-bottom:1px solid var(--line); }
+.report-head #hdr { flex:1; min-width:0; padding:0 var(--sp-2); border-bottom:0; }
 .report-head .theme-toggle { flex:none; margin:0 var(--sp-2); }
 body.shot .report-head { display:none; }
 

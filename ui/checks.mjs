@@ -2933,4 +2933,11 @@ export const CHECKS = [
   const nav=getComputedStyle(document.querySelector('#nav')).backgroundColor;
   const panel=getComputedStyle(document.querySelector('#panel')).backgroundColor;
   return nav === panel && panel !== 'rgba(0, 0, 0, 0)' || 'dock surfaces: '+nav+' / '+panel;`],
+  ["chrome desktop density matches the CAD shell contract", "p=1&v=board", `
+  const height=selector=>document.querySelector(selector).getBoundingClientRect().height;
+  const header=height('.report-head');
+  return (innerWidth<900 ? header>=32 : header===32) && height('#toolbar')===32
+    && height('#statusbar')===24 && height('[data-theme-toggle]')===24
+    && height('#modes [data-mode]')===24 && height('#panel-tabs [role=tab]')===28
+    || 'chrome heights '+JSON.stringify({header,toolbar:height('#toolbar'),status:height('#statusbar')});`],
 ];
