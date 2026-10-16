@@ -25,6 +25,7 @@ const mode = opt("--mode");
 if (mode && !["side", "overlay", "wipe", "blend", "semantic"].includes(mode)) throw Error("Invalid mode");
 const gpu = args.includes("--gpu"); if (gpu) args.splice(args.indexOf("--gpu"), 1);
 const width = Number(opt("--width") || 1920);
+const height = Number(opt("--height") || 1080); // bench-t7: exact viewport proofs
 const dpr = Number(opt("--dpr") || 1);
 const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
 const perf = process.env.CHECK_PERF === "1";
@@ -57,7 +58,7 @@ ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pe
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
-await send("Emulation.setDeviceMetricsOverride", { width, height: 1080, deviceScaleFactor: dpr, mobile: false });
+await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: false });
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 await send("Page.enable");
