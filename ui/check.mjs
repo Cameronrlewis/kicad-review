@@ -213,7 +213,12 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   finally {
     clearTimeout(timer);
     if (initialAppearance !== undefined) await evaluate(`localStorage.${initialAppearance === null ? "removeItem('kr.appearance.v1')" : `setItem('kr.appearance.v1',${JSON.stringify(initialAppearance)})`}`);
-    if (startupScript) await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript});
+    if (startupScript) {
+      const removed = await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript});
+      await send("Page.navigate", { url: "about:blank" }); await sleep(100);
+      const native = (await evaluate("String(Storage.prototype.setItem).includes('[native code]')")).result?.value;
+      if (process.env.CI || native !== true) console.log(`startup script ${startupScript} removed ${JSON.stringify(removed.error || 'ok')} storage native ${native}`);
+    }
   }
 }
 if (shot && !failed) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
