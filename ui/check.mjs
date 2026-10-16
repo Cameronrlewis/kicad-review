@@ -5,7 +5,8 @@
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname, basename, extname } from "node:path";
+import { createServer } from "node:http";
 import { CHECKS } from "./checks.mjs";
 
 const args = process.argv.slice(2);
@@ -34,6 +35,17 @@ const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), f
 if (args.length > 1 || args.some(a => a.startsWith("--"))) throw Error("Unknown arguments: " + args.join(" "));
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
 const port = Number(process.env.CHECK_PORT || 9334);
+// Serve the page over local http, as reviewers load it. file:// localStorage on CI's Linux Chrome
+// intermittently read stale settings after a reload, which failed persistence checks at random.
+const types = {".html":"text/html; charset=utf-8",".js":"text/javascript",".mjs":"text/javascript",".css":"text/css",".svg":"image/svg+xml",".json":"application/json"};
+const root = dirname(page), server = createServer((req, res) => {
+  const path = resolve(root, "." + decodeURIComponent(new URL(req.url, "http://x").pathname));
+  if (!path.startsWith(root + "/")) { res.writeHead(403).end(); return; }
+  try { const body = readFileSync(path); res.writeHead(200, {"Content-Type": types[extname(path)] || "application/octet-stream", "Cache-Control": "no-store"}).end(body); }
+  catch { res.writeHead(404).end(); }
+});
+await new Promise(r => server.listen(0, "127.0.0.1", r)); server.unref();
+const origin = `http://127.0.0.1:${server.address().port}`, pageUrl = `${origin}/${encodeURIComponent(basename(page))}`;
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const proc = spawn(chrome, ["--headless=new", "--no-sandbox", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
   ...(gpu ? ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"] : ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]), `--window-size=${width},1080`, "about:blank"], { stdio: "ignore" });
@@ -57,7 +69,7 @@ const onMessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) {
     const text = m.params.args.map(a => a.value ?? "").join(" ");
     if (/^BOARD_(FPS|PROOF) /.test(text)) console.log(text);
   }
-  if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url)) errors.push("external request: " + m.params.request.url);
+  if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url) && !m.params.request.url.startsWith(origin + "/")) errors.push("external request: " + m.params.request.url);
   if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text); };
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
@@ -89,7 +101,7 @@ const storageFlushed = async () => {
   const origin = (await send("Runtime.evaluate", {expression:"location.origin", returnByValue:true})).result?.result?.value;
   let last;
   for (const end = Date.now() + 3000; Date.now() < end; await sleep(25)) {
-    last = await send("DOMStorage.getDOMStorageItems", {storageId:{securityOrigin:"file://", isLocalStorage:true}});
+    last = await send("DOMStorage.getDOMStorageItems", {storageId:{securityOrigin:origin, isLocalStorage:true}});
     const items = last.result?.entries;
     if (!items) { console.log(`storage: DOMStorage unavailable (${origin}) ${JSON.stringify(last.error || last).slice(0, 200)}`); await sleep(300); return; }
     if (JSON.stringify(items.map(([k, v]) => [k, v]).sort()) === page) return;
@@ -133,7 +145,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   errors.length = 0;
   if (lifecycle.beforeStartup) startupScript = (await send("Page.addScriptToEvaluateOnNewDocument", {source:lifecycle.beforeStartup})).result.identifier;
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);
-  await send("Page.navigate", { url: `file://${page}#${hash}` });
+  await send("Page.navigate", { url: `${pageUrl}#${hash}` });
   const ready = await evaluate(`new Promise((r, reject) => { const deadline = performance.now() + ${readyTimeout}, t = () => window.reviewReady ? r(true) : performance.now() > deadline ? reject(new Error('reviewReady timed out')) : setTimeout(t, 50); t(); })`);
   if (ready.exceptionDetails || errors.length) return [`FAIL startup ${name} -> ${ready.exceptionDetails?.exception?.description || errors.join(' | ')}`, true];
   // The raw dev template has no inlined sprite (inline_page adds it); inject it so icons resolve.
