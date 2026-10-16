@@ -1795,7 +1795,7 @@ function renderInspector() {
   const flat = v => Array.isArray(v) && v.every(x => x == null || x !== Object(x));
   const value = v => v == null ? "—" : flat(v) ? v.join(", ") : v === Object(v) ? JSON.stringify(v) : String(v);
   // Arrays of plain values (Nets, layers) read as a list, not raw JSON.
-  const html = (v, text) => flat(v) && v.length > 1 && v.every(x => typeof x === "string") ? `<ul class="insp-list">${v.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : esc(text);
+  const html = (v, text) => flat(v) && v.length > 1 && v.every(x => x === String(x)) ? `<ul class="insp-list">${v.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : esc(text);
   const groups = Array.from({length:4}, () => ({main:[], geometry:[]}));
   const order = ["ref", "value", "Value", "kind", "footprint", "Footprint", "uuid", "X (mm)", "Y (mm)", "Rotation (°)", "position", "layer", "layers"];
   const keys = data ? [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
