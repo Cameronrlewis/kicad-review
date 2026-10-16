@@ -262,6 +262,20 @@ def render_cache(p, side, det, settings):
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
+def restore_renders(args=None):
+    """Use complete revision caches without starting/downloading the KiCad container."""
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    settings = load_settings()
+    entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
+               for side in ("base", "head")
+               if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
+    if any(not cache or not (cache / ".complete").is_file() for p, side, cache in entries):
+        raise SystemExit(1)
+    for p, side, cache in entries:
+        shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
+        print(f"{p['name']}: {side} render cache hit ({det[side]})")
+
+
 def cache_renders(args=None):
     """Snapshot final outputs, including workflow-compressed GLBs."""
     det = json.loads(pathlib.Path("review/detect.json").read_text())
@@ -3337,6 +3351,8 @@ def main():
     sub = ap.add_subparsers(required=True)
     p = sub.add_parser("detect", help="resolve base/head and list changed KiCad projects")
     p.set_defaults(func=cmd_detect)
+    p = sub.add_parser("restore-renders", help="restore complete revision caches without KiCad")
+    p.set_defaults(func=restore_renders)
     p = sub.add_parser("cache-renders", help="snapshot rendered outputs after optional compression")
     p.set_defaults(func=cache_renders)
     p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")

@@ -3531,9 +3531,14 @@ with TemporaryDirectory() as t:
             kr.cmd_render(None)
             assert render.call_count == 2
             shutil.rmtree("review/G")
+            kr.restore_renders(None)
+            assert pathlib.Path("review/G/base/drc.json").exists()
             kr.cmd_render(None)
             assert render.call_count == 2, "warm revision caches must skip all exports"
         assert pathlib.Path("review/G/base/drc.json").exists() and pathlib.Path("review/G/head/drc.json").exists()
     finally:
         os.chdir(old_cwd)
 print("ok per-commit project render cache hits retain both revisions")
+
+assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
+assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"

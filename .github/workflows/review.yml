@@ -94,8 +94,10 @@ jobs:
       - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'
         run: |
-          docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
-            python3 tools/kicad_review.py render
+          if ! python3 tools/kicad_review.py restore-renders; then
+            docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+              python3 tools/kicad_review.py render
+          fi
 
       - name: Cache 3D compression dependencies
         if: steps.detect.outputs.changed == 'true'
@@ -123,8 +125,13 @@ jobs:
           trap 'rm -rf "$cache"' EXIT
           for model in "${models[@]}"; do
             digest=$(sha256sum "$model" | cut -d' ' -f1)
+            if [ -f "$model.meshopt" ] && [ "$(cat "$model.meshopt")" = "$digest" ]; then
+              echo "Meshopt cache hit for $model"
+              continue
+            fi
             if [ -n "${compressed[$digest]:-}" ]; then
               cp "${compressed[$digest]}" "$model"
+              sha256sum "$model" | cut -d' ' -f1 > "$model.meshopt"
               echo "Meshopt reused for $model"
               continue
             fi
@@ -136,6 +143,7 @@ jobs:
               if mv "$tmp/board.glb" "$model"; then
                 cp "$model" "$cache/$digest.glb"
                 compressed[$digest]="$cache/$digest.glb"
+                sha256sum "$model" | cut -d' ' -f1 > "$model.meshopt"
                 echo "Meshopt $model: $before -> $(wc -c < "$model") bytes in $((SECONDS - start))s"
               fi
             else

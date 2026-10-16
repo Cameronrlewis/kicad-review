@@ -3635,3 +3635,27 @@ CHECKS.push(['vf-avail unchanged schematic sheet full design', '', `
   await applyState({p:S.p,v:'sheet:'+sheet.path,m:'side'});
   if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
 `]);
+
+CHECKS.push(['vf-avail several projects retained in full', '', `
+  if(D.projects.length<2)return 'skip';
+  const unchanged=D.projects.findIndex(p=>p.status==='unchanged');if(unchanged<0)throw Error('unchanged project required');
+  if(D.projects.slice(unchanged).some(p=>p.status!=='unchanged'))throw Error('unchanged projects must sort last');
+  for(let p=0;p<D.projects.length;p++){
+    await applyState({p,v:'board',m:'side',t:'appearance'});
+    if(!currentView()||!document.querySelector('#appearance-root'))throw Error('project board unavailable '+p);
+    for(const sheet of proj().sheets){await applyState({p,v:'sheet:'+sheet.path,m:'side'});if(document.querySelectorAll('#stage svg').length!==2)throw Error('sheet revision unavailable '+sheet.path);}
+    if(modelAvailable()){await applyState({p,v:'3d',m:'side'});if(window.Review3D.state.roots.filter(Boolean).length!==2)throw Error('project 3D unavailable '+p);}
+  }
+  await applyState({p:unchanged,v:'board',m:'side',t:'appearance'});
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',projects:D.projects.map(p=>({name:p.name,status:p.status,sheets:p.sheets.length,layers:p.board.layers.length})),theme:KRTheme.get()}));return true;
+`]);
+CHECKS.push(['vf-avail board-only unchanged schematic proof', '', `
+  const p=D.projects.findIndex(p=>p.board.changed&&p.sheets.every(s=>s.status==='unchanged'));if(p<0)return 'skip';
+  await applyState({p,v:'sheet:'+D.projects[p].sheets[0].path,m:'side'});
+  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('board-only edit hid unchanged schematic');return true;
+`]);
+CHECKS.push(['vf-avail one-sheet change retains unchanged sibling proof', '', `
+  const p=D.projects.findIndex(p=>p.sheets.some(s=>s.status!=='unchanged')&&p.sheets.some(s=>s.status==='unchanged'));if(p<0)return 'skip';
+  await applyState({p,v:'sheet:'+D.projects[p].sheets.find(s=>s.status==='unchanged').path,m:'side'});
+  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
+`]);
