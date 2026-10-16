@@ -3525,4 +3525,17 @@ export const CHECKS = [
   t.querySelector('[data-mode=side]').click(); fit();
   const d=t.querySelector('[data-dock=nav]'); d.click(); const off=document.body.classList.contains('nav-off'); d.click();
   return (innerWidth<900 || off && !document.body.classList.contains('nav-off')) || 'dock toggle';`],
+  ["bench toolbar 3D camera presets fit all modes", "v=3d", `
+    if (!window.Review3D) return 'skip';
+    const t=document.querySelector('#toolbar');
+    for(const mode of ['side','overlay','blend','semantic']) {
+      S.m=mode;renderModes();renderZoombar();
+      if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return mode+' overflow '+t.scrollWidth+'>'+t.clientWidth;
+    }
+    const menu=t.querySelector('.camera-presets'); menu.open=true;
+    await new Promise(r=>setTimeout(r,50));
+    const popup=menu.querySelector('.camera-menu').getBoundingClientRect();
+    if(popup.top<t.getBoundingClientRect().bottom || popup.right>innerWidth) return 'clipped camera menu';
+    menu.querySelector('[data-3d-camera=top]').click();
+    return !menu.open && document.activeElement===menu.querySelector('summary');`],
 ];

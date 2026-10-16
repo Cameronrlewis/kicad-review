@@ -379,7 +379,7 @@ body.shot #toolbar { display:none; }
 #modes [data-mode], #modes [data-mode]:first-child, #modes [data-mode]:last-of-type { border-radius:3px; margin-left:0; }
 #toolbar button { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; background:var(--module); border-color:var(--hair); }
 #toolbar button:hover:not(:disabled) { border-color:var(--tx2); background:var(--module); }
-#toolbar button .i { width:16px; height:16px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
+#toolbar button .i, #toolbar summary .i { width:16px; height:16px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
 #toolbar #change-nav button, #zoombar [data-z], #toolbar .tb-docks button { width:26px; padding:0; justify-content:center; }
 #toolbar #modes [aria-pressed="true"] { background:var(--acc); border-color:var(--acc); color:var(--on-acc); font-weight:600; box-shadow:none; }
 #toolbar .mark-styles button[aria-checked="true"] { background:var(--acc-bg); color:var(--tx); border-color:var(--acc); box-shadow:inset 0 -2px 0 var(--acc); }
@@ -387,6 +387,10 @@ body.shot #toolbar { display:none; }
 #toolbar #change-count, #zoombar .pct { display:inline-flex; align-items:center; justify-content:center; height:24px; box-sizing:border-box; padding:0 8px; min-width:52px; background:var(--inset); border:1px solid var(--hair); border-radius:3px; font:600 11.5px var(--font-mono); font-variant-numeric:tabular-nums; }
 #toolbar .muted { color:var(--tx2); }
 #toolbar .blend input { width:80px; }
+#toolbar .camera-presets summary { display:flex; align-items:center; gap:5px; height:24px; box-sizing:border-box; padding:0 8px; cursor:pointer; list-style:none; border:1px solid var(--hair); border-radius:3px; background:var(--module); }
+#toolbar .camera-presets summary::-webkit-details-marker { display:none; }
+#toolbar .camera-presets summary:focus-visible { outline:2px solid var(--acc); outline-offset:1px; }
+#toolbar .camera-menu { position:fixed; z-index:40; display:grid; grid-template-columns:repeat(2,1fr); gap:4px; width:160px; padding:8px; background:var(--panel); border:1px solid var(--line); border-radius:3px; }
 /* Keep the selected copy fallback outside the toolbar scroll container. */
 body > .copyfield { position:fixed; right:8px; top:72px; z-index:30; width:min(480px,calc(100vw - 32px)); padding:8px; font:12px var(--font-mono); color:var(--tx); background:var(--module); border:1px solid var(--acc); border-radius:3px; }
 @media(min-width:900px) {
