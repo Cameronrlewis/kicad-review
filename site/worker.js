@@ -1,5 +1,6 @@
 import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
+import { currentBody } from './report-shell.js';
 import { escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute } from './threads.js';
@@ -272,7 +273,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
     if (!location) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const blobResponse = await fetch(location);
     if (!blobResponse.ok || !blobResponse.body) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
-    return sessionResponse(blobResponse.body, {
+    return sessionResponse(await currentBody(blobResponse), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Security-Policy': reportCsp,

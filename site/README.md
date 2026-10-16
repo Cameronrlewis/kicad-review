@@ -2,7 +2,7 @@
 
 ## What it is
 
-By default, people sign in with GitHub and see reviews only for repositories they can already read. Every signed-in request is checked as that person. Nothing is stored; reports are read from workflow artifacts kept 90 days. Report pages run in a sandbox, so their content cannot act as the signed-in person. Optional share links below grant guests read-only access to one report without signing in.
+By default, people sign in with GitHub and see reviews only for repositories they can already read. Every signed-in request is checked as that person. Nothing is stored; reports are read from workflow artifacts kept 90 days. Report pages run in a sandbox, so their content cannot act as the signed-in person. Every report is shown with the interface the site was deployed with: the site keeps the report's stored design data and replaces the interface code it was built with, so older reviews get the current interface. Data an older run never stored (for example drawings it skipped) stays missing. The downloaded report file is unchanged. Optional share links below grant guests read-only access to one report without signing in.
 
 ## What a user approves at sign-in
 
@@ -82,7 +82,7 @@ Install the app on the organisation and select its repositories; add the organis
 
 ## Cost
 
-Cloudflare Workers' free plan has 100,000 requests a day and costs $0. Reports stream from GitHub's storage through the worker and are not stored by the site.
+Cloudflare Workers' free plan has 100,000 requests a day and costs $0. Reports are read from GitHub's storage through the worker, re-dressed in the current interface, and are not stored by the site.
 
 ## Limits
 
