@@ -789,6 +789,9 @@ function sceneBox() {   // retained scene bounds (um -> mm); null when the view 
 function fit() { const v = currentView(); zoomTo(v?.kind === "sheet" ? [0, 0, ...v.size] : sceneBox() || contentBox() || (v && [0, 0, ...v.size]), 2); }
 
 const MODE_NAMES = { side: "Side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Changes only" };
+const MODE_ICONS = { side: "side", overlay: "overlay", wipe: "wipe", blend: "blend", semantic: "delta" };
+const MODE_TIPS = { side: "Side by side: base left, head right", overlay: "Overlay: head over base, changes tinted", wipe: "Wipe: drag a divider between revisions", blend: "Blend: cross-fade base and head", semantic: "Changes only: dim everything unchanged" };
+const tbIcon = n => `<svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-${n}"></use></svg>`;
 S.blend = 0.5; S.wipe = 0.5;
 async function oneWorld(stage, view, label) {
   const w = viewport(stage, label, view.kind);
@@ -842,8 +845,8 @@ function renderModes() {
   const focus = document.activeElement?.dataset.mode;
   const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
-    `<button data-mode="${m}" role="radio" aria-checked="${S.m === m}" tabindex="${S.m === m ? 0 : -1}" aria-pressed="${S.m === m}" ${m === "side" ? 'title="Side by side"' : ""} ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${is3d && m === "semantic" ? "Changes only" : n}</button>`).join("")
-    + (S.m === "blend" ? (is3d ? `<label class="blend"><span>Base</span><input type="range" aria-label="Base to Head blend" min="0" max="100" value="${Math.round(S.blend * 100)}"><span>Head</span></label><button data-3d-blend-toggle>${S.blend < .5 ? "Show head" : "Show base"}</button>` : `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>`) : "");
+    `<button data-mode="${m}" role="radio" aria-checked="${S.m === m}" tabindex="${S.m === m ? 0 : -1}" aria-pressed="${S.m === m}" title="${is3d && m === "wipe" ? "Not available in 3D" : MODE_TIPS[m]}" ${is3d && m === "wipe" ? 'aria-disabled="true"' : ""}>${tbIcon(MODE_ICONS[m])}<span>${is3d && m === "semantic" ? "Changes only" : n}</span></button>`).join("")
+    + (S.m === "blend" ? (is3d ? `<label class="blend"><span>Base</span><input type="range" aria-label="Base to Head blend" min="0" max="100" value="${Math.round(S.blend * 100)}"><span>Head</span></label><button data-3d-blend-toggle title="Switch visible revision">${S.blend < .5 ? "Show head" : "Show base"}</button>` : `<label class="blend">Head opacity <input type="range" aria-label="Head opacity" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>`) : "");
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { if (b.getAttribute("aria-disabled") === "true") return; S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onkeydown = e => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
@@ -1441,35 +1444,40 @@ function positionLink() {
 function applyGoTo(text) { const i = text.indexOf("#"); if (i >= 0) applyState(decodeState(text.slice(i))); }
 function renderZoombar() {
   if (S.v === '3d' && window.Review3D) { window.Review3D.cameraBar(); return; }
-  const icon = name => ['light','dark'].map(theme=>`<svg class="icon icon-${theme}" aria-hidden="true" focusable="false"><use href="#kr-${name}-${theme}"></use></svg>`).join('');
-  $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out" title="Zoom out">${icon('zoom-out')}</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in" title="Zoom in">${icon('zoom-in')}</button>
-    <button data-act="fit" aria-label="Fit drawing (f)" title="Fit drawing (f)">${icon('fit')}<span>Fit</span></button>
-    <button data-act="copy" title="Copy current review link">Copy link</button><input class="goto" aria-label="Go to saved review position" placeholder="Go to… paste a link">`;
+  $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out" title="Zoom out (F2)">${tbIcon('zout')}</button><span class="pct" title="Zoom"></span><button data-z="1.25" aria-label="Zoom in" title="Zoom in (F1)">${tbIcon('zin')}</button><button data-act="fit" aria-label="Fit drawing (f)" title="Fit drawing to window (f)">${tbIcon('fit')}<span>Fit</span></button>`;
   for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => { if (placed()) setT({ z: S.z * +b.dataset.z }); };
   $("#zoombar [data-act=fit]").onclick = fit;
-  $("#zoombar [data-act=copy]").onclick = async e => {
-    const b = e.currentTarget, link = positionLink();
-    try {
-      await navigator.clipboard.writeText(link);
-      b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy link"; }, 1500);
-    } catch {   // no clipboard API (file://) or write refused: show the text selected so the user can press Cmd/Ctrl+C
-      let f = $("#zoombar input[readonly]");
-      if (!f) { f = document.createElement("input"); f.readOnly = true; f.className = "copyfield"; f.setAttribute("aria-label", "Link to copy"); b.after(f); }
-      f.value = link; f.focus(); f.select();
-    }
-  };
-  $("#zoombar .goto").onchange = e => { applyGoTo(e.target.value); e.target.value = ""; };
 }
+// Copy link and Go to left the toolbar; the header menu / review-bar overflow call these.
+async function copyLink() {
+  const link = positionLink(), msg = $("#statusbar .status-message");
+  try {
+    await navigator.clipboard.writeText(link);
+    if (msg) { const was = msg.textContent; msg.textContent = "Copied link"; setTimeout(() => { msg.textContent = was; }, 1500); }
+  } catch {   // no clipboard API (file://) or write refused: show the text selected so the user can press Cmd/Ctrl+C
+    let f = $("input.copyfield[readonly]");
+    if (!f) { f = document.createElement("input"); f.readOnly = true; f.className = "copyfield"; f.setAttribute("aria-label", "Link to copy"); document.body.append(f); }
+    f.value = link; f.focus(); f.select();
+  }
+  return link;
+}
+window.krReview = Object.assign(window.krReview || {}, { copyLink, goTo: applyGoTo, positionLink });
 renderZoombar();
 function setDock(name, open) {
   document.getElementById(name).classList.toggle("dock-open", open);
   document.querySelector(`[data-dock="${name}"]`).setAttribute("aria-expanded", String(open));
 }
+const wide = matchMedia("(min-width:900px)");
+function syncDockButtons() {   // wide: toggles collapse a docked column; narrow: toggles the overlay
+  for (const b of document.querySelectorAll("[data-dock]")) b.setAttribute("aria-expanded", String(wide.matches ? !document.body.classList.contains(b.dataset.dock + "-off") : $("#" + b.dataset.dock).classList.contains("dock-open")));
+}
 for (const b of document.querySelectorAll("[data-dock]")) b.onclick = () => {
+  if (wide.matches) { document.body.classList.toggle(b.dataset.dock + "-off"); syncDockButtons(); return; }
   const open = b.getAttribute("aria-expanded") !== "true";
   setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
   setDock(b.dataset.dock, open);
 };
+wide.addEventListener("change", syncDockButtons); syncDockButtons();
 for (const b of document.querySelectorAll("#change-nav [data-step]")) b.onclick = () => step(+b.dataset.step);
 
 // Changed regions: rasterise both sides, compare pixels on a grid, merge touching cells into boxes.

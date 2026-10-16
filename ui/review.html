@@ -12,15 +12,17 @@
 <!-- KR_ICONS -->
 <div class="report-head"><header id="hdr"></header><button type="button" class="btn theme-toggle" data-theme-toggle aria-label="Switch to light theme" title="Switch to light theme" aria-pressed="true"><svg class="icon" aria-hidden="true" focusable="false"><use href="#kr-theme"></use></svg><span>Theme</span></button></div>
 <div id="toolbar" role="toolbar" aria-label="Review tools">
-  <button type="button" data-dock="nav" aria-controls="nav" aria-expanded="false" title="Projects, sheets and layers">Navigator</button>
-  <div id="modes" role="group" aria-label="Comparison mode"></div>
-  <div id="change-nav" role="group" aria-label="Change navigation"><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)">&lsaquo;</button><span id="change-count" class="pct" title="Selected change / total" aria-label="Selected change of total"></span><button type="button" data-step="1" aria-label="Next change" title="Next change (j)">&rsaquo;</button></div>
-  <div id="zoombar" role="group" aria-label="View"></div>
-  <span class="tb-spacer"></span>
-  <div class="mark-styles" role="radiogroup" aria-label="Change mark style">
-    <span>Marks</span><button type="button" id="mark-style" data-mark-style="outline" role="radio" aria-checked="true" disabled>Outline</button><button type="button" data-mark-style="recolour" role="radio" aria-checked="false" tabindex="-1" disabled>Recolour</button>
+  <div class="tb-grp" role="group" aria-label="View"><span class="cap">View</span><div id="modes" role="group" aria-label="Comparison mode"></div></div>
+  <div class="tb-grp" id="change-nav" role="group" aria-label="Change navigation"><span class="cap">Change</span><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-prev"></use></svg></button><span id="change-count" class="pct" title="Selected change / total" aria-label="Selected change of total"></span><button type="button" data-step="1" aria-label="Next change" title="Next change (j)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-next"></use></svg></button></div>
+  <div class="tb-grp" role="group" aria-label="Zoom"><span class="cap">Zoom</span><div id="zoombar" role="group" aria-label="Zoom"></div></div>
+  <div class="tb-grp mark-styles" role="radiogroup" aria-label="Change mark style"><span class="cap">Marks</span>
+    <button type="button" id="mark-style" data-mark-style="outline" role="radio" aria-checked="true" title="Outline: box each change with shape and glyph" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-outline"></use></svg><span>Outline</span></button><button type="button" data-mark-style="recolour" role="radio" aria-checked="false" tabindex="-1" title="Recolour: repaint changed objects in diff colours" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-recolour"></use></svg><span>Recolour</span></button>
   </div>
-  <button type="button" data-dock="panel" aria-controls="panel" aria-expanded="false" title="Changes, checks, parts and threads">Inspector</button>
+  <span class="tb-spacer"></span>
+  <div class="tb-grp tb-docks">
+    <button type="button" data-dock="nav" aria-controls="nav" aria-expanded="false" aria-label="Toggle left dock" title="Left dock: projects, sheets and layers"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-dockl"></use></svg></button>
+    <button type="button" data-dock="panel" aria-controls="panel" aria-expanded="false" aria-label="Toggle right dock" title="Right dock: changes, checks, parts and threads"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-dock"></use></svg></button>
+  </div>
 </div>
 <div id="app">
   <nav id="nav" aria-label="Projects, sheets and layers"></nav>

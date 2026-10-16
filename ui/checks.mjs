@@ -261,7 +261,7 @@ export const CHECKS = [
     const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
     await new Promise(r => setTimeout(r, 400));
     const hash = "#p=0&s=" + row.id;
-    if ("${path}" === "pasted") { const input = document.querySelector("#zoombar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
+    if ("${path}" === "pasted") { krReview.goTo(hash); }
     else location.hash = hash;
     const until = performance.now() + 5000, box = rowBox(row, "head");
     while ((S.v !== "board" || S.x == null || Math.abs(S.x - (box[0] + box[2]) / 2) >= .01) && performance.now() < until) await new Promise(r => setTimeout(r, 50));
@@ -740,19 +740,20 @@ export const CHECKS = [
     const ok = [undefined, { writeText: () => Promise.reject(new Error("denied")) }];
     for (const stub of ok) {
       Object.defineProperty(navigator, "clipboard", { value: stub, configurable: true });
-      document.querySelector("#zoombar [data-act=copy]").click(); await sleep(100);
-      const f = document.querySelector("#zoombar input[readonly]");
+      copyLink(); await sleep(100);
+      const f = document.querySelector("input.copyfield[readonly]");
       if (!f || f.value !== positionLink() || document.activeElement !== f || f.selectionStart !== 0 || f.selectionEnd !== f.value.length) return "bad " + (f && f.value);
+      const rect = f.getBoundingClientRect(); if (rect.top < 0 || rect.bottom > innerHeight || rect.right > innerWidth || rect.width < 100) return "clipped copy fallback";
       f.remove();
     }
     return true;`],
   ["copy link shows Copied when clipboard works", "p=1&v=board", `
     Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.resolve() }, configurable: true });
-    const b = document.querySelector("#zoombar [data-act=copy]"); b.click();
+    const b = document.querySelector("#statusbar .status-message"), was = b.textContent; copyLink();
     await new Promise(r => setTimeout(r, 100));
     const during = b.textContent;
     await new Promise(r => setTimeout(r, 1700));
-    return during.includes("Copied") && b.textContent === "Copy link";`],
+    return during.includes("Copied") && b.textContent === was;`],
   ["theme follows the system and keeps text contrast", "", `
     const lum = c => { const [r, g, b] = c.match(/\\d+/g).map(Number).map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
     const start = KRTheme.get(), seen = [], res = {};
@@ -1928,7 +1929,7 @@ export const CHECKS = [
     key('PageDown'); if(Appearance.get().activeLayer!=='B.Cu') return 'bottom'; key('PageUp'); if(Appearance.get().activeLayer!=='F.Cu') return 'top';
     key('u',{ctrlKey:true}); if(Appearance.get().units!=='mil') return 'units';
     Appearance.patch({grid:{size:1.27}}); const g=Appearance.get().grid.size; key('n'); key('N',{shiftKey:true}); if(Math.abs(Appearance.get().grid.size-g)>1e-9) return 'grid inverse';
-    const input=document.querySelector('#zoombar .goto'); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.blur();
+    const input=document.createElement('input'); document.body.append(input); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.remove();
     const z=S.z; key('+',{ctrlKey:true,shiftKey:true}); if(S.z<z*1.3) return 'ctrl shift zoom';
     const copy=new KeyboardEvent('keydown',{key:'c',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(copy); if(copy.defaultPrevented) return 'copy consumed';
     key('?'); if(!document.querySelector('#shortcuts[open]')) return 'sheet'; document.querySelector('#shortcuts').close(); Appearance.reset(); return true;`],
@@ -2992,7 +2993,7 @@ export const CHECKS = [
   return S.m === 'wipe' && a.dataset.mode === 'wipe' && a.getAttribute('aria-checked') === 'true'
     && document.querySelector('#toolbar #zoombar') !== null
     && !document.querySelector('#zoombar').textContent.includes('j / k')
-    && document.querySelector('#zoombar .goto').getAttribute('aria-label') === 'Go to saved review position'
+    && typeof krReview.goTo === 'function' && typeof krReview.copyLink === 'function'
     && /^(\u2013|\\d+) \\/ \\d+$/.test(document.querySelector('#change-count').textContent)
     && !!document.querySelector('[data-mark-style]');`],
   ["chrome toolbar change counter follows step", "", `
@@ -3296,9 +3297,9 @@ export const CHECKS = [
   const theme=KRTheme.get(); document.querySelector('[data-theme-toggle]').click();
   if (KRTheme.get()===theme) return 'theme switch'; KRTheme.set(theme);
   Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});
-  document.querySelector('#zoombar [data-act=copy]').click();
+  copyLink();
   await new Promise(r=>setTimeout(r,100));
-  const field=document.querySelector('#zoombar input[readonly]');
+  const field=document.querySelector('input.copyfield[readonly]');
   if(!field || field.value!==positionLink() || document.activeElement!==field) return 'copy fallback';
   field.remove();
   const row=proj().changes.find(r=>viewOf(r)==='board');
@@ -3508,4 +3509,20 @@ export const CHECKS = [
     Appearance.patch({activeLayer:null,flip:false});check('F.Cu');
     return boardView.renderers.length===2 && uploads===boardView.renderers.map(r=>r.stats.uploads).join() && JSON.stringify(scene)===saved;
   `],
+  ["bench toolbar groups fit without cut-off", "p=1&v=board", `
+  const t=document.querySelector('#toolbar');
+  const caps=[...t.querySelectorAll(':scope > .tb-grp > .cap')].map(e=>e.textContent).join('|');
+  if(caps!=='View|Change|Zoom|Marks') return 'groups '+caps;
+  if(t.querySelector('[data-theme-toggle], [data-act=copy], .goto')) return 'moved controls still in toolbar';
+  if(t.querySelectorAll('.tb-grp').length<5 || t.querySelectorAll('svg.i use').length<14) return 'icons';
+  if(![...t.querySelectorAll('button')].every(b=>b.title||b.getAttribute('aria-label'))) return 'tooltips';
+  if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return 'overflow '+t.scrollWidth+'>'+t.clientWidth;
+  const r=t.getBoundingClientRect(); if([...t.querySelectorAll('button')].some(b=>b.getBoundingClientRect().right>r.right+1)) return 'cut off';
+  for(const mode of ['side','overlay','wipe','blend','semantic']) {
+    t.querySelector('[data-mode='+mode+']').click();
+    if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return mode+' overflow '+t.scrollWidth+'>'+t.clientWidth;
+  }
+  t.querySelector('[data-mode=side]').click(); fit();
+  const d=t.querySelector('[data-dock=nav]'); d.click(); const off=document.body.classList.contains('nav-off'); d.click();
+  return (innerWidth<900 || off && !document.body.classList.contains('nav-off')) || 'dock toggle';`],
 ];
