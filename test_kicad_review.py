@@ -3444,3 +3444,24 @@ assert 'function schematicGridPlan(' in page
 assert not re.search(r'<script[^>]+src=["\'](?!data:)', page)
 assert not re.search(r'<link[^>]+href=["\'](?:https?:|tokens\.css|review\.css)', page)
 print('ok SCH6 offline schematic assets')
+
+# vf-order: physical stack survives scrambled KiCad 10 file IDs and dielectrics.
+for count in (4, 6):
+    fixture = Path(__file__).parent / "ui" / "fixtures" / f"vf-order-{count}.kicad_pcb"
+    text = fixture.read_text()
+    expected = ["F.Cu", *[f"In{i}.Cu" for i in range(1, count - 1)], "B.Cu"]
+    scene = kr.board_geometry(fixture)
+    assert scene["complete"] and scene["copperStack"] == expected, scene
+    assert [l["name"] for l in scene["layers"]] == expected[::-1]
+    assert len(scene["objects"]) == count
+    # Explicit stackup, not file order or enum values, is authoritative.
+    swapped = text.replace('(layer "In1.Cu" (type', '(layer "TEMP" (type').replace(
+        '(layer "In2.Cu" (type', '(layer "In1.Cu" (type').replace('(layer "TEMP" (type', '(layer "In2.Cu" (type')
+    explicit = expected.copy()
+    explicit[1], explicit[2] = explicit[2], explicit[1]
+    assert scene_from_text(swapped)["copperStack"] == explicit
+    # Older boards omit setup; canonical layer names still define the stack.
+    legacy = re.sub(r' \(setup \(stackup.*?\)\)\)\n', '', text, flags=re.S)
+    assert "(setup" not in legacy
+    assert scene_from_text(legacy)["copperStack"] == expected
+print("ok vf-order 4/6-layer explicit stackup and legacy physical order")

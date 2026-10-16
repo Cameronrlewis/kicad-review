@@ -141,3 +141,26 @@ console.log("PASS contiguous object ranges retain all segment instances");
  assert.equal(bad.get().contrast,"normal");
  console.log("PASS Appearance defaults, normalization, net colour clear and blocked storage");
 }
+
+// vf-order: board-specific physical copper, mirrored base order, immutable input.
+for (const count of [2,4,6,32]) {
+  const copperStack = ['F.Cu', ...Array.from({length:count-2},(_,i)=>`In${i+1}.Cu`), 'B.Cu'];
+  const layers = [...copperStack].reverse().map((name,id)=>({name,id}));
+  const scene = {layers,copperStack};
+  for (const flip of [false,true]) {
+    const order = C.boardPriority(scene,flip);
+    assert.deepEqual(order.filter(n=>n.endsWith('.Cu')), flip ? [...copperStack].reverse() : copperStack);
+    assert.deepEqual(C.boardPriority({layers},flip),order);
+    assert.ok(order.indexOf('Edge.Cuts') < order.indexOf('F.Cu'));
+    assert.ok(order.indexOf('User.45') < order.indexOf('B.Cu'));
+    assert.ok(order.indexOf(flip?'B.Fab':'F.Fab') < order.indexOf(flip?'B.Cu':'F.Cu'));
+    assert.ok(order.indexOf(flip?'F.Cu':'B.Cu') < order.indexOf(flip?'F.Fab':'B.Fab'));
+  }
+  assert.deepEqual(scene.copperStack,copperStack);
+}
+const explicit = {layers:[{name:'F.Cu'},{name:'In1.Cu'},{name:'In2.Cu'},{name:'B.Cu'}],copperStack:['F.Cu','In2.Cu','In1.Cu','B.Cu']};
+assert.deepEqual(C.boardPriority(explicit).filter(n=>n.endsWith('.Cu')),explicit.copperStack);
+G.validateScene({...primitiveScene,copperStack:['F.Cu']});
+for (const copperStack of [null,[],['F.Cu','F.Cu'],['B.Cu'],['F.SilkS'],[null]])
+  assert.throws(()=>G.validateScene({...primitiveScene,copperStack}));
+console.log('ok vf-order physical stack, flip, technical priorities and metadata validation');

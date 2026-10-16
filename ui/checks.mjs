@@ -3408,4 +3408,104 @@ export const CHECKS = [
     const label=[...document.querySelectorAll('#stage .vp > .tag')].find(e=>(e.textContent||'').includes('Base (red)'));
     if(!label) return 'skip';
     return label.querySelectorAll('i.sw').length===3 && label.textContent.includes('Head (green)') && label.textContent.includes('both (black)');`],
+  ...['top','flipped','active In1.Cu'].map(view=>[
+    'vf-order synthetic 4-layer '+view, 'v=board', `
+      const panel=document.createElement('section');
+      panel.style.cssText='position:fixed;inset:100px 350px auto;z-index:9999;padding:20px;background:var(--bg);color:var(--text)';
+      const title=document.createElement('h2'); title.textContent='Synthetic 4-layer: ${view}';
+      const caption=document.createElement('p'); caption.textContent='Left: F.Cu / In2.Cu. Right: B.Cu / In1.Cu. Centre: all copper. Opaque tracks.';
+      const canvas=document.createElement('canvas'); canvas.style.cssText='width:800px;height:400px'; panel.append(title,caption,canvas);document.body.append(panel);
+      // Deliberately scrambled file layer enums (KiCad 10 B.Cu=2, In1.Cu=4).
+      const names=['In2.Cu','B.Cu','F.Cu','In1.Cu'];
+      const ids={'F.Cu':0,'B.Cu':2,'In1.Cu':4,'In2.Cu':6};
+      const track=(layer,x0,x1,y=5000)=>({uuid:layer+y,changeUuid:layer+y,kind:'track',layers:[layer],net:0,category:'tracks',side:null,hidden:false,
+        box:[x0,y-1000,x1,y+1000],geometry:{segments:[[x0,y,x1,y,2000]]}});
+      const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,20000,10000],
+        layers:names.map(name=>({id:ids[name],name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
+        objects:[track('F.Cu',2000,12000),track('In2.Cu',2000,12000),track('B.Cu',8000,18000),track('In1.Cu',8000,18000)]};
+      const r=BoardGL.create(canvas,{scene,manual:true});if(!r)throw Error('WebGL2 required');
+      r.setCamera({x:10,y:5,z:40,width:800,height:400,dpr:1});
+      const state={layers:Object.fromEntries(names.map(n=>[n,{visible:true,opacity:1}])),objects:{},nets:{},activeLayer:${JSON.stringify(view==='active In1.Cu'?'In1.Cu':null)},flip:${view==='flipped'}};
+      const close=(a,b)=>a.slice(0,3).every((v,i)=>Math.abs(v-b[i])<=1);
+      r.setAppearance(state);r.draw();
+      const expected=${JSON.stringify(view==='flipped'?'B.Cu':view==='active In1.Cu'?'In1.Cu':'F.Cu')};
+      const pixel=r.readPixel(400,200), color=KicadColors.layers[expected];
+      if(!close(pixel,color))throw Error('centre expected '+expected+' '+color+' got '+pixel);
+      const q=r.worldToScreen([${view==='flipped'?15:5},5]);
+      const edge=r.readPixel(Math.floor(q[0]),399-Math.floor(q[1]));
+      const edgeLayer=${JSON.stringify(view==='flipped'?'B.Cu':'F.Cu')};
+      if(!close(edge,KicadColors.layers[edgeLayer]))throw Error('unpromoted overlap expected '+edgeLayer+' got '+edge);
+      if(r.hitTest(r.worldToScreen([10,5]))[0]?.layers[0]!==expected)throw Error('picking disagrees with visible layer');
+      r.draw();console.log('BOARD_PROOF '+JSON.stringify({task:'vf-order',view:${JSON.stringify(view)},expected,pixel:[...pixel],theme:KRTheme.get()}));return true;
+    `]),
+  ["vf-order technical layers", "v=board", `
+    const canvas=document.createElement('canvas');canvas.style.cssText='width:200px;height:200px';document.body.append(canvas);
+    const names=['F.Cu','F.SilkS'];
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,2000,2000],layers:names.map((name,id)=>({id,name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
+      objects:names.map(layer=>({kind:'track',uuid:layer,changeUuid:layer,layers:[layer],net:0,category:'tracks',side:null,hidden:false,box:[0,500,2000,1500],geometry:{segments:[[0,1000,2000,1000,1000]]}}))};
+    const r=BoardGL.create(canvas,{scene,manual:true});if(!r)throw Error('WebGL2 required');
+    try {r.setCamera({x:1,y:1,z:100,width:200,height:200,dpr:1});r.setAppearance({activeLayer:null});r.draw();
+      const p=r.readPixel(100,100),expected=KicadColors.layers['F.SilkS'];
+      if(!p.slice(0,3).every((v,i)=>Math.abs(v-expected[i])<=1))throw Error('expected front silkscreen above F.Cu, got '+p);return true;
+    }finally{r.dispose();canvas.remove();}
+  `],
+  ["vf-order 2/4/6-layer stack pixels and active restoration", "v=board", `
+    const canvas=document.createElement('canvas');canvas.style.cssText='width:200px;height:200px';document.body.append(canvas);
+    const r=BoardGL.create(canvas,{manual:true});if(!r)throw Error('WebGL2 required');
+    r.setCamera({x:1,y:1,z:100,width:200,height:200,dpr:1});
+    let assertions=0;
+    try {
+      for(const count of [2,4,6]) for(const metadata of [false,true]) {
+        const copper=['F.Cu',...Array.from({length:count-2},(_,i)=>'In'+(i+1)+'.Cu'),'B.Cu'];
+        if(metadata && count>2) [copper[1],copper[2]]=[copper[2],copper[1]];
+        const front=['F.Mask','F.SilkS','F.Paste','F.Adhes','F.CrtYd','F.Fab'], back=['B.Mask','B.SilkS','B.Paste','B.Adhes','B.CrtYd','B.Fab'];
+        const names=['Dwgs.User','Edge.Cuts','User.1',...front,...copper,...back];
+        const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,2000,2000],layers:[...names].reverse().map((name,id)=>({id,name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
+          objects:names.map(layer=>({kind:'track',uuid:layer,changeUuid:layer,layers:[layer],net:0,category:'tracks',side:null,hidden:false,box:[0,500,2000,1500],geometry:{segments:[[0,1000,2000,1000,1000]]}}))};
+        if(metadata)scene.copperStack=copper;
+        const saved=JSON.stringify(scene);r.setScene(scene);
+        for(const flip of [false,true]) {
+          const order=['Dwgs.User','Edge.Cuts','User.1',...(flip?[...front,...copper,...back].reverse():[...front,...copper,...back])];
+          const layers=Object.fromEntries(names.map(n=>[n,{visible:true,color:[...KicadColors.layers[n].slice(0,3),1],opacity:1}]));
+          const state={layers,activeLayer:null,flip,contrast:'normal'};
+          const check=expected=>{
+            r.setAppearance(state);r.draw();const pixel=r.readPixel(100,100),color=KicadColors.layers[expected];assertions++;
+            if(!pixel.slice(0,3).every((v,i)=>Math.abs(v-color[i])<=1))throw Error(count+' layers metadata='+metadata+' flip='+flip+' expected '+expected+' got '+pixel);
+            if(r.hitTest(r.worldToScreen([1,1]))[0]?.layers[0]!==expected)throw Error('visible/pick order mismatch '+expected);
+          };
+          // Peel top layers off; every remaining layer must retain its order.
+          for(const expected of order) {
+            check(expected);
+            for(const active of copper.filter(n=>layers[n].visible)) {state.activeLayer=active;check(active);}
+            state.activeLayer=null;check(expected);layers[expected].visible=false;
+          }
+        }
+        if(JSON.stringify(scene)!==saved)throw Error('rendering mutated physical stack');
+      }
+      console.log('BOARD_PROOF '+JSON.stringify({task:'vf-order',pixelAssertions:assertions,stacks:[2,4,6],themes:KRTheme.get()}));return true;
+    }finally{r.dispose();canvas.remove();}
+  `],
+  ["vf-order Appearance active-layer pixel integration", "v=board", `
+    const names=['F.Cu','In1.Cu','In2.Cu','B.Cu'];
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,20000,10000],copperStack:names,
+      layers:names.map((name,id)=>({id,name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
+      objects:names.map(layer=>({kind:'track',uuid:layer,changeUuid:layer,layers:[layer],net:0,category:'tracks',side:null,hidden:false,box:[2000,4000,18000,6000],geometry:{segments:[[2000,5000,18000,5000,2000]]}}))};
+    const bytes=new Uint8Array(await new Response(new Blob([JSON.stringify(scene)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.vforder=btoa(String.fromCharCode(...bytes));proj().board.geometry={base:'vforder',head:'vforder'};
+    boardView.failed=null;Appearance.reset();Object.assign(S,{v:'board',m:'side',t:'appearance',x:10,y:5,z:30});renderPanel();await draw();
+    const uploads=boardView.renderers.map(r=>r.stats.uploads).join(),saved=JSON.stringify(scene);
+    const check=expected=>{
+      for(const r of boardView.renderers){r.draw();const q=r.worldToScreen([10,5]),p=r.readPixel(Math.floor(q[0]*devicePixelRatio),r.gl.canvas.height-1-Math.floor(q[1]*devicePixelRatio));
+        if(!p.slice(0,3).every((v,i)=>Math.abs(v-KicadColors.layers[expected][i])<=1))throw Error('Appearance expected '+expected+' got '+p);}
+    };
+    check('F.Cu');
+    for(const active of ['In1.Cu','In2.Cu','B.Cu','F.Cu']){
+      const button=document.querySelector('#appearance-root [data-layer="'+active+'"] .name');if(!button)throw Error('missing Layers tab button '+active);button.click();
+      if(Appearance.get().activeLayer!==active)throw Error('active layer did not change');check(active);
+    }
+    Appearance.patch({activeLayer:null,flip:true});check('B.Cu');
+    Appearance.patch({activeLayer:'In1.Cu'});check('In1.Cu');
+    Appearance.patch({activeLayer:null,flip:false});check('F.Cu');
+    return boardView.renderers.length===2 && uploads===boardView.renderers.map(r=>r.stats.uploads).join() && JSON.stringify(scene)===saved;
+  `],
 ];

@@ -800,6 +800,15 @@ def board_geometry(pcb_path):
     copper = sorted((name for name in names if name.endswith(".Cu")),
                     key=lambda name: -1 if name == "F.Cu" else (1000 if name == "B.Cu" else int(name[2:-3])))
 
+    # Stackup lists physical layers, including dielectric entries. Older boards
+    # omit it; their canonical copper names define the stack, not numeric IDs.
+    stackup = find(find(root, "setup") or [], "stackup") or []
+    defined = [layer[1] for layer in findall(stackup, "layer")
+               if len(layer) > 1 and layer[1] in copper]
+    if len(defined) == len(copper) and set(defined) == set(copper):
+        copper = defined
+    scene["copperStack"] = copper
+
     def warn(uid, kind, reason, unsupported=True):
         scene["warnings"].append({"uuid": uid, "kind": kind, "reason": reason})
         if unsupported:

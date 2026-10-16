@@ -23,6 +23,10 @@
       if (!l || !Number.isInteger(l.id) || l.id < 0 || l.id > 255 || typeof l.name !== "string" || layers.has(l.name) || layerIds.has(l.id)) fail();
       layers.add(l.name); layerIds.add(l.id);
     }
+    if (scene.copperStack !== undefined && (!Array.isArray(scene.copperStack) ||
+      scene.copperStack.length !== [...layers].filter(n=>n.endsWith('.Cu')).length ||
+      new Set(scene.copperStack).size !== scene.copperStack.length ||
+      scene.copperStack.some(n=>typeof n !== 'string' || !n.endsWith('.Cu') || !layers.has(n)))) fail();
     for (const n of scene.nets) {
       if (!n || !Number.isSafeInteger(n.id) || n.id < 0 || typeof n.name !== "string" || nets.has(n.id)) fail();
       nets.add(n.id);
@@ -458,11 +462,13 @@ void main() {
           });
           gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,Math.max(1,scene.nets.length),1,0,gl.RGBA,gl.FLOAT,data); stats.textureUploads++; net.version=netVersion; net.scene=scene;
         }
-        const priority = globalThis.KicadColors.drawPriority;
+        const priority = globalThis.KicadColors.boardPriority(scene, appearance.flip);
         const rank = {wall:1,hole:2}, within = {fill:0,text:2};
         const ordered = [...batches].sort((a,b)=> {
           const ra = rank[a.pass] ?? 0, rb = rank[b.pass] ?? 0;
           if (ra || rb) return ra-rb;
+          // KiCad 10 pcbnew/pcb_draw_panel_gal.cpp:560-578,636-649:
+          // active copper is on top; this promotion never mutates the base order.
           if ((a.layer===appearance.activeLayer)!==(b.layer===appearance.activeLayer)) return a.layer===appearance.activeLayer ? 1 : -1;
           return priority.indexOf(b.layer)-priority.indexOf(a.layer) || (within[a.pass] ?? 1)-(within[b.pass] ?? 1);
         });
@@ -547,7 +553,7 @@ void main() {
             if (api.readPixel(Math.floor(x*dpr),canvas.height-1-Math.floor(y*dpr))[0]>127) hits.push(object);
           }
         } finally { draw(); }
-        const priority = globalThis.KicadColors.drawPriority;
+        const priority = globalThis.KicadColors.boardPriority(scene, appearance.flip);
         const front = o => Math.max(...o.layers.filter(l=>layerFactor(l,appearance)>0).map(l=>l===appearance.activeLayer ? priority.length+1 : priority.length-priority.indexOf(l)));
         const area = o => (o.box[2]-o.box[0])*(o.box[3]-o.box[1]);
         return hits.sort((a,b)=>front(b)-front(a) || area(a)-area(b) || a.uuid.localeCompare(b.uuid));

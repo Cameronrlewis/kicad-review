@@ -50,18 +50,24 @@
   const users = Array.from({length:45},(_,i)=>`User.${i+1}`);
   const copper = ["F.Cu",...inner.map((_,i)=>`In${i+1}.Cu`),"B.Cu"];
   const appearanceOrder = [...copper,...tech,...users];
-  // Draw priority is NOT Appearance order. Values express top-to-bottom roles.
-  // Painters reverse this list; zones precede other objects on their layer,
-  // and pad/via copper precedes drill overlays. Promote the selected side's
-  // family, then its selected layer, without covering holes or review overlays.
-  // Selecting B.Cu does not flip the view.
-  // pcbnew/pcb_draw_panel_gal.cpp:66-297, active-side promotion:585-635.
-  const drawPriority = ["overlay","netnames","Dwgs.User","Cmts.User","Eco1.User",
-    "Eco2.User","Edge.Cuts","Margin",...users,"text","ratsnest","holes",
-    "F.Cu","F.Mask","F.SilkS","F.Paste","F.Adhes","F.CrtYd","F.Fab",
-    ...inner.map((_,i)=>`In${i+1}.Cu`),
-    "B.Cu","B.Mask","B.SilkS","B.Paste","B.Adhes","B.CrtYd","B.Fab",
-    "drawingSheet","grid"];
+  // KiCad 10 pcbnew/pcb_draw_panel_gal.cpp:85-136: user/edge layers
+  // stay above board layers; :157-162 and :292-297 give technical order.
+  // Viewer contract places front technical layers above front copper (KiCad's
+  // default GAL table instead places F.Cu first at :156). Back layers stay below.
+  const frontTech = ["F.Mask","F.SilkS","F.Paste","F.Adhes","F.CrtYd","F.Fab"];
+  const backTech = ["B.Mask","B.SilkS","B.Paste","B.Adhes","B.CrtYd","B.Fab"];
+  const aboveBoard = ["overlay","netnames","Dwgs.User","Cmts.User","Eco1.User",
+    "Eco2.User","Edge.Cuts","Margin",...users,"text","ratsnest","holes"];
+  const drawPriority = [...aboveBoard,...frontTech,...copper,...backTech,"drawingSheet","grid"];
+  function boardPriority(scene, flip = false) {
+    // Legacy reports lack copperStack. Names, not KiCad enum IDs or file order,
+    // recover their physical order (B.Cu=2 in KiCad 10, before all inner enums).
+    // Copper sequence: pcbnew/pcb_draw_panel_gal.cpp:164-291. The viewer's
+    // bottom-view contract reverses physical layers, not user/edge overlays.
+    const stack = scene.copperStack || copper.filter(name=>scene.layers.some(l=>l.name===name));
+    const physical = [...frontTech,...stack,...backTech];
+    return [...aboveBoard,...(flip ? physical.reverse() : physical),"drawingSheet","grid"];
+  }
   // Theme paths: common/settings/color_settings.cpp:55-101,124-243.
   // Existing renderer tables retain byte RGB; canonical theme data uses unit RGBA.
   const unit = rgba => rgba.map((v,i) => i < 3 ? v/255 : v);
@@ -140,6 +146,6 @@
     schematicThemeKeys[name] = 'schematic.' + name;
     themeDefaults['schematic.' + name] = unit(rgba);
   }
-  globalThis.KicadColors = {layers,objects,appearanceOrder,drawPriority,
+  globalThis.KicadColors = {layers,objects,appearanceOrder,drawPriority,boardPriority,
     themeDefaults,layerThemeKeys,schematicThemeKeys};
 })();
