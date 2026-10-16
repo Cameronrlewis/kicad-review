@@ -1957,9 +1957,9 @@ export const CHECKS = [
     const old=proposePin, on=THREADS_ON; let pins=[]; proposePin=(v,event)=>pins.push(toWorld(v,event)); THREADS_ON=true;
     try {
       const pointer=(type,x,button=2)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:e.clientY,button,pointerId:2,bubbles:true}));
-      pointer('pointerdown',e.clientX); pointer('pointerup',e.clientX+2); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+2,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'right pin';
+      pointer('pointerdown',e.clientX); pointer('pointerup',e.clientX+2); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+2,clientY:e.clientY,cancelable:true})); [...document.querySelectorAll('.bench-context button')].find(b=>b.textContent==='Comment here')?.click(); if(pins.length!==1) return 'right pin';
       const p=pins[0], screen=BoardGL.worldToScreen(p,{...boardCamera(vp),width:r.width,height:r.height}); if(Math.abs(screen[0]-(Math.trunc(e.clientX+2)-r.left))>1e-6) return 'pin roundtrip';
-      pointer('pointerdown',e.clientX); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'early context pinned'; pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'drag pinned';
+      pointer('pointerdown',e.clientX); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX,clientY:e.clientY,cancelable:true})); closeBenchMenu(); if(pins.length!==1) return 'early context pinned'; pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); closeBenchMenu(); if(pins.length!==1) return 'drag pinned';
       pointer('pointerdown',e.clientX); pointer('lostpointercapture',e.clientX); const x=S.x; pointer('pointermove',e.clientX+40); if(S.x!==x) return 'lost capture';
     } finally { proposePin=old; THREADS_ON=on; }
     const tiny=document.createElement('div'); document.body.append(tiny); const before={x:S.x,y:S.y,z:S.z}; zoomBoardAt(tiny,0,0,2); tiny.remove(); if(S.z!==before.z||S.x!==before.x) return 'zero size';
@@ -2662,9 +2662,9 @@ export const CHECKS = [
     const t=n=>document.querySelector('[data-coordinate='+n+']').textContent;
     if(t('dx')!=='3.000'||t('dy')!=='4.000'||t('dist')!=='5.000') return 'click '+t('dx')+t('dy')+t('dist');
     at('pointerdown',50,50); at('pointermove',90,90); at('pointerup',90,90); at('pointermove',90,90); await raf();
-    if(t('dx')==='—') return 'pan dropped origin';
+    if(t('dx')==='0.000') return 'pan dropped origin';
     S.v='sheet:/not-in-report'; await draw(); await raf();
-    return t('x')==='—' && t('dx')==='—' && !/NaN|Infinity/.test(document.querySelector('#statusbar').textContent);`],
+    return t('x')==='off canvas' && t('dx')==='0.000' && !/NaN|Infinity/.test(document.querySelector('#statusbar').textContent);`],
   ["status change counter matches visible change rows", "", `
     const row=proj().changes.find(r=>viewOf(r)&&currentView(viewOf(r))); if(!row) return 'skip';
     await goTo(row.id); await new Promise(r=>requestAnimationFrame(r));
@@ -3318,8 +3318,8 @@ export const CHECKS = [
   return !performance.getEntriesByType('resource').some(e=>/^https?:/.test(e.name));`],
   ["chrome status zoom is normalized against SVG camera scale", "p=1&v=board", `
   setT({x:100,y:100,z:8}); updateStatus();
-  return document.querySelector('#statusbar [data-zoom]').textContent === '2.00'
-    || 'zoom should be S.z / PX, got '+document.querySelector('#statusbar [data-zoom]').textContent;`],
+  return document.querySelector('#statusbar [data-zoom]').textContent === '200%'
+    || 'zoom should be S.z / PX as a percentage, got '+document.querySelector('#statusbar [data-zoom]').textContent;`],
   ["chrome overlay docks use opaque themed surfaces", "p=1&v=board", `
   const nav=getComputedStyle(document.querySelector('#nav')).backgroundColor;
   const panel=getComputedStyle(document.querySelector('#panel')).backgroundColor;
@@ -3970,4 +3970,42 @@ CHECKS.push(['bench polish inspector shows nets as a list', 'v=board', `
   if(!fp)return 'skip';renderInspector();
   const t=document.querySelector('#inspector').textContent;
   return !/\\[\\s*"/.test(t)&&document.querySelectorAll('#inspector .insp-list li').length>1;
+`]);
+
+// vf-sch-speed: a schematic pan must cost almost nothing (no ancestor restyle, no HUD rewrite, no grid repaint).
+CHECKS.push(['vf-sch-speed schematic pan is cheap', '', `
+  const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'skip';
+  S.v='sheet:'+sheet.path; S.m='side'; S.grid=true; await draw(); fit();
+  const raf=()=>new Promise(requestAnimationFrame), vp=document.querySelector('#stage .vp.sheet'), r=vp.getBoundingClientRect();
+  const ev=(type,i)=>vp.dispatchEvent(new PointerEvent(type,{pointerId:7,button:0,buttons:type==='pointerup'?0:1,clientX:r.x+r.width/2+(i||0)*3,clientY:r.y+r.height/2+(i||0),bubbles:true}));
+  // 1. unchanged HUD text must not be rewritten
+  const hud=new MutationObserver(()=>{}); hud.observe(document.querySelector('#statusbar'),{childList:true,characterData:true,subtree:true}); hud.observe(document.querySelector('#zoombar'),{childList:true,characterData:true,subtree:true});
+  apply(); hud.takeRecords(); apply(); apply(); updateStatus();
+  const rewrites=hud.takeRecords().length; hud.disconnect();
+  if(rewrites) return 'unchanged status/zoom text rewritten '+rewrites+'x';
+  // 2. grid: count dots painted while panning at constant zoom
+  const proto=CanvasRenderingContext2D.prototype, oldRect=proto.rect; let rects=0; proto.rect=function(...a){rects++;return oldRect.apply(this,a)};
+  let frames=[], t0;
+  try {
+    ev('pointerdown',0); await raf(); rects=0; t0=performance.now();
+    for(let i=1;i<=60;i++){ ev('pointermove',i); const t=performance.now(); await raf(); frames.push(performance.now()-t); }
+    ev('pointerup',60);
+  } finally { proto.rect=oldRect; }
+  if(rects) return 'grid repainted '+rects+' dots during pan';
+  // 3. no custom property on viewport ancestors of the SVG
+  if(/--cursor/.test(vp.style.cssText)) return 'pointer position written to SVG ancestor as CSS variable: '+vp.style.cssText;
+  frames.sort((a,b)=>a-b); const fps=1000*frames.length/frames.reduce((a,b)=>a+b), p95=frames[Math.floor(frames.length*.95)];
+  const gl=document.createElement('canvas').getContext('webgl'), ext=gl&&gl.getExtension('WEBGL_debug_renderer_info'), soft=!ext||/swiftshader|llvmpipe|software/i.test(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
+  console.log('BOARD_PROOF '+JSON.stringify({task:'vf-sch-speed',fps:+fps.toFixed(1),p95:+p95.toFixed(1),software:soft,elements:document.querySelectorAll('#stage *').length}));
+  if(!soft&&fps<50) return 'pan '+fps.toFixed(1)+' fps';
+  return true;
+`]);
+CHECKS.push(['vf-sch-speed board crosshair follows pointer by transform', 'v=board', `
+  const vp=document.querySelector('#stage .vp'), r=vp.getBoundingClientRect();
+  updateCoordinates(vp,{clientX:r.left+100,clientY:r.top+50});
+  const cross=vp.querySelector(':scope > .board-cross');
+  if(!cross||!vp.classList.contains('board-cursor')||getComputedStyle(cross).display!=='block') return 'no crosshair';
+  if(!new DOMMatrix(cross.style.transform).isIdentity&&Math.abs(new DOMMatrix(cross.style.transform).e-91)>1e-6) return cross.style.transform;
+  if(/--cursor/.test(vp.style.cssText)) return 'css variable';
+  const b=cross.getBoundingClientRect(); return Math.abs(b.left+9-(r.left+100))<1&&Math.abs(b.top+9-(r.top+50))<1||JSON.stringify(b);
 `]);

@@ -683,7 +683,7 @@ function apply() {
   onApply();
   if (boardDiff) { boardDiff.render(); drawPins(); }
   else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
-  const pct = $("#zoombar .pct"); if (pct) pct.textContent = Math.round(S.z / PX * 100) + "%";
+  setText($("#zoombar .pct"), Math.round(S.z / PX * 100) + "%");
   drawSchematicGrids(); updateSchematicStatus();
 }
 // KiCad 10: eeschema/eeschema_settings.cpp:705-706 defaults to 50 mil (index 1);
@@ -703,26 +703,29 @@ function schematicGridPlan(width, height) {
   const step = physical*stride, mod = v => ((v%step)+step)%step;
   return {step, x:mod(width/2-S.x*S.z), y:mod(height/2-S.y*S.z)};
 }
+// Dots are painted once per (size, dpr, step) into a canvas the size of the viewport; a pan only
+// moves that canvas by the lattice phase (an integer-px transform), so it costs no repaint.
 function drawSchematicGrids() {
   if (!placed()) return;
   for (const canvas of document.querySelectorAll("#stage .sch-grid")) {
     const vp = canvas.parentElement, w = vp.clientWidth, h = vp.clientHeight, dpr = devicePixelRatio || 1;
-    const width = Math.round(w*dpr), height = Math.round(h*dpr);
-    if (canvas.width !== width) canvas.width = width;
-    if (canvas.height !== height) canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h);
-    if (S.grid === false || !w || !h) continue;
-    const {step,x,y} = schematicGridPlan(w,h);
-    ctx.fillStyle = getComputedStyle(vp).getPropertyValue("--sch-ink-b5b5b5").trim() || "#b5b5b5";
-    ctx.beginPath();
-    for (let px=x; px<w; px+=step) for (let py=y; py<h; py+=step) ctx.rect(Math.round(px),Math.round(py),1,1);
-    ctx.fill();
+    if (S.grid === false || !w || !h) { if (canvas.dataset.key) { canvas.getContext("2d").clearRect(0,0,canvas.width,canvas.height); canvas.dataset.key = ""; } continue; }
+    const {step,x,y} = schematicGridPlan(w,h), key = [w,h,dpr,step].join();
+    if (canvas.dataset.key !== key) {
+      canvas.dataset.key = key; canvas.width = Math.round(w*dpr); canvas.height = Math.round(h*dpr);
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+      ctx.fillStyle = getComputedStyle(vp).getPropertyValue("--sch-ink-b5b5b5").trim() || "#b5b5b5";
+      ctx.beginPath();
+      for (let px=0; px<w; px+=step) for (let py=0; py<h; py+=step) ctx.rect(Math.round(px),Math.round(py),1,1);
+      ctx.fill();
+    }
+    canvas.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
   }
 }
 function updateSchematicStatus() { updateStatus(); }
 const schematicResize = new ResizeObserver(() => apply());
-window.addEventListener("kr-theme-change", drawSchematicGrids);
+window.addEventListener("kr-theme-change", () => { for (const c of document.querySelectorAll("#stage .sch-grid")) c.dataset.key = ""; drawSchematicGrids(); });
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
@@ -746,6 +749,7 @@ function resetCoordinates() {
   boardCursor = null; schematicCursor = null;
   updateStatus();
 }
+const setText = (node, text) => { if (node && node.textContent !== text) node.textContent = text; };   // an unchanged HUD value must not dirty layout
 function updateStatus() {
   const sheet = String(S.v).startsWith("sheet:");
   const a = Appearance.get(), units = S.v === "board" ? a.units : sheet ? S.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
@@ -779,10 +783,13 @@ function updateCoordinates(vp, event) {
   if (!placed() || !vp.isConnected || S.v === "3d" || !vp.clientWidth || !vp.clientHeight) { resetCoordinates(); return; }
   boardCursor = {vp, clientX:event.clientX, clientY:event.clientY, world:toWorld(vp,event)};
   if (String(S.v).startsWith("sheet:")) schematicCursor = schematicPoint(vp,event);
-  const r = vp.getBoundingClientRect();
+  const r = vp.getBoundingClientRect(), board = S.v === "board";
   for (const pane of document.querySelectorAll("#stage .vp")) {
-    pane.style.setProperty("--cursor-x", `${event.clientX-r.left}px`); pane.style.setProperty("--cursor-y", `${event.clientY-r.top}px`);
-    pane.classList.toggle("board-cursor", S.v === "board");
+    pane.classList.toggle("board-cursor", board);
+    if (!board) continue;
+    // One small element moved by transform: a CSS variable on the pane would restyle every descendant.
+    const cross = pane.querySelector(":scope > .board-cross") || pane.appendChild(Object.assign(document.createElement("div"), {className:"board-cross"}));
+    cross.style.transform = `translate(${event.clientX-r.left-9}px,${event.clientY-r.top-9}px)`;
   }
   updateStatus();
 }
