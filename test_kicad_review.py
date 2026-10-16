@@ -86,6 +86,20 @@ assert not re.search(r'<script[^>]+src=', html)
 assert 'src="appearance-state.js"' not in html
 assert 'function createStore(' in html
 assert html.index('function createStore(') < html.index('const D = window.REVIEW_DATA')
+# Theme import/reset and defaults must work from the standalone file, not fetch fixtures.
+from html.parser import HTMLParser
+class InlineAppearanceAssets(HTMLParser):
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'script':
+            assert not attrs.get('src'), ('external script', attrs)
+        if tag == 'link' and attrs.get('rel') == 'stylesheet':
+            assert not attrs.get('href'), ('external stylesheet', attrs)
+InlineAppearanceAssets().feed(html)
+assert html.index('window.KicadColors') < html.index('function createStore(')
+assert html.index('function createStore(') < html.index('const stores = new Map()')
+assert 'data-appearance-file' in html and 'data-appearance-reset' in html
+assert 'fixtures/themes/' not in html
 assert 'src="theme.js"' not in html
 assert "kr.theme" in html and "window.KRTheme" in html
 assert html.index("kr.theme") < html.index("<style>")
