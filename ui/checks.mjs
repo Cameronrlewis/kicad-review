@@ -2289,6 +2289,29 @@ export const CHECKS = [
       return boardView.renderers.every((r,i)=>r===before[i].renderer && r.stats.textureUploads===before[i].textures && r.stats.uploads===before[i].buffers) || 'camera replaced renderer or reuploaded textures or buffers';
     } finally {P.board.geometry=saved;delete cache[key];}
   `],
+  ["board comparison cameras retain revision net textures", "v=board&m=side", `
+    const P=proj(), saved=P.board.geometry, keys=['__camera_base__','__camera_head__'];
+    if(!saved) {
+      for(const [i,key] of keys.entries()) cache[key]=JSON.stringify({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,4000,4000],
+        layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''},{id:1,name:i?'VCC':'GND'}],
+        objects:[{kind:'track',uuid:key,changeUuid:key,ref:'',layers:['F.Cu'],net:1,category:'tracks',side:null,hidden:false,
+          box:[0,0,4000,1000],geometry:{segments:[[500,500,3500,500,500]]}}]});
+      P.board.geometry={base:keys[0],head:keys[1]};
+    }
+    try { for(const mode of ['side','overlay','wipe','blend','semantic']) {
+      S.v='board';S.m=mode;await draw();fit();
+      Appearance.patch({netColors:{GND:[.2,.4,.6,1]}});boardDiff.render();
+      const before=boardDiff.panes.map(p=>({renderer:p.renderer,targets:[...p.targets],textures:p.renderer.stats.textureUploads,buffers:p.renderer.stats.uploads}));
+      for(let n=0;n<5;n++) setT({x:S.x+.1,y:S.y-.1,z:S.z*1.01});
+      if(!boardDiff.panes.every((p,i)=>p.renderer===before[i].renderer
+        &&p.targets.every((t,j)=>t===before[i].targets[j])
+        &&p.renderer.stats.textureUploads===before[i].textures&&p.renderer.stats.uploads===before[i].buffers)) return mode+' camera uploaded or replaced resources';
+      Appearance.patch({netColors:{GND:[.6,.4,.2,1]}});boardDiff.render();
+      if(!boardDiff.panes.every((p,i)=>p.renderer.stats.textureUploads>before[i].textures)) return mode+' net appearance did not invalidate textures';
+    }
+    return true;
+    } finally {P.board.geometry=saved;for(const key of keys) delete cache[key];}
+  `],
   ["board offline generated controls selection links and fallback", "v=board&m=side&t=appearance", `
     if(!proj().board.geometry) return 'skip';
     S.v='board';S.m='side';S.t='appearance';await draw();Appearance.reset();fit();renderPanel();

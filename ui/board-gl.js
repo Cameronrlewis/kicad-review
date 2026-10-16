@@ -275,8 +275,8 @@ void main() {
     try { gl = canvas.getContext("webgl2", {alpha:false, antialias:false, stencil:true, premultipliedAlpha:false}); } catch { return null; }
     if (!gl || !gl.getParameter(gl.STENCIL_BITS)) return null;
     const resources = [], stats = {uploads:0, textureUploads:0, draws:0, vertices:0, instances:0, disposed:false};
-    const retained = new Map();
-    let disposed = false, failed = false, scene = null, batches = [], appearance = {}, camera = {}, netDirty = true, observer = null, frame = 0, atlasReady = false;
+    const retained = new Map(), netTextures = new Map();
+    let disposed = false, failed = false, scene = null, batches = [], appearance = {}, camera = {}, netVersion = 0, observer = null, frame = 0, atlasReady = false;
     const own = (type, value) => { if (!value) throw new Error(`Cannot allocate ${type}`); resources.push([type,value]); return value; };
     function dispose() {
       if (disposed) return;
@@ -285,7 +285,7 @@ void main() {
       observer?.disconnect(); observer = null;
       if (frame) cancelAnimationFrame(frame); frame = 0;
       for (const [type,value] of resources.splice(0).reverse()) gl[`delete${type}`](value);
-      batches = []; retained.clear();
+      batches = []; retained.clear(); netTextures.clear();
     }
     function failure(error) { if (failed) return; failed = true; dispose(); opts.onFailure?.(error); }
     function lost(event) { event.preventDefault(); failure(new Error("Board WebGL context lost")); }
@@ -307,10 +307,17 @@ void main() {
       const gridProgram = link(gridVertexSource,gridFragmentSource,["viewportSize","phase","zoom","mirrorX","spacing","dpr","color"]);
       const quad = own("Buffer",gl.createBuffer());
       gl.bindBuffer(gl.ARRAY_BUFFER,quad); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1]),gl.STATIC_DRAW); stats.uploads++;
-      const texture = own("Texture",gl.createTexture());
-      gl.bindTexture(gl.TEXTURE_2D,texture);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+      function netTexture() {
+        const key = opts.retained ? scene : null;
+        if (!netTextures.has(key)) {
+          const texture = own("Texture",gl.createTexture());
+          gl.bindTexture(gl.TEXTURE_2D,texture);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+          netTextures.set(key,{texture,version:-1,scene:null});
+        }
+        return netTextures.get(key);
+      }
       const atlas = own("Texture",gl.createTexture());
       gl.bindTexture(gl.TEXTURE_2D,atlas); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
@@ -329,8 +336,8 @@ void main() {
       }
       function setScene(next, revision = "head") {
         if (disposed || (opts.retained && scene === next)) return;
-        if (!next) { scene = null; batches = []; netDirty = true; return; }
-        if (opts.retained && retained.has(next)) { scene = next; batches = retained.get(next); netDirty = true; return; }
+        if (!next) { scene = null; batches = []; return; }
+        if (opts.retained && retained.has(next)) { scene = next; batches = retained.get(next); return; }
         const cpu = buildBatches(next, revision);
         if (next.nets.length > gl.getParameter(gl.MAX_TEXTURE_SIZE)) throw new TypeError("Too many board nets");
         // A scene replacement is the only operation that replaces retained buffers.
@@ -359,7 +366,6 @@ void main() {
             batches.push(b);
           }
           if (opts.retained) retained.set(next, batches);
-          netDirty = true;
         } catch (error) { failure(error); }
       }
       const rgba = c => [c[0]/255,c[1]/255,c[2]/255,c[3] ?? 1];
@@ -421,7 +427,8 @@ void main() {
         const opacity = categories.map(c=>appearance.objects?.[c]?.visible===false ? 0 : appearance.objects?.[c]?.opacity ?? 1);
         const sideVisible = [1,appearance.objects?.frontFootprints?.visible===false ? 0 : 1,appearance.objects?.backFootprints?.visible===false ? 0 : 1];
         gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,atlas);
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,texture);
+        gl.activeTexture(gl.TEXTURE0);
+        const net = netTexture(); gl.bindTexture(gl.TEXTURE_2D,net.texture);
         for (const {program,u} of [capsuleProgram,meshProgram]) {
           gl.useProgram(program);
           gl.uniform3fv(u.backgroundColor,background.slice(0,3));
@@ -440,7 +447,8 @@ void main() {
           gl.uniform4fv(u.color,appearance.colors?.['board.grid'] || rgba(globalThis.KicadColors.objects.grid));
           gl.drawArrays(gl.TRIANGLES,0,6); stats.draws++;
         }
-        if (netDirty) {
+        // Revision switches reuse their net tables; only net appearance changes invalidate them.
+        if (net.version !== netVersion || net.scene !== scene) {
           const data = new Float32Array(Math.max(1,scene.nets.length)*4);
           for(let i=0;i<scene.nets.length;i++) data[i*4+3]=-2;
           scene.nets.forEach((n,i)=>{
@@ -448,7 +456,7 @@ void main() {
             if (style?.visible === false) data[i*4+3] = -1;
             else if (appearance.netColors?.[n.name] || style?.color) data.set(appearance.netColors?.[n.name] || rgba(style.color),i*4);
           });
-          gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,Math.max(1,scene.nets.length),1,0,gl.RGBA,gl.FLOAT,data); stats.textureUploads++; netDirty=false;
+          gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,Math.max(1,scene.nets.length),1,0,gl.RGBA,gl.FLOAT,data); stats.textureUploads++; net.version=netVersion; net.scene=scene;
         }
         const priority = globalThis.KicadColors.drawPriority;
         const rank = {wall:1,hole:2}, within = {fill:0,text:2};
@@ -550,7 +558,7 @@ void main() {
         layerRGBA,
         setAppearance(state) {
           const next = state || {};
-          if (JSON.stringify([appearance.nets,appearance.netColors]) !== JSON.stringify([next.nets,next.netColors])) netDirty = true;
+          if (JSON.stringify([appearance.nets,appearance.netColors]) !== JSON.stringify([next.nets,next.netColors])) netVersion++;
           appearance = structuredClone(next); scheduleDraw();
         },
         draw, dispose, hitTest,
