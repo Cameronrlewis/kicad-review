@@ -3536,4 +3536,58 @@ export const CHECKS = [
   ['bench-t7 proof 1920', 'v=board', `return (async()=>{select('board');await draw();resetCoordinates();return document.querySelector('#statusbar').scrollWidth<=innerWidth;})()`],
   ['bench-t7 help proof', 'v=board', `showShortcuts();return true;`],
   ['bench-t7 context proof', 'v=board', `const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect();canvasMenu(vp,{clientX:r.left+100,clientY:r.top+160});return true;`],
+  // bench-t6
+  ["bench-t6 inspector selection and complete diffs", "p=1&v=board", `
+    const row=proj().changes.find(r=>r.where?.board); if(!row) throw Error('missing board row');
+    row.props={...row.props,customField:'<script>unsafe</script>',net:'GND'};
+    row.changes=[...(row.changes||[]),['Value','old-value','new-value']];
+    const tabs=document.querySelector('#panel-tabs'), panel=document.querySelector('#panel-body');
+    await goTo(row.id);
+    const text=document.querySelector('#inspector').textContent;
+    if(!text.includes('old-value')||!text.includes('new-value')||!text.includes('<script>unsafe</script>'))return text;
+    if(!document.querySelector('#inspector del')||document.querySelector('#inspector script'))return 'diff/escaping';
+    if(document.querySelector('#panel-tabs')!==tabs||document.querySelector('#panel-body')!==panel)return 'right dock rebuilt';
+    if(document.querySelectorAll('.insp-module').length!==4)return 'modules';
+    const finding=allViolations()[0]; if(finding){await goTo(finding.id);if(!document.querySelector('#inspector').textContent.includes(finding.description))return 'finding missing';}
+    S.s=null;S.io=null;S.ig=null;renderInspector();
+    return document.querySelector('.insp-empty')!==null;
+  `],
+  ["bench-t6 inspector inventory fields and splitter persistence", "p=1&v=board", `
+    proj().objects=[...(proj().objects||[]),{kind:'footprint',ref:'INSPECT_TEST',uuid:'inspector-test',pos:[10,20,90],value:'4.7k',footprint:'R_0402',customFlag:false}];
+    proj().parts={...(proj().parts||{}),lines:[{refs:['INSPECT_TEST'],mpn:'TEST-MPN',dnp:false}]};
+    const panel=document.querySelector('#panel-body');
+    await goToObject(proj().objects.length-1);
+    const text=document.querySelector('#inspector').textContent;
+    if(!text.includes('TEST-MPN')||!text.includes('customFlag')||!text.includes('false')||!text.includes('90'))return text;
+    if(document.querySelector('#panel-body')!==panel)return 'inventory rebuilt right dock';
+    const split=document.querySelector('#insp-split'),before=inspectorHeight;
+    split.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
+    if(inspectorHeight!==before+16)return 'resize';
+    document.querySelector('#insp-toggle').click();
+    if(!document.querySelector('#insp-body').hidden||!JSON.parse(localStorage.getItem('kr.inspector')).closed)return 'collapse persistence';
+    document.querySelector('#insp-toggle').click();
+    return !document.querySelector('#insp-body').hidden && !JSON.parse(localStorage.getItem('kr.inspector')).closed;
+  `],
+  ["bench-t6 inspector proof", "p=0&v=board&s=c1", `
+    if(innerWidth===1440){document.documentElement.style.height='900px';document.body.style.height='900px';}
+    inspectorClosed=false;inspectorHeight=176;inspectorLayout();
+    await goTo(proj().changes.find(r=>r.where?.board)?.id);
+    return document.querySelector('#inspector').getBoundingClientRect().height===176 && document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t6 inspector persists after reload", "v=board", `
+    inspectorHeight=224;inspectorClosed=true;inspectorLayout();persistInspector();renderInspector();
+    return document.querySelector('#insp-body').hidden;
+  `, {afterReload:`return inspectorHeight===224 && inspectorClosed && document.querySelector('#insp-body').hidden;`}],
+  ["bench-t6 inspector source snapshots and geometry", "p=1&v=board", `
+    const row=proj().changes.find(r=>r.where?.board);if(!row)return 'fixture';
+    row.before={fields:{MPN:'base-part'},dnp:true};row.after={fields:{MPN:'head-part'},dnp:false};
+    await goTo(row.id);
+    let data=inspectorProperties();
+    if(data.base['fields.MPN']!=='base-part'||data.head['fields.MPN']!=='head-part'||data.head.dnp!==false)return 'snapshots';
+    S.s=null;S.io=null;S.ig={side:'head',object:{uuid:'leaf-test',kind:'track',layers:['F.Cu'],net:7,geometry:{segments:[[1000,2000,3000,4000]]},hidden:false}};
+    const panel=document.querySelector('#panel-body');renderInspector();
+    const text=document.querySelector('#inspector').textContent;
+    if(!text.includes('leaf-test')||!text.includes('segments')||!text.includes('false'))return text;
+    return document.querySelector('#panel-body')===panel;
+  `],
 ];

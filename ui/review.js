@@ -161,7 +161,7 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : p.board.changed ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function openProject(i) { S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
 function select(view) { const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
@@ -192,7 +192,7 @@ function valid(st) {   // drop anything that does not exist in this report
 }
 function applyState(st) {
   const v = valid(st);
-  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
+  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
@@ -889,6 +889,7 @@ function markersFor(view) {
   return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" || r.action === "modified" && MARKED.has(r.kind)));
 }
 function afterDraw(view) {
+  renderInspector();
   syncMarkStyles();
   if (!view) return;
   refreshAppearance();
@@ -978,6 +979,10 @@ function pickAt(vp, e) {
   if (boardDiff) {
     const hit=boardDiff.pick(vp,e,S.s);
     if (hit) { S.s=hit.id; markSelected(); saveHash(); boardDiff.render(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({block:"nearest"}); }
+    else {
+      const leaf = boardDiff.hits(vp, e)[0];
+      if (leaf) { S.s = null; S.io = null; S.ig = leaf; renderInspector(); saveHash(); }
+    }
     return;
   }
   const [x, y] = toWorld(vp, e);
@@ -985,8 +990,13 @@ function pickAt(vp, e) {
   const side = sideOf(vp);
   const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
+  else {
+    const o = (proj().objects || []).find(o => objView(o) === S.v && (o.side || "head") === side &&
+      (o.box ? x >= o.box[0] && y >= o.box[1] && x <= o.box[2] && y <= o.box[3] : o.pos && Math.hypot(x-o.pos[0], y-o.pos[1]) < 2));
+    if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
+  }
 }
-function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); }
+function markSelected() { S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
@@ -1069,17 +1079,10 @@ function resolveAnchor(a) {
 }
 S.filter = { added: true, removed: true, modified: true, kind: "", q: "", all: false };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
-const PROP_ORDER = ["Value", "Footprint", "footprint", "layer", "position", "net", "layers", "text", "file", "width"];
-const rank = k => { const i = PROP_ORDER.indexOf(k); return i < 0 ? PROP_ORDER.length : i; };
 function card(r) {
-  const props = Object.entries(r.props || {}).filter(([, v]) => v != null && v !== "" && v !== "~").sort(([a], [b]) => rank(a) - rank(b));
-  const body = r.changes
-    ? r.changes.map(([k, a, b]) => `<div class="prop"><span>${esc(k)}</span><span class="old">${esc(a ?? "—")}</span><span class="arrow">→</span><span class="new">${esc(b ?? "—")}</span></div>`).join("")
-    : props.slice(0, 5).map(([k, v]) => `<div class="prop"><span>${esc(k)}</span><span class="new wide">${esc(v)}</span></div>`).join("")
-      + (props.length > 5 ? `<div class="more muted">+${props.length - 5} more</div>` : "");
   return `<button class="card" data-id="${esc(r.id)}" data-action="${esc(r.action)}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
-    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${body}</button>`;
+    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span></button>`;
 }
 function inventoryHtml() {
   // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
@@ -1099,6 +1102,7 @@ function inventoryHtml() {
 }
 function goToObject(i) {
   const o = proj().objects?.[i]; if (!o) return Promise.resolve();
+  S.s = null; S.ig = null; S.io = i; renderInspector();
   const view = objView(o); if (!currentView(view)) return Promise.resolve();
   const p = o.pos, box = o.box || (p && [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3]);
   if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
@@ -1110,7 +1114,7 @@ function goToObject(i) {
   });
 }
 function bindInventory() {
-  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goToObject(+b.dataset.obj); };
+  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
 }
 function cardsHtml() {
   const f = S.filter, q = f.q.toLowerCase();
@@ -1349,7 +1353,7 @@ function renderPanel() {
     const v = allViolations().find(x => x.id === b.dataset.issueFor), a = v && findingAnchor(v);
     if (ISSUES_ON && a && !issueForAnchor(a)) parent.postMessage({ kicadReviewIssueFor: { ...a, title: `${v.check}: ${v.description}`.slice(0, 200) } }, "*");
   };
-  for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
+  for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); else { S.s = b.dataset.id; markSelected(); saveHash(); } };
   for (const b of document.querySelectorAll("#panel [data-thread-status]")) b.onclick = () => { S.threadFilter.status = b.dataset.threadStatus; renderPanel(); draw(); };
   const ts = $("#panel select.thread-severity"); if (ts) ts.onchange = () => { S.threadFilter.severity = ts.value; renderPanel(); draw(); };
   for (const b of document.querySelectorAll("#panel .thread-card[data-thread]")) b.onclick = () => openThread(b.dataset.thread);
@@ -1595,6 +1599,103 @@ async function computeRegions(view) {
   }
   return boxes.sort((p, q) => (q.x1 - q.x0) * (q.y1 - q.y0) - (p.x1 - p.x0) * (p.y1 - p.y0));
 }
+
+// bench-t6: one readout for change rows, inventory, geometry and check findings.
+function inspectorProperties() {
+  const p = proj(), row = p.changes.find(r => r.id === S.s) || allViolations().find(r => r.id === S.s);
+  const selected = S.ig?.object || (S.io != null ? p.objects?.[S.io] : row);
+  if (!selected) return null;
+  const inventory = (p.objects || []).find(o => selected.uuid ? o.uuid === selected.uuid || o.uuid === selected.changeUuid : o.ref === selected.ref && o.kind === selected.kind && objView(o) === viewOf(selected));
+  const base = Object.create(null), head = Object.create(null);
+  const flatten = (target, object, prefix = "") => {
+    for (const [key, value] of Object.entries(object || {})) {
+      const name = prefix + key;
+      if (value && !Array.isArray(value) && value === Object(value)) flatten(target, value, name + ".");
+      else target[name] = value;
+    }
+  };
+  const common = {...inventory, ...selected};
+  for (const k of ["changes", "props", "before", "after", "pos_before"]) delete common[k];
+  flatten(base, common); flatten(head, common);
+  flatten(base, selected.props); flatten(head, selected.props);
+  if (selected.pos_before) base.pos = selected.pos_before;
+  const identity = selected.uuid || selected.changeUuid;
+  const geometry = side => (decodedBoardScenes.get(p.board?.geometry?.[side]) || (boardDiff?.project === S.p ? boardDiff.scenes[side] : null))?.objects.filter(o => identity && (o.uuid === identity || o.changeUuid === identity)) || [];
+  for (const [side, target] of [["base", base], ["head", head]]) {
+    const objects = geometry(side), root = objects.find(o => o.uuid === identity);
+    if (root?.layers?.length && target.layers == null) target.layers = root.layers;
+    const pads = objects.filter(o => o.kind === "pad");
+    if (pads.length) target.Pads = pads.length;
+    const scene = decodedBoardScenes.get(p.board?.geometry?.[side]) || boardDiff?.scenes[side];
+    const nets = [...new Set(objects.map(o => scene?.nets?.find(n => n.id === o.net)?.name).filter(Boolean))];
+    if (nets.length) target.Nets = nets;
+    objects.forEach((o, i) => flatten(target, o, objects.length > 1 ? `geometry ${i+1}.` : "geometry."));
+  }
+  const ref = selected.ref || inventory?.ref;
+  const part = p.parts?.lines?.find(l => l.refs?.includes(ref));
+  if (part) { flatten(base, part, "part."); flatten(head, part, "part."); }
+  for (const change of p.parts?.changes || []) if (change.refs?.includes(ref)) {
+    flatten(base, change.before, "part."); flatten(head, change.after, "part.");
+  }
+  flatten(base, selected.before); flatten(head, selected.after);
+  for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
+  if (selected.action === "added" || selected.added) for (const k of Object.keys(base)) delete base[k];
+  if (selected.action === "removed" || selected.side === "base") for (const k of Object.keys(head)) delete head[k];
+  // Position components get their own measured readouts; retain all other source fields.
+  for (const target of [base, head]) if (Array.isArray(target.pos)) {
+    target["X (mm)"] = target.pos[0]; target["Y (mm)"] = target.pos[1];
+    if (target.pos.length > 2) target["Rotation (°)"] = target.pos[2];
+    delete target.pos;
+  }
+  return {selected, base, head};
+}
+function renderInspector() {
+  const dock = $("#inspector"); if (!dock) return;
+  const data = inspectorProperties(), title = data?.selected.ref || data?.selected.type || data?.selected.kind || "";
+  const value = v => v == null ? "—" : v === Object(v) ? JSON.stringify(v) : String(v);
+  const groups = Array.from({length:4}, () => ({main:[], geometry:[]}));
+  const order = ["ref", "value", "Value", "kind", "footprint", "Footprint", "uuid", "X (mm)", "Y (mm)", "Rotation (°)", "position", "layer", "layers"];
+  const keys = data ? [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
+  keys.sort((a,b) => (order.includes(a) ? order.indexOf(a) : 100) - (order.includes(b) ? order.indexOf(b) : 100));
+  if (data) for (const key of keys) {
+    const k = key.toLowerCase(), leaf = k.split(".").at(-1);
+    const group = /^(x \(mm\)|y \(mm\)|rotation|position|pos|box|layer|layers|angle|where|sheet|board|locked)/.test(leaf) ? 1
+      : /net|pad|pin|clearance|drill|width|size|electrical|items|severity|description|check/.test(leaf) ? 2
+      : /^(ref|refs|value|kind|type|uuid|id|footprint|changeuuid|changeids)$/.test(leaf) ? 0 : 3;
+    const a = value(data.base[key]), b = value(data.head[key]), changed = a !== b;
+    const label = ({ref:"Reference", value:"Value", kind:"Type", footprint:"Footprint", uuid:"UUID"})[key] || key;
+    groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label)}</dt><dd>${changed ? `<del>${esc(a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${esc(b)}</ins>` : esc(b)}</dd>`);
+  }
+  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
+  $("#insp-toggle").onclick = () => { inspectorClosed = !inspectorClosed; inspectorLayout(); persistInspector(); renderInspector(); };
+}
+let inspectorHeight = 176, inspectorClosed = false;
+try { const saved = JSON.parse(localStorage.getItem("kr.inspector") || "null"); if (saved) { inspectorHeight = Number(saved.height) || 176; inspectorClosed = saved.closed === true; } } catch {}
+function persistInspector() { try { localStorage.setItem("kr.inspector", JSON.stringify({height:inspectorHeight, closed:inspectorClosed})); } catch {} }
+function inspectorLayout() {
+  const max = Math.max(96, $("#center").clientHeight - 120);
+  inspectorHeight = Math.min(Math.max(96, inspectorHeight), max);
+  $("#center").style.setProperty("--inspector-size", (inspectorClosed ? 28 : inspectorHeight) + "px");
+  const split = $("#insp-split");
+  split.setAttribute("aria-valuemin", "96"); split.setAttribute("aria-valuemax", String(max)); split.setAttribute("aria-valuenow", String(Math.round(inspectorHeight)));
+}
+const inspectorSplitter = $("#insp-split");
+inspectorSplitter.onpointerdown = e => {
+  if (e.button !== 0) return;
+  e.preventDefault(); inspectorSplitter.setPointerCapture(e.pointerId);
+  const y = e.clientY, height = inspectorHeight;
+  inspectorClosed = false; renderInspector();
+  inspectorSplitter.onpointermove = ev => { inspectorHeight = height + y - ev.clientY; inspectorLayout(); };
+  inspectorSplitter.onpointerup = inspectorSplitter.onpointercancel = () => { inspectorSplitter.onpointermove = null; persistInspector(); };
+};
+inspectorSplitter.onkeydown = e => {
+  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
+  e.preventDefault(); inspectorClosed = false;
+  inspectorHeight = e.key === "Home" ? 96 : e.key === "End" ? $("#center").clientHeight - 120 : inspectorHeight + (e.key === "ArrowUp" ? 16 : -16);
+  inspectorLayout(); persistInspector(); renderInspector();
+};
+new ResizeObserver(inspectorLayout).observe($("#center"));
+inspectorLayout();
 
 renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");
