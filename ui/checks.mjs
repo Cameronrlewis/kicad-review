@@ -2929,4 +2929,8 @@ export const CHECKS = [
   setT({x:100,y:100,z:8}); updateStatus();
   return document.querySelector('#statusbar [data-zoom]').textContent === '2.00'
     || 'zoom should be S.z / PX, got '+document.querySelector('#statusbar [data-zoom]').textContent;`],
+  ["chrome overlay docks use opaque themed surfaces", "p=1&v=board", `
+  const nav=getComputedStyle(document.querySelector('#nav')).backgroundColor;
+  const panel=getComputedStyle(document.querySelector('#panel')).backgroundColor;
+  return nav === panel && panel !== 'rgba(0, 0, 0, 0)' || 'dock surfaces: '+nav+' / '+panel;`],
 ];

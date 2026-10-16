@@ -255,7 +255,7 @@ body { height:100dvh; overflow:hidden; grid-template-rows:auto 32px minmax(0,1fr
 #nav h3 { padding:0 8px; }
 #nav .projsel { display:block; padding:0 8px; }
 #layers { padding:0 8px; }
-#panel { display:flex; flex-direction:column; overflow:hidden; }
+#panel { display:flex; flex-direction:column; overflow:hidden; background:var(--surface); }
 #panel-tabs { display:flex; flex-wrap:wrap; flex:none; min-width:0; background:var(--surface-2); border-bottom:1px solid var(--line); }
 #panel-tabs [role=tab] { flex:1 1 auto; max-width:100%; box-sizing:border-box; min-height:var(--tab-h); padding:0 8px; border:0; border-bottom:2px solid transparent; border-radius:0; font-size:12px; white-space:normal; overflow-wrap:anywhere; background:transparent; color:var(--muted); }
 #panel-tabs [role=tab][aria-selected=true] { background:var(--surface); color:var(--text); border-bottom-color:var(--accent); font-weight:600; }
