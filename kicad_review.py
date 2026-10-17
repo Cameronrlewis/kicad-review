@@ -3,6 +3,8 @@
 
 Standard library only. Subcommands are called from the reusable workflow.
 """
+import filecmp
+import shutil
 import argparse
 import datetime
 import http.client
@@ -128,8 +130,8 @@ def detect(base, head):
         for d in head_projects:
             by_project.setdefault(d, [])
     projects = []
-    for d in sorted(by_project):
-        status = "removed" if d not in head_projects else "added" if d not in base_projects or base_projects[d] != head_projects[d] else "modified"
+    for d in sorted(dirs, key=lambda d: (d not in by_project, d)):
+        status = "removed" if d not in head_projects else "added" if d not in base_projects or base_projects[d] != head_projects[d] else "modified" if d in by_project else "unchanged"
         pro = head_projects.get(d) or base_projects[d]
         projects.append({
             "dir": d,
@@ -200,7 +202,7 @@ def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     if os.path.exists(sch):
-        kicad_cli("sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{out}/sch", sch)
+        kicad_cli("sch", "export", "svg", "--no-background-color", "-o", f"{out}/sch", sch)
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
             kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
@@ -224,6 +226,16 @@ def board_changed(p):
     return contents[0] != contents[1]
 
 
+def glb_inputs(p, side):
+    """Board plus repository model assets; model-only edits must not reuse old exports."""
+    pcb = pathlib.Path(board_path(p, side))
+    if not pcb.is_file():
+        return None
+    models = sorted(path for path in pathlib.Path(side).rglob("*")
+                    if path.is_file() and path.suffix.lower() in (".step", ".stp", ".wrl", ".glb", ".gz"))
+    return (pcb.read_bytes(), [(str(path.relative_to(side)), path.read_bytes()) for path in models])
+
+
 def export_glb(p, side, out):
     """Best-effort 3D export. Its output is useful evidence when a footprint model is absent."""
     pcb, log = board_path(p, side), f"{out}/glb.log"
@@ -241,19 +253,71 @@ def export_glb(p, side, out):
         print(f"{p['name']}: 3D export failed for {side}; see {log}")
 
 
+def render_cache(p, side, det, settings):
+    """Revision/project/tool/settings identity; outputs remain independent of report change IDs."""
+    revision = det.get(side) or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
+    return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
+
+
+def restore_renders(args=None):
+    """Use complete revision caches without starting/downloading the KiCad container."""
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    settings = load_settings()
+    # Library drawings are selected by the compared pair, not the revision alone.
+    if settings["libraries"]["enabled"]:
+        raise SystemExit(1)
+    entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
+               for side in ("base", "head")
+               if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
+    if any(not cache or not (cache / ".complete").is_file() for p, side, cache in entries):
+        raise SystemExit(1)
+    for p, side, cache in entries:
+        shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
+        print(f"{p['name']}: {side} render cache hit ({det[side]})")
+
+
+def cache_renders(args=None):
+    """Snapshot final outputs, including workflow-compressed GLBs."""
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    settings = load_settings()
+    for p in det["projects"]:
+        for side in ("base", "head"):
+            cache = render_cache(p, side, det, settings)
+            out = pathlib.Path(f"review/{project_id(p['dir'])}/{side}")
+            if cache and out.is_dir():
+                shutil.copytree(out, cache, dirs_exist_ok=True)
+                (cache / ".complete").write_text("complete")
+
+
 def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     settings = load_settings()
     for p in det["projects"]:
-        export_3d = settings["3d"]["enabled"] and board_changed(p)
+        export_3d = settings["3d"]["enabled"]
+        shared_3d = export_3d and glb_inputs(p, "base") == glb_inputs(p, "head")
         for side in ("base", "head"):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
+            cache = render_cache(p, side, det, settings)
+            if cache and (cache / ".complete").is_file():
+                shutil.copytree(cache, out, dirs_exist_ok=True)
+                print(f"{p['name']}: {side} render cache hit ({det[side]})")
+                continue
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
             if export_3d:
-                export_glb(p, side, out)
+                if side == "head" and shared_3d:
+                    os.makedirs(out, exist_ok=True)
+                    for name in ("board.glb", "glb.log"):
+                        source = f"review/{project_id(p['dir'])}/base/{name}"
+                        if os.path.isfile(source):
+                            shutil.copyfile(source, f"{out}/{name}")
+                else:
+                    export_glb(p, side, out)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
@@ -284,6 +348,8 @@ def cmd_render(args):
                         except OSError:
                             print(f"::warning::No drawing for library item {c['lib']}:{c['item']} ({side})")
 
+    cache_renders()
+
 
 TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
 
@@ -313,20 +379,45 @@ def find(node, key):
     return found[0] if found else None
 
 
+def sheet_instance_page(node, project, parent_uuid_path):
+    """Resolve a child sheet's page for this project and parent UUID path."""
+    for entry in findall(find(node, "instances") or [], "project"):
+        if entry[1] != project:
+            continue
+        for path in findall(entry, "path"):
+            if path[1].rstrip("/") == parent_uuid_path.rstrip("/"):
+                page = find(path, "page")
+                if page and len(page) > 1 and str(page[1]).strip():
+                    return str(page[1])
+    return None
+
+
 def sheet_pages(proj_dir, name):
-    """Schematic pages in hierarchy order: [{path, name, file, parent}]. path is the sheet UUID path."""
+    """Schematic pages in hierarchy order, with instance page numbers and UUID paths."""
+    root_file = posixpath.join(proj_dir, f"{name}.kicad_sch")
+    if not os.path.exists(root_file):
+        return []
+    with open(root_file, encoding="utf-8") as fh:
+        root = parse_sexpr(fh.read())
+    root_uuid = (find(root, "uuid") or ["", ""])[1]
+    legacy = {}
+    for instance in findall(find(root, "sheet_instances") or [], "path"):
+        page = find(instance, "page")
+        if page and len(page) > 1 and str(page[1]).strip():
+            legacy[instance[1].rstrip("/") or "/"] = str(page[1])
     pages = []
 
     # stem: the file name kicad-cli gives the page's SVG, the sheet names along its path joined by "-".
-    def walk(file, path, sheet_name, parent, depth, stem):
-        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem})
+    def walk(file, path, sheet_name, parent, depth, stem, page=None):
+        pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem,
+                      "page": page or legacy.get(path.rstrip("/") or "/") or str(len(pages) + 1)})
         full = posixpath.join(proj_dir, file)
         if depth > 32 or not os.path.exists(full):
             return
         with open(full, encoding="utf-8") as fh:
-            root = parse_sexpr(fh.read())
+            node = parse_sexpr(fh.read())
         names = set()
-        for s in findall(root, "sheet"):
+        for s in findall(node, "sheet"):
             props = properties(s)
             child = props.get("Sheetname", "?")
             if child in names:
@@ -334,10 +425,13 @@ def sheet_pages(proj_dir, name):
                          "so neither drawing can be shown. Rename one of them.")
             names.add(child)
             safe = re.sub(r"[\\/]", "_", child)
-            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))), f"{path}{find(s, 'uuid')[1]}/", child, path, depth + 1, f"{stem}-{safe}")
+            child_path = f"{path}{find(s, 'uuid')[1]}/"
+            parent_uuid_path = f'/{root_uuid}{path.rstrip("/")}'
+            child_page = sheet_instance_page(s, name, parent_uuid_path)
+            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))),
+                 child_path, child, path, depth + 1, f"{stem}-{safe}", child_page)
 
-    if os.path.exists(posixpath.join(proj_dir, f"{name}.kicad_sch")):
-        walk(f"{name}.kicad_sch", "/", name, None, 0, name)
+    walk(f"{name}.kicad_sch", "/", name, None, 0, name)
     return pages
 
 
@@ -534,6 +628,569 @@ def pcb_objects(path):
     return objs
 
 
+def geometry_um(value):
+    """Round millimetres to integer micrometres, with a bounded scene range."""
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+    try:
+        n = Decimal(str(value)) * 1000
+        if not n.is_finite() or abs(n) > 2_000_000_000:
+            raise ValueError("board coordinate outside supported range")
+        return int(n.to_integral_value(rounding=ROUND_HALF_UP))
+    except InvalidOperation as error:
+        raise ValueError("invalid board coordinate") from error
+
+
+def geometry_point(point, footprint_at=None):
+    # Validate before converting to float, including when rotating local coordinates.
+    for value in point[:2]:
+        geometry_um(value)
+    if not footprint_at:
+        return [geometry_um(value) for value in point[:2]]
+    for value in footprint_at:
+        geometry_um(value)
+    x, y = map(float, point[:2])
+    fx, fy, *angle = footprint_at
+    degrees = float(angle[0]) if angle else 0
+    t = math.radians(degrees)
+    c, s = ((1, 0), (0, 1), (-1, 0), (0, -1))[int(degrees / 90) % 4] if degrees % 90 == 0 else (math.cos(t), math.sin(t))
+    return [geometry_um(float(fx) + x * c + y * s),
+            geometry_um(float(fy) - x * s + y * c)]
+
+
+def geometry_arc(start, middle, end, width):
+    for point in (start, middle, end):
+        geometry_point(point)
+    w = geometry_um(width)
+    if w < 0:
+        raise ValueError("negative geometry size")
+    ax, ay = map(float, start); bx, by = map(float, middle); cx, cy = map(float, end)
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return [[*geometry_point(start), *geometry_point(end), w]]
+    aa, bb, cc = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+    ox = (aa * (by - cy) + bb * (cy - ay) + cc * (ay - by)) / d
+    oy = (aa * (cx - bx) + bb * (ax - cx) + cc * (bx - ax)) / d
+    a, b, c = [math.atan2(y - oy, x - ox) for x, y in ((ax, ay), (bx, by), (cx, cy))]
+    sweep = (c - a) % math.tau
+    if (b - a) % math.tau > sweep:
+        sweep -= math.tau
+    radius = math.hypot(ax - ox, ay - oy)
+    step = 2 * math.acos(max(-1, 1 - .001 / max(radius, .001)))
+    count = max(1, math.ceil(abs(sweep) / max(step, 1e-8)))
+    if count > 65536:
+        raise ValueError("arc exceeds geometry budget")
+    pts = [geometry_point((ox + radius * math.cos(a + sweep * i / count),
+                           oy + radius * math.sin(a + sweep * i / count))) for i in range(count + 1)]
+    pts[0], pts[-1] = geometry_point(start), geometry_point(end)
+    return [[*p, *q, w] for p, q in zip(pts, pts[1:])]
+
+
+class GeometryFallback(ValueError):
+    """A drawable needs authoritative SVG instead of an incomplete approximation."""
+
+
+def geometry_cubic(points):
+    """Flatten a cubic in mm with a 1 um control-to-chord error bound."""
+    if len(points) != 4:
+        raise GeometryFallback("cubic requires four control points")
+    for point in points:
+        geometry_point(point)
+    result = [points[0]]
+
+    def distance(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        t = max(0, min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy))) if dx or dy else 0
+        return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+    def subdivide(a, b, c, d, depth):
+        if max(distance(b, a, d), distance(c, a, d)) <= .001:
+            if len(result) > 65536:
+                raise GeometryFallback("cubic exceeds geometry budget")
+            result.append(d)
+            return
+        if depth == 24:
+            raise GeometryFallback("cubic subdivision depth limit")
+        ab, bc, cd = [[(p[i] + q[i]) / 2 for i in (0, 1)] for p, q in ((a, b), (b, c), (c, d))]
+        abc, bcd = [[(p[i] + q[i]) / 2 for i in (0, 1)] for p, q in ((ab, bc), (bc, cd))]
+        mid = [(abc[i] + bcd[i]) / 2 for i in (0, 1)]
+        subdivide(a, ab, abc, mid, depth + 1)
+        subdivide(mid, bcd, cd, d, depth + 1)
+
+    subdivide(*[[float(v) for v in p] for p in points], 0)
+    return result
+
+
+def geometry_shape(node, footprint_at=None):
+    """Shared board/footprint graphic dispatch; only filled shapes have rings."""
+    kind = node[0][3:]
+    width = val(find(node, "stroke"), "width", val(node, "width", "0"))
+    w = geometry_um(width)
+    if w < 0:
+        raise ValueError("negative geometry size")
+    def point(key):
+        p = find(node, key)
+        if not p or len(p) < 3:
+            raise GeometryFallback(f"{node[0]} missing {key}")
+        geometry_point(p[1:3])
+        return p[1:3]
+    def world(p):
+        return geometry_point(p, footprint_at)
+    closed = kind in ("rect", "circle", "poly")
+    if kind == "line":
+        pts = [world(point("start")), world(point("end"))]
+    elif kind in ("arc", "circle"):
+        if kind == "arc":
+            arcs = [(point("start"), point("mid"), point("end"))]
+        else:
+            c, e = [[float(v) for v in point(key)] for key in ("center", "end")]
+            dx, dy = e[0] - c[0], e[1] - c[1]
+            opposite = [c[0] - dx, c[1] - dy]
+            arcs = [(e, [c[0] - dy, c[1] + dx], opposite), (opposite, [c[0] + dy, c[1] - dx], e)]
+        try:
+            segments = [s for a, b, c in arcs for s in geometry_arc(a, b, c, width)]
+        except ValueError as error:
+            if "budget" in str(error):
+                raise GeometryFallback(str(error)) from error
+            raise
+        if len(segments) > 65536:
+            raise GeometryFallback("circle exceeds geometry budget")
+        pts = [world([s[0] / 1000, s[1] / 1000]) for s in segments]
+        if not closed:
+            pts.append(world([v / 1000 for v in segments[-1][2:4]]))
+    elif kind == "rect":
+        a, b = point("start"), point("end")
+        pts = [world(p) for p in (a, [b[0], a[1]], b, [a[0], b[1]])]
+    elif kind in ("poly", "curve"):
+        path = find(node, "pts") or []
+        if any(isinstance(p, list) and p[0] != "xy" for p in path[1:]):
+            raise GeometryFallback("unsupported graphic path points")
+        points = [p[1:3] for p in findall(path, "xy")]
+        if kind == "curve":
+            points = geometry_cubic(points)
+        elif len(points) < 3:
+            raise GeometryFallback("polygon requires at least three points")
+        pts = [world(p) for p in points]
+    else:
+        raise GeometryFallback(f"unsupported graphic {node[0]}")
+    filled = closed and val(node, "fill", "none") in ("yes", "solid")
+    segments = [[*a, *b, w] for a, b in zip(pts, pts[1:] + (pts[:1] if closed else []))] if w or not filled else []
+    return {"segments": segments, "rings": [pts] if filled else []}
+
+
+def geometry_box(geometry):
+    """Integer bbox of normalized drawable geometry (not a filled footprint box)."""
+    boxes = []
+    for ax, ay, bx, by, width in geometry.get("segments", []):
+        r = width / 2
+        boxes.append([math.floor(min(ax, bx) - r), math.floor(min(ay, by) - r),
+                      math.ceil(max(ax, bx) + r), math.ceil(max(ay, by) + r)])
+    for ring in geometry.get("rings", []):
+        if ring:
+            xs, ys = zip(*ring)
+            boxes.append([min(xs), min(ys), max(xs), max(ys)])
+    if "text" in geometry:
+        # System-monospace atlas approximation, not KiCad stroke-font metrics.
+        text = geometry["text"]
+        lines = text["value"].split("\n")
+        w = max(map(len, lines), default=0) * text["size"][0]
+        h = len(lines) * text["size"][1]
+        justify = text["justify"]
+        left = 0 if "left" in justify else (-w if "right" in justify else -w / 2)
+        top = 0 if "top" in justify else (-h if "bottom" in justify else -h / 2)
+        t = math.radians(text["angle"] / 1000)
+        x, y = text["at"]
+        corners = [(px * (-1 if text["mirror"] else 1), py) for px, py in
+                   ((left, top), (left + w, top), (left + w, top + h), (left, top + h))]
+        xs = [x + px * math.cos(t) + py * math.sin(t) for px, py in corners]
+        ys = [y - px * math.sin(t) + py * math.cos(t) for px, py in corners]
+        r = text["thickness"] / 2
+        boxes.append([math.floor(min(xs) - r), math.floor(min(ys) - r),
+                      math.ceil(max(xs) + r), math.ceil(max(ys) + r)])
+    primitives = [geometry["primitive"]] if "primitive" in geometry else []
+    if "drill" in geometry:
+        primitives.append({**geometry["drill"], "shape": "oval"})
+    primitives += list(geometry.get("layerPrimitives", {}).values())
+    for p in primitives:
+        x, y = p["center"]; w, h = p["size"]
+        t = math.radians(p.get("angle", 0) / 1000)
+        c, s = abs(math.cos(t)), abs(math.sin(t))
+        if p.get("shape") == "circle":
+            dx, dy = w / 2, h / 2
+        elif p.get("shape") == "oval":
+            r = min(w, h) / 2
+            dx, dy = c * (w / 2 - r) + s * (h / 2 - r) + r, s * (w / 2 - r) + c * (h / 2 - r) + r
+        elif p.get("shape") == "trapezoid":
+            dx, dy = p.get("delta", [0, 0])
+            corners = [(sx * w / 2 - sx * sy * dy / 2,
+                        sy * h / 2 + sx * sy * dx / 2)
+                       for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            xs = [x + px * math.cos(t) + py * math.sin(t) for px, py in corners]
+            ys = [y - px * math.sin(t) + py * math.cos(t) for px, py in corners]
+            boxes.append([math.floor(round(min(xs), 8)), math.floor(round(min(ys), 8)),
+                          math.ceil(round(max(xs), 8)), math.ceil(round(max(ys), 8))])
+            continue
+        elif p.get("shape") == "roundrect":
+            r = p.get("radius", 0)
+            dx, dy = c * (w / 2 - r) + s * (h / 2 - r) + r, s * (w / 2 - r) + c * (h / 2 - r) + r
+        else:
+            delta = p.get("delta", [0, 0])
+            dx, dy = c * (w + abs(delta[1])) / 2 + s * (h + abs(delta[0])) / 2, s * (w + abs(delta[1])) / 2 + c * (h + abs(delta[0])) / 2
+        # Suppress trig noise at exact quarter turns before outward rounding.
+        boxes.append([math.floor(round(x - dx, 8)), math.floor(round(y - dy, 8)),
+                      math.ceil(round(x + dx, 8)), math.ceil(round(y + dy, 8))])
+    return geometry_union(boxes)
+
+
+def geometry_union(boxes):
+    boxes = [b for b in boxes if b is not None]
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes)] if boxes else None
+
+
+def board_geometry(pcb_path):
+    """Extract the revision scene without altering pcb_objects' diff identities.
+
+    Default text is metadata for a system-monospace glyph atlas, a visual
+    approximation, not KiCad stroke-font outlines. Named fonts require SVG.
+    """
+    with open(pcb_path, encoding="utf-8") as fh:
+        root = parse_sexpr(fh.read())
+    scene = {"version": 1, "units": "um", "complete": True, "warnings": [],
+             "bounds": [0, 0, 0, 0], "layers": [], "nets": [], "objects": []}
+    for layer in (find(root, "layers") or [])[1:]:
+        if isinstance(layer, list) and len(layer) >= 3:
+            scene["layers"].append({"id": int(layer[0]), "name": layer[1], "type": layer[2], "enabled": True})
+    names = [l["name"] for l in scene["layers"]]
+    # File order and KiCad numeric enums are not physical stack order.
+    copper = sorted((name for name in names if name.endswith(".Cu")),
+                    key=lambda name: -1 if name == "F.Cu" else (1000 if name == "B.Cu" else int(name[2:-3])))
+
+    # Stackup lists physical layers, including dielectric entries. Older boards
+    # omit it; their canonical copper names define the stack, not numeric IDs.
+    stackup = find(find(root, "setup") or [], "stackup") or []
+    defined = [layer[1] for layer in findall(stackup, "layer")
+               if len(layer) > 1 and layer[1] in copper]
+    if len(defined) == len(copper) and set(defined) == set(copper):
+        copper = defined
+    scene["copperStack"] = copper
+
+    def warn(uid, kind, reason, unsupported=True):
+        scene["warnings"].append({"uuid": uid, "kind": kind, "reason": reason})
+        if unsupported:
+            scene["complete"] = False
+
+    def walk(node):
+        yield node
+        for child in node[1:]:
+            if isinstance(child, list):
+                yield from walk(child)
+
+    nets = {int(n[1]): n[2] for n in findall(root, "net") if len(n) > 2}
+    nets[0] = ""
+    named, numbered = set(), set()
+    for node in walk(root):
+        n = find(node, "net")
+        if n and len(n) > 1 and n[1].isdigit() and val(node, "net_name") is not None:
+            nets.setdefault(int(n[1]), val(node, "net_name"))
+        if node[0] == "net" and len(node) > 1:
+            if len(node) > 2:
+                nets.setdefault(int(node[1]), node[2])
+                named.add(nets[int(node[1])])
+            elif node[1].isdigit():
+                numbered.add(int(node[1]))
+            else:
+                named.add(node[1])
+        elif node[0] == "net_name" and len(node) > 1:
+            named.add(node[1])
+    for number in sorted(numbered - nets.keys()):
+        nets[number] = f"Net {number}"
+        warn(str(number), "net", "numeric net has no declared name", False)
+    for name in sorted(named - set(nets.values())):
+        nets[max(nets) + 1] = name
+    nets[0] = ""
+    net_ids = {name: number for number, name in sorted(nets.items(), reverse=True)}
+    scene["nets"] = [{"id": number, "name": name} for number, name in sorted(nets.items())]
+
+    def net_id(node):
+        n = find(node, "net")
+        if n and len(n) > 1:
+            return int(n[1]) if len(n) > 2 or n[1].isdigit() else net_ids[n[1]]
+        return net_ids.get(val(node, "net_name", ""), 0)
+
+    def layers(node, via=False):
+        tokens = (find(node, "layers") or [])[1:] or [val(node, "layer")]
+        result = []
+        for token in tokens:
+            expanded = [n for n in names if n.endswith(token[1:])] if token in ("*.Cu", "*.Mask") else ([n for n in ("F.Cu", "B.Cu") if n in names] if token == "F&B.Cu" else [token])
+            for name in expanded:
+                if name in names and name not in result:
+                    result.append(name)
+                elif name not in names and name is not None:
+                    warn(val(node, "uuid", ""), node[0], f"undeclared layer {name}")
+        if via and len(result) == 2 and all(n in copper for n in result):
+            a, b = sorted(copper.index(n) for n in result)
+            result = copper[a:b + 1]
+        return result
+
+    def hidden(node):
+        effects = find(node, "effects") or []
+        return ("hide" in node or find(node, "hide") == ["hide"] or val(node, "hide") == "yes"
+                or "hide" in effects or find(effects, "hide") == ["hide"] or val(effects, "hide") == "yes")
+
+    def emit(kind, uid, change, ref, ls, net, side, category, geometry, hide=False):
+        obj = {"kind": kind, "uuid": uid, "changeUuid": change, "ref": ref,
+               "layers": ls, "net": net, "side": side, "category": category,
+               "hidden": hide, "geometry": geometry, "box": geometry_box(geometry)}
+        scene["objects"].append(obj)
+        return obj
+
+    def xy(node, key):
+        return (find(node, key) or [key, "0", "0"])[1:3]
+
+    def positive(value):
+        n = geometry_um(value)
+        if n < 0:
+            raise ValueError("negative geometry size")
+        return n
+
+    setup = find(root, "setup")
+
+    def pad_geometry(pad, fp, fp_at, uid):
+        pa = (find(pad, "at") or ["at", "0", "0"])[1:4]
+        center = geometry_point(pa, fp_at)
+        angle = geometry_um(pa[2] if len(pa) > 2 else 0)  # stored in the board frame
+        size = [positive(v) for v in xy(pad, "size")]
+        shape = pad[3]
+        visible = not hidden(fp) and not hidden(pad)
+        if visible and find(pad, "padstack"):
+            warn(uid, "pad", "per-layer padstack geometry not yet supported")
+        p = {"shape": shape, "center": center, "size": size, "angle": angle,
+             "radius": 0, "delta": [geometry_um(v) for v in xy(pad, "rect_delta")]}
+        if shape == "roundrect":
+            ratio = float(val(pad, "roundrect_rratio", 0))
+            if not math.isfinite(ratio) or not 0 <= ratio <= .5:
+                raise ValueError("invalid roundrect radius ratio")
+            p["radius"] = geometry_um(min(size) / 1000 * ratio)
+        geometry = {"primitive": p}
+        if shape not in ("circle", "rect", "oval", "roundrect", "trapezoid", "custom"):
+            if visible:
+                warn(uid, "pad", f"unsupported pad shape {shape}")
+            geometry = {}
+        if shape == "custom":
+            geometry = {"segments": [], "rings": []}
+            world_at = [center[0] / 1000, center[1] / 1000, angle / 1000]
+            def local(point):
+                return geometry_point(point, world_at)
+            options = find(pad, "options")
+            anchor = val(options, "anchor", "rect")
+            geometry["primitive"] = {**p, "shape": anchor}
+            for primitive in (find(pad, "primitives") or [])[1:]:
+                if not isinstance(primitive, list):
+                    continue
+                kind = primitive[0]
+                width = val(primitive, "width", "0")
+                if kind in ("gr_line", "gr_arc"):
+                    segments = geometry_arc(xy(primitive, "start"), xy(primitive, "mid"), xy(primitive, "end"), width) if kind == "gr_arc" else [[*geometry_point(xy(primitive, "start")), *geometry_point(xy(primitive, "end")), positive(width)]]
+                    geometry["segments"] += [[*local([s[0] / 1000, s[1] / 1000]), *local([s[2] / 1000, s[3] / 1000]), s[4]] for s in segments]
+                elif kind in ("gr_poly", "gr_rect"):
+                    ring = [local(n[1:3]) for n in findall(find(primitive, "pts") or [], "xy")] if kind == "gr_poly" else [local(v) for v in (xy(primitive, "start"), [xy(primitive, "end")[0], xy(primitive, "start")[1]], xy(primitive, "end"), [xy(primitive, "start")[0], xy(primitive, "end")[1]])]
+                    filled = val(primitive, "fill", "yes") in ("yes", "solid")
+                    if filled:
+                        geometry["rings"].append(ring)
+                    if positive(width) or not filled:
+                        geometry["segments"] += [[*a, *b, positive(width)] for a, b in zip(ring, ring[1:] + ring[:1])]
+                elif kind == "gr_circle":
+                    c, e = xy(primitive, "center"), xy(primitive, "end")
+                    # Split a circle into two bounded-error arcs, including its stroke.
+                    opposite = [2 * float(c[0]) - float(e[0]), 2 * float(c[1]) - float(e[1])]
+                    dx, dy = float(e[0]) - float(c[0]), float(e[1]) - float(c[1])
+                    segments = geometry_arc(e, [float(c[0]) - dy, float(c[1]) + dx], opposite, width) + geometry_arc(opposite, [float(c[0]) + dy, float(c[1]) - dx], e, width)
+                    transformed = [[*local([s[0] / 1000, s[1] / 1000]), *local([s[2] / 1000, s[3] / 1000]), s[4]] for s in segments]
+                    geometry["segments"] += transformed
+                    if val(primitive, "fill", "no") in ("yes", "solid"):
+                        geometry["rings"].append([s[:2] for s in transformed])
+                elif visible:
+                    warn(uid, "pad", f"unsupported custom primitive {kind}")
+        drill = find(pad, "drill")
+        if drill:
+            values = [v for v in drill[1:] if isinstance(v, str) and v != "oval"]
+            dims = [positive(v) for v in values]
+            if len(dims) == 1:
+                dims *= 2
+            if len(dims) != 2:
+                raise ValueError("invalid pad drill")
+            geometry["drill"] = {"center": geometry_point(xy(drill, "offset"), [center[0] / 1000, center[1] / 1000, angle / 1000]),
+                                 "size": dims, "angle": angle, "plated": pad[2] != "np_thru_hole"}
+        def override(key, setup_key=None):
+            return next((val(node, key) for node in (pad, fp) if val(node, key) is not None), val(setup, setup_key or key, "0"))
+        mask = geometry_um(override("solder_mask_margin", "pad_to_mask_clearance"))
+        paste = geometry_um(override("solder_paste_margin", "pad_to_paste_clearance"))
+        ratio = float(override("solder_paste_margin_ratio", "pad_to_paste_clearance_ratio"))
+        if not math.isfinite(ratio):
+            raise ValueError("invalid paste margin ratio")
+        # Ratio is dimensionless integer thousandths; all dimensions remain micrometres.
+        geometry["maskMargin"], geometry["pasteMargin"], geometry["pasteRatio"] = mask, paste, geometry_um(ratio)
+        ls = layers(pad)
+        exclusions = []
+        tenting = find(pad, "tenting")
+        for side, layer in (("front", "F.Mask"), ("back", "B.Mask")):
+            if find(tenting or [], side) and val(tenting, side, "yes") != "no":
+                exclusions.append(layer)
+        if pad[2] == "np_thru_hole":
+            exclusions += [n for n in ls if n.endswith(".Cu")]
+        geometry["removeUnusedLayers"] = find(pad, "remove_unused_layers") is not None and val(pad, "remove_unused_layers", "yes") != "no"
+        geometry["keepEndLayers"] = find(pad, "keep_end_layers") is not None and val(pad, "keep_end_layers", "yes") != "no"
+        geometry["zoneLayerConnections"] = (find(pad, "zone_layer_connections") or [])[1:]
+        if geometry["removeUnusedLayers"] and not hidden(fp) and not hidden(pad):
+            warn(uid, "pad", "unconnected pad layer removal requires connectivity")
+        ls = [n for n in ls if n not in exclusions]
+        geometry["layerExclusions"] = exclusions
+        if shape == "custom" and visible and ((mask and any(n.endswith(".Mask") for n in ls)) or ((paste or ratio) and any(n.endswith(".Paste") for n in ls))):
+            warn(uid, "pad", "custom pad mask/paste offset not yet supported")
+        if "primitive" in geometry:
+            derived = {}
+            for layer in ls:
+                if layer.endswith((".Mask", ".Paste")):
+                    margin = mask if layer.endswith(".Mask") else paste
+                    dims = [max(0, n + 2 * margin + (geometry_um(n / 1000 * ratio * 2) if layer.endswith(".Paste") else 0)) for n in size]
+                    derived[layer] = {**geometry["primitive"], "size": dims,
+                                      "radius": max(0, min(min(dims) // 2, p["radius"] + margin))}
+            if derived:
+                geometry["layerPrimitives"] = derived
+        return geometry, ls
+
+    def drawable(node, uid, change, ref="", side=None, fp_at=None, fp=None, hide=False):
+        kind = node[0]
+        hide = hide or hidden(node)
+        ls = layers(node)
+        geometry = {}
+        if kind == "zone":
+            net = net_id(node)
+            paths = [pts for region in findall(node, "polygon") + findall(node, "filled_polygon")
+                     for pts in findall(region, "pts")]
+            if not hide and any(isinstance(p, list) and p[0] != "xy" for pts in paths for p in pts[1:]):
+                warn(uid, kind, "unsupported zone path points; using SVG")
+            outlines = [[geometry_point(p[1:3], fp_at) for p in findall(pts, "xy")]
+                        for polygon in findall(node, "polygon") for pts in findall(polygon, "pts")]
+            segments = [[*a, *b, 50] for ring in outlines for a, b in zip(ring, ring[1:] + ring[:1])]
+            fills = findall(node, "filled_polygon")
+            keepout = find(node, "keepout") is not None or val(node, "rule_area") == "yes"
+            if not fills or keepout:
+                if not fills and not keepout and not hide:
+                    warn(uid, kind, f"zone {uid}: no stored fill; showing outline", False)
+                return [emit("zone", uid, change, ref or nets[net], ls, net, side, "zones",
+                             {"segments": segments, "rings": []}, hide)]
+            records = []
+            counts = Counter()
+            for fill in fills:
+                fill_ls = layers(fill) if find(fill, "layer") else ls
+                rings = [[geometry_point(p[1:3], fp_at) for p in findall(pts, "xy")]
+                         for pts in findall(fill, "pts")]
+                if not rings or any(len(r) < 3 for r in rings):
+                    if not hide:
+                        warn(uid, kind, "invalid stored fill; using SVG")
+                    continue
+                # Each source region is independent. Do not join islands or cancel overlaps.
+                for layer in fill_ls:
+                    counts[layer] += 1
+                    child_uid = f"{uid}/fill:{layer}:{counts[layer]}"
+                    records.append(emit("zone", child_uid, change, ref or nets[net], [layer], net, side,
+                                        "zones", {"segments": [], "rings": rings}, hide))
+            return records
+        if kind in ("gr_text", "fp_text", "property"):
+            effects = find(node, "effects") or []
+            font = find(effects, "font") or []
+            value = node[2] if kind in ("property", "fp_text") else node[1]
+            if fp is not None:
+                substitutions = {"REFERENCE": ref, "VALUE": properties(fp).get("Value", next((t[2] for t in findall(fp, "fp_text") if t[1] == "value"), ""))}
+                value = re.sub(r"\$\{(REFERENCE|VALUE)\}", lambda m: substitutions[m[1]], value)
+            if not hide:
+                if "knockout" in (find(node, "layer") or []):
+                    warn(uid, kind, "knockout text requires SVG")
+                if find(font, "line_spacing") is not None:
+                    warn(uid, kind, "custom text line spacing requires SVG")
+                if "${" in value:
+                    warn(uid, kind, "unresolved text substitution; using SVG")
+                if re.search(r"[~^_]\{", value) or "\\" in value:
+                    warn(uid, kind, "unsupported rich text; using SVG")
+                if val(font, "face"):
+                    warn(uid, kind, "named outline font requires SVG")
+            position = [v for v in (find(node, "at") or ["at", "0", "0"])[1:] if v != "unlocked"]
+            justify = (find(effects, "justify") or [])[1:]
+            geometry = {"text": {"value": value, "at": geometry_point(position, fp_at),
+                                 "size": [positive(v) for v in (find(font, "size") or ["size", "1", "1"])[1:3]][::-1],  # file: height, width
+                                 # KiCad stores footprint text angles in the board frame.
+                                 "angle": geometry_um(position[2] if len(position) > 2 else 0),
+                                 "thickness": positive(val(font, "thickness", "0.15")),
+                                 "justify": [v for v in justify if v in ("left", "right", "top", "bottom")],
+                                 "mirror": "mirror" in justify,
+                                 "italic": "italic" in font or (find(font, "italic") is not None and val(font, "italic", "yes") != "no"),
+                                 "bold": "bold" in font or (find(font, "bold") is not None and val(font, "bold", "yes") != "no"),
+                                 "unlocked": "unlocked" in node or val(node, "unlocked") == "yes" or "unlocked" in (find(node, "at") or [])}}
+            return [emit("text", uid, change, ref, ls, 0, side, "text", geometry, hide)]
+        try:
+            geometry = geometry_shape(node, fp_at)
+        except GeometryFallback as error:
+            if not hide:
+                warn(uid, kind, str(error))
+        return [emit("shape", uid, change, ref, ls, 0, side, "graphics", geometry, hide)]
+
+    for index, node in enumerate(root[1:]):
+        if not isinstance(node, list) or not node:
+            continue
+        kind = node[0]
+        uid = val(node, "uuid") or val(node, "tstamp") or f"board/{kind}:{index}"
+        if kind in ("segment", "arc"):
+            width = positive(val(node, "width", "0"))
+            segments = geometry_arc(xy(node, "start"), xy(node, "mid"), xy(node, "end"), val(node, "width", "0")) if kind == "arc" else [[*geometry_point(xy(node, "start")), *geometry_point(xy(node, "end")), width]]
+            net = net_id(node)
+            emit("arc" if kind == "arc" else "track", uid, uid, nets[net], layers(node), net, None, "tracks", {"segments": segments}, hidden(node))
+        elif kind == "via":
+            center = geometry_point(xy(node, "at")); size = positive(val(node, "size", "0")); drill = positive(val(node, "drill", "0"))
+            emit("via", uid, uid, nets[net_id(node)], layers(node, True), net_id(node), None, "vias",
+                 {"primitive": {"shape": "circle", "center": center, "size": [size, size], "angle": 0, "radius": size // 2, "delta": [0, 0]},
+                  "drill": {"center": center, "size": [drill, drill], "angle": 0, "plated": True}}, hidden(node))
+        elif kind == "footprint":
+            # Same UUID/tstamp and Reference precedence as pcb_objects; no new diff model.
+            ref = properties(node).get("Reference") or next((t[2] for t in findall(node, "fp_text") if t[1] == "reference"), "?")
+            side = "back" if val(node, "layer") == "B.Cu" else "front"
+            fp_at = (find(node, "at") or ["at", "0", "0"])[1:4]
+            geometry_point([0, 0], fp_at)
+            parent = emit("footprint", uid, uid, ref, layers(node), 0, side, "footprints", {}, hidden(node))
+            counts = Counter()
+            children = []
+            for child in node[1:]:
+                if not isinstance(child, list) or not child:
+                    continue
+                child_kind = child[0]
+                if child_kind == "pad":
+                    counts[child[1]] += 1
+                    child_uid = val(child, "uuid") or val(child, "tstamp") or f"{uid}/pad:{child[1]}:{counts[child[1]]}"
+                    geometry, ls = pad_geometry(child, node, fp_at, child_uid)
+                    children.append(emit("pad", child_uid, uid, ref, ls, net_id(child), side, "pads", geometry, parent["hidden"] or hidden(child)))
+                elif (child_kind in ("fp_text", "fp_text_box", "fp_line", "fp_arc", "fp_circle",
+                                      "fp_rect", "fp_poly", "fp_curve", "image", "zone", "dimension", "table")
+                      or (child_kind == "property" and all(find(child, key) for key in ("at", "layer", "effects")))):
+                    counts[child_kind] += 1
+                    child_uid = val(child, "uuid") or val(child, "tstamp") or f"{uid}/{child_kind}:{counts[child_kind]}"
+                    children += drawable(child, child_uid, uid, ref, side, fp_at, node, parent["hidden"])
+            parent["box"] = geometry_union([c["box"] for c in children]) or [0, 0, 0, 0]
+        elif kind == "zone" or kind.startswith("gr_") or kind in ("dimension", "target", "image", "table", "text_box"):
+            drawable(node, uid, uid)
+    scene["bounds"] = geometry_union([o["box"] for o in scene["objects"] if not o["hidden"] and o["kind"] != "footprint"]) or [0, 0, 0, 0]
+    def check_numbers(value):
+        if isinstance(value, dict):
+            for child in value.values():
+                check_numbers(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_numbers(child)
+        elif isinstance(value, (int, float)) and (not isinstance(value, int) or abs(value) > 2_000_000_000):
+            raise ValueError("board geometry outside supported integer range")
+    check_numbers(scene)
+    return scene
+
+
 def pad_points(fp, a):
     """Absolute pad centres of a footprint at a = [x, y, rotation]."""
     if not a:
@@ -614,9 +1271,9 @@ def diff_objects(base, head):
         changes = [[p, b["props"].get(p), h["props"].get(p)] for p in sorted(set(b["props"]) | set(h["props"]))
                    if b["props"].get(p) != h["props"].get(p)]
         if changes:
-            rows.append(row("modified", h, changes, b))
-    rows += [row("removed", o) for o in b_left.values()]
-    rows += [row("added", o) for o in h_left.values()]
+            rows.append({**row("modified", h, changes, b), "uuid": hk, **({"uuid_before": bk} if bk != hk else {})})
+    rows += [{**row("removed", o), "uuid": k} for k, o in b_left.items()]
+    rows += [{**row("added", o), "uuid": k} for k, o in h_left.items()]
     order = ["title block", "design rules", "symbol", "footprint", "sheet", "label", "global label", "hierarchical label",
              "power symbol", "zone", "board outline", "track", "via", "wire", "bus", "junction", "no connect", "graphic"]
     rows.sort(key=lambda r: (order.index(r["kind"]) if r["kind"] in order else 99, natural(r["ref"])))
@@ -1807,13 +2464,14 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings, waivers=None):
+def build_project(p, blobs, settings, waivers=None, change_offset=0):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
     for side in sides:
         for pg in sheet_pages(posixpath.join(side, p["dir"]), p["name"]):
             entry = pages.setdefault(pg["path"], {**pg, "svg": {}})
+            entry.update(pg)
             entry["svg"][side] = svg_body(page_svg(f"{out}/{side}", p["name"], pg))
     sheets = []
     for pg in pages.values():
@@ -1821,27 +2479,55 @@ def build_project(p, blobs, settings, waivers=None):
         del pg["stem"]
         b, h = texts.get("base"), texts.get("head")
         pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
-        if pg["status"] != "unchanged":
-            pg["size"] = svg_size(h or b)
-            pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
+        pg["size"] = svg_size(h or b)
+        pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
         sheets.append(pg)
     layers, changed = [], False
-    names = sorted({posixpath.basename(f) for s in sides for f in os.listdir(f"{out}/{s}/pcb")}
-                   if any(os.path.isdir(f"{out}/{s}/pcb") for s in sides) else [])
+    names = sorted({f for s in sides if os.path.isdir(f"{out}/{s}/pcb") for f in os.listdir(f"{out}/{s}/pcb")})
     for f in names:
         b, h = (svg_body(f"{out}/{s}/pcb/{f}") for s in ("base", "head"))
         changed |= b != h
-        if any(t and has_drawing(t) for t in (b, h)):
+        if b is not None or h is not None:
             layers.append({"name": f[len(p["name"]) + 1: -4], "base": b, "head": h})
-    has = {s: any(l[s] for l in layers) for s in ("base", "head")}
+    has = {s: os.path.isfile(board_path(p, s)) for s in ("base", "head")}
     board = {"changed": changed, "layers": [],
-             "status": "added" if not has["base"] else "removed" if not has["head"] else "modified"}
-    if changed:
+             "status": "added" if not has["base"] else "removed" if not has["head"] else "modified" if changed else "unchanged"}
+    if layers:
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
         board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    changes = diff_objects(objs["base"], objs["head"])
+    for n, change in enumerate(changes, change_offset + 1):
+        change["id"] = f"c{n}"
+    geometry = {}
+    pcbs = {side: posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb") for side in ("base", "head")}
+    same_board = all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
+    for side in ("base", "head"):
+        pcb = pcbs[side]
+        geometry[side] = None
+        if side == "head" and same_board:
+            geometry[side] = geometry["base"]
+            continue
+        if os.path.isfile(pcb):
+            try:
+                scene = board_geometry(pcb)
+                # Child pads, text and graphics use their owning footprint's UUID;
+                # standalone tracks/vias/zones use their own. Never match by net/ref.
+                ids = {(r["kind"], r.get("uuid_before", r["uuid"]) if side == "base" else r["uuid"]): r["id"]
+                       for r in changes if (r.get("where") or {}).get("board")
+                       and r["action"] != ("added" if side == "base" else "removed")}
+                for obj in scene["objects"]:
+                    uid = obj["changeUuid"]
+                    kind = objs[side].get(uid, {}).get("kind")
+                    change_id = ids.get((kind, uid))
+                    obj["changeIds"] = [change_id] if change_id else []
+                geometry[side] = add_blob(blobs, json.dumps(scene, separators=(",", ":"), sort_keys=True))
+            except Exception as exc:  # any unforeseen board construct falls back to SVG
+                print(f"{pcb}: geometry unavailable; retaining SVG: {exc!r}", file=sys.stderr)
+    if any(geometry.values()):
+        board["geometry"] = geometry
     parts = None
     if settings["parts"]["enabled"]:
         lines = {s: parts_lines(objs[s]) for s in ("base", "head")}
@@ -1854,10 +2540,13 @@ def build_project(p, blobs, settings, waivers=None):
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
-        if any(os.path.exists(path) for path in (*models.values(), *logs.values())):
-            board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
-                                for side, path in models.items()}
-            board["no_model"] = model3d_missing(out, objs)
+        board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
+                            for side, path in models.items()}
+        board["model3d"].update({"enabled": True,
+                                 "changed": board["model3d"]["base"] != board["model3d"]["head"],
+                                 "errors": {side: "3D export unavailable" for side in ("base", "head")
+                                            if has[side] and not board["model3d"][side]}})
+        board["no_model"] = model3d_missing(out, objs)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None
@@ -1867,7 +2556,7 @@ def build_project(p, blobs, settings, waivers=None):
         libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": diff_objects(objs["base"], objs["head"]), "checks": project_checks(p, settings, objs, waivers),
+            "changes": changes, "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {})}
@@ -1913,12 +2602,16 @@ def inline_page(data_js):
     page = (read("review.html")
             .replace('<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', f"<style>\n{read('tokens.css')}</style>\n<style>\n{read('review.css')}</style>")
             .replace('<script src="sample/review-data.js"></script>', f"<script>{data_js}</script>"))
+    page = page.replace('<!-- KR_ICONS -->', read('icons/sprite.svg'))
+    page = page.replace('<script src="theme.js"></script>', f"<script>\n{read('theme.js')}</script>")
     prefix = ""
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
-    if re.search(r'''(?:href|src)=(["'])(?:tokens\.css|review\.css|sample/review-data\.js|review\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
+    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js"):
+        page = page.replace(f'<script src="{asset}"></script>', f'<script>\n{read(asset)}</script>')
+    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-marks\.js|board-diff\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
 
@@ -2021,7 +2714,12 @@ def cmd_report(args):
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
-    data["projects"] = [build_project(p, blobs, settings, waivers) for p in det["projects"]]
+    data["projects"] = []
+    change_offset = 0
+    for p in det["projects"]:
+        project = build_project(p, blobs, settings, waivers, change_offset)
+        data["projects"].append(project)
+        change_offset += len(project["changes"])
     if settings.get("digikey", {}).get("enabled"):
         try:
             with open("review/supplier.json", encoding="utf-8") as fh:
@@ -2656,6 +3354,10 @@ def main():
     sub = ap.add_subparsers(required=True)
     p = sub.add_parser("detect", help="resolve base/head and list changed KiCad projects")
     p.set_defaults(func=cmd_detect)
+    p = sub.add_parser("restore-renders", help="restore complete revision caches without KiCad")
+    p.set_defaults(func=restore_renders)
+    p = sub.add_parser("cache-renders", help="snapshot rendered outputs after optional compression")
+    p.set_defaults(func=cache_renders)
     p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_render)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")

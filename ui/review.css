@@ -29,6 +29,7 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
                padding: var(--space-1) 8px var(--space-1) calc(8px + var(--depth, 0) * 14px); background: transparent; color: inherit;
                border: 0; border-left: 2px solid transparent; font: inherit; cursor: pointer; }
 .tree button[aria-current=true] { background: var(--surface-2); border-left-color: var(--accent); }
+.tree button[aria-current=true] .name { font-weight: 600; }
 .tree button:hover { background: var(--surface-2); }
 [data-status=unchanged] { color: var(--muted); }
 .counts { display: inline-flex; gap: var(--space-1); }
@@ -65,11 +66,11 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 
 .marker { position: absolute; pointer-events: none; z-index: 4;
   border: calc(2px / var(--k, 1)) solid; box-shadow: 0 0 0 calc(1px / var(--k, 1)) var(--marker-halo), inset 0 0 0 calc(1px / var(--k, 1)) var(--marker-halo); }
-.marker::after { content: attr(data-glyph); position: absolute; top: calc(-14px / var(--k, 1)); left: 0;
-  font: 700 calc(12px / var(--k, 1)) / 1 var(--font-mono); background: var(--marker-halo); color: var(--marker-core); padding: 0 calc(2px / var(--k, 1)); }
-.marker.added { border-color: var(--added); border-style: solid; }
-.marker.removed { border-color: var(--removed); border-style: dashed; }
-.marker.modified { border-color: var(--modified); border-style: double; border-width: calc(4px / var(--k, 1)); }
+.marker::after { content: attr(data-label); position: absolute; top: calc(-14px / var(--k, 1)); left: 0;
+  font: 700 calc(12px / var(--k, 1)) / 1 var(--font-mono); background: var(--marker-halo); color: var(--marker-core); white-space: nowrap; padding: 0 calc(2px / var(--k, 1)); }
+.marker.added:not(.sel) { --marker-core:var(--mark-added); --marker-halo:var(--halo-added); border-color:var(--marker-core); border-style:solid; }
+.marker.removed:not(.sel) { --marker-core:var(--mark-removed); --marker-halo:var(--halo-removed); border-color:var(--marker-core); border-style:dashed; background:repeating-linear-gradient(135deg,transparent 0 calc(6px / var(--k,1)),var(--marker-halo) calc(6px / var(--k,1)) calc(7px / var(--k,1))); }
+.marker.modified:not(.sel) { --marker-core:var(--mark-modified); --marker-halo:var(--halo-modified); border-color:var(--marker-core); border-style:dotted; }
 .marker.violation { border-color: var(--removed); border-style: dotted; }
 .marker.sel { border-color: var(--accent); border-style: solid; border-width: calc(3px / var(--k, 1)); }
 .card { display: block; width: 100%; text-align: left; background: var(--card-bg); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-2); margin-bottom: var(--space-2); }
@@ -131,7 +132,7 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 #zoombar .pct { min-width: 4em; text-align: center; font-family: var(--font-mono); }
 #zoombar .sep { flex: 1; }
 #zoombar .goto { width: 22em; max-width: 30vw; }
-body.shot #hdr, body.shot #nav, body.shot #panel, body.shot #modes, body.shot #zoombar { display: none; }
+body.shot #hdr, body.shot #nav, body.shot #panel { display: none; }
 body.shot #app { grid-template-columns: 1fr; }
 body.shot { grid-template-rows: 1fr; }
 #zoombar .copyfield { width: 22em; max-width: 30vw; font-family: var(--font-mono); }
@@ -173,3 +174,199 @@ body.placing #stage { cursor: crosshair; }
 .waive { font: inherit; font-size: 12px; background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0 var(--space-2); }
 .waiver-snippet { margin: var(--space-1) var(--space-2); padding: var(--space-2); background: var(--surface-2); border-radius: var(--radius); font: 12px/1.4 var(--font-mono); white-space: pre-wrap; user-select: all; }
 .waiver-help { padding: 0 var(--space-2); font-size: 12px; }
+
+/* Stage 1 task 4: dock tabs wrap instead of clipping; drawing X/Y status bar */
+:root { --statusbar-h: 24px; --tab-h: 28px; }
+body { grid-template-rows: auto var(--bar-h) minmax(0,1fr) auto var(--statusbar-h); }
+#app { grid-template-columns: var(--nav-w) minmax(0,1fr) var(--panel-w); }
+#app:has([data-tab=parts][aria-selected=true]) { grid-template-columns: var(--nav-w) minmax(240px, 1fr) minmax(var(--panel-w), 55%); }
+#statusbar { display:flex; align-items:center; gap:var(--space-3); box-sizing:border-box; min-width:0; height:var(--statusbar-h); padding:0 var(--space-2); background:var(--statusbar-bg, var(--surface)); color:var(--muted); border-top:1px solid var(--line); font:11px/1.4 var(--font-mono); font-variant-numeric:tabular-nums; }
+#statusbar [data-coordinate] { display:inline-block; min-width:8ch; color:var(--text); text-align:right; }
+#statusbar .status-message { margin-left:auto; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+body.shot #statusbar { display:none; }
+body.shot { grid-template-rows:minmax(0,1fr); }
+
+.report-head { display:flex; align-items:center; min-width:0; min-height:32px; box-sizing:border-box; background:var(--surface); border-bottom:1px solid var(--line); }
+.report-head #hdr { flex:1; min-width:0; padding:0 var(--sp-2); border-bottom:0; }
+.report-head .theme-toggle { flex:none; margin:0 var(--sp-2); }
+body.shot .report-head { display:none; }
+
+/* WebGL board (Stage 4): the canvas sits under the .world overlay; it is never CSS-transformed. */
+.vp > .board-gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.vp.board.flip .marker::after { transform: scaleX(-1); transform-origin: 0 100%; }
+.vp.board.flip .pin { transform: translate(-50%, -100%) scale(calc(-1 / var(--k, 1)), calc(1 / var(--k, 1))); }
+#stage { position: relative; }
+.board-diag { position: absolute; left: 8px; bottom: 8px; z-index: 8; max-width: 60%; background: var(--surface); color: var(--text);
+  border: 1px solid var(--line-strong); border-radius: 4px; font-size: 12px; padding: 2px 8px; }
+.board-diag pre { margin: 4px 0; max-height: 160px; overflow: auto; white-space: pre-wrap; }
+
+.vp[data-board-gl] > canvas {position:absolute;inset:0;width:100%;height:100%;display:block;}
+.vp[data-board-gl] > .board-hud {position:absolute;inset:0;pointer-events:none;overflow:hidden;}
+.vp[data-board-gl] .pin {pointer-events:auto;}
+
+/* Native modal supplies focus trapping, Escape, and focus restoration. */
+#shortcuts { color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:4px; max-width:680px; max-height:85vh; padding:24px; }
+#shortcuts::backdrop { background:rgb(0 0 0 / .55); }
+#shortcuts dl { display:grid; grid-template-columns:max-content 1fr; gap:8px 20px; }
+#shortcuts dt { font-family:monospace; font-weight:600; }
+#shortcuts dd { margin:0; }
+#statusbar { font-variant-numeric:tabular-nums; }
+.board-cross { display:none; position:absolute; left:0; top:0; pointer-events:none; width:18px; height:18px; background:linear-gradient(#c2c2c2,#c2c2c2) center/1px 100% no-repeat,linear-gradient(#c2c2c2,#c2c2c2) center/100% 1px no-repeat; }
+.vp.board-cursor > .board-cross { display:block; }
+@media(max-width:700px) { #shortcuts dl { grid-template-columns:1fr; } #shortcuts dd { margin-bottom:8px; } }
+
+#statusbar > span { white-space:nowrap; }
+#statusbar { overflow:hidden; flex-shrink:0; }
+
+/* Schematic grid belongs to the viewport, never to a revision stack. */
+.vp.sheet { background:var(--sch-paper); }
+.sch-grid { position:absolute; left:0; top:0; will-change:transform; width:100%; height:100%; pointer-events:none; }
+.vp.sheet .world { z-index:1; }
+.status-coordinates { display:flex; align-items:center; gap:var(--space-3); }
+[data-sch-coordinates], [data-sch-grid] { font-family:var(--font-mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+/* Stage 3 task 1: CAD dock shell. Header row, toolbar row, docks, status bar. */
+:root { --nav-w:220px; --panel-w:320px; }
+body { height:100dvh; overflow:hidden; grid-template-rows:auto 32px minmax(0,1fr) var(--statusbar-h); }
+#toolbar { display:flex; align-items:center; gap:var(--space-2); min-width:0; padding:0 8px; overflow-x:auto; background:var(--surface-2); border-bottom:1px solid var(--line); }
+#toolbar > *, #modes > *, #zoombar > * { flex-shrink:0; }
+#modes, #zoombar, #change-nav { display:flex; align-items:center; gap:4px; padding:0; border:0; background:transparent; }
+#toolbar .tb-spacer { flex:1 1 0; min-width:0; }
+#toolbar button, #toolbar input { box-sizing:border-box; height:24px; font:12px var(--font-ui); color:var(--text); background:var(--surface-2); border:1px solid var(--line-strong); border-radius:3px; padding:0 8px; }
+#toolbar button:hover:not(:disabled) { background:var(--surface-3, var(--surface)); }
+#toolbar button:disabled { opacity:.45; cursor:default; }
+#modes button[aria-pressed="true"] { background:var(--surface-sel, var(--surface-3)); color:var(--text); box-shadow:inset 0 -2px var(--accent); font-weight:500; }
+#modes .blend { margin-left:var(--space-2); display:flex; align-items:center; gap:4px; }
+#zoombar .pct { min-width:40px; font:11px var(--font-mono); }
+#zoombar .goto { width:112px; max-width:none; }
+#zoombar .copyfield { width:180px; }
+#zoombar .sep { flex:0 0 8px; }
+#zoombar .muted { white-space:nowrap; }
+#modes { gap:0; }
+#modes [data-mode] { border-radius:0; margin-left:-1px; }
+#modes [data-mode]:first-child { border-radius:3px 0 0 3px; margin-left:0; }
+#modes [data-mode]:last-of-type { border-radius:0 3px 3px 0; }
+#modes [aria-checked="true"] { position:relative; z-index:1; border-color:var(--accent); }
+#modes .blend { margin-left:var(--space-3); }
+#toolbar button:focus-visible, #toolbar input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+#change-nav { gap:2px; }
+#change-nav .pct { min-width:36px; text-align:center; font:11px var(--font-mono); font-variant-numeric:tabular-nums; color:var(--text); white-space:nowrap; }
+#toolbar [data-dock] { display:none; }
+#nav { padding:8px 0; }
+#nav h3 { padding:0 8px; }
+#nav .projsel { display:block; padding:0 8px; }
+#layers { padding:0 8px; }
+#panel { display:flex; flex-direction:column; overflow:hidden; background:var(--surface); }
+#panel-tabs { display:flex; flex-wrap:wrap; flex:none; min-width:0; background:var(--surface-2); border-bottom:1px solid var(--line); }
+#panel-tabs [role=tab] { flex:1 1 auto; max-width:100%; box-sizing:border-box; min-height:var(--tab-h); padding:0 8px; border:0; border-bottom:2px solid transparent; border-radius:0; font-size:12px; white-space:normal; overflow-wrap:anywhere; background:transparent; color:var(--muted); }
+#panel-tabs [role=tab][aria-selected=true] { background:var(--surface); color:var(--text); border-bottom-color:var(--accent); font-weight:600; }
+#panel-tabs [role=tab]:disabled { opacity:.45; cursor:default; }
+#panel-tabs [role=tab]:focus-visible { outline:2px solid var(--focus, var(--accent)); outline-offset:-2px; }
+#panel-body { flex:1; min-height:0; overflow:auto; padding-top:8px; }
+#app:has([data-tab=parts][aria-selected=true]) { grid-template-columns:var(--nav-w) minmax(0,1fr) var(--panel-w); }
+.card, .thread-card { border-radius:0; margin-bottom:0; border-width:0 0 1px; }
+.tree button { min-height:24px; font-size:12px; }
+.tree button[aria-current=true] { background:var(--surface-sel, var(--surface-2)); }
+.chip.removed { border-style:dashed; } .chip.modified { border-style:dotted; }
+@media(max-width:899px) {
+  #app { grid-template-columns:minmax(0,1fr) !important; position:relative; }
+  #nav, #panel { display:none; position:absolute; top:0; bottom:0; z-index:20; width:min(320px,85vw); box-sizing:border-box; box-shadow:0 4px 16px rgb(0 0 0/.4); }
+  #nav { left:0; } #panel { right:0; }
+  #nav.dock-open { display:block; } #panel.dock-open { display:flex; }
+  #toolbar [data-dock] { display:block; }
+}
+body.shot #toolbar { display:none; }
+/* Stage 4 task 8: Appearance dock (Layers / Objects / Nets), KiCad-style dense rows */
+#panel-body:has(#appearance-root) { padding:0; overflow:hidden; display:flex; flex-direction:column; }
+#appearance-root { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+.appearance .appearance-tabs { display:flex; justify-content:center; gap:2px; padding:var(--space-2) var(--space-2) var(--space-1); min-height:var(--h-md); flex:none; }
+#panel .appearance .appearance-tabs [role=tab] { box-sizing:border-box; height:var(--h-sm); padding:0 var(--space-3); font:inherit; font-size:12px; color:var(--muted); background:transparent; border:1px solid transparent; border-radius:var(--radius); cursor:pointer; }
+#panel .appearance .appearance-tabs [role=tab][aria-selected=true] { color:var(--text); background:var(--surface-sel); border-color:var(--line-strong); }
+#panel .appearance .appearance-tabs [role=tab]:focus-visible, .appearance button:focus-visible, .appearance input:focus-visible { outline:2px solid var(--focus); outline-offset:-1px; }
+.appearance-body { flex:1 1 auto; min-height:0; overflow:auto; padding:var(--space-1) 0; }
+.appearance-body[hidden], .appearance [hidden] { display:none; }
+.appearance-row { display:grid; grid-template-columns:24px 24px minmax(0,1fr) 80px; align-items:center; min-height:24px; gap:4px; padding:0 var(--space-2) 0 var(--space-3); box-sizing:border-box; font-size:12px; }
+.appearance-row:hover { background:var(--row-hover); }
+.appearance-row.off { color:var(--muted); }
+.appearance-row input[type=color] { width:24px; height:20px; padding:1px; border:1px solid var(--line-strong); border-radius:2px; background:transparent; cursor:pointer; }
+.appearance-row input[type=color].inherit { opacity:.5; }
+.appearance-row input[type=range] { width:100%; min-width:0; margin:0; accent-color:var(--accent-fill); }
+.appearance-row button, .appearance-row .name { font:inherit; color:inherit; background:transparent; border:0; text-align:left; padding:0 var(--space-1); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; line-height:24px; }
+.appearance-row .name { cursor:default; }
+.appearance-row button.name { cursor:pointer; }
+.appearance-row button:disabled { cursor:not-allowed; }
+.appearance-row .eye-btn { display:grid; place-items:center; width:24px; height:24px; padding:0; color:var(--text); }
+.appearance-row .off .eye-btn, .appearance-row .eye-btn[aria-pressed=false] { color:var(--muted); }
+.eye { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.3; stroke-linecap:round; }
+.eye circle { fill:currentColor; stroke:none; }
+.eye .slash { display:none; }
+.eye-btn[aria-pressed=false] .slash { display:block; }
+.appearance-row [aria-current=true] { box-shadow:inset 2px 0 var(--accent); font-weight:600; }
+.appearance-row [aria-current=true]::before { content:"\25B6"; font-size:8px; color:var(--accent); margin-right:4px; }
+.appearance-row button[aria-pressed=true].name { background:var(--surface-sel); box-shadow:inset 2px 0 var(--accent); font-weight:600; }
+.net-tools { display:flex; gap:var(--space-1); padding:var(--space-1) var(--space-3) var(--space-2); }
+.net-tools .net-filter { flex:1 1 auto; min-width:0; height:var(--h-sm); box-sizing:border-box; font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); border:1px solid var(--line-strong); border-radius:var(--radius); padding:0 var(--space-2); }
+.net-tools .btn { flex:none; height:var(--h-sm); font-size:12px; padding:0 var(--space-2); }
+.appearance .more, .appearance-note { padding:var(--space-1) var(--space-3); margin:0; font-size:12px; color:var(--muted); }
+.appearance-options { flex:none; border-top:1px solid var(--line); padding:var(--space-2) var(--space-3); background:var(--panel-bg); font-size:12px; }
+.appearance-options h4 { margin:0 0 var(--space-1); font-size:12px; font-weight:500; }
+.appearance-options fieldset { border:0; margin:0 0 var(--space-1); padding:0; display:flex; flex-wrap:wrap; gap:var(--space-1) var(--space-3); }
+.appearance-options legend { padding:0; width:100%; }
+.appearance-options label { display:inline-flex; align-items:center; gap:4px; min-height:24px; cursor:pointer; }
+.appearance-options .presets { display:grid; gap:var(--space-1); margin-top:var(--space-1); }
+[data-appearance-error] { margin:0; padding:var(--space-1) var(--space-2); font-size:12px; color:var(--removed); background:var(--removed-bg); border:1px solid currentColor; border-left-width:3px; overflow-wrap:anywhere; }
+[data-appearance-error].ok { color:var(--added); background:var(--added-bg); }
+[data-appearance-error][hidden] { display:none; }
+.appearance-options .btn { height:var(--h-sm); font-size:12px; }
+.appearance-row input[type=range] { opacity:0; }
+.appearance-row:hover input[type=range], .appearance-row:focus-within input[type=range], .appearance-row:has([aria-current=true]) input[type=range], .appearance-row:has([aria-pressed=true].name) input[type=range] { opacity:1; }
+.appearance-row .mark { color:var(--modified); font-size:12px; }
+.appearance-row:has(.mark) { grid-template-columns:24px 24px minmax(0,1fr) 12px 80px; }
+.appearance-options .btn { width:100%; }
+#panel-tabs:has([data-tab=appearance]) [role=tab] { padding:0 4px; }
+.appearance-options label.check { border:0; background:none; padding:0; margin:0; }
+.appearance-row[data-layer] input[type=range], .appearance-row.object-row input[type=range] { opacity:1; } .appearance-row.object-row input[type=range]:disabled { opacity:.35; }
+
+/* Geometry marks use CSS pixels, independently of camera zoom and board flip. */
+.board-marks {position:absolute;inset:0;pointer-events:none;}
+.board-mark-group {position:absolute;inset:0;pointer-events:none;overflow:hidden;}
+.board-mark-label,.board-mark-key {font:600 11px/14px var(--font-mono);color:var(--mark-color);background:var(--mark-backing);border:1px solid currentColor;padding:0 2px;white-space:nowrap;pointer-events:none;}
+.board-mark-label {position:absolute;}
+.board-mark-label.removed,.board-mark-key.removed {border-style:dashed;}
+.board-mark-label.modified,.board-mark-key.modified {border-style:dotted;}
+.board-mark-legend {position:absolute;bottom:8px;left:8px;display:flex;gap:6px;z-index:1;}
+
+/* Native radio buttons stay mounted while GPU mark passes update. */
+.mark-styles { display:flex; align-items:center; gap:var(--space-1); white-space:nowrap; }
+.mark-styles > span { color:var(--muted); }
+#toolbar .mark-styles button[aria-checked="true"] { border-color:var(--accent); box-shadow:inset 0 -2px var(--accent); font-weight:600; }
+/* Drawing marks never inherit chrome action colours or revision opacity. */
+.vp.sheet .world { background:var(--sch-background); }
+.diff-mark-legend { position:absolute;bottom:8px;left:8px;display:flex;gap:6px;z-index:5;pointer-events:none; }
+.diff-mark-legend > span,.board-mark-legend .board-mark-key { color:var(--text);background:var(--surface);font:600 11px/14px var(--font-mono);border:1px solid currentColor;padding:0 2px; }
+.diff-mark-legend [data-dash="dashed"] { border-style:dashed; }
+.diff-mark-legend [data-dash="dotted"] { border-style:dotted; }
+
+.marker.sel { border-color:transparent;box-shadow:none;outline:calc(2px / var(--k,1)) solid var(--accent);outline-offset:calc(3px / var(--k,1)); }
+.marker.sel::after { left:auto;right:0;top:0; }
+
+.marker:not(.sel) { z-index:5; }
+#statusbar #shortcuts-open { flex:none; min-width:20px; height:18px; padding:0 4px; font:inherit; color:var(--text); background:transparent; border:1px solid var(--line); border-radius:2px; cursor:pointer; }
+#statusbar #shortcuts-open:hover { background:var(--surface-2, var(--line)); }
+#statusbar #shortcuts-open:focus-visible { outline:2px solid var(--accent, currentColor); outline-offset:1px; }
+
+/* Schematic comparisons retain the exported paper and region-level action cues. */
+.mode-overlay .vp.sheet .world { background: transparent; }
+.vp.sheet .marker { border-color: var(--sch-mark, #b3201f); --marker-halo: #f5f4ef; --marker-core: #0f0f0f; }
+.vp.sheet .marker.modified { border-style: dotted; border-width: calc(2px / var(--k, 1)); }
+.vp.sheet .marker.sel { outline: calc(2px / var(--k, 1)) solid #0f0f0f; outline-offset: calc(3px / var(--k, 1)); }
+.vp.sheet .marker.sel.added { border-style: solid; }
+.vp.sheet .marker.sel.removed { border-style: dashed; }
+.vp.sheet .marker.sel.modified { border-style: dotted; }
+.sch-mark-label { position: absolute; left: 0; top: 100%; white-space: nowrap;
+  font: 11px var(--font-mono); transform: scale(calc(1 / var(--k, 1))); transform-origin: 0 0;
+  color: #0f0f0f; background: #f5f4ef; padding: 0 2px; }
+.vp.sheet .marker[data-mark-style="recolour"] { background: color-mix(in srgb, var(--sch-mark, #b3201f) 12%, transparent); }
+.vp.sheet .marker[data-mark-style="recolour"].removed {
+  background: repeating-linear-gradient(135deg, transparent 0 4px, color-mix(in srgb, var(--sch-mark) 22%, transparent) 4px 6px);
+}

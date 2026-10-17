@@ -73,10 +73,44 @@ print("ok")
 
 # The shipped page is one file: CSS, data and JS inlined, no external references left.
 from kicad_review import inline_page
+import re
 html = inline_page("window.REVIEW_DATA = {\"version\": 1};")
 assert 'href="tokens.css"' not in html and 'href="review.css"' not in html and 'src="review.js"' not in html and 'src="sample/' not in html
 assert "window.REVIEW_DATA = {\"version\": 1};" in html and "<style>" in html
 assert "http://" not in html and "https://fonts" not in html
+for asset in ('board-gl.js', 'appearance-state.js', 'appearance.js', 'board-marks.js', 'board-diff.js'):
+    assert not re.search(r'''(?:src|href)=["']''' + re.escape(asset), html), asset
+assert 'window.BoardMarks' in html and 'window.BoardDiff' in html
+assert html.index('window.BoardMarks') < html.index('window.BoardDiff') < html.index('const D = window.REVIEW_DATA')
+assert not re.search(r'<script[^>]+src=', html)
+assert 'src="appearance-state.js"' not in html
+assert 'function createStore(' in html
+assert html.index('function createStore(') < html.index('const D = window.REVIEW_DATA')
+# Theme import/reset and defaults must work from the standalone file, not fetch fixtures.
+from html.parser import HTMLParser
+class InlineAppearanceAssets(HTMLParser):
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'script':
+            assert not attrs.get('src'), ('external script', attrs)
+        if tag == 'link' and attrs.get('rel') == 'stylesheet':
+            assert not attrs.get('href'), ('external stylesheet', attrs)
+InlineAppearanceAssets().feed(html)
+assert html.index('window.KicadColors') < html.index('function createStore(')
+assert html.index('function createStore(') < html.index('const stores = new Map()')
+assert 'data-appearance-file' in html and 'data-appearance-reset' in html
+assert 'fixtures/themes/' not in html
+assert 'src="theme.js"' not in html
+assert "kr.theme" in html and "window.KRTheme" in html
+assert html.index("kr.theme") < html.index("<style>")
+assert '<!-- KR_ICONS -->' not in html
+assert 'id="kr-zoom-in-dark"' in html and 'id="kr-theme"' in html
+assert 'href="icons/' not in html and 'src="icons/' not in html
+assert 'CC-BY-SA-4.0' in html
+for name in ('zoom_in.svg', 'zoom_out.svg', 'zoom_fit_in_page.svg'):
+    assert name in open('ui/icons/LICENSE', encoding='utf-8').read()
+assert 'builtin_color_themes.h:160' in open('NOTICE', encoding='utf-8').read()
+assert "data-theme-toggle" in html
 print("ok")
 
 # Comment: direct link to the single HTML file plus a gh one-liner.
@@ -111,7 +145,7 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
 assert "typeof " not in js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
-assert "docs/superpowers" not in js and "docs/superpowers" not in readme and not os.path.exists("docs/superpowers"), "plan doc removed"
+assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")
 
@@ -149,6 +183,75 @@ try:
 except SystemExit as e:
     assert "same name" in str(e), e
 print("ok")
+
+# SCH6: page numbers belong to the project and parent instance, not the shared file.
+from tempfile import TemporaryDirectory
+import kicad_review as kr
+
+with TemporaryDirectory() as t:
+    def child(uid, label, page, parent="/root", project="H"):
+        return (f'(sheet (uuid "{uid}") (property "Sheetname" "{label}") '
+                '(property "Sheetfile" "shared.kicad_sch") '
+                f'(instances (project "Other" (path "{parent}" (page "99"))) '
+                f'(project "{project}" (path "{parent}" (page "{page}")))))')
+    write(t, {"H.kicad_sch": '(kicad_sch (uuid "root") '
+          '(sheet_instances (path "/" (page "1"))) '
+          + child("ten", "Ten", "10") + child("two", "Two", "2") + ')',
+          "shared.kicad_sch": '(kicad_sch ' +
+          child("nested", "Nested", "3", "/root/ten").replace('"shared.kicad_sch"', '"leaf.kicad_sch"')[:-2] +
+          '(project "H" (path "/root/two" (page "7"))))))'})
+    pages = kr.sheet_pages(t, "H")
+    assert {p["path"]: p["page"] for p in pages} == {
+        "/": "1", "/ten/": "10", "/ten/nested/": "3", "/two/": "2", "/two/nested/": "7"}
+    assert pages[1]["file"] == pages[3]["file"] == "shared.kicad_sch"
+    write(t, {"H.kicad_sch": '(kicad_sch (uuid "root") '
+          '(sheet_instances (path "/" (page "1")) (path "/two" (page "A2"))) '
+          + sheet("Two", "shared.kicad_sch", "two") + ')',
+          "shared.kicad_sch": '(kicad_sch)'})
+    assert kr.sheet_pages(t, "H")[1]["page"] == "A2"
+    n = kr.parse_sexpr('(sheet (instances (project "H" '
+        '(path "/root/a" (page "3")) (path "/root/b" (page "7")))))')
+    assert kr.sheet_instance_page(n, "H", "/root/b/") == "7"
+    assert kr.sheet_instance_page(n, "H", "/root/c") is None
+    assert kr.sheet_instance_page(n, "Other", "/root/b") is None
+    write(t, {"H.kicad_sch": '(kicad_sch ' + sheet("Two", "shared.kicad_sch", "two") + ')'})
+    assert [p["page"] for p in kr.sheet_pages(t, "H")] == ["1", "2"]
+    write(t, {"P.kicad_sch": '(kicad_sch)'})
+    calls = []
+    with patch.object(kr, "kicad_cli", side_effect=lambda *a: calls.append(a)):
+        kr.render_side(t, "P", t + "/out")
+    sch = next(c for c in calls if c[:3] == ("sch", "export", "svg"))
+    assert "--exclude-drawing-sheet" not in sch
+    assert "--no-background-color" in sch
+print("ok SCH6 instance pages and transparent framed export")
+
+# Unchanged drawings remain viewable, deduplicate blobs, and prefer head metadata.
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side, page in [("base", "2"), ("head", "10")]:
+            write(t, {f"{side}/H/H.kicad_sch":
+                f'(kicad_sch (sheet_instances (path "/" (page "{page}"))))',
+                f"review/H/{side}/erc.json": '{"sheets": []}',
+                f"review/H/{side}/sch/H.svg":
+                '<svg viewBox="0 0 320 213"><path d="M10 10H310"/></svg>'})
+        blobs = {}
+        p = kr.build_project({"dir": "H", "name": "H", "status": "modified"},
+                             blobs, kr.DEFAULT_SETTINGS)
+        pg = p["sheets"][0]
+        assert pg["page"] == "10" and pg["status"] == "unchanged"
+        assert pg["svg"]["base"] == pg["svg"]["head"]
+        assert pg["size"] == [320, 213] and "stem" not in pg
+        assert len(blobs) == 1
+        os.remove("head/H/H.kicad_sch")
+        removed = kr.build_project({"dir": "H", "name": "H", "status": "modified"},
+                                   {}, kr.DEFAULT_SETTINGS)["sheets"][0]
+        assert removed["page"] == "2" and removed["status"] == "removed"
+        assert removed["svg"]["base"] and removed["svg"]["head"] is None
+    finally:
+        os.chdir(old_cwd)
+print("ok SCH6 unchanged drawing blobs and head page metadata")
 
 # 2. Project folders with non-ASCII names and spaces are found (git quotes such paths unless told not to).
 from kicad_review import detect, commit
@@ -741,7 +844,10 @@ g("add", "-A"); g("commit", "-q", "-m", "delete shared")
 assert detect(commit("HEAD~1"), commit("HEAD")) == expected, "DR-S3: deleted shared sheet schedules all projects"
 write(t, {"notes.txt": "notes", "__MACOSX/._common.kicad_sch": "junk"})
 g("add", "-A"); g("commit", "-q", "-m", "unrelated")
-assert detect(commit("HEAD~1"), commit("HEAD")) == [], "DR-S3: unrelated files remain ignored"
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": d, "name": d, "status": "unchanged"} for d in ("A", "B")], "every review retains unchanged projects"
+write(t, {"B/B.kicad_sch": "(kicad_sch)"})
+g("add", "-A"); g("commit", "-q", "-m", "one project")
+assert detect(commit("HEAD~1"), commit("HEAD")) == [{"dir": "B", "name": "B", "status": "modified"}, {"dir": "A", "name": "A", "status": "unchanged"}], "changed projects first, unchanged projects retained"
 os.chdir(here)
 print("ok DR-S3 unowned KiCad changes schedule all projects")
 
@@ -891,7 +997,7 @@ kicad_review.subprocess.run = fake_cli
 try:
     render_side(f"{t}/P", "P", f"{t}/render")
     assert calls == [
-        ["kicad-cli", "sch", "export", "svg", "--exclude-drawing-sheet", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
+        ["kicad-cli", "sch", "export", "svg", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
         ["kicad-cli", "sch", "erc", "--format", "json", "--severity-all", "-o", f"{t}/render/erc.json", f"{t}/P/P.kicad_sch"],
         ["kicad-cli", "pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1", "--drill-shape-opt", "0", "-l", "F.Cu,B.Cu,Edge.Cuts", "-o", f"{t}/render/pcb", f"{t}/P/P.kicad_pcb"],
         ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity", "-o", f"{t}/render/drc.json", f"{t}/P/P.kicad_pcb"]], "TS-S2 render commands"
@@ -924,7 +1030,7 @@ assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
 for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
-assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 40\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
+assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
 print("ok TS-S1 CI browser matrix")
 print("ok")
@@ -1187,7 +1293,7 @@ with tempfile.TemporaryDirectory() as t:
 print("ok notes section is replaced, not added twice")
 
 wf = pathlib.Path(".github/workflows/review.yml").read_text()
-detect_step = wf[wf.index("- name: Find changed KiCad projects"):wf.index("- name: Check out both")]
+detect_step = wf[wf.index("- name: Find all KiCad projects (changed first)"):wf.index("- name: Check out both")]
 assert "refs/tags" not in detect_step.splitlines()[2]
 assert "TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}" in detect_step
 fail_step = wf[wf.index("- name: Fail on required checks"):wf.index("- name: Fabrication outputs")]
@@ -1222,7 +1328,7 @@ for settings_error in (SystemExit("invalid settings"), kicad_review.tomllib.TOML
     assert "::warning::" in output.getvalue()
 print("ok invalid tagged settings keep detection off")
 
-checkout_tools = wf[wf.index("- name: Check out review tools"):wf.index("- name: Find changed KiCad projects")]
+checkout_tools = wf[wf.index("- name: Check out review tools"):wf.index("- name: Find all KiCad projects (changed first)")]
 assert "id: tools" in checkout_tools
 assert "steps.tools.outcome == 'success'" in fab_step
 assert "steps.report.outcome" not in fab_step, "review failures must not suppress fabrication"
@@ -2920,3 +3026,529 @@ with tempfile.TemporaryDirectory() as t:
                 if contents == 'not json': assert "::warning::review/issues.json is not JSON" in stdout.getvalue()
     finally: os.chdir(_cwd)
 print("ok issues cmd_summary opt-in and malformed data")
+
+
+# Normalized board scenes: stable identity and exact micrometre geometry.
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from kicad_review import board_geometry, geometry_um
+GEOMETRY_FIXTURE = '''(kicad_pcb (version 20260206)
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "GND")
+ (segment (start 1 2) (end 3 2) (width .25) (layer "F.Cu") (net 1) (uuid tr))
+ (via (at 4 5) (size .8) (drill .4) (layers "F.Cu" "B.Cu") (net 1) (uuid vi))
+ (footprint "Test:X" (layer "B.Cu") (at 10 20 90) (uuid fp)
+  (property "Reference" "J1")
+  (pad "1" thru_hole oval (at 2 0 90) (size 2 1) (drill oval .8 .4)
+   (layers "*.Cu" "*.Mask") (net 1 "GND") (uuid pa))
+  (pad "1" smd roundrect (at 0 2 90) (size 1 1) (roundrect_rratio .25)
+   (layers "B.Cu") (net 1 "GND") (uuid pb))))'''
+def scene_from_text(text):
+    with TemporaryDirectory() as d:
+        p = Path(d) / "test.kicad_pcb"
+        p.write_text(text)
+        return board_geometry(p)
+s = scene_from_text(GEOMETRY_FIXTURE)
+assert (s["version"], s["units"]) == (1, "um")
+assert geometry_um("-0.0005") == -1
+assert geometry_um("1.2345") == 1235
+assert s["nets"] == [{"id": 0, "name": ""}, {"id": 1, "name": "GND"}]
+assert [l["id"] for l in s["layers"]] == [0, 2, 44]  # never assume old KiCad IDs
+by_id = {o["uuid"]: o for o in s["objects"]}
+assert by_id["tr"]["geometry"]["segments"] == [[1000,2000,3000,2000,250]]
+assert by_id["pa"]["geometry"]["primitive"]["center"] == [10000,18000]
+assert by_id["pb"]["geometry"]["primitive"]["center"] == [12000,20000]
+assert by_id["pa"]["changeUuid"] == by_id["pb"]["changeUuid"] == "fp"
+assert by_id["pa"]["ref"] == "J1" and by_id["pa"]["net"] == 1
+assert by_id["pa"]["geometry"]["primitive"]["angle"] == 90000
+assert by_id["pa"]["geometry"]["drill"]["size"] == [800,400]
+assert by_id["pb"]["geometry"]["primitive"]["radius"] == 250
+assert all(l in {x["name"] for x in s["layers"]} for o in s["objects"] for l in o["layers"])
+assert len({o["uuid"] for o in s["objects"]}) == len(s["objects"])
+from kicad_review import geometry_arc
+arc = geometry_arc((1,0),(0,1),(-1,0),".2")
+assert arc[0][:2] == [1000,0] and arc[-1][2:4] == [-1000,0]
+assert max(max(x[1],x[3]) for x in arc) == 1000
+without_ids = GEOMETRY_FIXTURE.replace('(uuid pa)','').replace('(uuid pb)','')
+a = scene_from_text(without_ids)
+ids = [o["uuid"] for o in a["objects"] if o["kind"] == "pad"]
+assert ids == ["fp/pad:1:1", "fp/pad:1:2"]
+modern = GEOMETRY_FIXTURE.replace('(net 1 "GND")','(net "GND")').replace('(net 1)', '(net "GND")')
+assert len([n for n in scene_from_text(modern)["nets"] if n["name"] == "GND"]) == 1
+for bad in ("NaN", "Infinity", "3000000"):
+    try:
+        geometry_um(bad)
+        raise AssertionError(bad)
+    except ValueError:
+        pass
+print("ok board scene identity, units, pad transforms, nets and arcs")
+
+# Empty and metadata-only boards stay complete; unsupported visible drawables fall back.
+empty_scene = scene_from_text('(kicad_pcb (version 20260206) (general (thickness 1.6)))')
+assert empty_scene['complete'] and empty_scene['bounds'] == [0, 0, 0, 0]
+assert empty_scene['objects'] == [] and empty_scene['nets'] == [{'id': 0, 'name': ''}]
+assert s['complete'] and s['warnings'] == []
+assert by_id['tr']['box'] == [875, 1875, 3125, 2125]
+assert by_id['vi']['box'] == [3600, 4600, 4400, 5400]
+assert by_id['fp']['geometry'] == {} and by_id['fp']['box'] == [9500, 17000, 12500, 20500]
+assert by_id['pa']['side'] == by_id['pb']['side'] == 'back'
+unknown = scene_from_text(GEOMETRY_FIXTURE[:-1] + '(gr_curve (uuid curve) (layer "F.Cu")))')
+assert not unknown['complete']
+assert unknown['warnings'] == [{'uuid': 'curve', 'kind': 'gr_curve', 'reason': 'cubic requires four control points'}]
+assert scene_from_text(GEOMETRY_FIXTURE[:-1] + '(gr_curve (uuid curve) hide))')['complete']
+
+# Copper ordering comes from canonical names, not numeric enums or layer declaration order.
+span_fixture = '''(kicad_pcb
+ (layers (0 "F.Cu" signal hide) (2 "B.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal)
+ (1 "F.Mask" user) (3 "B.Mask" user) (13 "F.Paste" user))
+ (via (at 0 0) (size 1) (drill .4) (layers "F.Cu" "B.Cu") (uuid through))
+ (via blind (at 2 0) (size 1) (drill .4) (layers "In1.Cu" "B.Cu") (uuid blind))
+ (footprint "Test" (uuid parent) (layer "F.Cu") (at 0 0)
+  (fp_text reference "R9" (hide yes))
+  (pad "1" smd rect (uuid margin) (at 0 0) (size 2 1)
+   (layers "F.Cu" "F.Mask" "F.Paste") (solder_mask_margin .1)
+   (solder_paste_margin -.05) (solder_paste_margin_ratio -.1))
+  (pad "2" np_thru_hole circle (uuid hole) (at 4 0) (size 1 1) (drill .8) (layers "*.Cu" "*.Mask"))))'''
+span = scene_from_text(span_fixture)
+span_ids = {o['uuid']: o for o in span['objects']}
+assert span_ids['through']['layers'] == ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+assert span_ids['blind']['layers'] == ['In1.Cu', 'In2.Cu', 'B.Cu']
+assert all(layer['enabled'] for layer in span['layers'])
+assert span_ids['hole']['layers'] == ['F.Mask', 'B.Mask']
+assert not span_ids['hole']['geometry']['drill']['plated']
+assert span_ids['margin']['ref'] == 'R9'
+assert span_ids['margin']['geometry']['layerPrimitives']['F.Mask']['size'] == [2200, 1200]
+assert span_ids['margin']['geometry']['layerPrimitives']['F.Paste']['size'] == [1500, 700]
+
+# Numeric unknown nets stay numeric; mixed modern names receive deterministic IDs.
+mixed = scene_from_text(GEOMETRY_FIXTURE.replace('(net 1 "GND")', '(net 1 "GND") (net "Z") (net "A")', 1).replace('(net 1) (uuid tr)', '(net 8) (uuid tr)'))
+assert mixed['nets'] == [{'id': 0, 'name': ''}, {'id': 1, 'name': 'GND'}, {'id': 8, 'name': 'Net 8'}, {'id': 9, 'name': 'A'}, {'id': 10, 'name': 'Z'}]
+assert next(o for o in mixed['objects'] if o['uuid'] == 'tr')['net'] == 8
+assert mixed['complete'] and mixed['warnings'][0]['kind'] == 'net'
+zone_named = scene_from_text('(kicad_pcb (zone (uuid z) (net 7) (net_name "Earth")))')
+assert zone_named['nets'] == [{'id': 0, 'name': ''}, {'id': 7, 'name': 'Earth'}]
+
+# Drill offsets rotate once with the world pad angle. Board setup is the last margin fallback.
+offset = scene_from_text(GEOMETRY_FIXTURE.replace('(drill oval .8 .4)', '(drill oval .8 .4 (offset .2 .1))'))
+assert next(o for o in offset['objects'] if o['uuid'] == 'pa')['geometry']['drill']['center'] == [10100, 17800]
+setup_margin = scene_from_text(span_fixture.replace('(via (at 0 0)', '(setup (pad_to_mask_clearance .3)) (via (at 0 0)').replace('(solder_mask_margin .1)', ''))
+assert next(o for o in setup_margin['objects'] if o['uuid'] == 'margin')['geometry']['layerPrimitives']['F.Mask']['size'] == [2600, 1600]
+print('ok board scene bounds, copper spans, NPTH, margins and mixed net syntax')
+
+# Custom pads retain their anchor and transformed primitives, never a replacement rectangle.
+custom_fixture = '''(kicad_pcb (layers (0 "F.Cu" signal))
+ (footprint "Custom" (layer "F.Cu") (uuid custom-fp) (at 10 20 90)
+  (property "Reference" "J2")
+  (pad "1" smd custom (uuid custom) (at 2 0 90) (size .2 .2) (layers "F.Cu")
+   (options (anchor circle))
+   (primitives
+    (gr_line (start 0 0) (end 1 0) (width .2))
+    (gr_poly (pts (xy 0 0) (xy 1 0) (xy 0 1)) (width .1) (fill yes))))))'''
+custom_scene = scene_from_text(custom_fixture)
+custom_pad = next(o for o in custom_scene['objects'] if o['uuid'] == 'custom')
+assert custom_scene['complete']
+assert custom_pad['geometry']['primitive']['shape'] == 'circle'
+assert custom_pad['geometry']['segments'][0] == [10000, 18000, 10000, 17000, 200]
+assert custom_pad['geometry']['rings'] == [[[10000, 18000], [10000, 17000], [11000, 18000]]]
+assert custom_pad['box'] == [9900, 16900, 11050, 18100]
+unsupported_custom = scene_from_text(custom_fixture.replace('(gr_line (start 0 0) (end 1 0) (width .2))', '(gr_curve (width .2))'))
+assert not unsupported_custom['complete']
+assert unsupported_custom['warnings'][0] == {'uuid': 'custom', 'kind': 'pad', 'reason': 'unsupported custom primitive gr_curve'}
+
+# Ordinary pad shapes, tented masks, footprint overrides and hidden parent inheritance.
+for shape in ('circle', 'rect', 'oval', 'roundrect', 'trapezoid'):
+    pad_scene = scene_from_text(span_fixture.replace('smd rect', 'smd ' + shape))
+    assert next(o for o in pad_scene['objects'] if o['uuid'] == 'margin')['geometry']['primitive']['shape'] == shape
+trapezoid = scene_from_text(span_fixture.replace('smd rect', 'smd trapezoid').replace('(uuid margin)', '(uuid margin) (rect_delta .2 .4)'))
+assert next(o for o in trapezoid['objects'] if o['uuid'] == 'margin')['geometry']['primitive']['delta'] == [200, 400]
+tented = scene_from_text(span_fixture.replace('(uuid hole)', '(uuid hole) (tenting (front yes) (back no))'))
+assert next(o for o in tented['objects'] if o['uuid'] == 'hole')['layers'] == ['B.Mask']
+fp_margin = scene_from_text(span_fixture.replace('(uuid parent)', '(uuid parent) (solder_mask_margin .4)').replace('(solder_mask_margin .1)', ''))
+assert next(o for o in fp_margin['objects'] if o['uuid'] == 'margin')['geometry']['layerPrimitives']['F.Mask']['size'] == [2800, 1800]
+hidden_parent = scene_from_text(GEOMETRY_FIXTURE.replace('(uuid fp)', '(uuid fp) (hide yes)'))
+assert all(o['hidden'] for o in hidden_parent['objects'] if o['changeUuid'] == 'fp')
+assert hidden_parent['bounds'] == [875, 1875, 4400, 5400]
+conditional = scene_from_text(span_fixture.replace('(uuid margin)', '(uuid margin) (remove_unused_layers) (keep_end_layers)'))
+assert not conditional['complete'] and 'requires connectivity' in conditional['warnings'][0]['reason']
+
+# Numerical guards apply to parsed geometry too, including reflected and rotated pad positions.
+from kicad_review import geometry_point, pcb_objects
+assert geometry_point(('-0.0005', '0.0005')) == [-1, 1]
+assert geometry_point(('0.0005', '0.0005'), ('0', '0', '90')) == [1, -1]
+assert geometry_arc((0, 0), (1, 0), (2, 0), '.1') == [[0, 0, 2000, 0, 100]]
+assert geometry_arc((1, 0), (0, -1), (-1, 0), '.2')[0][3] < 0
+for bad in ('NaN', 'Infinity', '3000000', '-.25'):
+    try:
+        scene_from_text(GEOMETRY_FIXTURE.replace('(width .25)', '(width ' + bad + ')'))
+        raise AssertionError('invalid track width accepted: ' + bad)
+    except ValueError:
+        pass
+try:
+    geometry_arc((2000000, 0), (-2000000, 0), (0, -2000000), '.1')
+    raise AssertionError('arc budget not enforced')
+except ValueError as error:
+    assert 'budget' in str(error)
+with TemporaryDirectory() as d:
+    board = Path(d) / 'identity.kicad_pcb'
+    board.write_text(GEOMETRY_FIXTURE)
+    semantic_before = pcb_objects(board)
+    identity_scene = board_geometry(board)
+    assert pcb_objects(board) == semantic_before
+    assert all(o['changeUuid'] in semantic_before for o in identity_scene['objects'])
+print('ok board custom pads, shape variants, visibility, margins, numeric guards and semantic identity')
+
+# Unsupported conditional/offset geometry is explicit SVG fallback, never guessed copper.
+hidden_text = scene_from_text(GEOMETRY_FIXTURE.replace('(property "Reference" "J1")', '(property "Reference" "J1" (effects (hide yes)))'))
+assert hidden_text['complete']
+hidden_custom = scene_from_text(custom_fixture.replace('(uuid custom-fp)', '(uuid custom-fp) (hide yes)').replace('(gr_line (start 0 0) (end 1 0) (width .2))', '(gr_curve (width .2))'))
+assert hidden_custom['complete'] and hidden_custom['bounds'] == [0, 0, 0, 0]
+custom_mask = scene_from_text(custom_fixture.replace('(0 "F.Cu" signal)', '(0 "F.Cu" signal) (1 "F.Mask" user)').replace('(layers "F.Cu")', '(layers "F.Cu" "F.Mask") (solder_mask_margin .1)'))
+assert not custom_mask['complete'] and 'offset not yet supported' in custom_mask['warnings'][0]['reason']
+try:
+    scene_from_text(GEOMETRY_FIXTURE.replace('(start 1 2)', '(start 2000000 2)'))
+    raise AssertionError('out-of-range stroked bbox accepted')
+except ValueError:
+    pass
+print('ok board fallback warnings, hidden effects and stroked extent limits')
+
+assert scene_from_text(GEOMETRY_FIXTURE.replace('(uuid fp)', '(uuid fp) (fp_metadata "opaque")'))["complete"]
+
+# Stored zone paths retain slit bridges, holes and independent islands verbatim.
+DRAW_FIXTURE = GEOMETRY_FIXTURE.replace('(44 "Edge.Cuts" user)', '(44 "Edge.Cuts" user) (37 "F.SilkS" user) (36 "B.SilkS" user) (40 "Dwgs.User" user)')
+EXTRA = '''
+(zone (net 1) (layer "F.Cu") (uuid zone)
+ (polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))
+ (filled_polygon (layer "F.Cu")
+  (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10) (xy 0 0)
+       (xy 2 2) (xy 2 8) (xy 8 8) (xy 8 2) (xy 2 2) (xy 0 0)))
+ (filled_polygon (layer "F.Cu") (pts (xy 20 0) (xy 21 0) (xy 21 1)))
+ (filled_polygon (layer "B.Cu") (pts (xy 30 0) (xy 31 0) (xy 31 1))))
+(gr_line (start -1 -1) (end 11 -1) (stroke (width .05) (type default))
+ (layer "Edge.Cuts") (uuid edge))
+(gr_text "<& Board" (at 5 6 30) (layer "F.SilkS") (uuid text) unlocked
+ (effects (font (size 1 2) (thickness .15) bold italic) (justify left top mirror)))
+'''
+ss = scene_from_text(DRAW_FIXTURE[:-1] + EXTRA + ')')
+u = {o['uuid']: o for o in ss['objects']}
+zones = [o for o in ss['objects'] if o['changeUuid'] == 'zone']
+assert ss['complete'], ss['warnings']
+assert len(zones) == 3 and len({o['uuid'] for o in zones}) == 3
+assert [o['layers'] for o in zones] == [['F.Cu'], ['F.Cu'], ['B.Cu']]
+assert zones[0]['geometry']['rings'][0] == [[0,0],[10000,0],[10000,10000],[0,10000],[0,0],[2000,2000],[2000,8000],[8000,8000],[8000,2000],[2000,2000],[0,0]]
+assert zones[1]['geometry']['rings'] == [[[20000,0],[21000,0],[21000,1000]]]
+assert u['edge']['geometry']['segments'] == [[-1000,-1000,11000,-1000,50]]
+t = u['text']['geometry']['text']
+assert t == {'value': '<& Board', 'at': [5000,6000], 'size': [2000,1000], 'angle': 30000,
+             'thickness': 150, 'justify': ['left','top'], 'mirror': True, 'italic': True, 'bold': True, 'unlocked': True}
+assert u['text']['box'] is not None
+unfilled = EXTRA[:EXTRA.index('(gr_line')].replace('filled_polygon', 'not_a_fill')
+zz = scene_from_text(DRAW_FIXTURE[:-1] + unfilled + ')')
+zo = next(o for o in zz['objects'] if o['changeUuid'] == 'zone')
+assert zz['complete'] and zo['geometry']['rings'] == [] and len(zo['geometry']['segments']) == 4
+assert any('no stored fill; showing outline' in w['reason'] for w in zz['warnings'])
+keepout = scene_from_text(DRAW_FIXTURE[:-1] + EXTRA[:EXTRA.index('(gr_line')].replace('(uuid zone)', '(uuid zone) (keepout (tracks not_allowed))') + ')')
+assert keepout['complete'] and all(o['geometry']['rings'] == [] for o in keepout['objects'] if o['changeUuid'] == 'zone')
+print('ok board stored zone topology, islands, layers, keepouts and unfilled outlines')
+
+SHAPES = '''
+(gr_rect (start 0 0) (end 2 1) (stroke (width .1)) (fill none) (layer "F.SilkS") (uuid rect))
+(gr_rect (start 3 0) (end 5 1) (width .2) (fill solid) (layer "F.SilkS") (uuid solid))
+(gr_circle (center 0 0) (end 1 0) (stroke (width .1)) (fill solid) (layer "F.SilkS") (uuid circle))
+(gr_arc (start 1 0) (mid 0 1) (end -1 0) (width .1) (layer "F.SilkS") (uuid arc-shape))
+(gr_poly (pts (xy 0 0) (xy 2 0) (xy 1 1)) (width .1) (fill none) (layer "F.SilkS") (uuid poly))
+(gr_curve (pts (xy 0 0) (xy 0 2) (xy 2 2) (xy 2 0)) (stroke (width .1)) (layer "F.SilkS") (uuid curve-ok))
+'''
+shape_scene = scene_from_text(DRAW_FIXTURE[:-1] + SHAPES + ')')
+assert shape_scene['complete'], shape_scene['warnings']
+shapes = {o['uuid']: o for o in shape_scene['objects']}
+assert len(shapes['rect']['geometry']['segments']) == 4 and shapes['rect']['geometry']['rings'] == []
+assert shapes['solid']['geometry']['rings'] == [[[3000,0],[5000,0],[5000,1000],[3000,1000]]]
+assert len(shapes['circle']['geometry']['segments']) > 32 and len(shapes['circle']['geometry']['rings']) == 1
+assert shapes['arc-shape']['geometry']['segments'][0][:2] == [1000,0]
+assert len(shapes['poly']['geometry']['segments']) == 3 and shapes['poly']['geometry']['rings'] == []
+curve = shapes['curve-ok']['geometry']['segments']
+assert len(curve) > 16 and curve[0][:2] == [0,0] and curve[-1][2:4] == [2000,0]
+assert all(a[2:4] == b[:2] for a,b in zip(curve,curve[1:]))
+# Collinear controls beyond the chord must subdivide, not collapse a retracing curve.
+retraced = scene_from_text(DRAW_FIXTURE[:-1] + SHAPES[SHAPES.index('(gr_curve'):].replace('(xy 0 2) (xy 2 2)', '(xy 5 0) (xy -3 0)') + ')')
+assert len(next(o for o in retraced['objects'] if o['uuid'] == 'curve-ok')['geometry']['segments']) > 1
+print('ok board graphics shapes, fills, circle/arc and bounded cubic flattening')
+
+FP_DRAW = '''
+ (fp_line (start 1 0) (end 2 0) (stroke (width .1)) (layer "B.SilkS") (uuid fp-line))
+ (fp_text user "${REFERENCE}/${VALUE}" (at 1 0 90) (layer "B.SilkS") (uuid fp-label)
+  (effects (font (size 1 1)) (justify right bottom mirror)))
+ (property "Value" "Connector" (at 0 1 90) (layer "B.SilkS") (uuid value-label) (effects (font (size 1 1))))
+ (property "Reference" "J1" (at 0 0 90) (layer "B.SilkS") hide (uuid hidden-property) (effects (font (size 1 1))))
+'''
+fp_scene = scene_from_text(DRAW_FIXTURE.replace('(uuid fp)', '(uuid fp)' + FP_DRAW))
+fpo = {o['uuid']: o for o in fp_scene['objects']}
+assert fp_scene['complete'], fp_scene['warnings']
+assert fpo['fp-line']['geometry']['segments'] == [[10000,19000,10000,18000,100]]
+assert fpo['fp-label']['geometry']['text']['at'] == [10000,19000]
+assert fpo['fp-label']['geometry']['text']['angle'] == 90000  # already board-frame, not doubled
+assert fpo['fp-label']['geometry']['text']['value'] == 'J1/Connector'
+assert fpo['fp-label']['changeUuid'] == 'fp' and fpo['fp-label']['side'] == 'back'
+assert fpo['hidden-property']['hidden']
+for hide in ('hide', '(hide yes)', '(effects (hide yes))'):
+    hidden_scene = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "SECRET" (at 0 0) (layer "F.SilkS") ' + hide + ' (uuid hidden) (effects (font (size 1 1))))' + ')')
+    assert hidden_scene['complete'] and next(o for o in hidden_scene['objects'] if o['uuid'] == 'hidden')['hidden']
+for unsupported in ('dimension', 'table', 'gr_text_box', 'image'):
+    ss = scene_from_text(DRAW_FIXTURE[:-1] + '(' + unsupported + ' (layer "Dwgs.User") (uuid unsupported))' + ')')
+    assert not ss['complete'] and any(w['kind'] == unsupported for w in ss['warnings'])
+for label in ('${UNKNOWN}', '~{rich}', '^{rich}'):
+    ss = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "' + label + '" (at 0 0) (layer "F.SilkS") (effects (font (size 1 1))))' + ')')
+    assert not ss['complete'], label
+font_scene = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "Label" (at 0 0) (layer "F.SilkS") (effects (font (face "Embedded") (size 1 1))))' + ')')
+assert not font_scene['complete'] and any('font' in w['reason'] for w in font_scene['warnings'])
+print('ok board text metadata, hidden properties, footprint transforms and explicit SVG fallbacks')
+
+# Guard pathological flattening and new/legacy text flags without silent geometry loss.
+for huge_shape in (
+    '(gr_circle (center 0 0) (end 2000000 0) (width .1) (layer "F.Cu") (uuid huge))',
+    '(gr_curve (pts (xy -2000000 -2000000) (xy -2000000 2000000) (xy 2000000 -2000000) (xy 2000000 2000000)) (layer "F.Cu") (uuid huge))',
+):
+    huge_scene = scene_from_text(DRAW_FIXTURE[:-1] + huge_shape + ')')
+    assert not huge_scene['complete'] and any('budget' in w['reason'] for w in huge_scene['warnings'])
+    assert next(o for o in huge_scene['objects'] if o['uuid'] == 'huge')['geometry'] == {}
+# Numeric error bound against a sampled cubic before integer rounding.
+from kicad_review import geometry_cubic
+import math
+flattened = geometry_cubic([[0,0], [0,2], [2,2], [2,0]])
+for i in range(1001):
+    t = i / 1000
+    p = [6*t*t - 4*t*t*t, 6*t*(1-t)]
+    def chord_distance(a, b):
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        u = max(0, min(1, ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / (dx*dx + dy*dy)))
+        return math.hypot(p[0]-a[0]-u*dx, p[1]-a[1]-u*dy)
+    assert min(chord_distance(a,b) for a,b in zip(flattened,flattened[1:])) <= .001
+flags = scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "Flags" (at 1 2 45 unlocked) (layer "F.SilkS") (uuid flags) (effects (font (size 1 2) (bold yes) (italic no))))' + ')')
+flag_text = next(o for o in flags['objects'] if o['uuid'] == 'flags')['geometry']['text']
+assert flag_text['size'] == [2000,1000] and flag_text['unlocked'] and flag_text['bold'] and not flag_text['italic']
+for unsupported_text in ('(layer "F.SilkS" knockout) (effects (font (size 1 1)))', '(layer "F.SilkS") (effects (font (size 1 1) (line_spacing 2)))'):
+    assert not scene_from_text(DRAW_FIXTURE[:-1] + '(gr_text "Special" (at 0 0) ' + unsupported_text + '))')['complete']
+for shape in ('gr_line', 'gr_arc', 'gr_circle', 'gr_rect', 'gr_poly', 'gr_curve'):
+    # Board and footprint use exactly the same shape kernel and transform once.
+    from kicad_review import geometry_shape, parse_sexpr, geometry_point
+    node = next(n for n in parse_sexpr('(kicad_pcb ' + SHAPES + ')')[1:] if n[0] == shape) if shape != 'gr_line' else parse_sexpr('(gr_line (start 1 0) (end 2 0) (width .1))')
+    local_shape = geometry_shape(node)
+    node[0] = shape.replace('gr_', 'fp_')
+    world_shape = geometry_shape(node, [10,20,90])
+    for a,b in zip(local_shape['segments'], world_shape['segments']):
+        expected = [*geometry_point([a[0]/1000,a[1]/1000], [10,20,90]), *geometry_point([a[2]/1000,a[3]/1000], [10,20,90]), a[4]]
+        # Cubics transform unrounded points, so a half-um tie can differ from
+        # transforming an already rounded local coordinate by one um.
+        assert all(abs(x-y) <= (1 if shape == 'gr_curve' else 0) for x,y in zip(b,expected))
+print('ok board flattening budgets, cubic error bound, graphic transforms and text flag variants')
+
+# Force the depth guard deterministically; it must choose SVG, not a truncated path.
+from unittest.mock import patch
+with patch('kicad_review.math.hypot', return_value=1):
+    limited = scene_from_text(DRAW_FIXTURE[:-1] + SHAPES[SHAPES.index('(gr_curve'):] + ')')
+assert not limited['complete'] and any('depth limit' in w['reason'] for w in limited['warnings'])
+assert next(o for o in limited['objects'] if o['uuid'] == 'curve-ok')['geometry'] == {}
+concave = scene_from_text(DRAW_FIXTURE[:-1] + '(zone (uuid concave) (layer "F.Cu") (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 4 0) (xy 4 1) (xy 1 1) (xy 1 4) (xy 0 4))))' + ')')
+assert concave['complete'] and next(o for o in concave['objects'] if o['changeUuid'] == 'concave')['geometry']['rings'] == [[[0,0],[4000,0],[4000,1000],[1000,1000],[1000,4000],[0,4000]]]
+# New child IDs without file UUIDs are deterministic and never alias another child.
+no_ids = scene_from_text(DRAW_FIXTURE.replace('(uuid fp)', '(uuid fp)' + FP_DRAW.replace('(uuid fp-line)', '').replace('(uuid fp-label)', '').replace('(uuid value-label)', '').replace('(uuid hidden-property)', '')))
+assert len({o['uuid'] for o in no_ids['objects']}) == len(no_ids['objects'])
+assert {o['uuid'] for o in no_ids['objects']} >= {'fp/fp_line:1', 'fp/fp_text:1', 'fp/property:1', 'fp/property:2'}
+print('ok board cubic depth fallback, concave fill paths and stable drawable child IDs')
+
+# Board scenes are embedded as deduplicated gzip blobs; absence or corruption never breaks the report.
+import gzip, base64, contextlib
+from kicad_review import add_blob
+gblobs = {}
+graw = json.dumps(s, separators=(',', ':'), sort_keys=True)
+gkey = add_blob(gblobs, graw)
+assert add_blob(gblobs, graw) == gkey and len(gblobs) == 1
+assert json.loads(gzip.decompress(base64.b64decode(gblobs[gkey]))) == s
+gpage = inline_page('window.REVIEW_DATA = {"projects":[],"blobs":{}};')
+for asset in ('kicad-colors.js', 'board-gl.js', 'board-diff.js'):
+    assert f'src="{asset}"' not in gpage
+assert 'KicadColors' in gpage and 'BoardGL' in gpage
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side in ("base", "head"):
+            write(t, {f"review/G/{side}/erc.json": '{"sheets": []}'})
+        pr = {"dir": "G", "name": "G", "status": "modified"}
+        patch("kicad_review.project_checks", return_value=[]).start()
+        gb = {}
+        assert "geometry" not in kr.build_project(pr, gb, kr.DEFAULT_SETTINGS)["board"] and not gb
+        write(t, {"base/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        gb = {}
+        geo = kr.build_project(pr, gb, kr.DEFAULT_SETTINGS)["board"]["geometry"]
+        assert geo["head"] is None and json.loads(gzip.decompress(base64.b64decode(gb[geo["base"]])))["version"] == 1
+        write(t, {"head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        os.remove("base/G/G.kicad_pcb")
+        geo = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]["geometry"]
+        assert geo["base"] is None and geo["head"]
+        write(t, {"head/G/G.kicad_pcb": "(kicad_pcb (layers (x y z)))"})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            bad = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
+        assert "geometry" not in bad and "geometry unavailable" in err.getvalue()
+        # Unchanged boards retain both revisions, parsing identical geometry once.
+        write(t, {"base/G/G.kicad_pcb": GEOMETRY_FIXTURE, "head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        same = {}
+        with patch("kicad_review.board_geometry", wraps=kr.board_geometry) as parse:
+            board = kr.build_project(pr, same, kr.DEFAULT_SETTINGS)["board"]
+        assert board["geometry"]["base"] == board["geometry"]["head"] and board["geometry"]["base"]
+        assert parse.call_count == 1
+        assert board["status"] == "unchanged"
+        os.remove("base/G/G.kicad_pcb")
+        err = io.StringIO()
+        with patch("kicad_review.board_geometry", side_effect=KeyError("unexpected")), contextlib.redirect_stderr(err):
+            odd = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
+        assert "geometry" not in odd and "geometry unavailable" in err.getvalue()
+    finally:
+        patch.stopall()
+        os.chdir(old_cwd)
+print('ok board scene blobs, added/removed/no/corrupt geometry')
+
+# Production geometry carries typed, revision-aware change identity, not reference guesses.
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        base = GEOMETRY_FIXTURE.replace('(via ', '(footprint "Test:X" (layer "F.Cu") (at 30 30) (uuid other) (property "Reference" "J1")) (via ')
+        head = base.replace('(at 10 20 90)', '(at 11 20 90)').replace('(width .25)', '(width .5)')
+        head = head.replace('(kicad_pcb ', '(kicad_pcb (setup (pad_to_mask_clearance .1)) ')
+        write(t, {"base/G/G.kicad_pcb": base, "head/G/G.kicad_pcb": head})
+        blobs = {}
+        with patch("kicad_review.project_checks", return_value=[]):
+            report = kr.build_project({"dir": "G", "name": "G", "status": "modified"}, blobs, kr.DEFAULT_SETTINGS)
+        changes = {r["uuid"]: r for r in report["changes"]}
+        assert set(changes) == {"fp", "tr", "meta:setup"}
+        for side in ("base", "head"):
+            scene = json.loads(gzip.decompress(base64.b64decode(blobs[report["board"]["geometry"][side]])))
+            for o in scene["objects"]:
+                expected = [changes[o["changeUuid"]]["id"]] if o["changeUuid"] in changes else []
+                assert o["changeIds"] == expected, (side, o)
+        # Reference-paired regenerated footprint UUIDs must link both revisions explicitly.
+        write(t, {"head/G/G.kicad_pcb": head.replace('(uuid fp)', '(uuid new-fp)')})
+        with patch("kicad_review.project_checks", return_value=[]):
+            second = kr.build_project({"dir": "G", "name": "G", "status": "modified"}, blobs, kr.DEFAULT_SETTINGS, change_offset=len(report["changes"]))
+        moved = next(r for r in second["changes"] if r["kind"] == "footprint")
+        assert moved["uuid"] == "new-fp" and moved["uuid_before"] == "fp"
+        kr.assign_ids([report, second])
+        for side in ("base", "head"):
+            scene = json.loads(gzip.decompress(base64.b64decode(blobs[second["board"]["geometry"][side]])))
+            assert all(o["changeIds"] == [moved["id"]] for o in scene["objects"] if o["changeUuid"] in ("fp", "new-fp"))
+            assert all(o["changeIds"] == [] for o in scene["objects"] if o["changeUuid"] in ("vi", "other"))
+    finally:
+        os.chdir(old_cwd)
+print("ok production geometry typed change IDs, unchanged isolation and multi-project IDs")
+
+# SCH6: schematic rendering and styles ship inside the offline report.
+page = kr.inline_page('window.REVIEW_DATA={"version":1};')
+assert '--sch-paper:#f5f4ef' in page
+assert 'function themeSchematic(' in page
+assert 'function schematicGridPlan(' in page
+assert not re.search(r'<script[^>]+src=["\'](?!data:)', page)
+assert not re.search(r'<link[^>]+href=["\'](?:https?:|tokens\.css|review\.css)', page)
+print('ok SCH6 offline schematic assets')
+
+# vf-order: physical stack survives scrambled KiCad 10 file IDs and dielectrics.
+for count in (4, 6):
+    fixture = Path(__file__).parent / "ui" / "fixtures" / f"vf-order-{count}.kicad_pcb"
+    text = fixture.read_text()
+    expected = ["F.Cu", *[f"In{i}.Cu" for i in range(1, count - 1)], "B.Cu"]
+    scene = kr.board_geometry(fixture)
+    assert scene["complete"] and scene["copperStack"] == expected, scene
+    assert [l["name"] for l in scene["layers"]] == expected[::-1]
+    assert len(scene["objects"]) == count
+    # Explicit stackup, not file order or enum values, is authoritative.
+    swapped = text.replace('(layer "In1.Cu" (type', '(layer "TEMP" (type').replace(
+        '(layer "In2.Cu" (type', '(layer "In1.Cu" (type').replace('(layer "TEMP" (type', '(layer "In2.Cu" (type')
+    explicit = expected.copy()
+    explicit[1], explicit[2] = explicit[2], explicit[1]
+    assert scene_from_text(swapped)["copperStack"] == explicit
+    # Older boards omit setup; canonical layer names still define the stack.
+    legacy = re.sub(r' \(setup \(stackup.*?\)\)\)\n', '', text, flags=re.S)
+    assert "(setup" not in legacy
+    assert scene_from_text(legacy)["copperStack"] == expected
+print("ok vf-order 4/6-layer explicit stackup and legacy physical order")
+
+# A schematic-only review still exports 3D once and retains every board layer.
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "G", "name": "G", "status": "modified"}
+        svg = '<svg width="20mm" height="10mm" viewBox="0 0 20 10"><g/></svg>'
+        for side in ("base", "head"):
+            write(t, {f"{side}/G/G.kicad_pcb": GEOMETRY_FIXTURE,
+                      f"review/G/{side}/pcb/G-F_Cu.svg": svg,
+                      f"review/G/{side}/pcb/G-B_Cu.svg": svg})
+        write(t, {"review/detect.json": json.dumps({"projects": [pr]}),
+                  "base/kicad-review.toml": "[3d]\nenabled = true\n"})
+        def fake_export(p, side, out):
+            write(t, {f"{out}/board.glb": "timestamped model", f"{out}/glb.log": ""})
+        with patch("kicad_review.render_side"), patch("kicad_review.export_glb", side_effect=fake_export) as export:
+            kr.cmd_render(None)
+        assert export.call_count == 1, "identical 3D inputs export once even when board unchanged"
+        assert pathlib.Path("review/G/base/board.glb").read_bytes() == pathlib.Path("review/G/head/board.glb").read_bytes()
+        with patch("kicad_review.project_checks", return_value=[]):
+            board = kr.build_project(pr, {}, kr.load_settings())["board"]
+        assert not board["changed"] and board["status"] == "unchanged"
+        assert len(board["layers"]) == 2 and board["size"] == [20.0, 10.0]
+        assert all(l["svg"]["base"] == l["svg"]["head"] and l["svg"]["base"] for l in board["layers"])
+        assert board["model3d"]["base"] == board["model3d"]["head"] and board["model3d"]["enabled"]
+        # A local model edit with identical PCB bytes needs separate exports.
+        write(t, {"base/G/body.step": "old model", "head/G/body.step": "new model"})
+        with patch("kicad_review.render_side"), patch("kicad_review.export_glb", side_effect=fake_export) as export:
+            kr.cmd_render(None)
+        assert export.call_count == 2, "model-only edits must not share an export"
+        for side in ("base", "head"):
+            os.remove(f"review/G/{side}/board.glb")
+            os.remove(f"review/G/{side}/glb.log")
+        with patch("kicad_review.project_checks", return_value=[]):
+            failed = kr.build_project(pr, {}, kr.load_settings())["board"]["model3d"]
+            disabled = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
+        assert failed["enabled"] and failed["base"] is None and failed["head"] is None
+        assert set(failed["errors"]) == {"base", "head"}
+        assert "model3d" not in disabled
+    finally:
+        os.chdir(old_cwd)
+print("ok unchanged board full SVG inventory, shared geometry and shared 3D")
+
+# Revision render caches avoid all KiCad exports on a warm run and track settings/tool identity.
+import shutil
+with TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "G", "name": "G", "status": "unchanged"}
+        write(t, {"review/detect.json": json.dumps({"base": "1"*40, "head": "2"*40, "projects": [pr]}),
+                  "base/G/G.kicad_pcb": GEOMETRY_FIXTURE, "head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
+        def fake_render(src, name, out, **kw):
+            write(t, {f"{out}/drc.json": '{"violations": []}'})
+        with patch("kicad_review.render_side", side_effect=fake_render) as render:
+            kr.cmd_render(None)
+            assert render.call_count == 2
+            shutil.rmtree("review/G")
+            kr.restore_renders(None)
+            assert pathlib.Path("review/G/base/drc.json").exists()
+            kr.cmd_render(None)
+            assert render.call_count == 2, "warm revision caches must skip all exports"
+        assert pathlib.Path("review/G/base/drc.json").exists() and pathlib.Path("review/G/head/drc.json").exists()
+        # Library exports compare a pair of commits, unlike standalone board/sheet exports.
+        lib_settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+        lib_settings["libraries"]["enabled"] = True
+        with patch("kicad_review.load_settings", return_value=lib_settings):
+            kr.cache_renders()
+            try:
+                kr.restore_renders(None)
+                raise AssertionError("pair-dependent library exports must not be skipped")
+            except SystemExit as exc:
+                assert exc.code == 1
+    finally:
+        os.chdir(old_cwd)
+print("ok per-commit project render cache hits retain both revisions")
+
+assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
+assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"

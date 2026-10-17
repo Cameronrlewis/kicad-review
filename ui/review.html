@@ -4,18 +4,33 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KiCad review</title>
+<script src="theme.js"></script>
 <link rel="stylesheet" href="tokens.css">
 <link rel="stylesheet" href="review.css">
 </head>
 <body>
-<header id="hdr"></header>
-<div id="modes" role="toolbar" aria-label="Comparison mode"></div>
+<!-- KR_ICONS -->
+<div class="report-head"><header id="hdr"></header><button type="button" class="btn theme-toggle" data-theme-toggle aria-label="Switch to light theme" title="Switch to light theme" aria-pressed="true"><svg class="icon" aria-hidden="true" focusable="false"><use href="#kr-theme"></use></svg><span>Theme</span></button></div>
+<div id="toolbar" role="toolbar" aria-label="Review tools">
+  <button type="button" data-dock="nav" aria-controls="nav" aria-expanded="false" title="Projects, sheets and layers">Navigator</button>
+  <div id="modes" role="group" aria-label="Comparison mode"></div>
+  <div id="change-nav" role="group" aria-label="Change navigation"><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)">&lsaquo;</button><span id="change-count" class="pct" title="Selected change / total" aria-label="Selected change of total"></span><button type="button" data-step="1" aria-label="Next change" title="Next change (j)">&rsaquo;</button></div>
+  <div id="zoombar" role="group" aria-label="View"></div>
+  <span class="tb-spacer"></span>
+  <div class="mark-styles" role="radiogroup" aria-label="Change mark style">
+    <span>Marks</span><button type="button" id="mark-style" data-mark-style="outline" role="radio" aria-checked="true" disabled>Outline</button><button type="button" data-mark-style="recolour" role="radio" aria-checked="false" tabindex="-1" disabled>Recolour</button>
+  </div>
+  <button type="button" data-dock="panel" aria-controls="panel" aria-expanded="false" title="Changes, checks, parts and threads">Inspector</button>
+</div>
 <div id="app">
   <nav id="nav" aria-label="Projects, sheets and layers"></nav>
   <main id="stage" aria-label="Drawing"></main>
-  <aside id="panel" aria-label="Changes and checks"></aside>
+  <aside id="panel" aria-label="Review inspector"></aside>
 </div>
-<div id="zoombar" role="toolbar" aria-label="View"></div>
+<dialog id="shortcuts" aria-labelledby="shortcuts-title"><h2 id="shortcuts-title">Keyboard shortcuts</h2>
+<dl><dt>Home / Ctrl+0 / f</dt><dd>Fit drawing, keep selection</dd><dt>F1 / Ctrl+= / Ctrl+Shift+=</dt><dd>Zoom in at cursor</dd><dt>F2 / Ctrl+−</dt><dd>Zoom out at cursor</dd><dt>F4</dt><dd>Center on cursor</dd><dt>PageUp / PageDown</dt><dd>Front / back copper (board); previous / next sheet (schematic)</dd><dt>+ / −</dt><dd>Next / previous enabled board layer</dd><dt>H</dt><dd>Inactive layers: normal / dim / hide</dd><dt>Ctrl+U</dt><dd>Units: mm / mil / in</dd><dt>N / Shift+N</dt><dd>Finer / coarser grid</dd><dt>{ / }</dt><dd>Decrease / increase active layer opacity</dd><dt>j / k / ↓ / ↑</dt><dd>Next / previous change</dd><dt>c / Right click</dt><dd>Place thread pin (when enabled)</dd><dt>Esc</dt><dd>Cancel pin / clear selection; close this sheet</dd><dt>b</dt><dd>Toggle 3D blend</dd><dt>Alt+↑</dt><dd>Parent schematic sheet</dd><dt>?</dt><dd>Show shortcuts</dd><dt>Left / middle / right drag</dt><dd>Pan linked views; wheel zooms at cursor</dd></dl>
+<button type="button" data-close autofocus>Close</button></dialog>
+<footer id="statusbar" aria-label="Drawing status"><span class="status-coordinates"><span>X <span data-coordinate="x">—</span></span><span>Y <span data-coordinate="y">—</span></span><span data-units>mm</span></span><span>Z <span data-zoom>—</span></span><span>dx <span data-coordinate="dx">—</span> dy <span data-coordinate="dy">—</span> dist <span data-coordinate="dist">—</span></span><span>grid <span data-grid>—</span></span><span>Change <span data-change>0/0</span></span><button type="button" id="shortcuts-open" aria-label="Keyboard shortcuts (?)" title="Keyboard shortcuts (?)">?</button><span class="status-message" role="status" aria-live="polite">Ready</span></footer>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <!-- Keep each drawing's alpha, replace its colour: removed = red, added = green. Multiplied together, unchanged ink turns black. -->
   <filter id="tint-del" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .85  0 0 0 0 .1  0 0 0 0 .15  0 0 0 1 0"/></filter>
@@ -25,6 +40,12 @@
   <filter id="ink-add" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="0 0 0 0 .1  0 0 0 0 .6  0 0 0 0 .2  -.3 -.59 -.11 1 0"/></filter>
 </svg>
 <script src="sample/review-data.js"></script>
+<script src="kicad-colors.js"></script>
+<script src="board-gl.js"></script>
+<script src="appearance-state.js"></script>
+<script src="appearance.js"></script>
+<script src="board-marks.js"></script>
+<script src="board-diff.js"></script>
 <script src="review.js"></script>
 </body>
 </html>

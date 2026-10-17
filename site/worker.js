@@ -1,6 +1,6 @@
 import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { escapeHtml, sharedPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
+import { escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute } from './threads.js';
 import { issuesRoute } from './issues.js';
@@ -156,7 +156,7 @@ function errorPage(status, title, message, links = [], active, init = {}, detail
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'text/html; charset=utf-8');
   const pageDetails = title === "Can't open this page" ? refusalDetails : details;
-  return sessionResponse(messagePage({ title, message, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
+  return sessionResponse(messagePage({ title, message, code: status, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
 export function gh(path, token, init = {}) {
@@ -631,7 +631,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/logout') return redirect('/', [clear('s', url.protocol === 'https:')]);
       if (request.method === 'GET' && url.pathname === '/') return await home(request, env);
       const shareView = url.pathname.match(/^\/s\/([^/]+)(\/raw)?$/);
-      if (request.method === 'GET' && shareView) return await serveShare(request, env, shareView[1], Boolean(shareView[2]), { gh, response, reportCsp, frameCsp, sharedPage, allowedOwners });
+      if (request.method === 'GET' && shareView) return await serveShare(request, env, shareView[1], Boolean(shareView[2]), { gh, response, reportCsp, frameCsp, sharedPage, sharedNotFoundPage, allowedOwners });
       const revoke = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/share\/revoke$/);
       if (request.method === 'POST' && revoke) return await revokeShares(request, env, { owner: revoke[1], repo: revoke[2] }, { access, gh, response, sessionResponse });
       const shareCreate = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/share$/);

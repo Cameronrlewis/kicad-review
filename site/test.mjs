@@ -4,10 +4,11 @@ import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
+import { fixturePages } from './proof.mjs';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
 import { historyEvents, HISTORY_QUERY } from './history.js';
-import { historyPage } from './pages.js';
+import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -120,7 +121,7 @@ test('TS-S5 a page that never becomes ready fails instead of hanging', { skip: s
   writeFileSync(page, '<!doctype html><title>Never ready</title>');
   const r = spawnSync(process.execPath, ['ui/check.mjs', 'loads sample', '--page', page], { encoding: 'utf8', timeout: 30000,
     env: { ...process.env, CHECK_PORT: process.env.CHECK_PORT || '9395', CHECK_TIMEOUT: '2000', CHROME: chrome } });
-  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL loads sample -> Runtime.evaluate timed out/);
+  assert.equal(r.status, 1); assert.match(r.stdout + r.stderr, /FAIL (startup )?(loads sample|startup)\b.* -> .*timed out/);
 });
 
 test('3D runner reports and bounds one whole check', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
@@ -133,11 +134,11 @@ test('3D runner reports and bounds one whole check', { skip: spawnSync(chrome, [
 });
 
 test('timed-out runner body settles before the next check starts', async () => {
-  const source = readFileSync('ui/check.mjs', 'utf8'), loop = source.slice(source.indexOf('let failed = 0;'), source.indexOf('if (shot)'));
+  const source = readFileSync('ui/check.mjs', 'utf8'), loop = source.slice(source.indexOf('let failed = 0;'), source.indexOf('if (shot'));
   let settled = false, overlap = false;
   const log = line => { if (line === 'RUN second' && !settled) overlap = true; };
   await runInNewContext(`(async()=>{${loop}})()`, {
-    CHECKS: [['first', '', 'first()'], ['second', '', 'second()']], filter:'', dark:false, page:'', noSkip:false, errors:[],
+    CHECKS: [['first', '', 'first()'], ['second', '', 'second()']], filter:'', dark:false, page:'', pageUrl:'http://127.0.0.1:1/page.html', noSkip:false, errors:[],
     setTimeout, clearTimeout, process:{env:{CHECK_WALL_TIMEOUT:'1'}}, console:{log},
     send:async () => ({}), sleep:() => new Promise(r => setTimeout(r, 10)),
     evaluate:async expr => { if (expr.includes('first()')) settled = true; return {result:{value:true}}; },
@@ -301,7 +302,7 @@ test('home shows the session-ended notice only when a stale cookie was sent', as
   assert.doesNotMatch(await signedOut.text(), /You were signed out\. Sign in again to continue\./);
   const response = await call('/', { headers: { Cookie: 's=stale' } });
   const body = await response.text();
-  assert.match(body, /class="notice notice-info">You were signed out\. Sign in again to continue\./);
+  assert.match(body, /class="notice notice-info" role="status">You were signed out\. Sign in again to continue\./);
   assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
 });
 
@@ -375,7 +376,7 @@ test('unsafe next is ignored and login text is HTML escaped', async () => {
     const home = await call('/', { headers: { Cookie: `s=${cookieValue(callback, 's')}` } });
     const body = await home.text();
     assert.match(body, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-    assert.doesNotMatch(body, /<script>/);
+    assert.doesNotMatch(body, /<script>alert/);
   } finally { restore(); }
 });
 
@@ -738,13 +739,13 @@ test('repository cards show escaped details, visibility, update time, and two ac
       pushed_at: '2025-02-03T04:05:00Z',
     }],
   });
-  assert.match(body, /class="card"/);
+  assert.match(body, /aria-label="Repositories"/);
   assert.match(body, /&lt;owner&gt;/);
   assert.match(body, /&lt;board&gt;/);
   assert.match(body, /private/);
-  assert.match(body, /updated .* ago/);
+  assert.match(body, /\d+ \w+ ago/);
   assert.match(body, /title="2025-02-03T04:05:00Z"/);
-  assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E"[^>]*>Reviews<\/a>/);
+  assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E"[^>]*>&lt;owner&gt;\/&lt;board&gt;<\/a>/);
   assert.match(body, /href="\/r\/%3Cowner%3E\/%3Cboard%3E\/commits"[^>]*>Compare commits<\/a>/);
 });
 
@@ -768,7 +769,7 @@ test('review cards parse, escape, and list artifacts once', async () => {
     assert.equal(artifactCalls, 1);
     assert.match(body, /class="review-card"/); assert.match(body, /deadbee/); assert.match(body, /cafebad/);
     assert.match(body, /✓ passing/); assert.match(body, /branch push/);
-    assert.match(body, /Revisions not recorded \(older report\)/); assert.match(body, /— not recorded/);
+    assert.match(body, /Revisions not recorded \(older report\)/); assert.match(body, /· not recorded/);
     assert.doesNotMatch(body, /Not run/); assert.doesNotMatch(body, /1234567/); assert.doesNotMatch(body, />\?<\//); assert.match(body, /&lt;b&gt;x/);
     assert.doesNotMatch(body, /kicad-review-bad/); assert.doesNotMatch(body, /bbbbbbb/);
   } finally { restore(); }
@@ -1073,7 +1074,7 @@ function commitsScript() {
   const bar = { querySelector: () => status, querySelectorAll: () => [node(), node()] };
   const document = { createElement: node, querySelector: (selector) => ({ '.compare-form': form, '.compare-bar': bar, '[name=branch]': branch, '[name=tag]': tag, '#tag': tag })[selector] };
   const page = commitsPage({ owner: 'owner', repo: 'repo', branch: 'main', branches: ['main', 'dev'], tag: 'v1', tags: [{ name: 'v1' }], commits: [] });
-  runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document });
+  runInNewContext([...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1], { document });
   return { branch, tag, row };
 }
 
@@ -1108,13 +1109,14 @@ test('compare page renders every inline-script target and keeps Show in its pick
 test('generating review maps queued, rendering, and completed job steps', () => {
   const common = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', base: 'deadbeef', head: 'cafebabe', startedAt: '2026-10-07T10:00:00Z' };
   const queued = runPage({ ...common, running: true, status: 'queued', jobs: [] });
-  assert.match(queued, /● <span class="spinner"[^>]*><\/span> Waiting to start <span class="step-state">· in progress<\/span>/);
+  assert.match(queued, /<li class="active"><span class="spinner"[^>]*><\/span> Waiting to start <span class="step-state">· in progress<\/span>/);
   const rendering = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
     { name: 'Check out repository', status: 'completed', conclusion: 'success' },
     { name: 'Render board', status: 'in_progress', conclusion: null },
   ] }] });
   assert.match(rendering, /✓ Getting the files <span class="step-state">· done<\/span>/);
-  assert.match(rendering, /● <span class="spinner"/);
+  assert.match(rendering, /<li class="active"><span class="spinner"/);
+  assert.doesNotMatch(rendering, /[●○✓✕] <span class="spinner"|● /);
   const done = runPage({ ...common, running: true, status: 'in_progress', jobs: [{ steps: [
     { name: 'Check out', status: 'completed', conclusion: 'success' },
     { name: 'Render schematic', status: 'completed', conclusion: 'success' },
@@ -1177,7 +1179,7 @@ test('run page validates revisions and only refreshes while running', () => {
   const running = runPage({ ...common, running: true, base: base, head, startedAt: '2026-10-07T10:00:00Z' });
   assert.match(running, /http-equiv="refresh" content="5"/);
   assert.match(running, /deadbee → cafebab/);
-  assert.match(running, /Revisions: <span class="mono">deadbee/);
+  assert.match(running, /Revisions: <span class="mono"><span title="deadbeef[0-9a-f]*">deadbee<\/span> → <span title="cafebabe[0-9a-f]*">cafebab<\/span>/);
   const invalid = runPage({ ...common, running: true, base: '<bad>', head });
   assert.match(invalid, /Revisions: not recorded/);
   const finished = runPage({ ...common, running: false, status: 'completed', base, head });
@@ -2075,9 +2077,11 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
 });
 test('missing share secrets keep existing review HTML byte-identical and guest routes inactive', async () => {
   const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
-  const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>');
+  const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
+    // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
+    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '82be67bc0030511bc6cca251252770b78a742053b98f7e08d74ba0e027824daa');
+  assert.equal(createHash('sha256').update(current).digest('hex'), 'ca368f2e613de7c4f3dbc3afd7f6eeccf928c3ddc9dde2435db92b02c1857703');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -2153,7 +2157,7 @@ test('share default and maximum lifetime are seven and thirty days; only writers
     assert.match(page.headers.get('Content-Security-Policy'), /connect-src 'self'/);
   } finally { restore(); }
   const reader = shareCreationFetch({ push: false });
-  try { const page = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${await signedIn()}` } }), appEnv); assert.doesNotMatch(await page.text(), /share-open|share-dialog/); }
+  try { const page = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${await signedIn()}` } }), appEnv); assert.doesNotMatch(await page.text(), /id="share-open"|id="share-dialog"/); }
   finally { reader(); }
 });
 test('missing App permissions cannot mint a capability or serve a guest, and exceptions retain refreshed cookies', async () => {
@@ -2185,7 +2189,7 @@ test('malformed guest capabilities fail privately without touching a signed-in s
     const cookie = await signedIn({ e: Date.now() - 1 });
     for (const config of [env, appEnv]) {
       const response = await worker.fetch(request('/s/garbage/raw', { headers: { Cookie: `s=${cookie}`, 'Sec-Fetch-Dest': 'iframe' } }), config);
-      assert.equal(response.status, 404); guestSecurity(response); assert.equal(await response.text(), 'Not found');
+      assert.equal(response.status, 404); guestSecurity(response); assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8'); assert.equal(await response.text(), sharedNotFoundPage());
     }
     assert.equal(calls, 0);
   } finally { restore(); }
@@ -2916,4 +2920,240 @@ test('missing artifact points readers to the updated PR comment', async () => {
     assert.equal(response.status, 404);
     assert.match(await response.text(), /Open the review from the pull request comment/);
   } finally { restore(); }
+});
+
+test('every frame carries early shared theme script and a labeled toggle',()=>{
+  for(const html of [signedOutPage(),homePage({user:'cam',repositories:[]}),
+    messagePage({title:'Error',message:'Unavailable'})]) {
+    assert.match(html,/data-theme-toggle/);
+    assert.match(html,/kr\.theme/);
+    assert.ok(html.indexOf('kr.theme') < html.indexOf('<style>'));
+    assert.match(html,/aria-label="Switch to light theme"/);
+  }
+});
+
+test('site embeds sprite and theme icon without external asset URLs',()=>{
+  const html=signedOutPage();
+  assert.match(html,/id="kr-theme"/); assert.match(html,/href="#kr-theme"/);
+  assert.ok(!html.includes('href="icons/'));
+});
+
+test('S2 shell and primitives have dense accessible contracts', () => {
+  const html = frame({ title: '<x>', body: '<main>Body</main>' });
+  assert.match(html, /data-theme-toggle/);
+  assert.match(html, /<header class="top">/);
+  assert.match(html, /--toolbar-h/);
+  assert.match(html, /--input-border/);
+  assert.match(siteBadge('removed', '<bad>'), /−[^<]*&lt;bad&gt;/);
+  assert.match(siteBadge('modified'), /status-modified/);
+  assert.match(siteTable(['Name'], '<tr><td>R16</td></tr>', 'Parts'), /aria-label="Parts"/);
+  assert.match(siteTable(['<b>'], '', 'Empty'), /&lt;b&gt;/);
+});
+
+test('S2 message page shows status and safe collapsible diagnostics', () => {
+  const html = messagePage({ title: '<bad>', message: '<script>', code: 502, details: ['Request ID: <id>'], links: [{ href: '/r/o/r', label: 'Back to reviews' }] });
+  assert.match(html, /class="message-code mono muted">502/);
+  assert.match(html, /<details class="message-diagnostics"><summary>Details<\/summary>/);
+  assert.match(html, /Request ID: &lt;id&gt;/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /href="\/r\/o\/r"/);
+  assert.doesNotMatch(messagePage({ title: 'Missing', message: 'No details' }), /<details class="message-diagnostics"/);
+});
+
+test('S2 repositories use a compact safe table and explicit empty state', () => {
+  const html = homePage({ user: 'u', repositories: [{ owner: { login: 'o' }, name: '<r>', private: true, default_branch: 'main', pushed_at: 'invalid' }] });
+  assert.match(html, /aria-label="Repositories"/);
+  assert.match(html, /&lt;r&gt;/);
+  assert.match(html, /\/r\/o\/%3Cr%3E\/commits/);
+  assert.match(html, /unknown time/);
+  assert.match(html, /<code>main<\/code>/);
+  assert.doesNotMatch(html, /<h2><r>/);
+  assert.match(homePage({ user: 'u', repositories: [] }), /No repositories granted/);
+  assert.match(signedOutPage({ sessionEnded: true }), /role="status"/);
+});
+
+// Task p2-t3
+test('S2 review tables retain manual legacy and milestone semantics', () => {
+  const item = { id: 9, branch: '<branch>', manual: true, legacy: true, result: 'new', createdAt: 'bad', date: 'today', pdf: true };
+  const html = reviewsPage({ user: 'u', owner: 'o', repo: 'r', items: [item], counts: {}, view: 'milestones', groups: [{ title: '<M>', url: 'javascript:bad', open: 0, merged: 0, items: [item] }] });
+  assert.match(html, /aria-label="Reviews"/);
+  assert.match(html, /Manual comparison/);
+  assert.match(html, /Revisions not recorded \(older report\)/);
+  assert.match(html, /\/a\/9\?pdf=1/);
+  assert.match(html, /&lt;M&gt;/);
+  assert.match(html, /0\/0/);
+  assert.doesNotMatch(html, /javascript:bad/);
+});
+test('S2 timeline identifies event types without colour', () => {
+  for (const kind of ['commit', 'thread', 'review', 'checks']) {
+    const html = historyPage({ owner: 'o', repo: 'r', pull: 7, title: 'R16', filter: 'all', events: [{ kind, text: '<event>', who: 'Ada', time: '2026-10-14T10:00:00Z' }] });
+    assert.match(html, new RegExp(`data-kind="${kind}"`));
+    assert.match(html, /&lt;event&gt;/);
+  }
+});
+
+test('S2 compare carries non-colour A B labels and safe source metadata', () => {
+  const html = commitsPage({ owner: 'o', repo: 'r', branch: '<main>', branches: ['<main>'], commits: [{ sha: 'a'.repeat(40), message: '<script>', author: '<Ada>', date: 'today' }] });
+  assert.match(html, /Base <span class="compare-letter" aria-hidden="true">A<\/span>/);
+  assert.match(html, /Head <span class="compare-letter" aria-hidden="true">B<\/span>/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;Ada&gt;/);
+  assert.match(html, /aria-label="Commit revisions"/);
+});
+test('S2 progress announces current state and keeps recoverable outcomes', () => {
+  const args = { owner: 'o', repo: 'r', base: 'a'.repeat(40), head: 'b'.repeat(40) };
+  assert.match(runPage({ ...args, status: 'queued', running: true }), /aria-label="Review stages"/);
+  for (const state of ['failed', 'expired', 'nothing']) {
+    const html = runPage({ ...args, state });
+    assert.match(html, /Back to reviews/);
+    assert.doesNotMatch(html, /http-equiv="refresh"/);
+  }
+});
+
+test('S2 wrapper themes the opaque sandbox without changing raw routes', () => {
+  const html = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 9, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' });
+  assert.match(html, /new MutationObserver/);
+  assert.match(html, /attributeFilter: \['data-theme'\]/);
+  assert.match(html, /postMessage\(\{ kicadReviewTheme: theme \}, '\*'\)/);
+  assert.match(html, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true\) \{ loading\.hidden = true; syncTheme/);
+  assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.doesNotMatch(html, /allow-same-origin|contentDocument/);
+  assert.match(html, /<nav class="wrapper-navigation" aria-label="Review navigation">/);
+  assert.match(html, /<\/nav><\/div><div class="review-stage">/);
+});
+
+test('S2 thread dialogs have names labels and keyboard hint', () => {
+  const html = reviewPage({ owner: 'o', repo: 'r', id: 9, pull: 7, name: 'kicad-review.html' });
+  assert.match(html, /id="thread-composer" class="thread-dialog" aria-labelledby="thread-composer-title"/);
+  assert.match(html, /id="thread-view" class="thread-dialog" aria-labelledby="thread-view-title"/);
+  assert.match(html, /id="thread-composer-title"/);
+  assert.match(html, /Ctrl\+Enter/);
+  assert.match(html, /<label>Text<textarea name="text"/);
+  assert.match(html, /data-act="issue" hidden/);
+});
+test('S2 readiness uses bordered states even when unknown', async () => {
+  const panel = { children: [], replaceChildren(...items) { this.children = items; } };
+  const node = () => ({ children: [], append(...items) { this.children.push(...items); } });
+  await runInNewContext(`(${readinessClient.toString()})({readiness:'/ready',reviewHead:null})`, {
+    document: { getElementById: () => panel, createElement: node, addEventListener() {} },
+    fetch: async () => new Response(JSON.stringify({ head: 'b'.repeat(40), decisions: [], requested: [], blocking: null, open: null })),
+  });
+  assert.equal(panel.children[0].children[0].className, 'wait');
+  assert.match(panel.children[0].children[0].textContent, /waiting.*freshness unknown/);
+  assert.match(panel.children[0].children[2].textContent, /could not be read/);
+});
+
+test('S2 thread keyboard respects composition disabled state and native close', () => {
+  const submits = [], events = {}, nodes = {};
+  const element = () => ({ disabled: false, listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } });
+  function dialog() {
+    const children = {};
+    return { open: true, querySelector(s) {
+      const node = children[s] ||= element();
+      if (s === 'form') {
+        node.querySelector = selector => children[selector] ||= element();
+        node.requestSubmit = button => submits.push(button);
+      }
+      return node;
+    }, close() { this.open = false; } };
+  }
+  const composer = dialog(), view = dialog();
+  Object.assign(nodes, { 'review-report': { contentWindow: {} }, 'thread-composer': composer, 'thread-view': view, 'thread-notice': {} });
+  runInNewContext(`(${threadsClient.toString()})({})`, {
+    document: { getElementById: id => nodes[id] },
+    addEventListener(type, fn) { events[type] = fn; },
+    fetch() { assert.fail('keyboard or close must not fetch directly'); },
+  });
+  const key = view.querySelector('textarea').listeners.keydown;
+  let prevented = 0;
+  const event = { key: 'Enter', ctrlKey: true, preventDefault() { prevented++; } };
+  key({ ...event, isComposing: true }); key({ ...event, shiftKey: true });
+  assert.equal(submits.length, 0);
+  key(event);
+  assert.equal(submits.length, 1);
+  assert.equal(submits[0], view.querySelector('form').querySelector('[data-act=reply]'));
+  key({ key: 'Enter', metaKey: true, preventDefault() { prevented++; } }); // Cmd+Enter on macOS
+  assert.equal(submits.length, 2);
+  submits[0].disabled = true; key(event); assert.equal(submits.length, 2);
+  composer.querySelector('[data-act=close]').listeners.click();
+  view.querySelector('[data-act=close]').listeners.click();
+  assert.equal(composer.open, false); assert.equal(view.open, false);
+  assert.equal(prevented, 3);
+});
+
+test('S2 share presents read-only access and copy control', () => {
+  const html = reviewPage({ owner: 'o', repo: 'r', id: 9, name: 'kicad-review.html', share: true });
+  assert.match(html, /id="share-copy" type="button"/);
+  assert.match(html, /Read-only access/);
+  assert.match(html, /min="1" max="30" step="1" value="7"/);
+  assert.match(sharedPage({ token: 'body.signature', name: 'kicad-review.html' }), /Read-only shared review/);
+});
+test('S2 invalid share page is neutral accessible HTML without identity', async () => {
+  const html = sharedNotFoundPage();
+  assert.match(html, /Shared review unavailable/);
+  assert.match(html, /404/);
+  assert.doesNotMatch(html, /Signed in as|class="account"|\/logout|\/login/);
+  const restore = mockFetch(async () => { throw new Error('must not call upstream'); });
+  try {
+    const response = await worker.fetch(request('/s/not-a-capability'), env);
+    assert.equal(response.status, 404);
+    assert.match(response.headers.get('content-type'), /text\/html/);
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
+    assert.equal(await response.text(), html);
+  } finally { restore(); }
+});
+test('S2 share copy and duplicate-submit handlers', async () => {
+  const html = reviewPage({ owner: 'o', repo: 'r', id: 9, name: 'kicad-review.html', share: true });
+  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).find(x => x.includes("getElementById('share-dialog')"));
+  const mk = () => Object.fromEntries(['share-dialog', 'share-status', 'share-result', 'share-open', 'share-form', 'share-days', 'share-revoke', 'share-copy'].map(id => [id, { textContent: '', value: id === 'share-days' ? '7' : '' }]));
+  const run = (clipboard, fetchFn) => {
+    const el = mk(), timers = [], calls = [];
+    el['share-result'].focus = () => calls.push('focus'); el['share-result'].select = () => calls.push('select');
+    runInNewContext(script, { document: { getElementById: id => el[id] }, location: { origin: 'https://site.example' }, URL, confirm: () => true, navigator: { clipboard }, setTimeout: fn => { timers.push(fn); }, fetch: fetchFn });
+    return { el, timers, calls };
+  };
+  const copied = [];
+  const ok = run({ writeText: async v => { copied.push(v); } }, async () => shareJson({ url: 'https://site.example/s/body.signature', expires: Date.now() + 1000 }));
+  await ok.el['share-form'].onsubmit({ preventDefault() {} });
+  await ok.el['share-copy'].onclick();
+  assert.deepEqual(copied, ['https://site.example/s/body.signature']);
+  assert.equal(ok.el['share-status'].textContent, 'Copied ✓'); assert.notEqual(ok.el['share-copy'].disabled, true);
+  ok.timers.forEach(t => t()); assert.equal(ok.el['share-status'].textContent, '');
+  const bad = run({ writeText: async () => { throw new Error('denied'); } }, async () => shareJson({ url: 'https://site.example/s/body.signature', expires: Date.now() + 1000 }));
+  await bad.el['share-form'].onsubmit({ preventDefault() {} }); await bad.el['share-copy'].onclick();
+  assert.match(bad.el['share-status'].textContent, /Copy was blocked/); assert.deepEqual(bad.calls, ['focus', 'select']);
+  let posts = 0, release, fail = true;
+  const dup = run({}, () => { posts++; return new Promise((res, rej) => { release = () => fail ? rej(new Error('nope')) : res(shareJson({ url: 'https://site.example/s/a.b', expires: 1 })); }); });
+  const first = dup.el['share-form'].onsubmit({ preventDefault() {} });
+  await dup.el['share-form'].onsubmit({ preventDefault() {} });
+  assert.equal(posts, 1); release(); await first;
+  const third = dup.el['share-form'].onsubmit({ preventDefault() {} }); assert.equal(posts, 2); fail = false; release(); await third;
+});
+
+test('S2 complete screen inventory has labelled pages and no external UI assets', () => {
+  const fixtures = fixturePages();
+  assert.equal(Object.keys(fixtures).length, 23);
+  for (const [name, html] of Object.entries(fixtures)) {
+    assert.match(html, /<html\b[^>]*\blang="en"/, name);
+    assert.match(html, /<title>[^<]+<\/title>/, name);
+    assert.match(html, /data-theme-toggle/, name);
+    assert.match(html, /<main\b/, name);
+    assert.doesNotMatch(html, /<script[^>]+src=|<link[^>]+rel="stylesheet"|fonts\.googleapis/, name);
+  }
+  assert.match(fixtures['shared-invalid'], /Shared review unavailable/);
+  assert.match(fixtures.repositories, /aria-label="Repositories"/);
+  assert.match(fixtures.reviews, /aria-label="Reviews"/);
+});
+
+test('p2-gate: long content wraps and the active step shows one indicator', () => {
+  const css = readFileSync('site/site.css', 'utf8');
+  assert.match(css, /^body \{ overflow-wrap: anywhere; \}$/m);
+  assert.match(css, /^\.source-picker label \{ max-width: 100%; \}$/m);
+  assert.match(css, /^select \{ max-width: min\(100%, 40ch\)/m);
+  assert.match(css, /prefers-reduced-motion: reduce\) \{ \.spinner \{ animation: none; \} \}/);
+  const html = runPage({ user: 'u', owner: 'o', repo: 'r', base: 'a', head: 'b', startedAt: '2026-10-07T10:00:00Z', running: true, status: 'in_progress', jobs: [{ steps: [{ name: 'Render board', status: 'in_progress' }] }] });
+  const active = /<li class="active">(.*?)<\/li>/.exec(html)[1];
+  assert.equal((active.match(/class="spinner"/g) || []).length, 1);
+  assert.doesNotMatch(active, /[●○]/);
 });

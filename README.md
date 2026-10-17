@@ -242,6 +242,111 @@ To update KiCad, change `KICAD_IMAGE` in `review.yml` to a new tag and its diges
 
 Run the self-check with `python3 test_kicad_review.py`.
 
+## Schematic viewer
+
+Schematics retain KiCad's exported drawing sheet and title block. Paper stays
+warm white in both interface themes. The dot grid is 50 mil (1.27 mm), anchored
+to the drawing origin; distant views omit intermediate dots for legibility.
+Ctrl+U toggles schematic coordinates between mm and mil without moving the view.
+PageUp/PageDown visit the previous/next sheet by page number; Alt+Up visits the
+parent. The hierarchy shows Name (page n), with the active sheet in bold.
+
+Schematic colours use an exact-value map from KiCad's default SVG palette.
+Roles with the same exported RGB value stay linked. Unknown/custom export
+colours are preserved. Schematic diff outlines and recolour/hatch marks use
+changed bounding regions because CLI SVG paths do not carry object UUIDs.
+Existing reports without sheet renders still show the no-render message.
+
+## Board viewer
+
+New reports can draw both board revisions with retained **WebGL2** geometry. The board
+background remains KiCad navy in either chrome theme. Side by side shares one camera;
+Appearance provides **Layers**, **Objects**, and **Nets**, including layer eyes, colour and
+alpha, active-layer promotion, net highlighting, Normal/Dim/Hide inactive layers, and
+horizontal-only flip. Active B.Cu does not itself flip the board.
+
+Drag with the left, middle, or right button to pan; wheel/trackpad zoom anchors at the
+pointer. Click an object to select its change; right-click without dragging places a
+thread pin when online threads are enabled. Pointer coordinates and delta, units, zoom,
+and physical grid spacing appear in the status bar. Native input controls keep their
+editing keys; shortcuts act when focus is outside inputs and open dialogs.
+
+| Board shortcut | Action |
+|---|---|
+| Home / Ctrl+0 | Fit both revisions |
+| F1 / F2, Ctrl+plus / Ctrl+minus | Zoom in / out |
+| F4 | Centre at pointer |
+| Ctrl+U | Cycle mm / mil / inches (camera stays in mm) |
+| Page Up / Page Down | Activate F.Cu / B.Cu |
+| + / − | Next / previous declared layer |
+| H | Normal → Dim → Hide inactive layers |
+| N / Shift+N | Next / previous physical grid spacing; show grid |
+| { / } | Decrease / increase active-layer opacity |
+| ? | Shortcut sheet |
+
+The default PCB grid spacing is **0.5 mm**, matching KiCad 10's
+`common/settings/app_settings.cpp` default PCB grid index 15. The Objects tab toggles
+grid visibility. Tracks, vias, pads and filled shapes default to 100% opacity; zones and
+images to 60%. Images, ratsnest, DRC markers and drawing-sheet rows explain when data
+is unavailable. Validated per-viewer appearance persists under localStorage key
+`kr.appearance.v1`; **Reset to KiCad defaults** restores the initial settings. Blocked
+storage does not prevent viewing.
+
+### Geometry, text and fallback
+
+Optional `project.board.geometry = {base, head}` contains gzip/base64 **blob IDs**, not
+nested scenes; either revision may be `null`. Decoded JSON has its own `version: 1`,
+`units: "um"`, integer-micrometre bounds and dimensions (angles in millidegrees), declared
+layers/nets and drawable objects. `uuid` identifies the child; `changeUuid` identifies its
+owning semantic object; `changeIds` preserves report change links. Identical serialized
+scenes deduplicate through the existing blob store. Camera/hash `x`, `y` and `z` remain
+millimetres and CSS pixels per millimetre, independent of display units.
+
+Supported drawings include segments, tessellated arcs, vias, circle/rect/oval/roundrect/
+trapezoid pads, supported custom pad rings and layer-specific pad primitives, round or
+slotted drills, footprint transforms, lines/polygons, stored zone fills with holes and
+islands, and text. Zone outlines without stored fills are not invented copper. Text uses
+a **system monospace glyph atlas**, not KiCad's exact stroke font; glyph shapes/spacing
+are an approximation and unsupported glyphs use a replacement. No external font or
+texture is downloaded.
+
+A current browser needs WebGL2 with stencil support plus the native gzip
+`DecompressionStream` API for geometry. Unsupported drawable types make that revision
+incomplete: the **authoritative KiCad-exported SVG** is retained, not a partially drawn
+WebGL board. Old reports, invalid scenes, unavailable WebGL2 and context loss also use
+SVG with a diagnostic and reduced Appearance controls. Existing SVG Side, Overlay,
+Wipe, Blend and Semantic comparisons remain available. Stage 4 supplies geometry and
+Appearance; Stage 5 enables the new WebGL diff compositor (already integrated in this
+branch). This does not claim the later change-mark styling is complete.
+
+### Local board proof
+
+Generate an offline report with the normal `detect`, `render`, `report` pipeline and
+supply its absolute path. The default sample suite deliberately skips the hardware
+performance gate; **a skip is not performance evidence**. Explicit measurement is strict
+about two complete WebGL revision scenes and runs three six-second pan/zoom samples,
+each with a one-second warm-up. Every warm run must reach 50 FPS with both scenes
+drawn and no geometry or net-texture uploads. Evidence includes counts, viewport/DPR,
+frame-interval p95, CPU submission time, and a separate `gl.finish()` diagnostic. rAF
+measures scheduled draws, not guaranteed GPU completion. No performance claim is made
+without passing measurements on the target board and machine.
+
+```sh
+CHECK_PERF=1 CHECK_PORT=9386 CHECK_TIMEOUT=60000 CHECK_WALL_TIMEOUT=120000 \
+  timeout 150 node ui/check.mjs 'board fps two revisions' --no-skip --page "$REPORT"
+CHECK_PORT=9386 CHECK_TIMEOUT=60000 timeout 120 node ui/check.mjs \
+  'board proof Layers Normal' --page "$REPORT" --shot "$SHOT"
+# Also: Objects, Nets, Dim, Hide, Flip, active B.Cu; add --dark for chrome theme.
+# Repeat the FPS gate with --dpr 2 for a separate robustness measurement.
+# --offline blocks HTTP(S), and fails any attempted external resource request.
+```
+
+The harness uses headless Chrome, ANGLE SwiftShader, 1920×1080 and DPR1 by default.
+Keep generated reports, measurement logs and screenshots outside the repository.
+The added offline payload target is at most 1,500,000 raw HTML bytes versus the
+pre-renderer report for identical inputs/settings, including base64 scenes and assets;
+compressed geometry size alone is not the budget.
+
 ## Developing the review page
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
@@ -259,14 +364,20 @@ python3 -c "import re; h = open('kicad-review.html', encoding='utf-8').read(); o
 
 The workflow and the page share one contract, `window.REVIEW_DATA` (`version: 1`): `repo`; `links`
 (`review`, `base`, `head`, `run` — github.com URLs, empty outside Actions); `base`, `head`, `reason`;
-`settings`; `projects[]`, each with `sheets[]` (UUID `path`, `parent`, `status`, and for changed sheets
-`size` in mm and `svg.base`/`svg.head` blob ids), `board` (`changed`, `status`, `size`, `layers[]` with
+`settings`; `projects[]` (all projects, changed first and unchanged afterward), each with `sheets[]`
+(UUID `path`, `parent`, `status`, `size` in mm and `svg.base`/`svg.head` blob ids for every sheet), `board` (`changed`, `status`, `size`, `layers[]` with
 `changed` and blob ids), `changes[]` (`id`, `action`, `kind`, `ref`, `where`, `pos`, `pos_before`, `box`,
 and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `new`, `severity`, `pos`,
-`box`, `where`); and `blobs` (gzip + base64 SVG text, and opted-in GLB bytes). When `3d.enabled` is true
-and an export runs, `board.model3d` has base/head GLB blob ids (or `null`), `board.model3d_failed` marks
-failed exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
+`box`, `where`); and `blobs` (gzip + base64 SVG text, optional board-scene JSON, and opted-in GLB bytes). When `3d.enabled` is true
+on every review, `board.model3d` has base/head GLB blob ids (or `null`), `enabled`, `changed`, and
+an `errors` map for unavailable exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
 footprint`). Positions and boxes are drawing millimetres.
+
+Unchanged sheets, board layers (including blank layers), board geometry, and enabled 3D views remain
+available at both revisions. The viewer labels these views “No layout changes”, “No schematic changes
+on this sheet”, or “No 3D changes” without hiding the design. Identical board/model inputs share one
+GLB export, including its generated timestamp. Actions caches rendered outputs per commit, project,
+settings, KiCad image, and tool version; a complete warm hit avoids starting the KiCad container.
 
 Library review (`[libraries] enabled = true`) covers only library files inside the project folder. Nicknames come from the file name (`Parts.kicad_sym` or `Parts.pretty` means `Parts`); library tables and external libraries are not resolved. Footprint item names come from `.kicad_mod` file stems, including legacy KiCad `module` files; symbol item names come from their declarations without a library prefix. For placed-part usage, exact library IDs win. When a placed part's nickname is not a local library, its item name is matched only if exactly one local library across the compared revisions contains that item of the same kind. This supports renamed or global nicknames without guessing when names are ambiguous, including duplicates in unchanged local libraries. All symbol units contribute pins; the drawing shows unit 1. Pad removals or renumbering and symbol electrical-type changes warn when placed parts use the item.
 With waivers enabled, format v1 adds `violations[].waiver_key`, `violations[].waived` for matched findings, `checks[].waived` counts on waivable checks, and top-level `waivers` lists (`stale`, `expired`, `proposed`, `invalid`); these additive fields are absent when waivers are off.
