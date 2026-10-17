@@ -37,5 +37,6 @@ jobs:
       - run: node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"
       - run: node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"
+      - run: node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"
