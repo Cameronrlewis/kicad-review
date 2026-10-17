@@ -4,7 +4,7 @@ import { register } from 'node:module';
 register(import.meta.url);
 
 export async function load(url, context, nextLoad) {
-  if (url.endsWith('.css') || url.endsWith('/ui/theme.js') || url.endsWith('/ui/icons/sprite.svg')) {
+  if (url.endsWith('.css') || /\/ui\/[^/]+\.js$/.test(url) || url.endsWith('/ui/review.html') || url.endsWith('/ui/icons/sprite.svg')) {
     const source = await readFile(new URL(url), 'utf8');
     return { format: 'module', source: `export default ${JSON.stringify(source)};`, shortCircuit: true };
   }

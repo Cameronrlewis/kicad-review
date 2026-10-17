@@ -1,5 +1,6 @@
 import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
+import { currentBody } from './report-shell.js';
 import { escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute } from './threads.js';
@@ -272,7 +273,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
     if (!location) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     const blobResponse = await fetch(location);
     if (!blobResponse.ok || !blobResponse.body) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
-    return sessionResponse(blobResponse.body, {
+    return sessionResponse(await currentBody(blobResponse), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Security-Policy': reportCsp,
@@ -322,23 +323,58 @@ async function home(request, env) {
       },
     });
   }
-  let repositories = [];
+  let repositories = [], recent = [], activity = [], limited = false;
+  const errors = [];
+  // bench-t8: request-local promise cache; at most 21 GitHub calls (1 + 5 + 5×3).
+  // No per-report requests, pagination fan-out, or cross-user cached responses.
+  const cache = new Map();
+  const json = path => {
+    if (!cache.has(path)) cache.set(path, (async () => {
+      const result = await gh(path, active.token);
+      if (!result.ok) throw new Error('GitHub request failed');
+      return result.json();
+    })());
+    return cache.get(path);
+  };
   try {
-    const installationsResponse = await gh('/user/installations', active.token);
-    if (installationsResponse.ok) {
-      const installations = (await installationsResponse.json()).installations || [];
-      const results = await Promise.all(installations.map(async ({ id }) => {
-        const list = await gh(`/user/installations/${encodeURIComponent(id)}/repositories?per_page=100`, active.token);
-        return list.ok ? (await list.json()).repositories || [] : [];
-      }));
-      repositories = results.flat().filter((repo) => {
-        return allowedOwners(env).includes(String(repo.owner?.login).toLowerCase());
-      }).sort((a, b) => String(b.pushed_at || '').localeCompare(String(a.pushed_at || '')));
+    const installations = (await json('/user/installations')).installations || [];
+    limited = installations.length > 5;
+    const results = await Promise.all(installations.slice(0, 5).map(async ({ id }) => {
+      try { return (await json(`/user/installations/${encodeURIComponent(id)}/repositories?per_page=100`)).repositories || []; }
+      catch { errors.push('An installation repository list could not be loaded.'); return []; }
+    }));
+    const unique = new Map();
+    for (const repo of results.flat()) if (allowedOwners(env).includes(String(repo.owner?.login).toLowerCase())) {
+      unique.set(`${repo.owner.login}/${repo.name}`.toLowerCase(), repo);
     }
-  } catch {
-    /* Display the installation guidance below. */
-  }
-  return sessionResponse(homePage({ user: active.login, repositories }), {
+    repositories = [...unique.values()].sort((a, b) => String(b.pushed_at || '').localeCompare(String(a.pushed_at || '')));
+    await Promise.all(repositories.slice(0, 5).map(async repo => {
+      const owner = repo.owner.login;
+      const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo.name)}`;
+      const [artifacts, runs, pulls] = await Promise.all([
+        json(`${root}/actions/artifacts?per_page=100`),
+        json(`${root}/actions/runs?per_page=20`),
+        json(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=20`),
+      ].map(promise => promise.catch(() => null)));
+      if (!artifacts || !runs || !pulls) errors.push(`Some recent data for ${owner}/${repo.name} could not be loaded.`);
+      repo.runs = runs?.workflow_runs || [];
+      activity.push(...repo.runs.map(run => ({ ...run, owner, repo: repo.name })));
+      const items = reviews(artifacts?.artifacts).slice(0, 20).map(item => {
+        const run = repo.runs.find(run => run.id === item.workflow_run?.id);
+        const pullNumber = run?.pull_requests?.[0]?.number;
+        const pull = Array.isArray(pulls) ? pulls.find(pr => pr.number === pullNumber || (!pullNumber && pr.head?.sha === item.workflow_run?.head_sha)) : null;
+        return { id: item.id, owner, repo: repo.name, base: item.base, head: item.head, result: item.result,
+          createdAt: item.created_at, branch: item.workflow_run?.head_branch, pull,
+          freshness: pull?.head?.sha && item.revisionsRecorded ? (pull.head?.sha?.slice(0, 7) === item.head ? 'Latest commit' : 'Older commit') : 'Not checked' };
+      });
+      repo.latest = items[0]; recent.push(...items);
+    }));
+    recent.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    recent = recent.slice(0, 20);
+    activity.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  } catch { errors.push('Repositories could not be loaded. Check GitHub access and retry.'); }
+
+  return sessionResponse(homePage({ user: active.login, repositories, recent, activity, errors, limited }), {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
   }, active);
 }

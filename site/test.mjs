@@ -438,7 +438,7 @@ test('HTML pages inline tokens and render the shared frame safely', async () => 
   for (const page of pages) {
     assert.match(page, /--accent/);
     assert.match(page, /<header class="top">/);
-    assert.match(page, /Signed in as &lt;b&gt;octocat&lt;\/b&gt;/);
+    assert.match(page, /&lt;b&gt;octocat&lt;\/b&gt; ▾/);
     assert.doesNotMatch(page, /Signed in as <b>/);
   }
 });
@@ -611,8 +611,8 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('Content-Security-Policy'), frameCsp);
     const body = await response.text();
-    assert.match(body, /Review deadbee → cafebad/);
-    assert.match(body, /✕ checks failing/);
+    assert.match(body, /deadbee → cafebad · KiCad review/);
+    assert.match(body, /✕ NEEDS WORK/);
     assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/123/);
     assert.match(body, /<iframe[^>]+src="\/r\/Cameronrlewis\/repo\/a\/44\/raw"/);
     assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
@@ -2080,8 +2080,8 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
   const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
-  // Fixed digest of merged issue-links HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), 'ca368f2e613de7c4f3dbc3afd7f6eeccf928c3ddc9dde2435db92b02c1857703');
+  // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
+  assert.equal(createHash('sha256').update(current).digest('hex'), 'e425e07582503d0703ce8562bf3aafe8bded02bc802e1dcb55f7a0a01b4a966e');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -2266,7 +2266,7 @@ test('serialized thread client has no bundler name helpers and notice is in revi
   assert.doesNotMatch(threadsClient.toString(), /__name/);
   assert.match(readFileSync('site/wrangler.toml', 'utf8'), /^keep_names = false$/m);
   const html = reviewPage({ owner: 'Cameronrlewis', repo: 'repo', id: '123', pull: 7 });
-  assert.match(html, /class="review-bar">[^]*?id="thread-notice"[^]*?<\/div><div class="review-stage">/);
+  assert.match(html, /class="review-bar" aria-label="Review navigation">[^]*?id="thread-notice"[^]*?<\/nav><div class="review-stage">/);
 });
 
 test('thread client contains load failures, clears notice, and guards vanished threads', async () => {
@@ -2855,11 +2855,11 @@ test('rerun retains refreshed cookie across errors and success', async () => {
 test('PR review page includes serialized readiness before thread notice', () => {
   const args = { user: 'u', owner: 'o', repo: 'r', id: '1', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9, pull: 7 };
   const html = reviewPage(args);
-  assert.match(html, /<section id="readiness" class="readiness" aria-live="polite">/);
+  assert.match(html, /<section id="readiness" class="readiness bench-popover" aria-live="polite">/);
   assert.match(html, /"readiness":"\/r\/o\/r\/pull\/7\/readiness"/);
   assert.match(html, /"reviewHead":"bbbbbbb"/);
   assert.match(reviewPage({ ...args, name: 'unknown' }), /"reviewHead":null/);
-  assert.doesNotMatch(reviewPage({ ...args, pull: null }), /id="readiness"/);
+  assert.doesNotMatch(reviewPage({ ...args, pull: null }), /\"readiness\":/);
   assert.doesNotMatch(readinessClient.toString(), /__name/);
 });
 
@@ -2889,7 +2889,7 @@ test('review badge uses workflow conclusion, not artifact checks', () => {
   assert.doesNotMatch(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'failure' }), /✓ (?:checks )?passing/);
   assert.match(reviewPage({ ...args, runStatus: 'completed', runConclusion: 'success' }), /✓ run passing/);
   assert.match(reviewPage({ ...args, runStatus: 'in_progress' }), /… run in progress/);
-  assert.match(reviewPage(args), /✓ checks passing/);
+  assert.match(reviewPage(args), /Run result not recorded/);
 });
 
 test('readiness reloads on thread mutations and ignores older responses', async () => {
@@ -2922,19 +2922,19 @@ test('missing artifact points readers to the updated PR comment', async () => {
   } finally { restore(); }
 });
 
-test('every frame carries early shared theme script and a labeled toggle',()=>{
+test('every frame carries early shared theme script and a labeled theme menu',()=>{
   for(const html of [signedOutPage(),homePage({user:'cam',repositories:[]}),
     messagePage({title:'Error',message:'Unavailable'})]) {
     assert.match(html,/data-theme-toggle/);
     assert.match(html,/kr\.theme/);
     assert.ok(html.indexOf('kr.theme') < html.indexOf('<style>'));
-    assert.match(html,/aria-label="Switch to light theme"/);
+    assert.match(html,/aria-label="User menu"/);
   }
 });
 
-test('site embeds sprite and theme icon without external asset URLs',()=>{
+test('site embeds sprite and product mark without external asset URLs',()=>{
   const html=signedOutPage();
-  assert.match(html,/id="kr-theme"/); assert.match(html,/href="#kr-theme"/);
+  assert.match(html,/id="kr-theme"/); assert.match(html,/href="#kr-mark"/);
   assert.ok(!html.includes('href="icons/'));
 });
 
@@ -3018,8 +3018,8 @@ test('S2 wrapper themes the opaque sandbox without changing raw routes', () => {
   assert.match(html, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true\) \{ loading\.hidden = true; syncTheme/);
   assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
   assert.doesNotMatch(html, /allow-same-origin|contentDocument/);
-  assert.match(html, /<nav class="wrapper-navigation" aria-label="Review navigation">/);
-  assert.match(html, /<\/nav><\/div><div class="review-stage">/);
+  assert.match(html, /<nav class="review-bar" aria-label="Review navigation">/);
+  assert.match(html, /<\/nav><div class="review-stage">/);
 });
 
 test('S2 thread dialogs have names labels and keyboard hint', () => {
@@ -3156,4 +3156,128 @@ test('p2-gate: long content wraps and the active step shows one indicator', () =
   const active = /<li class="active">(.*?)<\/li>/.exec(html)[1];
   assert.equal((active.match(/class="spinner"/g) || []).length, 1);
   assert.doesNotMatch(active, /[●○]/);
+});
+
+// bench-t8 opening screens
+ test('bench-t8 start escapes every GitHub field and labels unverified readiness', () => {
+  const html = homePage({ user: '<user>', repositories: [{ name: '<repo>', owner: { login: '<owner>' }, runs: [{ name: '"<run>', conclusion: 'failure' }] }],
+    recent: [{ owner: '<owner>', repo: '<repo>', id: '1"', base: '<base>', head: '<head>', result: 'fail', createdAt: 'invalid', pull: { number: 1, title: '<script>alert(1)</script>' } }],
+    activity: [{ owner: '<owner>', repo: '<repo>', name: '<activity>', status: '<status>' }], errors: ['<failure>'] });
+  for (const field of ['user', 'repo', 'owner', 'base', 'head', 'activity', 'status', 'failure']) assert.ok(html.includes(`&lt;${field}&gt;`));
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /approval unknown/); assert.match(html, /Checks fail/);
+  assert.match(html, /id="bench-link"/); assert.doesNotMatch(html, /<activity>|<failure>|<head> →/);
+  // Validate inline navigation code independently of CSS / the theme script.
+  const code = html.match(/<script>\(\(\) => \{ const form = document.getElementById\('bench-link'\)[\s\S]*?<\/script>/)[0].slice(8, -9);
+  let submit, assigned;
+  const message = {};
+  const form = { addEventListener: (_, fn) => { submit = fn; }, querySelector: () => message, elements: { link: { value: 'https://evil.test/r/o/r/a/1' } } };
+  runInNewContext(code, { URL, document: { getElementById: () => form }, location: { origin: 'https://site.test', assign: value => { assigned = value; } } });
+  submit({ preventDefault() {} }); assert.equal(assigned, undefined); assert.match(message.textContent, /from this site/);
+  for (const value of ['/r/o/r/a/1?p=board#x=1', '/s/token.signature']) {
+    form.elements.link.value = value; submit({ preventDefault() {} }); assert.equal(assigned, value);
+  }
+ });
+
+test('bench-t8 start distinguishes empty repositories from API failure', async () => {
+  const html = homePage({ user: 'u', repositories: [] });
+  assert.match(html, /No recent reviews/); assert.match(html, /No repositories granted/);
+  assert.match(html, /No recent workflow activity/); assert.match(html, /0 recorded/);
+  const sealed = await signedIn();
+  const restore = mockFetch(async () => new Response('{}', { status: 503 }));
+  try {
+    const result = await call('/', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(result.status, 200); const body = await result.text();
+    assert.match(body, /Some GitHub data is unavailable/); assert.match(body, /Repository data could not be loaded/);
+    assert.doesNotMatch(body, /No repositories granted/); assert.ok(result.headers.get('Content-Security-Policy'));
+  } finally { restore(); }
+});
+
+test('bench-t8 start caps calls, deduplicates repositories and joins only recorded PRs', async () => {
+  const sealed = await signedIn(); const calls = [];
+  const restore = mockFetch(async url => {
+    calls.push(url);
+    if (url.endsWith('/user/installations')) return Response.json({ installations: Array.from({ length: 10 }, (_, id) => ({ id })) });
+    if (url.includes('/repositories?')) return Response.json({ repositories: Array.from({ length: 8 }, (_, i) => ({ owner: { login: 'Cameronrlewis' }, name: `repo${i}`, pushed_at: `2026-10-${10+i}T00:00:00Z` })) });
+    if (url.includes('/actions/artifacts?')) return Response.json({ artifacts: Array.from({ length: 30 }, (_, i) => ({ id: i, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', created_at: '2026-10-16T10:00:00Z', workflow_run: { id: 77, head_sha: 'b'.repeat(40), head_branch: 'topic' } })) });
+    if (url.includes('/actions/runs?')) return Response.json({ workflow_runs: [{ id: 77, pull_requests: [{ number: 8 }], name: 'Review workflow', conclusion: 'success', created_at: '2026-10-16T10:00:00Z' }] });
+    if (url.includes('/pulls?')) return Response.json([{ number: 8, title: 'Move R16', head: { sha: 'b'.repeat(40) } }]);
+    throw new Error(`Unexpected ${url}`);
+  });
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.equal(calls.length, 21); assert.equal(new Set(calls).size, calls.length);
+    assert.equal((body.match(/PR #8 · Move R16/g) || []).length, 20);
+    assert.match(body, /Latest commit · approval unknown/); assert.match(body, /first 5 app installations/);
+    assert.match(body, /repo0/); assert.ok(!calls.some(url => url.includes('/repo0/')));
+  } finally { restore(); }
+});
+
+test('bench-t8 retains available reports when run and PR APIs fail', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/user/installations')) return Response.json({ installations: [{ id: 1 }] });
+    if (url.includes('/repositories?')) return Response.json({ repositories: [{ owner: { login: 'Cameronrlewis' }, name: 'board' }] });
+    if (url.includes('/artifacts?')) return Response.json({ artifacts: [{ id: 12, name: 'kicad-review-aaaaaaa-bbbbbbb-fail.html' }] });
+    return new Response('{}', { status: 403 });
+  });
+  try {
+    const body = await (await call('/', { headers: { Cookie: `s=${sealed}` } })).text();
+    assert.match(body, /Some GitHub data is unavailable/); assert.match(body, /Checks fail/); assert.match(body, /Not checked · approval unknown/);
+    assert.match(body, /href="\/r\/Cameronrlewis\/board\/a\/12"/);
+  } finally { restore(); }
+});
+// bench-t2: chrome contracts, without changing auth or the opaque report boundary.
+test('bench-t2 review chrome has one header, one bar, one merge badge and menu-only Theme', () => {
+  for (const html of [reviewPage({ user:'cam', owner:'o', repo:'r', id:1, pull:7, share:true, workflowRunId:9, name:'kicad-review-aaaaaaa-bbbbbbb-pass.html' }), sharedPage({ token:'body.signature', name:'kicad-review-aaaaaaa-bbbbbbb-pass.html' })]) {
+    const body = html.slice(html.indexOf('</style>'));
+    assert.equal((body.match(/<header /g) || []).length, 1);
+    assert.equal((body.match(/class="review-bar(?: shared-bar)?"/g) || []).length, 1);
+    assert.equal((body.match(/id="merge-badge"/g) || []).length, 1);
+    assert.equal((body.match(/data-theme-set=/g) || []).length, 3);
+    assert.doesNotMatch(body, /data-theme-toggle|wrapper-navigation/);
+    assert.match(body, /href="#kr-mark"/);
+    assert.match(body, /data-review-copy/);
+    assert.match(body, /data-review-goto/);
+    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.doesNotMatch(body, /allow-same-origin/);
+  }
+});
+test('bench-t2 readiness badge derives its three rows from existing readiness data', async () => {
+  const node = () => ({ children:[], append(...items){this.children.push(...items);}, replaceChildren(...items){this.children=items;} });
+  for (const [blocking, expected] of [[0, 'MERGE · READY 3/3'], [1, 'MERGE · NOT READY 2/3'], [null, 'MERGE · NOT READY 2/3']]) {
+    const panel=node(), badge=node();
+    await readinessClientWith({panel,badge,body:{head:'bbbbbbb', decisions:[{login:'cam',state:'APPROVED',stale:false}],requested:[],blocking,open:1}});
+    assert.equal(badge.textContent,expected);
+    assert.equal(panel.children[0].children.length,3);
+  }
+  async function readinessClientWith({panel,badge,body}) {
+    return runInNewContext(`(${readinessClient.toString()})({readiness:'/ready',reviewHead:'bbbbbbb'})`, {
+      document:{getElementById:id=>id==='readiness'?panel:badge, createElement:node, addEventListener(){}},
+      fetch:async()=>new Response(JSON.stringify(body)),
+    });
+  }
+});
+
+// Stored reports are served with the interface this site was deployed with.
+import { currentReport } from './report-shell.js';
+import { execFileSync } from 'node:child_process';
+const inlinePage = data => execFileSync('python3', ['-c', 'import runpy,sys;sys.stdout.write(runpy.run_path("kicad_review.py")["inline_page"](sys.stdin.read()))'],
+  { cwd: new URL('..', import.meta.url), input: data, encoding: 'utf8', maxBuffer: 1 << 28 });
+test('stored reports are re-dressed exactly as kicad_review.py builds the current report', () => {
+  for (const sample of ['review-data-2.js', 'review-data-3d.js']) {
+    const data = readFileSync(new URL(`../ui/sample/${sample}`, import.meta.url), 'utf8');
+    const current = inlinePage(data);
+    // An old report: same data, an outdated interface around it.
+    const old = current.replace(/<style>[\s\S]*?<\/style>/, '<style>old</style>').replace('KiCad review', 'Old review');
+    assert.equal(currentReport(old), current);
+  }
+});
+test('reports without a recognisable data script are served unchanged', () => {
+  assert.equal(currentReport('<!doctype html><p>hand-made</p>'), null);
+  assert.equal(currentReport('<script>window.REVIEW_DATA = {"a":1};'), null);   // truncated: no closing tag
+});
+test('data with replacement patterns is inserted literally', () => {
+  const html = currentReport('<script>window.REVIEW_DATA = {"v":"$& $1 $$"};</script>');
+  assert.match(html, /window\.REVIEW_DATA = \{"v":"\$& \$1 \$\$"\};/);
 });

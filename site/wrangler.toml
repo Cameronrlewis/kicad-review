@@ -6,7 +6,7 @@ keep_names = false
 
 [[rules]]
 type = "Text"
-globs = ["**/*.css", "**/ui/theme.js", "**/ui/icons/sprite.svg"]
+globs = ["**/*.css", "**/ui/*.js", "**/ui/review.html", "**/ui/icons/sprite.svg"]
 
 # Set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and SESSION_KEY with
 # npx wrangler secret put NAME; never commit those secrets.
