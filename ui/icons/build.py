@@ -64,6 +64,14 @@ for name, filename in [('zoom-in', 'zoom_in'), ('zoom-out', 'zoom_out'), ('fit',
 symbol = ET.SubElement(root, f'{{{SVG}}}symbol', {'id':'kr-theme', 'viewBox':'0 0 24 24'})
 ET.SubElement(symbol, f'{{{SVG}}}circle', {'cx':'12','cy':'12','r':'8','fill':'none','stroke':'currentColor','stroke-width':'1.5'})
 ET.SubElement(symbol, f'{{{SVG}}}path', {'d':'M12 4a8 8 0 0 1 0 16Z','fill':'currentColor'})
+# Bench icon set (original artwork): stroke attributes inherit into each <use> shadow tree.
+bench = ET.parse(HERE / 'bench.svg').getroot()
+for node in bench:
+    if node.tag != f'{{{SVG}}}symbol': continue
+    node.set('fill', 'none'); node.set('stroke', 'currentColor')
+    node.set('stroke-linecap', 'round'); node.set('stroke-linejoin', 'round')
+    if 'stroke-width' not in node.attrib: node.set('stroke-width', '1.5')
+    root.append(node)
 serialized = ET.tostring(root, encoding='unicode')
 serialized = serialized.replace(' xmlns="http://www.w3.org/2000/svg"', '', 1)
 (HERE / 'sprite.svg').write_text(serialized + '\n', encoding='utf-8')

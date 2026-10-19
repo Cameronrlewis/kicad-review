@@ -125,16 +125,17 @@ export const CHECKS = [
          document.querySelector('[data-coordinate=y]').textContent!=='33.625') return 'mapping';
     }
     const hash=location.hash; resetCoordinates();
-    if(document.querySelector('[data-coordinate=x]').textContent!=='—') return 'stale';
+    // Bench: leaving the drawing keeps the last reading, greyed as off canvas.
+    if(!document.querySelector('.status-coordinates.off-canvas')) return 'stale';
     await draw();
-    return document.querySelector('[data-coordinate=y]').textContent==='—' && location.hash===hash;`],
+    return location.hash===hash;`],
 ["Stage 1 dark default ignores OS and tokens resolve", "", `
   const root = document.documentElement; root.removeAttribute('data-theme');
   const c = getComputedStyle(root), b = getComputedStyle(document.body);
-  return c.colorScheme === 'dark' && b.backgroundColor === 'rgb(20, 23, 28)'
+  return c.colorScheme === 'dark' && b.backgroundColor === 'rgb(10, 12, 14)'
     && c.getPropertyValue('--btn-h').trim() === '24px'
     && c.getPropertyValue('--tab-h').trim() === '28px'
-    && c.getPropertyValue('--toolbar-h').trim() === '32px'
+    && c.getPropertyValue('--toolbar-h').trim() === '36px'
     && c.getPropertyValue('--space-2').trim() === '8px';`],
 ["Stage 1 both token themes pass text contrast", "", `
   const root = document.documentElement, old = root.getAttribute('data-theme');
@@ -261,7 +262,7 @@ export const CHECKS = [
     const row = proj().changes.find(r => r.where?.board && rowBox(r, "head")); if (!row) return "skip";
     await new Promise(r => setTimeout(r, 400));
     const hash = "#p=0&s=" + row.id;
-    if ("${path}" === "pasted") { const input = document.querySelector("#zoombar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
+    if ("${path}" === "pasted") { const input = document.querySelector("#report-review-bar .goto"); input.value = hash; input.dispatchEvent(new Event("change")); }
     else location.hash = hash;
     const until = performance.now() + 5000, box = rowBox(row, "head");
     while ((S.v !== "board" || S.x == null || Math.abs(S.x - (box[0] + box[2]) / 2) >= .01) && performance.now() < until) await new Promise(r => setTimeout(r, 50));
@@ -449,9 +450,10 @@ export const CHECKS = [
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
-    const h = document.querySelector("#hdr").textContent;
+    // Bench: breadcrumb in the header, revisions and PR link in the review bar, verdict in the header readout.
+    const h = document.querySelector(".report-chrome").textContent;
     return h.includes("kicad-review-test") && h.includes(REVIEW_DATA.head.slice(0, 7))
-      && document.querySelector('#hdr a[href$="/pull/2"]') !== null && /failing|passing/.test(h);`],
+      && document.querySelector('.report-chrome a[href$="/pull/2"]') !== null && /failing|passing|needs work/i.test(h);`],
   ["navigator lists every project, sheet and board with counts", "", `
     let boards = 0, ok = true;
     for (let i = 0; i < REVIEW_DATA.projects.length; i++) {
@@ -576,8 +578,10 @@ export const CHECKS = [
     return total > 0 && noAdded && [...document.querySelectorAll("#panel .card")].every(c => c.dataset.kind === "symbol");`],
   ["modified card shows every changed property old and new", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
-    const card = document.querySelector('#panel .card[data-id="' + r.id + '"]');
-    return r.changes.every(([k, a, b]) => card.textContent.includes(k) && card.textContent.includes(String(a ?? "—")) && card.textContent.includes(String(b ?? "—")));`],
+    // Bench: the old → new values live in the bottom inspector for the selected card.
+    document.querySelector('#panel .card[data-id="' + r.id + '"]')?.click?.(); await new Promise(res => setTimeout(res, 1500));
+    const text = document.querySelector('#inspector')?.textContent || "";
+    return r.changes.every(([k, a, b]) => text.includes(k) && text.includes(String(a ?? "—")) && text.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
     const p=D.projects.findIndex(p=>p.changes.some(r=>r.kind==='footprint'&&r.action==='modified'&&r.box));
     if(p<0) return 'fixture requires a modified footprint';
@@ -622,7 +626,7 @@ export const CHECKS = [
     renderNav();
     const a = document.querySelector('#nav [data-view="sheet:/"]'), b = document.querySelector('#nav [data-view="sheet:/copy/"]');
     const n = e => e.querySelector(".chip.added").textContent;
-    return a && b && n(b) === "＋1" && n(a) !== n(b) && document.querySelectorAll('#nav [data-view^="sheet:"]').length === 2;`],
+    return a && b && n(b).replace(/\\s/g, "") === "+1" && n(a) !== n(b) && document.querySelectorAll('#nav [data-view^="sheet:"]').length === 2;`],
   ["panel scrolls instead of stretching the page", "p=1", `
     await new Promise(res => setTimeout(res, 1200));
     const cards = document.querySelector("#panel .cards"), one = cards.innerHTML;
@@ -640,7 +644,8 @@ export const CHECKS = [
     chip.click();
     const off = getComputedStyle(document.querySelector('#panel .chip-filter[data-action="added"]'));
     const tab = getComputedStyle(document.querySelector('#panel [role=tab][aria-selected="true"]')), t2 = getComputedStyle(document.querySelector('#panel [role=tab][aria-selected="false"]'));
-    return off.backgroundColor !== onBg && off.textDecorationLine !== onDeco && tab.backgroundColor !== t2.backgroundColor;`],
+    // Bench: an off chip loses its tint and gets a dashed border (no strike-through).
+    return off.backgroundColor !== onBg && off.borderStyle !== on.borderStyle && tab.backgroundColor !== t2.backgroundColor;`],
   ["clicking the Base pane selects the moved row at its old place", "p=1&v=board", `
     await new Promise(res => setTimeout(res, 1200));
     const r = REVIEW_DATA.projects[1].changes.find(r => r.kind === "footprint" && r.action === "modified");
@@ -702,7 +707,7 @@ export const CHECKS = [
   ["violation without position is listed and does not move", "p=1&t=checks", `
     S.checks.scope = "all"; const v = REVIEW_DATA.projects[1].checks[0].violations[0], old = [v.pos, v.box]; v.pos = null; v.box = null; renderPanel();
     const el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'), before = [S.v, S.x, S.y]; el.click(); await new Promise(r => setTimeout(r, 300));
-    const ok = el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true" && S.v === before[0] && S.x === before[1] && S.s !== v.id;
+    const ok = el.textContent.includes("no location") && el.getAttribute("aria-disabled") === "true" && S.v === before[0] && S.x === before[1];   // it may be inspected, but never moves the view
     [v.pos, v.box] = old; renderPanel(); return ok;`],
   ["violation on an unrendered sheet has no location", "p=1&t=checks", `
     S.checks.scope = "all"; const P = REVIEW_DATA.projects[1], sh = P.sheets[0], old = [sh.status, sh.svg]; sh.status = "unchanged"; sh.svg = null;
@@ -740,15 +745,16 @@ export const CHECKS = [
     const ok = [undefined, { writeText: () => Promise.reject(new Error("denied")) }];
     for (const stub of ok) {
       Object.defineProperty(navigator, "clipboard", { value: stub, configurable: true });
-      document.querySelector("#zoombar [data-act=copy]").click(); await sleep(100);
-      const f = document.querySelector("#zoombar input[readonly]");
+      document.querySelector("#report-review-bar [data-act=copy]").click(); await sleep(100);
+      const f = document.querySelector("#report-review-bar input[readonly]");
       if (!f || f.value !== positionLink() || document.activeElement !== f || f.selectionStart !== 0 || f.selectionEnd !== f.value.length) return "bad " + (f && f.value);
+      const rect = f.getBoundingClientRect(); if (rect.top < 0 || rect.bottom > innerHeight || rect.right > innerWidth || rect.width < 100) return "clipped copy fallback";
       f.remove();
     }
     return true;`],
   ["copy link shows Copied when clipboard works", "p=1&v=board", `
     Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.resolve() }, configurable: true });
-    const b = document.querySelector("#zoombar [data-act=copy]"); b.click();
+    const b = document.querySelector("#report-review-bar [data-act=copy]"); b.click();
     await new Promise(r => setTimeout(r, 100));
     const during = b.textContent;
     await new Promise(r => setTimeout(r, 1700));
@@ -762,11 +768,11 @@ export const CHECKS = [
         const cs = getComputedStyle(document.body), a = lum(cs.color), b = lum(cs.backgroundColor);
         const ratio = (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
         res[theme] = {ratio, b, attr:document.documentElement.dataset.theme};
-        if (!(ratio >= 4.5 && (theme === "dark" ? b < 0.05 : b > 0.8) && KRTheme.get() === theme)) return JSON.stringify(res);
+        if (!(ratio >= 4.5 && (theme === "dark" ? b < 0.05 : b > 0.5) && KRTheme.get() === theme)) return JSON.stringify(res);
       }
       document.addEventListener("kr-theme-change", e => seen.push(e.detail));
       KRTheme.set("dark", {persist:false});
-      const btn = document.querySelector("[data-theme-toggle]");
+      const btn = document.querySelector('[data-theme-set=dark]');
       return seen[0] === "dark" && !!btn && btn.getAttribute("aria-pressed") === "true" || JSON.stringify({seen, res});
     } finally { KRTheme.set(start, {persist:false}); }`],
   ["drawing background is KiCad's in both themes", "", `
@@ -803,8 +809,10 @@ export const CHECKS = [
     return bad.length ? bad.join("; ") : true;`],
   ["added footprint card shows its footprint and layer", "p=0", `
     const r = REVIEW_DATA.projects[0].changes.find(r => r.kind === "footprint" && r.action === "added" && r.props.layer);
-    const t = document.querySelector('#panel .card[data-id="' + r.id + '"]').textContent;
-    return t.includes(r.props.footprint) && t.includes(r.props.layer) && /\\+\\d+ more/.test(t) && !t.includes("Datasheet");`],
+    // Bench: property dumps moved from the card to the bottom inspector.
+    document.querySelector('#panel .card[data-id="' + r.id + '"]').click(); await new Promise(res => setTimeout(res, 1500));
+    const t = document.querySelector('#inspector').textContent;
+    return t.includes(r.props.footprint) && t.includes(r.props.layer);`],
   ["address with selection and position keeps the position", "p=1&v=board&x=150&y=100&z=8&s=c600", `
     await new Promise(r => setTimeout(r, 1200));
     return (S.x === 150 && S.y === 100 && S.z === 8 && S.s === "c600" && document.querySelector("#stage .marker.sel") !== null) || JSON.stringify([S.x, S.z, S.s]);`],
@@ -1158,9 +1166,10 @@ export const CHECKS = [
       acceptThreads([]);
       await new Promise(r => setTimeout(r, 100));
       if (!vp.isConnected || vp.querySelector(".world") !== world) return "thread arrival replaced right-click target";
-      vp.dispatchEvent(event);
+      vp.dispatchEvent(event);   // Bench: right-click opens the canvas menu; Comment here places the pin
       vp.dispatchEvent(new PointerEvent("pointerup", {button:2, bubbles:true}));
       vp.dispatchEvent(new PointerEvent("pointerup", {button:2,bubbles:true,clientX:event.clientX,clientY:event.clientY}));
+      [...document.querySelectorAll('.bench-context button')].find(b => b.textContent === 'Comment here')?.click();
       return event.defaultPrevented && sent.length === 1 && !!sent[0].kicadReviewPin?.file || JSON.stringify(sent);
     } finally { parent.postMessage = saved; THREADS_ON = enabled; }
   `],
@@ -1544,7 +1553,8 @@ export const CHECKS = [
       }
       const b=document.querySelector('#zoombar [data-z="1.25"]');
       const icons=[...b.querySelectorAll('svg')].filter(s=>getComputedStyle(s).display!=='none');
-      if(icons.length!==1 || !icons[0].querySelector('use').getAttribute('href').endsWith(theme)) return 'palette';
+      // Bench toolbar icons are one currentColor symbol that follows the theme's text colour.
+      if(icons.length!==1) return 'palette';
       const box=icons[0].getBBox(); if(!box.width || !box.height) return 'empty icon';
       if(!b.getAttribute('aria-label') || !b.title) return 'unlabeled';
     }
@@ -1555,12 +1565,12 @@ export const CHECKS = [
     .filter(el=>!(el.getAttribute('href')||'').startsWith('#'));
   const embedded=!document.querySelector('script[src="review.js"]');
   if(embedded && external.length) return external.map(el=>el.outerHTML).join(' ');
-  if(!document.querySelector('[data-theme-toggle]') || !document.querySelector('#statusbar')) return 'missing shell';
+  if(!document.querySelector('[data-theme-set]') || !document.querySelector('#statusbar')) return 'missing shell';
   const old=KRTheme.get();
   KRTheme.set('light'); const light=getComputedStyle(document.body).backgroundColor;
   KRTheme.set('dark'); const dark=getComputedStyle(document.body).backgroundColor;
   KRTheme.set(old);
-  return light==='rgb(228, 232, 237)' && dark==='rgb(20, 23, 28)';`],
+  return light==='rgb(207, 212, 216)' && dark==='rgb(10, 12, 14)';`],
   ["board WebGL cameras fallback and context loss", "v=board&x=10&y=20&z=5", `
     const p = proj(); if (!p.board?.changed) return "skip";
     const gz = async text => { const buf = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer(); return btoa(String.fromCharCode(...new Uint8Array(buf))); };
@@ -1928,7 +1938,7 @@ export const CHECKS = [
     key('PageDown'); if(Appearance.get().activeLayer!=='B.Cu') return 'bottom'; key('PageUp'); if(Appearance.get().activeLayer!=='F.Cu') return 'top';
     key('u',{ctrlKey:true}); if(Appearance.get().units!=='mil') return 'units';
     Appearance.patch({grid:{size:1.27}}); const g=Appearance.get().grid.size; key('n'); key('N',{shiftKey:true}); if(Math.abs(Appearance.get().grid.size-g)>1e-9) return 'grid inverse';
-    const input=document.querySelector('#zoombar .goto'); input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.blur();
+    const input=document.querySelector('#report-review-bar .goto'); input.closest('details').open=true; input.focus(); input.dispatchEvent(new KeyboardEvent('keydown',{key:'h',bubbles:true})); if(Appearance.get().contrast!=='normal') return 'editing'; input.blur();
     const z=S.z; key('+',{ctrlKey:true,shiftKey:true}); if(S.z<z*1.3) return 'ctrl shift zoom';
     const copy=new KeyboardEvent('keydown',{key:'c',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(copy); if(copy.defaultPrevented) return 'copy consumed';
     key('?'); if(!document.querySelector('#shortcuts[open]')) return 'sheet'; document.querySelector('#shortcuts').close(); Appearance.reset(); return true;`],
@@ -1954,9 +1964,9 @@ export const CHECKS = [
     const old=proposePin, on=THREADS_ON; let pins=[]; proposePin=(v,event)=>pins.push(toWorld(v,event)); THREADS_ON=true;
     try {
       const pointer=(type,x,button=2)=>vp.dispatchEvent(new PointerEvent(type,{clientX:x,clientY:e.clientY,button,pointerId:2,bubbles:true}));
-      pointer('pointerdown',e.clientX); pointer('pointerup',e.clientX+2); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+2,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'right pin';
+      pointer('pointerdown',e.clientX); pointer('pointerup',e.clientX+2); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+2,clientY:e.clientY,cancelable:true})); [...document.querySelectorAll('.bench-context button')].find(b=>b.textContent==='Comment here')?.click(); if(pins.length!==1) return 'right pin';
       const p=pins[0], screen=BoardGL.worldToScreen(p,{...boardCamera(vp),width:r.width,height:r.height}); if(Math.abs(screen[0]-(Math.trunc(e.clientX+2)-r.left))>1e-6) return 'pin roundtrip';
-      pointer('pointerdown',e.clientX); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'early context pinned'; pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); if(pins.length!==1) return 'drag pinned';
+      pointer('pointerdown',e.clientX); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX,clientY:e.clientY,cancelable:true})); closeBenchMenu(); if(pins.length!==1) return 'early context pinned'; pointer('pointermove',e.clientX+40); pointer('pointerup',e.clientX+40); vp.dispatchEvent(new MouseEvent('contextmenu',{clientX:e.clientX+40,clientY:e.clientY,cancelable:true})); closeBenchMenu(); if(pins.length!==1) return 'drag pinned';
       pointer('pointerdown',e.clientX); pointer('lostpointercapture',e.clientX); const x=S.x; pointer('pointermove',e.clientX+40); if(S.x!==x) return 'lost capture';
     } finally { proposePin=old; THREADS_ON=on; }
     const tiny=document.createElement('div'); document.body.append(tiny); const before={x:S.x,y:S.y,z:S.z}; zoomBoardAt(tiny,0,0,2); tiny.remove(); if(S.z!==before.z||S.x!==before.x) return 'zero size';
@@ -1997,7 +2007,7 @@ export const CHECKS = [
     const vp=document.querySelector('#stage .vp.sheet'), canvas=vp.querySelector('.sch-grid');
     const alpha=()=>canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data.some((v,i)=>i%4===3&&v);
     if(!alpha() || canvas.closest('.stack') || canvas.getAttribute('aria-hidden')!=='true') return 'grid ink/layer';
-    S.grid=false; apply(); if(alpha() || document.querySelector('[data-sch-grid]').textContent!=='grid off') return 'off';
+    S.grid=false; apply(); if(alpha() || !/grid ?off/i.test(document.querySelector('[data-sch-grid]').textContent)) return 'off';
     S.grid=true; const oldDpr=Object.getOwnPropertyDescriptor(window,'devicePixelRatio');
     try {
       Object.defineProperty(window,'devicePixelRatio',{configurable:true,value:2}); apply();
@@ -2017,9 +2027,9 @@ export const CHECKS = [
     if(S.units!==units) return 'editor/dialog'; key(document.body);
     if(S.units!=='mil'||encodeState()!==camera) return 'units camera/hash';
     document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'n',bubbles:true}));
-    if(document.querySelector('[data-sch-grid]').textContent!=='grid 50.000') return 'fixed schematic lattice';
+    if(document.querySelector('[data-sch-grid]').textContent.toLowerCase().replace(/ +/g,' ').trim()!=='grid 50.000') return 'fixed schematic lattice';
     KRTheme.set(KRTheme.get()==='dark'?'light':'dark'); if(!alpha()) return 'theme';
-    vp.dispatchEvent(new PointerEvent('pointerleave')); if(schematicCursor!==null||document.querySelector('[data-coordinate=x]').textContent!=='—') return 'leave';
+    vp.dispatchEvent(new PointerEvent('pointerleave')); if(schematicCursor!==null||!document.querySelector('.status-coordinates.off-canvas')) return 'leave';   // Bench keeps the last reading greyed
     const oldCanvas=canvas; await draw(); if(oldCanvas.isConnected||schematicCursor!==null) return 'draw lifecycle';
     S.v='board'; await draw(); if(document.querySelector('.sch-grid,[data-sch-coordinates],[data-sch-grid]')) return 'schematic only';
     return true;`],
@@ -2659,9 +2669,9 @@ export const CHECKS = [
     const t=n=>document.querySelector('[data-coordinate='+n+']').textContent;
     if(t('dx')!=='3.000'||t('dy')!=='4.000'||t('dist')!=='5.000') return 'click '+t('dx')+t('dy')+t('dist');
     at('pointerdown',50,50); at('pointermove',90,90); at('pointerup',90,90); at('pointermove',90,90); await raf();
-    if(t('dx')==='—') return 'pan dropped origin';
+    if(t('dx')==='0.000') return 'pan dropped origin';
     S.v='sheet:/not-in-report'; await draw(); await raf();
-    return t('x')==='—' && t('dx')==='—' && !/NaN|Infinity/.test(document.querySelector('#statusbar').textContent);`],
+    return t('x')==='off canvas' && t('dx')==='0.000' && !/NaN|Infinity/.test(document.querySelector('#statusbar').textContent);`],
   ["status change counter matches visible change rows", "", `
     const row=proj().changes.find(r=>viewOf(r)&&currentView(viewOf(r))); if(!row) return 'skip';
     await goTo(row.id); await new Promise(r=>requestAnimationFrame(r));
@@ -2992,7 +3002,7 @@ export const CHECKS = [
   return S.m === 'wipe' && a.dataset.mode === 'wipe' && a.getAttribute('aria-checked') === 'true'
     && document.querySelector('#toolbar #zoombar') !== null
     && !document.querySelector('#zoombar').textContent.includes('j / k')
-    && document.querySelector('#zoombar .goto').getAttribute('aria-label') === 'Go to saved review position'
+    && document.querySelector('#report-review-bar .goto').getAttribute('aria-label') === 'Go to saved review position'
     && /^(\u2013|\\d+) \\/ \\d+$/.test(document.querySelector('#change-count').textContent)
     && !!document.querySelector('[data-mark-style]');`],
   ["chrome toolbar change counter follows step", "", `
@@ -3006,6 +3016,7 @@ export const CHECKS = [
     const realGeometry=!!proj().board.geometry;
     if(!realGeometry) { ${BOARD_LIFECYCLE_FIXTURE} }
     else {S.m='overlay';await draw();fit();}
+    setT({});   // a placed camera: live Fit would otherwise re-centre when the fallback changes the layout
     renderModes();
     if(!boardDiff) return 'missing compositor';
     S.s=proj().changes.find(c=>c.where?.board)?.id || null; S.layers=['F_Cu'];
@@ -3241,8 +3252,8 @@ export const CHECKS = [
     store.import(JSON.stringify({meta:{version:5},board:{background:'#ffffff'}}));
     if(store.get().colors['board.background'][0]!==1)return 'blocked import';
     store.reset();if(JSON.stringify(store.get())!==JSON.stringify(KrAppearance.defaults()))return 'blocked reset';
-    const toggle=document.querySelector('[data-theme-toggle]'),before=KRTheme.get(),palette=JSON.stringify(store.get().colors);
-    toggle.focus();toggle.click();
+    const toggle=document.querySelector('[data-theme-set='+(KRTheme.get()==='dark'?'light':'dark')+']'),before=KRTheme.get(),palette=JSON.stringify(store.get().colors);
+    toggle.closest('details').open=true; toggle.focus();toggle.click();
     return KRTheme.get()!==before&&document.activeElement===toggle&&JSON.stringify(store.get().colors)===palette;
   `,{beforeStartup:`Storage.prototype.getItem=Storage.prototype.setItem=function(){throw new DOMException('Blocked','SecurityError')};`}],
   ["SCH6 single selected change retains themed action cues", "", `
@@ -3293,12 +3304,12 @@ export const CHECKS = [
     await applyState({p:1,v:'board',m:mode}); fit();
     if (S.m!==mode || !document.querySelector('#stage svg')) return 'mode '+mode;
   }
-  const theme=KRTheme.get(); document.querySelector('[data-theme-toggle]').click();
+  const theme=KRTheme.get(); document.querySelector('[data-theme-set='+(theme==='dark'?'light':'dark')+']').click();
   if (KRTheme.get()===theme) return 'theme switch'; KRTheme.set(theme);
   Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});
-  document.querySelector('#zoombar [data-act=copy]').click();
+  document.querySelector('#report-review-bar [data-act=copy]').click();
   await new Promise(r=>setTimeout(r,100));
-  const field=document.querySelector('#zoombar input[readonly]');
+  const field=document.querySelector('#report-review-bar input[readonly]');
   if(!field || field.value!==positionLink() || document.activeElement!==field) return 'copy fallback';
   field.remove();
   const row=proj().changes.find(r=>viewOf(r)==='board');
@@ -3316,8 +3327,8 @@ export const CHECKS = [
   return !performance.getEntriesByType('resource').some(e=>/^https?:/.test(e.name)&&!e.name.startsWith(location.origin+'/'));`],
   ["chrome status zoom is normalized against SVG camera scale", "p=1&v=board", `
   setT({x:100,y:100,z:8}); updateStatus();
-  return document.querySelector('#statusbar [data-zoom]').textContent === '2.00'
-    || 'zoom should be S.z / PX, got '+document.querySelector('#statusbar [data-zoom]').textContent;`],
+  return document.querySelector('#statusbar [data-zoom]').textContent === '200%'
+    || 'zoom should be S.z / PX as a percentage, got '+document.querySelector('#statusbar [data-zoom]').textContent;`],
   ["chrome overlay docks use opaque themed surfaces", "p=1&v=board", `
   const nav=getComputedStyle(document.querySelector('#nav')).backgroundColor;
   const panel=getComputedStyle(document.querySelector('#panel')).backgroundColor;
@@ -3325,8 +3336,8 @@ export const CHECKS = [
   ["chrome desktop density matches the CAD shell contract", "p=1&v=board", `
   const height=selector=>document.querySelector(selector).getBoundingClientRect().height;
   const header=height('.report-head');
-  return (innerWidth<900 ? header>=32 : header===32) && height('#toolbar')===32
-    && height('#statusbar')===24 && height('[data-theme-toggle]')===24
+  return header===36 && height('#toolbar')===34
+    && height('#statusbar')===24 && height('.account summary')===24
     && height('#modes [data-mode]')===24 && height('#panel-tabs [role=tab]')===28
     || 'chrome heights '+JSON.stringify({header,toolbar:height('#toolbar'),status:height('#statusbar')});`],
   ["board Thermal proof", "v=board", `
@@ -3509,6 +3520,291 @@ export const CHECKS = [
     Appearance.patch({activeLayer:null,flip:false});check('F.Cu');
     return boardView.renderers.length===2 && uploads===boardView.renderers.map(r=>r.stats.uploads).join() && JSON.stringify(scene)===saved;
   `],
+  ['bench-t7 status and menus', 'v=board', `return (async()=>{
+    select('board'); await draw();
+    const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect();
+    updateCoordinates(vp,{clientX:r.left+r.width/2,clientY:r.top+r.height/2});
+    const x=document.querySelector('[data-coordinate=x]');
+    if(!Number.isFinite(Number(x.textContent)))throw Error('missing coordinate');
+    let writes=0;const observer=new MutationObserver(ms=>writes+=ms.length);observer.observe(document.querySelector('#statusbar'),{childList:true,subtree:true});
+    updateStatus();updateStatus();await Promise.resolve();observer.disconnect();if(writes)throw Error('unchanged readouts rewritten');
+    const before=x.textContent;resetCoordinates();if(x.textContent!==before||!x.closest('.off-canvas'))throw Error('last coordinate lost');
+    const units=document.querySelector('#status-units');units.value='mil';units.dispatchEvent(new Event('change'));if(Appearance.get().units!=='mil')throw Error('units menu disconnected');
+    canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});
+    if(document.querySelectorAll('.bench-context [role=menuitem]').length!==6)throw Error('missing canvas actions');
+    if(document.activeElement.textContent!=='Zoom to here')throw Error('menu not focused');
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));if(document.activeElement.textContent!=='Copy coordinates')throw Error('menu arrow navigation');
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));if(document.querySelector('.bench-context')||document.activeElement!==vp)throw Error('menu escape focus');
+    if(!Appearance.get().layers[Appearance.get().activeLayer]) Appearance.patch({activeLayer:Object.keys(Appearance.get().layers)[0]});
+    const snapshot=Appearance.get(),layer=snapshot.activeLayer;
+    canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});document.querySelectorAll('.bench-context button')[4].click();if(Appearance.get().layers[layer].visible)throw Error('hide layer action');
+    canvasMenu(vp,{clientX:r.left+50,clientY:r.top+50});document.querySelectorAll('.bench-context button')[5].click();if(Object.entries(Appearance.get().layers).some(([name,state])=>state.visible!==(name===layer)))throw Error('solo layer action');Appearance.patch(snapshot);
+    const row=document.querySelector('#panel .card[data-id]')||document.querySelector('#nav [data-view]');row.focus();row.dispatchEvent(new KeyboardEvent('keydown',{key:'F10',shiftKey:true,bubbles:true}));
+    if(!document.querySelector('.bench-context'))throw Error('keyboard row menu missing');closeBenchMenu();
+    showShortcuts();if(document.querySelectorAll('#shortcuts section').length!==3)throw Error('help groups missing');document.querySelector('#shortcuts [data-close]').click();
+    const btn=document.querySelector('#shortcuts-open');btn.blur();btn.focus();btn.dispatchEvent(new FocusEvent('focusin',{bubbles:true}));await new Promise(r=>setTimeout(r,500));if(document.querySelector('#bench-tooltip').hidden)throw Error('tooltip missing '+btn.outerHTML+' active '+document.activeElement.outerHTML);btn.blur();
+    Appearance.patch({units:'mm'});resetCoordinates();return true;
+  })()`],
+  ['bench-t7 proof 1440', 'v=board', `return (async()=>{select('board');await draw();resetCoordinates();return document.querySelector('#statusbar').scrollWidth<=innerWidth;})()`],
+  ['bench-t7 proof 1920', 'v=board', `return (async()=>{select('board');await draw();resetCoordinates();return document.querySelector('#statusbar').scrollWidth<=innerWidth;})()`],
+  ['bench-t7 help proof', 'v=board', `showShortcuts();return true;`],
+  ['bench-t7 context proof', 'v=board', `const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect();canvasMenu(vp,{clientX:r.left+100,clientY:r.top+160});return true;`],
+  // bench-t6
+  ["bench-t6 inspector selection and complete diffs", "p=1&v=board", `
+    const row=proj().changes.find(r=>r.where?.board); if(!row) throw Error('missing board row');
+    row.props={...row.props,customField:'<script>unsafe</script>',net:'GND'};
+    row.changes=[...(row.changes||[]),['Value','old-value','new-value']];
+    const tabs=document.querySelector('#panel-tabs'), panel=document.querySelector('#panel-body');
+    await goTo(row.id);
+    const text=document.querySelector('#inspector').textContent;
+    if(!text.includes('old-value')||!text.includes('new-value')||!text.includes('<script>unsafe</script>'))return text;
+    if(!document.querySelector('#inspector del')||document.querySelector('#inspector script'))return 'diff/escaping';
+    if(document.querySelector('#panel-tabs')!==tabs||document.querySelector('#panel-body')!==panel)return 'right dock rebuilt';
+    if(document.querySelectorAll('.insp-module').length!==4)return 'modules';
+    const finding=allViolations()[0]; if(finding){await goTo(finding.id);if(!document.querySelector('#inspector').textContent.includes(finding.description))return 'finding missing';}
+    S.s=null;S.io=null;S.ig=null;renderInspector();
+    return document.querySelector('.insp-empty')!==null;
+  `],
+  ["bench-t6 inspector inventory fields and splitter persistence", "p=1&v=board", `
+    proj().objects=[...(proj().objects||[]),{kind:'footprint',ref:'INSPECT_TEST',uuid:'inspector-test',pos:[10,20,90],value:'4.7k',footprint:'R_0402',customFlag:false}];
+    proj().parts={...(proj().parts||{}),lines:[{refs:['INSPECT_TEST'],mpn:'TEST-MPN',dnp:false}]};
+    const panel=document.querySelector('#panel-body');
+    await goToObject(proj().objects.length-1);
+    const text=document.querySelector('#inspector').textContent;
+    if(!text.includes('TEST-MPN')||!text.includes('customFlag')||!text.includes('false')||!text.includes('90'))return text;
+    if(document.querySelector('#panel-body')!==panel)return 'inventory rebuilt right dock';
+    const split=document.querySelector('#insp-split'),before=inspectorHeight;
+    split.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
+    if(inspectorHeight!==before+16)return 'resize';
+    document.querySelector('#insp-toggle').click();
+    if(!document.querySelector('#insp-body').hidden||!JSON.parse(localStorage.getItem('kr.inspector')).closed)return 'collapse persistence';
+    document.querySelector('#insp-toggle').click();
+    return !document.querySelector('#insp-body').hidden && !JSON.parse(localStorage.getItem('kr.inspector')).closed;
+  `],
+  ["bench-t6 inspector proof", "p=0&v=board&s=c1", `
+    if(innerWidth===1440){document.documentElement.style.height='900px';document.body.style.height='900px';}
+    inspectorClosed=false;inspectorHeight=176;inspectorLayout();
+    await goTo(proj().changes.find(r=>r.where?.board)?.id);
+    return document.querySelector('#inspector').getBoundingClientRect().height===176 && document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t6 inspector persists after reload", "v=board", `
+    inspectorHeight=224;inspectorClosed=true;inspectorLayout();persistInspector();renderInspector();
+    return document.querySelector('#insp-body').hidden;
+  `, {afterReload:`return inspectorHeight===224 && inspectorClosed && document.querySelector('#insp-body').hidden;`}],
+  ["bench-t6 inspector source snapshots and geometry", "p=1&v=board", `
+    const row=proj().changes.find(r=>r.where?.board);if(!row)return 'fixture';
+    row.before={fields:{MPN:'base-part'},dnp:true};row.after={fields:{MPN:'head-part'},dnp:false};
+    await goTo(row.id);
+    let data=inspectorProperties();
+    if(data.base['fields.MPN']!=='base-part'||data.head['fields.MPN']!=='head-part'||data.head.dnp!==false)return 'snapshots';
+    S.s=null;S.io=null;S.ig={side:'head',object:{uuid:'leaf-test',kind:'track',layers:['F.Cu'],net:7,geometry:{segments:[[1000,2000,3000,4000]]},hidden:false}};
+    const panel=document.querySelector('#panel-body');renderInspector();
+    const text=document.querySelector('#inspector').textContent;
+    if(!text.includes('leaf-test')||!text.includes('segments')||!text.includes('false'))return text;
+    return document.querySelector('#panel-body')===panel;
+  `],
+  ["bench toolbar groups fit without cut-off", "p=1&v=board", `
+  const t=document.querySelector('#toolbar');
+  const caps=[...t.querySelectorAll(':scope > .tb-grp > .cap')].map(e=>e.textContent).join('|');
+  if(caps!=='View|Change|Zoom|Marks') return 'groups '+caps;
+  if(t.querySelector('[data-theme-toggle], [data-act=copy], .goto')) return 'moved controls still in toolbar';
+  if(t.querySelectorAll('.tb-grp').length<5 || t.querySelectorAll('svg.i use').length<14) return 'icons';
+  if(![...t.querySelectorAll('button')].every(b=>b.title||b.getAttribute('aria-label'))) return 'tooltips';
+  if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return 'overflow '+t.scrollWidth+'>'+t.clientWidth;
+  const r=t.getBoundingClientRect(); if([...t.querySelectorAll('button')].some(b=>b.getBoundingClientRect().right>r.right+1)) return 'cut off';
+  for(const mode of ['side','overlay','wipe','blend','semantic']) {
+    t.querySelector('[data-mode='+mode+']').click();
+    if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return mode+' overflow '+t.scrollWidth+'>'+t.clientWidth;
+  }
+  t.querySelector('[data-mode=side]').click(); fit();
+  const d=t.querySelector('[data-dock=nav]'); d.click(); const off=document.querySelector('#nav').classList.contains('left-collapsed'); d.click();
+  return (innerWidth<900 || off && !document.querySelector('#nav').classList.contains('left-collapsed')) || 'dock toggle';`],
+  ["bench toolbar 3D camera presets fit all modes", "v=3d", `
+    if (!window.Review3D) return 'skip';
+    const t=document.querySelector('#toolbar');
+    for(const mode of ['side','overlay','blend','semantic']) {
+      S.m=mode;renderModes();renderZoombar();
+      if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return mode+' overflow '+t.scrollWidth+'>'+t.clientWidth;
+    }
+    const menu=t.querySelector('.camera-presets'); menu.open=true;
+    await new Promise(r=>setTimeout(r,50));
+    const popup=menu.querySelector('.camera-menu').getBoundingClientRect();
+    if(popup.top<t.getBoundingClientRect().bottom || popup.right>innerWidth) return 'clipped camera menu';
+    menu.querySelector('[data-3d-camera=top]').click();
+    return !menu.open && document.activeElement===menu.querySelector('summary');`],
+  ["bench-t2 single offline chrome and framed suppression", "#v=board", `
+    const visible = selector => [...document.querySelectorAll(selector)].filter(n => n.getBoundingClientRect().height > 0);
+    if (visible('.report-head').length !== 1 || visible('#report-review-bar').length !== 1) throw Error('duplicate or missing chrome');
+    if (document.querySelector('[data-theme-toggle]')) throw Error('duplicate Theme toggle');
+    if (document.querySelectorAll('[data-theme-set]').length !== 3) throw Error('missing theme choices');
+    if (document.querySelector('#zoombar [data-act=copy], #zoombar .goto')) throw Error('overflow controls still in toolbar');
+    document.documentElement.dataset.benchCheckTheme = KRTheme.get();
+    const menu = document.querySelector('.account'); menu.open = true;
+    const target = document.querySelector('[data-theme-set=light]'), box = target.getBoundingClientRect();
+    if (document.elementFromPoint(box.left+box.width/2,box.top+box.height/2) !== target) throw Error('theme menu clipped or covered');
+    document.querySelector('[data-theme-set=light]').click();
+    if (KRTheme.get() !== 'light') throw Error('light choice failed');
+    document.querySelector('[data-theme-set=system]').click();
+    if (KRTheme.mode() !== 'system') throw Error('system choice failed');
+    document.querySelector('[data-theme-set=dark]').click();
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+    if (menu.open) throw Error('Escape did not close menu');
+    KRTheme.set(document.documentElement.dataset.benchCheckTheme || 'dark');
+    if (document.documentElement.scrollWidth > innerWidth) throw Error('horizontal overflow');
+    const frame = document.createElement('iframe'); frame.setAttribute('sandbox','allow-scripts');
+    const result = new Promise((resolve,reject) => {
+      const timer = setTimeout(()=>reject(Error('framed chrome check timed out')),15000);
+      const receive = event => { if(event.source !== frame.contentWindow || !event.data?.benchChrome) return;
+        clearTimeout(timer); removeEventListener('message',receive); resolve(event.data.benchChrome); };
+      addEventListener('message',receive);
+    });
+    if(document.querySelector('link[rel=stylesheet][href="review.css"]')) return 'skip';   // the framed copy needs the single-file report (CI runs it with --page)
+    frame.srcdoc = document.documentElement.outerHTML + '<script>addEventListener("load",()=>parent.postMessage({benchChrome:[getComputedStyle(document.querySelector(".report-chrome")).display,getComputedStyle(document.querySelector("#toolbar")).display]},"*"))<\/script>';
+    frame.style.cssText='position:fixed;width:800px;height:600px;left:-2000px'; document.body.append(frame);
+    const rows = await result; frame.remove();
+    if(rows[0] !== 'none' || rows[1] === 'none') throw Error('framed report duplicated chrome or hid toolbar '+rows);
+    return true;
+  `],
+  ["bench-t5 right dock resize collapse wide and table", "t=checks", `
+    const panel=document.getElementById('panel'), app=document.getElementById('app'), splitter=document.getElementById('right-splitter');
+    splitter.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
+    if (panel.getBoundingClientRect().width !== 700 || localStorage.getItem('kr.rightDockWidth') !== '700') return 'resize persistence';
+    document.querySelector('[data-panel-wide]').click();
+    if (panel.getBoundingClientRect().width !== 360) return 'restore narrow';
+    document.querySelector('[data-panel-table]').click();
+    if (!app.classList.contains('right-table') || panel.getBoundingClientRect().right > innerWidth || panel.getBoundingClientRect().width < innerWidth / 2) return 'table geometry';
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    if (app.classList.contains('right-table') || document.activeElement !== document.querySelector('[data-panel-table]')) return 'escape';
+    document.querySelector('[data-panel-close]').click();
+    if (!app.classList.contains('right-collapsed') || panel.getBoundingClientRect().width) return 'collapse';
+    document.querySelector('[data-dock=panel]').click();
+    return !app.classList.contains('right-collapsed') && panel.getBoundingClientRect().width === 360;
+  `],
+  ["bench-t5 compact references tags and narrow columns", "", `
+    const p=proj(); p.parts={lines:[{refs:['C1','C2','C3','C4','C5','C20'],value:'100nF',mpn:'',lcsc:'',problems:['missing_lcsc','missing_mpn']}],changes:[],supplier:null};
+    S.t='parts'; resizeRightDock(360); renderPanel();
+    const row=document.querySelector('.parts-row'), refs=row.querySelector('.parts-refs');
+    if(refs.textContent!=='C1–C5, C20' || refs.title!=='C1, C2, C3, C4, C5, C20') return 'ranges';
+    const tags=[...row.querySelectorAll('.problem-tag')];
+    if(tags.map(t=>t.textContent).join()!=='LCSC,MPN' || tags.some(t=>!t.title)) return 'tags';
+    if(row.offsetHeight>35 || getComputedStyle(row.children[4]).display!=='none') return 'narrow';
+    document.querySelector('[data-panel-wide]').click();
+    if(getComputedStyle(document.querySelector('.parts-row').children[4]).display==='none') return 'wide columns';
+    document.querySelector('[data-panel-table]').click();
+    document.querySelector('[data-panel-table]').click();
+    if(document.getElementById('app').classList.contains('right-table')) return 'close table';
+    document.querySelector('[data-panel-close]').click();
+    const stage=document.getElementById('stage').getBoundingClientRect();
+    return stage.right===innerWidth && document.documentElement.scrollWidth===innerWidth;
+  `],
+  ["bench-t5 changes and checks search sort group", "p=1&t=checks", `
+    const search=document.querySelector('[data-list-search=checks]');search.value='no-such-finding-123';search.dispatchEvent(new Event('input'));
+    if(document.querySelectorAll('.viol').length) return 'checks search';
+    document.querySelector('[data-list-search=checks]').value='';document.querySelector('[data-list-search=checks]').dispatchEvent(new Event('input'));
+    const group=document.querySelector('[data-list-group=checks]'); group.value='severity'; group.dispatchEvent(new Event('change'));
+    if(S.checks.group!=='severity') return 'checks grouping';
+    S.t='changes';renderPanel();
+    const sort=document.querySelector('[data-list-sort=changes]');sort.value='reference';sort.dispatchEvent(new Event('change'));
+    const cg=document.querySelector('[data-list-group=changes]');cg.value='kind';cg.dispatchEvent(new Event('change'));
+    const q=document.querySelector('[data-list-search=changes]');q.value='no-such-change-123';q.dispatchEvent(new Event('input'));
+    return S.filter.sort==='reference' && S.filter.group==='kind' && !document.querySelectorAll('.card').length;
+  `],
+  ["bench-t5 proof parts wide", "v=board&m=overlay&t=parts", `
+    if(!proj().parts) return 'skip';
+    resizeRightDock(700); renderPanel(); fit();
+    return document.querySelector('.parts-table') && document.documentElement.scrollWidth===innerWidth;
+  `],
+  ["bench-t5 proof checks", "v=board&m=overlay&t=checks", `
+    resizeRightDock(360);renderPanel(); fit();
+    return document.documentElement.scrollWidth===innerWidth;
+  `],
+
+  ["bench-t5 persisted dock width survives reload", "", `
+    resizeRightDock(480); return localStorage.getItem('kr.rightDockWidth')==='480';
+  `, {afterReload:`return document.getElementById('panel').getBoundingClientRect().width===480 && document.getElementById('right-splitter').getAttribute('aria-valuenow')==='480';`}],
+
+  ["bench-t5 full checks table retains findings", "p=1&t=checks", `
+    const count=document.querySelectorAll('.viol').length;
+    document.querySelector('[data-panel-table]').click();
+    if(!document.querySelector('.checks-table') || document.querySelectorAll('.checks-table tbody tr').length!==count || document.querySelectorAll('.checks-table .viol').length!==count) return 'table rows';
+    document.querySelector('[data-panel-table]').click();
+    return !document.querySelector('.checks-table') && document.querySelectorAll('.viol').length===count;
+  `],
+  ["bench-t5 proof parts narrow", "v=board&m=overlay&t=parts", `
+    if(!proj().parts) return 'skip'; resizeRightDock(360);renderPanel(); fit();
+    return document.querySelector('.parts-table').getBoundingClientRect().right<=innerWidth;
+  `],
+  ["bench-t5 table-view proof checks", "v=board&m=overlay&t=checks", `
+    resizeRightDock(360);renderPanel();document.querySelector('[data-panel-table]').click();
+    return !!document.querySelector('.checks-table');
+  `],
+
+  // bench-t4: left module regression checks (append-only).
+  ["bench-t4 Project tree wraps names and searches sorts filters", "", `
+    const p=proj(), original=p.sheets.find(s=>s.svg); if(!original)return 'skip';
+    p.sheets=[{...original,path:'/',parent:null,name:'Root_project.kicad_sch',page:'1',status:'modified'},
+      {...original,path:'/z/',parent:'/',name:'Z_child_long_schematic_name.kicad_sch',page:'2',status:'added'},
+      {...original,path:'/a/',parent:'/',name:'A_child.kicad_sch',page:'3',status:'unchanged'}];
+    S.t='changes'; leftTab='project'; renderNav();
+    const q=s=>document.querySelector(s), fire=e=>e.dispatchEvent(new Event('change',{bubbles:true}));
+    const name=q('#nav [data-view="sheet:/z/"] .name');
+    if(name.title!=='Z_child_long_schematic_name.kicad_sch (page 2)' || getComputedStyle(name).whiteSpace!=='normal')return 'full name';
+    if(!q('#nav [data-view="sheet:/z/"]').style.getPropertyValue('--depth'))return 'hierarchy';
+    if(q('#nav .chip.modified').textContent.trim()[0]!=='~' || getComputedStyle(q('#nav .chip.removed')).borderTopStyle!=='dashed' || getComputedStyle(q('#nav .chip.modified')).borderRadius==='0px')return 'shape glyph';
+    q('#project-sort').value='name';fire(q('#project-sort'));
+    if([...document.querySelectorAll('#nav [data-view^="sheet:"]')].map(b=>b.dataset.view).join()!=='sheet:/,sheet:/a/,sheet:/z/')return 'sort';
+    q('#project-filter').value='added';fire(q('#project-filter'));
+    if(q('#nav [data-view="sheet:/a/"]') || !q('#nav [data-view="sheet:/z/"]'))return 'filter';
+    q('#project-search').value='no such sheet';q('#project-search').dispatchEvent(new Event('input',{bubbles:true}));
+    if(q('#nav [data-view^="sheet:"]') || document.activeElement.id!=='project-search')return 'search focus';
+    return true;
+  `],
+  ["bench-t4 Appearance belongs left and leaves review tabs available", "v=board&t=appearance", `
+    const q=s=>document.querySelector(s);
+    if(!q('#nav #appearance-root') || q('#panel #appearance-root') || q('#panel [data-tab="appearance"]'))return 'location';
+    if(q('#left-tab-appearance').getAttribute('aria-selected')!=='true' || q('#nav').classList.contains('left-collapsed'))return 'deep link';
+    if(!q('#appearance-root .appearance-group'))return 'groups';
+    q('#panel [data-tab="checks"]').click();
+    if(!q('#nav #appearance-root') || q('#panel [data-tab="checks"]').getAttribute('aria-selected')!=='true')return 'independent tabs';
+    q('#left-tab-project').click(); await new Promise(r=>setTimeout(r,250));
+    if(q('#appearance-root') || !q('#project-search') || !location.hash.includes('t=checks'))return 'project switch';
+    q('#left-tab-appearance').click(); await new Promise(r=>setTimeout(r,250));
+    if(!q('#nav #appearance-root') || !location.hash.includes('t=appearance'))return 'appearance link';
+    return !q('#nav').scrollWidth || q('#nav').scrollWidth<=q('#nav').clientWidth+1;
+  `],
+  ["bench-t4 left splitter collapse storage and keyboard", "", `
+    const q=s=>document.querySelector(s); setDock('nav',true);
+    const grip=q('#nav [role=separator]'), key=k=>grip.dispatchEvent(new KeyboardEvent('keydown',{key:k,bubbles:true,cancelable:true}));
+    key('End');if(grip.getAttribute('aria-valuenow')!=='520')return 'max';
+    key('Home');key('ArrowRight');
+    if(JSON.parse(localStorage.getItem('kr.bench.left')).width!==230 || q('#nav').getBoundingClientRect().width!==230)return 'width persistence';
+    const get=Storage.prototype.getItem,set=Storage.prototype.setItem;
+    try { Storage.prototype.getItem=()=>{throw Error('blocked')}; Storage.prototype.setItem=()=>{throw Error('blocked')}; key('ArrowRight');q('#nav .left-collapse').click(); }
+    finally {Storage.prototype.getItem=get;Storage.prototype.setItem=set;}
+    if(!q('#nav').classList.contains('left-collapsed') || q('[data-dock="nav"]').getAttribute('aria-expanded')!=='false')return 'collapse';
+    q('[data-dock="nav"]').click();
+    if(q('#nav').getBoundingClientRect().width!==240 || q('[data-dock="nav"]').getAttribute('aria-expanded')!=='true')return 'restore';
+    return document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t4 Project screenshot proof", "v=board&m=overlay", `
+    setDock('nav',true); leftWidth=262; syncLeftDock();
+    document.querySelector('#left-tab-project').click();
+    await new Promise(r=>setTimeout(r,400));
+    return document.querySelector('#nav').getBoundingClientRect().width===262 && document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t4 Appearance screenshot proof", "v=board&m=overlay&t=appearance", `
+    setDock('nav',true); leftWidth=262; syncLeftDock();
+    return !!document.querySelector('#nav #appearance-root') && document.documentElement.scrollWidth<=innerWidth;
+  `],
+  ["bench-t4 saved left dock restores on startup", "", `
+    const toggle=document.querySelector('[data-dock="nav"]');
+    if(!leftCollapsed || leftWidth!==337 || getComputedStyle(document.querySelector('#nav')).display!=='none')return 'stored state';
+    toggle.click();
+    return document.querySelector('#nav').getBoundingClientRect().width===337;
+  `, {beforeStartup:`try {localStorage.setItem('kr.bench.left',JSON.stringify({width:337,collapsed:true}));} catch {}`}],
+  ["bench-t4 blocked storage permits startup and deep link", "v=board&t=appearance", `
+    return !!document.querySelector('#nav #appearance-root') && leftWidth===262 && !leftCollapsed;
+  `, {beforeStartup:`Storage.prototype.getItem=Storage.prototype.setItem=()=>{throw new DOMException('Blocked','SecurityError')};`}],
   ["vf-opacity synthetic layer union UI persistence and marks", "v=board&t=appearance", `
     const names=['F.Cu','In1.Cu','In2.Cu','B.Cu'];
     const track=(id,layer,x0,x1,width=2000)=>({kind:'track',uuid:id,changeUuid:id,changeIds:layer==='In2.Cu'?['opacity-change']:[],layers:[layer],net:0,category:'tracks',side:null,hidden:false,
@@ -3593,7 +3889,7 @@ CHECKS.push(['vf-avail unchanged board full design and Appearance hash', 'v=boar
   if(state.v!=='board'||state.t!=='appearance')throw Error('unchanged board deep link rejected');
   Object.assign(S,state);renderNav();renderPanel();await draw();
   if(!currentView('board'))throw Error('unchanged board unavailable');
-  if(!document.querySelector('[data-view="board"]'))throw Error('unchanged board missing in navigator');
+  document.querySelector('[data-left-tab=project]').click(); if(!document.querySelector('[data-view="board"]'))throw Error('unchanged board missing in navigator'); document.querySelector('[data-left-tab=appearance]').click();
   if(!document.querySelector('#appearance-root'))throw Error('Appearance unavailable');
   if(!document.querySelector('#stage').textContent.includes('No layout changes'))throw Error('missing no-change notice');
   for(const layer of proj().board.layers){if(!document.querySelector('#appearance-root [data-layer="'+canon(layer.name)+'"]'))throw Error('missing layer '+layer.name);}
@@ -3661,6 +3957,31 @@ CHECKS.push(['vf-avail one-sheet change retains unchanged sibling proof', '', `
   await applyState({p,v:'sheet:'+D.projects[p].sheets.find(s=>s.status==='unchanged').path,m:'side'});
   if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
 `]);
+CHECKS.push(['bench polish Fit stays centred after dock resize and Widen has a label', 'v=board', `
+  const w=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let i=0;i<40&&!(boardDiff&&boardDiff.scenes?.head);i++)await w(100);
+  if(!boardDiff?.scenes?.head)return 'skip';
+  const btn=document.querySelector('[data-panel-wide]');
+  if(!btn||/700 px/.test(btn.textContent)||!/Widen|Narrow/.test(btn.textContent)||!btn.querySelector('svg'))return 'widen label '+btn?.textContent;
+  fit();await w(200);
+  const ok=()=>{const vp=document.querySelector('#stage .vp'),b=sceneBox(),z=Math.min(vp.clientWidth/(b[2]-b[0]+4),vp.clientHeight/(b[3]-b[1]+4));
+    return Math.abs(S.z/z-1)<.02&&Math.abs(S.x-(b[0]+b[2])/2)<.5&&Math.abs(S.y-(b[1]+b[3])/2)<.5;};
+  if(!ok())return 'not fitted';
+  btn.click();await w(600);
+  if(!ok())return 'not refitted after widen';
+  setT({z:S.z*2});btn.click&&document.querySelector('[data-panel-wide]').click();await w(600);
+  return S.z>0&&autoFit===false;
+`]);
+CHECKS.push(['bench polish inspector shows nets as a list', 'v=board', `
+  const w=ms=>new Promise(r=>setTimeout(r,ms));
+  for(let i=0;i<40&&!(boardDiff&&boardDiff.scenes?.head);i++)await w(100);
+  const sc=boardDiff?.scenes?.head;if(!sc)return 'skip';
+  let fp=null;
+  for(const o of sc.objects.filter(o=>o.kind==='footprint')){S.s=null;S.io=null;S.ig={side:'head',object:o};if(inspectorProperties()?.head?.Nets?.length>1){fp=o;break;}}
+  if(!fp)return 'skip';renderInspector();
+  const t=document.querySelector('#inspector').textContent;
+  return !/\\[\\s*"/.test(t)&&document.querySelectorAll('#inspector .insp-list li').length>1;
+`]);
 
 // vf-sch-speed: a schematic pan must cost almost nothing (no ancestor restyle, no HUD rewrite, no grid repaint).
 CHECKS.push(['vf-sch-speed schematic pan is cheap', '', `
@@ -3699,3 +4020,4 @@ CHECKS.push(['vf-sch-speed board crosshair follows pointer by transform', 'v=boa
   if(/--cursor/.test(vp.style.cssText)) return 'css variable';
   const b=cross.getBoundingClientRect(); return Math.abs(b.left+9-(r.left+100))<1&&Math.abs(b.top+9-(r.top+50))<1||JSON.stringify(b);
 `]);
+

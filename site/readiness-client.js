@@ -1,13 +1,14 @@
 // Each state has words and a symbol, never colour alone.
 export function readinessClient(config) {
   const panel = document.getElementById('readiness');
+  const badge = document.getElementById('merge-badge');
   const row = (ok, label, text, word = 'blocking') => {
     const li = document.createElement('li');
     li.className = ok === null ? 'wait' : ok ? 'ok' : 'bad';
     li.textContent = `${ok === null ? '… waiting' : ok ? '✓ ready' : `✕ ${word}`} — ${label}: ${text}`;
     return li;
   };
-  const failed = (text) => { const list = document.createElement('ul'); list.append(row(null, 'Readiness', text)); panel.replaceChildren(list); };
+  const failed = (text) => { const list = document.createElement('ul'); for (const label of ['This review', 'GitHub approval', 'Blocking threads']) list.append(row(null, label, text)); panel.replaceChildren(list); if (badge) badge.textContent = 'MERGE · Unknown'; };
   let generation = 0;
   const load = () => {
     const current = ++generation;
@@ -24,6 +25,8 @@ export function readinessClient(config) {
         changes.length ? `changes requested by ${changes.map(describe).join(', ')}` : approved.length ? `approved by ${approved.map(describe).join(', ')}` : data.requested.length ? `waiting for ${data.requested.join(', ')}` : 'no reviews yet'));
       list.append(row(data.blocking === null || data.open === null ? null : data.blocking === 0, 'Blocking threads',
         data.blocking === null || data.open === null ? 'could not be read' : data.blocking ? `${data.blocking} open` : `none open (${data.open} open in total)`));
+      const ready = [...list.children].filter(li => li.className === 'ok').length;
+      if (badge) badge.textContent = `MERGE · ${ready === 3 ? 'READY' : 'NOT READY'} ${ready}/3`;
       panel.replaceChildren(list);
     }).catch(() => { if (current === generation) failed('could not be loaded'); });
   };

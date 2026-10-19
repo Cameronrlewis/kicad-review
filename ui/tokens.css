@@ -1,64 +1,64 @@
-/* Primitive: all literal colour values are kept in this layer. */
+/* Bench identity (direction A). Literal values live only in this block and the two theme blocks. */
 :root {
-  --n-0:#fff; --n-50:#f4f6f8; --n-100:#e9edf1; --n-150:#dde3ea; --n-200:#e4e8ed;
-  --n-300:#c3cad3; --n-400:#7a8594; --n-500:#55606d; --n-900:#1c2128;
-  --d-0:#14171c; --d-1:#1b1f26; --d-2:#232831; --d-3:#2c323c;
-  --d-line:#343b46; --d-line-strong:#6b7585; --d-text:#d8dde4; --d-muted:#99a3b0;
-  --blue-300:#5aa9ff; --blue-400:#79b8ff; --blue-500:#2f6fd0; --blue-600:#0b5cc4;
-  --green-300:#4cc26a; --green-600:#146c2e; --red-300:#ff7b72; --red-600:#b3201f;
-  --amber-300:#e3b341; --amber-600:#8a5a00; --violet-300:#b79cff; --violet-600:#6b3fc4;
-  --board:#001023; --paper:#f5f4ef;
-  --d-selected:#1f3a5f; --l-selected:#cfe2fb; --hud:#c8d0dc;
-  --d-added:#12301c; --d-removed:#3a1b1a; --d-modified:#352a0c; --d-waived:#2a2140; --d-info:#1a2c47;
-  --l-added:#dff3e4; --l-removed:#fbe1e0; --l-modified:#f8ecc8; --l-waived:#e9e1fa; --l-info:#dbe9fb;
-  --d-scrim:rgb(0 0 0 / .55); --l-scrim:rgb(20 28 40 / .35);
-  --d-shadow:0 6px 18px rgb(0 0 0 / .5); --l-shadow:0 6px 18px rgb(20 28 40 / .22);
-  --font-ui:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  --font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
-  --fs-2xs:10px; --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:18px; --fs-2xl:22px;
-  --lh-tight:1.2; --lh-base:1.4; --fw-regular:400; --fw-medium:500; --fw-semibold:600;
+  --board:#001023; --paper:#f5f4ef; --hud:#c8d0dc;
+  --font-ui:-apple-system,"SF Pro Text","Segoe UI",system-ui,Roboto,sans-serif;
+  --font-cap:"Avenir Next Condensed","Arial Narrow","Roboto Condensed",sans-serif;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  /* type scale: 10.5 caps / 11 readout / 12 body / 13 row title / 22 KPI */
+  --fs-2xs:10.5px; --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:18px; --fs-2xl:22px;
+  --fs-cap:10.5px; --fs-readout:11px; --fs-body:12px; --fs-row:13px; --fs-kpi:22px;
+  --cap-track:.11em; --lh-tight:1.2; --lh-base:1.35; --fw-regular:400; --fw-medium:500; --fw-semibold:600;
   --sp-0:2px; --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
   --h-xs:20px; --h-sm:24px; --h-md:28px; --h-lg:32px;
-  --r-0:0; --r-1:2px; --r-2:3px; --r-3:6px; --r-pill:999px; --bw:1px;
+  --hdr-h:36px; --rbar-h:34px; --tbar-h:34px; --sbar-h:24px; --dock-l:262px; --dock-r:360px; --inspector-h:176px;
+  --r-0:0; --r-1:2px; --r-2:3px; --r-3:4px; --r-pill:999px; --bw:1px;
   --dur-fast:80ms; --dur:140ms; --ease:cubic-bezier(.2,0,0,1);
   --z-dock:1; --z-popover:20; --z-dialog:30; --z-toast:40;
 }
-/* Semantic: no OS media rule. Unset/invalid theme remains dark. */
+/* Unset/invalid theme remains dark. Theme mechanism: ui/theme.js, data-theme, kr.theme. */
 :root, :root[data-theme="dark"] {
   color-scheme:dark;
-  --bg:var(--d-0); --surface:var(--d-1); --surface-2:var(--d-2); --surface-3:var(--d-3);
-  --surface-sel:var(--d-selected); --line:var(--d-line); --line-strong:var(--d-line-strong);
-  --text:var(--d-text); --muted:var(--d-muted); --accent:var(--blue-300);
-  --accent-fill:var(--blue-500); --on-accent:var(--n-0); --focus:var(--blue-400);
-  --added:var(--green-300); --removed:var(--red-300); --modified:var(--amber-300); --waived:var(--violet-300);
-  --added-bg:var(--d-added); --removed-bg:var(--d-removed); --modified-bg:var(--d-modified); --waived-bg:var(--d-waived); --info-bg:var(--d-info);
-  --scrim:var(--d-scrim); --shadow-pop:var(--d-shadow),0 0 0 1px var(--line);
-  --canvas:var(--board); --canvas-chrome:var(--hud);
+  --chassis:#0a0c0e; --panel:#101316; --module:#161b1f; --inset:#0b0e10; --line:#2d363d; --hair:#1e252b;
+  --tx:#dde3e8; --tx2:#95a1ac; --deco:#55616b;
+  --acc:#ffb224; --acc-tx:#ffb224; --on-acc:#1a1100; --acc-bg:rgb(255 178 36 / .13);
+  --add:#4fd18b; --rem:#ff7b72; --mod:#6cb6ff; --wav:#b79cff;
+  --add-bg:rgb(79 209 139 / .12); --rem-bg:rgb(255 123 114 / .12); --mod-bg:rgb(108 182 255 / .12); --wav-bg:rgb(183 156 255 / .14);
+  --shadow:0 8px 24px rgb(0 0 0 / .6); --scrim:rgb(0 0 0 / .55);
 }
 :root[data-theme="light"] {
   color-scheme:light;
-  --bg:var(--n-200); --surface:var(--n-50); --surface-2:var(--n-100); --surface-3:var(--n-150);
-  --surface-sel:var(--l-selected); --line:var(--n-300); --line-strong:var(--n-400);
-  --text:var(--n-900); --muted:var(--n-500); --accent:var(--blue-600);
-  --accent-fill:var(--blue-600); --on-accent:var(--n-0); --focus:var(--blue-600);
-  --added:var(--green-600); --removed:var(--red-600); --modified:var(--amber-600); --waived:var(--violet-600);
-  --added-bg:var(--l-added); --removed-bg:var(--l-removed); --modified-bg:var(--l-modified); --waived-bg:var(--l-waived); --info-bg:var(--l-info);
-  --scrim:var(--l-scrim); --shadow-pop:var(--l-shadow),0 0 0 1px var(--line);
+  --chassis:#cfd4d8; --panel:#eceef0; --module:#f7f8f9; --inset:#dde1e4; --line:#9aa5ae; --hair:#c9d0d5;
+  --tx:#12171b; --tx2:#434f59; --deco:#8a959e;
+  --acc:#d98a00; --acc-tx:#7d4a00; --on-acc:#160e00; --acc-bg:rgb(217 138 0 / .16);
+  --add:#14683a; --rem:#a5211a; --mod:#1a5aa0; --wav:#6538bd;
+  --add-bg:rgb(20 104 58 / .11); --rem-bg:rgb(179 38 30 / .1); --mod-bg:rgb(26 90 160 / .1); --wav-bg:rgb(107 63 196 / .1);
+  --shadow:0 8px 24px rgb(0 0 0 / .25); --scrim:rgb(20 28 40 / .35);
+}
+/* Legacy semantic names (kept so existing CSS works) map onto Bench. */
+:root {
+  --bg:var(--chassis); --surface:var(--panel); --surface-2:var(--module); --surface-3:var(--inset);
+  --surface-sel:var(--acc-bg); --line-strong:var(--tx2);
+  --text:var(--tx); --muted:var(--tx2); --accent:var(--acc-tx); --accent-fill:var(--acc);
+  --on-accent:var(--on-acc); --focus:var(--acc);
+  --added:var(--add); --removed:var(--rem); --modified:var(--mod); --waived:var(--wav);
+  --added-bg:var(--add-bg); --removed-bg:var(--rem-bg); --modified-bg:var(--mod-bg); --waived-bg:var(--wav-bg); --info-bg:var(--acc-bg);
+  --shadow-pop:var(--shadow),0 0 0 1px var(--line);
+  --canvas:var(--board); --canvas-chrome:var(--hud);
 }
 /* Component API plus migration aliases. */
 :root {
   --space-1:var(--sp-1); --space-2:var(--sp-2); --space-3:var(--sp-3); --space-4:var(--sp-4); --radius:var(--r-3);
-  --toolbar-h:var(--h-lg); --toolbar-bg:var(--surface-2);
-  --btn-h:var(--h-sm); --btn-bg:var(--surface-2); --btn-bg-hover:var(--surface-3); --btn-border:var(--line-strong);
-  --btn-primary-bg:var(--accent-fill); --btn-primary-fg:var(--on-accent);
+  --toolbar-h:var(--hdr-h); --toolbar-bg:var(--panel);
+  --btn-h:var(--h-sm); --btn-bg:var(--surface-2); --btn-bg-hover:var(--surface-3); --btn-border:var(--line);
+  --btn-primary-bg:var(--acc); --btn-primary-fg:var(--on-accent);
   --icon-btn-size:var(--h-sm); --icon-size:16px;
   --seg-h:var(--h-sm); --seg-on-bg:var(--surface-sel); --seg-on-fg:var(--text);
-  --tab-h:var(--h-md); --tab-underline:var(--accent);
+  --tab-h:var(--h-md); --tab-underline:var(--acc);
   --panel-head-h:var(--h-md); --panel-head-bg:var(--surface-2); --panel-bg:var(--surface);
   --row-h:var(--h-sm); --row-hover:var(--surface-3); --row-sel:var(--surface-sel);
   --th-h:var(--h-sm); --td-pad-x:var(--sp-2); --chip-h:var(--h-xs); --badge-h:var(--h-xs);
-  --statusbar-h:var(--h-sm); --statusbar-bg:var(--surface-2);
-  --input-h:var(--h-sm); --input-bg:var(--bg); --input-border:var(--line-strong);
+  --statusbar-h:var(--sbar-h); --statusbar-bg:var(--surface-2);
+  --input-h:var(--h-sm); --input-bg:var(--inset); --input-border:var(--hair);
   --dialog-bg:var(--surface); --dialog-w:480px; --splitter:4px;
 }
 @media (prefers-reduced-motion:reduce) { * { transition:none!important; animation:none!important; } }
@@ -66,7 +66,8 @@
 .btn, .btn-primary { box-sizing:border-box; min-height:var(--btn-h); font:inherit; color:var(--text); background:var(--btn-bg); border:1px solid var(--btn-border); border-radius:var(--r-2); padding:0 var(--sp-3); cursor:pointer; }
 .btn:hover, .btn-primary:hover { background:var(--btn-bg-hover); }
 .btn-primary { background:var(--btn-primary-bg); color:var(--btn-primary-fg); }
-.btn-primary:hover { background:var(--btn-primary-bg); }
+.btn-primary:hover { background:var(--btn-primary-bg); border-color:var(--acc); }
+.btn-primary { border-color:var(--acc); font-weight:var(--fw-semibold); }
 .shared-card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:var(--space-4); }
 .shared-chip { font:11px var(--font-mono); border:1px solid currentColor; border-radius:var(--r-1); padding:0 4px; }
 .shared-badge { font:700 11px var(--font-mono); text-transform:uppercase; letter-spacing:.06em; }
@@ -78,6 +79,9 @@
 .shared-status.is-fail, .shared-status.is-error { color:var(--removed); }
 .shared-status.is-new { color:var(--modified); }
 .shared-status.is-notrun, .shared-muted { color:var(--muted); }
+.cap { font:var(--fw-semibold) var(--fs-cap)/1 var(--font-cap); letter-spacing:var(--cap-track); text-transform:uppercase; color:var(--tx2); }
+.led { width:8px; height:8px; border-radius:50%; background:var(--deco); flex:none; }
+.led.ok { background:var(--add); } .led.bad { background:var(--rem); } .led.warn { background:var(--acc); }
 .mono { font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
 
 /* KiCad schematic palette; independent of the chrome theme. See NOTICE. */
@@ -95,6 +99,7 @@
 }
 
 .icon { width:var(--icon-size); height:var(--icon-size); flex:none; vertical-align:middle; }
+.brand-mark { width:22px; height:22px; flex:none; color:var(--tx); }
 .icon-light { display:none; }
 :root[data-theme="light"] .icon-light { display:inline-block; }
 :root[data-theme="light"] .icon-dark { display:none; }

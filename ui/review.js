@@ -1,6 +1,8 @@
 "use strict";
 // KiCad review page. Data contract: window.REVIEW_DATA, format v1 (see README, "Data format").
 const D = window.REVIEW_DATA;
+// bench-t2: never repeat the site frame inside its sandboxed report.
+document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
@@ -106,12 +108,21 @@ function renderLayers() {
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
-  $("#hdr").innerHTML = `<b>${esc(D.repo || "KiCad review")}</b>
-    <span class="revs">${link(L.base, short(D.base))} → ${link(L.head, short(D.head))}</span>
-    <span class="muted">${esc(D.reason)}</span>
-    ${L.review ? link(L.review, /\/pull\/(\d+)/.test(L.review) ? `PR #${L.review.match(/\/pull\/(\d+)/)[1]} ↗` : "Compare ↗") : ""}
-    <span class="verdict ${v.failing ? "fail" : "pass"}">${v.failing ? `✕ ${v.failing} check${v.failing > 1 ? "s" : ""} failing` : "✓ checks passing"}${v.newErrors ? ` · ${v.newErrors} new error${v.newErrors > 1 ? "s" : ""}` : ""}</span>
-    ${L.run ? link(L.run, "Workflow run") : ""}`;
+  const pr = /\/pull\/(\d+)/.exec(L.review || '');
+  $("#hdr").innerHTML = `<span>${esc(D.repo || 'Repository')}</span><span aria-hidden="true">›</span><span>${pr ? `PR #${pr[1]}` : 'Review'}</span>`;
+  $("#report-state").textContent = v.failing ? `✕ NEEDS WORK · ${v.failing} CHK · ${v.newErrors} NEW ERR` : '✓ CHECKS PASSING';
+  $("#report-review-bar").innerHTML = `<span class="bench-revision"><span class="bench-label">BASE</span> ${link(L.base, short(D.base))}</span><span aria-hidden="true">→</span><span class="bench-revision"><span class="bench-label">HEAD</span> ${link(L.head, short(D.head))}</span>${L.review ? link(L.review, pr ? `PR #${pr[1]} ↗` : 'Compare ↗') : ''}<span class="muted">Run result not recorded</span><details class="bench-menu bench-merge"><summary>MERGE · Unavailable</summary><div class="bench-popover"><ul>${['This review', 'GitHub approval', 'Blocking threads'].map(label => `<li>… ${label}: live data unavailable offline</li>`).join('')}</ul></div></details><details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${pr ? link(L.review + '/commits', 'History ↗') : '<button disabled title="No pull request recorded">History</button>'}<button disabled title="Open the online review to create a share link">Share…</button>${L.run ? link(L.run, 'Open run ↗') : '<button disabled title="Run not recorded">Open run</button>'}<button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved review position" placeholder="Paste a review link"></label><input class="copyfield" aria-label="Link to copy" readonly hidden></div></details>`;
+  $("#report-review-bar [data-act=copy]").onclick = async event => {
+    const button = event.currentTarget, value = positionLink();
+    button.closest('details').open = true;
+    try { await navigator.clipboard.writeText(value); button.textContent = 'Copied'; setTimeout(() => { button.textContent = 'Copy link'; }, 1500); }
+    catch {
+      let input = $("#report-review-bar .copyfield");
+      if (!input) { input = document.createElement('input'); input.className = 'copyfield'; input.readOnly = true; input.setAttribute('aria-label', 'Link to copy'); button.after(input); }
+      input.hidden = false; input.value = value; input.focus(); input.select();
+    }
+  };
+  $("#report-review-bar .goto").onchange = event => { applyGoTo(event.target.value); event.target.value = ''; };
 }
 function sheetNumber(sheet) {
   return sheet.page == null || !String(sheet.page).trim()
@@ -133,37 +144,87 @@ function navigateSheet(direction) {
   const page = direction === "parent" ? pages.find(s => s.path === pages[i].parent) : pages[i + direction];
   if (page) select(`sheet:${page.path}`);
 }
+// bench-t4: the left dock owns navigation and Appearance; t=appearance remains shareable.
+let leftTab = "project", rightTab = "changes";
+const projectTools = {q:"", sort:"page", filter:"all"};
+let leftWidth = 262, leftCollapsed = false;
+try {
+  const saved = JSON.parse(localStorage.getItem("kr.bench.left") || "null");
+  if (Number.isFinite(saved?.width)) leftWidth = Math.max(220, Math.min(520, saved.width));
+  leftCollapsed = saved?.collapsed === true;
+} catch {} // file reports and blocked storage must remain usable
+function persistLeftDock() {
+  try { localStorage.setItem("kr.bench.left", JSON.stringify({width:leftWidth, collapsed:leftCollapsed})); } catch {}
+}
+function syncLeftDock() {
+  document.documentElement.style.setProperty("--nav-w", leftCollapsed ? "0px" : `${leftWidth}px`);
+  $("#nav").classList.toggle("left-collapsed", leftCollapsed);
+  const toggle = $('[data-dock="nav"]');
+  toggle?.setAttribute("aria-expanded", String(!leftCollapsed && (!matchMedia("(max-width:899px)").matches || $("#nav").classList.contains("dock-open"))));
+}
+function projectChips(c) {
+  return `<span class="counts">${["added", "removed", "modified"].map((a, i) => `<span class="chip ${a}" title="${c[a]} ${a}" aria-label="${c[a]} ${a}">${["+", "−", "~"][i]} ${c[a]}</span>`).join("")}</span>`;
+}
+const projectBoardSummaries = new WeakMap();
+function projectBoardSummary(loadedScene) {
+  const p = proj(), scene = loadedScene || (boardView.project === S.p ? boardView.scenes?.[1] || boardView.scenes?.[0] : null);
+  if (!scene && projectBoardSummaries.has(p)) return projectBoardSummaries.get(p);
+  const layers = scene?.layers || p.board.layers;
+  const copper = layers.filter(l => /(?:[._]Cu)$/.test(l.name) && l.enabled !== false).length;
+  const inventory = p.objects?.filter(o => o.kind === "footprint" && o.side === "head");
+  const footprints = scene ? scene.objects.filter(o => o.kind === "footprint").length : inventory?.length;
+  const summary = `${copper} copper layers · ${footprints == null ? "footprints unavailable" : `${footprints} footprints`}`;
+  if (scene) projectBoardSummaries.set(p,summary);
+  return summary;
+}
 function boardAvailable(p = proj()) { return !!(p.board.layers.length || p.board.geometry?.base || p.board.geometry?.head); }
 function modelAvailable(p = proj()) { return !!(p.board.model3d?.enabled || p.board.model3d?.base || p.board.model3d?.head); }
 function renderNav() {
   const p = proj();
-  const kids = parent => p.sheets.filter(s => s.parent === parent).sort(compareSheetPages);
+  if (S.t === "appearance") leftTab = "appearance";
+  appearanceUI?.dispose(); appearanceUI = null;
+  const kids = parent => p.sheets.filter(s => s.parent === parent).sort(projectTools.sort === "name" ? (a,b) => a.name.localeCompare(b.name, undefined, {numeric:true}) : compareSheetPages);
+  const matches = (name, status) => name.toLowerCase().includes(projectTools.q.toLowerCase()) && (projectTools.filter === "all" || (projectTools.filter === "changed" ? status !== "unchanged" : status === projectTools.filter));
   const sheetItems = (parent, depth) => kids(parent).map(s => {
-    const view = `sheet:${s.path}`;
-    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}"
-      aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${s.status === "unchanged" ? "" : "● "}${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${chips(counts(p, view))}</button>
-      ${kids(s.path).length ? `<ul>${sheetItems(s.path, depth + 1)}</ul>` : ""}</li>`;
+    const view = `sheet:${s.path}`, children = sheetItems(s.path, depth + 1);
+    if (!matches(s.name, s.status) && !children) return "";
+    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}" aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${projectChips(counts(p, view))}</button>${children ? `<ul>${children}</ul>` : ""}</li>`;
   }).join("");
-  $("#nav").innerHTML = `
-    <h3>Projects</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project">${D.projects.map((q, i) =>
-      `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label>
-    <h3>Sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null, 0) || '<li class="muted">No schematic</li>'}</ul>
-    <h3>Board</h3><ul class="tree">${boardAvailable(p)
-      ? `<li><button data-view="board" data-status="${p.board.changed ? p.board.status : "unchanged"}" aria-current="${S.v === "board"}">
-          <span class="name" title="${esc(p.name)}.kicad_pcb">${p.board.changed ? "● " : ""}${esc(p.name)}.kicad_pcb</span>${chips(counts(p, "board"))}</button></li>`
-      : '<li class="muted">No board in either revision</li>'}
-      ${modelAvailable(p) ? `<li><button data-view='3d' aria-current="${S.v === '3d'}"><span class="name">3D view</span></button></li>` : ""}</ul>
-    ${p.libraries?.length ? `<h3>Libraries</h3><ul class="tree">${p.libraries.map((c, i) => `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">● ${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span>${c.warnings.length ? ` <span aria-label="${c.warnings.length} warnings">⚠ ${c.warnings.length}</span>` : ""}</button></li>`).join("")}</ul>` : ""}
-    <div id="layers"></div>`;
-  $("#proj").onchange = e => openProject(+e.target.value);
-  for (const b of document.querySelectorAll("#nav [data-view]")) b.onclick = () => select(b.dataset.view);
-  renderLayers();
+  $("#nav").innerHTML = `<div class="left-tabs" role="tablist" aria-label="Left dock">${[["project","Project"],["appearance","Appearance"]].map(([id,label]) => `<button type="button" role="tab" id="left-tab-${id}" data-left-tab="${id}" ${id === "appearance" ? 'data-tab="appearance"' : ''} aria-controls="left-body" aria-selected="${leftTab === id}" tabindex="${leftTab === id ? 0 : -1}">${label}</button>`).join("")}<button type="button" class="left-collapse" aria-label="Collapse left dock" title="Collapse left dock">‹</button></div>
+    <div id="left-body" role="tabpanel" aria-labelledby="left-tab-${leftTab}">${leftTab === "appearance" ? '<div id="appearance-root"></div><div id="layers" hidden></div>' : `
+    <div class="project-tools"><input type="search" id="project-search" aria-label="Search project tree" placeholder="Search project…" value="${esc(projectTools.q)}"><div><select id="project-sort" aria-label="Sort project tree"><option value="page" ${projectTools.sort === "page" ? "selected" : ""}>Page order</option><option value="name" ${projectTools.sort === "name" ? "selected" : ""}>Name A–Z</option></select><select id="project-filter" aria-label="Filter project tree">${[["all","All items"],["changed","Changed"],["added","Added"],["removed","Removed"],["modified","Modified"]].map(([v,label]) => `<option value="${v}" ${projectTools.filter === v ? "selected" : ""}>${label}</option>`).join("")}</select></div></div>
+    <h3>Project</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project" title="${esc(p.name)}">${D.projects.map((q,i) => `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label><div class="project-name" title="${esc(p.name)}">${esc(p.name)}</div>
+    <h3>Schematic sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null,0) || '<li class="muted">No matching sheets</li>'}</ul>
+    <h3>Board</h3><ul class="tree">${boardAvailable(p) && matches(p.name + ".kicad_pcb", p.board.status || "unchanged") ? `<li><button data-view="board" data-status="${esc(p.board.status || "unchanged")}" aria-current="${S.v === "board"}"><span class="name" title="${esc(p.name)}.kicad_pcb">${esc(p.name)}.kicad_pcb</span>${projectChips(counts(p,"board"))}</button><div class="project-meta" data-board-summary>${projectBoardSummary()}</div></li>` : '<li class="muted">No matching board</li>'}
+    ${modelAvailable(p) && matches("3D model",p.board.status || "unchanged") ? `<li><button data-view="3d" aria-current="${S.v === "3d"}"><span class="name" title="${esc(p.name)} — 3D model">3D model</span></button></li>` : ""}</ul>
+    <h3>Libraries</h3><ul class="tree">${p.libraries?.map((c,i) => matches(c.item + " " + c.file,c.status) ? `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span></button></li>` : "").join("") || '<li class="muted">No library changes</li>'}</ul><div id="layers"></div>`}</div>
+    <div class="left-splitter" role="separator" tabindex="0" aria-label="Resize left dock" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="520" aria-valuenow="${leftWidth}"></div>`;
+  for (const tab of $("#nav").querySelectorAll("[data-left-tab]")) {
+    tab.onclick = () => { leftTab = tab.dataset.leftTab; S.t = leftTab === "appearance" ? "appearance" : rightTab; renderNav(); renderPanel(); saveHash(); $(`#left-tab-${leftTab}`).focus(); };
+    tab.onkeydown = e => { if (["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) { e.preventDefault(); $(`[data-left-tab="${e.key === "Home" ? "project" : e.key === "End" ? "appearance" : leftTab === "project" ? "appearance" : "project"}"]`).click(); } };
+  }
+  $("#nav .left-collapse").onclick = () => { setDock("nav",false); $('[data-dock="nav"]').focus(); };
+  if (leftTab === "appearance") mountAppearance();
+  else {
+    $("#proj").onchange = e => openProject(+e.target.value);
+    $("#project-search").oninput = e => { const pos=e.target.selectionStart; projectTools.q=e.target.value; renderNav(); $("#project-search").focus(); $("#project-search").setSelectionRange(pos,pos); };
+    for (const key of ["sort","filter"]) $(`#project-${key}`).onchange = e => { projectTools[key]=e.target.value; renderNav(); $(`#project-${key}`).focus(); };
+    for (const b of $("#nav").querySelectorAll("[data-view]")) b.onclick = () => select(b.dataset.view);
+    renderLayers();
+    const summary = $("[data-board-summary]"), geometry = p.board.geometry?.head || p.board.geometry?.base;
+    if (summary && geometry) loadBoardScene(geometry).then(scene => { if (scene && summary.isConnected && proj() === p) summary.textContent = projectBoardSummary(scene); }).catch(() => {});
+  }
+  const grip = $("#nav .left-splitter");
+  const resize = width => { leftWidth=Math.max(220,Math.min(520,width)); syncLeftDock(); grip.setAttribute("aria-valuenow",leftWidth); persistLeftDock(); };
+  grip.onkeydown = e => { if (["ArrowLeft","ArrowRight","Home","End"].includes(e.key)) { e.preventDefault(); resize(e.key === "Home" ? 220 : e.key === "End" ? 520 : leftWidth + (e.key === "ArrowLeft" ? -10 : 10)); } };
+  grip.onpointerdown = e => { if (e.button !== 0) return; e.preventDefault(); grip.setPointerCapture(e.pointerId); const startWidth=leftWidth; grip.onpointermove = ev => resize(startWidth + ev.clientX - e.clientX); const end=()=> { grip.onpointermove=null; grip.onpointerup=null; grip.onpointercancel=null; }; grip.onpointerup=end; grip.onpointercancel=end; };
+  syncLeftDock();
 }
 function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { S.p = i; S.s = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function openProject(i) { S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
 function select(view) { const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
@@ -183,7 +244,7 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" && st.v === "board" && boardAvailable(p)) out.t = st.t;
+  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -194,7 +255,8 @@ function valid(st) {   // drop anything that does not exist in this report
 }
 function applyState(st) {
   const v = valid(st);
-  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, t: v.t ?? S.t,
+  if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
+  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
@@ -277,13 +339,14 @@ function boardFallback(note) {   // one route to SVG per project; a later projec
   disposeBoardRenderers();
   if (S.v === "board") draw();
 }
-// Appearance dock: Layers / Objects / Nets mounted into the panel's Appearance tab.
+// Appearance dock: Layers / Objects / Nets in the left Appearance tab.
 let appearanceUI = null;
 const UNAVAILABLE = Object.fromEntries(["images", "ratsnest", "drcMarkers", "drawingSheet", "values", "references"].map(k => [k, "Not present in this report"]));
 function appearanceCtx() {
   const scenes = (boardView.scenes || []).filter(Boolean), sides = (boardView.scenes || []).map(sc => new Set((sc?.layers || []).filter(l => l.enabled).map(l => l.name)));
   const present = new Set([...scenes.flatMap(sc => sc.layers.filter(l => l.enabled).map(l => l.name)), ...proj().board.layers.map(l => canon(l.name))]);
-  const layers = Object.keys(Appearance.get().layers).filter(n => present.has(n)).map(name => ({ name, label: layerLabel(name), changed: !!proj().board.layers.find(x => canon(x.name) === name)?.changed,
+  const family = n => /\.Cu$/.test(n) ? 0 : /\.(CrtYd|Fab)$/.test(n) ? 2 : /^(User\.|Dwgs\.|Cmts\.|Eco)/.test(n) ? 3 : 1;
+  const layers = Object.keys(Appearance.get().layers).filter(n => present.has(n)).sort((a,b) => family(a) - family(b)).map(name => ({ name, label: layerLabel(name), changed: !!proj().board.layers.find(x => canon(x.name) === name)?.changed,
     title: sides.length === 2 && sides[0].has(name) !== sides[1].has(name) ? `${layerLabel(name)} (${sides[0].has(name) ? "base" : "head"} only)` : layerLabel(name) }));
   const shown = name => { const svg = proj().board.layers.find(x => canon(x.name) === name)?.name; return S.layers ? !svg || S.layers.includes(svg) : !svg || !HIDE_LAYERS.test(svg); };
   const fallback = !boardView.useGL;
@@ -295,7 +358,7 @@ function mountAppearance() {
   const root = $("#appearance-root"); if (!root) return;
   appearanceUI = Appearance.mount(root, { ...appearanceCtx(), getState: Appearance.get, onChange: changeBoardAppearance, unavailable: UNAVAILABLE });
 }
-function refreshAppearance() { if (appearanceUI && S.t === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
+function refreshAppearance() { const summary = $("[data-board-summary]"); if (summary) summary.textContent = projectBoardSummary(); if (appearanceUI && leftTab === "appearance" && $("#appearance-root")?.isConnected) appearanceUI.update(appearanceCtx()); }
 function syncMarkStyles() {
   const sheet = currentView()?.kind === "sheet";
   const available = sheet || S.v === "board" && !!boardDiff && boardView.useGL;
@@ -669,7 +732,8 @@ function gesture() {           // composite as a bitmap while moving, re-rasteri
   gesturing = true; clearTimeout(settle);
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
-function setT(t) { if (S.v === "board" && Number.isFinite(t.z)) t.z = clampBoardZoom(t.z); Object.assign(S, t); apply(); updateStatus(); saveHash(); }
+let autoFit = false;   // see fit()
+function setT(t) { autoFit = false; if (S.v === "board" && Number.isFinite(t.z)) t.z = clampBoardZoom(t.z); Object.assign(S, t); apply(); updateStatus(); saveHash(); }
 // KiCad source 3e051f88: common/view/view.cpp:241 (50000 maximum; .1 minimum is
 // the review px/mm contract, not KiCad's .2 internal scale). common/tool/common_tools.cpp:256-260 (1.3 step).
 const clampBoardZoom = z => Math.max(.1, Math.min(50000, z));
@@ -678,9 +742,10 @@ const BOARD_GRID_MM = [5,2.5,2,1,.5,.25,.2,.1,.05,.025,.02,.01];
 const BOARD_GRID_MIL = [1000,500,250,200,100,50,25,20,10,5,2,1].map(n => n*.0254);
 // Deliberately configurable for measured device calibration (Task 10), not a platform sniff.
 const BOARD_WHEEL_PIXEL_RATE = .0015, BOARD_WHEEL_MAC_ROTATION_RATE = .01;
-let boardCursor = null, deltaAnchor = null, anchorKey = "";
+let boardCursor = null, deltaAnchor = null, anchorKey = "", lastPosition = null, lastPositionKey = "";
+// bench-t7: pointer updates must not churn unchanged readout text.
+function statusText(selector, value) { const node = $("#statusbar " + selector); if (node && node.textContent !== String(value)) node.textContent = value; }
 function resetCoordinates() {
-  for (const node of document.querySelectorAll("#statusbar [data-coordinate]")) node.textContent = "—";
   boardCursor = null; schematicCursor = null;
   updateStatus();
 }
@@ -688,23 +753,31 @@ const setText = (node, text) => { if (node && node.textContent !== text) node.te
 function updateStatus() {
   const sheet = String(S.v).startsWith("sheet:");
   const a = Appearance.get(), units = S.v === "board" ? a.units : sheet ? S.units : "mm", divisor = units === "mil" ? .0254 : units === "in" ? 25.4 : 1;
-  const fmt = n => Number.isFinite(n) ? (Math.abs(n/divisor) < .0005 ? 0 : n/divisor).toFixed(3) : "—";
-  const key = JSON.stringify([S.p,S.v]);   // click origin belongs to one drawing; never survives a view change
+  const fmt = n => Number.isFinite(n) ? (Math.abs(n/divisor) < .0005 ? 0 : n/divisor).toFixed(3) : "off canvas";
+  const key = JSON.stringify([S.p,S.v]);
   if (anchorKey !== key) { anchorKey = key; deltaAnchor = null; }
-  const anchor = deltaAnchor;
-  const p = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world, dx = p && anchor ? p[0]-anchor[0] : NaN, dy = p && anchor ? p[1]-anchor[1] : NaN;
-  const values = {x:p?.[0], y:p?.[1], dx, dy, dist:Math.hypot(dx,dy)};
-  for (const [key,value] of Object.entries(values)) { const node = $(`#statusbar [data-coordinate=${key}]`); setText(node, fmt(value)); }
+  const current = sheet ? schematicCursor && [schematicCursor.x,schematicCursor.y] : boardCursor?.world;
+  if (current) { lastPosition = current; lastPositionKey = key; }
+  const p = current || (lastPositionKey === key ? lastPosition : null);
+  const dx = p && deltaAnchor ? p[0]-deltaAnchor[0] : 0, dy = p && deltaAnchor ? p[1]-deltaAnchor[1] : 0;
+  for (const [name,value] of Object.entries({x:p?.[0],y:p?.[1],dx,dy,dist:Math.hypot(dx,dy)})) statusText(`[data-coordinate=${name}]`,fmt(value));
+  const coords = $("#statusbar .status-coordinates");
+  coords?.classList.toggle("off-canvas",!current); coords?.toggleAttribute("data-sch-coordinates",sheet);
   const rows = [...document.querySelectorAll("#panel .card[data-id]")], at = rows.findIndex(e => e.dataset.id === S.s);
-  const change = $("#statusbar [data-change]"); setText(change, `${at < 0 ? 0 : at+1}/${rows.length}`);
-  const zoom = $("#statusbar [data-zoom]"); setText(zoom, placed() ? (S.z / PX).toFixed(2) : "—");
-  const unit = $("#statusbar [data-units]"); setText(unit, units);
-  const coords = $("#statusbar .status-coordinates"); coords?.toggleAttribute("data-sch-coordinates", sheet);
-  const grid = $("#statusbar [data-grid]");
-  if (grid) {
-    grid.parentElement.toggleAttribute("data-sch-grid", sheet);
-    setText(grid, S.v === "board" ? fmt(a.grid.size) : sheet ? S.grid === false ? "off" : fmt(SCHEMATIC_GRID_MM) : "—");
-  }
+  statusText("[data-change]",`${at < 0 ? 0 : at+1}/${rows.length}`);
+  statusText("[data-zoom]",placed() ? `${(S.z / PX * 100).toFixed(0)}%` : "off canvas");
+  statusText("[data-units]",units);
+  if ($("#status-units").value !== units) $("#status-units").value = units;
+  const grid = $("#statusbar [data-grid]"); grid.parentElement.toggleAttribute("data-sch-grid",sheet);
+  statusText("[data-grid]",S.v === "board" ? `${fmt(a.grid.size)}${a.grid.visible ? "" : " off"}` : sheet && S.grid !== false ? fmt(SCHEMATIC_GRID_MM) : "off");
+  statusText("[data-active-layer]",S.v === "board" ? a.activeLayer || "no layer" : sheet ? "Schematic" : "no layer");
+  const color = a.layers[a.activeLayer]?.color;
+  const swatch = $("[data-layer-swatch]"), swatchColor = S.v === "board" && color ? `rgb(${color.slice(0,3).join(",")})` : "transparent";
+  if (swatch.dataset.color !== swatchColor) { swatch.style.background = swatchColor; swatch.dataset.color = swatchColor; }
+  const selected = proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
+  statusText("[data-selection]",selected ? selected.ref || selected.reference || selected.kind || selected.id : "Nothing selected");
+  statusText("[data-view-mode]",({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
+
 }
 function updateCoordinates(vp, event) {
   if (!placed() || !vp.isConnected || S.v === "3d" || !vp.clientWidth || !vp.clientHeight) { resetCoordinates(); return; }
@@ -731,6 +804,8 @@ function zoomBoardAt(vp, clientX, clientY, factor) {
   updateCoordinates(vp,e);
 }
 function attachPanZoom(vp) {
+  vp.tabIndex = 0;
+  vp.setAttribute("aria-label", "Drawing canvas; Shift+F10 for actions");
   vp.addEventListener("wheel", e => {
     const r = vp.getBoundingClientRect(); if (!placed() || !r.width || !r.height) return;
     e.preventDefault(); gesture();
@@ -765,7 +840,7 @@ function attachPanZoom(vp) {
       deltaAnchor = String(S.v).startsWith("sheet:") ? (p => [p.x,p.y])(schematicPoint(vp,e)) : toWorld(vp,e); updateStatus();
     }
     if (e.type === "pointerup" && a.moved < 4 && a.button === 0) pickAt(vp,e);
-    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext && THREADS_ON) proposePin(vp,pendingContext);
+    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext) canvasMenu(vp,pendingContext);
     pendingContext = null;
     if (e.type !== "pointerup") { suppressContext=false; if(cursorFrame) cancelAnimationFrame(cursorFrame); cursorFrame=0; resetCoordinates(); }
   };
@@ -774,8 +849,8 @@ function attachPanZoom(vp) {
   vp.addEventListener("auxclick", e => { if (suppressContext || e.button===1) e.preventDefault(); });
   vp.addEventListener("contextmenu", e => {
     if (suppressContext || active?.moved >= 4) { e.preventDefault(); return; }
-    if (!THREADS_ON || !placed()) return; e.preventDefault();
-    if (active) pendingContext=e; else proposePin(vp,e);
+    if (!placed()) return; e.preventDefault();
+    if (active) pendingContext=e; else canvasMenu(vp,e);
   });
 }
 function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
@@ -805,9 +880,18 @@ function sceneBox() {   // retained scene bounds (um -> mm); null when the view 
   const live = boardView.scenes.filter(sc => sc && sc.objects.length), b = (live.length ? live : boardView.scenes.filter(Boolean)).map(sc => sc.bounds.map(n => n / 1000));
   return [Math.min(...b.map(x => x[0])), Math.min(...b.map(x => x[1])), Math.max(...b.map(x => x[2])), Math.max(...b.map(x => x[3]))];
 }
-function fit() { const v = currentView(); zoomTo(v?.kind === "sheet" ? [0, 0, ...v.size] : sceneBox() || contentBox() || (v && [0, 0, ...v.size]), 2); }
+// Fit stays live until the user pans or zooms: dock/inspector/window resizes re-centre the whole design in each pane.
+const vpKey = () => { const vp = document.querySelector("#stage .vp"); return vp ? vp.clientWidth + "x" + vp.clientHeight : ""; };
+let fitKey = "";
+function fit() { const v = currentView(); zoomTo(v?.kind === "sheet" ? [0, 0, ...v.size] : sceneBox() || contentBox() || (v && [0, 0, ...v.size]), 2); autoFit = true; fitKey = vpKey(); }
+{ let af = 0;   // #stage is replaced on redraw, so watch the surrounding boxes (centre column and inspector)
+  const ro = new ResizeObserver(() => { if (!autoFit) return; cancelAnimationFrame(af); af = requestAnimationFrame(() => { if (autoFit && placed() && vpKey() !== fitKey) fit(); }); });
+  for (const sel of ["#center", "#inspector"]) { const el = document.querySelector(sel); if (el) ro.observe(el); } }
 
 const MODE_NAMES = { side: "Side", overlay: "Overlay", wipe: "Wipe", blend: "Blend", semantic: "Changes only" };
+const MODE_ICONS = { side: "side", overlay: "overlay", wipe: "wipe", blend: "blend", semantic: "delta" };
+const MODE_TIPS = { side: "Side by side: base left, head right", overlay: "Overlay: head over base, changes tinted", wipe: "Wipe: drag a divider between revisions", blend: "Blend: cross-fade base and head", semantic: "Changes only: dim everything unchanged" };
+const tbIcon = n => `<svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-${n}"></use></svg>`;
 S.blend = 0.5; S.wipe = 0.5;
 async function oneWorld(stage, view, label) {
   const w = viewport(stage, label, view.kind);
@@ -861,8 +945,8 @@ function renderModes() {
   const focus = document.activeElement?.dataset.mode;
   const is3d = S.v === '3d';
   $("#modes").innerHTML = Object.entries(MODE_NAMES).map(([m, n]) =>
-    `<button data-mode="${m}" role="radio" aria-checked="${S.m === m}" tabindex="${S.m === m ? 0 : -1}" aria-pressed="${S.m === m}" ${m === "side" ? 'title="Side by side"' : ""} ${is3d && m === "wipe" ? 'aria-disabled="true" title="Not available in 3D"' : ""}>${is3d && m === "semantic" ? "Changes only" : n}</button>`).join("")
-    + (S.m === "blend" ? (is3d ? `<label class="blend"><span>Base</span><input type="range" aria-label="Base to Head blend" min="0" max="100" value="${Math.round(S.blend * 100)}"><span>Head</span></label><button data-3d-blend-toggle>${S.blend < .5 ? "Show head" : "Show base"}</button>` : `<label class="blend">Head opacity <input type="range" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>`) : "");
+    `<button data-mode="${m}" role="radio" aria-checked="${S.m === m}" tabindex="${S.m === m ? 0 : -1}" aria-pressed="${S.m === m}" title="${is3d && m === "wipe" ? "Not available in 3D" : MODE_TIPS[m]}" ${is3d && m === "wipe" ? 'aria-disabled="true"' : ""}>${tbIcon(MODE_ICONS[m])}<span>${is3d && m === "semantic" ? "Changes only" : n}</span></button>`).join("")
+    + (S.m === "blend" ? (is3d ? `<label class="blend"><span>Base</span><input type="range" aria-label="Base to Head blend" min="0" max="100" value="${Math.round(S.blend * 100)}"><span>Head</span></label><button data-3d-blend-toggle title="Switch visible revision">${S.blend < .5 ? "Show head" : "Show base"}</button>` : `<label class="blend">Head opacity <input type="range" aria-label="Head opacity" min="0" max="100" value="${Math.round(S.blend * 100)}"></label>`) : "");
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onclick = () => { if (b.getAttribute("aria-disabled") === "true") return; S.m = b.dataset.mode; renderModes(); draw(); saveHash(); };
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.onkeydown = e => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
@@ -897,6 +981,7 @@ function markersFor(view) {
   return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" || r.action === "modified" && MARKED.has(r.kind)));
 }
 function afterDraw(view) {
+  renderInspector();
   syncMarkStyles();
   if (!view) return;
   refreshAppearance();
@@ -986,6 +1071,10 @@ function pickAt(vp, e) {
   if (boardDiff) {
     const hit=boardDiff.pick(vp,e,S.s);
     if (hit) { S.s=hit.id; markSelected(); saveHash(); boardDiff.render(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({block:"nearest"}); }
+    else {
+      const leaf = boardDiff.hits(vp, e)[0];
+      if (leaf) { S.s = null; S.io = null; S.ig = leaf; renderInspector(); saveHash(); }
+    }
     return;
   }
   const [x, y] = toWorld(vp, e);
@@ -993,8 +1082,13 @@ function pickAt(vp, e) {
   const side = sideOf(vp);
   const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
+  else {
+    const o = (proj().objects || []).find(o => objView(o) === S.v && (o.side || "head") === side &&
+      (o.box ? x >= o.box[0] && y >= o.box[1] && x <= o.box[2] && y <= o.box[3] : o.pos && Math.hypot(x-o.pos[0], y-o.pos[1]) < 2));
+    if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
+  }
 }
-function markSelected() { for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); }
+function markSelected() { S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
@@ -1077,17 +1171,10 @@ function resolveAnchor(a) {
 }
 S.filter = { added: true, removed: true, modified: true, kind: "", q: "", all: false };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
-const PROP_ORDER = ["Value", "Footprint", "footprint", "layer", "position", "net", "layers", "text", "file", "width"];
-const rank = k => { const i = PROP_ORDER.indexOf(k); return i < 0 ? PROP_ORDER.length : i; };
 function card(r) {
-  const props = Object.entries(r.props || {}).filter(([, v]) => v != null && v !== "" && v !== "~").sort(([a], [b]) => rank(a) - rank(b));
-  const body = r.changes
-    ? r.changes.map(([k, a, b]) => `<div class="prop"><span>${esc(k)}</span><span class="old">${esc(a ?? "—")}</span><span class="arrow">→</span><span class="new">${esc(b ?? "—")}</span></div>`).join("")
-    : props.slice(0, 5).map(([k, v]) => `<div class="prop"><span>${esc(k)}</span><span class="new wide">${esc(v)}</span></div>`).join("")
-      + (props.length > 5 ? `<div class="more muted">+${props.length - 5} more</div>` : "");
   return `<button class="card" data-id="${esc(r.id)}" data-action="${esc(r.action)}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
-    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${body}</button>`;
+    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span></button>`;
 }
 function inventoryHtml() {
   // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
@@ -1097,9 +1184,15 @@ function inventoryHtml() {
   const place = o => o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet);
   const q = S.filter.q.toLowerCase(), objs = (proj().objects || []).map((o, i) => ({ o, i }))
     .filter(({ o }) => !q || [o.ref, o.value, o.footprint, place(o)].some(v => String(v ?? "").toLowerCase().includes(q)));
+  const f = S.filter, groupFor = o => f.group === "action" ? changeFor(o)?.action || "unchanged" : o.kind;
+  if (f.sort) objs.sort((a, b) => String(f.sort === "kind" ? a.o.kind : a.o.ref).localeCompare(String(f.sort === "kind" ? b.o.kind : b.o.ref), undefined, {numeric:true}));
+  if (f.group) objs.sort((a, b) => groupFor(a.o).localeCompare(groupFor(b.o)));
+  let previous;
   return (objs.slice(0, 1500).map(({ o, i }) => {
     const ch = changeFor(o), view = objView(o), drawn = !!currentView(view);
-    return `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
+    const group = groupFor(o), heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
+    previous = group;
+    return heading + `<button class="card inv-row" data-obj="${i}" ${drawn ? "" : 'aria-disabled="true"'}><span class="ref">${esc(o.ref)}</span> <span class="kind">${esc(o.kind)}</span>
       ${ch ? `<span class="badge ${esc(ch.action)}">${GLYPH[ch.action] ?? ""} ${esc(ch.action)}</span>` : ""}
       <div class="prop"><span>value</span><span class="new wide">${esc(o.value ?? "—")}</span></div><div class="prop"><span>footprint</span><span class="new wide">${esc(o.footprint ?? "—")}</span></div>
       <div class="more muted">${esc(place(o))}${drawn ? "" : " · drawing unavailable"}</div></button>`;
@@ -1107,6 +1200,7 @@ function inventoryHtml() {
 }
 function goToObject(i) {
   const o = proj().objects?.[i]; if (!o) return Promise.resolve();
+  S.s = null; S.ig = null; S.io = i; renderInspector();
   const view = objView(o); if (!currentView(view)) return Promise.resolve();
   const p = o.pos, box = o.box || (p && [p[0] - 3, p[1] - 3, p[0] + 3, p[1] + 3]);
   if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
@@ -1118,13 +1212,22 @@ function goToObject(i) {
   });
 }
 function bindInventory() {
-  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goToObject(+b.dataset.obj); };
+  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
 }
 function cardsHtml() {
   const f = S.filter, q = f.q.toLowerCase();
-  const rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
+  let rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
     && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
-  return (rows.slice(0, 1500).map(card).join("") || '<p class="muted">No changes match.</p>')
+  if (f.sort === "reference") rows.sort((a, b) => String(a.ref).localeCompare(String(b.ref), undefined, {numeric:true}));
+  if (f.sort === "kind") rows.sort((a, b) => a.kind.localeCompare(b.kind));
+  if (f.group) rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
+  let previous;
+  return (rows.slice(0, 1500).map(r => {
+    const group = f.group ? r[f.group] : null;
+    const heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
+    previous = group;
+    return heading + card(r);
+  }).join("") || '<p class="muted">No changes match.</p>')
     + (rows.length > 1500 ? `<p class="muted">showing 1500 of ${rows.length}; narrow the filter to see the rest</p>` : "");
 }
 function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
@@ -1157,18 +1260,18 @@ function renderChecks() {
       <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
       <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
-  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived));
+  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
   const totalShown = shown.length;
   const groups = new Map();
   for (const v of shown) {
-    const key = `${v.check.name}\u0000${v.type}`;
-    if (!groups.has(key)) groups.set(key, { check: v.check, type: v.type, violations: [] });
+    const key = state.group === "severity" ? v.severity : state.group === "check" ? v.check.name : `${v.check.name}\u0000${v.type}`;
+    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? v.check.title : v.type, violations: [] });
     groups.get(key).violations.push(v);
   }
   const groupHtml = [...groups.values()].sort((a, b) => {
     const an = a.violations.some(v => v.new), bn = b.violations.some(v => v.new);
     const ae = a.violations.some(v => v.severity === "error"), be = b.violations.some(v => v.severity === "error");
-    return (bn - an) || (be - ae) || a.type.localeCompare(b.type);
+    return (state.sort === "rule" ? a.type.localeCompare(b.type) : (bn - an) || (be - ae) || a.type.localeCompare(b.type));
   }).map(g => {
     const vs = g.violations.sort((a, b) => (b.new - a.new) || ((a.severity === "error") ? -1 : 1) - ((b.severity === "error") ? -1 : 1));
     const newCount = vs.filter(v => v.new).length, errors = vs.some(v => v.severity === "error");
@@ -1178,7 +1281,7 @@ function renderChecks() {
         ${v.new ? '<span class="new-tag">NEW</span>' : ""}${v.waived ? '<span class="waived-tag">WAIVED</span><span class="waived-reason"></span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${v.waiver_key && !v.waived && ["erc", "drc", "parity"].includes(v.check.name) ? `<button class="waive" data-waive="${esc(v.id)}" aria-label="Waive ${esc(v.items.join(" · ") || v.description)}" aria-controls="waiver-${esc(v.id)}" aria-expanded="${S.waiveOpen === v.id}">Waive…</button>${S.waiveOpen === v.id ? `<pre class="waiver-snippet" id="waiver-${esc(v.id)}" data-waiver-snippet="${esc(v.id)}"></pre><p class="muted waiver-help">Add this to kicad-review-waivers.toml on the pull request's target branch through a pull request, fill in reason and by, then re-run this review.</p>` : ""}` : ""}${issueAnchor && !issueForAnchor(issueAnchor) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
-  return `<div class="checks-summary">${summary}</div><div class="filters checks-filters">
+  return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div><div class="filters checks-filters">
     <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
@@ -1210,11 +1313,10 @@ function digiKeyUrl(value) {
 }
 function coverageHtml(parts) {
   const c = parts.coverage; if (!c) return "";
-  const rows = Object.keys(c.head).map(f => {
+  return `<div class="bom-coverage" role="group" tabindex="0" aria-label="BOM coverage"><b>BOM</b>${Object.keys(c.head).map(f => {
     const [n, t] = c.head[f], d = c.base?.[f] ? n - c.base[f][0] : 0, pct = t ? Math.round(100 * n / t) : 100;
-    return `<tr${n < t ? ' class="short"' : ""}><th scope="row">${n < t ? '<span aria-hidden="true">⚠ </span><span class="sr-only">incomplete: </span>' : ""}${esc(f)}</th><td>${n} / ${t}</td><td>${pct}%</td><td>${d ? (d > 0 ? "+" : "") + d : ""}</td></tr>`;
-  }).join("");
-  return `<table class="bom-coverage"><caption>BOM coverage (this revision; change from base)</caption><thead><tr><th>Field</th><th>Parts</th><th>%</th><th>Δ</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<span class="coverage-item${/^(lcsc|mpn|order ready)$/i.test(f) ? " primary" : ""}${n < t ? ' short' : ''}" title="${esc(f)}: ${n} / ${t} (${pct}%) · change from base ${d > 0 ? '+' : ''}${d}"><span class="sr-only">${n < t ? 'incomplete: ' : ''}</span>${esc(f)} <b>${pct}%</b><span class="sr-only"> ${n} / ${t} ${d > 0 ? '+' : ''}${d}</span></span>`;
+  }).join("")}</div>`;
 }
 function fieldChangesHtml(parts) {
   const fc = parts.field_changes || [];
@@ -1228,12 +1330,12 @@ function renderParts() {
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
-  const shown = rows.filter(r => (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
-    .sort((a, b) => Number(blocking(b.line)) - Number(blocking(a.line)));
+  const shown = rows.filter(r => (!f.q || JSON.stringify(r.line).toLowerCase().includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
+    .sort((a, b) => f.sort === "reference" ? a.line.refs[0].localeCompare(b.line.refs[0], undefined, {numeric:true}) : Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
   const notLookedUp = [["no_mpn", "no MPN"], ["invalid_mpn", "invalid MPN"], ["run_limit", "run limit"]]
     .filter(([key]) => counts[key] > 0).map(([key, reason]) => `${esc(counts[key])} part${counts[key] === 1 ? "" : "s"} not looked up: ${reason}`).join(". ");
-  return `${coverageHtml(parts)}${parts.supplier ? `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>` : ""}
+  return `${dockListTools("parts", f)}${coverageHtml(parts)}${parts.supplier ? `<p class="parts-age${age.stale ? " stale" : age.warn ? " warn" : ""}">${age.text}</p>` : ""}
     ${parts.supplier?.fetched_at ? '<p class="parts-attribution parts-age">Stock and price from DigiKey</p>' : ""}
     ${parts.supplier?.error ? `<p class="parts-lookup-error parts-age">DigiKey lookup unavailable: ${esc(parts.supplier.error)}</p>` : ""}
     ${notLookedUp ? `<p class="parts-not-looked-up parts-age">${notLookedUp}.</p>` : ""}
@@ -1262,7 +1364,7 @@ function renderParts() {
       const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
       const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td>${refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ")}</td><td>${changeText("value")}${l.mpn ? `<br>${esc(l.mpn)}` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${esc(problems.join(" · "))}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td>${l.mpn ? "MPN ✔" : "MPN missing"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn ? `<span class="parts-mpn"> ${esc(l.mpn)}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
@@ -1295,29 +1397,60 @@ function libInfoHtml(c) {
     <p>Used by: ${c.used_by.length ? c.used_by.map(ref => { const i = proj().objects?.findIndex(o => o.kind === c.kind && o.lib === `${c.lib}:${c.item}` && o.side === "head" && o.ref.split(" unit ")[0] === ref); return i >= 0 && currentView(objView(proj().objects[i])) ? `<button data-lib-object="${i}">${esc(ref)}</button>` : esc(ref); }).join(", ") : '<span class="muted">nothing in this project</span>'}</p></div>`;
 }
 
+// bench-t5: native dock controls, no dependencies.
+function referenceRanges(refs) {
+  const sorted = [...refs].sort((a, b) => a.localeCompare(b, undefined, {numeric:true})), out = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i], match = /^(.*?)(\d+)$/.exec(start);
+    let end = i;
+    if (match) while (end + 1 < sorted.length && sorted[end + 1] === match[1] + (+match[2] + end - i + 1)) end++;
+    out.push(end - i >= 2 ? `${start}–${sorted[end]}` : sorted.slice(i, end + 1).join(", "));
+    i = end;
+  }
+  return out.join(", ");
+}
+function dockListTools(name, state) {
+  const options = (values, current) => values.map(([v, label]) => `<option value="${v}" ${v === (current || "") ? "selected" : ""}>${label}</option>`).join("");
+  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "No groups"], ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
+}
 function renderPanel() {
+  appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
-  if (S.t === "appearance" && !(S.v === "board" && boardAvailable(p))) S.t = "changes";
+  if (S.t === "appearance" && leftTab !== "appearance") renderNav();
   if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
+  if (S.t !== "appearance") rightTab = S.t;
+  if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = "changes";
+  const panelTab = rightTab;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
-  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${S.t === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
+  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  $("#panel").innerHTML = `<div id="panel-tabs" role="tablist" aria-label="Inspector">${S.v === "board" && boardAvailable(p) ? tab("appearance", "Appearance", true) : ""}${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${S.t}">` +
-    (S.t === "appearance" ? '<div id="appearance-root"></div>' : S.t === "threads" ? renderThreads() : S.t === "parts" ? renderParts() : S.t === "checks" ? renderChecks() : `
+  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
+    (panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
-    <input class="q" type="search" placeholder="Search reference, value, net, layer…" value="${esc(f.q)}">
+    ${dockListTools("changes", f)}
     ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
     <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
+  bindRightDock();
+  for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
+    const attribute = input.hasAttribute("data-list-search") ? "search" : input.hasAttribute("data-list-sort") ? "sort" : "group";
+    const name = input.getAttribute(`data-list-${attribute}`), state = name === "checks" ? S.checks : name === "parts" ? S.partsFilter : S.filter;
+    input[attribute === "search" ? "oninput" : "onchange"] = () => {
+      const start = input.selectionStart;
+      state[attribute === "search" ? "q" : attribute] = input.value;
+      renderPanel();
+      const next = document.querySelector(`[data-list-${attribute}="${name}"]`); next?.focus();
+      if (attribute === "search" && next?.type === "search") next.setSelectionRange(start, start);
+    };
+  }
   for (const t of document.querySelectorAll("#panel-tabs [role=tab]")) t.onclick = () => { if (t.disabled) return; S.wantThreads = false; S.t = t.dataset.tab; renderPanel(); saveHash(); };
   const tabs = [...document.querySelectorAll("#panel-tabs [role=tab]:not(:disabled)")];
-  appearanceUI?.dispose(); appearanceUI = null; if (S.t === "appearance") mountAppearance();
   for (const tab of tabs) {
     tab.tabIndex = tab.getAttribute("aria-selected") === "true" ? 0 : -1;
     tab.addEventListener("keydown", event => {
@@ -1338,7 +1471,7 @@ function renderPanel() {
   $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true, waived: true }); renderPanel(); });
   const wc = $("#panel [data-check-waived]"); if (wc) wc.onclick = () => { S.checks.waived = !S.checks.waived; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-waive]")) b.onclick = () => { S.waiveOpen = S.waiveOpen === b.dataset.waive ? null : b.dataset.waive; renderPanel(); };
-  if (S.t === "checks") for (const c of p.checks || []) for (const v of c.violations) {
+  if (panelTab === "checks") for (const c of p.checks || []) for (const v of c.violations) {
     if (!v.waived && S.waiveOpen !== v.id) continue;
     const reason = $(`#panel .viol[data-id="${CSS.escape(v.id)}"] .waived-reason`);
     if (reason) reason.textContent = `${v.waived.reason} · ${v.waived.by}${v.waived.until ? ` · until ${v.waived.until}` : " · permanent"}`;
@@ -1356,7 +1489,7 @@ function renderPanel() {
     const v = allViolations().find(x => x.id === b.dataset.issueFor), a = v && findingAnchor(v);
     if (ISSUES_ON && a && !issueForAnchor(a)) parent.postMessage({ kicadReviewIssueFor: { ...a, title: `${v.check}: ${v.description}`.slice(0, 200) } }, "*");
   };
-  for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); };
+  for (const b of document.querySelectorAll("#panel .viol[data-id]")) b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") goTo(b.dataset.id); else { S.s = b.dataset.id; markSelected(); saveHash(); } };
   for (const b of document.querySelectorAll("#panel [data-thread-status]")) b.onclick = () => { S.threadFilter.status = b.dataset.threadStatus; renderPanel(); draw(); };
   const ts = $("#panel select.thread-severity"); if (ts) ts.onchange = () => { S.threadFilter.severity = ts.value; renderPanel(); draw(); };
   for (const b of document.querySelectorAll("#panel .thread-card[data-thread]")) b.onclick = () => openThread(b.dataset.thread);
@@ -1426,6 +1559,75 @@ function boardKey(e) {
   else return false;
   return true;
 }
+// bench-t7: shared delayed tooltip helper; delegated so rebuilt controls work too.
+function installBenchTooltips() {
+  const tip=document.createElement('div'); tip.id='bench-tooltip'; tip.role='tooltip'; tip.hidden=true; document.body.append(tip);
+  let timer, target;
+  const hide=()=>{clearTimeout(timer);tip.hidden=true;if(target?.getAttribute('aria-describedby')===tip.id)target.removeAttribute('aria-describedby');target=null;};
+  const show=e=>{
+    const node=e.target.closest?.('#toolbar button, #toolbar [title], #statusbar button, #statusbar [title], #statusbar select');
+    if(!node || node===target)return;
+    hide(); const owner=node.closest('[title]') || node;
+    if(owner.title){owner.dataset.benchTip=owner.title;owner.removeAttribute('title');}
+    let text=node.dataset.benchTip || owner.dataset.benchTip || node.getAttribute('aria-label') || node.textContent.trim();
+    const hint=node.matches('[data-z]') ? (+node.dataset.z>1?'F1 / Ctrl+=':'F2 / Ctrl+−') : node.matches('[data-act=fit]') ? 'Home / Ctrl+0 / f' : node.matches('[data-step]') ? (+node.dataset.step>0?'j / ↓':'k / ↑') : '';
+    if(hint && !text.includes(hint))text+=' · '+hint;
+    if(!text)return;
+    target=node; timer=setTimeout(()=>{if(!target?.isConnected)return;tip.textContent=text;tip.hidden=false;node.setAttribute('aria-describedby',tip.id);const r=node.getBoundingClientRect();tip.style.left=Math.max(6,Math.min(innerWidth-tip.offsetWidth-6,r.left))+'px';tip.style.top=(r.bottom+tip.offsetHeight+12<innerHeight?r.bottom+6:r.top-tip.offsetHeight-6)+'px';},450);
+  };
+  document.addEventListener('pointerover',show);document.addEventListener('focusin',show);
+  document.addEventListener('pointerout',e=>{if(target && !target.contains(e.relatedTarget))hide();});document.addEventListener('focusout',hide);
+  document.addEventListener('pointerdown',hide);document.addEventListener('keydown',hide);window.addEventListener('blur',hide);
+}
+installBenchTooltips();
+$('#status-units').onchange=e=>{if(S.v==='board')Appearance.patch({units:e.target.value});else{S.units=e.target.value;updateStatus();}};
+let benchMenu=null, benchMenuOrigin=null;
+function closeBenchMenu(restore=true){if(!benchMenu)return;benchMenu.remove();benchMenu=null;if(restore && benchMenuOrigin?.isConnected)benchMenuOrigin.focus();}
+function showBenchMenu(items,x,y,origin){
+  closeBenchMenu(false);benchMenuOrigin=origin;const menu=document.createElement('div');menu.className='bench-context';menu.role='menu';menu.setAttribute('aria-label','Context actions');
+  for(const item of items){const b=document.createElement('button');b.type='button';b.role='menuitem';b.textContent=item.label;b.disabled=!!item.disabled;b.onclick=()=>{closeBenchMenu();item.run();};menu.append(b);}
+  document.body.append(menu);benchMenu=menu;menu.style.left=Math.max(4,Math.min(x,innerWidth-menu.offsetWidth-4))+'px';menu.style.top=Math.max(4,Math.min(y,innerHeight-menu.offsetHeight-4))+'px';menu.querySelector('button:not(:disabled)')?.focus();
+  menu.onkeydown=e=>{const buttons=[...menu.querySelectorAll('button:not(:disabled)')],i=buttons.indexOf(document.activeElement);if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){e.preventDefault();e.stopPropagation();buttons[e.key==='Home'?0:e.key==='End'?buttons.length-1:(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}else if(e.key==='Escape'||e.key==='Tab'){if(e.key==='Escape')e.preventDefault();e.stopPropagation();closeBenchMenu();}};
+}
+async function benchCopy(text){
+  try{await navigator.clipboard.writeText(text);statusText('.status-message','Copied');}
+  catch{const dialog=document.createElement('dialog');dialog.className='bench-copy';const label=document.createElement('label');label.textContent='Copy with Ctrl/Cmd+C';const field=document.createElement('input');field.readOnly=true;field.value=text;label.append(field);const close=document.createElement('button');close.textContent='Close';close.onclick=()=>dialog.close();dialog.append(label,close);document.body.append(dialog);dialog.onclose=()=>dialog.remove();dialog.showModal();field.select();}
+}
+function canvasMenu(vp,e){
+  const point=toWorld(vp,e),a=Appearance.get(),layer=a.activeLayer,board=S.v==='board',layerAvailable=board&&!!a.layers[layer];
+  showBenchMenu([
+    {label:'Zoom to here',run:()=>setT({x:point[0],y:point[1],z:S.z*1.3})},
+    {label:'Copy coordinates',run:()=>{const units=board?a.units:S.units,div=units==='mil'?.0254:units==='in'?25.4:1;benchCopy(`X ${(point[0]/div).toFixed(3)} Y ${(point[1]/div).toFixed(3)} ${units}`);}},
+    {label:'Comment here',disabled:!THREADS_ON,run:()=>proposePin(vp,e)},
+    {label:'Select object under cursor',run:()=>pickAt(vp,e)},
+    {label:`Hide layer${layerAvailable?' · '+layer:''}`,disabled:!layerAvailable,run:()=>Appearance.patch({layers:{[layer]:{visible:false}}})},
+    {label:'Show only this layer',disabled:!layerAvailable,run:()=>Appearance.patch({layers:Object.fromEntries(Object.keys(a.layers).map(name=>[name,{visible:name===layer}]))})}
+  ],e.clientX,e.clientY,vp);
+}
+const benchRowSelector='#panel .card[data-id], #panel .inv-row[data-obj], #panel .viol[data-id], #panel .parts-row, #panel .thread-card, #nav [data-view]';
+function rowMenu(row,x,y){
+  const id=row.dataset.id,change=proj().changes.find(c=>c.id===id),thread=S.threads?.find(t=>t.id===row.dataset.thread);
+  const ref=change?.ref || row.querySelector('.ref')?.textContent.trim() || row.querySelector('td:nth-child(2)')?.textContent.trim() || row.querySelector('.name')?.textContent.trim() || change?.kind || id || row.textContent.trim().slice(0,160);
+  const references=ref.split(',').map(s=>s.trim()),objectIndex=row.hasAttribute('data-obj')?+row.dataset.obj:(proj().objects || []).findIndex(o=>references.includes(o.ref)&&o.side==='head');
+  const object=proj().objects?.[objectIndex],view=change?viewOf(change):object?objView(object):row.dataset.view || S.v;
+  const file=thread?.anchor.file || (view?.startsWith('lib:')?proj().libraries?.[+view.slice(4)]?.file:viewFile(proj(),view));
+  let github=null;
+  try{const repo=new URL(D.repo);if(repo.origin==='https://github.com' && file)github=`${repo.href.replace(/\/$/,'')}/blob/${encodeURIComponent(D.head)}/${file.split('/').map(encodeURIComponent).join('/')}`;}catch{}
+  const go=()=>{if(id)goTo(id);else if(row.dataset.view)select(row.dataset.view);else if(objectIndex>=0)goToObject(objectIndex);else row.click();};
+  const canGo=row.getAttribute('aria-disabled')!=='true' && (id || row.dataset.view || row.dataset.thread || (object && currentView(objView(object))));
+  showBenchMenu([{label:'Go to',disabled:!canGo,run:go}, {label:'Copy reference',run:()=>benchCopy(ref)},...(github?[{label:'Open in GitHub',run:()=>window.open(github,'_blank','noopener,noreferrer')}]:[])],x,y,row);
+
+}
+document.addEventListener('contextmenu',e=>{const row=e.target.closest?.(benchRowSelector);if(row){e.preventDefault();rowMenu(row,e.clientX,e.clientY);}});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='ContextMenu' && !(e.shiftKey&&e.key==='F10'))return;
+  const row=e.target.closest?.(benchRowSelector),vp=e.target.closest?.('#stage .vp');if(!row&&!vp)return;e.preventDefault();e.stopImmediatePropagation();const r=(row||vp).getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;if(row)rowMenu(row,x,y);else if(placed())canvasMenu(vp,{clientX:x,clientY:y});
+},true);
+document.addEventListener('pointerdown',e=>{if(benchMenu&&!benchMenu.contains(e.target))closeBenchMenu(false);});
+window.addEventListener('resize',()=>closeBenchMenu(false));
+// Parts table rows are otherwise non-interactive; give their context actions a focus target.
+new MutationObserver(()=>{for(const row of document.querySelectorAll('#panel .parts-row'))if(!row.hasAttribute('tabindex'))row.tabIndex=0;}).observe($('#panel'),{childList:true,subtree:true});
+
 function showShortcuts() { const dialog=$("#shortcuts"); if(!dialog.open) dialog.showModal(); }
 new MutationObserver(updateStatus).observe($("#panel"), {childList:true, subtree:true});   // change n/N follows any list rebuild or filter
 $("#shortcuts-open").onclick=showShortcuts;
@@ -1459,35 +1661,46 @@ function positionLink() {
 function applyGoTo(text) { const i = text.indexOf("#"); if (i >= 0) applyState(decodeState(text.slice(i))); }
 function renderZoombar() {
   if (S.v === '3d' && window.Review3D) { window.Review3D.cameraBar(); return; }
-  const icon = name => ['light','dark'].map(theme=>`<svg class="icon icon-${theme}" aria-hidden="true" focusable="false"><use href="#kr-${name}-${theme}"></use></svg>`).join('');
-  $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out" title="Zoom out">${icon('zoom-out')}</button><span class="pct"></span><button data-z="1.25" aria-label="Zoom in" title="Zoom in">${icon('zoom-in')}</button>
-    <button data-act="fit" aria-label="Fit drawing (f)" title="Fit drawing (f)">${icon('fit')}<span>Fit</span></button>
-    <button data-act="copy" title="Copy current review link">Copy link</button><input class="goto" aria-label="Go to saved review position" placeholder="Go to… paste a link">`;
+  $("#zoombar").innerHTML = `<button data-z="0.8" aria-label="Zoom out" title="Zoom out (F2)">${tbIcon('zout')}</button><span class="pct" title="Zoom"></span><button data-z="1.25" aria-label="Zoom in" title="Zoom in (F1)">${tbIcon('zin')}</button><button data-act="fit" aria-label="Fit drawing (f)" title="Fit drawing to window (f)">${tbIcon('fit')}<span>Fit</span></button>`;
   for (const b of document.querySelectorAll("#zoombar [data-z]")) b.onclick = () => { if (placed()) setT({ z: S.z * +b.dataset.z }); };
   $("#zoombar [data-act=fit]").onclick = fit;
-  $("#zoombar [data-act=copy]").onclick = async e => {
-    const b = e.currentTarget, link = positionLink();
-    try {
-      await navigator.clipboard.writeText(link);
-      b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy link"; }, 1500);
-    } catch {   // no clipboard API (file://) or write refused: show the text selected so the user can press Cmd/Ctrl+C
-      let f = $("#zoombar input[readonly]");
-      if (!f) { f = document.createElement("input"); f.readOnly = true; f.className = "copyfield"; f.setAttribute("aria-label", "Link to copy"); b.after(f); }
-      f.value = link; f.focus(); f.select();
-    }
-  };
-  $("#zoombar .goto").onchange = e => { applyGoTo(e.target.value); e.target.value = ""; };
 }
+// Copy link and Go to left the toolbar; the header menu / review-bar overflow call these.
+async function copyLink() {
+  const link = positionLink(), msg = $("#statusbar .status-message");
+  try {
+    await navigator.clipboard.writeText(link);
+    if (msg) { const was = msg.textContent; msg.textContent = "Copied link"; setTimeout(() => { msg.textContent = was; }, 1500); }
+  } catch {   // no clipboard API (file://) or write refused: show the text selected so the user can press Cmd/Ctrl+C
+    let f = $("input.copyfield[readonly]");
+    if (!f) { f = document.createElement("input"); f.readOnly = true; f.className = "copyfield"; f.setAttribute("aria-label", "Link to copy"); document.body.append(f); }
+    f.value = link; f.focus(); f.select();
+  }
+  return link;
+}
+window.krReview = Object.assign(window.krReview || {}, { copyLink, goTo: applyGoTo, positionLink });
 renderZoombar();
 function setDock(name, open) {
+  if (name === "panel") {
+    document.getElementById("app").classList.toggle("right-collapsed", !open);
+    if (!open) { S.panelTable = false; document.getElementById("app").classList.remove("right-table"); }
+  }
+  if (name === "nav") { leftCollapsed = !open; syncLeftDock(); persistLeftDock(); }
   document.getElementById(name).classList.toggle("dock-open", open);
   document.querySelector(`[data-dock="${name}"]`).setAttribute("aria-expanded", String(open));
 }
+const wide = matchMedia("(min-width:900px)");
+function syncDockButtons() {   // wide: toggles collapse a docked column; narrow: toggles the overlay
+  for (const b of document.querySelectorAll("[data-dock]")) b.setAttribute("aria-expanded", String(wide.matches ? !(b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed) : $("#" + b.dataset.dock).classList.contains("dock-open")));
+}
 for (const b of document.querySelectorAll("[data-dock]")) b.onclick = () => {
+  // Each dock owns its collapse state (splitter, persisted width).
+  if (wide.matches) { setDock(b.dataset.dock, b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed); syncDockButtons(); return; }
   const open = b.getAttribute("aria-expanded") !== "true";
-  setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
+  if (matchMedia("(max-width:899px)").matches) setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
   setDock(b.dataset.dock, open);
 };
+wide.addEventListener("change", syncDockButtons); syncDockButtons();
 for (const b of document.querySelectorAll("#change-nav [data-step]")) b.onclick = () => step(+b.dataset.step);
 
 // Changed regions: rasterise both sides, compare pixels on a grid, merge touching cells into boxes.
@@ -1533,6 +1746,180 @@ async function computeRegions(view) {
   }
   return boxes.sort((p, q) => (q.x1 - q.x0) * (q.y1 - q.y0) - (p.x1 - p.x0) * (p.y1 - p.y0));
 }
+
+// bench-t6: one readout for change rows, inventory, geometry and check findings.
+function inspectorProperties() {
+  const p = proj(), row = p.changes.find(r => r.id === S.s) || allViolations().find(r => r.id === S.s);
+  const selected = S.ig?.object || (S.io != null ? p.objects?.[S.io] : row);
+  if (!selected) return null;
+  const inventory = (p.objects || []).find(o => selected.uuid ? o.uuid === selected.uuid || o.uuid === selected.changeUuid : o.ref === selected.ref && o.kind === selected.kind && objView(o) === viewOf(selected));
+  const base = Object.create(null), head = Object.create(null);
+  const flatten = (target, object, prefix = "") => {
+    for (const [key, value] of Object.entries(object || {})) {
+      const name = prefix + key;
+      if (value && !Array.isArray(value) && value === Object(value)) flatten(target, value, name + ".");
+      else target[name] = value;
+    }
+  };
+  const common = {...inventory, ...selected};
+  for (const k of ["changes", "props", "before", "after", "pos_before"]) delete common[k];
+  flatten(base, common); flatten(head, common);
+  flatten(base, selected.props); flatten(head, selected.props);
+  if (selected.pos_before) base.pos = selected.pos_before;
+  const identity = selected.uuid || selected.changeUuid;
+  const geometry = side => (decodedBoardScenes.get(p.board?.geometry?.[side]) || (boardDiff?.project === S.p ? boardDiff.scenes[side] : null))?.objects.filter(o => identity && (o.uuid === identity || o.changeUuid === identity)) || [];
+  for (const [side, target] of [["base", base], ["head", head]]) {
+    const objects = geometry(side), root = objects.find(o => o.uuid === identity);
+    if (root?.layers?.length && target.layers == null) target.layers = root.layers;
+    const pads = objects.filter(o => o.kind === "pad");
+    if (pads.length) target.Pads = pads.length;
+    const scene = decodedBoardScenes.get(p.board?.geometry?.[side]) || boardDiff?.scenes[side];
+    const nets = [...new Set(objects.map(o => scene?.nets?.find(n => n.id === o.net)?.name).filter(Boolean))];
+    if (nets.length) target.Nets = nets;
+    objects.forEach((o, i) => flatten(target, o, objects.length > 1 ? `geometry ${i+1}.` : "geometry."));
+  }
+  const ref = selected.ref || inventory?.ref;
+  const part = p.parts?.lines?.find(l => l.refs?.includes(ref));
+  if (part) { flatten(base, part, "part."); flatten(head, part, "part."); }
+  for (const change of p.parts?.changes || []) if (change.refs?.includes(ref)) {
+    flatten(base, change.before, "part."); flatten(head, change.after, "part.");
+  }
+  flatten(base, selected.before); flatten(head, selected.after);
+  for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
+  if (selected.action === "added" || selected.added) for (const k of Object.keys(base)) delete base[k];
+  if (selected.action === "removed" || selected.side === "base") for (const k of Object.keys(head)) delete head[k];
+  // Position components get their own measured readouts; retain all other source fields.
+  for (const target of [base, head]) if (Array.isArray(target.pos)) {
+    target["X (mm)"] = target.pos[0]; target["Y (mm)"] = target.pos[1];
+    if (target.pos.length > 2) target["Rotation (°)"] = target.pos[2];
+    delete target.pos;
+  }
+  return {selected, base, head};
+}
+function renderInspector() {
+  const dock = $("#inspector"); if (!dock) return;
+  const data = inspectorProperties(), title = data?.selected.ref || data?.selected.type || data?.selected.kind || "";
+  const flat = v => Array.isArray(v) && v.every(x => x == null || x !== Object(x));
+  const value = v => v == null ? "—" : flat(v) ? v.join(", ") : v === Object(v) ? JSON.stringify(v) : String(v);
+  // Arrays of plain values (Nets, layers) read as a list, not raw JSON.
+  const html = (v, text) => flat(v) && v.length > 1 && v.every(x => x === String(x)) ? `<ul class="insp-list">${v.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : esc(text);
+  const groups = Array.from({length:4}, () => ({main:[], geometry:[]}));
+  const order = ["ref", "value", "Value", "kind", "footprint", "Footprint", "uuid", "X (mm)", "Y (mm)", "Rotation (°)", "position", "layer", "layers"];
+  const keys = data ? [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
+  keys.sort((a,b) => (order.includes(a) ? order.indexOf(a) : 100) - (order.includes(b) ? order.indexOf(b) : 100));
+  if (data) for (const key of keys) {
+    const k = key.toLowerCase(), leaf = k.split(".").at(-1);
+    const group = /^(x \(mm\)|y \(mm\)|rotation|position|pos|box|layer|layers|angle|where|sheet|board|locked)/.test(leaf) ? 1
+      : /net|pad|pin|clearance|drill|width|size|electrical|items|severity|description|check/.test(leaf) ? 2
+      : /^(ref|refs|value|kind|type|uuid|id|footprint|changeuuid|changeids)$/.test(leaf) ? 0 : 3;
+    const a = value(data.base[key]), b = value(data.head[key]), changed = a !== b;
+    const label = ({ref:"Reference", value:"Value", kind:"Type", footprint:"Footprint", uuid:"UUID"})[key] || key;
+    groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label).replace(/\./g, ".<wbr>")}</dt><dd>${changed ? `<del>${html(data.base[key], a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${html(data.head[key], b)}</ins>` : html(data.head[key], b)}</dd>`);
+  }
+  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
+  $("#insp-toggle").onclick = () => { inspectorClosed = !inspectorClosed; inspectorLayout(); persistInspector(); renderInspector(); };
+}
+let inspectorHeight = 176, inspectorClosed = false;
+try { const saved = JSON.parse(localStorage.getItem("kr.inspector") || "null"); if (saved) { inspectorHeight = Number(saved.height) || 176; inspectorClosed = saved.closed === true; } } catch {}
+function persistInspector() { try { localStorage.setItem("kr.inspector", JSON.stringify({height:inspectorHeight, closed:inspectorClosed})); } catch {} }
+function inspectorLayout() {
+  const max = Math.max(96, $("#center").clientHeight - 120);
+  inspectorHeight = Math.min(Math.max(96, inspectorHeight), max);
+  $("#center").style.setProperty("--inspector-size", (inspectorClosed ? 28 : inspectorHeight) + "px");
+  const split = $("#insp-split");
+  split.setAttribute("aria-valuemin", "96"); split.setAttribute("aria-valuemax", String(max)); split.setAttribute("aria-valuenow", String(Math.round(inspectorHeight)));
+}
+const inspectorSplitter = $("#insp-split");
+inspectorSplitter.onpointerdown = e => {
+  if (e.button !== 0) return;
+  e.preventDefault(); inspectorSplitter.setPointerCapture(e.pointerId);
+  const y = e.clientY, height = inspectorHeight;
+  inspectorClosed = false; renderInspector();
+  inspectorSplitter.onpointermove = ev => { inspectorHeight = height + y - ev.clientY; inspectorLayout(); };
+  inspectorSplitter.onpointerup = inspectorSplitter.onpointercancel = () => { inspectorSplitter.onpointermove = null; persistInspector(); };
+};
+inspectorSplitter.onkeydown = e => {
+  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
+  e.preventDefault(); inspectorClosed = false;
+  inspectorHeight = e.key === "Home" ? 96 : e.key === "End" ? $("#center").clientHeight - 120 : inspectorHeight + (e.key === "ArrowUp" ? 16 : -16);
+  inspectorLayout(); persistInspector(); renderInspector();
+};
+new ResizeObserver(inspectorLayout).observe($("#center"));
+inspectorLayout();
+function bindRightDock() {
+  const app = document.getElementById("app"), panel = document.getElementById("panel");
+  if (!["parts", "checks"].includes(rightTab)) S.panelTable = false;
+  app.classList.toggle("right-table", !!S.panelTable);
+  panel.classList.toggle("dock-wide", !!S.panelWide);
+  for (const cell of panel.querySelectorAll(".parts-table td")) if (!cell.title) cell.title = cell.textContent;
+  if (S.panelTable && S.t === "checks" && panel.querySelector(".checks-list")) {
+    const list = panel.querySelector(".checks-list"), findings = new Map(proj().checks.flatMap(c => c.violations.map(v => [v.id, {...v, check:c.title}])));
+    const table = document.createElement("table"); table.className = "checks-table";
+    table.innerHTML = '<thead><tr><th>State</th><th>Check / rule</th><th>Location / actions</th><th>Description</th></tr></thead>';
+    const body = table.createTBody();
+    for (const button of list.querySelectorAll(".viol")) {
+      const v = findings.get(button.dataset.id); if (!v) continue;
+      const row = body.insertRow();
+      row.insertCell().textContent = `${v.severity}${v.new ? " · NEW" : ""}${v.waived ? " · WAIVED" : ""}`;
+      row.insertCell().textContent = `${v.check} / ${v.type}`;
+      const cell = row.insertCell();
+      const actions = []; let next = button.nextElementSibling;
+      while (next && !next.matches(".viol")) { actions.push(next); next = next.nextElementSibling; }
+      cell.append(button, ...actions);
+      row.insertCell().textContent = v.description;
+    }
+    if (body.rows.length) list.replaceChildren(table);
+  }
+  panel.querySelector("[data-panel-close]").onclick = () => { setDock("panel", false); document.querySelector('[data-dock="panel"]')?.focus(); };
+  panel.querySelector("[data-panel-wide]").onclick = () => {
+    const wide = !S.panelWide;
+    resizeRightDock(wide ? 700 : 360);
+    renderPanel(); panel.querySelector("[data-panel-wide]")?.focus();
+  };
+  const coverage = panel.querySelector(".bom-coverage");
+  if (coverage) {
+    coverage.title = [...coverage.querySelectorAll(".coverage-item")].map(item => item.title).join("\n");
+    coverage.setAttribute("aria-label", "BOM coverage: " + coverage.title);
+  }
+  const table = panel.querySelector("[data-panel-table]");
+  if (table) table.onclick = () => { S.panelTable = !S.panelTable; renderPanel(); panel.querySelector("[data-panel-table]")?.focus(); };
+}
+let rightDockWidth = 360;
+try { rightDockWidth = Math.max(300, Math.min(700, +localStorage.getItem("kr.rightDockWidth") || 360)); } catch {}
+document.documentElement.style.setProperty("--panel-w", rightDockWidth + "px");
+const rightSplitter = document.createElement("div");
+rightSplitter.id = "right-splitter"; rightSplitter.tabIndex = 0;
+rightSplitter.setAttribute("role", "separator"); rightSplitter.setAttribute("aria-label", "Resize right dock");
+rightSplitter.setAttribute("aria-orientation", "vertical");
+document.getElementById("app").append(rightSplitter);
+function resizeRightDock(width, persist = true) {
+  rightDockWidth = Math.round(Math.max(300, Math.min(700, width)));
+  S.panelWide = rightDockWidth === 700;
+  document.documentElement.style.setProperty("--panel-w", rightDockWidth + "px");
+  rightSplitter.setAttribute("aria-valuenow", rightDockWidth);
+  rightSplitter.setAttribute("aria-valuemin", "300"); rightSplitter.setAttribute("aria-valuemax", "700");
+  document.getElementById("panel").classList.toggle("dock-wide", S.panelWide);
+  if (persist) try { localStorage.setItem("kr.rightDockWidth", rightDockWidth); } catch {}
+}
+resizeRightDock(rightDockWidth, false);
+rightSplitter.onpointerdown = event => {
+  if (event.button !== 0) return;
+  event.preventDefault(); rightSplitter.setPointerCapture(event.pointerId);
+  rightSplitter.onpointermove = e => resizeRightDock(document.getElementById("app").getBoundingClientRect().right - e.clientX);
+  rightSplitter.onpointerup = () => { rightSplitter.onpointermove = null; renderPanel(); };
+  rightSplitter.onpointercancel = () => { rightSplitter.onpointermove = null; };
+};
+rightSplitter.onkeydown = event => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault(); resizeRightDock(event.key === "Home" ? 300 : event.key === "End" ? 700 : rightDockWidth + (event.key === "ArrowLeft" ? 20 : -20)); renderPanel();
+};
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && S.panelTable) {
+    event.preventDefault(); event.stopImmediatePropagation(); S.panelTable = false; renderPanel();
+    document.querySelector("[data-panel-table]")?.focus();
+  }
+}, true);
+if (!matchMedia("(max-width:899px)").matches) document.querySelector('[data-dock="panel"]').setAttribute("aria-expanded", "true");
 
 renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");
