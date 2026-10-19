@@ -1,3 +1,4 @@
+import { currentBody } from './report-shell.js';
 // Read-only, artifact-bound capabilities. No GitHub credential enters a URL or page.
 const enc = new TextEncoder();
 const b64url = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -158,7 +159,7 @@ export async function serveShare(request, env, token, raw, deps) {
     const location = zip.status === 302 ? downloadUrl(zip.headers.get('Location')) : null;
     const blob = location ? await fetch(location, { redirect: 'manual', referrerPolicy: 'no-referrer' }) : null;
     if (!blob?.ok || !blob.body) return missing();
-    return guestResponse(deps, blob.body, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': deps.reportCsp, 'X-Frame-Options': 'SAMEORIGIN' } });
+    return guestResponse(deps, await currentBody(blob), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': deps.reportCsp, 'X-Frame-Options': 'SAMEORIGIN' } });
   } catch { return missing(); }
 }
 export async function revokeShares(request, env, { owner, repo }, deps) {

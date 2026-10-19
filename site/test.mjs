@@ -3258,3 +3258,26 @@ test('bench-t2 readiness badge derives its three rows from existing readiness da
     });
   }
 });
+
+// Stored reports are served with the interface this site was deployed with.
+import { currentReport } from './report-shell.js';
+import { execFileSync } from 'node:child_process';
+const inlinePage = data => execFileSync('python3', ['-c', 'import runpy,sys;sys.stdout.write(runpy.run_path("kicad_review.py")["inline_page"](sys.stdin.read()))'],
+  { cwd: new URL('..', import.meta.url), input: data, encoding: 'utf8', maxBuffer: 1 << 28 });
+test('stored reports are re-dressed exactly as kicad_review.py builds the current report', () => {
+  for (const sample of ['review-data-2.js', 'review-data-3d.js']) {
+    const data = readFileSync(new URL(`../ui/sample/${sample}`, import.meta.url), 'utf8');
+    const current = inlinePage(data);
+    // An old report: same data, an outdated interface around it.
+    const old = current.replace(/<style>[\s\S]*?<\/style>/, '<style>old</style>').replace('KiCad review', 'Old review');
+    assert.equal(currentReport(old), current);
+  }
+});
+test('reports without a recognisable data script are served unchanged', () => {
+  assert.equal(currentReport('<!doctype html><p>hand-made</p>'), null);
+  assert.equal(currentReport('<script>window.REVIEW_DATA = {"a":1};'), null);   // truncated: no closing tag
+});
+test('data with replacement patterns is inserted literally', () => {
+  const html = currentReport('<script>window.REVIEW_DATA = {"v":"$& $1 $$"};</script>');
+  assert.match(html, /window\.REVIEW_DATA = \{"v":"\$& \$1 \$\$"\};/);
+});
