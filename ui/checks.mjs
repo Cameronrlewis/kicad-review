@@ -533,6 +533,41 @@ export const CHECKS = [
     d.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: r.left + r.width * 0.25 }));
     d.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
     return Math.abs(S.wipe - 0.25) < 0.02 && d.getAttribute("aria-valuenow") === String(Math.round(S.wipe * 100));`],
+  ["wipe hides base on the head side", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    const hits = (fx, side) => { let n = 0; for (let fy = .1; fy < .95; fy += .05) n += document.elementsFromPoint(r.left + r.width*fx, r.top + r.height*fy).filter(e => e.closest('.stack.' + side)).length; return n; };
+    S.wipe = .5; apply();
+    const baseRight = hits(.75, 'base'), headLeft = hits(.25, 'head'), baseLeft = hits(.25, 'base'), headRight = hits(.75, 'head');
+    return baseRight === 0 && headLeft === 0 && baseLeft > 0 && headRight > 0 || JSON.stringify({baseRight, headLeft, baseLeft, headRight});`],
+  ["wipe at the ends shows one revision", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    const at = (side) => document.elementsFromPoint(r.left + r.width*.5, r.top + r.height*.5).some(e => e.closest('.stack.' + side));
+    S.wipe = 0; apply(); const h0 = at('base');
+    S.wipe = 1; apply(); const h1 = at('head');
+    S.wipe = .5; apply();
+    return !h0 && !h1 || JSON.stringify({h0, h1});`],
+  ["wipe clip is removed when leaving wipe", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    S.m = 'blend'; await draw();
+    const clips = [...document.querySelectorAll('#stage .stack')].map(s => s.style.clipPath).filter(Boolean);
+    S.m = 'wipe'; await draw();
+    return clips.length === 0 || JSON.stringify(clips);`],
+  ["flipped board wipe hides base on the head side", "p=1&v=board&m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    Appearance.patch({flip:true});
+    await new Promise(r => setTimeout(r, 800));
+    boardFallback('check');
+    await new Promise(r => setTimeout(r, 800));
+    if (!document.querySelector('#stage .stack.base')) { Appearance.patch({flip:false}); return 'skip'; }
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    S.wipe = .5; apply();
+    const at = (fx, side) => { let n = 0; for (let fy = .1; fy < .95; fy += .05) n += document.elementsFromPoint(r.left + r.width*fx, r.top + r.height*fy).filter(e => e.closest('.stack.' + side)).length; return n; };
+    // Mirroring reverses stack coordinates, not the screen-space Base/Head sides.
+    const out = {baseHeadSide: at(.75, 'base'), headBaseSide: at(.25, 'head'), baseOwnSide: at(.25, 'base'), headOwnSide: at(.75, 'head')};
+    Appearance.patch({flip:false});
+    return out.baseHeadSide === 0 && out.headBaseSide === 0 && out.baseOwnSide > 0 && out.headOwnSide > 0 || JSON.stringify(out);`],
   ["blend slider sets head opacity", "m=blend", `
     await new Promise(r => setTimeout(r, 800));
     const s = document.querySelector("#modes input[type=range]"); s.value = 20; s.dispatchEvent(new Event("input"));

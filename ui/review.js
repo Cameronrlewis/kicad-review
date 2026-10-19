@@ -929,12 +929,16 @@ MODES.semantic = (stage, view) => oneWorld(stage, view, "Changes only");
 function onApply() {
   const vp = document.querySelector("#stage.mode-wipe .vp");
   if (!vp) return;
-  const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, head = vp.querySelector(".stack.head");
+  const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, head = vp.querySelector(".stack.head"), base = vp.querySelector(".stack.base");
   vp.querySelector(".divider").style.left = `${x}px`;
   vp.querySelector(".divider").setAttribute("aria-valuenow", Math.round(S.wipe * 100));
-  if (!head) return;
-  if (flipOn()) { const u = (W / 2 + S.x * S.z - x) / k; head.style.clipPath = `inset(0 ${Math.max(0, parseFloat(head.style.width) - u)}px 0 0)`; }   // mirrored: Head is the right of the divider = lower x
-  else head.style.clipPath = `inset(0 0 0 ${Math.max(0, (x - (W / 2 - S.x * S.z)) / k)}px)`;
+  if (!head || !base) return;
+  // Divider in stack pixels. Each stack is clipped to its own side: kicad-cli SVGs have no background, so an unclipped base shows through head.
+  const width = parseFloat(head.style.width);
+  const u = flipOn() ? (W / 2 + S.x * S.z - x) / k : (x - (W / 2 - S.x * S.z)) / k;
+  const split = Math.max(0, Math.min(width, u));
+  if (flipOn()) { head.style.clipPath = `inset(0 ${width - split}px 0 0)`; base.style.clipPath = `inset(0 0 0 ${split}px)`; }   // mirrored: Head is the right of the divider = lower x
+  else { head.style.clipPath = `inset(0 0 0 ${split}px)`; base.style.clipPath = `inset(0 ${width - split}px 0 0)`; }
 }
 function toggleBlend3D() {
   window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend;
