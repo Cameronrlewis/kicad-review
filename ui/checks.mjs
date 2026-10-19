@@ -4056,3 +4056,46 @@ CHECKS.push(['vf-sch-speed board crosshair follows pointer by transform', 'v=boa
   const b=cross.getBoundingClientRect(); return Math.abs(b.left+9-(r.left+100))<1&&Math.abs(b.top+9-(r.top+50))<1||JSON.stringify(b);
 `]);
 
+// zoom-burst: a wheel/pinch burst on the largest sample sheet (project 1 Thermal_Camera root, ~28k SVG elements) must not freeze the page.
+const ZB_WHEEL = `const zb = (vp, r, dy) => vp.dispatchEvent(new WheelEvent('wheel', {deltaY: dy, ctrlKey: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2, bubbles: true, cancelable: true}));`;
+CHECKS.push(['zoom-burst no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  const long = []; const po = new PerformanceObserver(l => long.push(...l.getEntries().map(e => e.duration))); po.observe({type:'longtask', buffered:false});
+  const frames = []; let last = performance.now(), on = true;
+  const tick = t => { frames.push(t - last); last = t; if (on) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
+  for (let i = 0; i < 200; i++) { zb(vp, r, i % 2 ? 4 : -4); if (i % 2) await new Promise(res => setTimeout(res, 10)); }
+  await new Promise(res => setTimeout(res, 400)); on = false; po.disconnect();
+  const worst = Math.max(...frames.slice(1)), task = Math.max(0, ...long);
+  return worst < 200 && task < 200 || JSON.stringify({worst: Math.round(worst), task: Math.round(task)});
+`]);
+CHECKS.push(['zoom-burst dock tab responds', 'p=1&v=sheet:/', `${ZB_WHEEL}
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  for (let i = 0; i < 100; i++) zb(vp, r, -4);
+  await new Promise(res => setTimeout(res, 160));   // settle re-raster pending
+  const tab = document.querySelector('[role="tab"][aria-selected="false"]');
+  if (!tab) return 'no unselected tab';
+  const t0 = performance.now(); tab.click();
+  await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+  const ms = performance.now() - t0, now = document.getElementById(tab.id);   // tab bars re-render, so read the live node
+  return now?.getAttribute('aria-selected') === 'true' && ms < 200 || JSON.stringify({ms: Math.round(ms), tab: tab.id, selected: now?.getAttribute('aria-selected')});
+`]);
+CHECKS.push(['zoom-burst memory returns', 'p=1&v=sheet:/', `${ZB_WHEEL}
+  if (!performance.memory) return 'skip';
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  const nodes0 = document.getElementsByTagName('*').length;
+  for (let run = 0; run < 5; run++) for (let i = 0; i < 200; i++) zb(vp, r, i % 2 ? 4 : -4);
+  await new Promise(res => setTimeout(res, 400));
+  const nodes1 = document.getElementsByTagName('*').length;
+  return nodes1 <= nodes0 * 1.1 || JSON.stringify({nodes0, nodes1});
+`]);
+CHECKS.push(['zoom-burst deep zoom no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  setT({z: S.z * 28}); await new Promise(res => setTimeout(res, 400));   // the original report: sustained pinch at deep zoom
+  const long = []; const po = new PerformanceObserver(l => long.push(...l.getEntries().map(e => e.duration))); po.observe({type:'longtask', buffered:false});
+  const frames = []; let last = performance.now(), on = true;
+  const tick = t => { frames.push(t - last); last = t; if (on) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
+  for (let i = 0; i < 200; i++) { zb(vp, r, i % 2 ? 4 : -4); if (i % 2) await new Promise(res => setTimeout(res, 10)); }
+  await new Promise(res => setTimeout(res, 400)); on = false; po.disconnect();
+  const worst = Math.max(...frames.slice(1)), task = Math.max(0, ...long);
+  return worst < 200 && task < 200 || JSON.stringify({worst: Math.round(worst), task: Math.round(task), z: +S.z.toFixed(2)});
+`]);
