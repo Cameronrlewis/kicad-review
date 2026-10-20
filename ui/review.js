@@ -477,6 +477,31 @@ function themeSchematic(svg) {
   }
 }
 
+// kicad-cli strokes each glyph segment as its own <path d> (~25k on a dense sheet), and Chrome repaints
+// them all when a zoom settles. Join runs of sibling attribute-less paths under an unfilled group into one
+// path: same inherited style, same pixels, ~10x fewer elements. Nothing addresses these paths individually.
+function simplifySchematic(svg) {
+  const walk = (g, unfilled) => {
+    const m = /(?:^|;)\s*fill\s*:\s*([^;]+)/i.exec(g.getAttribute('style') || '') || (g.hasAttribute('fill') && [, g.getAttribute('fill')]);
+    if (m) unfilled = m[1].trim() === 'none';
+    let run = null, d = [];
+    const flush = () => { if (run && d.length > 1) run.setAttribute('d', d.join(' ')); run = null; d = []; };
+    for (const el of [...g.children]) {
+      if (unfilled && el.localName === 'path' && el.attributes.length === 1 && el.hasAttribute('d')) {
+        d.push(el.getAttribute('d')); if (run) el.remove(); else run = el;
+      } else if (el.localName === 'desc') continue;
+      else { flush(); if (el.localName === 'g') walk(el, unfilled); }
+    }
+    flush();
+  };
+  walk(svg, false);
+}
+const simpleSheets = new Map();   // raw sheet SVG text -> simplified markup; only sheets actually shown get here
+function simpleSheet(t) {
+  if (!simpleSheets.has(t)) { const d = document.createElement('div'); d.innerHTML = t.slice(t.indexOf('<svg')); simplifySchematic(d.firstElementChild); simpleSheets.set(t, d.innerHTML); }
+  return simpleSheets.get(t);
+}
+
 // SVG fallback: replace only the original layer RGB; retain custom object/diff paint and none;
 // existing inline opacity stays, the colour's alpha and the layer opacity become the layer's own opacity.
 function recolorLayer(div, look, original) {
@@ -506,7 +531,7 @@ async function stack(side, view) {
     if (!t || look[canon(l.name)]?.visible === false) continue;
     const d = document.createElement("div");
     d.className = "layer"; d.dataset.layer = l.name;
-    d.innerHTML = t.slice(t.indexOf("<svg"));
+    d.innerHTML = view.kind === 'sheet' ? simpleSheet(t) : t.slice(t.indexOf("<svg"));
     if (view.kind === 'sheet') {
       const svg = d.querySelector('svg'); themeSchematic(svg); svg.dataset.appearanceSchematic = '';
       setSchematicAppearance(svg, KrAppearance.resolve(Appearance.get()));
