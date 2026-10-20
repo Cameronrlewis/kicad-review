@@ -544,16 +544,51 @@ export const CHECKS = [
     await new Promise(r => setTimeout(r, 800));
     const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
     const at = (side) => document.elementsFromPoint(r.left + r.width*.5, r.top + r.height*.5).some(e => e.closest('.stack.' + side));
-    S.wipe = 0; apply(); const h0 = at('base');
-    S.wipe = 1; apply(); const h1 = at('head');
+    S.wipe = 0; apply(); const base0 = at('base'), head0 = at('head');
+    S.wipe = 1; apply(); const base1 = at('base'), head1 = at('head');
     S.wipe = .5; apply();
-    return !h0 && !h1 || JSON.stringify({h0, h1});`],
+    return !base0 && head0 && base1 && !head1 || JSON.stringify({base0, head0, base1, head1});`],
+  ["wipe with one revision empty still shows the other", "p=1&m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    const at = (left, side) => { for (let fx = left ? .05 : .55; fx < (left ? .5 : .95); fx += .025) for (let fy = .1; fy < .95; fy += .025) if (document.elementsFromPoint(r.left + r.width*fx, r.top + r.height*fy).some(e => e.closest('.stack.' + side + ' .layer'))) return true; return false; };
+    for (const empty of ['base', 'head']) {
+      const stack = vp.querySelector('.stack.' + empty), children = [...stack.childNodes];
+      try {
+        stack.replaceChildren(); S.wipe = .5; apply();
+        const baseLeft = at(true, 'base'), baseRight = at(false, 'base'), headLeft = at(true, 'head'), headRight = at(false, 'head');
+        if (baseLeft !== (empty === 'head') || headRight !== (empty === 'base') || baseRight || headLeft) return JSON.stringify({empty, baseLeft, baseRight, headLeft, headRight});
+      } finally { stack.replaceChildren(...children); apply(); }
+    }
+    return true;`],
+  ["wipe fractional split uses one whole-pixel boundary", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), head = vp.querySelector('.stack.head'), base = vp.querySelector('.stack.base');
+    const width = parseFloat(head.style.width), k = S.z / PX;
+    try {
+      for (const fraction of [.371, .629]) {
+        S.wipe = fraction; apply();
+        const u = (fraction * vp.clientWidth - (vp.clientWidth / 2 - S.x * S.z)) / k;
+        const expected = Math.max(0, Math.min(width, Math.round(u)));
+        const inset = stack => stack.style.clipPath.slice(6, -1).split(/ +/).map(parseFloat);
+        const h = inset(head), b = inset(base);
+        if (Math.abs(h[3] - expected) > .001 || Math.abs(width - b[1] - expected) > .001) return JSON.stringify({u, expected, head:h, base:b});
+      }
+      return true;
+    } finally { S.wipe = .5; apply(); }`],
   ["wipe clip is removed when leaving wipe", "m=wipe", `
     await new Promise(r => setTimeout(r, 800));
-    S.m = 'blend'; await draw();
-    const clips = [...document.querySelectorAll('#stage .stack')].map(s => s.style.clipPath).filter(Boolean);
-    S.m = 'wipe'; await draw();
-    return clips.length === 0 || JSON.stringify(clips);`],
+    try {
+      for (const mode of ['blend', 'overlay']) {
+        S.m = mode; await draw();
+        if (document.querySelector('#stage').classList.contains('mode-wipe')) return 'still mode-wipe: ' + mode;
+        apply();
+        const clips = [...document.querySelectorAll('#stage .stack')].map(s => s.style.clipPath).filter(Boolean);
+        if (clips.length) return mode + ': ' + JSON.stringify(clips);
+        S.m = 'wipe'; await draw();
+      }
+      return true;
+    } finally { S.m = 'wipe'; await draw(); }`],
   ["flipped board wipe hides base on the head side", "p=1&v=board&m=wipe", `
     await new Promise(r => setTimeout(r, 800));
     Appearance.patch({flip:true});

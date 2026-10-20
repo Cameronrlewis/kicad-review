@@ -942,7 +942,7 @@ function onApply() {
   // Divider in stack pixels. Each stack is clipped to its own side: kicad-cli SVGs have no background, so an unclipped base shows through head.
   const width = parseFloat(head.style.width);
   const u = flipOn() ? (W / 2 + S.x * S.z - x) / k : (x - (W / 2 - S.x * S.z)) / k;
-  const split = Math.max(0, Math.min(width, u));
+  const split = Math.max(0, Math.min(width, Math.round(u)));   // shared whole-pixel edge avoids a fractional clip hairline
   if (flipOn()) { head.style.clipPath = `inset(0 ${width - split}px 0 0)`; base.style.clipPath = `inset(0 0 0 ${split}px)`; }   // mirrored: Head is the right of the divider = lower x
   else { head.style.clipPath = `inset(0 0 0 ${split}px)`; base.style.clipPath = `inset(0 ${width - split}px 0 0)`; }
 }
