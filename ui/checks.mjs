@@ -4093,7 +4093,9 @@ CHECKS.push(['vf-sch-speed board crosshair follows pointer by transform', 'v=boa
 
 // zoom-burst: a wheel/pinch burst on the largest sample sheet (project 1 Thermal_Camera root, ~28k SVG elements) must not freeze the page.
 const ZB_WHEEL = `const zb = (vp, r, dy) => vp.dispatchEvent(new WheelEvent('wheel', {deltaY: dy, ctrlKey: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2, bubbles: true, cancelable: true}));`;
-// ponytail: the post-gesture GPU repaint of a ~29k-element sheet still stalls 1-2 s; these skip until fix/schematic-simplify lands. Run with --no-skip "zoom-burst" to see them fail.
+// ponytail: still skipped. In headless SwiftShader the post-gesture re-raster of this sheet costs ~1.7-2.3 s with or
+// without simplifySchematic (layers hidden: ~20 ms), so raster of the geometry, not element count, is the cost here.
+// Under --gpu they pass with and without it. Run with --no-skip "zoom-burst" to see them.
 const ZB_PENDING = `return 'skip';`;
 CHECKS.push(['zoom-burst no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}${ZB_PENDING}
   const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
@@ -4135,4 +4137,26 @@ CHECKS.push(['zoom-burst deep zoom no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}
   await new Promise(res => setTimeout(res, 400)); on = false; po.disconnect();
   const worst = Math.max(...frames.slice(1)), task = Math.max(0, ...long);
   return worst < 200 && task < 200 || JSON.stringify({worst: Math.round(worst), task: Math.round(task), z: +S.z.toFixed(2)});
+`]);
+// simplifySchematic: < 3,000 painted elements; joined strokes lighten thin text at fit, limits ~1.5x measured (fit mean 1.66, 18% moved; 28x 0.12, 2%).
+CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=sheet:/', `
+  const svgs = [...document.querySelectorAll('#stage svg[data-appearance-schematic]')];
+  const painted = svgs.map(s => s.querySelectorAll('path,line,polyline,polygon,rect,circle,ellipse').length);
+  if (!svgs.length || painted.some(n => n >= 3000)) return 'painted ' + painted;
+  const raw = await svgText(currentView().layers[0].svg.head), size = currentView().size;
+  const render = async (markup, vb, W, H) => {
+    const d = new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement;
+    d.setAttribute('viewBox', vb.join(' ')); d.setAttribute('width', W); d.setAttribute('height', H);
+    const img = new Image(); img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(d)); await img.decode();
+    const x = new OffscreenCanvas(W, H).getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, W, H); x.drawImage(img, 0, 0); return x.getImageData(0, 0, W, H).data; };
+  const out = {painted};
+  // [name, viewBox mm, px, mean limit, share of ink pixels allowed to move > 32/255]
+  for (const [name, vb, W, H, meanMax, moveMax] of [['fit', [0, 0, size[0], size[1]], 1600, Math.round(1600 * size[1] / size[0]), 2.5, 0.25], ['28x', [60, 125, 1600 / 28 / 3.78, 900 / 28 / 3.78], 1600, 900, 0.25, 0.03]]) {
+    const a = await render(raw.slice(raw.indexOf('<svg')), vb, W, H), b = await render(simpleSheet(raw), vb, W, H);
+    let sum = 0, moved = 0, ink = 0;
+    for (let i = 0; i < a.length; i += 4) { const m = Math.max(Math.abs(a[i]-b[i]), Math.abs(a[i+1]-b[i+1]), Math.abs(a[i+2]-b[i+2])); sum += m; if (m > 32) moved++; if (Math.min(a[i], a[i+1], a[i+2]) < 200) ink++; }
+    out[name] = {mean: +(sum / (a.length / 4)).toFixed(2), moved: +(moved / ink).toFixed(3)};
+    if (out[name].mean > meanMax || out[name].moved > moveMax) return JSON.stringify(out);
+  }
+  return true;
 `]);
