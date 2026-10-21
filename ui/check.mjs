@@ -54,7 +54,8 @@ process.on("uncaughtException", e => { console.error("FAIL startup -> " + e.mess
 const timeout = Number(process.env.CHECK_TIMEOUT || 15000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let tab;
-for (let i = 0; i < 50 && !tab; i++) { await sleep(200); try { tab = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === "page"); } catch {} }
+// 30 s: a cold CI runner can need ~10 s to start the first Chrome.
+for (let i = 0; i < 150 && !tab; i++) { await sleep(200); try { tab = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === "page"); } catch {} }
 if (!tab) { console.error(`FAIL startup -> Chrome did not start on port ${port}`); process.exit(1); }
 let ws;
 async function openTab(target) {
