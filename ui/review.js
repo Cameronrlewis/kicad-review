@@ -684,7 +684,8 @@ function apply() {
   if (boardDiff) { boardDiff.render(); drawPins(); }
   else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   setText($("#zoombar .pct"), Math.round(S.z / PX * 100) + "%");
-  drawSchematicGrids(); updateSchematicStatus();
+  if (!gesturing) drawSchematicGrids();
+  updateSchematicStatus();
 }
 // KiCad 10: eeschema/eeschema_settings.cpp:705-706 defaults to 50 mil (index 1);
 // common/settings/app_settings.cpp:603-609 defines that lattice: 50 mil = 1.27 mm.
@@ -733,7 +734,12 @@ function gesture() {           // composite as a bitmap while moving, re-rasteri
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
 let autoFit = false;   // see fit()
-function setT(t) { autoFit = false; if (S.v === "board" && Number.isFinite(t.z)) t.z = clampBoardZoom(t.z); Object.assign(S, t); apply(); updateStatus(); saveHash(); }
+let frameApply = 0;
+function setT(t, {frame = false} = {}) {
+  autoFit = false; if (S.v === "board" && Number.isFinite(t.z)) t.z = clampBoardZoom(t.z); Object.assign(S, t); saveHash();
+  if (!frame) { cancelAnimationFrame(frameApply); frameApply = 0; apply(); updateStatus(); return; }
+  if (!frameApply) frameApply = requestAnimationFrame(() => { frameApply = 0; apply(); updateStatus(); });   // a trackpad fires several wheel events per frame
+}
 // KiCad source 3e051f88: common/view/view.cpp:241 (50000 maximum; .1 minimum is
 // the review px/mm contract, not KiCad's .2 internal scale). common/tool/common_tools.cpp:256-260 (1.3 step).
 const clampBoardZoom = z => Math.max(.1, Math.min(50000, z));
@@ -797,10 +803,10 @@ function toWorld(vp, e) {   // the one inverse camera adapter: pointer -> drawin
   const r = vp.getBoundingClientRect();
   return BoardGL.screenToWorld([e.clientX - r.left, e.clientY - r.top], {x: S.x, y: S.y, z: S.z, width: r.width, height: r.height, flip: flipOn()});
 }
-function zoomBoardAt(vp, clientX, clientY, factor) {
+function zoomBoardAt(vp, clientX, clientY, factor, opts) {
   const r = vp.getBoundingClientRect(); if (!r.width || !r.height || !placed()) return;
   const e = {clientX,clientY}, before = toWorld(vp,e), z = clampBoardZoom(S.z*factor), f = z/S.z;
-  setT({z, x:before[0]-(before[0]-S.x)/f, y:before[1]-(before[1]-S.y)/f});
+  setT({z, x:before[0]-(before[0]-S.x)/f, y:before[1]-(before[1]-S.y)/f}, opts);
   updateCoordinates(vp,e);
 }
 function attachPanZoom(vp) {
@@ -811,7 +817,7 @@ function attachPanZoom(vp) {
     e.preventDefault(); gesture();
     const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? r.height : 1);
     const rate = window.KRBoardWheelProfile === "mac-rotation" ? BOARD_WHEEL_MAC_ROTATION_RATE/100 : BOARD_WHEEL_PIXEL_RATE;
-    zoomBoardAt(vp,e.clientX,e.clientY,Math.exp(Math.max(-20,Math.min(20,-pixels*rate))));
+    zoomBoardAt(vp,e.clientX,e.clientY,Math.exp(Math.max(-20,Math.min(20,-pixels*rate))),{frame:true});
   }, { passive:false });
   let active = null, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
   vp.addEventListener("pointerdown", e => {
@@ -825,7 +831,7 @@ function attachPanZoom(vp) {
   vp.addEventListener("pointermove", e => {
     if (active && active.id === e.pointerId) {
       const a = active; a.moved = Math.max(a.moved, Math.hypot(e.clientX-a.x,e.clientY-a.y));
-      if (a.moved >= 4) { gesture(); setT({x:S.x-(flipOn()?-1:1)*(e.clientX-a.lx)/S.z,y:S.y-(e.clientY-a.ly)/S.z}); }
+      if (a.moved >= 4) { gesture(); setT({x:S.x-(flipOn()?-1:1)*(e.clientX-a.lx)/S.z,y:S.y-(e.clientY-a.ly)/S.z},{frame:true}); }
       a.lx=e.clientX; a.ly=e.clientY;
     }
     cursorEvent=e;
@@ -929,12 +935,16 @@ MODES.semantic = (stage, view) => oneWorld(stage, view, "Changes only");
 function onApply() {
   const vp = document.querySelector("#stage.mode-wipe .vp");
   if (!vp) return;
-  const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, head = vp.querySelector(".stack.head");
+  const W = vp.clientWidth, x = S.wipe * W, k = S.z / PX, head = vp.querySelector(".stack.head"), base = vp.querySelector(".stack.base");
   vp.querySelector(".divider").style.left = `${x}px`;
   vp.querySelector(".divider").setAttribute("aria-valuenow", Math.round(S.wipe * 100));
-  if (!head) return;
-  if (flipOn()) { const u = (W / 2 + S.x * S.z - x) / k; head.style.clipPath = `inset(0 ${Math.max(0, parseFloat(head.style.width) - u)}px 0 0)`; }   // mirrored: Head is the right of the divider = lower x
-  else head.style.clipPath = `inset(0 0 0 ${Math.max(0, (x - (W / 2 - S.x * S.z)) / k)}px)`;
+  if (!head || !base) return;
+  // Divider in stack pixels. Each stack is clipped to its own side: kicad-cli SVGs have no background, so an unclipped base shows through head.
+  const width = parseFloat(head.style.width);
+  const u = flipOn() ? (W / 2 + S.x * S.z - x) / k : (x - (W / 2 - S.x * S.z)) / k;
+  const split = Math.max(0, Math.min(width, Math.round(u)));   // shared whole-pixel edge avoids a fractional clip hairline
+  if (flipOn()) { head.style.clipPath = `inset(0 ${width - split}px 0 0)`; base.style.clipPath = `inset(0 0 0 ${split}px)`; }   // mirrored: Head is the right of the divider = lower x
+  else { head.style.clipPath = `inset(0 0 0 ${split}px)`; base.style.clipPath = `inset(0 ${width - split}px 0 0)`; }
 }
 function toggleBlend3D() {
   window.Review3D?.toggleBlend(); S.blend = window.Review3D.state.blend;

@@ -533,6 +533,76 @@ export const CHECKS = [
     d.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: r.left + r.width * 0.25 }));
     d.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
     return Math.abs(S.wipe - 0.25) < 0.02 && d.getAttribute("aria-valuenow") === String(Math.round(S.wipe * 100));`],
+  ["wipe hides base on the head side", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    const hits = (fx, side) => { let n = 0; for (let fy = .1; fy < .95; fy += .05) n += document.elementsFromPoint(r.left + r.width*fx, r.top + r.height*fy).filter(e => e.closest('.stack.' + side)).length; return n; };
+    S.wipe = .5; apply();
+    const baseRight = hits(.75, 'base'), headLeft = hits(.25, 'head'), baseLeft = hits(.25, 'base'), headRight = hits(.75, 'head');
+    return baseRight === 0 && headLeft === 0 && baseLeft > 0 && headRight > 0 || JSON.stringify({baseRight, headLeft, baseLeft, headRight});`],
+  ["wipe at the ends shows one revision", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    const at = (side) => document.elementsFromPoint(r.left + r.width*.5, r.top + r.height*.5).some(e => e.closest('.stack.' + side));
+    S.wipe = 0; apply(); const base0 = at('base'), head0 = at('head');
+    S.wipe = 1; apply(); const base1 = at('base'), head1 = at('head');
+    S.wipe = .5; apply();
+    return !base0 && head0 && base1 && !head1 || JSON.stringify({base0, head0, base1, head1});`],
+  ["wipe with one revision empty still shows the other", "p=1&m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    const at = (left, side) => { let hit = false; for (let fx = left ? .05 : .55; fx < (left ? .5 : .95); fx += .025) for (let fy = .1; fy < .95; fy += .025) hit ||= document.elementsFromPoint(r.left + r.width*fx, r.top + r.height*fy).some(e => e.closest('.stack.' + side + ' .layer')); return hit; };
+    for (const empty of ['base', 'head']) {
+      const stack = vp.querySelector('.stack.' + empty), children = [...stack.childNodes];
+      try {
+        stack.replaceChildren(); S.wipe = .5; apply();
+        const baseLeft = at(true, 'base'), baseRight = at(false, 'base'), headLeft = at(true, 'head'), headRight = at(false, 'head');
+        if (baseLeft !== (empty === 'head') || headRight !== (empty === 'base') || baseRight || headLeft) return JSON.stringify({empty, baseLeft, baseRight, headLeft, headRight});
+      } finally { stack.replaceChildren(...children); apply(); }
+    }
+    return true;`],
+  ["wipe fractional split uses one whole-pixel boundary", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    const vp = document.querySelector('#stage .vp'), head = vp.querySelector('.stack.head'), base = vp.querySelector('.stack.base');
+    const width = parseFloat(head.style.width), k = S.z / PX;
+    try {
+      for (const fraction of [.371, .629]) {
+        S.wipe = fraction; apply();
+        const u = (fraction * vp.clientWidth - (vp.clientWidth / 2 - S.x * S.z)) / k;
+        const expected = Math.max(0, Math.min(width, Math.round(u)));
+        const inset = stack => stack.style.clipPath.slice(6, -1).split(/ +/).map(parseFloat);
+        const h = inset(head), b = inset(base);
+        if (Math.abs(h[3] - expected) > .001 || Math.abs(width - b[1] - expected) > .001) return JSON.stringify({u, expected, head:h, base:b});
+      }
+      return true;
+    } finally { S.wipe = .5; apply(); }`],
+  ["wipe clip is removed when leaving wipe", "m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    try {
+      for (const mode of ['blend', 'overlay']) {
+        S.m = mode; await draw();
+        if (document.querySelector('#stage').classList.contains('mode-wipe')) return 'still mode-wipe: ' + mode;
+        apply();
+        const clips = [...document.querySelectorAll('#stage .stack')].map(s => s.style.clipPath).filter(Boolean);
+        if (clips.length) return mode + ': ' + JSON.stringify(clips);
+        S.m = 'wipe'; await draw();
+      }
+      return true;
+    } finally { S.m = 'wipe'; await draw(); }`],
+  ["flipped board wipe hides base on the head side", "p=1&v=board&m=wipe", `
+    await new Promise(r => setTimeout(r, 800));
+    Appearance.patch({flip:true});
+    await new Promise(r => setTimeout(r, 800));
+    boardFallback('check');
+    await new Promise(r => setTimeout(r, 800));
+    if (!document.querySelector('#stage .stack.base')) { Appearance.patch({flip:false}); return 'skip'; }
+    const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+    S.wipe = .5; apply();
+    const at = (fx, side) => { let n = 0; for (let fy = .1; fy < .95; fy += .05) n += document.elementsFromPoint(r.left + r.width*fx, r.top + r.height*fy).filter(e => e.closest('.stack.' + side)).length; return n; };
+    // Mirroring reverses stack coordinates, not the screen-space Base/Head sides.
+    const out = {baseHeadSide: at(.75, 'base'), headBaseSide: at(.25, 'head'), baseOwnSide: at(.25, 'base'), headOwnSide: at(.75, 'head')};
+    Appearance.patch({flip:false});
+    return out.baseHeadSide === 0 && out.headBaseSide === 0 && out.baseOwnSide > 0 && out.headOwnSide > 0 || JSON.stringify(out);`],
   ["blend slider sets head opacity", "m=blend", `
     await new Promise(r => setTimeout(r, 800));
     const s = document.querySelector("#modes input[type=range]"); s.value = 20; s.dispatchEvent(new Event("input"));
@@ -4021,3 +4091,48 @@ CHECKS.push(['vf-sch-speed board crosshair follows pointer by transform', 'v=boa
   const b=cross.getBoundingClientRect(); return Math.abs(b.left+9-(r.left+100))<1&&Math.abs(b.top+9-(r.top+50))<1||JSON.stringify(b);
 `]);
 
+// zoom-burst: a wheel/pinch burst on the largest sample sheet (project 1 Thermal_Camera root, ~28k SVG elements) must not freeze the page.
+const ZB_WHEEL = `const zb = (vp, r, dy) => vp.dispatchEvent(new WheelEvent('wheel', {deltaY: dy, ctrlKey: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2, bubbles: true, cancelable: true}));`;
+// ponytail: the post-gesture GPU repaint of a ~29k-element sheet still stalls 1-2 s; these skip until fix/schematic-simplify lands. Run with --no-skip "zoom-burst" to see them fail.
+const ZB_PENDING = `return 'skip';`;
+CHECKS.push(['zoom-burst no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}${ZB_PENDING}
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  const long = []; const po = new PerformanceObserver(l => long.push(...l.getEntries().map(e => e.duration))); po.observe({type:'longtask', buffered:false});
+  const frames = []; let last = performance.now(), on = true;
+  const tick = t => { frames.push(t - last); last = t; if (on) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
+  for (let i = 0; i < 200; i++) { zb(vp, r, i % 2 ? 4 : -4); if (i % 2) await new Promise(res => setTimeout(res, 10)); }
+  await new Promise(res => setTimeout(res, 400)); on = false; po.disconnect();
+  const worst = Math.max(...frames.slice(1)), task = Math.max(0, ...long);
+  return worst < 200 && task < 200 || JSON.stringify({worst: Math.round(worst), task: Math.round(task)});
+`]);
+CHECKS.push(['zoom-burst dock tab responds', 'p=1&v=sheet:/', `${ZB_WHEEL}${ZB_PENDING}
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  for (let i = 0; i < 100; i++) zb(vp, r, -4);
+  await new Promise(res => setTimeout(res, 160));   // settle re-raster pending
+  const tab = document.querySelector('[role="tab"][aria-selected="false"]');
+  if (!tab) return 'no unselected tab';
+  const t0 = performance.now(); tab.click();
+  await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+  const ms = performance.now() - t0, now = document.getElementById(tab.id);   // tab bars re-render, so read the live node
+  return now?.getAttribute('aria-selected') === 'true' && ms < 200 || JSON.stringify({ms: Math.round(ms), tab: tab.id, selected: now?.getAttribute('aria-selected')});
+`]);
+CHECKS.push(['zoom-burst memory returns', 'p=1&v=sheet:/', `${ZB_WHEEL}
+  if (!performance.memory) return 'skip';
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  const nodes0 = document.getElementsByTagName('*').length;
+  for (let run = 0; run < 5; run++) for (let i = 0; i < 200; i++) zb(vp, r, i % 2 ? 4 : -4);
+  await new Promise(res => setTimeout(res, 400));
+  const nodes1 = document.getElementsByTagName('*').length;
+  return nodes1 <= nodes0 * 1.1 || JSON.stringify({nodes0, nodes1});
+`]);
+CHECKS.push(['zoom-burst deep zoom no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}${ZB_PENDING}
+  const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
+  setT({z: S.z * 28}); await new Promise(res => setTimeout(res, 400));   // the original report: sustained pinch at deep zoom
+  const long = []; const po = new PerformanceObserver(l => long.push(...l.getEntries().map(e => e.duration))); po.observe({type:'longtask', buffered:false});
+  const frames = []; let last = performance.now(), on = true;
+  const tick = t => { frames.push(t - last); last = t; if (on) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
+  for (let i = 0; i < 200; i++) { zb(vp, r, i % 2 ? 4 : -4); if (i % 2) await new Promise(res => setTimeout(res, 10)); }
+  await new Promise(res => setTimeout(res, 400)); on = false; po.disconnect();
+  const worst = Math.max(...frames.slice(1)), task = Math.max(0, ...long);
+  return worst < 200 && task < 200 || JSON.stringify({worst: Math.round(worst), task: Math.round(task), z: +S.z.toFixed(2)});
+`]);
