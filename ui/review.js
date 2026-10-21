@@ -479,7 +479,7 @@ function themeSchematic(svg) {
 
 // kicad-cli strokes each glyph segment as its own <path d> (~25k on a dense sheet), and Chrome repaints
 // them all when a zoom settles. Join runs of sibling attribute-less paths under an unfilled group into one
-// path: same inherited style, same pixels, ~10x fewer elements. Nothing addresses these paths individually.
+// path: same inherited style, near-identical pixels (overlapping strokes no longer double their edge), ~10x fewer elements. Nothing addresses these paths individually.
 function simplifySchematic(svg) {
   const walk = (g, unfilled) => {
     const m = /(?:^|;)\s*fill\s*:\s*([^;]+)/i.exec(g.getAttribute('style') || '') || (g.hasAttribute('fill') && [, g.getAttribute('fill')]);
@@ -487,7 +487,7 @@ function simplifySchematic(svg) {
     let run = null, d = [];
     const flush = () => { if (run && d.length > 1) run.setAttribute('d', d.join(' ')); run = null; d = []; };
     for (const el of [...g.children]) {
-      if (unfilled && el.localName === 'path' && el.attributes.length === 1 && el.hasAttribute('d')) {
+      if (unfilled && el.localName === 'path' && el.attributes.length === 1 && /^\s*M/.test(el.getAttribute('d') || '')) {   // absolute start: joining cannot shift it
         d.push(el.getAttribute('d')); if (run) el.remove(); else run = el;
       } else if (el.localName === 'desc') continue;
       else { flush(); if (el.localName === 'g') walk(el, unfilled); }

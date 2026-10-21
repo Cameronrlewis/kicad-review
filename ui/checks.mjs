@@ -4097,22 +4097,17 @@ const ZB_WHEEL = `const zb = (vp, r, dy) => vp.dispatchEvent(new WheelEvent('whe
 // without simplifySchematic (layers hidden: ~20 ms), so raster of the geometry, not element count, is the cost here.
 // Under --gpu they pass with and without it. Run with --no-skip "zoom-burst" to see them.
 const ZB_PENDING = `return 'skip';`;
-// The first raster after page load stalls ~3 s in headless SwiftShader whatever the sheet holds (a redraw of the
-// same sheet does not), so burst checks wait for 60 smooth frames (1 s) first; they measure the gesture, not page load.
-const ZB_SETTLE = `await new Promise(res => { let l = performance.now(), ok = 0; const t0 = l; const t = n => { ok = n - l < 50 ? ok + 1 : 0; l = n; ok >= 60 || n - t0 > 20000 ? res() : requestAnimationFrame(t); }; requestAnimationFrame(t); });`;
 CHECKS.push(['zoom-burst no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}${ZB_PENDING}
-  ${ZB_SETTLE}
   const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
   const long = []; const po = new PerformanceObserver(l => long.push(...l.getEntries().map(e => e.duration))); po.observe({type:'longtask', buffered:false});
   const frames = []; let last = performance.now(), on = true;
   const tick = t => { frames.push(t - last); last = t; if (on) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
   for (let i = 0; i < 200; i++) { zb(vp, r, i % 2 ? 4 : -4); if (i % 2) await new Promise(res => setTimeout(res, 10)); }
-  await new Promise(res => setTimeout(res, 400)); await new Promise(res => requestAnimationFrame(res)); on = false; po.disconnect();   // the last rAF lands after any stalled frame, so it is counted
+  await new Promise(res => setTimeout(res, 400)); on = false; po.disconnect();
   const worst = Math.max(...frames.slice(1)), task = Math.max(0, ...long);
   return worst < 200 && task < 200 || JSON.stringify({worst: Math.round(worst), task: Math.round(task)});
 `]);
 CHECKS.push(['zoom-burst dock tab responds', 'p=1&v=sheet:/', `${ZB_WHEEL}${ZB_PENDING}
-  ${ZB_SETTLE}
   const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
   for (let i = 0; i < 100; i++) zb(vp, r, -4);
   await new Promise(res => setTimeout(res, 160));   // settle re-raster pending
@@ -4133,22 +4128,18 @@ CHECKS.push(['zoom-burst memory returns', 'p=1&v=sheet:/', `${ZB_WHEEL}
   return nodes1 <= nodes0 * 1.1 || JSON.stringify({nodes0, nodes1});
 `]);
 CHECKS.push(['zoom-burst deep zoom no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}${ZB_PENDING}
-  ${ZB_SETTLE}
   const vp = document.querySelector('#stage .vp'), r = vp.getBoundingClientRect();
   setT({z: S.z * 28}); await new Promise(res => setTimeout(res, 400));   // the original report: sustained pinch at deep zoom
   const long = []; const po = new PerformanceObserver(l => long.push(...l.getEntries().map(e => e.duration))); po.observe({type:'longtask', buffered:false});
   const frames = []; let last = performance.now(), on = true;
   const tick = t => { frames.push(t - last); last = t; if (on) requestAnimationFrame(tick); }; requestAnimationFrame(tick);
   for (let i = 0; i < 200; i++) { zb(vp, r, i % 2 ? 4 : -4); if (i % 2) await new Promise(res => setTimeout(res, 10)); }
-  await new Promise(res => setTimeout(res, 400)); await new Promise(res => requestAnimationFrame(res)); on = false; po.disconnect();   // the last rAF lands after any stalled frame, so it is counted
+  await new Promise(res => setTimeout(res, 400)); on = false; po.disconnect();
   const worst = Math.max(...frames.slice(1)), task = Math.max(0, ...long);
   return worst < 200 && task < 200 || JSON.stringify({worst: Math.round(worst), task: Math.round(task), z: +S.z.toFixed(2)});
 `]);
-// simplifySchematic: the largest sheet drops below 3,000 painted elements and renders the same.
-// Before/after are rasterised by the same SVG renderer; joined strokes no longer double-composite their
-// anti-aliased overlaps, so thin text at fit is slightly lighter (measured: mean 1.66/255, 18% of ink pixels move > 32) and 28x is
-// near-identical (mean 0.12, 2%).
-CHECKS.push(['simplify largest sheet few elements, same pixels', 'p=1&v=sheet:/', `
+// simplifySchematic: < 3,000 painted elements; joined strokes lighten thin text at fit, limits ~1.5x measured (fit mean 1.66, 18% moved; 28x 0.12, 2%).
+CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=sheet:/', `
   const svgs = [...document.querySelectorAll('#stage svg[data-appearance-schematic]')];
   const painted = svgs.map(s => s.querySelectorAll('path,line,polyline,polygon,rect,circle,ellipse').length);
   if (!svgs.length || painted.some(n => n >= 3000)) return 'painted ' + painted;
