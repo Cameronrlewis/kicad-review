@@ -23,6 +23,18 @@ assert rows["modified", "R1"]["pos_before"] == [1, 0]
 # S-expression parsing: quoted strings with escapes, nesting.
 n = parse_sexpr('(a (b "x \\"y\\" z") (c 1 2))')
 assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]
+import json
+import pickle
+from kicad_review import Quoted, is_net_number
+numeric_tokens = parse_sexpr('(net "12" 12)')
+assert numeric_tokens == ['net', '12', '12']
+assert isinstance(numeric_tokens[1], Quoted) and not is_net_number(numeric_tokens[1])
+assert is_net_number(numeric_tokens[2])
+assert len(set(numeric_tokens[1:])) == 1 and {numeric_tokens[1]: 'name'}['12'] == 'name'
+assert json.dumps(numeric_tokens) == '["net", "12", "12"]'
+restored_tokens = pickle.loads(pickle.dumps(numeric_tokens))
+assert restored_tokens == numeric_tokens and isinstance(restored_tokens[1], Quoted)
+assert not is_net_number(restored_tokens[1]) and is_net_number(restored_tokens[2])
 assert flatten({"classes": [{"name": "Power", "w": 1}, {"name": "Default", "w": 2}]}) == {"classes.Power.w": "1", "classes.Power.name": "Power", "classes.Default.w": "2", "classes.Default.name": "Default"}
 print("ok")
 
@@ -3075,6 +3087,42 @@ ids = [o["uuid"] for o in a["objects"] if o["kind"] == "pad"]
 assert ids == ["fp/pad:1:1", "fp/pad:1:2"]
 modern = GEOMETRY_FIXTURE.replace('(net 1 "GND")','(net "GND")').replace('(net 1)', '(net "GND")')
 assert len([n for n in scene_from_text(modern)["nets"] if n["name"] == "GND"]) == 1
+# KiCad 10 has no net table: a quoted numeric name is not a numbered reference.
+numeric_name_board = '''(kicad_pcb (version 20260206)
+ (layers (0 "F.Cu" signal) (2 "B.Cu" signal))
+ (segment (start 0 0) (end 1 0) (width .25) (layer "F.Cu") (net "12") (uuid digits))
+ (via (at 1 0) (size .8) (drill .4) (layers "F.Cu" "B.Cu") (net "GND") (uuid ground))
+ (footprint "Test:X" (layer "F.Cu") (at 0 0) (uuid fp)
+  (property "Reference" "J1")
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "12") (uuid pad))))'''
+numeric_scene = scene_from_text(numeric_name_board)
+assert {n['name'] for n in numeric_scene['nets']} == {'', '12', 'GND'}, numeric_scene['nets']
+assert numeric_scene['warnings'] == [], numeric_scene['warnings']
+numeric_ids = {n['name']: n['id'] for n in numeric_scene['nets']}
+numeric_objects = {o['uuid']: o for o in numeric_scene['objects']}
+assert numeric_objects['digits']['net'] == numeric_objects['pad']['net'] == numeric_ids['12']
+assert numeric_objects['ground']['net'] == numeric_ids['GND'] != numeric_ids['12']
+with TemporaryDirectory() as d:
+    p = Path(d) / 'nets.kicad_pcb'
+    p.write_text(numeric_name_board)
+    objects = pcb_objects(p)
+    assert objects['digits']['props']['net'] == objects['fp']['props']['pad 1 net'] == '12'
+    assert objects['ground']['props']['net'] == 'GND'
+    # Old net tables resolve both bare and inline numbered references.
+    old_board = numeric_name_board.replace('20260206', '20221018').replace(
+        '(layers', '(net 12 "GND") (net 13 "12") (layers', 1).replace(
+        '(net "12")', '(net 13)').replace('(net "GND")', '(net 12 "GND")')
+    old_scene = scene_from_text(old_board)
+    assert old_scene['nets'] == [{'id': 0, 'name': ''}, {'id': 12, 'name': 'GND'}, {'id': 13, 'name': '12'}]
+    assert old_scene['warnings'] == []
+    assert {o['uuid']: o['net'] for o in old_scene['objects'] if o['kind'] != 'footprint'} == {
+        'digits': 13, 'ground': 12, 'pad': 13}
+    p.write_text(old_board)
+    assert pcb_objects(p) == objects
+    # A modern name must not resolve through an unrelated old numeric table key.
+    p.write_text(old_board.replace('(net 13)', '(net "12")'))
+    assert pcb_objects(p) == objects
+print('ok quoted numeric net names and older numbered references')
 for bad in ("NaN", "Infinity", "3000000"):
     try:
         geometry_um(bad)
