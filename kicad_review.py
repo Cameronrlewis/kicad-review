@@ -1745,7 +1745,42 @@ def violation(v, scale, where):
             "pos": pos[0] if pos else None, "box": box_of(pos, 1.5), "where": where}
 
 
-def load_violations(path, kind):
+def erc_position_scale(sheets, objects, kicad_version=None):
+    """Infer the ERC JSON writer's 1/100 bug from referenced schematic geometry."""
+    exact, pins = [], []
+    for sheet in sheets:
+        parts = sheet.get("uuid_path", "/").strip("/").split("/")[1:]
+        page = "/" + "".join(f"{p}/" for p in parts)
+        refs = {o["ref"]: o for o in objects.values() if o.get("where") == {"sheet": page} and o.get("kind") == "symbol"}
+        for v in sheet.get("violations", []):
+            for item in v.get("items", []):
+                if "pos" not in item:
+                    continue
+                obj = objects.get(page + item.get("uuid", ""))
+                direct = obj is not None
+                if not direct:
+                    match = re.match(r"Symbol (\S+) Pin ", item.get("description", ""))
+                    obj = refs.get(match[1]) if match else None
+                if not obj or not obj.get("pos"):
+                    continue
+                p = item["pos"]
+                distances = [math.hypot(p["x"] * scale - obj["pos"][0], p["y"] * scale - obj["pos"][1]) for scale in (1, 100)]
+                if direct:
+                    if min(distances) < 0.02 and max(distances) > 0.02:
+                        exact.append(distances[1] < distances[0])
+                # Pin UUIDs are not in the object model; require a 10x closer symbol anchor.
+                # Exact UUID matches take precedence over this pin-only fallback.
+                elif max(distances) > 10 * max(min(distances), 0.02):
+                    pins.append(distances[1] < distances[0])
+    votes = exact or pins
+    if votes.count(True) != votes.count(False):
+        return 100 if votes.count(True) > votes.count(False) else 1
+    # KiCad #25582 is fixed in 10.0.7; use the report version only without decisive geometry.
+    version = re.search(r"(?<![\d.])(\d+)\.(\d+)\.(\d+)(?![\d.])", kicad_version) if isinstance(kicad_version, str) else None
+    return 100 if version and (10, 0, 0) <= tuple(map(int, version.groups())) <= (10, 0, 6) else 1
+
+
+def load_violations(path, kind, objects=None):
     """ERC/DRC JSON as a flat list of errors and warnings. kind: erc, drc or parity."""
     if not os.path.exists(path):
         return None
@@ -1753,11 +1788,11 @@ def load_violations(path, kind):
         d = json.load(fh)
     out = []
     if kind == "erc":
+        scale = erc_position_scale(d.get("sheets", []), objects or {}, d.get("kicad_version"))
         for sheet in d.get("sheets", []):
             parts = sheet.get("uuid_path", "/").strip("/").split("/")[1:]  # drop the root sheet UUID
             page = "/" + "".join(f"{p}/" for p in parts)
-            # ponytail: kicad-cli 10 writes ERC positions in units of 100 mm; DRC positions are mm
-            out += [violation(v, 100, {"sheet": page}) for v in sheet.get("violations", [])]
+            out += [violation(v, scale, {"sheet": page}) for v in sheet.get("violations", [])]
     else:
         for key in (("violations", "unconnected_items") if kind == "drc" else ("schematic_parity",)):
             out += [violation(v, 1, {"board": True}) for v in d.get(key, [])]
@@ -2222,7 +2257,7 @@ def project_checks(p, settings, objs, waivers=None):
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
         if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
-        return load_violations(f"{out_dir}/{s}/{f}", k)
+        return load_violations(f"{out_dir}/{s}/{f}", k, objs[s])
     fields = settings["bom"]["required_fields"]
     checks = [
         run_check("erc", settings, side("head", "erc.json", "erc"), side("base", "erc.json", "erc"), waivers),
