@@ -2751,6 +2751,18 @@ with _t.TemporaryDirectory() as d:
             {"uuid": "symbol", "pos": {"x": 1.27, "y": 0.889}}]}]}]
         assert erc_position_scale(tied, objects, "10.0.6") == 100
         assert erc_position_scale(tied, objects, "10.0.7") == 1
+        # Ambiguous pin anchors must not outvote the version for a multi-unit symbol.
+        multi = {"/unit1": {"kind": "symbol", "ref": "U1", "pos": [30, 30], "where": {"sheet": "/"}},
+                 "/unit2": {"kind": "symbol", "ref": "U1 unit 2", "pos": [200, 150], "where": {"sheet": "/"}}}
+        ambiguous = [{"uuid_path": "/root", "violations": [{"items": [
+            {"uuid": "pin5", "description": "Symbol U1 Pin 5", "pos": {"x": 2.0, "y": 1.5254}}]}]}]
+        assert erc_position_scale(ambiguous, multi, "10.0.6") == 100, "ambiguous pin must defer to version"
+        # A far UUID match is not exact evidence and must not override a decisive pin vote.
+        far_objects = {**multi, "/other": {"kind": "symbol", "ref": "U2", "pos": [200, 150], "where": {"sheet": "/"}}}
+        far = [{"uuid_path": "/root", "violations": [{"items": [
+            {"uuid": "unit1", "pos": {"x": 2.0, "y": 0.3}},
+            {"uuid": "pin", "description": "Symbol U2 Pin 1", "pos": {"x": 2.0, "y": 1.5254}}]}]}]
+        assert erc_position_scale(far, far_objects, "10.0.7") == 100, "far exact match must not override pins"
     finally:
         os.chdir(old_cwd)
 print("ok ERC scale detection for fixed and buggy reports, pins and reused sheets")
