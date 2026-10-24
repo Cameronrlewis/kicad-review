@@ -354,8 +354,16 @@ def cmd_render(args):
 TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
 
 
+class Quoted(str):
+    """A quoted S-expression token, with normal string equality and serialization."""
+
+
+def is_net_number(token):
+    return not isinstance(token, Quoted) and token.isdigit()
+
+
 def parse_sexpr(text):
-    """KiCad S-expression text to nested lists of strings."""
+    """KiCad S-expression text to nested lists of strings, preserving quoted tokens."""
     stack = [[]]
     for m in TOKEN.finditer(text):
         if m.group(1):
@@ -364,7 +372,7 @@ def parse_sexpr(text):
             node = stack.pop()
             stack[-1].append(node)
         elif m.group(3) is not None:
-            stack[-1].append(re.sub(r"\\(.)", lambda e: "\n" if e.group(1) == "n" else e.group(1), m.group(3)))
+            stack[-1].append(Quoted(re.sub(r"\\(.)", lambda e: "\n" if e.group(1) == "n" else e.group(1), m.group(3))))
         elif m.group(4):
             stack[-1].append(m.group(4))
     return stack[0][0]
@@ -562,8 +570,8 @@ def sch_objects(proj_dir, name):
 def pcb_objects(path):
     with open(path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())
-    net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2}  # older files number their nets
-    net = lambda node: (lambda n: net_names.get(n[1], n[-1]) if n else None)(find(node, "net"))
+    net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2 and is_net_number(n[1])}  # older files number their nets
+    net = lambda node: (lambda n: (net_names.get(n[1], n[-1]) if is_net_number(n[1]) else n[1]) if n else None)(find(node, "net"))
     where = {"board": True}
     objs = dict(title_block(root, "board"))
     setup = find(root, "setup")
@@ -885,18 +893,18 @@ def board_geometry(pcb_path):
             if isinstance(child, list):
                 yield from walk(child)
 
-    nets = {int(n[1]): n[2] for n in findall(root, "net") if len(n) > 2}
+    nets = {int(n[1]): n[2] for n in findall(root, "net") if len(n) > 2 and is_net_number(n[1])}
     nets[0] = ""
     named, numbered = set(), set()
     for node in walk(root):
         n = find(node, "net")
-        if n and len(n) > 1 and n[1].isdigit() and val(node, "net_name") is not None:
+        if n and len(n) > 1 and is_net_number(n[1]) and val(node, "net_name") is not None:
             nets.setdefault(int(n[1]), val(node, "net_name"))
         if node[0] == "net" and len(node) > 1:
-            if len(node) > 2:
+            if is_net_number(node[1]) and len(node) > 2:
                 nets.setdefault(int(node[1]), node[2])
                 named.add(nets[int(node[1])])
-            elif node[1].isdigit():
+            elif is_net_number(node[1]):
                 numbered.add(int(node[1]))
             else:
                 named.add(node[1])
@@ -914,7 +922,7 @@ def board_geometry(pcb_path):
     def net_id(node):
         n = find(node, "net")
         if n and len(n) > 1:
-            return int(n[1]) if len(n) > 2 or n[1].isdigit() else net_ids[n[1]]
+            return int(n[1]) if is_net_number(n[1]) else net_ids[n[1]]
         return net_ids.get(val(node, "net_name", ""), 0)
 
     def layers(node, via=False):
