@@ -2715,6 +2715,70 @@ with _t.TemporaryDirectory() as d:
     assert [waiver_key(v) for v in vs] == [waiver_key(v) for v in load_violations(f"{d}/drc.json", "drc")]
 print("ok unconnected duplicates get distinct keys")
 
+# ERC scale comes from referenced schematic geometry, never the KiCad version.
+with _t.TemporaryDirectory() as d:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(d)
+        objects = {"/symbol": {"kind": "symbol", "ref": "U1", "pos": [127, 88.9, 0], "props": {}, "where": {"sheet": "/"}},
+                   "/child/symbol": {"kind": "symbol", "ref": "U1", "pos": [254, 177.8, 0], "props": {}, "where": {"sheet": "/child/"}}}
+        settings = {**DEFAULT_SETTINGS, "checks": {"erc": "required"}}
+        for divisor in (1, 100):
+            for pins_only in (False, True):
+                sheets = []
+                for page, x, y in (("/", 127, 88.9), ("/child/", 254, 177.8)):
+                    items = [{"uuid": "pin" if pins_only else "symbol", "description": "Symbol U1 Pin 1 [Input]" if pins_only else "Symbol U1 [Test]",
+                              "pos": {"x": x / divisor, "y": (y + (2.54 if pins_only else 0)) / divisor}},
+                             {"uuid": "unknown", "description": "Unmapped item", "pos": {"x": (x + 5) / divisor, "y": y / divisor}}]
+                    sheets.append({"uuid_path": "/root" + page.rstrip("/"), "violations": [
+                        {"type": "pin_not_connected", "severity": "error", "description": "Test", "items": items},
+                        {"type": "test", "severity": "warning", "description": "No position", "items": []}]})
+                report = {"coordinate_units": "mm", "kicad_version": "10.0.6", "sheets": sheets}
+                write(d, {"head/G/G.kicad_sch": "", "review/G/head/erc.json": _j.dumps(report)})
+                check = project_checks({"dir": "G", "name": "G"}, settings, {"head": objects, "base": {}})[0]
+                located = [v for v in check["violations"] if v["pos"]]
+                assert [v["pos"] for v in located] == [[127, 91.44 if pins_only else 88.9], [254, 180.34 if pins_only else 177.8]], "ERC must detect bad scale without rescaling correct mm"
+                assert located[0]["box"] == [125.5, 87.4, 133.5, 92.94 if pins_only else 90.4], located[0]
+                assert all(v["pos"] is None and v["box"] is None for v in check["violations"] if not v["pos"])
+        # An exact UUID match wins over pin-anchor proximity; small coordinates alone prove nothing.
+        from kicad_review import erc_position_scale
+        evidence = [{"uuid_path": "/root", "violations": [{"items": [
+            {"uuid": "symbol", "pos": {"x": 127, "y": 88.9}},
+            {"uuid": "pin", "description": "Symbol U1 Pin 1 [Input]", "pos": {"x": 1.27, "y": 0.889}}]}]}]
+        assert erc_position_scale(evidence, objects) == 1
+        assert erc_position_scale([], objects) == 1
+        # Inconclusive geometry falls back to the report version; evidence still wins.
+        report["sheets"] = [{"uuid_path": "/root", "violations": [{"type": "test", "severity": "error", "description": "Test", "items": [
+            {"uuid": "unknown", "pos": {"x": 0.5, "y": 0.8}}]}]}]
+        for version, scale in (("10.0.6", 100), ("10.0.6-1", 100), ("(10.0.6)", 100),
+                               ("10.0.0", 100), ("10.0.7", 1), ("10.0.60", 1), ("11.0.0", 1),
+                               (None, 1), ("unknown", 1), ({}, 1)):
+            report["kicad_version"] = version
+            write(d, {"review/G/head/erc.json": _j.dumps(report)})
+            assert load_violations("review/G/head/erc.json", "erc")[0]["pos"] == [0.5 * scale, 0.8 * scale], version
+        assert erc_position_scale(evidence, objects, "10.0.6") == 1
+        # A tied vote is also inconclusive, not evidence that the writer is fixed.
+        tied = [{"uuid_path": "/root", "violations": [{"items": [
+            {"uuid": "symbol", "pos": {"x": 127, "y": 88.9}},
+            {"uuid": "symbol", "pos": {"x": 1.27, "y": 0.889}}]}]}]
+        assert erc_position_scale(tied, objects, "10.0.6") == 100
+        assert erc_position_scale(tied, objects, "10.0.7") == 1
+        # Ambiguous pin anchors must not outvote the version for a multi-unit symbol.
+        multi = {"/unit1": {"kind": "symbol", "ref": "U1", "pos": [30, 30], "where": {"sheet": "/"}},
+                 "/unit2": {"kind": "symbol", "ref": "U1 unit 2", "pos": [200, 150], "where": {"sheet": "/"}}}
+        ambiguous = [{"uuid_path": "/root", "violations": [{"items": [
+            {"uuid": "pin5", "description": "Symbol U1 Pin 5", "pos": {"x": 2.0, "y": 1.5254}}]}]}]
+        assert erc_position_scale(ambiguous, multi, "10.0.6") == 100, "ambiguous pin must defer to version"
+        # A far UUID match is not exact evidence and must not override a decisive pin vote.
+        far_objects = {**multi, "/other": {"kind": "symbol", "ref": "U2", "pos": [200, 150], "where": {"sheet": "/"}}}
+        far = [{"uuid_path": "/root", "violations": [{"items": [
+            {"uuid": "unit1", "pos": {"x": 2.0, "y": 0.3}},
+            {"uuid": "pin", "description": "Symbol U2 Pin 1", "pos": {"x": 2.0, "y": 1.5254}}]}]}]
+        assert erc_position_scale(far, far_objects, "10.0.7") == 100, "far exact match must not override pins"
+    finally:
+        os.chdir(old_cwd)
+print("ok ERC scale detection for fixed and buggy reports, pins and reused sheets")
+
 # Waivers: read from the target ref with git, head copy only proposes; invalid entries skipped; expiry by date.
 import datetime
 from kicad_review import load_waivers
