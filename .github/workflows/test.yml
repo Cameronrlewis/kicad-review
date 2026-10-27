@@ -27,9 +27,14 @@ jobs:
           export PAGES=$(mktemp -d)
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
           python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js")]]'
+          FAB_REPORT_FIXTURE="$PAGES/fab.html" python3 test_kicad_review.py
       - run: node ui/check.mjs
       - run: node ui/check.mjs --dark
       - run: node ui/check.mjs --no-skip "Waivers"
+      - run: node ui/check.mjs --no-skip "Fab limits"
+      - run: node ui/check.mjs --no-skip "Fab limits" --dark
+      - run: node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"
+      - run: node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"
       - run: node ui/check.mjs --no-skip "selection-only address"
       - run: node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"
       - run: node ui/check.mjs --no-skip "passing checks with baseline findings"
