@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdtempSync,readFileSync,rmSync,mkdirSync,readdirSync,statSync,writeFileSync,existsSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {join as pathJoin} from 'node:path';
 const require=createRequire(import.meta.url), P=require('./compress3d.cjs');
 test('BR02 mask finish and pair-safe cache policy',()=>{
@@ -631,6 +632,8 @@ test('BR02 CLI preserves legacy compression and supports metadata keep override'
     }
     const missing=run([input,output,'--metadata',meta]);assert.notEqual(missing.status,0);
     assert.match(missing.stderr,/requires --parts and --stats/);
+    const missingCache=run([input,output,'--metadata',meta,'--parts',parts,'--stats',stats,'--cache']);
+    assert.notEqual(missingCache.status,0);assert.match(missingCache.stderr,/--cache requires a value/);
     assert.deepEqual(readFileSync(output),before);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
@@ -648,13 +651,16 @@ test('BR02 restored raw pair A B A and corrupt cache cannot cross indexes',integ
     assert.deepEqual(readFileSync(input),original);
     assert.equal(existsSync(output),false);
     for(const keep of [['R12'],['U3'],['R12']]) {
+      const cacheKey=P.processorKey(original,{...metadata,keep},readFileSync(new URL('./compress3d.cjs',import.meta.url)));
+      const previous=keep[0]==='R12'&&existsSync(output)?statSync(pathJoin(cache,cacheKey,'board.glb')).mtimeMs:null;
       assert.equal(await P.cachedCompress(input,output,{...metadata,keep},parts,stats,cache),true);
+      if(previous!==null)assert.equal(statSync(pathJoin(cache,cacheKey,'board.glb')).mtimeMs,previous,
+        'valid A cache entry is reused without rebuild');
       const final=await new NodeIO().registerExtensions(require('@gltf-transform/extensions').ALL_EXTENSIONS)
         .registerDependencies({'meshopt.decoder':require('meshoptimizer').MeshoptDecoder}).read(output);
       assert.ok(final.getRoot().listNodes().some(n=>n.getName()===keep[0]));
       assert.ok(!final.getRoot().listNodes().some(n=>n.getName()===(keep[0]==='R12'?'U3':'R12')));
       assert.equal(JSON.parse(readFileSync(parts)).length,2);assert.deepEqual(readFileSync(input),original);
-      const {createHash}=require('node:crypto');
       const manifest=JSON.parse(readFileSync(pathJoin(dir,'board-processed.json')));
       for(const [file,destination] of [['board.glb',output],['parts.json',parts],['stats.json',stats]])
         assert.equal(manifest.hashes[file],createHash('sha256').update(readFileSync(destination)).digest('hex'));
@@ -670,5 +676,10 @@ test('BR02 restored raw pair A B A and corrupt cache cannot cross indexes',integ
     assert.deepEqual(readFileSync(output),Buffer.from('corrupt'));
     for(const file of [parts,stats,pathJoin(dir,'board-processed.json')])assert.equal(existsSync(file),false);
     assert.ok(!readdirSync(cache).some(p=>p.startsWith('.build-')));
+    const stale=pathJoin(cache,'.build-abandoned');mkdirSync(stale);writeFileSync(pathJoin(stale,'partial'),'x');
+    // Restore a valid raw input and ensure startup removes abandoned temp builds.
+    writeFileSync(input,original);
+    assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true);
+    assert.equal(existsSync(stale),false);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });

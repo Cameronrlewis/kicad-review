@@ -244,8 +244,11 @@ async function cachedCompress(input,output,metadata,partsPath,statsPath,cacheRoo
   };
   try {
     await fs.rm(manifestPath,{force:true});
+    await fs.mkdir(cacheRoot,{recursive:true});
+    // Recover temporary builds abandoned by a terminated prior processor.
+    for(const name of await fs.readdir(cacheRoot))
+      if(name.startsWith('.build-'))await fs.rm(path.join(cacheRoot,name),{recursive:true,force:true});
     if(!await valid()) {
-      await fs.mkdir(cacheRoot,{recursive:true});
       const temp=await fs.mkdtemp(path.join(cacheRoot,'.build-'));
       try {
         await compress(input,path.join(temp,files[0]),metadata,path.join(temp,files[1]),path.join(temp,files[2]));
@@ -266,7 +269,7 @@ module.exports.cachedCompress=cachedCompress;
 
 if(require.main===module)(async()=>{
   const [input,output,...args]=process.argv.slice(2);
-  const option=name=>{const i=args.indexOf(name);return i<0?null:args[i+1]};
+  const option=name=>{const i=args.indexOf(name);if(i<0)return null;if(!args[i+1]||args[i+1].startsWith('--'))throw Error(name+' requires a value');return args[i+1]};
   const meta=option('--metadata')?JSON.parse(require('node:fs').readFileSync(option('--metadata'),'utf8')):null;
   if(meta&&option('--keep'))meta.keep=option('--keep').split(',').filter(Boolean);
   if(meta&&(!option('--parts')||!option('--stats')))
