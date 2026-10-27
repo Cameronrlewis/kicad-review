@@ -3909,6 +3909,21 @@ def fab_assert_via_position(rows):
                              for p in positions), 'FAB real-mm via centre'
 
 
+def fab_four_fixture(root):
+    """Generate the synthetic four-layer report input, including its house rules."""
+    board = root / 'four.kicad_pcb'
+    board.write_text(fab_probe_board(''.join(
+        fab_segment('four-'+layer, layer, .08, y=10+10*i)
+        for i, layer in enumerate(('F.Cu', 'In1.Cu', 'B.Cu')))))
+    # KiCad's project-less 0.2 mm minimum would classify every narrow track as
+    # a house violation and subtract it from the vendor ledger. This generated
+    # fixture deliberately uses a weaker house minimum; report production never
+    # rewrites the input board, project or authored rules.
+    board.with_suffix('.kicad_pro').write_text(json.dumps(
+        {'board': {'design_settings': {'rules': {'min_track_width': .05}}}}))
+    return board
+
+
 def fab_capability_probe(root):
     summaries = []
     for profile, layers in (('jlcpcb-multilayer', 4), ('pcbway-std', 4),
@@ -3917,9 +3932,7 @@ def fab_capability_probe(root):
         target.mkdir(parents=True, exist_ok=False)
         summaries.append(fab_profile_probe(target, profile, layers))
     (root / 'manifest.json').write_text(json.dumps(summaries, indent=2))
-    (root / 'four.kicad_pcb').write_text(fab_probe_board(''.join(
-        fab_segment('four-'+layer, layer, .08, y=10+10*i)
-        for i, layer in enumerate(('F.Cu', 'In1.Cu', 'B.Cu')))))
+    fab_four_fixture(root)
     print('ok FAB-03 geometry, precedence, exclusions and stale fills (both vendors, 2/4 layers)')
 
 
@@ -4724,10 +4737,8 @@ def fab_four_report(root, board):
     cfg['fabrication']['check_limits']=True
     cfg['checks'].update(drc='required',fab_limits='required')
     p={'name':'Four','dir':'','status':'modified'}
-    # Read the Task 3 fixture in place. Its default 0.2 mm house minimum can
-    # suppress narrower tracks from the vendor-only ledger; this integration
-    # check validates profile selection and outline coverage, not vendor-only rows.
-    source=board
+    # Read the Task 3 fixture and its generated project in place, unmodified.
+    source=board.resolve()
     with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
         kr.render_fab(p,'head',str(root/'head'),cfg)
         checks=kr.fab_checks(p,cfg,str(root),{'active':{}})
@@ -4736,13 +4747,14 @@ def fab_four_report(root, board):
     assert jl['profile']=='jlcpcb-multilayer' and jl['layers']==4
     assert sections['pcbway']['profile']=='pcbway-std' and sections['pcbway']['unsupported'] is None
     assert jl['values']['trackWidthOuterMm']==jl['values']['trackWidthInnerMm']==.09
-    check=next(c for c in checks if c['vendor']=='jlcpcb')
-    assert {'trackWidthOuterMm','trackWidthInnerMm'} <= set(check['checked'])
-    assert 'edgeClearanceMm' in check['checked'] and not check['unsupported']
-    # The fixture's project-less KiCad defaults may suppress narrower widths;
-    # validate detected tracks only when they survive board-DRC subtraction.
-    for layer in ('F.Cu','In1.Cu','B.Cu'):
-        assert isinstance(fab_target(jl['violations'],'track_width',['four-'+layer]), bool), layer
+    for check in checks:
+        vendor=check['vendor']
+        assert {'trackWidthOuterMm','trackWidthInnerMm'} <= set(check['checked']), vendor
+        assert 'edgeClearanceMm' in check['checked'] and not check['unsupported'], vendor
+        for layer in ('F.Cu','In1.Cu','B.Cu'):
+            assert fab_target(sections[vendor]['violations'],'track_width',['four-'+layer]), (vendor,layer)
+            assert any(v['type']=='track_width' and fab_uid('four-'+layer) in v['uuids']
+                       for v in check['violations']), ('report track missing',vendor,layer)
     sample=pathlib.Path('ui/sample/review-data.js').read_text()
     data=json.loads(sample.split('=',1)[1].strip().rstrip(';'))
     project=next(p for p in data['projects'] if p.get('board',{}).get('layers'))
