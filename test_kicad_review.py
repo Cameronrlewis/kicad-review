@@ -79,6 +79,42 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
             else:
                 raise AssertionError("unchanged copied board must fail save verification")
             load_board.assert_not_called()
+    # Hidden Reference/Value fields do not export copper; visible ones do.
+    board = pcbnew.BOARD()
+    footprint = pcbnew.FOOTPRINT(board)
+    board.Add(footprint)
+    fields = (footprint.Reference(), footprint.Value())
+    for index, field in enumerate(fields):
+        field.SetText("BR03")
+        field.SetLayer(pcbnew.F_Cu)
+        field.SetPosition(pcbnew.VECTOR2I(index * 10000000, 0))
+        field.SetVisible(False)
+    with patch.object(copper, "refill_board", return_value=board):
+        assert copper.collect("fixture") == {}, "hidden fields must not contribute copper"
+        for field in fields:
+            field.SetVisible(True)
+            assert copper.collect("fixture")[("F.Cu", "")].Area() > 0
+            field.SetVisible(False)
+        fields[0].SetLayer(pcbnew.F_SilkS)
+        fields[0].SetVisible(True)
+        assert copper.collect("fixture") == {}, "non-copper fields must be ignored"
+    # Identical bytes saved in the same coarse timestamp tick are still a save.
+    with tempfile.TemporaryDirectory(prefix="br03-refill-coarse-time-test-") as tmp:
+        source = pathlib.Path(tmp) / "fixture.kicad_pcb"
+        source.write_text("unchanged")
+        coarse_time = 1700000000
+        os.utime(source, (coarse_time, coarse_time))
+        source_stat = source.stat()
+        def identical_save(*args, **kwargs):
+            target = pathlib.Path(args[0][-1])
+            target.write_bytes(source.read_bytes())
+            os.utime(target, (coarse_time, coarse_time))
+            return type("Run", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        with patch.object(copper.subprocess, "run", side_effect=identical_save), patch.object(
+                copper.pcbnew, "LoadBoard", return_value=fake_board):
+            assert copper.refill_board(str(source)) is fake_board
+        assert source.read_text() == "unchanged"
+        assert source.stat().st_mtime_ns == source_stat.st_mtime_ns
     print("ok BR03 signed copper polygons")
 
 from kicad_review import is_kicad_file, owner_project

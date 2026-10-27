@@ -4,6 +4,7 @@ Areas describe KiCad's exported copper polygons, not drill-subtracted metal.
 Both revisions use the same 0.005 mm chord approximation.
 """
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -25,6 +26,9 @@ def refill_board(path):
                 shutil.copy2(item, root / item.name)
         target = root / source.name
         # --save-board writes only the disposable copy, never a source revision.
+        # Use an old sentinel so an identical rewrite within the source file's
+        # timestamp tick still proves a save, even on coarse-resolution filesystems.
+        os.utime(target, ns=(0, 0))
         original = (target.stat().st_mtime_ns, target.stat().st_size)
         run = subprocess.run(
             ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-error",
@@ -72,7 +76,7 @@ def collect(path):
     # Reference/Value fields are not GraphicalItems; include copper-layer fields too.
     for footprint in board.GetFootprints():
         for field in (footprint.Reference(), footprint.Value()):
-            if field.IsOnCopperLayer():
+            if field.IsVisible() and field.IsOnCopperLayer():
                 graphics.append(field)
 
     for layer in board.GetEnabledLayers().CuStack():
