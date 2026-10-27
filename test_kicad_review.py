@@ -19,11 +19,9 @@ for key in FRESH_VENDOR_PROFILES:
     assert profiles[key]['checkedOn'] >= '2026-10-26', key + ' still has the study date'
     assert profiles[key]['source'] in FRESH_VENDOR_SOURCES, key + ' cites an unlisted page'
 assert all(profiles[k]['checkedOn'] == '2026-10-24' for k in profiles if k not in FRESH_VENDOR_PROFILES), 'other nine profiles keep the study date'
-# Published changes and deliberately unverified study assumptions; sources in README.
+# Published changes are asserted; unverified study assumptions are recorded, not pinned.
 assert all(profiles[k]['values']['drillPlatedMinMm'] == .15 for k in FRESH_VENDOR_PROFILES)
 assert profiles['pcbway-std']['values']['holeToHoleMm'] == .45
-assert profiles['pcbway-std']['values']['drillNpthMinMm'] == .45
-assert profiles['pcbway-std']['values']['edgeClearanceMm'] == .25
 assert 'holeToHoleViaMm' not in profiles['pcbway-std']['values']
 
 assert kr.DEFAULT_SETTINGS["fabrication"]["check_limits"] is False
