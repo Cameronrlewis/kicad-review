@@ -1,0 +1,24 @@
+# Template for ci-probe workflow.yml. Mirrors review.yml: host runner, KiCad via `docker run` on the pinned image.
+# Put probe inputs (scripts, synthetic fixtures) next to workflow.yml; they are checked out under probe/.
+# Write results to out/; everything in out/ comes back to DIR/out/probe-out/.
+name: probe
+on:
+  push:
+    branches: ['probe/br03-task43']
+permissions:
+  contents: read
+env:
+  KICAD_IMAGE: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+jobs:
+  p:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - run: |
+          mkdir -p out
+          docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$KICAD_IMAGE" bash probe/run.sh > out/stdout.txt 2> out/stderr.txt; echo "rc=$?" >> out/stdout.txt
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with: {name: probe-out, path: out, retention-days: 1}
