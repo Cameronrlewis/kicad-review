@@ -2725,6 +2725,55 @@ def add_blob(blobs, content):
     return key
 
 
+def artifact3d(raw, suffix, root=pathlib.Path('review/3d')):
+    """Write a deterministic gzip asset keyed by its uncompressed SHA-256 digest."""
+    digest = hashlib.sha256(raw).hexdigest()
+    name = f'kicad-3d-{digest}-{suffix}.gz'
+    root.mkdir(parents=True, exist_ok=True)
+    packed = gzip.compress(raw, mtime=0)
+    (root / name).write_bytes(packed)
+    return {'digest': digest, 'artifactName': name, 'bytes': len(packed)}
+
+def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
+    """Attach stills independently, and coverage/index/assets only for verified processed sets."""
+    if any(side not in ('base','head') for side in allowed_sides):
+        raise ValueError('invalid allowed 3D side')
+    board.pop('coverage3d', None)
+    board.update({key:{side:None for side in ('base','head')}
+                  for key in ('parts3d','poster3d','coverage3dBySide','assets3d')})
+    for side in allowed_sides:
+        folder = pathlib.Path(out,side)
+        poster = folder / 'poster.png'
+        if poster.is_file() and poster.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'):
+            board['poster3d'][side] = add_blob(blobs,poster.read_bytes())
+        try:
+            manifest = json.loads((folder/'board-processed.json').read_text())
+            files = {'board.glb':folder/'board.glb','parts.json':folder/'board-parts.json',
+                     'stats.json':folder/'board-stats.json'}
+            raw = {name:path.read_bytes() for name,path in files.items()}
+            if any(hashlib.sha256(value).hexdigest()!=manifest['hashes'][name]
+                   for name,value in raw.items()):
+                raise ValueError('processed output hash mismatch')
+            parts = json.loads(raw['parts.json'])
+            stats = json.loads(raw['stats.json'])
+            fields = ('footprints','withModel','placeholders','triangles','primitives')
+            if not isinstance(parts,list) or not isinstance(stats,dict) or any(
+                    type(stats.get(k)) is not int or stats[k]<0 for k in fields):
+                raise ValueError('invalid coverage')
+            if stats['footprints']!=len(parts) or stats['withModel']+stats['placeholders']!=len(parts):
+                raise ValueError('inconsistent coverage')
+            board['parts3d'][side] = add_blob(blobs,raw['parts.json'])
+            board['coverage3dBySide'][side] = stats
+            board['assets3d'][side] = {'model':artifact3d(raw['board.glb'],'board.glb'),
+                                      'parts':artifact3d(raw['parts.json'],'board-parts.json')}
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            if (folder/'board.glb').exists():
+                print(f'{side}: optimized 3D coverage unavailable: {error}')
+    coverage = board['coverage3dBySide']['head'] or board['coverage3dBySide']['base']
+    if coverage is not None:
+        board['coverage3d'] = coverage
+
+
 def model3d_missing(out, objs):
     """Missing 3D models from KiCad's export log and footprints without a model declaration."""
     missing = {}
@@ -2825,9 +2874,9 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                  "supplier": None,  # Filled only when DigiKey lookup is enabled.
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
+    allowed_sides = ('base', 'head')  # Snapshot integration will restrict this to ('head',).
     if settings["3d"]["enabled"]:
-        models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
-        logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
+        models = {side: f"{out}/{side}/board.glb" for side in allowed_sides}
         board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
                             for side, path in models.items()}
         board["model3d"].update({"enabled": True,
@@ -2835,6 +2884,8 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                                  "errors": {side: "3D export unavailable" for side in ("base", "head")
                                             if has[side] and not board["model3d"][side]}})
         board["no_model"] = model3d_missing(out, objs)
+    if settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False):
+        attach3d(board, out, blobs, allowed_sides)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None

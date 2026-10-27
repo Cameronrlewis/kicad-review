@@ -4264,3 +4264,212 @@ def br02_task2a_prepare_contract():
 
 
 br02_task2a_prepare_contract()
+
+
+# BR02 Task 4A: verified additive coverage and digest artifacts.
+import gzip, hashlib, json, os, pathlib, tempfile
+with tempfile.TemporaryDirectory() as t:
+    old=os.getcwd();os.chdir(t)
+    try:
+        root=pathlib.Path(t);side=root/'head';side.mkdir()
+        raw=b'glTF-model';parts=json.dumps([{'uuid':'u','ref':'R1','side':'top',
+            'box':[0,0,0,1,1,1],'hasModel':True,'reason':None}]).encode()
+        counts={'footprints':1,'withModel':1,'placeholders':0,'triangles':1,'primitives':1,'warnings':[]}
+        values={'board.glb':raw,'parts.json':parts,'stats.json':json.dumps(counts).encode()}
+        for name,value in values.items():
+            target={'parts.json':'board-parts.json','stats.json':'board-stats.json'}.get(name,name)
+            (side/target).write_bytes(value)
+        (side/'poster.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+        (side/'board-processed.json').write_text(json.dumps({'key':'pair','hashes':{
+            name:hashlib.sha256(value).hexdigest() for name,value in values.items()}}))
+        blobs={};board={'model3d':{'head':'existing-model-id','base':None}}
+        kicad_review.attach3d(board,str(root),blobs)
+        assert board['coverage3d']==counts and board['coverage3dBySide']['base'] is None
+        assert board['model3d']['head']=='existing-model-id'
+        assert board['parts3d']['head'] in blobs and board['poster3d']['head'] in blobs
+        # Test the asset function in a scratch directory; attach3d's artifact path is redirected by cwd below.
+        asset=kicad_review.artifact3d(raw,'board.glb',root/'assets')
+        assert gzip.decompress((root/'assets'/asset['artifactName']).read_bytes())==raw
+        assert asset['digest']==hashlib.sha256(raw).hexdigest()
+        assert asset==kicad_review.artifact3d(raw,'board.glb',root/'assets')
+        (side/'board-stats.json').write_text('{}')
+        legacy={'model3d':board['model3d']};kicad_review.attach3d(legacy,str(root),{})
+        assert legacy['coverage3dBySide']['head'] is None and 'coverage3d' not in legacy
+    finally:
+        os.chdir(old)
+
+# BR02 head-only attachment never probes stale base files.
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as t:
+    old=os.getcwd();os.chdir(t)
+    try:
+        root=pathlib.Path(t)/'P'
+        payloads={}
+        for side,count in (('base',2),('head',1)):
+            folder=root/side;folder.mkdir(parents=True)
+            parts=[{'uuid':side+str(i),'ref':'R'+str(i),'side':'top',
+                    'box':[0,0,0,1,1,1],'hasModel':True,'reason':None} for i in range(count)]
+            stats={'footprints':count,'withModel':count,'placeholders':0,
+                   'triangles':count,'primitives':count,'warnings':[]}
+            values={'board.glb':b'glTF-'+side.encode(),'parts.json':json.dumps(parts).encode(),
+                    'stats.json':json.dumps(stats).encode()}
+            for name,value in values.items():
+                target={'parts.json':'board-parts.json','stats.json':'board-stats.json'}.get(name,name)
+                (folder/target).write_bytes(value)
+            poster=b'\x89PNG\r\n\x1a\n'+side.encode();(folder/'poster.png').write_bytes(poster)
+            (folder/'board-processed.json').write_text(json.dumps({'hashes':{
+                name:hashlib.sha256(value).hexdigest() for name,value in values.items()}}))
+            payloads[side]=(values,poster)
+        reads=pathlib.Path.read_bytes;texts=pathlib.Path.read_text;stat=pathlib.Path.stat
+        def checked(method):
+            def call(path,*args,**kwargs):
+                assert not path.is_relative_to(root/'base'), 'BR02 single must not probe base'
+                return method(path,*args,**kwargs)
+            return call
+        blobs={};board={'model3d':{'base':None,'head':'head-model'}}
+        with patch.object(pathlib.Path,'read_bytes',checked(reads)), \
+             patch.object(pathlib.Path,'read_text',checked(texts)), \
+             patch.object(pathlib.Path,'stat',checked(stat)):
+            kicad_review.attach3d(board,str(root),blobs,allowed_sides=('head',))
+        expected={}
+        head_values,head_poster=payloads['head']
+        kicad_review.add_blob(expected,head_poster)
+        kicad_review.add_blob(expected,head_values['parts.json'])
+        assert blobs==expected, 'BR02 single blob snapshot contains base'
+        assert all(board[key]['base'] is None for key in
+                   ('parts3d','poster3d','coverage3dBySide','assets3d'))
+        assert board['coverage3d']['footprints']==1
+        assert len(list(pathlib.Path('review/3d').iterdir()))==2
+    finally:
+        os.chdir(old)
+
+# BR02 design-only stills require no model or processed files.
+with tempfile.TemporaryDirectory() as t:
+    folder=pathlib.Path(t,'head');folder.mkdir()
+    png=b'\x89PNG\r\n\x1a\nhead-only-still';(folder/'poster.png').write_bytes(png)
+    board={};blobs={}
+    kicad_review.attach3d(board,t,blobs,allowed_sides=('head',))
+    expected={};poster_id=kicad_review.add_blob(expected,png)
+    assert blobs==expected and board['poster3d']=={'base':None,'head':poster_id}
+    assert board['parts3d']=={'base':None,'head':None} and 'coverage3d' not in board
+
+
+def br02_task4a_attachment_contract():
+    import base64, contextlib, copy, gzip, hashlib, io, json, os, pathlib, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+
+    def processed(folder, count=1, triangles=1):
+        folder.mkdir(parents=True, exist_ok=True)
+        parts = [{'uuid': 'u'+str(i), 'ref': 'R'+str(i), 'side': 'top',
+                  'box': [0,0,0,1,1,1], 'hasModel': True, 'reason': None} for i in range(count)]
+        stats = {'footprints': count, 'withModel': count, 'placeholders': 0,
+                 'triangles': triangles, 'primitives': count, 'warnings': []}
+        values = {'board.glb': b'glTF-model', 'parts.json': json.dumps(parts).encode(),
+                  'stats.json': json.dumps(stats).encode()}
+        for name, value in values.items():
+            target = {'parts.json': 'board-parts.json', 'stats.json': 'board-stats.json'}.get(name, name)
+            (folder/target).write_bytes(value)
+        (folder/'board-processed.json').write_text(json.dumps({'hashes': {
+            name: hashlib.sha256(value).hexdigest() for name, value in values.items()}}))
+        return values, stats
+
+    with tempfile.TemporaryDirectory() as t:
+        old = os.getcwd()
+        os.chdir(t)
+        try:
+            root = pathlib.Path('review/P')
+            _, base_stats = processed(root/'base', count=2, triangles=5)
+            _, head_stats = processed(root/'head')
+            board = {}; blobs = {}
+            kr.attach3d(board, str(root), blobs)
+            assert board['coverage3d'] == head_stats
+            assert board['coverage3dBySide'] == {'base': base_stats, 'head': head_stats}
+            assert board['parts3d']['base'] != board['parts3d']['head']
+            values, _ = processed(root/'base', triangles=9)
+            kr.attach3d(board, str(root), blobs)
+            assert board['parts3d']['base'] == board['parts3d']['head'], 'identical indexes deduplicate'
+            assert board['coverage3dBySide']['base']['triangles'] == 9
+            assert board['coverage3d']['triangles'] == 1
+            asset = board['assets3d']['head']['parts']
+            packed = (pathlib.Path('review/3d')/asset['artifactName']).read_bytes()
+            assert asset['bytes'] == len(packed) and gzip.decompress(packed) == values['parts.json']
+            assert asset['artifactName'] == 'kicad-3d-'+asset['digest']+'-board-parts.json.gz'
+            assert packed == gzip.compress(values['parts.json'], mtime=0)
+
+            # A stale/corrupt optimized set never advertises an index or coverage; base remains valid.
+            (root/'head/board-parts.json').write_bytes(b'corrupt')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kr.attach3d(board, str(root), {})
+            assert 'processed output hash mismatch' in output.getvalue()
+            assert board['coverage3d'] == board['coverage3dBySide']['base']
+            assert all(board[key]['head'] is None for key in ('parts3d','coverage3dBySide','assets3d'))
+            # Hash-valid but malformed coverage fails closed too.
+            for invalid in ([], {}, {'footprints': True}, {**head_stats, 'placeholders': 2}):
+                processed(root/'head')
+                raw = json.dumps(invalid).encode()
+                (root/'head/board-stats.json').write_bytes(raw)
+                manifest = json.loads((root/'head/board-processed.json').read_text())
+                manifest['hashes']['stats.json'] = hashlib.sha256(raw).hexdigest()
+                (root/'head/board-processed.json').write_text(json.dumps(manifest))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    kr.attach3d(board, str(root), {})
+                assert board['coverage3dBySide']['head'] is None
+            try:
+                kr.attach3d({}, str(root), {}, allowed_sides=('other',))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('invalid allowed side accepted')
+
+            # Actual build/report integration: design-only attaches PNG without model/index files.
+            import shutil
+            shutil.rmtree(root)
+            (root/'head').mkdir(parents=True)
+            png = b'\x89PNG\r\n\x1a\ndesign-only'
+            (root/'head/poster.png').write_bytes(png)
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            settings['design'] = {'enabled': True}
+            project = {'name': 'P', 'dir': 'P', 'status': 'added'}
+            pathlib.Path('review/detect.json').write_text(json.dumps({
+                'projects': [project], 'base': '', 'head': 'abc123', 'reason': 'test'}))
+            with patch.object(kr, 'load_settings', return_value=settings), \
+                 patch.object(kr, 'project_checks', return_value=[]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                kr.cmd_report(None)
+            html = pathlib.Path('review/kicad-review.html').read_text()
+            embedded = json.JSONDecoder().raw_decode(html.split('window.REVIEW_DATA = ', 1)[1])[0]
+            disk = json.loads(pathlib.Path('review/data.json').read_text())
+            assert embedded['version'] == disk['version'] == 1
+            assert {k:v for k,v in embedded.items() if k != 'blobs'} == disk
+            still_board = disk['projects'][0]['board']
+            assert 'model3d' not in still_board and 'coverage3d' not in still_board
+            poster_id = still_board['poster3d']['head']
+            assert gzip.decompress(base64.b64decode(embedded['blobs'][poster_id])) == png
+            assert len(embedded['blobs']) == 1, 'design-only report embeds only its poster'
+            # 3D-enabled build keeps the established model blob IDs and attaches processed data.
+            processed(root/'head')
+            settings['3d']['enabled'] = True
+            with patch.object(kr, 'project_checks', return_value=[]):
+                blobs = {}; model_board = kr.build_project(project, blobs, settings)['board']
+            model_id = kr.add_blob({}, b'glTF-model')
+            assert model_board['model3d']['head'] == model_id and model_id in blobs
+            assert model_board['parts3d']['head'] in blobs and model_board['coverage3d'] == head_stats
+        finally:
+            os.chdir(old)
+
+    # Legacy fixture remains version 1 with the same embedded model IDs, no new fields required.
+    source = pathlib.Path(kr.UI_DIR, 'sample/review-data-3d.js').read_text()
+    legacy = json.JSONDecoder().raw_decode(source.split('window.REVIEW_DATA = ', 1)[1])[0]
+    page = kr.inline_page(source)
+    restored = json.JSONDecoder().raw_decode(page.split('window.REVIEW_DATA = ', 1)[1])[0]
+    assert restored == legacy and restored['version'] == 1
+    for project in restored['projects']:
+        for side in ('base', 'head'):
+            model_id = project['board'].get('model3d', {}).get(side)
+            if model_id:
+                assert gzip.decompress(base64.b64decode(restored['blobs'][model_id])).startswith(b'glTF')
+    print('ok BR02 verified coverage, digest assets, head-only/poster-only attachments and legacy offline v1')
+
+
+br02_task4a_attachment_contract()
