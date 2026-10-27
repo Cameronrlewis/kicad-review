@@ -1460,12 +1460,12 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off", "fab_limits": "informational"},
     "interfaces": {},  # pattern overrides for the interfaces check
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
             "order_ready_fields": []},  # empty: the fabrication preset's fields
-    "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
+    "fabrication": {"preset": "jlcpcb", "part_field": None, "check_limits": False},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
     "release": {"review": False},
@@ -1479,7 +1479,38 @@ DEFAULT_SETTINGS = {
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package", "fab_limits": "Fab limits"}
+
+
+FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
+
+
+def fab_profiles():
+    return json.loads(FAB_TABLE.read_text(encoding="utf-8"))
+
+
+def fab_context(pcb):
+    tree = parse_sexpr(pcb.read_text(encoding="utf-8"))
+    layers = [x[1] for x in (find(tree, "layers") or [])[1:]
+              if len(x) > 2 and x[1].endswith(".Cu")]
+    n = len(layers)
+    coverage_warnings = []
+    stack = find(find(tree, "setup") or [], "stackup") or []
+    thickness = {x[1]: find(x, "thickness") for x in findall(stack, "layer") if x[1] in layers}
+    for layer in layers:
+        t = thickness.get(layer)
+        if not t:
+            coverage_warnings.append(f"{layer}: copper thickness unknown; limits assume 0.035 mm (1 oz)")
+        elif abs(float(t[1]) - .035) > .000001:
+            coverage_warnings.append(f"{layer}: copper thickness {t[1]} mm; limits assume 0.035 mm (1 oz)")
+    sections = []
+    for vendor, key in (("jlcpcb", "jlcpcb-2l" if n == 2 else "jlcpcb-multilayer"), ("pcbway", "pcbway-std")):
+        profile = fab_profiles()[key]
+        sections.append({"vendor": vendor, "profile": key, "layers": n, "checkedOn": profile["checkedOn"],
+            "assumedCopperOz": 1, "unsupported": None if n in profile["layers"] else
+            f"not checked: profile covers {', '.join(map(str, profile['layers']))} layers; board has {n}",
+            "coverageWarnings": list(coverage_warnings), "unchecked": [], "values": profile["values"]})
+    return sections
 
 
 INTERFACE_PATTERNS = {
@@ -1523,6 +1554,10 @@ def load_settings(roots=("base", "head")):
             sys.exit(f"{SETTINGS_FILE}: interfaces.{k} must be one of {', '.join(INTERFACE_PATTERNS)} with a list of names")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
+    if type(settings["fabrication"]["check_limits"]) is not bool:
+        sys.exit(f"{SETTINGS_FILE}: fabrication.check_limits must be true or false")
+    if settings["fabrication"]["check_limits"] and settings["checks"]["drc"] == "off":
+        sys.exit(f'{SETTINGS_FILE}: fabrication.check_limits requires checks.drc != "off"')
     if settings["fail_on"] not in ("new", "all"):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
     if not isinstance(settings["3d"]["enabled"], bool):

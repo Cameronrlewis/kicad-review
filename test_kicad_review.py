@@ -1,6 +1,53 @@
 """Self-checks for kicad_review.py. Run: python3 test_kicad_review.py"""
 from kicad_review import is_kicad_file, owner_project
 
+# FAB-01: dated profiles, opt-in settings and copper coverage.
+import copy, json, pathlib, tempfile
+import kicad_review as kr
+profiles = kr.fab_profiles()
+assert len(profiles) == 12, "FAB-01 twelve exact profiles"
+assert profiles["jlcpcb-2l"]["values"]["holeToHoleViaMm"] == .2
+assert profiles["pcbway-std"]["values"]["drillPlatedMaxMm"] == 6
+assert all(p["checkedOn"] >= "2026-10-24" and p["source"].startswith("https://")
+           for p in profiles.values()), "FAB-01 dated provenance (Task 8 may later move the three sign-off profiles to a newer date)"
+assert kr.DEFAULT_SETTINGS["fabrication"]["check_limits"] is False
+assert kr.DEFAULT_SETTINGS["checks"]["fab_limits"] == "informational"
+with tempfile.TemporaryDirectory() as td:
+    pcb = pathlib.Path(td, "four.kicad_pcb")
+    pcb.write_text(pathlib.Path("ui/fixtures/vf-order-4.kicad_pcb").read_text())
+    sections = {s["vendor"]: s for s in kr.fab_context(pcb)}
+    assert (sections["jlcpcb"]["profile"], sections["jlcpcb"]["layers"], sections["jlcpcb"]["unsupported"]) == ("jlcpcb-multilayer", 4, None)
+    assert (sections["pcbway"]["profile"], sections["pcbway"]["unsupported"]) == ("pcbway-std", None), "FAB-01 PCBWay checked on 4 layers"
+    assert sections["jlcpcb"]["coverageWarnings"] == [], "FAB-01 explicit standard copper has no warning"
+    pcb.write_text(pcb.read_text().replace('(thickness 0.035)', '', 1))
+    assert all(any("thickness unknown" in x for x in s["coverageWarnings"]) for s in kr.fab_context(pcb)), "FAB-01 missing thickness is unknown in both sections"
+    pcb.write_text('(kicad_pcb (layers (0 "F.Cu" signal)))')
+    assert all(s["unsupported"] for s in kr.fab_context(pcb)), "FAB-01 unsupported is not pass in both sections"
+    pcb.write_text('(kicad_pcb (layers (0 "F.Cu" signal) (2 "B.Cu" signal)) '
+                   '(setup (stackup (layer "F.Cu" (thickness 0.07)) '
+                   '(layer "B.Cu" (thickness 0.035)))))')
+    assert all(any("0.07" in x for x in s["coverageWarnings"]) for s in kr.fab_context(pcb))
+
+with tempfile.TemporaryDirectory() as td:
+    base, head = pathlib.Path(td, 'base'), pathlib.Path(td, 'head')
+    base.mkdir(); head.mkdir()
+    (base / kr.SETTINGS_FILE).write_text('[fabrication]\ncheck_limits = true\n')
+    (head / kr.SETTINGS_FILE).write_text('[fabrication]\ncheck_limits = false\n')
+    assert kr.load_settings((str(base), str(head)))['fabrication']['check_limits'] is True
+    for toml, message in (
+        ('[fabrication]\ncheck_limits = "true"\n', f'{kr.SETTINGS_FILE}: fabrication.check_limits must be true or false'),
+        ('[fabrication]\ncheck_limits = true\n[checks]\ndrc = "off"\n', f'{kr.SETTINGS_FILE}: fabrication.check_limits requires checks.drc != "off"'),
+        ('[fabrication]\ncheck_limits = 1\n', f'{kr.SETTINGS_FILE}: fabrication.check_limits must be true or false'),
+        ('[checks]\nfab_limits = "banana"\n', f"{kr.SETTINGS_FILE}: checks.fab_limits = 'banana'; expected one of {', '.join(kr.CHECK_NAMES)} = required/informational/off")):
+        (base / kr.SETTINGS_FILE).write_text(toml)
+        try:
+            kr.load_settings((str(base),))
+            raise AssertionError('FAB-01 invalid setting accepted')
+        except SystemExit as exc:
+            assert str(exc) == message
+
+print("ok FAB-01 profiles, copper coverage and settings")
+
 dirs = {"", "boards/a", "boards/a/sub", "b"}
 assert owner_project("boards/a/x.kicad_sch", dirs) == "boards/a"
 assert owner_project("boards/a/sub/Libraries/y.kicad_mod", dirs) == "boards/a/sub"
@@ -3664,3 +3711,28 @@ print("ok per-commit project render cache hits retain both revisions")
 
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
+
+# FAB-01 integration: actual fixture + parsed settings, separately opt-in and no KiCad required.
+if os.environ.get("KICAD_REVIEW_FAB_INTEGRATION") == "1":
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        pcb = root / "four.kicad_pcb"
+        pcb.write_text(pathlib.Path("ui/fixtures/vf-order-4.kicad_pcb").read_text())
+        for preset in ("jlcpcb", "pcbway"):
+            (root / kr.SETTINGS_FILE).write_text(
+                f'[fabrication]\npreset = "{preset}"\ncheck_limits = true\n'
+                '[checks]\nfab_limits = "required"\n')
+            settings = kr.load_settings((str(root),))
+            assert settings["fabrication"]["check_limits"] is True
+            assert settings["checks"]["fab_limits"] == "required"
+            sections = kr.fab_context(pcb)
+            assert [s["vendor"] for s in sections] == ["jlcpcb", "pcbway"]
+            assert [s["profile"] for s in sections] == ["jlcpcb-multilayer", "pcbway-std"]
+            for section in sections:
+                assert section == {
+                    "vendor": section["vendor"], "profile": section["profile"], "layers": 4,
+                    "checkedOn": profiles[section["profile"]]["checkedOn"], "assumedCopperOz": 1,
+                    "unsupported": None, "coverageWarnings": [], "unchecked": [],
+                    "values": profiles[section["profile"]]["values"],
+                }, "FAB-01 full supported context contract"
+    print("ok FAB-01 integration: both vendors independent of parsed fabrication preset")
