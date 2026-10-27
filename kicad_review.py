@@ -236,21 +236,107 @@ def glb_inputs(p, side):
     return (pcb.read_bytes(), [(str(path.relative_to(side)), path.read_bytes()) for path in models])
 
 
-def export_glb(p, side, out):
-    """Best-effort 3D export. Its output is useful evidence when a footprint model is absent."""
-    pcb, log = board_path(p, side), f"{out}/glb.log"
-    if not os.path.exists(pcb):
-        return
+def prepare3d(p):
+    """Write revision-local processor inputs; footprint geometry is still in board millimetres."""
+    paths = {side: pathlib.Path(board_path(p, side)) for side in ("base", "head")}
+    objs = {side: pcb_objects(path) if path.is_file() else {} for side, path in paths.items()}
+    changes = [c for c in diff_objects(objs["base"], objs["head"]) if c["kind"] == "footprint"]
+    out = pathlib.Path("review") / project_id(p["dir"])
+    missing = model3d_missing(out, objs)
+    for side, path in paths.items():
+        if not path.is_file():
+            continue
+        keep = set()
+        for change in changes:
+            if change["action"] == ("added" if side == "base" else "removed"):
+                continue
+            uid = change.get("uuid_before", change["uuid"]) if side == "base" else change["uuid"]
+            if uid in objs[side]:
+                keep.add(objs[side][uid]["ref"])
+        reasons = {r["ref"]: r["reason"] for r in missing if r["side"] in (side, "both")}
+        footprints = []
+        for uid, obj in sorted(objs[side].items(), key=lambda item: (natural(item[1]["ref"]), item[0])):
+            if obj["kind"] != "footprint":
+                continue
+            reason = "no model in footprint" if not obj.get("has_model") else reasons.get(obj["ref"])
+            footprints.append({"uuid": uid, "ref": obj["ref"],
+                               "side": "bottom" if obj["props"].get("layer") == "B.Cu" else "top",
+                               "pos": obj.get("pos") or [], "box": obj.get("box"),
+                               "hasModel": bool(obj.get("has_model")) and reason is None, "reason": reason})
+        root = parse_sexpr(path.read_text(encoding="utf-8"))
+        stackup = find(find(root, "setup") or [], "stackup") or []
+        metadata = {"version": 1, "side": side, "keep": sorted(keep, key=natural),
+                    "finish": val(stackup, "copper_finish") or "", "footprints": footprints}
+        folder = out / side
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "board-3d-input.json").write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def cmd_prepare3d(args):
+    det = json.loads(pathlib.Path("review/detect.json").read_text(encoding="utf-8"))
+    for p in det["projects"]:
+        prepare3d(p)
+
+
+def glb_argv(pcb, folder):
+    return ["kicad-cli", "pcb", "export", "glb", "--include-tracks", "--include-pads",
+            "--include-zones", "--include-silkscreen", "--include-soldermask",
+            "--subst-models", "-f", "-o", str(folder / "board.raw.glb"), pcb]
+
+
+def poster_argv(pcb, folder):
+    return ["kicad-cli", "pcb", "render", "--quality", "basic", "--perspective",
+            "--rotate", "-45,0,45", "-w", "1600", "-h", "1000", "-o", str(folder / "poster.png"), pcb]
+
+
+def export_glb(p, side, out, *, model=True):
+    """Best-effort raw/fallback model and shared still; render warnings never affect coverage."""
+    pcb = board_path(p, side)
+    folder = pathlib.Path(out)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def run(argv, name, log):
+        dest = folder / name
+        dest.unlink(missing_ok=True)
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True)
+            (folder / log).write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+            if proc.returncode == 0 and dest.is_file() and dest.stat().st_size:
+                return True
+        except OSError as error:
+            (folder / log).write_text(str(error), encoding="utf-8")
+        dest.unlink(missing_ok=True)
+        return False
+
+    if model:
+        if run(glb_argv(pcb, folder), "board.raw.glb", "glb.log"):
+            shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+        else:
+            (folder / "board.glb").unlink(missing_ok=True)
+    run(poster_argv(pcb, folder), "poster.png", "poster.log")
+
+
+def render_tool_identity():
+    """The pinned image identifies CI's KiCad, including on the host before it is pulled."""
+    if os.environ.get("KICAD_IMAGE"):
+        return os.environ["KICAD_IMAGE"]
     try:
-        r = subprocess.run(["kicad-cli", "pcb", "export", "glb", "--include-silkscreen", "--include-soldermask",
-                            "--output", f"{out}/board.glb", pcb], capture_output=True, text=True)
-        output = r.stdout + r.stderr  # KiCad 10.0.0 writes missing-model warnings to stdout.
-    except OSError as e:
-        r, output = None, str(e)
-    with open(log, "w", encoding="utf-8") as fh:
-        fh.write(output)
-    if r is None or r.returncode:
-        print(f"{p['name']}: 3D export failed for {side}; see {log}")
+        proc = subprocess.run(["kicad-cli", "--version"], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip()
+    except OSError:
+        pass
+    return "local-kicad-unavailable"
+
+
+def render_cache_complete(cache, p, side, settings):
+    if not cache or not (cache / ".complete").is_file():
+        return False
+    need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
+    if need_still and pathlib.Path(board_path(p, side)).is_file():
+        poster = cache / "poster.png"
+        return poster.is_file() and poster.stat().st_size > 0
+    return True
 
 
 def render_cache(p, side, det, settings):
@@ -258,7 +344,11 @@ def render_cache(p, side, det, settings):
     revision = det.get(side) or ""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
-    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
+    # Normalize only input/output locations so the same revision can move from Head to Base.
+    inputs = {"settings": settings, "tool": render_tool_identity(),
+              "glb": glb_argv("PCB", pathlib.Path(".")), "poster": poster_argv("PCB", pathlib.Path(".")),
+              "board_models": hashlib.sha256(repr(glb_inputs(p, side)).encode()).hexdigest()}
+    identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -272,7 +362,7 @@ def restore_renders(args=None):
     entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
                for side in ("base", "head")
                if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
-    if any(not cache or not (cache / ".complete").is_file() for p, side, cache in entries):
+    if any(not render_cache_complete(cache, p, side, settings) for p, side, cache in entries):
         raise SystemExit(1)
     for p, side, cache in entries:
         shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
@@ -298,26 +388,29 @@ def cmd_render(args):
     settings = load_settings()
     for p in det["projects"]:
         export_3d = settings["3d"]["enabled"]
-        shared_3d = export_3d and glb_inputs(p, "base") == glb_inputs(p, "head")
+        need_still = export_3d or settings.get("design", {}).get("enabled", False)
+        shared_3d = need_still and glb_inputs(p, "base") == glb_inputs(p, "head")
         for side in ("base", "head"):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
             cache = render_cache(p, side, det, settings)
-            if cache and (cache / ".complete").is_file():
+            if render_cache_complete(cache, p, side, settings):
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
-            if export_3d:
+            if need_still and pathlib.Path(board_path(p, side)).is_file():
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
-                    for name in ("board.glb", "glb.log"):
-                        source = f"review/{project_id(p['dir'])}/base/{name}"
-                        if os.path.isfile(source):
-                            shutil.copyfile(source, f"{out}/{name}")
+                    for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log"):
+                        source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
+                        dest = pathlib.Path(out) / name
+                        dest.unlink(missing_ok=True)
+                        if source.is_file():
+                            shutil.copyfile(source, dest)
                 else:
-                    export_glb(p, side, out)
+                    export_glb(p, side, out, model=export_3d)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
@@ -3403,6 +3496,8 @@ def main():
     p.set_defaults(func=cache_renders)
     p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_render)
+    p = sub.add_parser("prepare-3d", help="write revision-scoped metadata for the 3D processor")
+    p.set_defaults(func=cmd_prepare3d)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
     p.add_argument("--tag", required=True)
     p.set_defaults(func=cmd_release)
