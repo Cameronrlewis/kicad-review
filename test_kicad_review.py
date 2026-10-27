@@ -20,6 +20,47 @@ assert set(rows) == {("modified", "R1"), ("added", "R4")}, rows.keys()  # R2 reg
 assert rows["modified", "R1"]["changes"] == [["Value", "10k", "4.7k"], ["position", "(1, 0)", "(5, 0)"]]
 assert rows["modified", "R1"]["pos_before"] == [1, 0]
 
+# Image exports discover declared layers regardless of whitespace or declaration layout.
+import pathlib
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+import kicad_review as kr
+
+four = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb')
+assert kr.board_layers(str(four)) == ['B.Cu', 'In2.Cu', 'In1.Cu', 'F.Cu']
+with TemporaryDirectory() as d:
+    p = pathlib.Path(d, 'four.kicad_pcb')
+    p.write_text(four.read_text().replace('(layers ', '(layers\n '))
+    assert kr.board_layers(str(p)) == kr.board_layers(str(four))
+    with patch('kicad_review.kicad_cli') as cli:
+        kr.render_side(d, 'four', str(pathlib.Path(d, 'out')))
+    svg_call = next(c.args for c in cli.call_args_list if c.args[:3] == ('pcb', 'export', 'svg'))
+    layer_flag = '--layers' if '--layers' in svg_call else '-l'
+    assert svg_call[svg_call.index(layer_flag) + 1] == 'B.Cu,In2.Cu,In1.Cu,F.Cu'
+print('ok image export layer discovery')
+
+# Only plain, absolutely-started stroke runs may join; preserve metadata and custom paint.
+import xml.etree.ElementTree as ET
+svg = '<svg xmlns="http://www.w3.org/2000/svg"><g style="fill:none"><path d="M 0 0 L 1 1"/><desc>x</desc><path d="M 1 1 L 2 2"/><path d="m 3 3 l 1 1"/><path transform="translate(1)" d="M 0 0"/></g><g fill="#abcdef"><path d="M 0 0"/><path d="M 1 1"/></g></svg>'
+out = ET.fromstring(kr.simplify_sheet_svg(svg))
+ns = {'s': 'http://www.w3.org/2000/svg'}
+assert len(out.findall('.//s:path', ns)) == 5
+assert out.findall('.//s:path', ns)[0].get('d') == 'M 0 0 L 1 1 M 1 1 L 2 2'
+assert out.findall('.//s:g', ns)[1].get('fill') == '#abcdef'
+assert out.find('.//s:desc', ns).text == 'x'
+assert out.findall('.//s:path', ns)[1].get('d') == 'm 3 3 l 1 1'
+assert out.findall('.//s:path', ns)[2].get('transform') == 'translate(1)'
+inherited = '<svg xmlns="http://www.w3.org/2000/svg" fill="none"><g stroke="#abcdef"><path d="M0 0"/><path d="M1 1"/><circle r="1"/><path d="M2 2"/><path d="M3 3"/></g><g style="fill:#123456"><path d="M0 0"/><path d="M1 1"/></g></svg>'
+out = ET.fromstring(kr.simplify_sheet_svg(inherited))
+assert [p.get('d') for p in out.findall('.//s:path', ns)] == ['M0 0 M1 1', 'M2 2 M3 3', 'M0 0', 'M1 1']
+assert out.find('.//s:circle', ns).get('r') == '1'
+assert out.findall('.//s:g', ns)[0].get('stroke') == '#abcdef'
+assert out.findall('.//s:g', ns)[1].get('style') == 'fill:#123456'
+assert kr.simplify_sheet_svg(kr.simplify_sheet_svg(svg)) == kr.simplify_sheet_svg(svg)
+assert kr.IMAGE_EXPORT_OPTIONS == {'page_size_mode': '1', 'drill_shape_opt': '0',
+                                   'check_zones': True, 'themes': ['light', 'dark']}
+print('ok image export contracts')
+
 # S-expression parsing: quoted strings with escapes, nesting.
 n = parse_sexpr('(a (b "x \\"y\\" z") (c 1 2))')
 assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]

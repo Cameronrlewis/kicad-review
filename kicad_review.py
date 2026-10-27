@@ -184,18 +184,44 @@ def kicad_cli(*args):
 
 
 def board_layers(pcb_path):
-    """Layer names declared in the board's (layers ...) block, in KiCad order."""
-    names, inside = [], False
+    """Declared layer names; physical draw order is resolved by the viewer."""
     with open(pcb_path, encoding="utf-8") as fh:
-        for line in fh:
-            s = line.strip()
-            if s == "(layers":
-                inside = True
-            elif inside and s == ")":
-                break
-            elif inside and s.startswith("("):
-                names.append(s.split('"')[1])
-    return names
+        root = parse_sexpr(fh.read())
+    return [str(row[1]) for row in (find(root, "layers") or [])[1:]
+            if isinstance(row, list) and len(row) > 1]
+
+
+def simplify_sheet_svg(text):
+    """Join plain sibling stroke paths without changing inherited paint or coordinates."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(text)
+
+    def walk(group, unfilled=False):
+        style = dict(re.findall(r'(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)', group.get('style', '')))
+        fill = style.get('fill', group.get('fill'))
+        if fill is not None:
+            unfilled = fill.strip() == 'none'
+        run = None
+        for child in list(group):
+            tag = child.tag.rsplit('}', 1)[-1]
+            if unfilled and tag == 'path' and set(child.attrib) == {'d'} and re.match(r'\s*M', child.get('d', '')):
+                if run is None:
+                    run = child
+                else:
+                    run.set('d', run.get('d') + ' ' + child.get('d'))
+                    group.remove(child)
+            elif tag != 'desc':
+                run = None
+                if tag == 'g':
+                    walk(child, unfilled)
+
+    walk(root)
+    ET.register_namespace('', 'http://www.w3.org/2000/svg')
+    return ET.tostring(root, encoding='unicode')
+
+
+IMAGE_EXPORT_OPTIONS = {'page_size_mode': '1', 'drill_shape_opt': '0',
+                        'check_zones': True, 'themes': ['light', 'dark']}
 
 
 def render_side(src_dir, name, out, netlist=False):
