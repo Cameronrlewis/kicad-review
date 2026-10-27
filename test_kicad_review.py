@@ -4273,5 +4273,5 @@ for pin in ('2', '3'):
     drill = by_pin[pin]['geometry']['drill']
     assert 'shape' not in drill and set(('center', 'size', 'angle', 'plated')) <= drill.keys()
 for pin in ('4', '5', '6'): assert by_pin[pin]['geometry']['segments']
-(fixture_dir / 'image-pick-records.json').write_text(json.dumps(records, sort_keys=True))
+(fixture_dir / 'image-pick-records.json').write_text(json.dumps(records, sort_keys=True) + '\n')
 print('ok producer-backed image pick records')
