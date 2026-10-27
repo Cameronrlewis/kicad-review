@@ -3998,4 +3998,23 @@ try:
     assert False, 'inheritance cycle must fail'
 except ValueError as error:
     assert 'symbol inheritance cycle' in str(error)
+
+# Missing definition raises KeyError per interface contract
+try:
+    kr.symbol_primitives(libs, 'NonExistent', '1')
+    assert False, 'missing definition must raise KeyError'
+except KeyError:
+    pass
+
+# Empty primitives produce empty coordinates and pins without approximation
+assert kr.symbol_geometry([]) == ([], [], False)
+
+# Angled pin rotates endpoint correctly (90 degrees: along +y)
+rotated_pin = kr.parse_sexpr('(pin input line (at 10 20 90) (length 5) (name "CLK") (number "1"))')
+rot_coords, rot_pins, rot_approx = kr.symbol_geometry([rotated_pin])
+assert not rot_approx
+assert rot_pins == [{'number': '1', 'name': 'CLK', 'x': 10.0, 'y': 20.0}]
+assert rot_coords[0] == [10.0, 20.0]
+assert abs(rot_coords[1][0] - 10.0) < 1e-6 and abs(rot_coords[1][1] - 25.0) < 1e-6
+
 print('ok inherited symbol geometry')
