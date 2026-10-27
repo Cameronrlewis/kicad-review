@@ -1274,6 +1274,71 @@ def pro_objects(path):
                          "props": {k: v for k, v in flatten(keep).items() if v != "None"}}}
 
 
+MM_RULE_KEYS = {"min_clearance", "min_track_width", "min_via_diameter", "min_through_hole_diameter",
+                "min_microvia_diameter", "min_microvia_drill", "min_hole_clearance", "min_hole_to_hole",
+                "min_copper_edge_clearance", "clearance", "track_width", "via_diameter", "via_drill",
+                "microvia_diameter", "microvia_drill", "diff_pair_width", "diff_pair_gap", "diff_pair_via_gap",
+                "min_via_annular_width", "min_connection", "min_groove_width", "min_silk_clearance",
+                "min_text_height", "min_text_thickness", "solder_mask_to_copper_clearance"}
+
+
+def rule_values(root: str, name: str) -> dict[str, object]:
+    """Read rule sources without flatten's stringification; absent revisions are empty."""
+    out = {}
+
+    def walk(value, key):
+        if isinstance(value, dict):
+            for k, v in sorted(value.items()):
+                walk(v, f"{key}.{k}")
+        elif isinstance(value, list) and value and all(isinstance(v, dict) and "name" in v for v in value):
+            for v in sorted(value, key=lambda v: v["name"]):
+                walk(v, f"{key}.{v['name']}")
+        else:
+            out[key] = value
+
+    pro = pathlib.Path(root) / (name + ".kicad_pro")
+    if pro.exists():
+        data = json.loads(pro.read_text(encoding="utf-8"))
+        walk(data.get("board", {}).get("design_settings", {}).get("rules", {}), "rules")
+        net_settings = data.get("net_settings", {})
+        if "classes" in net_settings:
+            walk(net_settings["classes"], "net_settings.classes")
+        # Pattern order is meaningful, unlike named class order. Keep assignments intact.
+        if "netclass_patterns" in net_settings:
+            out["net_settings.netclass_patterns"] = net_settings["netclass_patterns"]
+    dru = pathlib.Path(root) / (name + ".kicad_dru")
+    if dru.exists():
+        out["custom rules"] = dru.read_text(encoding="utf-8").replace("\r\n", "\n")
+    pcb = pathlib.Path(root) / (name + ".kicad_pcb")
+    if pcb.exists():
+        setup = find(parse_sexpr(pcb.read_text(encoding="utf-8")), "setup") or []
+        stack = find(setup, "stackup")
+        if stack:
+            out["stackup"] = stack
+    return out
+
+
+def diff_rules(base_root, head_root, name) -> list[dict]:
+    """Describe dimensional constraints, ordered assignments, custom text and stackup."""
+    b, h = rule_values(base_root, name), rule_values(head_root, name)
+    rows = []
+    for key in sorted(b.keys() | h.keys()):
+        before, after = b.get(key), h.get(key)
+        if before == after:
+            continue
+        dimensional = key.rsplit(".", 1)[-1] in MM_RULE_KEYS
+        numeric = dimensional and all(v is None or type(v) in (int, float) for v in (before, after))
+        detail = {"kind": "number", "unit": "mm", "before": before, "after": after} if numeric else {
+            "kind": "text", "before": before, "after": after}
+        stackup = key == "stackup"
+        row = electrical_row("stackup" if stackup else "rule", key,
+                             channel="visual" if stackup else "rules",
+                             weight="light" if stackup else "heavy", detail=detail)
+        row["document"] = "board"
+        rows.append(row)
+    return rows
+
+
 def project_objects(proj_dir, name):
     if not os.path.isdir(proj_dir):
         return {}

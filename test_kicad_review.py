@@ -4270,3 +4270,90 @@ for test in (test_br03_wires, test_br03_wire_parser, test_br03_board_pins, test_
              test_br03_pad_geometry_format, test_br03_board_parse_once, test_br03_pad_metadata_fallback):
     test()
 print("ok BR03 physical pads and wires (10 tests)")
+
+
+def test_br03_typed_rules():
+    import pathlib
+    import tempfile
+    from kicad_review import diff_rules, rule_values
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td)/"base", pathlib.Path(td)/"head"
+        b.mkdir(); h.mkdir()
+        assert rule_values(b, "p") == {} and diff_rules(b, h, "p") == []
+
+        def pair(before, after):
+            for root, data in ((b, before), (h, after)):
+                (root/"p.kicad_pro").write_text(json.dumps(data), encoding="utf-8")
+            return diff_rules(str(b), str(h), "p")
+
+        def rulepro(values):
+            return {"board": {"design_settings": {"rules": values}}}
+
+        pro = {**rulepro({"min_clearance": .2}), "net_settings": {
+            "classes": [{"name": "Default", "clearance": .2}],
+            "netclass_patterns": [{"pattern": "USB*", "netclass": "Default"}]}}
+        pair(pro, pro)
+        pro["board"]["design_settings"]["rules"]["min_clearance"] = .25
+        pro["net_settings"]["netclass_patterns"][0]["netclass"] = "Fast"
+        (h/"p.kicad_pro").write_text(json.dumps(pro), encoding="utf-8")
+        (b/"p.kicad_dru").write_bytes(b'(version 1)\r\n')
+        custom = '(version 1)\n(rule "custom" (constraint clearance (min 0.3mm)))\n'
+        (h/"p.kicad_dru").write_text(custom, encoding="utf-8")
+        rows = diff_rules(str(b), str(h), "p")
+        n = next(r for r in rows if r["ref"].endswith("min_clearance"))
+        assert n["detail"] == {"kind": "number", "unit": "mm", "before": .2, "after": .25}
+        assert n["weight"] == "heavy"
+        assert any("netclass_patterns" in r["ref"] for r in rows)
+        dru = next(r for r in rows if r["ref"] == "custom rules")
+        assert dru["detail"] == {"kind": "text", "before": '(version 1)\n', "after": custom}
+        assert all(r["channel"] == "rules" and r["document"] == "board" for r in rows)
+        assert [r['ref'] for r in rows] == sorted(r['ref'] for r in rows)
+        reverse = diff_rules(str(h), str(b), "p")
+        assert all(r['weight'] == 'heavy' for r in reverse)
+        assert next(r for r in reverse if r['ref'] == 'rules.min_clearance')['detail'] == {
+            'kind': 'number', 'unit': 'mm', 'before': .25, 'after': .2}
+        (h/"p.kicad_dru").write_text('(version 1)\n', encoding='utf-8')
+        assert not any(r['ref'] == 'custom rules' for r in diff_rules(b, h, 'p'))
+        (b/"p.kicad_dru").unlink(); (h/"p.kicad_dru").unlink()
+
+        keys = ('min_via_annular_width', 'min_connection', 'min_groove_width', 'min_silk_clearance',
+                'min_text_height', 'min_text_thickness', 'solder_mask_to_copper_clearance')
+        for key in ('min_clearance', *keys):
+            row, = pair(rulepro({key: .1}), rulepro({key: .2}))
+            assert row['detail'] == {"kind": "number", "unit": "mm", "before": .1, "after": .2}, 'BR03 missing dimensional rule'
+            assert pair(rulepro({}), rulepro({key: .2}))[0]['detail']['before'] is None
+            assert pair(rulepro({key: .1}), rulepro({}))[0]['detail']['after'] is None
+        for key, values in {'min_resolved_spokes': (2, 3), 'use_height_for_length_calcs': (False, True),
+                            'unknown_count': (1, 2), 'min_clearance': (.2, "0.2")}.items():
+            detail = pair(rulepro({key: values[0]}), rulepro({key: values[1]}))[0]['detail']
+            assert detail == {'kind': 'text', 'before': values[0], 'after': values[1]}
+        assert pair(rulepro({'min_clearance': False}), rulepro({'min_clearance': True}))[0]['detail']['kind'] == 'text'
+        classes = [{"name": "A", "clearance": .1}, {"name": "B", "clearance": .2}]
+        patterns = [{"pattern": "USB*", "netclass": "A"}, {"pattern": "*", "netclass": "B"}]
+        assert pair({"net_settings": {"classes": classes}}, {"net_settings": {"classes": classes[::-1]}}) == []
+        rows = pair({"net_settings": {"netclass_patterns": patterns}},
+                    {"net_settings": {"netclass_patterns": patterns[::-1]}})
+        assert len(rows) == 1 and rows[0]['ref'] == 'net_settings.netclass_patterns'
+        assert rows[0]['detail'] == {'kind': 'text', 'before': patterns, 'after': patterns[::-1]}
+        row, = pair({"net_settings": {"classes": [{"name": "A", "clearance": .1}]}},
+                    {"net_settings": {"classes": [{"name": "A", "clearance": .2}]}})
+        assert row['ref'] == 'net_settings.classes.A.clearance' and row['detail']['unit'] == 'mm'
+        pair({}, {})
+        for root, thickness in ((b, '.2'), (h, '.3')):
+            (root/'p.kicad_pcb').write_text('(kicad_pcb (setup (stackup (layer "dielectric 1" (thickness '+thickness+')))))')
+        row, = diff_rules(str(b), str(h), 'p')
+        assert (row['channel'], row['weight'], row['ref'], row['kind']) == ('visual', 'light', 'stackup', 'stackup')
+        assert row['detail'] == {'kind': 'text',
+                                 'before': ['stackup', ['layer', 'dielectric 1', ['thickness', '.2']]],
+                                 'after': ['stackup', ['layer', 'dielectric 1', ['thickness', '.3']]]}
+        (h/'p.kicad_pro').write_text('{invalid', encoding='utf-8')
+        try:
+            rule_values(h, 'p')
+        except json.JSONDecodeError:
+            pass  # Task 6 owns incomplete-channel handling, not this extractor.
+        else:
+            assert False, 'Malformed existing project JSON must propagate'
+
+
+test_br03_typed_rules()
+print("ok BR03 typed rules, assignments and stackup")
