@@ -1324,6 +1324,73 @@ else:
     raise AssertionError("a 2,049-byte record with its CRLF must be refused, although the planner writes it")
 print("ok bom files")
 
+# Repository BOM (Owner decision 2026-10-26: combined BOM): board-qualified references; lines join only on identical identity.
+import json as _rjson
+import kicad_review as kr
+_fixture = _rjson.loads(pathlib.Path(__file__).with_name("ui").joinpath("fixtures", "bom-multiboard.json").read_text(encoding="utf-8"))
+boards = [{"name": b["name"], "objects": b["objects"], "lines": kr.parts_lines(b["objects"])} for b in _fixture["boards"]]
+combined = kr.bom_repository(boards, "jlcpcb")
+assert combined["error"] is None
+by_key = {f"{l['mpn']}/{l['lcsc'] or '-'}": l for l in combined["lines"]}
+joined = by_key["RC0805/C17414"]
+assert joined["refs"] == ["Alpha:R1", "Alpha:R2", "Beta:R1"] and joined["boards"] == {"Alpha": 2, "Beta": 1}, joined
+assert joined["refsCompressed"] == "Alpha:R1-R2; Beta:R1", joined["refsCompressed"]
+assert by_key["RC0805FR/C17414"]["refs"] == ["Beta:R2"], "same value and footprint, different MPN: never joined"
+assert by_key["CC0603/C14663"]["refs"] == ["Alpha:C1"] and by_key["CC0603/-"]["refs"] == ["Beta:C1"], "a missing LCSC is a different line"
+assert by_key["TL072/-"]["refs"] == ["Alpha:U1"], "units count once; the DNP R3 stays out"
+assert combined["summary"] == {"components": 7, "unique": 5, "withMpn": 5, "byCategory": {"Resistors": 4, "Capacitors": 2, "ICs & Modules": 1}}, combined["summary"]
+rows = read(combined["exports"]["csv"])
+assert rows[0] == list(kr.BOM_HEADER) and rows[1] == ["Resistors", "3", "10k", "R_0805", "Alpha:R1, Alpha:R2, Beta:R1", "RC0805", "C17414", ""], rows[1]
+assert rows[2][4] == "Beta:R2" and len(rows) == 6, rows
+fab = read(combined["exports"]["fab"])
+assert fab[0] == ["Comment", "Designator", "Footprint", "LCSC", "Quantity"]
+assert fab[1] == ["10k", "Alpha:R1,Alpha:R2,Beta:R1", "R_0805", "C17414", "3"], fab[1]
+assert fab[2] == ["10k", "Beta:R2", "R_0805", "C17414", "1"], fab[2]
+assert fab[3] == ["100n", "Alpha:C1", "C_0603", "C14663", "1"] and fab[4] == ["100n", "Beta:C1", "C_0603", "", "1"] and fab[5] == ["TL072", "Alpha:U1", "SOIC-8", "", "1"], fab
+custom = kr.bom_repository(boards, "jlcpcb", "Order Code")
+cust = read(custom["exports"]["fab"])
+assert cust[1] == ["10k", "Alpha:R1,Alpha:R2", "R_0805", "CUST-A", "2"] and cust[2] == ["10k", "Beta:R1", "R_0805", "CUST-B", "1"], cust[1:3]
+assert cust[3] == ["10k", "Beta:R2", "R_0805", "", "1"], "a missing ordering field leaves its cell blank"
+dup = kr.bom_repository([boards[0], {**boards[1], "name": "Alpha"}], "jlcpcb")
+assert dup["error"] and dup["exports"] is None and dup["lines"] == [], dup
+assert read(kr.bom_repository([], "jlcpcb")["exports"]["fab"]) == [list(kr.BOM_JLCPCB_HEADER)]
+# PCBWay keeps every qualified reference, including custom ordering-field splits.
+pcbway = kr.bom_repository(boards, "pcbway")
+assert read(pcbway["exports"]["fab"])[1] == ["Alpha:R1,Alpha:R2,Beta:R1", "3", "Yageo", "RC0805", "10k", "R_0805"]
+pcbway_custom = kr.bom_repository(boards, "pcbway", "Order Code")
+assert [row[:4] for row in read(pcbway_custom["exports"]["fab"])[1:3]] == [
+    ["Alpha:R1,Alpha:R2", "2", "Yageo", "CUST-A"], ["Beta:R1", "1", "Yageo", "CUST-B"]]
+for exported, ref_column in ((combined, 1), (pcbway, 0), (custom, 1), (pcbway_custom, 0)):
+    assert sorted(ref for row in read(exported["exports"]["fab"])[1:] for ref in row[ref_column].split(",")) == sorted(
+        ref for line in combined["lines"] for ref in line["refs"]), "no qualified reference lost or duplicated"
+# All four carried identity fields matter, not just the canonical BOM key.
+import copy as _rcopy
+before = _rcopy.deepcopy(boards)
+for identity_field, different in (("key", "different-key"), ("category", "Other"),
+                                  ("manufacturer", "Another maker"), ("datasheet", "https://example.test/part.pdf")):
+    split_boards = _rcopy.deepcopy(boards)
+    beta_shared = next(line for line in split_boards[1]["lines"] if line["mpn"] == "RC0805")
+    beta_shared[identity_field] = different
+    split = kr.bom_repository(split_boards, "jlcpcb")
+    assert split["summary"]["components"] == 7 and split["summary"]["unique"] == 6, (identity_field, split)
+    assert all(not {"Alpha:R1", "Beta:R1"} <= set(line["refs"]) for line in split["lines"])
+# A board name is not a symbol reference: its literal " unit " must not be stripped.
+unit_named = [{**boards[0], "name": "Control unit A"}, boards[1]]
+for preset, want in (("jlcpcb", "C17414"), ("pcbway", "RC0805")):
+    named = kr.bom_repository(unit_named, preset)
+    named_rows = read(named["exports"]["fab"])
+    assert all(row[3] == want for row in named_rows[1:] if "Control unit A:R1" in row[1 if preset == "jlcpcb" else 0]), named_rows
+    custom_named = kr.bom_repository(unit_named, preset, "Order Code")
+    assert any(row[3] == "CUST-A" and "Control unit A:R1" in row[1 if preset == "jlcpcb" else 0]
+               for row in read(custom_named["exports"]["fab"])[1:])
+assert boards == before, "combining/exporting does not mutate project lines or objects"
+assert combined["boards"] == ["Alpha", "Beta"]
+blank = kr.bom_repository([{**boards[0], "name": ""}], "jlcpcb")
+assert blank["error"] and blank["exports"] is None and blank["lines"] == []
+empty = kr.bom_repository([], "jlcpcb")
+assert empty["boards"] == [] and empty["error"] is None and empty["summary"] == kr.bom_summary([])
+print("ok repository bom")
+
 bom_cases = json.loads((Path(__file__).parent / "ui/fixtures/bom-cases.json").read_text(encoding="utf-8"))
 for case in bom_cases:
     identities = {i: bom_identity(o) for i, o in case["objects"].items()}
@@ -1401,7 +1468,33 @@ try:
                 assert embedded == opted_out_embedded
                 del embedded["blobs"]
                 assert embedded == data
+                assert "bom" not in data, "single-project reports keep their existing payload shape"
+        # Report-level BOM appears in both offline HTML and JSON only with multiple opted-in projects.
+        multi_projects = [{"dir": b["name"], "name": b["name"], "status": "modified"} for b in boards]
+        write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": multi_projects})})
+        board_objects = {b["name"]: b["objects"] for b in boards}
+        for enabled in (False, True):
+            settings["parts"]["enabled"] = enabled
+            with patch("kicad_review.project_objects", side_effect=lambda path, name: board_objects[name]), \
+                 patch("kicad_review.load_settings", return_value=settings), patch("sys.stdout", new=io.StringIO()):
+                kicad_review.cmd_report(None)
+            multi_data = json.loads(pathlib.Path("review/data.json").read_text())
+            embedded = json.loads(pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
+            del embedded["blobs"]
+            assert embedded == multi_data
+            assert ("bom" in multi_data) == enabled
+            if enabled:
+                assert multi_data["bom"] == combined
+                assert multi_data["bom"]["summary"]["components"] == sum(p["parts"]["summary"]["components"] for p in multi_data["projects"])
+            else:
+                no_sink = []
+                build_project(project, {}, settings, None, 0, no_sink)
+                assert no_sink == [], "disabled parts must not append repository BOM inputs"
         settings["parts"]["enabled"] = True
+        sink = []
+        with_sink = build_project(project, {}, settings, None, 0, sink)
+        assert [(s["name"], s["lines"]) for s in sink] == [(project["name"], with_sink["parts"]["lines"])], "build_project hands the head lines to the repository BOM"
+        assert sink[0]["objects"] == objects["head"], "the sink carries head properties, not base properties"
         with patch("kicad_review.project_objects", return_value={}):
             empty = build_project(project, {}, settings)["parts"]
             assert {k: empty[k] for k in ("lines", "changes", "supplier", "field_changes", "dnp_mismatch")} == {"lines": [], "changes": [], "supplier": None, "field_changes": [], "dnp_mismatch": []}

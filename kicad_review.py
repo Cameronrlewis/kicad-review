@@ -2220,12 +2220,15 @@ def bom_fabrication_lines(lines, objects, part_field, preset):
     by_ref = {}
     for obj in objects.values():
         identity = bom_identity(obj)
-        if not identity["included"] or identity["ref"] in by_ref:
+        # Repository inputs carry the board separately: strip symbol units before qualifying,
+        # never interpret a literal " unit " in a project name as a symbol-unit suffix.
+        ref = f"{obj['_bomBoard']}:{identity['ref']}" if "_bomBoard" in obj else identity["ref"]
+        if not identity["included"] or ref in by_ref:
             continue  # match parts_lines: the first eligible unit supplies each reference's fields
         number = field(obj["props"], selected)
         if preset == "jlcpcb" and not part_field:
             number = number.upper() if number else None  # same normalization as parts_lines
-        by_ref[identity["ref"]] = number
+        by_ref[ref] = number
     out = []
     for line in lines:
         groups = {}
@@ -2268,6 +2271,36 @@ def bom_exports(lines, preset, part_field=None, objects=None):
     except ValueError as exc:
         out["fabError"] = str(exc)
     return out
+
+
+def bom_repository(boards, preset, part_field=None):
+    """Combined BOM across the repository's projects (Owner decision 2026-10-26). A board line joins another board's line
+    only when key, category, manufacturer and datasheet all match. Board-qualified references stay distinct;
+    quantities add only inside a joined line."""
+    names = [b["name"] for b in boards]
+    if len(set(names)) != len(names) or not all(names):
+        return {"boards": names, "error": "Combined BOM unavailable: project names must be unique and non-empty.", "summary": bom_summary([]), "lines": [], "exports": None}
+    joined, objects = {}, {}
+    for b in boards:
+        for uid, obj in b["objects"].items():
+            objects[(b["name"], uid)] = {**obj, "_bomBoard": b["name"]}
+        for line in b["lines"]:
+            ident = json.dumps([line["key"], line["category"], line["manufacturer"], line["datasheet"]], ensure_ascii=False, separators=(",", ":"))
+            comb = joined.setdefault(ident, {"key": line["key"], "category": line["category"], "value": line["value"], "footprint": line["footprint"],
+                                             "lcsc": line["lcsc"], "mpn": line["mpn"], "manufacturer": line["manufacturer"], "datasheet": line["datasheet"],
+                                             "refs": [], "boards": {}})
+            comb["refs"] += [(b["name"], ref) for ref in line["refs"]]
+            comb["boards"][b["name"]] = len(line["refs"])
+    lines = []
+    for comb in joined.values():
+        runs = {}
+        for name, ref in comb["refs"]:
+            runs.setdefault(name, []).append(ref)
+        lines.append({**comb, "refs": [f"{name}:{ref}" for name, ref in comb["refs"]],
+                      "refsCompressed": "; ".join(f"{name}:{ref_ranges(refs)}" for name, refs in runs.items())})
+    lines = bom_order(lines)
+    return {"boards": names, "error": None, "summary": bom_summary(lines), "lines": lines,
+            "exports": bom_exports(lines, preset, part_field, objects)}
 
 
 def diff_parts(base, head):
@@ -2692,7 +2725,7 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings, waivers=None, change_offset=0):
+def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=None):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -2766,6 +2799,8 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                  "summary": bom_summary(lines["head"]), "exports": bom_exports(lines["head"], settings["fabrication"]["preset"], settings["fabrication"].get("part_field"), objs["head"]),
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
+        if bom_sink is not None:  # repository BOM (Task 5A) reads the head lines and objects
+            bom_sink.append({"name": p["name"], "lines": lines["head"], "objects": objs["head"]})
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -2945,10 +2980,13 @@ def cmd_report(args):
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
     data["projects"] = []
     change_offset = 0
+    bom_boards = []
     for p in det["projects"]:
-        project = build_project(p, blobs, settings, waivers, change_offset)
+        project = build_project(p, blobs, settings, waivers, change_offset, bom_boards)
         data["projects"].append(project)
         change_offset += len(project["changes"])
+    if len(bom_boards) >= 2:  # repository-wide BOM, only when there are several projects (Owner decision 2026-10-26)
+        data["bom"] = bom_repository(bom_boards, settings["fabrication"]["preset"], settings["fabrication"].get("part_field"))
     if settings.get("digikey", {}).get("enabled"):
         try:
             with open("review/supplier.json", encoding="utf-8") as fh:
