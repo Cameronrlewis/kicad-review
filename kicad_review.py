@@ -18,6 +18,7 @@ import datetime
 import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -2173,6 +2174,96 @@ def bom_summary(lines):
 _VENDOR_SPEC = importlib.util.spec_from_file_location("vendor_bom_csv", pathlib.Path(__file__).with_name("vendor") / "bom_csv.py")
 vendor_bom_csv = importlib.util.module_from_spec(_VENDOR_SPEC)
 _VENDOR_SPEC.loader.exec_module(vendor_bom_csv)
+
+
+# ---- BOM files for the report (spec 08): the generic CSV, the JLCPCB file through the vendored planner, and PCBWay. ----
+# ponytail: report-only writers; the release (07) keeps KiCad's own export (Owner decision 2026-10-26: option A).
+
+BOM_LINE_MAX_BYTES = vendor_bom_csv.BOM_LINE_MAX_BYTES  # 2048, the vendored rule; JLCPCB rejects longer designator cells
+BOM_JLCPCB_HEADER = ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
+BOM_PCBWAY_HEADER = ("Designator", "Qty", "Manufacturer", "Mfg Part #", "Description/Value", "Package/Footprint")
+BOM_HEADER = ("Category", "Quantity", "Value", "Footprint", "References", "MPN", "LCSC", "Datasheet")
+
+
+def neutral(text):
+    """A cell a spreadsheet would run as a formula (=, +, -, @, tab, CR) gets a leading quote. Applied once per cell."""
+    text = "" if text is None else str(text)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def csv_line(cells):
+    """One CSV line with CRLF; every cell passes through neutral()."""
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\r\n").writerow([neutral(c) for c in cells])
+    return out.getvalue()
+
+
+def bom_order(lines):
+    return sorted(lines, key=lambda l: (BOM_CATEGORIES.index(l["category"]), natural(l["refs"][0])))
+
+
+def bom_csv(lines):
+    return csv_line(BOM_HEADER) + "".join(
+        csv_line([l["category"], len(l["refs"]), l["value"], l["footprint"], ", ".join(l["refs"]), l["mpn"], l["lcsc"], l["datasheet"]])
+        for l in bom_order(lines))
+
+
+def bom_fabrication_lines(lines, objects, part_field, preset):
+    """Split ordering fields separately without changing displayed LCSC/MPN lines."""
+    if objects is None:
+        if part_field and part_field != PRESETS[preset]["part_field"]:
+            raise ValueError("Custom fabrication.part_field needs head symbol properties")
+        return lines
+    selected = (part_field.strip().lower(),) if part_field else (LCSC_FIELDS if preset == "jlcpcb" else MPN_FIELDS)
+    by_ref = {}
+    for obj in objects.values():
+        if obj["kind"] == "symbol":
+            number = field(obj["props"], selected)
+            if preset == "jlcpcb" and not part_field:
+                number = number.upper() if number else None  # same normalization as parts_lines
+            by_ref.setdefault((obj.get("ref") or "").split(" unit ")[0], number)
+    out = []
+    for line in lines:
+        groups = {}
+        for ref in line["refs"]:
+            groups.setdefault(by_ref.get(ref), []).append(ref)
+        out.extend({**line, "refs": refs, "orderingPart": number} for number, refs in groups.items())
+    return out
+
+
+def bom_jlcpcb_csv(lines):
+    """Comment, Designator, Footprint, LCSC, Quantity. The vendored planner (vendor_bom_csv.plan_bom) decides every row,
+    so a longer designator list continues on another row of the same part with its own Quantity. This adapter adds the
+    formula guard before planning and fails closed: a reference that cannot fit, or a written record over
+    BOM_LINE_MAX_BYTES including its CRLF, raises ValueError instead of writing an oversize row."""
+    groups = [vendor_bom_csv.BomGroup(neutral(l["value"]), tuple(neutral(ref) for ref in l["refs"]), neutral(l["footprint"]),
+                                      neutral(l.get("orderingPart", l["lcsc"]))) for l in bom_order(lines)]
+    plan = vendor_bom_csv.plan_bom(groups, None)
+    if plan.warnings:
+        raise ValueError(f"JLCPCB export unavailable: {plan.warnings[0]}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
+    out = [csv_line(BOM_JLCPCB_HEADER)]
+    for row in plan.lines:
+        text = csv_line(row)
+        if len(text.encode("utf-8")) > BOM_LINE_MAX_BYTES:
+            raise ValueError(f"JLCPCB export unavailable: the BOM row for {row[1].split(',')[0]} is {len(text.encode('utf-8'))} UTF-8 bytes with its line break, over {BOM_LINE_MAX_BYTES}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
+        out.append(text)
+    return "".join(out)
+
+
+def bom_pcbway_csv(lines):
+    return csv_line(BOM_PCBWAY_HEADER) + "".join(
+        csv_line([",".join(l["refs"]), len(l["refs"]), l["manufacturer"], l.get("orderingPart", l["mpn"]), l["value"], l["footprint"]]) for l in bom_order(lines))
+
+
+def bom_exports(lines, preset, part_field=None, objects=None):
+    """Keep report/generic CSV usable if fabrication export fails."""
+    out = {"preset": preset, "csv": bom_csv(lines), "fab": None, "fabError": None}
+    try:
+        fabrication = bom_fabrication_lines(lines, objects, part_field, preset)
+        out["fab"] = bom_pcbway_csv(fabrication) if preset == "pcbway" else bom_jlcpcb_csv(fabrication)
+    except ValueError as exc:
+        out["fabError"] = str(exc)
+    return out
 
 
 def diff_parts(base, head):

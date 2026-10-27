@@ -1194,6 +1194,100 @@ import kicad_review as _kr
 assert _kr.vendor_bom_csv.BOM_LINE_MAX_BYTES == 2048 and _kr.vendor_bom_csv.BOM_HEADER == ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
 print("ok vendored bom_csv")
 
+# BOM files: generic CSV, JLCPCB through the vendored planner with the 2,048-byte limit, PCBWay, and spreadsheet-formula neutering.
+import csv as _csv, io as _io2
+from kicad_review import BOM_LINE_MAX_BYTES, BOM_JLCPCB_HEADER, bom_exports, csv_line
+read = lambda text: list(_csv.reader(_io2.StringIO(text, newline="")))
+assert BOM_LINE_MAX_BYTES == 2048
+many = parts_lines({f"r{n}": sym2(f"R{n}", "10kΩ", "RC") for n in range(1, 801)})
+fab = bom_exports(many, "jlcpcb")["fab"]
+rows = read(fab)
+assert rows[0] == ["Comment", "Designator", "Footprint", "LCSC", "Quantity"] and len(rows) > 2, len(rows)
+assert max(len(line.encode("utf-8")) for line in fab.splitlines(keepends=True)) <= BOM_LINE_MAX_BYTES, "every line within the limit"
+assert sum(int(r[4]) for r in rows[1:]) == 800 and all(len(r[1].split(",")) == int(r[4]) for r in rows[1:]), "quantities add up, one per chunk"
+assert [ref for r in rows[1:] for ref in r[1].split(",")] == [f"R{n}" for n in range(1, 801)], "no reference lost or reordered"
+lone = [{"category": "Other", "refs": ["X1"], "value": "v" * 3000, "footprint": "F", "lcsc": None, "mpn": None, "manufacturer": None, "datasheet": None}]
+failed = bom_exports(lone, "jlcpcb")
+assert failed["fab"] is None and 'X1' in failed['fabError'] and '2048' in failed['fabError']
+assert read(failed['csv'])[1][2] == 'v' * 3000, 'generic CSV stays lossless'
+assert read(bom_exports(unannotated, 'jlcpcb')['fab']) == [list(BOM_JLCPCB_HEADER)]
+risky = [{"category": "Other", "refs": ["X1"], "value": "=HYPERLINK(\"http://x\")", "footprint": "+3V3", "lcsc": "@x", "mpn": "-1", "manufacturer": None, "datasheet": None}]
+assert read(bom_exports(risky, "jlcpcb")["fab"])[1] == ["'=HYPERLINK(\"http://x\")", "X1", "'+3V3", "'@x", "1"]
+assert csv_line(["a,b", None, 3]) == '"a,b",,3\r\n'
+mixed = parts_lines({"a": sym2("C1", "1u", lib="Device:C_Small"), "b": sym2("R1", "1k", "RC", mf="Yageo"), "c": sym2("R2", "1k", "RC", mf="Yageo")})
+generic = read(bom_exports(mixed, "jlcpcb")["csv"])
+assert generic[0] == ["Category", "Quantity", "Value", "Footprint", "References", "MPN", "LCSC", "Datasheet"]
+assert [r[0] for r in generic[1:]] == ["Resistors", "Capacitors"] and generic[1][1] == "2" and generic[1][4] == "R1, R2", generic
+pcbway = bom_exports(mixed, "pcbway")
+assert pcbway["preset"] == "pcbway" and read(pcbway["fab"])[:2] == [["Designator", "Qty", "Manufacturer", "Mfg Part #", "Description/Value", "Package/Footprint"], ["R1,R2", "2", "Yageo", "RC", "1k", "R_0805"]]
+assert read(bom_exports([], "jlcpcb")["fab"]) == [["Comment", "Designator", "Footprint", "LCSC", "Quantity"]]
+# Round-trip hostile cells, including CR/LF, in both layouts and the generic CSV.
+for value in ['a,b', 'a"b', 'a\r\nb', '\tleading', '\rleading', '=1', '+1', '-1', '@x']:
+    safe = "'" + value if value[:1] in "=+-@\t\r" else value
+    line = {**risky[0], 'value': value, 'footprint': value, 'mpn': value, 'lcsc': value, 'manufacturer': value}
+    for preset in ('jlcpcb', 'pcbway'):
+        x = bom_exports([line], preset)
+        assert read(x['csv'])[1][2:8] == [safe, safe, 'X1', safe, safe, '']
+        cells = read(x['fab'])[1]
+        assert cells == ([safe, 'X1', safe, safe, '1'] if preset == 'jlcpcb' else ['X1', '1', safe, safe, safe, safe])
+        if preset == 'jlcpcb':
+            assert len(csv_line(cells).encode('utf-8')) <= BOM_LINE_MAX_BYTES
+for preset in ('jlcpcb', 'pcbway'):
+    objs = {'a': sym2('R1', '1k', 'display-mpn'), 'b': sym2('R2', '1k', 'display-mpn')}
+    objs['a']['props']['Order Code'] = 'CUSTOM-A'; objs['b']['props']['Order Code'] = 'CUSTOM-B'
+    displayed = parts_lines(objs)
+    x = bom_exports(displayed, preset, 'Order Code', objs)
+    assert [row[3] for row in read(x['fab'])[1:]] == ['CUSTOM-A', 'CUSTOM-B']
+    assert len(displayed) == 1 and displayed[0]['mpn'] == 'display-mpn' and displayed[0]['lcsc'] is None
+    default = bom_exports(displayed, preset, None, objs)
+    assert read(default['fab'])[1][3] == ('' if preset == 'jlcpcb' else 'display-mpn')
+# The build_project path passes objects; all supported aliases must survive that path.
+from kicad_review import LCSC_FIELDS, MPN_FIELDS
+for lcsc_alias in LCSC_FIELDS:
+    for mpn_alias in MPN_FIELDS:
+        alias_obj = sym2('R1', '1k')
+        alias_obj['props'].update({lcsc_alias: 'C123', mpn_alias: 'ABC'})
+        alias_objects = {'a': alias_obj}
+        alias_lines = parts_lines(alias_objects)
+        assert alias_lines[0]['lcsc'] == 'C123' and alias_lines[0]['mpn'] == 'ABC'
+        for preset, want in (('jlcpcb', 'C123'), ('pcbway', 'ABC')):
+            exported = bom_exports(alias_lines, preset, None, alias_objects)
+            assert exported['fabError'] is None and read(exported['fab'])[1][3] == want, (lcsc_alias, mpn_alias, preset, exported)
+            custom = bom_exports(alias_lines, preset, 'Order Code', alias_objects)
+            assert read(custom['fab'])[1][3] == '', 'explicit missing custom field must not fall back to aliases'
+raw_csv = read(bom_exports(raw_lines, 'jlcpcb', None, raw_objs)['csv'])
+assert raw_csv[1][2:5] == ['10k', 'R_0805', 'R1, R2'], 'raw parser Value/Footprint serialize without coercion at grouping time'
+# Owner decision 2026-10-26: option A, separate writers. Pin the release-writer behaviour without executing KiCad.
+import kicad_review as _bomkr
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as d:
+    pro = pathlib.Path(d, 'only.kicad_pro'); pro.write_text('{}')
+    pro.with_suffix('.kicad_sch').write_text('(kicad_sch)')
+    for preset in ('jlcpcb', 'pcbway'):
+        with patch.object(_bomkr, 'kicad_cli') as cli:
+            _bomkr.release_project(str(pro), 'v0', {'fabrication': {'preset': preset, 'part_field': 'Order Code'}}, d, 'only')
+        args = cli.call_args.args
+        assert args[:3] == ('sch', 'export', 'bom') and '--exclude-dnp' in args
+        assert 'Order Code' in args[args.index('--fields') + 1]
+        assert args[args.index('--group-by') + 1] == 'Value,Footprint,Order Code'
+        assert args[args.index('--labels') + 1].split(',') == (['Comment', 'Designator', 'Footprint', 'LCSC Part #'] if preset == 'jlcpcb' else list(_bomkr.BOM_PCBWAY_HEADER))
+# Shared cases with the vendored planner: the adapter writes exactly the rows that plan_bom plans.
+import kicad_review as kr
+groups = [kr.vendor_bom_csv.BomGroup("10kΩ", tuple(f"R{n}" for n in range(1, 801)), "R_0805", "C123")]
+planned = [[str(c) for c in row] for row in kr.vendor_bom_csv.plan_bom(groups, None).lines]
+shared = [{"category": "Resistors", "refs": [f"R{n}" for n in range(1, 801)], "value": "10kΩ", "footprint": "R_0805", "lcsc": "C123", "mpn": None, "manufacturer": None, "datasheet": None}]
+assert read(kr.bom_jlcpcb_csv(shared))[1:] == planned and read(kr.bom_jlcpcb_csv(shared))[0] == list(kr.vendor_bom_csv.BOM_HEADER)
+# Line edges, measured as written with the CRLF. A value of 2,031 characters gives a 2,048-byte record (written); 2,032 gives 2,049 (refused).
+edge = lambda n: [{"category": "Other", "refs": ["X1"], "value": "v" * n, "footprint": "R_0805", "lcsc": "C1", "mpn": None, "manufacturer": None, "datasheet": None}]
+assert len(kr.bom_jlcpcb_csv(edge(2031)).splitlines(keepends=True)[1].encode("utf-8")) == 2048
+try:
+    kr.bom_jlcpcb_csv(edge(2032))
+except ValueError as exc:
+    assert "X1" in str(exc) and "2048" in str(exc), exc
+else:
+    raise AssertionError("a 2,049-byte record with its CRLF must be refused, although the planner writes it")
+print("ok bom files")
+
 bom_cases = json.loads((Path(__file__).parent / "ui/fixtures/bom-cases.json").read_text(encoding="utf-8"))
 for case in bom_cases:
     identities = {i: bom_identity(o) for i, o in case["objects"].items()}
