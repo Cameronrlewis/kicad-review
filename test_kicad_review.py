@@ -3907,22 +3907,22 @@ def br03_pcb(fp, pads):
 
 def test_br03_wires():
     from kicad_review import diff_wires, wire_counts
-    wire = lambda pts, sheet="/": {"kind":"wire", "where":{"sheet":sheet}, "props":{"points":pts}}
-    r, = diff_wires({"a":wire("(0, 0) (1, 0)"), "b":wire("(1, 0) (0, 0)")},
-                   {"c":wire("(1.0004, 0) (0, 0)")})
+    wire = lambda *pts, sheet="/": {"kind":"wire", "where":{"sheet":sheet}, "points_mm":list(pts)}
+    r, = diff_wires({"a":wire((0,0),(1,0)), "b":wire((1,0),(0,0))},
+                   {"c":wire((1.0004,0),(0,0))})
     assert r["detail"] == {"kind":"wires", "drawn":0, "erased":1}
     assert (r["kind"], r["ref"], r["weight"], r["channel"]) == (
         "wires", "Wires drawn / erased", "medium", "wiring")
     assert diff_wires({}, {}) == []
-    assert diff_wires({"a":wire("(-0.0004, -2e-4) (+1e0, 2)")},
-                      {"b":wire("(1, 2) (0, 0)")}) == []
-    assert wire_counts({"a":wire("(0, 0) (1, 0) (2, 0)")}) == wire_counts(
-        {"b":wire("(1, 0) (0, 0)"), "c":wire("(2, 0) (1, 0)")})
-    r, = diff_wires({"a":wire("(0, 0) (2, 0)")},
-                   {"b":wire("(0, 0) (1, 0)"), "c":wire("(1, 0) (2, 0)")})
+    assert diff_wires({"a":wire((-0.0004,-0.0002),(1.0,2.0))},
+                      {"b":wire((1,2),(0,0))}) == []
+    assert wire_counts({"a":wire((0,0),(1,0),(2,0))}) == wire_counts(
+        {"b":wire((1,0),(0,0)), "c":wire((2,0),(1,0))})
+    r, = diff_wires({"a":wire((0,0),(2,0))},
+                   {"b":wire((0,0),(1,0)), "c":wire((1,0),(2,0))})
     assert r["detail"] == {"kind":"wires", "drawn":2, "erased":1}
-    r, = diff_wires({"a":wire("(0, 0) (1, 0)", "/a/")},
-                   {"b":wire("(0, 0) (1, 0)", "/b/")})
+    r, = diff_wires({"a":wire((0,0),(1,0),sheet="/a/")},
+                   {"b":wire((0,0),(1,0),sheet="/b/")})
     assert r["detail"] == {"kind":"wires", "drawn":1, "erased":1}
     assert wire_counts({"ignored":{"kind":"bus"}}) == {}
 
@@ -3986,6 +3986,11 @@ def test_br03_board_pins():
         b.write_text(br03_pcb("fp",two).replace('(uuid p1)','').replace('(uuid p2)',''))
         h.write_text(br03_pcb("fp",one).replace('(uuid p1)',''))
         assert diff_board_pins(kr.pcb_objects(b),kr.pcb_objects(h),board_pads(b),board_pads(h),{}) == []
+        # The same fallback must pair the unique match: a changed net on it is exactly one row.
+        b.write_text(br03_pcb("fp",[("p1","1",0,"GND")]).replace('(uuid p1)',''))
+        h.write_text(br03_pcb("fp",[("p1","1",0,"B")]).replace('(uuid p1)',''))
+        r, = diff_board_pins(kr.pcb_objects(b),kr.pcb_objects(h),board_pads(b),board_pads(h),{})
+        assert (r["detail"]["before"],r["detail"]["after"]) == ("GND","B")
         # Removing/adding a physical footprint never invents disconnections/connections.
         assert diff_board_pins(kr.pcb_objects(b),{},board_pads(b),{},{}) == []
         assert diff_board_pins({},kr.pcb_objects(h),{},board_pads(h),{}) == []
@@ -4055,7 +4060,62 @@ def test_br03_object_pairs():
     assert (base,head) == original
 
 
+def test_br03_wire_rounding():
+    # Endpoints round once, from source values, to 0.001 mm. The 4 dp display text must not round again.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        sch = pathlib.Path(td) / "test.kicad_sch"
+        sch.write_text('(kicad_sch (uuid root) (wire (pts (xy 0.00049 0) (xy 1 0)) (uuid a)))')
+        base = kr.sch_objects(td, "test")
+        sch.write_text('(kicad_sch (uuid root) (wire (pts (xy 0 0) (xy 1 0)) (uuid a)))')
+        assert kr.diff_wires(base, kr.sch_objects(td, "test")) == []
+
+
+def test_br03_pad_geometry_format():
+    # Re-saved numeric spellings of the same repeated-number pads still pair by geometry, without UUIDs.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    from kicad_review import board_pads, diff_board_pins
+    pad = ('(pad "1" smd rect {at} (size {size}) (layers "F.Cu") (net "{net}"))')
+    def pcb(pads):
+        return ('(kicad_pcb (footprint "x" (uuid fp) (property "Reference" "D1") (at 0 0) '
+                + " ".join(pads) + "))")
+    base = pcb([pad.format(at="(at 0 0)", size="1 1", net="GND"), pad.format(at="(at 2 0)", size="1 1", net="A")])
+    head = pcb([pad.format(at="(at 0.0 0.0)", size="1.0 1.0", net="B"),
+                pad.format(at="(at 2.0 0.0)", size="1.00 1.0", net="A")])
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td) / "b.kicad_pcb", pathlib.Path(td) / "h.kicad_pcb"
+        b.write_text(base)
+        h.write_text(head)
+        r, = diff_board_pins(kr.pcb_objects(b), kr.pcb_objects(h), board_pads(b), board_pads(h), {})
+        assert (r["detail"]["before"], r["detail"]["after"]) == ("GND", "B")
+
+
+def test_br03_board_parse_once():
+    # board_pads reads the PCB through one parse, shared with the footprint and pad net lookup.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "b.kicad_pcb"
+        p.write_text(br03_pcb("fp", [("p1", "1", 0, "GND")]))
+        calls, real = [], kr.parse_sexpr
+        def counting(text):
+            calls.append(text)
+            return real(text)
+        kr.parse_sexpr = counting
+        try:
+            assert kr.board_pads(p)["fp"][0]["net"] == "GND"
+        finally:
+            kr.parse_sexpr = real
+        assert len(calls) == 1, len(calls)
+
+
 for test in (test_br03_wires, test_br03_wire_parser, test_br03_board_pins, test_br03_pad_pair_identity,
-             test_br03_pad_net_parser, test_br03_object_pairs):
+             test_br03_pad_net_parser, test_br03_object_pairs, test_br03_wire_rounding,
+             test_br03_pad_geometry_format, test_br03_board_parse_once):
     test()
-print("ok BR03 physical pads and wires (6 tests)")
+print("ok BR03 physical pads and wires (9 tests)")

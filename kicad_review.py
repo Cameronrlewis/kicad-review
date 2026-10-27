@@ -551,7 +551,7 @@ def sch_objects(proj_dir, name):
             elif kind in ("wire", "bus"):
                 pts = points(n)
                 objs[key] = {"kind": kind, "ref": "", "props": {"points": " ".join(fmt_at(p) for p in pts)},
-                             "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
+                             "points_mm": pts, "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
             elif kind in ("label", "global_label", "hierarchical_label"):
                 a = at(n)
                 objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "shape": val(n, "shape"), "position": fmt_at(a)},
@@ -570,6 +570,10 @@ def sch_objects(proj_dir, name):
 def pcb_objects(path):
     with open(path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())
+    return pcb_objects_from_root(root)
+
+
+def pcb_objects_from_root(root):
     net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2 and is_net_number(n[1])}  # older files number their nets
     net = lambda node: (lambda n: (net_names.get(n[1], n[-1]) if is_net_number(n[1]) else n[1]) if n else None)(find(node, "net"))
     where = {"board": True}
@@ -2337,13 +2341,13 @@ def net_members(text, objects, commit):
         unknown = False
         for node in nodes:
             ref, pin = node["ref"] or "", node["pin"] or ""
-            if ref.startswith("#"):  # power symbols and flags are not component pins
+            if ref.startswith("#"):  # Open Question 4 ruling: power symbols and flags are skipped, never fabricated as pins
                 continue
             candidates = by_ref.get(ref, [])
             units = [(o["where"]["sheet"], o["props"].get("unit", "1"))
                      for _, o in candidates]
             invalid = not ref or "?" in ref
-            # A missing reference has no UUID in the netlist node, so only one candidate can be trusted.
+            # Open Question 4 ruling: a missing reference has no UUID in the netlist node, so only one candidate is trusted.
             ambiguous = (not pin or not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
                          or (invalid and len(candidates) != 1))
             if ambiguous:
@@ -2441,13 +2445,12 @@ def diff_nets(base, head):
 
 
 def wire_counts(objects):
-    """Multiset of schematic wire segments, per sheet; endpoints sorted and rounded to 0.001 mm."""
+    """Multiset of schematic wire segments, per sheet; source endpoints rounded once to 0.001 mm and sorted."""
     result = Counter()
     for o in objects.values():
         if o["kind"] != "wire":
             continue
-        values = [float(x) for x in re.findall(r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", o["props"]["points"])]
-        pts = [tuple(round(x, 3) + 0.0 for x in values[i:i + 2]) for i in range(0, len(values), 2)]
+        pts = [tuple(round(x, 3) + 0.0 for x in p) for p in o["points_mm"]]
         for a, b in zip(pts, pts[1:]):
             result[(o["where"]["sheet"], *sorted((a, b)))] += 1
     return result
@@ -2460,12 +2463,26 @@ def diff_wires(base, head):
                            detail={"kind": "wires", "drawn": drawn, "erased": erased})] if drawn or erased else []
 
 
+NUMBER_TOKEN = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def pad_geometry(tokens):
+    """Pad geometry key: bare numbers rounded to 0.0001 mm as pcb_objects does, so re-saved spellings match."""
+    def norm(x):
+        if isinstance(x, list):
+            return [norm(y) for y in x]
+        if isinstance(x, Quoted) or not NUMBER_TOKEN.fullmatch(x):
+            return str(x)
+        return round(float(x), 4) + 0.0
+    return repr([norm(x) for x in tokens])
+
+
 def board_pads(path):
     """Physical pads per footprint UUID: UUID, number and local geometry from the PCB, net from the semantic parser."""
     if not pathlib.Path(path).is_file():
         return {}
     root = parse_sexpr(pathlib.Path(path).read_text(encoding="utf-8"))
-    objects = pcb_objects(path)
+    objects = pcb_objects_from_root(root)
     result = {}
     for fp in findall(root, "footprint"):
         uid = val(fp, "uuid") or val(fp, "tstamp")
@@ -2480,7 +2497,7 @@ def board_pads(path):
             suffix = "#" + str(seen[number]) if counts[number] > 1 else ""
             geom = [x for x in p[1:] if not (isinstance(x, list) and x and x[0] in ("net", "uuid", "tstamp"))]
             result[uid].append({"uuid": val(p, "uuid") or val(p, "tstamp"), "number": number,
-                                "geom": repr(geom),
+                                "geom": pad_geometry(geom),
                                 "net": objects[uid]["props"].get("pad " + number + suffix + " net") or ""})
     return result
 
@@ -2502,10 +2519,10 @@ def pad_pairs(base, head, replaced=False):
             h.remove(y)
 
     take(lambda x, y: bool(x["uuid"]) and x["uuid"] == y["uuid"])
-    # ponytail: no heuristic pairing of duplicate-number pads after geometry/UUID loss.
+    # Duplicate-number pads never pair by number alone once UUIDs are gone; only unique number-plus-geometry evidence does.
     compatible = lambda x, y: not (x["uuid"] and y["uuid"] and x["uuid"] != y["uuid"])
     take(lambda x, y: (compatible(x, y) or replaced) and (x["number"], x["geom"]) == (y["number"], y["geom"]))
-    # ponytail: replacement fallback stops at unique number-plus-geometry evidence; never use number alone for repeated pads.
+    # The replacement fallback pairs a pad by number only when that number is unique on both sides.
     take(lambda x, y: (compatible(x, y) or replaced) and x["number"] == y["number"] and
          sum(p["number"] == x["number"] for p in base) == 1 and
          sum(p["number"] == y["number"] for p in head) == 1)
