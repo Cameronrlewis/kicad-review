@@ -2036,27 +2036,44 @@ def bom_coverage(objs, settings):
     return cov
 
 
+def bom_identity(obj):
+    """Canonical BOM contract for one schematic object (spec 08). Fields are unclipped; display clipping belongs to 09."""
+    p = obj.get("props") or {}
+    ref = (obj.get("ref") or "").split(" unit ")[0]  # units of one part share their base reference
+    reason = ("not_symbol" if obj.get("kind") != "symbol" else "dnp" if p.get("dnp") == "yes" else
+              "excluded" if p.get("in_bom") == "no" else "unannotated" if ref.endswith("?") else None)
+    value, footprint = p.get("Value", ""), p.get("Footprint", "")
+    lcsc, mpn = (field(p, LCSC_FIELDS) or "").upper() or None, field(p, MPN_FIELDS)
+    ds = field(p, ("datasheet",))
+    return {"included": reason is None, "excludedReason": reason, "ref": ref, "value": value, "footprint": footprint,
+            "lcsc": lcsc, "mpn": mpn, "manufacturer": field(p, MANUFACTURER_FIELDS),
+            "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
+            "category": bom_category(ref, p.get("symbol")),
+            # ensure_ascii=False, compact separators. 10 uses this key as received from 09 and never recomputes it.
+            "key": json.dumps([value, footprint, lcsc or "", mpn or ""], ensure_ascii=False, separators=(",", ":"))}
+
+
 def parts_lines(objs):
-    """One line per distinct part on the schematic (Value + Footprint + LCSC), with what blocks a supplier lookup."""
-    lines = {}
+    """One line per distinct part on the schematic (Value + Footprint + LCSC + MPN), with what blocks a supplier lookup."""
+    lines, first_key, conflicts = {}, {}, set()
     for o in objs.values():
-        p = o["props"]
-        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+        b = bom_identity(o)
+        if not b["included"]:
             continue
-        lcsc = (field(p, LCSC_FIELDS) or "").upper() or None
-        ds = field(p, ("datasheet",))
-        line = lines.setdefault((p.get("Value", ""), p.get("Footprint", ""), lcsc), {
-            "value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "lcsc": lcsc,
-            "mpn": field(p, MPN_FIELDS), "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
-            "refs": [], "problems": []})
-        if o["ref"] not in line["refs"]:
-            line["refs"].append(o["ref"])
+        if first_key.setdefault(b["ref"], b["key"]) != b["key"]:
+            conflicts.add(b["ref"])  # units of one reference disagree: count once and flag below
+            continue
+        line = lines.setdefault(b["key"], {
+            "value": b["value"], "footprint": b["footprint"], "lcsc": b["lcsc"], "mpn": b["mpn"],
+            "manufacturer": b["manufacturer"], "category": b["category"], "datasheet": b["datasheet"],
+            "key": b["key"], "refs": [], "problems": []})
+        if b["ref"] not in line["refs"]:
+            line["refs"].append(b["ref"])
             # Per-reference values: a grouped line can hide one reference's MPN or placeholder behind another's.
-            line.setdefault("_each", []).append((o["ref"], field(p, MPN_FIELDS), (p.get("Value", ""), field(p, MPN_FIELDS), lcsc)))
+            line.setdefault("_each", []).append((b["ref"], b["mpn"], (b["value"], b["mpn"], b["lcsc"])))
     by_lcsc = {}
     for l in lines.values():
         l["refs"].sort(key=natural)
-        l["key"] = "|".join([l["value"], l["footprint"], l["lcsc"] or ""])
         if l["lcsc"] and not re.fullmatch(r"C\d+", l["lcsc"]):
             l["problems"].append("bad_lcsc")
         if not l["lcsc"]:
@@ -2082,6 +2099,9 @@ def parts_lines(objs):
         if hit:
             l["problems"].append("mpn_footprint_conflict")
             l.setdefault("problem_refs", {})["mpn_footprint_conflict"] = hit
+        l["refsCompressed"] = ref_ranges(l["refs"])
+        if conflicts.intersection(l["refs"]):
+            l["problems"].append("unit_identity_conflict")
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
@@ -2156,7 +2176,7 @@ def diff_parts(base, head):
         x, y = b.get(ref), h.get(ref)
         if x and y and x["key"] == y["key"]:
             continue
-        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint"
+        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint" if x["footprint"] != y["footprint"] else "mpn"
         r = rows.setdefault((action, x and x["key"], y and y["key"]), {"action": action, "refs": [], "before": x, "after": y})
         r["refs"].append(ref)
     return list(rows.values())

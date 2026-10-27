@@ -1143,6 +1143,73 @@ assert list(summary["byCategory"]) == [c for c in BOM_CATEGORIES if c in summary
 assert bom_summary([]) == {"components": 0, "unique": 0, "withMpn": 0, "byCategory": {}}
 print("ok bom helpers")
 
+# BOM lines: the MPN splits a part, units count once, every line carries category and ranges.
+from kicad_review import bom_identity
+from pathlib import Path
+sym2 = lambda ref, v, mpn=None, lib="Device:R_Small", mf=None: {"kind": "symbol", "ref": ref, "props": {
+    "Value": v, "Footprint": "R_0805", "Datasheet": "~", "symbol": lib, **({"MPN": mpn} if mpn else {}), **({"Manufacturer": mf} if mf else {})}}
+two = parts_lines({"a": sym2("R1", "5.1k", "A"), "b": sym2("R2", "5.1k", "B")})
+assert [(l["refs"], l["mpn"]) for l in two] == [(["R1"], "A"), (["R2"], "B")] and two[0]["key"] != two[1]["key"], two
+three = parts_lines({"a": sym2("R1", "5.1k", "A"), "b": sym2("R2", "5.1k", "B"), "c": sym2("R3", "5.1k")})
+assert len(three) == 3 and [l["mpn"] for l in three] == ["A", "B", None], "no MPN is its own line too"
+one = parts_lines({"a": sym2("R1", "5.1k", "A"), "b": sym2("R2", "5.1k", "A"), "c": sym2("R3", "5.1k", "A")})
+assert len(one) == 1 and one[0]["refs"] == ["R1", "R2", "R3"] and one[0]["refsCompressed"] == "R1-R3" and one[0]["category"] == "Resistors", one
+units = parts_lines({"a": sym2("U1", "TL072", lib="Amplifier_Operational:TL072"), "b": sym2("U1 unit 2", "TL072", lib="Amplifier_Operational:TL072"),
+                     "c": sym2("U1 unit 3", "TL072", lib="Amplifier_Operational:TL072")})
+assert len(units) == 1 and units[0]["refs"] == ["U1"] and units[0]["category"] == "ICs & Modules", units
+fitted = parts_lines({"a": sym2("R1", "1k"), "b": {**sym2("R2", "1k"), "props": {**sym2("R2", "1k")["props"], "dnp": "yes"}},
+                      "c": {**sym2("R3", "1k"), "props": {**sym2("R3", "1k")["props"], "in_bom": "no"}}})
+assert len(fitted) == 1 and fitted[0]["refs"] == ["R1"], "DNP and excluded parts stay out of the BOM"
+unannotated = parts_lines({"a": sym2("U?", "TL072"), "b": sym2("U? unit 2", "TL072")})
+assert unannotated == [] and bom_summary(unannotated)["components"] == 0
+only_symbol = sym2('H1', 'Watch glass', lib='Mechanical:Housing')
+only_symbol['props'].update(Footprint='', on_board='no')
+mechanical = parts_lines({'only-symbol': only_symbol})
+assert len(mechanical) == 1 and mechanical[0]['category'] == 'Mechanical' and mechanical[0]['refs'] == ['H1'] and bom_summary(mechanical)['components'] == 1
+assert parts_lines({"a": sym2("R1", "1k", mf="Yageo")})[0]["manufacturer"] == "Yageo"
+old = parts_lines({"a": sym2("R1", "5.1k", "A")})
+assert [r["action"] for r in diff_parts(old, parts_lines({"a": sym2("R1", "5.1k", "B")}))] == ["mpn"], "an MPN-only edit is a change"
+assert [r['action'] for r in diff_parts(old, parts_lines({'a': sym2('R1', '5.1k')}))] == ['mpn'], 'removing an MPN is a change too'
+# Exercise actual parser property values after the concurrent quoted-token fix; do not coerce them first.
+from kicad_review import parse_sexpr, properties
+raw_props = properties(parse_sexpr('(symbol (property "Value" "10k") (property "Footprint" "R_0805") (property "MPN" "RC"))'))
+raw_objs = {ref: {'kind': 'symbol', 'ref': ref, 'props': dict(raw_props)} for ref in ('R1', 'R2')}
+raw_lines = parts_lines(raw_objs)
+assert len(raw_lines) == 1 and raw_lines[0]['value'] == raw_props['Value'] and raw_lines[0]['footprint'] == raw_props['Footprint']
+assert raw_lines[0]['category'] == bom_category('R1', raw_props['Value']) == 'Resistors'
+assert raw_lines[0]['refsCompressed'] == ref_ranges(raw_lines[0]['refs']) == 'R1-R2'
+assert json.loads(json.dumps(raw_lines))[0]['value'] == '10k'
+assert json.loads(json.dumps(raw_lines))[0]['footprint'] == 'R_0805'
+print("ok bom lines")
+
+bom_cases = json.loads((Path(__file__).parent / "ui/fixtures/bom-cases.json").read_text(encoding="utf-8"))
+for case in bom_cases:
+    identities = {i: bom_identity(o) for i, o in case["objects"].items()}
+    expected = case["expect"]
+    assert {i: b["included"] for i, b in identities.items()} == expected["included"], case["name"]
+    assert {i: b["excludedReason"] for i, b in identities.items()} == expected["excludedReason"], case["name"]
+    for i, b in identities.items():
+        p = case["objects"][i]["props"]
+        assert b["value"] == p.get("Value", "") and b["footprint"] == p.get("Footprint", ""), case["name"]
+        assert b["key"] == json.dumps([b["value"], b["footprint"], b["lcsc"] or "", b["mpn"] or ""], ensure_ascii=False, separators=(",", ":")), case["name"]
+    actual = parts_lines(case["objects"])
+    assert len(actual) == len(expected["lines"]), (case["name"], actual)
+    for got, want in zip(actual, expected["lines"]):
+        assert {k: (len(got["refs"]) if k == "quantity" else got[k]) for k in want} == want, (case["name"], got)
+        assert all(identities[i]["key"] == got["key"] for i in identities
+                   if identities[i]["ref"] in got["refs"] and "unit_identity_conflict" not in got["problems"]), case["name"]
+contract_obj = {"kind": "symbol", "ref": "R1 unit 2", "props": {
+    "Value": "10kΩ", "Footprint": "R_0805", " LCSC Part # ": " c123 ", "Mfg Part #": " RC ",
+    "Mfr.": " Yageo ", "Datasheet": "HTTPS://example.test/rc.pdf", "symbol": "Device:R_Small"}}
+assert bom_identity(contract_obj) == {
+    "included": True, "excludedReason": None, "ref": "R1", "value": "10kΩ", "footprint": "R_0805",
+    "lcsc": "C123", "mpn": "RC", "manufacturer": "Yageo", "datasheet": "HTTPS://example.test/rc.pdf",
+    "category": "Resistors", "key": '["10kΩ","R_0805","C123","RC"]'}
+contract_obj["props"]["Datasheet"] = "javascript:alert(1)"
+assert bom_identity(contract_obj)["datasheet"] is None
+print("ok bom shared cases")
+
+
 # Project payload and report settings omit opted-out features; supplier lookup remains deferred.
 import copy
 here = os.getcwd()
@@ -2187,9 +2254,10 @@ print("ok bom readiness comment")
 # Grouped lines: every reference's MPN and values are checked, and the comment names only the offending references.
 L = parts_lines({"1": symp("R1", Value="10k", Footprint="0805", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0805", MPN="AP2112"),
                  "3": symp("R3", Value="10k", Footprint="0805"), "4": symp("U1", Value="LDO", Footprint="SOT23", MPN="AP2112")})
-r = next(l for l in L if "R1" in l["refs"])
-assert "placeholder" in r["problems"] and "mpn_footprint_conflict" in r["problems"], r
-assert r["problem_refs"] == {"placeholder": ["R1"], "mpn_footprint_conflict": ["R2"]}, r
+# Different MPNs are different BOM lines, so R1 (TBD), R2 (AP2112) and R3 (none) each own a line.
+r, r2 = next(l for l in L if "R1" in l["refs"]), next(l for l in L if "R2" in l["refs"])
+assert r["problems"] == ["missing_lcsc", "placeholder"] and r["problem_refs"] == {"placeholder": ["R1"]}, r
+assert "mpn_footprint_conflict" in r2["problems"] and r2["problem_refs"] == {"mpn_footprint_conflict": ["R2"]}, r2
 u = next(l for l in L if "U1" in l["refs"])
 assert u["problem_refs"] == {"mpn_footprint_conflict": ["U1"]}, u
 mark_new_problems([], L)
