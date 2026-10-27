@@ -9,4 +9,5 @@ Table: jlc_kicad_tools/cpl_rotations_db.csv in https://github.com/matthewlai/JLC
 - Arithmetic: ported from jlc_kicad_tools/jlc_lib/cpl_fix_rotations.py at commit cdd504e30adf77fbd6a4d33189e12f95df61a2d3 (sha256 d836b4f8e242695ed3130f2af8ca41feba463a5045cc6c316e877487fa8ae39d), lines 121-173. Algorithm only; no code copied.
 - Bottom side: the mirror (-rotation + 180) % 360 follows the pinned code's July 2022 rule. It is unverified against JLCPCB's current behaviour.
 - PCBWay: no rotation source is pinned, so PCBWay positions are not corrected.
+- Fixtures: `fixtures/cpl-rotation-pos-raw.csv` and `fixtures/cpl-rotation-pos-corrected.csv` are generated from synthetic board `ui/fixtures/cpl-rotation.kicad_pcb` per Owner decision 2026-10-27 (generic names only). See `fixtures/README.md`.
 - Not JLCPCB's published data. It is the community table the pinned code uses.

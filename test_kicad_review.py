@@ -4294,7 +4294,8 @@ with tempfile.TemporaryDirectory() as case, patch("kicad_review.subprocess.run",
     assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL failure changed release evidence"
 print("ok CPL overflow and malformed CSV fabrication isolation")
 
-# Synthetic board CPL regression: raw KiCad export and committed corrected output (Task 3B, Step 6).
+# Synthetic board CPL regression: raw KiCad export and committed corrected output (Task 3B, Step 6;
+# amended per Owner decision 2026-10-27 and AGENTS.md private-design rule: generic names only).
 FIXTURES = pathlib.Path(kr.__file__).with_name("cpl_rotations") / "fixtures"
 with open(FIXTURES / "cpl-rotation-pos-raw.csv", newline="", encoding="utf-8") as f:
     raw_rows = list(csv.reader(f))
