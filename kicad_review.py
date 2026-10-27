@@ -247,6 +247,34 @@ IMAGE_EXPORT_OPTIONS = {'page_size_mode': '1', 'drill_shape_opt': '0',
                         'check_zones': True, 'themes': ['light', 'dark']}
 
 
+def export_board_stats(pcb, out):
+    """Optional revision facts: publish validated JSON atomically, or a diagnostic."""
+    root = pathlib.Path(out)
+    root.mkdir(parents=True, exist_ok=True)
+    target, pending, marker = (root / name for name in ('stats.json', 'stats.pending.json', 'stats.json.error'))
+    for path in (target, pending, marker):
+        path.unlink(missing_ok=True)
+    command = ['kicad-cli', 'pcb', 'export', 'stats', '--format', 'json', '--units', 'mm', '-o', str(pending), pcb]
+    try:
+        # One synchronous export per revision, capped at 60 seconds; no retry queue.
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise ValueError('statistics export failed (%s): %s' %
+                             (result.returncode, (result.stderr or result.stdout).strip()[:500]))
+        if not pending.is_file():
+            raise ValueError('statistics export produced no output')
+        if not isinstance(json.loads(pending.read_text(encoding='utf-8')), dict):
+            raise ValueError('statistics export produced a non-object JSON value')
+        os.replace(pending, target)
+        return None
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        target.unlink(missing_ok=True)
+        pending.unlink(missing_ok=True)
+        error = ('statistics unavailable: ' + str(exc)).replace('\n', ' ')[:1000]
+        marker.write_text(error, encoding='utf-8')
+        return error
+
+
 def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"

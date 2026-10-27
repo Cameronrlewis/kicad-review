@@ -88,6 +88,43 @@ assert kr.IMAGE_EXPORT_OPTIONS == {'page_size_mode': '1', 'drill_shape_opt': '0'
                                    'check_zones': True, 'themes': ['light', 'dark']}
 print('ok image export contracts')
 
+# Optional revision statistics publish only validated, successful output, never stale/partial files.
+import json
+import subprocess
+for mode in ('ok', 'nonzero', 'missing', 'malformed', 'nonobject', 'timeout', 'unavailable'):
+    with TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        for name in ('stats.json', 'stats.pending.json', 'stats.json.error'):
+            (root / name).write_text('stale')
+        def stats_run(command, **kwargs):
+            assert command[:8] == ['kicad-cli', 'pcb', 'export', 'stats', '--format', 'json', '--units', 'mm']
+            assert kwargs == {'capture_output': True, 'text': True, 'timeout': 60}
+            pending = pathlib.Path(command[command.index('-o') + 1])
+            assert pending == root / 'stats.pending.json' and command[-1] == 'P.kicad_pcb'
+            assert not (root / 'stats.json').exists() and not pending.exists()
+            if mode == 'timeout':
+                pending.write_text('{}')
+                raise subprocess.TimeoutExpired(command, 60)
+            if mode == 'unavailable':
+                raise FileNotFoundError('kicad-cli unavailable')
+            if mode != 'missing':
+                pending.write_text('{broken' if mode == 'malformed' else '[]' if mode == 'nonobject' else '{"board":{}}')
+            return subprocess.CompletedProcess(command, 1 if mode == 'nonzero' else 0, stdout='', stderr='stats failed')
+        with patch.object(kr.subprocess, 'run', side_effect=stats_run) as run:
+            error = kr.export_board_stats('P.kicad_pcb', d)
+        assert run.call_count == 1
+        assert not (root / 'stats.pending.json').exists()
+        if mode == 'ok':
+            assert error is None and json.loads((root / 'stats.json').read_text()) == {'board': {}}
+            assert not (root / 'stats.json.error').exists()
+        else:
+            assert error and not (root / 'stats.json').exists()
+            assert (root / 'stats.json.error').read_text() == error
+            assert '\n' not in error and len(error) <= 1000
+            if mode == 'nonzero':
+                assert 'stats failed' in error
+print('ok optional atomic board statistics: seven outcomes')
+
 # S-expression parsing: quoted strings with escapes, nesting.
 n = parse_sexpr('(a (b "x \\"y\\" z") (c 1 2))')
 assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]
