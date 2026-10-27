@@ -31,7 +31,15 @@ def refill_board(path):
              "-o", str(root / "drc.json"), str(target)],
             capture_output=True, text=True, timeout=55)
         if run.returncode not in (0, 5):
-            raise RuntimeError("project-context refill failed")
+            detail = (run.stderr or run.stdout or "no diagnostic output").strip()
+            raise RuntimeError(
+                f"project-context refill failed (exit {run.returncode}): {detail}"
+            )
+        if not target.is_file():
+            raise RuntimeError(
+                f"project-context refill failed (exit {run.returncode}): "
+                "kicad-cli did not produce the refilled board"
+            )
         board = pcbnew.LoadBoard(str(target))
         if board is None:
             raise ValueError("refilled board missing")
@@ -39,7 +47,11 @@ def refill_board(path):
 
 
 def collect(path):
-    """Union tracks, vias, pads and refilled zones by (layer name, net name)."""
+    """Union copper tracks, pads, zones and copper graphics/text by layer and net.
+
+    KiCad exports transformed copper graphics as filled polygon approximations;
+    non-copper-layer drawings are ignored.
+    """
     if path == "-":
         return {}
     board = refill_board(path)
@@ -62,6 +74,18 @@ def collect(path):
         for zone in board.Zones():
             if zone.IsOnLayer(layer) and not zone.GetIsRuleArea():
                 add(layer, zone.GetNetname(), zone.GetFilledPolysList(layer))
+        # Include standalone and footprint-attached copper drawings and text.
+        graphics = list(board.GetDrawings())
+        for footprint in board.GetFootprints():
+            graphics.extend(footprint.GraphicalItems())
+        for item in graphics:
+            if not item.IsOnLayer(layer):
+                continue
+            poly = pcbnew.SHAPE_POLY_SET()
+            item.TransformShapeToPolygon(poly, layer, 0, 5000, pcbnew.ERROR_INSIDE)
+            if poly.OutlineCount():
+                get_netname = getattr(item, "GetNetname", None)
+                add(layer, get_netname() if get_netname else "", poly)
     for poly in out.values():
         poly.Simplify()
     return out

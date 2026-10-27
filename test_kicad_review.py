@@ -42,6 +42,21 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
     assert [r["removedMm2"] for r in removed["rows"]] == [4.0, 2.0]
     assert all(r["addedMm2"] == 0 and not r["addedContours"] for r in removed["rows"])
     assert [-2.0, -1.0] in added["rows"][1]["addedContours"][0]
+    # Refill failures preserve actionable CLI diagnostics (and never reach LoadBoard).
+    import pathlib
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="br03-refill-test-") as tmp:
+        source = pathlib.Path(tmp) / "fixture.kicad_pcb"
+        source.write_text("synthetic fixture path")
+        failure = type("Run", (), {"returncode": 2, "stderr": "fixture CLI failure", "stdout": ""})()
+        with patch.object(copper.subprocess, "run", return_value=failure):
+            try:
+                copper.refill_board(str(source))
+            except RuntimeError as exc:
+                assert "exit 2" in str(exc) and "fixture CLI failure" in str(exc)
+            else:
+                raise AssertionError("refill failure should retain CLI diagnostic")
     print("ok BR03 signed copper polygons")
 
 from kicad_review import is_kicad_file, owner_project
