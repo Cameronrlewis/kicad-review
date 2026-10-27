@@ -224,6 +224,54 @@ for failure in (None, 'missing-light', 'missing-dark', 'ambiguous', 'cli'):
                         assert len(ET.fromstring((root / 'out' / relative).read_text()).findall('.//s:path', ns)) == 1
 print('ok instance image mappings, missing/ambiguous exports and config cleanup')
 
+# Image cache identity covers renderer, complete palettes/options and declared layers; host restore never runs KiCad.
+with TemporaryDirectory() as d, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'):
+    previous = os.getcwd()
+    try:
+        os.chdir(d)
+        p = {'dir': 'demo', 'name': 'H', 'status': 'modified'}
+        det = {'base': 'a' * 40, 'head': 'b' * 40, 'projects': [p]}
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        before = kr.render_cache(p, 'head', det, settings)
+        with patch.object(kr, 'IMAGE_EXPORT_OPTIONS', {**kr.IMAGE_EXPORT_OPTIONS, 'page_size_mode': '2'}):
+            assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored image options'
+        palette = json.loads(json.dumps(kr.IMAGE_PALETTES))
+        palette['light']['colors']['schematic.wire'] = [1, 0, 0, 1]
+        with patch.object(kr, 'IMAGE_PALETTES', palette):
+            assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored image palette'
+        with patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.0'):
+            assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored renderer'
+        pcb = pathlib.Path(kr.board_path(p, 'head'))
+        pcb.parent.mkdir(parents=True)
+        pcb.write_text('(kicad_pcb (layers (0 "F.Cu" signal)))')
+        assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored declared layers'
+        assert kr.image_export_identity(p, 'head')['layers'] == ['F.Cu']
+        pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps(det))
+        for side in ('base', 'head'):
+            cache = kr.render_cache(p, side, det, settings)
+            cache.mkdir(parents=True)
+            marker = cache / '.complete'
+            for invalid in ('complete', '{broken', 'null', '{}'):
+                marker.write_text(invalid)
+                assert not kr.image_cache_complete(cache, p, side), 'legacy/malformed identity accepted'
+            marker.write_text(json.dumps(kr.image_export_identity(p, side), sort_keys=True))
+            assert kr.image_cache_complete(cache, p, side)
+            with patch.object(kr, 'IMAGE_RENDERER', 'local-unverified'):
+                marker.write_text(json.dumps(kr.image_export_identity(p, side), sort_keys=True))
+                assert not kr.image_cache_complete(cache, p, side), 'unverified local renderer reused cache'
+            marker.write_text(json.dumps(kr.image_export_identity(p, side), sort_keys=True))
+            (cache / 'proof.txt').write_text(side)
+        with patch.object(kr, 'load_settings', return_value=settings), \
+             patch.object(kr, 'kicad_cli', side_effect=AssertionError('host CLI forbidden')), \
+             patch.object(kr.subprocess, 'run', side_effect=AssertionError('host subprocess forbidden')):
+            kr.restore_renders()
+        for side in ('base', 'head'):
+            assert pathlib.Path('review', kr.project_id('demo'), side, 'proof.txt').read_text() == side
+    finally:
+        os.chdir(previous)
+print('ok complete image cache fingerprint and CLI-free warm restore')
+
 # S-expression parsing: quoted strings with escapes, nesting.
 n = parse_sexpr('(a (b "x \\"y\\" z") (c 1 2))')
 assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]
@@ -3851,7 +3899,7 @@ print("ok unchanged board full SVG inventory, shared geometry and shared 3D")
 
 # Revision render caches avoid all KiCad exports on a warm run and track settings/tool identity.
 import shutil
-with TemporaryDirectory() as t:
+with TemporaryDirectory() as t, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'):
     old_cwd = os.getcwd()
     try:
         os.chdir(t)
@@ -3868,6 +3916,21 @@ with TemporaryDirectory() as t:
             assert pathlib.Path("review/G/base/drc.json").exists()
             kr.cmd_render(None)
             assert render.call_count == 2, "warm revision caches must skip all exports"
+            det = json.loads(pathlib.Path('review/detect.json').read_text())
+            cache = kr.render_cache(pr, 'head', det, kr.DEFAULT_SETTINGS)
+            marker = cache / '.complete'
+            assert json.loads(marker.read_text()) == kr.image_export_identity(pr, 'head')
+            marker.write_text('{}')
+            try:
+                kr.restore_renders(None)
+                raise AssertionError('restore accepted mismatched image metadata')
+            except SystemExit as exc:
+                assert exc.code == 1
+            kr.cmd_render(None)
+            assert render.call_count == 3, 'cmd_render reused mismatched image metadata'
+            with patch.object(kr, 'IMAGE_RENDERER', 'local-unverified'):
+                kr.cmd_render(None)
+            assert render.call_count == 5, 'cmd_render reused an unverified local renderer'
         assert pathlib.Path("review/G/base/drc.json").exists() and pathlib.Path("review/G/head/drc.json").exists()
         # Library exports compare a pair of commits, unlike standalone board/sheet exports.
         lib_settings = copy.deepcopy(kr.DEFAULT_SETTINGS)

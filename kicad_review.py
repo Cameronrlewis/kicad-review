@@ -381,12 +381,30 @@ def export_glb(p, side, out):
         print(f"{p['name']}: 3D export failed for {side}; see {log}")
 
 
+def image_export_identity(p, side):
+    """Explicit image inputs shared by host restore and the pinned renderer."""
+    pcb = board_path(p, side)
+    return {'renderer': IMAGE_RENDERER, 'options': IMAGE_EXPORT_OPTIONS,
+            'layers': board_layers(pcb) if os.path.isfile(pcb) else [], 'palettes': IMAGE_PALETTES}
+
+
+def image_cache_complete(cache, p, side):
+    """Legacy/unversioned renders cannot satisfy the image export contract."""
+    if IMAGE_RENDERER == 'local-unverified':
+        return False
+    try:
+        return json.loads((cache / '.complete').read_text(encoding='utf-8')) == image_export_identity(p, side)
+    except (OSError, ValueError):
+        return False
+
+
 def render_cache(p, side, det, settings):
     """Revision/project/tool/settings identity; outputs remain independent of report change IDs."""
     revision = det.get(side) or ""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
+    identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -400,7 +418,7 @@ def restore_renders(args=None):
     entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
                for side in ("base", "head")
                if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
-    if any(not cache or not (cache / ".complete").is_file() for p, side, cache in entries):
+    if any(not cache or not image_cache_complete(cache, p, side) for p, side, cache in entries):
         raise SystemExit(1)
     for p, side, cache in entries:
         shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
@@ -417,7 +435,7 @@ def cache_renders(args=None):
             out = pathlib.Path(f"review/{project_id(p['dir'])}/{side}")
             if cache and out.is_dir():
                 shutil.copytree(out, cache, dirs_exist_ok=True)
-                (cache / ".complete").write_text("complete")
+                (cache / '.complete').write_text(json.dumps(image_export_identity(p, side), sort_keys=True), encoding='utf-8')
 
 
 def cmd_render(args):
@@ -432,7 +450,7 @@ def cmd_render(args):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
             cache = render_cache(p, side, det, settings)
-            if cache and (cache / ".complete").is_file():
+            if cache and image_cache_complete(cache, p, side):
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
