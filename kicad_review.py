@@ -1862,6 +1862,7 @@ def jlc_position(side, rotation, x, y, rule):
         x = -x
     if rule is not None:
         degrees, dx, dy = rule
+        degrees %= 360  # Reduce integer overrides before float arithmetic, even beyond float range.
         rotation = (rotation - degrees) % 360 if bottom else (rotation + degrees) % 360
         x, y = x + dx, y + dy
     if bottom:
@@ -1874,7 +1875,7 @@ def load_cpl_overrides(path):
     if not os.path.exists(path):
         return {}
     with open(path, newline="", encoding="utf-8-sig") as f:
-        rows = list(csv.reader(f))
+        rows = list(csv.reader(f, strict=True))
     if not rows or rows[0] != CPL_OVERRIDE_HEADER:
         raise ValueError("CPL overrides header must be Designator,Rotation,Offset X,Offset Y")
     overrides = {}
@@ -1928,7 +1929,7 @@ def cpl_for_download(pro, name, settings, raw, dest):
 def fab_entry(pro, name, settings, fab_dir, dest):
     """Read raw release evidence; correct only the download zip's disposable CPL copy."""
     entry = {"kind": "fab", "label": DOWNLOAD_LABELS["fab"], "file": None, "error": None}
-    expected = (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile)
+    expected = (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile)
     try:
         if os.path.lexists(dest):
             os.remove(dest)

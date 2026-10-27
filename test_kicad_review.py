@@ -4229,3 +4229,67 @@ with tempfile.TemporaryDirectory() as cpl_dir:
         except ValueError:
             pass
 print("ok synthetic CPL CSV regression and pin validation")
+
+# Task 3B fix: unterminated override fields must not be silently repaired.
+with tempfile.TemporaryDirectory() as cpl_dir:
+    override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
+    override.write_text('Designator,Rotation,Offset X,Offset Y\nU1,90,0,"0\n', encoding="utf-8")
+    try:
+        kr.load_cpl_overrides(override)
+    except csv.Error:
+        pass
+    else:
+        raise AssertionError("accepted an unterminated CPL override quote")
+print("ok CPL overrides reject unterminated quotes")
+
+# Task 3B fix: whole-degree overrides are periodic even beyond float range.
+with tempfile.TemporaryDirectory() as cpl_dir:
+    override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
+    huge_degrees = 360 * 10**397 + 90  # 400 digits, exactly equivalent to +90 degrees.
+    for degrees, top, bottom in ((huge_degrees, 120, 240), (-huge_degrees, 300, 60)):
+        override.write_text(f"Designator,Rotation,Offset X,Offset Y\nU1,{degrees},0.5,-1\n", encoding="utf-8")
+        huge_rule = kr.load_cpl_overrides(override)["U1"]
+        assert kr.jlc_position("Top", 30.0, 1.0, 2.0, huge_rule) == (top, 1.5, 1.0)
+        assert kr.jlc_position("Bottom", 30.0, -1.0, 2.0, huge_rule) == (bottom, 1.5, 1.0)
+print("ok CPL oversized positive and negative rotations")
+
+# Task 3B fix: arithmetic/CSV failures stay inside fabrication; other exports survive.
+with tempfile.TemporaryDirectory() as case, patch("kicad_review.subprocess.run", side_effect=dl_fake):
+    dl_mode.clear()
+    source = dl_project(case, "P")
+    cached = pathlib.Path(case, "out/fab"); cached.mkdir()
+    kr.release_project(f"{source}/P.kicad_pro", "review", dl_settings, str(cached), "P")
+    (cached / "P-review-jlcpcb-positions.csv").write_text(
+        "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+        "Q1,BSS138,SOT-23-5,1,2,30,Top\n"
+        "Q2,BSS138,SOT-23-5,-1,2,30,Bottom\n", encoding="utf-8")
+    original = {p.name: p.read_bytes() for p in cached.iterdir()}
+    override = pathlib.Path(source, "P.cpl-overrides.csv")
+    huge_degrees = 360 * 10**397 + 90
+    override.write_text(f"Designator,Rotation,Offset X,Offset Y\nQ1,{huge_degrees},0,0\nQ2,{-huge_degrees},0,0\n", encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert not warnings.getvalue() and all(e["file"] and e["error"] is None for e in made), (made, warnings.getvalue())
+    zip_path = pathlib.Path(case, "out/downloads", made[0]["file"])
+    with zipfile.ZipFile(zip_path) as z:
+        rows = list(csv.reader(io.StringIO(z.read("P-review-jlcpcb-positions.csv").decode("utf-8"))))
+    assert [row[5] for row in rows[1:]] == ["120.000000", "60.000000"], rows
+
+    # Force arithmetic overflow independently of normalization to pin the nonfatal boundary.
+    with patch("kicad_review.jlc_position", side_effect=OverflowError("synthetic arithmetic overflow")), contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert made[0]["file"] is None and made[0]["error"] == "fabrication export failed", made
+    assert all(e["file"] and e["error"] is None for e in made[1:]), made
+    assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+    assert not zip_path.exists() and not list(zip_path.parent.glob(".fab-*")), "failed CPL left archive or staging"
+
+    # A malformed quote must have the same fabrication-only failure semantics.
+    override.write_text('Designator,Rotation,Offset X,Offset Y\nQ1,90,0,"0\n', encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert made[0]["file"] is None and made[0]["error"] == "fabrication export failed", made
+    assert all(e["file"] and e["error"] is None for e in made[1:]), made
+    assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+    assert not zip_path.exists() and not list(zip_path.parent.glob(".fab-*")), "malformed CPL left archive or staging"
+    assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL failure changed release evidence"
+print("ok CPL overflow and malformed CSV fabrication isolation")
