@@ -146,7 +146,7 @@ function geometryCounts(document) {
 }
 async function simplifyBodies(document) {
   if(geometryCounts(document).triangles<=600000)return;
-  const {simplifyPrimitive,weldPrimitive}=require('@gltf-transform/functions');
+  const {simplifyPrimitive,weldPrimitive,prune}=require('@gltf-transform/functions');
   const {MeshoptSimplifier}=require('meshoptimizer');await MeshoptSimplifier.ready;
   for(const n of document.getRoot().listNodes()) {
     if(n.getExtras().role!=='body'||!n.getMesh())continue;
@@ -163,6 +163,8 @@ async function simplifyBodies(document) {
     }
     n.setMesh(mesh);
   }
+  // Replaced meshes and isolated accessors otherwise remain in the emitted GLB.
+  await document.transform(prune({keepExtras:true}));
 }
 async function processDocument(document,metadata) {
   const parts=snapshotParts(document,metadata); // identities only; not final stats
@@ -197,18 +199,25 @@ async function compress(input,output,metadata,partsPath,statsPath) {
   }
   const result=await processDocument(document,metadata);
   await document.transform(meshopt({encoder:MeshoptEncoder,level:'high'}));
-  const temp=await fs.mkdtemp(path.join(path.dirname(output),'.3d-'));
+  const temps=[];
   try {
-    const model=path.join(temp,'board.glb');await io.write(model,document);
+    // Stage beside each destination so every rename stays on its filesystem.
+    const staged=[];
+    for(const destination of [output,partsPath,statsPath]) {
+      const temp=await fs.mkdtemp(path.join(path.dirname(destination),'.3d-'));
+      temps.push(temp);staged.push(path.join(temp,path.basename(destination)));
+    }
+    const [model,parts,stats]=staged;await io.write(model,document);
     Object.assign(result.stats,geometryCounts(await io.read(model)));
     result.stats.warnings=budgetWarnings(result.stats,metadata);
-    await fs.writeFile(path.join(temp,'parts.json'),JSON.stringify(result.parts));
-    await fs.writeFile(path.join(temp,'stats.json'),JSON.stringify(result.stats));
-    // Caller validates/install manifest last; no partial set is a valid cache hit.
+    await fs.writeFile(parts,JSON.stringify(result.parts));
+    await fs.writeFile(stats,JSON.stringify(result.stats));
+    // Each replacement is atomic, not the set. Caller installs/validates its
+    // cache manifest last; a partial set must never be treated as a cache hit.
     await fs.rename(model,output);
-    await fs.rename(path.join(temp,'parts.json'),partsPath);
-    await fs.rename(path.join(temp,'stats.json'),statsPath);
-  } finally {await fs.rm(temp,{recursive:true,force:true});}
+    await fs.rename(parts,partsPath);
+    await fs.rename(stats,statsPath);
+  } finally {await Promise.all(temps.map(temp=>fs.rm(temp,{recursive:true,force:true})));}
 }
 Object.assign(module.exports,{geometryCounts,simplifyBodies,processDocument,compress});
 

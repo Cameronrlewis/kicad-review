@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
+import {mkdtempSync,readFileSync,rmSync,mkdirSync,readdirSync,statSync,writeFileSync} from 'node:fs';
+import {join as pathJoin} from 'node:path';
 const require=createRequire(import.meta.url), P=require('./compress3d.cjs');
 test('BR02 mask finish and pair-safe cache policy',()=>{
   for(const rgb of [[.7,.02,.01],[.01,.02,.8],[0,0,0],[1,1,1]])
@@ -402,12 +404,6 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
   }
 });
 
-
-
-
-
-import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
-import {join as pathJoin} from 'node:path';
 test('BR02 shipped coverage equals reread processed GLB counts',integration,async()=>{
   const {NodeIO}=require('@gltf-transform/core');
   const {ALL_EXTENSIONS}=require('@gltf-transform/extensions');
@@ -454,6 +450,37 @@ for(const nonindexed of [false,true])test('BR02 reducible body shrinks and board
   assert.ok(reduced.getIndices().getCount()/3<triangles,'BR02 component triangles must decrease');
   for(const n of board)assert.deepEqual(arrays(n.getMesh().listPrimitives()[0]),before);
 });
+test('BR02 over-budget body delivery prunes replaced geometry and reduces encoded size',integration,async()=>{
+  const {NodeIO}=require('@gltf-transform/core'),{ALL_EXTENSIONS}=require('@gltf-transform/extensions');
+  const {MeshoptDecoder}=require('meshoptimizer');await MeshoptDecoder.ready;
+  const io=new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({'meshopt.decoder':MeshoptDecoder});
+  const dir=mkdtempSync(pathJoin(process.env.OUT,'body-delivery-'));
+  try {
+    const {d}=gridDocument(550),{metadata}=makeDocument(['R1']);
+    const before=P.geometryCounts(d).triangles;
+    assert.ok(before>600000);
+    const input=pathJoin(dir,'in.glb'),baseline=pathJoin(dir,'baseline.glb');
+    // Separate destination directories exercise destination-local staging.
+    const destinations=['model','parts','stats'].map(name=>pathJoin(dir,name));
+    for(const destination of destinations)mkdirSync(destination);
+    const output=pathJoin(destinations[0],'out.glb'),parts=pathJoin(destinations[1],'parts.json');
+    const stats=pathJoin(destinations[2],'stats.json');
+    await io.write(input,d);
+    await P.compress(input,baseline);
+    await P.compress(input,output,metadata,parts,stats);
+    const final=await io.read(output),counts=P.geometryCounts(final);
+    assert.ok(counts.triangles<before,'batching must preserve body role for simplification');
+    const coverage=JSON.parse(readFileSync(stats));
+    assert.deepEqual({triangles:coverage.triangles,primitives:coverage.primitives},counts);
+    assert.equal(JSON.parse(readFileSync(parts))[0].hasModel,true);
+    const used=new Set();
+    for(const scene of final.getRoot().listScenes())scene.traverse(n=>{if(n.getMesh())used.add(n.getMesh());});
+    assert.equal(final.getRoot().listMeshes().length,used.size,'no orphaned original body meshes ship');
+    assert.ok(statSync(output).size<statSync(baseline).size,'simplification must shrink encoded GLB');
+    for(const destination of destinations)assert.ok(!readdirSync(destination).some(p=>p.startsWith('.3d-')));
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
 test('BR02 below budget stays unchanged',integration,async()=>{
   const {d,body,primitive}=gridDocument(8),before=arrays(primitive),mesh=body.getMesh();
   await P.simplifyBodies(d);assert.equal(body.getMesh(),mesh);assert.deepEqual(arrays(primitive),before);
@@ -467,8 +494,6 @@ test('BR02 copper dominated workload warns truthfully',integration,async()=>{
   assert.ok(stats.triangles>600000);assert.ok(stats.warnings.includes('triangle budget exceeded after one body-only pass'));
   assert.equal(stats.triangles,550*550*2,'copper triangles remain above budget');
 });
-
-
 
 test('BR02 padless footprint does not discard processed board',integration,async()=>{
   const {d,metadata}=makeDocument(['R1','R2']);
@@ -499,8 +524,6 @@ for(const rgb of [[.7,.02,.01],[.01,.02,.8],[0,0,0],[1,1,1],[.08,.2,.14],[.0627,
   }
  });
 
-
-
 test('BR02 incompatible changed appearances diagnose but never waive the hard gate',integration,async()=>{
   const {d,metadata}=makeDocument(['R12'],240);metadata.keep=['R12'];
   const mesh=d.getRoot().listNodes().find(n=>n.getMesh()).getMesh();
@@ -511,7 +534,6 @@ test('BR02 incompatible changed appearances diagnose but never waive the hard ga
   assert.ok(stats.warnings.some(w=>w.includes('hard draw-call budget exceeded')));
   assert.equal(stats.primitives<100+1,false,'workload must remain an acceptance failure');
 });
-
 
 test('BR02 counts scene instances, indexed and nonindexed triangles, but not lines',integration,()=>{
   const {d}=makeDocument(['R1']);
@@ -546,6 +568,22 @@ test('BR02 rejects corrupt input and missing sidecar paths without touching outp
     for(const p of [output,parts,stats])assert.equal(readFileSync(p,'utf8'),'sentinel');
     assert.ok(!readdirSync(dir).some(p=>p.startsWith('.3d-')));
     assert.ok(existsSync(input));
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('BR02 staging failure cleans already-created temp directories before replacing outputs',integration,async()=>{
+  const {NodeIO}=require('@gltf-transform/core');
+  const dir=mkdtempSync(pathJoin(process.env.OUT,'staging-failure-'));
+  try {
+    const {d,metadata}=makeDocument(['R1']);
+    const input=pathJoin(dir,'in.glb'),output=pathJoin(dir,'out.glb'),stats=pathJoin(dir,'stats.json');
+    const parts=pathJoin(dir,'missing','parts.json');
+    await new NodeIO().write(input,d);
+    for(const p of [output,stats])writeFileSync(p,'sentinel');
+    await assert.rejects(P.compress(input,output,metadata,parts,stats),{code:'ENOENT'});
+    // Model staging succeeds before the absent parts directory causes failure.
+    assert.ok(!readdirSync(dir).some(p=>p.startsWith('.3d-')),'staging finally removes created directories');
+    for(const p of [output,stats])assert.equal(readFileSync(p,'utf8'),'sentinel');
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 
