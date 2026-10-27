@@ -30,6 +30,7 @@ import tomllib
 import zipfile
 from collections import Counter
 from urllib.parse import urlsplit
+import xml.etree.ElementTree as ET
 
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
@@ -193,7 +194,6 @@ def board_layers(pcb_path):
 
 def simplify_sheet_svg(text):
     """Join plain sibling stroke paths without changing inherited paint or coordinates."""
-    import xml.etree.ElementTree as ET
     root = ET.fromstring(text)
 
     # Only optimize self-contained presentation paint. CSS, paint servers, alpha,
@@ -2843,12 +2843,16 @@ def svg_body(path):
         return re.sub(r"<title>.*?</title>", "", fh.read(), count=1, flags=re.S)
 
 
-def svg_size(text):
+def svg_viewbox(text):
     match = re.search(r"viewBox\s*=\s*[\"']([^\"']+)[\"']", text)
     values = [float(v) for v in re.split(r"[\s,]+", match[1].strip())] if match else []
     if len(values) != 4 or not all(math.isfinite(v) for v in values) or min(values[2:]) <= 0:
         raise ValueError("SVG needs a finite viewBox with positive width and height")
-    return values[2:]
+    return values
+
+
+def svg_size(text):
+    return svg_viewbox(text)[2:]
 
 
 def has_drawing(text):
@@ -2910,12 +2914,36 @@ def model3d_missing(out, objs):
     return rows
 
 
+def read_optional_json(path, default=None):
+    return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
+
+
 def build_project(p, blobs, settings, waivers=None, change_offset=0):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
+    theme_paths = {side: read_optional_json(f'{out}/{side}/sheet-images.json', {}) for side in sides}
+    pages_by_side = {side: sheet_pages(posixpath.join(side, p['dir']), p['name']) for side in sides}
+    hotspot_ids = image_pair(None, None)
+    for side in sides:
+        src = posixpath.join(side, p['dir'])
+        source = pathlib.Path(src, p['name'] + '.kicad_sch')
+        # Legacy fixtures may lack a root identity. Keep artwork without inventing anchors.
+        if source.is_file() and val(parse_sexpr(source.read_text()), 'uuid'):
+            manifest = sheet_hotspots(src, p['name'])
+            page_by_path = {page['path']: page for page in pages_by_side[side]}
+            for view in manifest['views']:
+                rel = theme_paths[side].get(view['sheet'], {}).get('light')
+                page = page_by_path.get(view['sheet'])
+                path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', p['name'], page)
+                text = svg_body(path)
+                if text:
+                    view['viewBox'] = svg_viewbox(text)
+            payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
+            pathlib.Path(out, side, 'sheet-hotspots.json').write_text(payload)
+            hotspot_ids[side] = add_blob(blobs, payload)
     pages = {}
     for side in sides:
-        for pg in sheet_pages(posixpath.join(side, p["dir"]), p["name"]):
+        for pg in pages_by_side[side]:
             entry = pages.setdefault(pg["path"], {**pg, "svg": {}})
             entry.update(pg)
             entry["svg"][side] = svg_body(page_svg(f"{out}/{side}", p["name"], pg))
@@ -2927,6 +2955,15 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
         pg["size"] = svg_size(h or b)
         pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
+        pg['hotspots'] = {side: hotspot_ids[side] if texts.get(side) is not None else None for side in ('base', 'head')}
+        pg['svgThemes'] = {}
+        for theme in ('light', 'dark'):
+            pair = {}
+            for side in ('base', 'head'):
+                rel = theme_paths.get(side, {}).get(pg['path'], {}).get(theme)
+                text = svg_body(str(pathlib.Path(out, side, rel))) if rel else texts.get(side)
+                pair[side] = add_blob(blobs, text) if texts.get(side) is not None else None
+            pg['svgThemes'][theme] = pair
         sheets.append(pg)
     layers, changed = [], False
     names = sorted({f for s in sides if os.path.isdir(f"{out}/{s}/pcb") for f in os.listdir(f"{out}/{s}/pcb")})
@@ -2943,10 +2980,21 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
+    for row in board['layers']:
+        row['svgThemes'] = {}
+        for theme, folder in (('light', 'pcb'), ('dark', 'pcb-dark')):
+            pair = {}
+            for side in ('base', 'head'):
+                path = pathlib.Path(out, side, folder, p['name'] + '-' + row['name'] + '.svg')
+                pair[side] = add_blob(blobs, svg_body(str(path))) if row['svg'][side] and path.is_file() else row['svg'][side]
+            row['svgThemes'][theme] = pair
+        canonical = row['name'].replace('_', '.')
+        row['sourceRGBThemes'] = {t: IMAGE_PALETTES[t]['sourceRGB'].get(canonical, [255, 255, 255]) for t in ('light', 'dark')}
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     changes = diff_objects(objs["base"], objs["head"])
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
+    inspect = image_pair(None, None)
     geometry = {}
     pcbs = {side: posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb") for side in ("base", "head")}
     same_board = all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
@@ -2955,6 +3003,10 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         geometry[side] = None
         if side == "head" and same_board:
             geometry[side] = geometry["base"]
+            inspect[side] = inspect["base"]
+            if inspect[side]:
+                pathlib.Path(out, side).mkdir(parents=True, exist_ok=True)
+                pathlib.Path(out, side, "board-inspect.json").write_bytes(pathlib.Path(out, "base", "board-inspect.json").read_bytes())
             continue
         if os.path.isfile(pcb):
             try:
@@ -2972,6 +3024,16 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 geometry[side] = add_blob(blobs, json.dumps(scene, separators=(",", ":"), sort_keys=True))
             except Exception as exc:  # any unforeseen board construct falls back to SVG
                 print(f"{pcb}: geometry unavailable; retaining SVG: {exc!r}", file=sys.stderr)
+                continue
+            try:
+                manifest = board_inspect(scene, read_optional_json(f'{out}/{side}/stats.json'))
+                payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
+                pathlib.Path(out, side).mkdir(parents=True, exist_ok=True)
+                pathlib.Path(out, side, 'board-inspect.json').write_text(payload)
+                inspect[side] = add_blob(blobs, payload)
+            except Exception as exc:
+                print(f"{pcb}: inspection unavailable; retaining geometry and SVG: {exc!r}", file=sys.stderr)
+    board["inspect"] = inspect
     if any(geometry.values()):
         board["geometry"] = geometry
     parts = None

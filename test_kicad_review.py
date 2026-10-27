@@ -590,7 +590,6 @@ print('ok inherited symbol geometry')
 # Task 2.2: hotspot manifests resolve by sheet-instance path, never by export name.
 def hotspot_regressions():
     import base64, gzip, json, math
-    import xml.etree.ElementTree as ET
 
     with TemporaryDirectory() as root:
         root_sch = ('(kicad_sch (uuid root) (paper A4) ' +
@@ -732,7 +731,7 @@ with TemporaryDirectory() as t:
         os.chdir(t)
         for side, page in [("base", "2"), ("head", "10")]:
             write(t, {f"{side}/H/H.kicad_sch":
-                f'(kicad_sch (sheet_instances (path "/" (page "{page}"))))',
+                f'(kicad_sch (uuid root) (sheet_instances (path "/" (page "{page}"))))',
                 f"review/H/{side}/erc.json": '{"sheets": []}',
                 f"review/H/{side}/sch/H.svg":
                 '<svg viewBox="0 0 320 213"><path d="M10 10H310"/></svg>'})
@@ -743,7 +742,14 @@ with TemporaryDirectory() as t:
         assert pg["page"] == "10" and pg["status"] == "unchanged"
         assert pg["svg"]["base"] == pg["svg"]["head"]
         assert pg["size"] == [320, 213] and "stem" not in pg
-        assert len(blobs) == 1
+        artwork = {key for pair in pg['svgThemes'].values() for key in pair.values()}
+        assert artwork == {pg['svg']['head']}, 'unchanged artwork deduplicates independently of manifests'
+        assert pg['hotspots']['base'] == pg['hotspots']['head']
+        assert len(blobs) == 2, 'one drawing and one revision manifest'
+        # Missing root identity is a legacy compatibility case, not a fabricated anchor.
+        pathlib.Path('head/H/H.kicad_sch').write_text('(kicad_sch (paper A4))')
+        legacy = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS)
+        assert legacy['sheets'][0]['hotspots']['head'] is None
         os.remove("head/H/H.kicad_sch")
         removed = kr.build_project({"dir": "H", "name": "H", "status": "modified"},
                                    {}, kr.DEFAULT_SETTINGS)["sheets"][0]
@@ -3004,7 +3010,11 @@ try:
                 assert json.dumps(off, sort_keys=True) == json.dumps(legacy, sort_keys=True)
                 # Golden JSON bytes from the pre-libraries parent, with inventory enabled.
                 import hashlib
-                assert hashlib.sha256(json.dumps(off, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
+                legacy_shape = copy.deepcopy(off)
+                legacy_shape['board'].pop('inspect', None)
+                for row in legacy_shape['sheets'] + legacy_shape['board']['layers']:
+                    for key in ('hotspots', 'svgThemes', 'sourceRGBThemes'): row.pop(key, None)
+                assert hashlib.sha256(json.dumps(legacy_shape, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
                 assert comment_markdown({**d2, "projects": [off]}, [], "") == comment_markdown({**d2, "projects": [legacy]}, [], "")
         with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.build_project", return_value=off):
             kicad_review.cmd_report(None)
@@ -4008,6 +4018,7 @@ with TemporaryDirectory() as t:
         with contextlib.redirect_stderr(err):
             bad = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
         assert "geometry" not in bad and "geometry unavailable" in err.getvalue()
+        assert bad["inspect"] == {"base": None, "head": None}
         # Unchanged boards retain both revisions, parsing identical geometry once.
         write(t, {"base/G/G.kicad_pcb": GEOMETRY_FIXTURE, "head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
         same = {}
@@ -4015,12 +4026,24 @@ with TemporaryDirectory() as t:
             board = kr.build_project(pr, same, kr.DEFAULT_SETTINGS)["board"]
         assert board["geometry"]["base"] == board["geometry"]["head"] and board["geometry"]["base"]
         assert parse.call_count == 1
+        assert board["inspect"]["base"] == board["inspect"]["head"] and board["inspect"]["base"]
+        assert pathlib.Path("review/G/base/board-inspect.json").read_bytes() == pathlib.Path("review/G/head/board-inspect.json").read_bytes()
         assert board["status"] == "unchanged"
+        # Inspection is optional: its failure must not discard a working GL scene.
+        retained = {}
+        err = io.StringIO()
+        with patch.object(kr, 'board_inspect', side_effect=ValueError('bad inspection')), contextlib.redirect_stderr(err):
+            partial = kr.build_project(pr, retained, kr.DEFAULT_SETTINGS)['board']
+        assert partial['geometry']['base'] == partial['geometry']['head']
+        assert partial['geometry']['base'] in retained
+        assert partial['inspect'] == {'base': None, 'head': None}
+        assert 'inspection unavailable' in err.getvalue() and 'geometry unavailable' not in err.getvalue()
         os.remove("base/G/G.kicad_pcb")
         err = io.StringIO()
         with patch("kicad_review.board_geometry", side_effect=KeyError("unexpected")), contextlib.redirect_stderr(err):
             odd = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
         assert "geometry" not in odd and "geometry unavailable" in err.getvalue()
+        assert odd["inspect"] == {"base": None, "head": None}
     finally:
         patch.stopall()
         os.chdir(old_cwd)
@@ -4288,7 +4311,6 @@ with tempfile.TemporaryDirectory() as d:
 assert kr.image_pair(None, 'head-id') == {'base':None, 'head':'head-id'}
 
 
-import copy
 blobs={}
 svg_id=kr.add_blob(blobs,'<svg viewBox="0 0 10 10"></svg>')
 json_id=kr.add_blob(blobs,'{"version":1,"views":[]}')
@@ -4314,6 +4336,219 @@ with TemporaryDirectory() as d, patch.object(kr,'inline_page',side_effect=lambda
     kr.finalize_report(legacy,d)
     assert legacy['assets']=={} and legacy['blobs']=={}
 
+
+def missing_side_projects():
+    order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').resolve().read_text()
+    old = os.getcwd()
+    blobs, projects = {}, []
+    with TemporaryDirectory() as directory:
+        try:
+            os.chdir(directory)
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            for name in ('parts','threads','issues','inventory','libraries','3d'):
+                settings[name]['enabled'] = False
+            settings['checks'] = {k:'off' for k in settings['checks']}
+            for kind in ('sheet','board'):
+                for present, status in (('head','added'),('base','removed')):
+                    name = f'{status}-{kind}'
+                    desc = {'dir':name,'name':'H','status':status}
+                    out = f'review/{kr.project_id(name)}/{present}'
+                    source = f'{present}/{name}'
+                    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 80"><path stroke="#009600" fill="none" d="M 5 5 L 95 75"/></svg>'
+                    files = {f'{out}/sch/H.svg':svg,
+                             f'{source}/H.kicad_sch':'(kicad_sch (uuid root) (paper A4) (symbol (uuid moved) (at 50 40 0) (property "Reference" "U1") (property "Value" "test")))'} if kind == 'sheet' else {
+                        f'{source}/H.kicad_pcb':order_board, f'{out}/pcb/H-F_Cu.svg':svg}
+                    files[f'{out}/erc.json'] = json.dumps({'violations':[]})
+                    files[f'{out}/drc.json'] = json.dumps({'violations':[], 'unconnected_items':[]})
+                    write('.', files)
+                    project = kr.build_project(desc, blobs, settings)
+                    absent = 'base' if present == 'head' else 'head'
+                    rows = project['sheets'] if kind == 'sheet' else project['board']['layers']
+                    assert rows, (kind, present)
+                    assert project['board']['status'] == status if kind == 'board' else rows[0]['status'] == status
+                    for row in rows:
+                        assert row['svg'][absent] is None
+                        key = row['svg'][present]
+                        assert key in blobs and '<svg' in gzip.decompress(base64.b64decode(blobs[key])).decode()
+                        assert row['svgThemes']['light'][absent] is None
+                        assert row['svgThemes']['dark'][absent] is None
+                    if kind == 'sheet':
+                        assert rows[0]['hotspots'][absent] is None
+                        assert rows[0]['hotspots'][present] in blobs
+                    else:
+                        assert project['board']['inspect'][absent] is None
+                        assert project['board']['inspect'][present] in blobs
+                    assert project['changes'], 'present-side legacy picking needs real changes'
+                    projects.append(project)
+        finally:
+            os.chdir(old)
+    return projects, blobs
+missing_projects, missing_blobs = missing_side_projects()
+assert len(missing_projects) == 4
+
+
+# Runnable image fixture generator: real KiCad 10.0.0 exports, no CLI needed to regenerate.
+IMAGE_LAYER_EXPORTS = {'In2_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#CE7D2C; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n', 'F_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#C83434; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n', 'B_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#4D7FC4; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n', 'In1_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#7FC87F; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n'}
+
+def augment_front_svg(text, original):
+    ET.register_namespace('', 'http://www.w3.org/2000/svg')
+    root = ET.fromstring(text)
+    x,y,w,h = map(float, root.get('viewBox').split())
+    color = '#%02x%02x%02x' % tuple(original)
+    for left, width, paint in ((.1,.3,color),(.25,.3,color),(.7,.1,'#abcdef')):
+        ET.SubElement(root, '{http://www.w3.org/2000/svg}rect', {
+            'x':str(x+left*w),'y':str(y+.3*h),'width':str(width*w),'height':str(.4*h),
+            'fill':paint,'stroke':'none'})
+    return '\n'.join(line.rstrip() for line in ET.tostring(root, encoding='unicode').split('\n'))
+
+
+def augment_front_svg_regressions():
+    # Simulate an unrelated caller registering a different SVG prefix first.
+    with patch.dict(ET._namespace_map):
+        ET.register_namespace('ns_test', 'http://www.w3.org/2000/svg')
+        result = augment_front_svg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>', [1, 2, 3])
+        assert result.startswith('<svg xmlns='), result
+        assert len(ET.fromstring(result)) == 3
+    print('ok standalone augmented SVG namespace')
+
+augment_front_svg_regressions()
+
+
+def build_augmented_image_project(desc, blobs, settings, committed_svg):
+    out=pathlib.Path('review',kr.project_id(desc['dir']))
+    for side in ('base','head'):
+        for theme,folder in (('light','pcb'),('dark','pcb-dark')):
+            front_path=out/side/folder/(desc['name']+'-F_Cu.svg')
+            if not front_path.is_file(): continue
+            original=kr.IMAGE_PALETTES[theme]['sourceRGB']['F.Cu']
+            front_path.write_text(augment_front_svg(front_path.read_text(),original))
+            if side == 'head' and theme == 'light':
+                committed_svg.write_text(front_path.read_text())
+    return kr.build_project(desc,blobs,settings)
+
+
+def generate_image_fixture(missing_projects, missing_blobs, destination, committed_svg):
+    """Generate browser data into caller-owned paths through the real producer."""
+    order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text()
+    settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    for name in ('parts', 'threads', 'issues', 'inventory', 'libraries', '3d'):
+        settings[name]['enabled'] = False
+    settings['checks'] = {k: 'off' for k in settings['checks']}
+    old = os.getcwd()
+    image_blobs = dict(missing_blobs)
+    try:
+        with TemporaryDirectory() as directory:
+            os.chdir(directory)
+            desc = {'dir': 'images', 'name': 'Images', 'status': 'modified'}
+            out = pathlib.Path('review', kr.project_id(desc['dir']))
+            root = ('(kicad_sch (uuid root) (paper A4) ' +
+                    sheet('Left', 'shared.kicad_sch', 'left') +
+                    sheet('Right', 'shared.kicad_sch', 'right') + ')')
+            for side in ('base', 'head'):
+                x = 105 if side == 'base' else 107.54
+                shared = f'''(kicad_sch (uuid child) (paper A4)
+                  (lib_symbols (symbol "Test:Base"
+                    (symbol "Base_0_1" (rectangle (start -1 -1) (end 1 1)))
+                    (symbol "Base_2_1" (pin input line (at -5 0 0) (length 2)
+                      (name "B") (number "3"))))
+                    (symbol "Test:Op" (extends "Base")))
+                  (symbol (uuid placed) (lib_id "Test:Op") (unit 2) (at {x} 55 0)
+                    (property "Reference" "U?") (property "Value" "Op")
+                    (instances (project "Images"
+                      (path "/root/left" (reference "U1") (unit 2))
+                      (path "/root/right" (reference "U2") (unit 2))))))'''
+                write('.', {f'{side}/images/Images.kicad_sch': root,
+                            f'{side}/images/shared.kicad_sch': shared,
+                            f'{side}/images/Images.kicad_pcb': order_board,
+                            f'{out}/{side}/erc.json': '{"violations":[]}',
+                            f'{out}/{side}/drc.json': '{"violations":[],"unconnected_items":[]}'})
+                mapping = {}
+                for page in kr.sheet_pages(f'{side}/images', 'Images'):
+                    mapping[page['path']] = {}
+                    for theme, folder in (('light', 'sch'), ('dark', 'sch-dark')):
+                        color = '#009600' if theme == 'light' else '#00ff00'
+                        text = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 297 210">'
+                                f'<rect x="{x-1}" y="54" width="2" height="2" fill="none" stroke="{color}"/>'
+                                f'<path d="M{x-5} 55h2" stroke="{color}"/></svg>')
+                        rel = f'{folder}/{page["stem"]}.svg'
+                        write('.', {f'{out}/{side}/{rel}': text})
+                        mapping[page['path']][theme] = rel
+                write('.', {f'{out}/{side}/sheet-images.json': json.dumps(mapping)})
+                for layer, text in IMAGE_LAYER_EXPORTS.items():
+                    # Replace only the exported layer ink, keeping every real track.
+                    canonical = layer.replace('_', '.')
+                    colors = re.findall(r'stroke:(#[0-9A-Fa-f]{6}); stroke-width:2', text)
+                    assert colors
+                    for theme, folder in (('light', 'pcb'), ('dark', 'pcb-dark')):
+                        ink = '#%02x%02x%02x' % tuple(kr.IMAGE_PALETTES[theme]['sourceRGB'][canonical])
+                        themed = text.replace(colors[0], ink)
+                        write('.', {f'{out}/{side}/{folder}/Images-{layer}.svg': themed})
+            with patch.object(kr, 'sheet_pages', wraps=kr.sheet_pages) as parsed_pages:
+                image_project = build_augmented_image_project(desc, image_blobs, settings, committed_svg)
+            # Per revision: producer page cache, hotspot parser, and object parser.
+            # The three manifest views must not each trigger another hierarchy parse.
+            assert parsed_pages.call_count == 6, parsed_pages.call_args_list
+            for side in ('base', 'head'):
+                manifest = json.loads(gzip.decompress(base64.b64decode(image_blobs[image_project['sheets'][0]['hotspots'][side]])))
+                assert all(view['viewBox'] == [10, 20, 297, 210] for view in manifest['views'])
+                for path, ref in (('/left/', 'U1'), ('/right/', 'U2')):
+                    view = next(v for v in manifest['views'] if v['sheet'] == path)
+                    symbol = next(e for e in view['elements'] if e['ref'] == ref)
+                    assert symbol['unit'] == '2' and symbol['uuid'] == 'placed'
+                    pin = next(p for p in symbol['pins'] if p['number'] == '3')
+                    assert pin['name'] == 'B' and pin['y'] == 55
+                    assert abs(pin['x'] - (100 if side == 'base' else 102.54)) < .0001
+                assert json.loads((out / side / 'sheet-hotspots.json').read_text()) == manifest
+                assert (out / side / 'board-inspect.json').is_file()
+            # Sample points are source-viewBox fractions: single, overlap, custom paint.
+            augmented = ET.fromstring(committed_svg.read_text())
+            rects = list(augmented)[-3:]
+            vx, vy, vw, vh = map(float, augmented.get('viewBox').split())
+            for fx, expected in ((.15, 1), (.3, 2), (.75, 1)):
+                covering = [r for r in rects if float(r.get('x')) <= vx+fx*vw <= float(r.get('x'))+float(r.get('width'))
+                            and float(r.get('y')) <= vy+.5*vh <= float(r.get('y'))+float(r.get('height'))]
+                assert len(covering) == expected
+                assert all(r.get('opacity', '1') == '1' and r.get('fill') != 'none' for r in covering)
+                assert covering[-1].get('fill') == ('#abcdef' if fx == .75 else '#%02x%02x%02x' % tuple(kr.IMAGE_PALETTES['light']['sourceRGB']['F.Cu']))
+    finally:
+        os.chdir(old)
+    copper = {r['name'].replace('_', '.'): r for r in image_project['board']['layers']}
+    assert set(copper) == {'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'}
+    for layer in copper.values():
+        for side in ('base', 'head'):
+            assert '<svg' in gzip.decompress(base64.b64decode(image_blobs[layer['svg'][side]])).decode()
+    data = {'version': 1, 'repo': 'fixture/images', 'base': 'a'*40, 'head': 'b'*40,
+            'links': {}, 'run_url': '', 'reason': 'synthetic image regression', 'settings': settings,
+            'projects': [image_project, *missing_projects], 'blobs': image_blobs}
+    kr.assign_ids(data['projects'])
+    with TemporaryDirectory() as directory:
+        html = kr.finalize_report(data, directory)
+        assert not re.search(r'<(?:script[^>]+src|link[^>]+href)=', html)
+    destination.write_text('window.REVIEW_DATA = ' + json.dumps(data, separators=(',', ':')).replace('<', '\\u003c') + ';\n')
+    return image_project, image_blobs
+
+with TemporaryDirectory() as directory:
+    generated_data = pathlib.Path(directory, 'review-data-images.js')
+    generated_svg = pathlib.Path(directory, 'image-layer-overlap.svg')
+    image_project, image_blobs = generate_image_fixture(missing_projects, missing_blobs, generated_data, generated_svg)
+    for generated, committed in ((generated_data, pathlib.Path('ui/sample/review-data-images.js')),
+                                 (generated_svg, pathlib.Path('ui/fixtures/image-layer-overlap.svg'))):
+        # Updating fixtures is explicit; ordinary test runs only compare bytes.
+        if os.environ.get('REGENERATE_IMAGE_FIXTURES') == '1':
+            committed.write_bytes(generated.read_bytes())
+        assert committed.read_bytes() == generated.read_bytes(), f'{committed} drift; run REGENERATE_IMAGE_FIXTURES=1 python3 test_kicad_review.py'
+print('ok additive image finalization, missing sides, repeated-instance and four-layer fixtures')
+
+# Asset filenames and MIME kinds are never inferred from user-controlled names.
+for key, kind in (('../escape', 'svg'), ('a'*12, 'html'), ('A'*12, 'json')):
+    with TemporaryDirectory() as directory:
+        try:
+            kr.write_image_assets({}, {key: {'kind': kind, 'name': 'x'}}, directory)
+            raise AssertionError('invalid asset accepted')
+        except ValueError:
+            assert not list(pathlib.Path(directory).iterdir())
+print('ok image asset validation')
+
 # The command delegates finalization exactly once, before metadata drops offline blobs.
 old = os.getcwd()
 try:
@@ -4329,7 +4564,6 @@ try:
 finally:
     os.chdir(old)
 print('ok report command shares image finalization')
-
 
 def image_asset_contract_regressions():
     blobs = {}

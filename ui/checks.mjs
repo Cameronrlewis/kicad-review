@@ -44,6 +44,26 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ...['added-sheet','removed-sheet','added-board','removed-board'].map(name=>[
+  'images missing '+name, '', `
+  const index=D.projects.findIndex(p=>p.dir===${JSON.stringify(name)});
+  if(index<0)return 'missing producer project';
+  const P=D.projects[index], side=${JSON.stringify(name.startsWith('added')?'head':'base')};
+  const sheet=P.sheets[0], board=P.board, saved=board.inspect;
+  const maps=P.sheets.map(s=>s.hotspots);P.sheets.forEach(s=>delete s.hotspots);delete board.inspect;
+  try {
+    await applyState({...S,p:index,v:${JSON.stringify(name.endsWith('board')?'board':null)}||'sheet:'+sheet.path,m:'side'});
+    const images=[...document.querySelectorAll('#stage img[data-image-artwork]')];
+    if(!images.length||images.some(i=>i.dataset.side!==side||!i.complete||i.naturalWidth===0))return 'present revision did not decode';
+    if(images.some(i=>i.dataset.side!==side))return 'fabricated absent image';
+    const row=P.changes.find(r=>onView(r,S.v));if(!row)return 'no real legacy change';
+    const vp=images[0].closest('.vp'),box=rowBox(row,side),point=box?[(box[0]+box[2])/2,(box[1]+box[3])/2]:(side==='base'?row.pos_before||row.pos:row.pos);
+    if(!point||!hitTest([row],point[0],point[1],null,side))return 'present side not pickable';
+    if(S.imageSelection)return 'fabricated inspection selection';
+    return true;
+  } finally {P.sheets.forEach((s,i)=>{if(maps[i])s.hotspots=maps[i];});if(saved)board.inspect=saved;}
+`])
+,
   ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
     const id = '__sch6_palette_probe__';
     const source = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
