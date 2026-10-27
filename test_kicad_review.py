@@ -4191,22 +4191,38 @@ def br02_task2a_prepare_contract():
             assert 'P1: 3D processing unavailable:' in proc.stdout
             good_meta = pathlib.Path('review', kicad_review.project_id(p_good['dir']), 'head', 'board-3d-input.json')
             assert json.loads(good_meta.read_text())['finish'] == 'ENIG', 'BR02 later projects still run after malformed board'
-            # Malformed base board removes only base input; valid head input is still written.
+            # Malformed base board unlinks both sides' inputs; comparison keep set cannot be computed.
             p_base_bad = {'dir': 'badbase/P3', 'name': 'P3'}
             pathlib.Path('base/badbase/P3').mkdir(parents=True)
             pathlib.Path('base/badbase/P3/P3.kicad_pcb').write_text('(kicad_pcb (unbalanced')
             stale_base_meta = pathlib.Path('review', kicad_review.project_id(p_base_bad['dir']), 'base', 'board-3d-input.json')
             stale_base_meta.parent.mkdir(parents=True, exist_ok=True)
             stale_base_meta.write_text('{"stale": true}')
+            stale_head_meta = pathlib.Path('review', kicad_review.project_id(p_base_bad['dir']), 'head', 'board-3d-input.json')
+            stale_head_meta.parent.mkdir(parents=True, exist_ok=True)
+            stale_head_meta.write_text('{"stale": true}')
             pathlib.Path('head/badbase/P3').mkdir(parents=True)
             pathlib.Path('head/badbase/P3/P3.kicad_pcb').write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 kicad_review.prepare3d(p_base_bad)
             assert not stale_base_meta.exists(), 'BR02 malformed base unlinks base input'
+            assert not stale_head_meta.exists(), 'BR02 malformed base unlinks head input when comparison cannot be computed'
             assert 'P3: 3D processing unavailable:' in output.getvalue()
-            head_valid_meta = pathlib.Path('review', kicad_review.project_id(p_base_bad['dir']), 'head', 'board-3d-input.json')
-            assert head_valid_meta.exists() and json.loads(head_valid_meta.read_text())['finish'] == 'ENIG', \
-                'BR02 malformed base preserves valid head input'
+            # Per-side metadata failure: when both boards parse but one has invalid metadata, valid side is preserved.
+            p_side_bad = {'dir': 'badside/P4', 'name': 'P4'}
+            pathlib.Path('base/badside/P4').mkdir(parents=True)
+            pathlib.Path('base/badside/P4/P4.kicad_pcb').write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            pathlib.Path('head/badside/P4').mkdir(parents=True)
+            pathlib.Path('head/badside/P4/P4.kicad_pcb').write_text('''(kicad_pcb
+                (footprint "Test" (layer "F.Cu") (uuid "u1") (at 7 8) (property "Reference" "R1"))
+                (footprint "Test" (layer "B.Cu") (uuid "u2") (at 9 10) (property "Reference" "R1")))''')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kicad_review.prepare3d(p_side_bad)
+            base_p4_meta = pathlib.Path('review', kicad_review.project_id(p_side_bad['dir']), 'base', 'board-3d-input.json')
+            head_p4_meta = pathlib.Path('review', kicad_review.project_id(p_side_bad['dir']), 'head', 'board-3d-input.json')
+            assert base_p4_meta.exists() and json.loads(base_p4_meta.read_text())['finish'] == 'ENIG', 'BR02 valid base preserved'
+            assert not head_p4_meta.exists(), 'BR02 invalid head metadata unlinked'
+            assert 'P4: 3D processing unavailable: duplicate reference: R1' in output.getvalue()
         finally:
             os.chdir(old)
     print('ok BR02 prepare-3d failed export, stale absent/invalid sides and sanitized CLI output')

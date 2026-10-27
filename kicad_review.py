@@ -285,29 +285,19 @@ def prepare3d(p):
         if not path.is_file():
             # Never create the side folder here: build_project treats an existing folder as a present revision.
             targets[side].unlink(missing_ok=True)
-    objects = {}
-    for side, path in paths.items():
-        if not path.is_file():
-            objects[side] = {}
-            continue
-        try:
-            objects[side] = pcb_objects(path)
-        except Exception as error:
-            objects[side] = None
-            targets[side].unlink(missing_ok=True)
-            print(f"{p['name']}: 3D processing unavailable: {error}")
     try:
-        valid_objects = {s: o or {} for s, o in objects.items()}
-        keep = kept_refs(valid_objects["base"], valid_objects["head"])
-        missing = model3d_missing(str(out), valid_objects)
+        objects = {side: pcb_objects(path) if path.is_file() else {} for side, path in paths.items()}
+        keep = kept_refs(objects["base"], objects["head"])
+        missing = model3d_missing(str(out), objects)
     except Exception as error:
+        # A malformed board file prevents computing the comparison's shared keep set; both sides are unavailable.
         for target in targets.values():
             target.unlink(missing_ok=True)
         print(f"{p['name']}: 3D processing unavailable: {error}")
         return
     for side, path in paths.items():
         target = targets[side]
-        if not path.is_file() or objects[side] is None:
+        if not path.is_file():
             continue
         try:
             root = parse_sexpr(path.read_text(encoding="utf-8"))
