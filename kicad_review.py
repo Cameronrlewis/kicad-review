@@ -625,6 +625,61 @@ def box_of(pts, pad=0.5):
     return [min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad] if pts else None
 
 
+def symbol_primitives(libraries, identity, unit, style='1', trail=()):
+    """Drawing primitives of a library symbol for one unit and body style, with inherited (extends) bodies first."""
+    if identity in trail:
+        raise ValueError('symbol inheritance cycle: ' + ' -> '.join((*trail, identity)))
+    node = libraries[identity]
+    parent = val(node, 'extends')
+    out = symbol_primitives(libraries, parent, unit, style, (*trail, identity)) if parent else []
+    for child in findall(node, 'symbol'):
+        m = re.search(r'_(\d+)_(\d+)$', child[1])
+        if m and m[1] in ('0', str(unit)) and m[2] in ('0', str(style)):
+            out.extend(c for c in child[2:] if isinstance(c, list))
+    return out
+
+
+def symbol_geometry(parts):
+    """Conservative bounds (coords), pin records and an approximate flag for symbol primitives in millimetres."""
+    coords, pins, approximate = [], [], False
+    for n in parts:
+        kind = n[0]
+        if kind == 'rectangle':
+            a, b = find(n, 'start'), find(n, 'end')
+            coords.extend([[float(a[1]), float(a[2])], [float(b[1]), float(b[2])],
+                           [float(a[1]), float(b[2])], [float(b[1]), float(a[2])]])
+        elif kind in ('polyline', 'bezier'):
+            coords.extend([list(p) for p in points(n)])
+            approximate |= kind == 'bezier'  # conservative control-point hull
+        elif kind == 'circle':
+            c, r = find(n, 'center'), float(val(n, 'radius'))
+            coords.extend([[float(c[1]) + dx * r, float(c[2]) + dy * r] for dx in (-1, 1) for dy in (-1, 1)])
+        elif kind == 'arc':
+            a, m, b = [[float(v) for v in find(n, k)[1:3]] for k in ('start', 'mid', 'end')]
+            ax, ay = a
+            mx, my = m
+            bx, by = b
+            d = 2 * (ax * (my - by) + mx * (by - ay) + bx * (ay - my))
+            if abs(d) < 1e-12:
+                coords.extend([a, m, b])
+            else:
+                aa = ax * ax + ay * ay
+                mm = mx * mx + my * my
+                bb = bx * bx + by * by
+                cx = (aa * (my - by) + mm * (by - ay) + bb * (ay - my)) / d
+                cy = (aa * (bx - mx) + mm * (ax - bx) + bb * (mx - ax)) / d
+                r = math.hypot(ax - cx, ay - cy)
+                coords.extend([[cx + dx * r, cy + dy * r] for dx in (-1, 1) for dy in (-1, 1)])
+            approximate = True
+        elif kind == 'pin':
+            x, y, *angle = at(n)
+            theta = math.radians(angle[0] if angle else 0)
+            length = float(val(n, 'length', 0))
+            coords.extend([[x, y], [x + math.cos(theta) * length, y + math.sin(theta) * length]])
+            pins.append({'number': str(val(n, 'number', '')), 'name': str(val(n, 'name', '')), 'x': x, 'y': y})
+    return coords, pins, approximate
+
+
 def properties(node):
     return {p[1]: p[2] for p in findall(node, "property") if len(p) > 2}
 

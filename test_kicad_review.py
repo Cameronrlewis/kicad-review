@@ -3948,3 +3948,20 @@ print("ok per-commit project render cache hits retain both revisions")
 
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
+
+# Inherited symbol geometry: a derived symbol draws its base's shared body and selected unit only.
+libs = {
+    'Base': kr.parse_sexpr('(symbol "Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))) (symbol "Base_2_1" (pin input line (at -5 0 0) (length 2) (name "B") (number "3"))))'),
+    'Derived': kr.parse_sexpr('(symbol "Derived" (extends "Base") (symbol "Derived_1_1" (circle (center 0 0) (radius 9))))')}
+parts = kr.symbol_primitives(libs, 'Derived', '2')
+coords, pins, approximate = kr.symbol_geometry(parts)
+assert pins == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}], pins
+assert [-3.0, 0.0] in coords and [-2.0, -1.0] in coords
+assert not approximate and max(p[0] for p in coords) == 2
+libs['Base'].append(['extends', 'Derived'])
+try:
+    kr.symbol_primitives(libs, 'Derived', '2')
+    assert False, 'inheritance cycle must fail'
+except ValueError as error:
+    assert 'symbol inheritance cycle' in str(error)
+print('ok inherited symbol geometry')
