@@ -3780,7 +3780,7 @@ def test_br03_missing_multi_policy():
 
 def test_br03_unit_anchor_candidates():
     # Membership is REF.PIN, not unit-specific. These are candidate anchors, not proven pin positions.
-    # Task 8 must select the owning unit with its pin manifest; Task 2 must not pick the first unit.
+    # Without library ownership evidence, only the UI hotspot manifest can resolve these candidates.
     objects = {"/s/a": br03_object("U1", "1", "/s/"), "/s/b": br03_object("U1", "2", "/s/")}
     text = '''(export (nets (net (name N) (node (ref U1) (pin 1))
       (node (ref U1) (pin 1)) (node (ref U1) (pin 2)))))'''
@@ -4171,6 +4171,32 @@ def test_br03_pad_net_parser():
         assert kr.board_pads(p)["fp"][0]["geom"] == expected[0]["geom"]
 
 
+def test_br03_pad_metadata_fallback():
+    # Repeated-number pads without UUIDs need physical geometry to prove rewiring.
+    # Test each descriptive field independently: excluding only one is insufficient.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    base = br03_pcb("fp", [("p1", "1", 0, "GND"), ("p2", "1", 2, "A")])
+    base = base.replace('(uuid p1)', '').replace('(uuid p2)', '')
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td) / "b.kicad_pcb", pathlib.Path(td) / "h.kicad_pcb"
+        b.write_text(base)
+        base_objects, base_pads = kr.pcb_objects(b), kr.board_pads(b)
+        for metadata in ('(pinfunction "NEW")', '(pintype "output")',
+                         '(pinfunction "NEW") (pintype "output")'):
+            head = base.replace('(at 0 0) (size 1 1)', '(at 0 0) ' + metadata + ' (size 1 1)')
+            head = head.replace('(net "GND")', '(net "B")')
+            h.write_text(head)
+            head_pads = kr.board_pads(h)
+            assert head_pads["fp"][0]["geom"] == base_pads["fp"][0]["geom"], metadata
+            row, = kr.diff_board_pins(base_objects, kr.pcb_objects(h), base_pads, head_pads, {})
+            assert (row["detail"]["pin"], row["detail"]["before"], row["detail"]["after"]) == ("1", "GND", "B")
+            # Do not weaken the geometry requirement to make metadata-only changes pair.
+            h.write_text(head.replace('(size 1 1)', '(size 3 1)', 1))
+            assert kr.diff_board_pins(base_objects, kr.pcb_objects(h), base_pads, kr.board_pads(h), {}) == []
+
+
 def test_br03_object_pairs():
     import copy
     from kicad_review import object_pairs, diff_objects
@@ -4241,6 +4267,6 @@ def test_br03_board_parse_once():
 
 for test in (test_br03_wires, test_br03_wire_parser, test_br03_board_pins, test_br03_pad_pair_identity,
              test_br03_pad_net_parser, test_br03_object_pairs, test_br03_wire_rounding,
-             test_br03_pad_geometry_format, test_br03_board_parse_once):
+             test_br03_pad_geometry_format, test_br03_board_parse_once, test_br03_pad_metadata_fallback):
     test()
-print("ok BR03 physical pads and wires (9 tests)")
+print("ok BR03 physical pads and wires (10 tests)")

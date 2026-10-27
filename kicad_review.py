@@ -512,7 +512,8 @@ def lib_unit_pins(root):
     """Pin numbers per unit from a schematic's embedded lib_symbols: {lib name: {unit: {number}}}.
 
     Unit "0" holds the pins common to every unit. A symbol without an embedded
-    definition is absent, so callers treat its pin ownership as unknown.
+    definition is absent, so callers treat its pin ownership as unknown. This is
+    backend connectivity identity evidence, not a source of UI pin coordinates.
     """
     result = {}
     for lib in findall(find(root, "lib_symbols") or [], "symbol"):
@@ -2349,9 +2350,13 @@ def net_members(text, objects, commit):
 
     None marks an unknown net, distinct from an observed empty set. Comparers must
     suppress a net pair if either side is unknown, not treat it as added/removed.
-    Multi-unit anchors resolve to the owning unit when unit pin sets are known;
-    otherwise all units on the sheet remain candidate anchors for subsequent manifest
-    resolution in Task 8. Their positions are symbol, not pin, positions.
+    Embedded library pin sets narrow backend anchor candidates to owning units;
+    shared pins retain every owning unit. Without that evidence all units on the
+    sheet remain candidates, not proven owners. Positions here are symbol positions,
+    never pin coordinates. The UI independently resolves these candidates against
+    the per-revision hotspot manifest for pin selection (Task 8); this function
+    neither reads that manifest nor implements selection. Missing sheet identity
+    makes membership unknown rather than conflating distinct schematic instances.
 
     Per spec and plan prose, power symbols ('#' references) are skipped rather than
     fabricated into component pins. Per Open Question 4, missing or unannotated
