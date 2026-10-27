@@ -1718,6 +1718,7 @@ print("ok missing screenshots are explained")
 
 from kicad_review import cmd_pdf
 import types as _types, kicad_review as kr
+import contextlib as _contextlib, io as _io
 _cwd = os.getcwd()
 with tempfile.TemporaryDirectory() as d:
     os.chdir(d); os.makedirs("review/images")
@@ -1727,7 +1728,10 @@ with tempfile.TemporaryDirectory() as d:
     kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
     try:
         os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
-        cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        pdf_output = _io.StringIO()
+        with _contextlib.redirect_stdout(pdf_output):
+            cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        assert pdf_output.getvalue() == "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
     finally:
         kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
     assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
@@ -1775,9 +1779,12 @@ with tempfile.TemporaryDirectory() as d:
         os.makedirs("review")
         pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
+            expected_warning = "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
-                with patch("kicad_review.subprocess.run", side_effect=failure):
+                output = _io.StringIO()
+                with patch("kicad_review.subprocess.run", side_effect=failure), _contextlib.redirect_stdout(output):
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+                assert output.getvalue() == expected_warning, output.getvalue()
                 assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
     finally:
         os.chdir(old_cwd)
