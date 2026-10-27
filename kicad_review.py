@@ -1262,8 +1262,8 @@ def project_objects(proj_dir, name):
     return objs
 
 
-def diff_objects(base, head):
-    """Rows of added / removed / modified objects. UUID first; unmatched symbols and footprints by reference."""
+def object_pairs(base, head):
+    """UUID pairs first; unmatched objects pair by their match key (reference for footprints and symbols)."""
     pairs = [(k, k) for k in base if k in head]
     b_left = {k: o for k, o in base.items() if k not in head}
     h_left = {k: o for k, o in head.items() if k not in base}
@@ -1273,6 +1273,12 @@ def diff_objects(base, head):
         if hk in h_left:
             pairs.append((k, hk))
             del b_left[k], h_left[hk]
+    return pairs, b_left, h_left
+
+
+def diff_objects(base, head):
+    """Rows of added / removed / modified objects. UUID first; unmatched symbols and footprints by reference."""
+    pairs, b_left, h_left = object_pairs(base, head)
     rows = []
     for bk, hk in pairs:
         b, h = base[bk], head[hk]
@@ -2431,6 +2437,102 @@ def diff_nets(base, head):
         for n in hs:
             h.pop(n)
         edges = {(bn, hn) for bn, hn in edges if bn in b and hn in h}
+    return rows
+
+
+def wire_counts(objects):
+    """Multiset of schematic wire segments, per sheet; endpoints sorted and rounded to 0.001 mm."""
+    result = Counter()
+    for o in objects.values():
+        if o["kind"] != "wire":
+            continue
+        values = [float(x) for x in re.findall(r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", o["props"]["points"])]
+        pts = [tuple(round(x, 3) + 0.0 for x in values[i:i + 2]) for i in range(0, len(values), 2)]
+        for a, b in zip(pts, pts[1:]):
+            result[(o["where"]["sheet"], *sorted((a, b)))] += 1
+    return result
+
+
+def diff_wires(base, head):
+    b, h = wire_counts(base), wire_counts(head)
+    drawn, erased = sum((h - b).values()), sum((b - h).values())
+    return [electrical_row("wires", "Wires drawn / erased", weight="medium",
+                           detail={"kind": "wires", "drawn": drawn, "erased": erased})] if drawn or erased else []
+
+
+def board_pads(path):
+    """Physical pads per footprint UUID: UUID, number and local geometry from the PCB, net from the semantic parser."""
+    if not pathlib.Path(path).is_file():
+        return {}
+    root = parse_sexpr(pathlib.Path(path).read_text(encoding="utf-8"))
+    objects = pcb_objects(path)
+    result = {}
+    for fp in findall(root, "footprint"):
+        uid = val(fp, "uuid") or val(fp, "tstamp")
+        if uid not in objects:
+            continue
+        pads = findall(fp, "pad")
+        counts, seen = Counter(p[1] for p in pads), Counter()
+        result[uid] = []
+        for p in pads:
+            number = p[1]
+            seen[number] += 1
+            suffix = "#" + str(seen[number]) if counts[number] > 1 else ""
+            geom = [x for x in p[1:] if not (isinstance(x, list) and x and x[0] in ("net", "uuid", "tstamp"))]
+            result[uid].append({"uuid": val(p, "uuid") or val(p, "tstamp"), "number": number,
+                                "geom": repr(geom),
+                                "net": objects[uid]["props"].get("pad " + number + suffix + " net") or ""})
+    return result
+
+
+def pad_pairs(base, head, replaced=False):
+    """Pair physical pads by UUID, then by unique number plus geometry; repeated numbers never pair by number alone."""
+    pairs, b, h = [], list(base), list(head)
+
+    def take(predicate):
+        for x in list(b):
+            matches = [y for y in h if predicate(x, y)]
+            if len(matches) != 1:
+                continue
+            y = matches[0]
+            if sum(predicate(z, y) for z in b) != 1:
+                continue
+            pairs.append((x, y))
+            b.remove(x)
+            h.remove(y)
+
+    take(lambda x, y: bool(x["uuid"]) and x["uuid"] == y["uuid"])
+    # ponytail: no heuristic pairing of duplicate-number pads after geometry/UUID loss.
+    compatible = lambda x, y: not (x["uuid"] and y["uuid"] and x["uuid"] != y["uuid"])
+    take(lambda x, y: (compatible(x, y) or replaced) and (x["number"], x["geom"]) == (y["number"], y["geom"]))
+    # ponytail: replacement fallback stops at unique number-plus-geometry evidence; never use number alone for repeated pads.
+    take(lambda x, y: (compatible(x, y) or replaced) and x["number"] == y["number"] and
+         sum(p["number"] == x["number"] for p in base) == 1 and
+         sum(p["number"] == y["number"] for p in head) == 1)
+    return pairs
+
+
+def diff_board_pins(base, head, base_pads, head_pads, commits):
+    """Rows for matched footprints whose physical pad net changed. Added or removed pads are not connectivity claims."""
+    rows = []
+    for bk, hk in object_pairs(base, head)[0]:
+        b, h = base[bk], head[hk]
+        if b["kind"] != "footprint" or h["kind"] != "footprint":
+            continue
+        for bp, hp in pad_pairs(base_pads.get(bk, []), head_pads.get(hk, []), replaced=bk != hk):
+            if bp["net"] == hp["net"]:
+                continue
+            r = electrical_row("board-pad-net", h["ref"] + "." + hp["number"],
+                               detail={"kind": "pad-net", "pin": hp["number"], "before": bp["net"],
+                                       "after": hp["net"], "boardOnly": True},
+                               where={"board": True})
+            r.update(document="board", pos=h.get("pos"), box=h.get("box"))
+            # Derived row does not own scene changeIds. Keep each revision identity separately.
+            for side, uid, o, pad in (("base", bk, b, bp), ("head", hk, h, hp)):
+                r["anchors"][side] = [{"uuid": uid, "padUuid": pad["uuid"], "ref": o["ref"],
+                                       "pin": pad["number"], "pos": o.get("pos"),
+                                       "commit": commits.get(side), "board": True}]
+            rows.append(r)
     return rows
 
 

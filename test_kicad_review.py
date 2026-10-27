@@ -3896,3 +3896,166 @@ def test_br03_net_determinism():
 for test in (test_br03_net_graph, test_br03_net_rows, test_br03_net_unknown_pair, test_br03_net_determinism):
     test()
 print("ok BR03 net graph regressions (4 tests)")
+
+# BR03: wire multisets and physical board-pad connectivity, through the real parsers.
+def br03_pcb(fp, pads):
+    return ('(kicad_pcb (footprint "x" (uuid '+fp+') (property "Reference" "D1") '
+            '(at 0 0) '+''.join('(pad "'+n+'" smd rect (uuid '+u+') (at '+str(x)+' 0) '
+            '(size 1 1) (layers "F.Cu")'+ (' (net "'+net+'")' if net else '')+')'
+            for u,n,x,net in pads)+'))')
+
+
+def test_br03_wires():
+    from kicad_review import diff_wires, wire_counts
+    wire = lambda pts, sheet="/": {"kind":"wire", "where":{"sheet":sheet}, "props":{"points":pts}}
+    r, = diff_wires({"a":wire("(0, 0) (1, 0)"), "b":wire("(1, 0) (0, 0)")},
+                   {"c":wire("(1.0004, 0) (0, 0)")})
+    assert r["detail"] == {"kind":"wires", "drawn":0, "erased":1}
+    assert (r["kind"], r["ref"], r["weight"], r["channel"]) == (
+        "wires", "Wires drawn / erased", "medium", "wiring")
+    assert diff_wires({}, {}) == []
+    assert diff_wires({"a":wire("(-0.0004, -2e-4) (+1e0, 2)")},
+                      {"b":wire("(1, 2) (0, 0)")}) == []
+    assert wire_counts({"a":wire("(0, 0) (1, 0) (2, 0)")}) == wire_counts(
+        {"b":wire("(1, 0) (0, 0)"), "c":wire("(2, 0) (1, 0)")})
+    r, = diff_wires({"a":wire("(0, 0) (2, 0)")},
+                   {"b":wire("(0, 0) (1, 0)"), "c":wire("(1, 0) (2, 0)")})
+    assert r["detail"] == {"kind":"wires", "drawn":2, "erased":1}
+    r, = diff_wires({"a":wire("(0, 0) (1, 0)", "/a/")},
+                   {"b":wire("(0, 0) (1, 0)", "/b/")})
+    assert r["detail"] == {"kind":"wires", "drawn":1, "erased":1}
+    assert wire_counts({"ignored":{"kind":"bus"}}) == {}
+
+
+def test_br03_wire_parser():
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        sch = pathlib.Path(td) / "test.kicad_sch"
+        sch.write_text('''(kicad_sch (uuid root)
+          (wire (pts (xy 0 0) (xy 2 0)) (uuid original)))''')
+        base = kr.sch_objects(td, "test")
+        sch.write_text('''(kicad_sch (uuid root)
+          (wire (pts (xy 0 0) (xy 1 0)) (uuid first))
+          (wire (pts (xy 2 0) (xy 1 0)) (uuid second))
+          (junction (at 1 0) (uuid joint))
+          (bus (pts (xy 0 0) (xy 3 0)) (uuid ignored)))''')
+        r, = kr.diff_wires(base, kr.sch_objects(td, "test"))
+        assert r["detail"] == {"kind":"wires", "drawn":2, "erased":1}
+
+
+def test_br03_board_pins():
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    from kicad_review import diff_board_pins, board_pads
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td)/"b.kicad_pcb", pathlib.Path(td)/"h.kicad_pcb"
+        def compare(bp, hp, bfp="fp", hfp="fp"):
+            b.write_text(br03_pcb(bfp, bp)); h.write_text(br03_pcb(hfp, hp))
+            return diff_board_pins(kr.pcb_objects(b), kr.pcb_objects(h), board_pads(b), board_pads(h),
+                                   {"base":"b"*40, "head":"h"*40})
+        rows = compare([("c","C",0,"12")], [("c","C",0,"GND")], "old-fp", "new-fp")
+        assert [(r["detail"]["before"],r["detail"]["after"]) for r in rows] == [("12","GND")]
+        r, = rows
+        assert r["anchors"]["base"][0]["uuid"] == "old-fp"
+        assert r["anchors"]["head"][0]["uuid"] == "new-fp"
+        assert (r["kind"],r["ref"],r["weight"],r["channel"],r["document"]) == (
+            "board-pad-net","D1.C","heavy","wiring","board")
+        assert r["detail"] == {"kind":"pad-net","pin":"C","before":"12","after":"GND","boardOnly":True}
+        assert r["where"] == {"board":True} and r["pos"] == [0,0] and r["box"] is not None
+        assert "uuid" not in r and "uuid_before" not in r  # derived rows do not own scene changeIds
+        for side, uid, commit in (("base","old-fp","b"*40), ("head","new-fp","h"*40)):
+            assert r["anchors"][side] == [{"uuid":uid,"padUuid":"c","ref":"D1","pin":"C",
+                                           "pos":[0,0],"commit":commit,"board":True}]
+        assert compare([("c","C",0,"GND")],[("c","C",0,"")],"old","new")[0]["detail"]["after"] == ""
+        assert compare([("c","C",0,"")],[("c","C",0,"12")])[0]["detail"]["before"] == ""
+        assert compare([("old-pad","C",0,"GND")],[("new-pad","C",0,"12")],"old","new")[0]["detail"]["after"] == "12"
+        # Renewed pad identity on the same footprint is replacement geometry, not proven rewiring.
+        assert compare([("old-pad","C",0,"GND")],[("new-pad","C",0,"12")]) == []
+        two = [("p1","1",0,"GND"),("p2","1",2,"A")]
+        one = [("p1","1",0,"GND")]
+        assert compare(two,one) == [] and compare(one,two) == []
+        changed = [("p1","1",0,"B")]
+        assert len(compare(two,changed)) == 1
+        # The repeated pad's occurrence index may change; its UUID must win.
+        assert compare(two,list(reversed(two))) == []
+        assert len(compare(two,[("p2","1",2,"B"),("p1","1",0,"GND")])) == 1
+        # Explicit fallback: absent UUIDs, unique same-number/local-geometry match; no net-based pairing.
+        b.write_text(br03_pcb("fp",two).replace('(uuid p1)','').replace('(uuid p2)',''))
+        h.write_text(br03_pcb("fp",one).replace('(uuid p1)',''))
+        assert diff_board_pins(kr.pcb_objects(b),kr.pcb_objects(h),board_pads(b),board_pads(h),{}) == []
+        # Removing/adding a physical footprint never invents disconnections/connections.
+        assert diff_board_pins(kr.pcb_objects(b),{},board_pads(b),{},{}) == []
+        assert diff_board_pins({},kr.pcb_objects(h),{},board_pads(h),{}) == []
+        assert board_pads(pathlib.Path(td)/"missing.kicad_pcb") == {}
+
+
+def test_br03_pad_pair_identity():
+    import copy
+    from kicad_review import pad_pairs
+    pad = lambda uid, number, geom, net: {"uuid":uid,"number":number,"geom":geom,"net":net}
+    a, b = pad("a","1","x","A"), pad("b","1","y","B")
+    # UUID survives geometry edits; even identical nets cannot identify a lost duplicate-number pad.
+    h = [pad("b","1","changed","A"),pad("a","1","changed","B")]
+    original = copy.deepcopy(([a,b],h))
+    assert pad_pairs([a,b],h) == [(a,h[1]),(b,h[0])]
+    assert ([a,b],h) == original
+    assert pad_pairs([a,b],[pad("c","1","z","A")],replaced=True) == []
+    assert pad_pairs([a,b],[pad("c","1","y","A")],replaced=True) == [(b,pad("c","1","y","A"))]
+    # No pairing when either side has indistinguishable physical candidates.
+    repeated = [pad("","1","x","A"),pad("","1","x","B")]
+    assert pad_pairs(repeated,[pad("","1","x","A")]) == []
+    assert pad_pairs([pad("","1","x","A")],repeated) == []
+    assert pad_pairs([a],[pad("c","1","x","B")]) == []
+    assert pad_pairs([a],[pad("c","1","changed","B")],replaced=True) == [(a,pad("c","1","changed","B"))]
+
+
+def test_br03_pad_net_parser():
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td)/"board.kicad_pcb"
+        modern = br03_pcb("fp",[("c","C",0,"12"),("g","1",2,"GND"),("u","1",4,"")])
+        old = modern.replace('(kicad_pcb ', '(kicad_pcb (net 12 "GND") (net 13 "12") ', 1).replace(
+            '(net "12")','(net 13)').replace('(net "GND")','(net 12 "GND")')
+        expected = None
+        for text in (modern,old):
+            p.write_text(text)
+            pads = kr.board_pads(p)["fp"]
+            assert [(v["uuid"],v["number"],v["net"]) for v in pads] == [
+                ("c","C","12"),("g","1","GND"),("u","1","")]
+            if expected is None: expected = pads
+            else: assert pads == expected
+            props = kr.pcb_objects(p)["fp"]["props"]
+            assert props["pad C net"] == "12" and props["pad 1#1 net"] == "GND"
+            assert "pad 1#2 net" not in props
+            scene = kr.board_geometry(p)
+            nets = {v["id"]:v["name"] for v in scene["nets"]}
+            assert {o["uuid"]:nets[o["net"]] for o in scene["objects"] if o["kind"] == "pad"} == {
+                "c":"12","g":"GND","u":""}
+        # Legacy tstamp identity remains available for both footprints and physical pads.
+        p.write_text(modern.replace("(uuid ","(tstamp "))
+        assert kr.board_pads(p)["fp"] == expected
+
+
+def test_br03_object_pairs():
+    import copy
+    from kicad_review import object_pairs, diff_objects
+    obj = lambda ref: {"kind":"footprint","ref":ref,"match":("footprint",ref),"props":{},"where":{"board":True}}
+    base = {"same":obj("D1"),"old":obj("D2"),"gone":obj("D3")}
+    head = {"same":obj("D9"),"new":obj("D2"),"added":obj("D4")}
+    original = copy.deepcopy((base,head))
+    pairs,b_left,h_left = object_pairs(base,head)
+    assert pairs == [("same","same"),("old","new")]
+    assert b_left == {"gone":base["gone"]} and h_left == {"added":head["added"]}
+    assert [(r["action"],r["ref"]) for r in diff_objects(base,head)] == [("removed","D3"),("added","D4")]
+    assert (base,head) == original
+
+
+for test in (test_br03_wires, test_br03_wire_parser, test_br03_board_pins, test_br03_pad_pair_identity,
+             test_br03_pad_net_parser, test_br03_object_pairs):
+    test()
+print("ok BR03 physical pads and wires (6 tests)")
