@@ -1036,6 +1036,63 @@ finally:
     kicad_review.subprocess.run = real_run
 print("ok TS-S2 release zip and CSV contents")
 
+# BR02: synthetic populated four-layer board for 3D export/index regression probes.
+fixture = pathlib.Path('ui/fixtures/3d-four-layer.kicad_pcb')
+assert fixture.is_file(), 'BR02 four-layer 3D fixture missing'
+fixture_text = fixture.read_text(encoding='utf-8')
+root = kicad_review.parse_sexpr(fixture_text)
+assert all(name in fixture_text for name in ('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'))
+outline = kicad_review.findall(root, 'gr_line')
+assert len(outline) == 4, 'BR02 closed rectangular outline'
+assert [(kicad_review.find(n, 'start')[1:], kicad_review.find(n, 'end')[1:]) for n in outline] == [
+    (['0', '0'], ['20', '0']), (['20', '0'], ['20', '20']),
+    (['20', '20'], ['0', '20']), (['0', '20'], ['0', '0'])], 'BR02 20 mm closed outline'
+assert all(kicad_review.find(n, 'layer')[1] == 'Edge.Cuts' for n in outline)
+# KiCad 10 uses layer-table order for outer-side model placement. The separate
+# vf-order-4 fixture deliberately remains scrambled for layer-order regression.
+assert [n[1] for n in kicad_review.find(root, 'layers')[1:] if n[1].endswith('.Cu')] == [
+    'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'], 'BR02 physical copper layer table'
+stackup = kicad_review.find(kicad_review.find(root, 'setup'), 'stackup')
+assert [n[1] for n in kicad_review.findall(stackup, 'layer') if n[1].endswith('.Cu')] == [
+    'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'], 'BR02 physical stack order'
+assert kicad_review.find(stackup, 'copper_finish') == ['copper_finish', 'ENIG']
+footprints = {o['ref']: o for o in kicad_review.pcb_objects(str(fixture)).values() if o['kind'] == 'footprint'}
+assert set(footprints) == {'R1', 'R2', 'J1', 'U3', 'U4', 'LOGO1'}
+for ref, (pos, layer, model) in {
+    'R1': ([5, 5], 'F.Cu', True), 'R2': ([15, 5], 'F.Cu', True),
+    'J1': ([10, 15, 90], 'B.Cu', True), 'U3': ([15, 15], 'F.Cu', False),
+    'U4': ([5, 15], 'B.Cu', False), 'LOGO1': ([10, 10], 'F.Cu', False),
+}.items():
+    obj = footprints[ref]
+    assert obj['pos'] == pos and obj['props']['layer'] == layer and obj['has_model'] == model, ref
+logo = footprints['LOGO1']
+assert logo['box'] is None and all(isinstance(v, (int, float)) for v in logo['pos'][:2]), 'BR02 padless raw footprint'
+nodes = kicad_review.findall(root, 'footprint')
+by_ref = {next(p[2] for p in kicad_review.findall(n, 'property') if p[1] == 'Reference'): n for n in nodes}
+assert kicad_review.findall(by_ref['LOGO1'], 'fp_rect') and not kicad_review.findall(by_ref['LOGO1'], 'pad')
+# Flipping the stock header to B.Cu mirrors local Y; pin 2 must still align
+# with its installed model after the footprint's 90-degree board rotation.
+j1_pad2 = next(p for p in kicad_review.findall(by_ref['J1'], 'pad') if p[1] == '2')
+assert kicad_review.find(j1_pad2, 'at')[1:] == ['0', '-2.54', '90'], 'BR02 bottom header pad/model alignment'
+assert all(any(layer in kicad_review.find(p, 'layers')[1:] or '*.Cu' in kicad_review.find(p, 'layers')[1:]
+               for n in nodes for p in kicad_review.findall(n, 'pad'))
+           for layer in ('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu')), 'BR02 pads on every copper layer'
+assert {kicad_review.find(n, 'layer')[1] for n in kicad_review.findall(root, 'segment')} == {
+    'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'}, 'BR02 visible copper on every layer'
+models = [m[1] for n in nodes for m in kicad_review.findall(n, 'model')]
+assert len(models) == 3 and all(m.startswith('${KICAD10_3DMODEL_DIR}/') for m in models), 'BR02 portable installed models'
+import uuid as uuid_module
+def fixture_uuids(node):
+    for child in node:
+        if isinstance(child, list):
+            if child and child[0] == 'uuid':
+                yield child[1]
+            else:
+                yield from fixture_uuids(child)
+uuids = list(fixture_uuids(root))
+assert len(uuids) == len(set(uuids)) and all(str(uuid_module.UUID(u)) == u for u in uuids), 'BR02 unique valid identities'
+print('ok BR02 synthetic four-layer 3D fixture')
+
 # TS-S1: CI exercises default, real 3D and unchanged two-project pages without extra installs.
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
