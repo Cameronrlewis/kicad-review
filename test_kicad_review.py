@@ -57,6 +57,31 @@ assert out.find('.//s:circle', ns).get('r') == '1'
 assert out.findall('.//s:g', ns)[0].get('stroke') == '#abcdef'
 assert out.findall('.//s:g', ns)[1].get('style') == 'fill:#123456'
 assert kr.simplify_sheet_svg(kr.simplify_sheet_svg(svg)) == kr.simplify_sheet_svg(svg)
+
+# Separate translucent strokes composite twice at overlaps; a compound path paints once.
+plain_pair = '<path d="M0 0 L10 0"/><path d="M0 0 L10 0"/>'
+for paint in ('stroke="red" stroke-opacity="0.5"',
+              'style="stroke:red;stroke-opacity:50%"',
+              'stroke="rgba(255,0,0,0.5)"', 'stroke="#ff000080"',
+              'stroke="currentColor"', 'stroke="url(#paint)"',
+              'stroke="red" opacity="0.5"', 'stroke="red" filter="url(#blur)"',
+              'stroke="red" mask="url(#mask)"', 'stroke="red" marker-end="url(#arrow)"',
+              'style="stroke:red;mix-blend-mode:multiply"',
+              'style="stroke:red;/* inherited alpha */stroke-opacity:.5"',
+              'stroke="red" stroke-dasharray="1 2"'):
+    unsafe = f'<svg xmlns="{ns["s"]}" fill="none"><g {paint}><g>{plain_pair}</g></g></svg>'
+    optimized = ET.fromstring(kr.simplify_sheet_svg(unsafe))
+    assert len(optimized.findall('.//s:path', ns)) == 2, paint
+    assert [p.get('d') for p in optimized.findall('.//s:path', ns)] == ['M0 0 L10 0'] * 2
+    assert kr.simplify_sheet_svg(kr.simplify_sheet_svg(unsafe)) == kr.simplify_sheet_svg(unsafe)
+# CSS may target otherwise plain paths; do not infer paint from presentation attributes alone.
+css_svg = f'<svg xmlns="{ns["s"]}"><style>path {{ stroke-opacity: .5 }}</style><g fill="none" stroke="red">{plain_pair}</g></svg>'
+assert len(ET.fromstring(kr.simplify_sheet_svg(css_svg)).findall('.//s:path', ns)) == 2
+animated_svg = f'<svg xmlns="{ns["s"]}"><g fill="none" stroke="red">{plain_pair}<animate attributeName="stroke-opacity" values="1;.5" dur="1s"/></g></svg>'
+assert len(ET.fromstring(kr.simplify_sheet_svg(animated_svg)).findall('.//s:path', ns)) == 2
+opaque_svg = f'<svg xmlns="{ns["s"]}" fill="none" stroke="#ff0000" stroke-opacity="1.0000"><g>{plain_pair}</g></svg>'
+assert len(ET.fromstring(kr.simplify_sheet_svg(opaque_svg)).findall('.//s:path', ns)) == 1
+print('ok image export inherited compositing safety')
 assert kr.IMAGE_EXPORT_OPTIONS == {'page_size_mode': '1', 'drill_shape_opt': '0',
                                    'check_zones': True, 'themes': ['light', 'dark']}
 print('ok image export contracts')
@@ -1768,7 +1793,9 @@ with tempfile.TemporaryDirectory() as d:
     kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
     try:
         os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
-        cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        with patch('sys.stdout', new_callable=io.StringIO) as warnings:
+            cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        assert warnings.getvalue() == '::warning::PDF report failed: Chrome unavailable, failed or timed out\n'
     finally:
         kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
     assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
@@ -1817,8 +1844,9 @@ with tempfile.TemporaryDirectory() as d:
         pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
-                with patch("kicad_review.subprocess.run", side_effect=failure):
+                with patch("kicad_review.subprocess.run", side_effect=failure), patch('sys.stdout', new_callable=io.StringIO) as warnings:
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+                assert warnings.getvalue() == '::warning::PDF report failed: Chrome unavailable, failed or timed out\n'
                 assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
     finally:
         os.chdir(old_cwd)

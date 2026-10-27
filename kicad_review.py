@@ -196,15 +196,37 @@ def simplify_sheet_svg(text):
     import xml.etree.ElementTree as ET
     root = ET.fromstring(text)
 
-    def walk(group, unfilled=False):
+    # Only optimize self-contained presentation paint. CSS, paint servers, alpha,
+    # markers and effects can make one compound path differ from separate strokes.
+    dynamic_paint = ('<?xml-stylesheet' in text or any(
+        node.tag.rsplit('}', 1)[-1] in {'style', 'link', 'animate', 'animateTransform', 'set'}
+        for node in root.iter()))
+    paint_attrs = {'fill', 'fill-opacity', 'stroke', 'stroke-opacity', 'stroke-width',
+                   'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit'}
+    container_attrs = {'style', 'transform', 'version', 'width', 'height', 'viewBox'}
+
+    def walk(group, unfilled=False, safe=True):
         style = dict(re.findall(r'(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)', group.get('style', '')))
         fill = style.get('fill', group.get('fill'))
         if fill is not None:
             unfilled = fill.strip() == 'none'
+        paint = {**group.attrib, **style}
+        safe = (safe and not dynamic_paint
+                and all(re.fullmatch(r'\s*[\w-]+\s*:\s*[^;]+', declaration)
+                        for declaration in group.get('style', '').split(';') if declaration.strip())
+                and set(group.attrib) <= paint_attrs | container_attrs
+                and set(style) <= paint_attrs)
+        if 'stroke-opacity' in paint:
+            safe = safe and bool(re.fullmatch(r'(?:1(?:\.0*)?|100(?:\.0*)?%)', paint['stroke-opacity'].strip()))
+        if 'stroke' in paint:
+            stroke = paint['stroke'].strip().lower()
+            safe = safe and bool(re.fullmatch(
+                r'#[0-9a-f]{3}(?:[0-9a-f]{3})?|rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)'
+                r'|none|black|white|red|green|blue', stroke))
         run = None
         for child in list(group):
             tag = child.tag.rsplit('}', 1)[-1]
-            if unfilled and tag == 'path' and set(child.attrib) == {'d'} and re.match(r'\s*M', child.get('d', '')):
+            if safe and unfilled and tag == 'path' and set(child.attrib) == {'d'} and re.match(r'\s*M', child.get('d', '')):
                 if run is None:
                     run = child
                 else:
@@ -213,7 +235,7 @@ def simplify_sheet_svg(text):
             elif tag != 'desc':
                 run = None
                 if tag == 'g':
-                    walk(child, unfilled)
+                    walk(child, unfilled, safe)
 
     walk(root)
     ET.register_namespace('', 'http://www.w3.org/2000/svg')
