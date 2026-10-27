@@ -81,6 +81,8 @@ animated_svg = f'<svg xmlns="{ns["s"]}"><g fill="none" stroke="red">{plain_pair}
 assert len(ET.fromstring(kr.simplify_sheet_svg(animated_svg)).findall('.//s:path', ns)) == 2
 opaque_svg = f'<svg xmlns="{ns["s"]}" fill="none" stroke="#ff0000" stroke-opacity="1.0000"><g>{plain_pair}</g></svg>'
 assert len(ET.fromstring(kr.simplify_sheet_svg(opaque_svg)).findall('.//s:path', ns)) == 1
+stroked_text_svg = f'<svg xmlns="{ns["s"]}" fill="none" stroke="#840000" stroke-opacity="1"><g class="stroked-text"><desc>1</desc>{plain_pair}</g><g class="custom">{plain_pair}</g></svg>'
+assert [len(g.findall('s:path', ns)) for g in ET.fromstring(kr.simplify_sheet_svg(stroked_text_svg)).findall('s:g', ns)] == [1, 2]
 print('ok image export inherited compositing safety')
 assert kr.IMAGE_EXPORT_OPTIONS == {'page_size_mode': '1', 'drill_shape_opt': '0',
                                    'check_zones': True, 'themes': ['light', 'dark']}

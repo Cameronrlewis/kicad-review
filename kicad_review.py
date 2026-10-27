@@ -203,7 +203,7 @@ def simplify_sheet_svg(text):
         for node in root.iter()))
     paint_attrs = {'fill', 'fill-opacity', 'stroke', 'stroke-opacity', 'stroke-width',
                    'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit'}
-    container_attrs = {'style', 'transform', 'version', 'width', 'height', 'viewBox'}
+    container_attrs = {'class', 'style', 'transform', 'version', 'width', 'height', 'viewBox'}
 
     def walk(group, unfilled=False, safe=True):
         style = dict(re.findall(r'(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)', group.get('style', '')))
@@ -212,6 +212,7 @@ def simplify_sheet_svg(text):
             unfilled = fill.strip() == 'none'
         paint = {**group.attrib, **style}
         safe = (safe and not dynamic_paint
+                and group.get('class') in (None, 'stroked-text')
                 and all(re.fullmatch(r'\s*[\w-]+\s*:\s*[^;]+', declaration)
                         for declaration in group.get('style', '').split(';') if declaration.strip())
                 and set(group.attrib) <= paint_attrs | container_attrs
