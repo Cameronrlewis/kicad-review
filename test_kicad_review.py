@@ -4102,6 +4102,15 @@ def br02_task2a_metadata_contract():
             assert False, 'BR02 missing finite fallback position must fail metadata'
         except ValueError as error:
             assert 'finite position' in str(error)
+    valid_box = [4, 4, 6, 6]
+    for bad_pos in (None, [], [5], [float('nan'), 5], [5, float('nan')], [float('inf'), 5]):
+        try:
+            kicad_review.metadata3d('head', {'r1': {'kind':'footprint', 'ref':'R1', 'has_model':True,
+                                                    'props':{'layer':'F.Cu'}, 'box':valid_box, 'pos':bad_pos}},
+                                    [], '', [])
+            assert False, f'BR02 finite box with invalid pos {bad_pos} must fail metadata'
+        except ValueError as error:
+            assert 'finite position' in str(error)
     both = [{'ref':'R1','side':'both','reason':'file not found'}]
     assert not kicad_review.metadata3d('head',base,[], '', both)['footprints'][1]['hasModel']
     print('ok BR02 metadata rename/delete, UUID fallback, bottom models, finite estimates and duplicate rejection')
@@ -4154,6 +4163,26 @@ def br02_task2a_prepare_contract():
             target = pathlib.Path('review', kicad_review.project_id(project['dir']), 'head', 'board-3d-input.json')
             assert json.loads(target.read_text()) == {
                 'version':1, 'side':'head', 'keep':[], 'finish':'ENEPIG', 'footprints':[]}
+            # Malformed board leaves no stale input and later projects still run.
+            p_bad = {'dir': 'bad/P1', 'name': 'P1'}
+            p_good = {'dir': 'good/P2', 'name': 'P2'}
+            pathlib.Path('review/detect.json').write_text(json.dumps({'projects': [p_bad, p_good]}))
+            bad_pcb = pathlib.Path('head/bad/P1/P1.kicad_pcb')
+            bad_pcb.parent.mkdir(parents=True)
+            bad_pcb.write_text('(kicad_pcb (unbalanced')
+            stale_bad_meta = pathlib.Path('review', kicad_review.project_id(p_bad['dir']), 'head', 'board-3d-input.json')
+            stale_bad_meta.parent.mkdir(parents=True, exist_ok=True)
+            stale_bad_meta.write_text('{"stale": true}')
+            good_pcb = pathlib.Path('head/good/P2/P2.kicad_pcb')
+            good_pcb.parent.mkdir(parents=True)
+            good_pcb.write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            proc = subprocess.run([sys.executable, str(pathlib.Path(kicad_review.__file__).resolve()),
+                                   'prepare-3d'], capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr
+            assert not stale_bad_meta.exists(), 'BR02 malformed board leaves no stale input'
+            assert 'P1: 3D processing unavailable:' in proc.stdout
+            good_meta = pathlib.Path('review', kicad_review.project_id(p_good['dir']), 'head', 'board-3d-input.json')
+            assert json.loads(good_meta.read_text())['finish'] == 'ENIG', 'BR02 later projects still run after malformed board'
         finally:
             os.chdir(old)
     print('ok BR02 prepare-3d failed export, stale absent/invalid sides and sanitized CLI output')

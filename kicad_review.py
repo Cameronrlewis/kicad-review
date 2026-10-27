@@ -260,48 +260,59 @@ def metadata3d(side, objects, keep, finish, missing):
         refs.add(ref)
         reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
         box, pos = obj.get("box"), obj.get("pos")
+        if not (pos and len(pos) >= 2 and all(math.isfinite(v) for v in pos[:2])):
+            raise ValueError("footprint has no finite position: " + ref)
         if not (box and len(box) == 4 and all(math.isfinite(v) for v in box)):
-            if not (pos and len(pos) >= 2 and all(math.isfinite(v) for v in pos[:2])):
-                raise ValueError("footprint has no finite position: " + ref)
             # Padless graphics get a 2 mm estimated box; it is not enclosure clearance.
             box = [pos[0] - 1, pos[1] - 1, pos[0] + 1, pos[1] + 1]
         layer = (obj.get("props") or {}).get("layer") or ""
         footprints.append({"uuid": uid, "ref": ref, "side": "bottom" if layer.startswith("B.") else "top",
-                           "pos": list(pos or []), "box": box,
+                           "pos": list(pos), "box": box,
                            "hasModel": bool(obj.get("has_model")) and reason is None, "reason": reason})
     return {"version": 1, "side": side, "keep": sorted(set(keep)), "finish": finish, "footprints": footprints}
 
 
 def prepare3d(p):
     """Write revision-local processor inputs. One kept set serves both revisions of a comparison."""
-    paths = {side: board_path(p, side) for side in ("base", "head")}
-    objects = {side: pcb_objects(path) if os.path.isfile(path) else {} for side, path in paths.items()}
-    keep = kept_refs(objects["base"], objects["head"])
-    out = f"review/{project_id(p['dir'])}"
-    missing = model3d_missing(out, objects)
+    paths = {side: pathlib.Path(board_path(p, side)) for side in ("base", "head")}
+    out = pathlib.Path("review", project_id(p["dir"]))
+    targets = {side: out / side / "board-3d-input.json" for side in paths}
     for side, path in paths.items():
-        target = pathlib.Path(out, side, "board-3d-input.json")
-        if not os.path.isfile(path):
+        if not path.is_file():
             # Never create the side folder here: build_project treats an existing folder as a present revision.
+            targets[side].unlink(missing_ok=True)
+    try:
+        objects = {side: pcb_objects(path) if path.is_file() else {} for side, path in paths.items()}
+        keep = kept_refs(objects["base"], objects["head"])
+        missing = model3d_missing(str(out), objects)
+        for side, path in paths.items():
+            target = targets[side]
+            if not path.is_file():
+                continue
+            try:
+                root = parse_sexpr(path.read_text(encoding="utf-8"))
+                stackup = find(find(root, "setup") or [], "stackup") or []
+                finish = val(stackup, "copper_finish") or ""
+                metadata = metadata3d(side, objects[side], keep, finish, missing)
+            except Exception as error:
+                target.unlink(missing_ok=True)
+                print(f"{p['name']}: 3D processing unavailable: {error}")
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+    except Exception as error:
+        for target in targets.values():
             target.unlink(missing_ok=True)
-            continue
-        root = parse_sexpr(pathlib.Path(path).read_text(encoding="utf-8"))
-        stackup = find(find(root, "setup") or [], "stackup") or []
-        finish = val(stackup, "copper_finish") or ""
-        try:
-            metadata = metadata3d(side, objects[side], keep, finish, missing)
-        except ValueError as error:
-            target.unlink(missing_ok=True)
-            print(f"{p['name']}: 3D processing unavailable: {error}")
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"{p['name']}: 3D processing unavailable: {error}")
 
 
 def cmd_prepare3d(args):
     det = json.loads(pathlib.Path("review/detect.json").read_text(encoding="utf-8"))
     for p in det["projects"]:
-        prepare3d(p)
+        try:
+            prepare3d(p)
+        except Exception as error:
+            print(f"{p.get('name', 'project')}: 3D processing unavailable: {error}")
 
 
 def glb_argv(pcb, folder):
