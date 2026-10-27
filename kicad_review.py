@@ -17,6 +17,7 @@ import csv
 import datetime
 import gzip
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -2165,6 +2166,13 @@ def bom_summary(lines):
         by[line["category"]] += len(line["refs"])
     return {"components": sum(by.values()), "unique": len(lines), "withMpn": sum(1 for l in lines if present(l["mpn"])),
             "byCategory": {c: by[c] for c in BOM_CATEGORIES if by[c]}}
+
+
+# Vendored bom_csv.py (Bouni/kicad-jlcpcb-tools, MIT; commit and licence in vendor/bom_csv.py). Loaded by path, so this
+# module's own bom_csv(lines) writer keeps its name.
+_VENDOR_SPEC = importlib.util.spec_from_file_location("vendor_bom_csv", pathlib.Path(__file__).with_name("vendor") / "bom_csv.py")
+vendor_bom_csv = importlib.util.module_from_spec(_VENDOR_SPEC)
+_VENDOR_SPEC.loader.exec_module(vendor_bom_csv)
 
 
 def diff_parts(base, head):

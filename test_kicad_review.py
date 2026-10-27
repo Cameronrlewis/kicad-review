@@ -1182,6 +1182,18 @@ assert json.loads(json.dumps(raw_lines))[0]['value'] == '10k'
 assert json.loads(json.dumps(raw_lines))[0]['footprint'] == 'R_0805'
 print("ok bom lines")
 
+# Vendored planner (Task 4A): the body is the pinned upstream bom_csv.py, and the licence header sits above it.
+import hashlib as _vh
+_vendored = pathlib.Path(__file__).with_name("vendor") / "bom_csv.py"
+_data = _vendored.read_bytes()
+_start = _data.index(b'"""Plan the JLC BOM CSV')
+assert _vh.sha256(_data[_start:]).hexdigest() == "3deebff2f36376a561b4014dbbf6ea6c66cd4325b1f614c6bfe4def466569bec", "vendored body differs from kicad-jlcpcb-tools bom_csv.py at 9209edcd"
+for marker in (b"MIT License", b"Copyright (c) 2022 bouni", b"9209edcdd682fc4df51e3a0325f967b78ef254ee"):
+    assert marker in _data[:_start], marker
+import kicad_review as _kr
+assert _kr.vendor_bom_csv.BOM_LINE_MAX_BYTES == 2048 and _kr.vendor_bom_csv.BOM_HEADER == ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
+print("ok vendored bom_csv")
+
 bom_cases = json.loads((Path(__file__).parent / "ui/fixtures/bom-cases.json").read_text(encoding="utf-8"))
 for case in bom_cases:
     identities = {i: bom_identity(o) for i, o in case["objects"].items()}
@@ -1461,10 +1473,12 @@ print("ok fabrication requires successful tool checkout")
 import textwrap
 script = textwrap.dedent(notes_step.split("run: |\n", 1)[1])
 tool_source = pathlib.Path(kicad_review.__file__).read_text()
+vendor_source = pathlib.Path(kicad_review.__file__).with_name("vendor").joinpath("bom_csv.py").read_text()
 with tempfile.TemporaryDirectory() as t:
     try:
         os.chdir(t)
         write(t, {"review/data.json": json.dumps(rdata), "tools/kicad_review.py": tool_source,
+                  "tools/vendor/bom_csv.py": vendor_source,
                   "bin/gh": "#!" + sys.executable + "\nimport os, pathlib, sys\nif sys.argv[2] == 'view':\n p = pathlib.Path('view-count'); n = int(p.read_text()) if p.exists() else 0; p.write_text(str(n + 1)); print('changed notes' if n and os.environ['BODY_CHANGED'] == '1' else 'human notes')\nelif sys.argv[2] == 'edit':\n pathlib.Path('edited').write_text('yes')\n"})
         pathlib.Path("bin/gh").chmod(0o755)
         for changed in (False, True):
