@@ -57,6 +57,28 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
                 assert "exit 2" in str(exc) and "fixture CLI failure" in str(exc)
             else:
                 raise AssertionError("refill failure should retain CLI diagnostic")
+    # Refill must actually update the copied board, not merely see its initial copy.
+    with tempfile.TemporaryDirectory(prefix="br03-refill-save-test-") as tmp:
+        source = pathlib.Path(tmp) / "fixture.kicad_pcb"
+        source.write_text("stale")
+        def silent_success(*args, **kwargs):
+            target = pathlib.Path(args[0][-1])
+            target.write_text("refilled")
+            return type("Run", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        fake_board = object()
+        with patch.object(copper.subprocess, "run", side_effect=silent_success), patch.object(
+                copper.pcbnew, "LoadBoard", return_value=fake_board):
+            assert copper.refill_board(str(source)) is fake_board
+        with patch.object(copper.subprocess, "run", return_value=type(
+                "Run", (), {"returncode": 0, "stderr": "", "stdout": ""})()), patch.object(
+                copper.pcbnew, "LoadBoard") as load_board:
+            try:
+                copper.refill_board(str(source))
+            except RuntimeError as exc:
+                assert "did not save" in str(exc)
+            else:
+                raise AssertionError("unchanged copied board must fail save verification")
+            load_board.assert_not_called()
     print("ok BR03 signed copper polygons")
 
 from kicad_review import is_kicad_file, owner_project

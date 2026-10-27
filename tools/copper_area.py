@@ -25,6 +25,7 @@ def refill_board(path):
                 shutil.copy2(item, root / item.name)
         target = root / source.name
         # --save-board writes only the disposable copy, never a source revision.
+        original = (target.stat().st_mtime_ns, target.stat().st_size)
         run = subprocess.run(
             ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-error",
              "--exit-code-violations", "--refill-zones", "--save-board",
@@ -35,10 +36,11 @@ def refill_board(path):
             raise RuntimeError(
                 f"project-context refill failed (exit {run.returncode}): {detail}"
             )
-        if not target.is_file():
+        saved = target.stat()
+        if (saved.st_mtime_ns, saved.st_size) == original:
             raise RuntimeError(
                 f"project-context refill failed (exit {run.returncode}): "
-                "kicad-cli did not produce the refilled board"
+                "kicad-cli did not save the refilled board"
             )
         board = pcbnew.LoadBoard(str(target))
         if board is None:
@@ -64,6 +66,15 @@ def collect(path):
             out[key] = pcbnew.SHAPE_POLY_SET()
         out[key].BooleanAdd(poly)
 
+    graphics = list(board.GetDrawings())
+    for footprint in board.GetFootprints():
+        graphics.extend(footprint.GraphicalItems())
+    # Reference/Value fields are not GraphicalItems; include copper-layer fields too.
+    for footprint in board.GetFootprints():
+        for field in (footprint.Reference(), footprint.Value()):
+            if field.IsOnCopperLayer():
+                graphics.append(field)
+
     for layer in board.GetEnabledLayers().CuStack():
         for item in [*board.GetTracks(), *board.GetPads()]:
             if not item.IsOnLayer(layer):
@@ -75,9 +86,6 @@ def collect(path):
             if zone.IsOnLayer(layer) and not zone.GetIsRuleArea():
                 add(layer, zone.GetNetname(), zone.GetFilledPolysList(layer))
         # Include standalone and footprint-attached copper drawings and text.
-        graphics = list(board.GetDrawings())
-        for footprint in board.GetFootprints():
-            graphics.extend(footprint.GraphicalItems())
         for item in graphics:
             if not item.IsOnLayer(layer):
                 continue
