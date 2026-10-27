@@ -1387,7 +1387,10 @@ try:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
                     mark_new_problems(lines["base"], lines["head"])
                     assert {k: p["parts"][k] for k in ("lines", "changes", "supplier")} == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
-                    assert set(p["parts"]) == {"lines", "changes", "supplier", "coverage", "field_changes", "dnp_mismatch"}
+                    assert set(p["parts"]) == {"lines", "changes", "supplier", "summary", "exports", "coverage", "field_changes", "dnp_mismatch"}
+                    assert p["parts"]["summary"] == {"components": 1, "unique": 1, "withMpn": 0, "byCategory": {"Resistors": 1}}
+                    assert p["parts"]["exports"]["preset"] == "jlcpcb" and p["parts"]["exports"]["fab"].startswith("Comment,Designator,Footprint,LCSC,Quantity\r\n")
+                    assert p["parts"]["lines"][0]["category"] == "Resistors" and p["parts"]["lines"][0]["refsCompressed"] == "R1"
                     assert p["parts"]["changes"][0]["action"] == "swapped"
                     assert all("supplier" not in line for line in p["parts"]["lines"])
                 html = pathlib.Path("review/kicad-review.html").read_text()
@@ -1403,6 +1406,13 @@ try:
             empty = build_project(project, {}, settings)["parts"]
             assert {k: empty[k] for k in ("lines", "changes", "supplier", "field_changes", "dnp_mismatch")} == {"lines": [], "changes": [], "supplier": None, "field_changes": [], "dnp_mismatch": []}
             assert empty["coverage"]["base"] is None and all(v == [0, 0] for v in empty["coverage"]["head"].values())
+            assert empty["summary"] == {"components": 0, "unique": 0, "withMpn": 0, "byCategory": {}} and empty["exports"]["fab"] == "Comment,Designator,Footprint,LCSC,Quantity\r\n"
+            with patch('kicad_review.bom_jlcpcb_csv', side_effect=ValueError('X1 exceeds 2048 bytes')):
+                usable = build_project(project, {}, settings)['parts']
+                assert usable['exports']['fab'] is None and usable['exports']['csv'] and '2048' in usable['exports']['fabError']
+                assert usable['summary']['components'] == 0
+            settings["fabrication"]["preset"] = "pcbway"
+            assert build_project(project, {}, settings)["parts"]["exports"]["preset"] == "pcbway"
 finally:
     os.chdir(here)
 print("ok parts report data")
