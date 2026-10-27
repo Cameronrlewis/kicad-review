@@ -1727,7 +1727,9 @@ with tempfile.TemporaryDirectory() as d:
     kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
     try:
         os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
-        cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        with patch("sys.stdout", new=io.StringIO()) as diagnostics:
+            cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        assert diagnostics.getvalue() == "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
     finally:
         kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
     assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
@@ -1776,8 +1778,9 @@ with tempfile.TemporaryDirectory() as d:
         pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
-                with patch("kicad_review.subprocess.run", side_effect=failure):
+                with patch("kicad_review.subprocess.run", side_effect=failure), patch("sys.stdout", new=io.StringIO()) as diagnostics:
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+                assert diagnostics.getvalue() == "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
                 assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
     finally:
         os.chdir(old_cwd)
