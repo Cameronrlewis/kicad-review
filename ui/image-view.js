@@ -95,15 +95,19 @@
   }
   function copperArea(o) {
     const g=o.geometry,p=g.primitive;
-    if(g.rings?.length)return g.rings.reduce((n,r)=>n+Math.abs(r.reduce((s,a,i)=>{
+    const ringArea=(g.rings||[]).reduce((n,r)=>n+Math.abs(r.reduce((s,a,i)=>{
       const b=r[(i+1)%r.length];return s+a[0]*b[1]-b[0]*a[1];
     },0))/2,0);
-    if(!p)return Infinity;
-    const [w,h]=p.size;
-    if(p.shape==='circle')return Math.PI*w*w/4;
-    if(p.shape==='oval')return Math.min(w,h)*Math.abs(w-h)+Math.PI*Math.min(w,h)**2/4;
-    if(p.shape==='roundrect')return w*h-(4-Math.PI)*(p.radius||0)**2;
-    return w*h;
+    const [w,h]=p?.size||[];
+    let primitiveArea=Infinity;
+    if(p){
+      if(p.shape==='circle')primitiveArea=Math.PI*w*w/4;
+      else if(p.shape==='oval')primitiveArea=Math.min(w,h)*Math.abs(w-h)+Math.PI*Math.min(w,h)**2/4;
+      else if(p.shape==='roundrect')primitiveArea=w*h-(4-Math.PI)*(p.radius||0)**2;
+      else primitiveArea=w*h;
+    }
+    const segmentArea=(g.segments||[]).reduce((n,s)=>n+(Math.hypot(s[2]-s[0],s[3]-s[1])+s[4])*s[4],0);
+    return ringArea+segmentArea+(Number.isFinite(primitiveArea)?primitiveArea:0);
   }
   function inspectHit(graph,pointMm,visibleLayers,pxPerMm,touch) {
     if(pointMm.length!==2||!pointMm.every(Number.isFinite)||!Number.isFinite(pxPerMm)||pxPerMm<=0)return null;
