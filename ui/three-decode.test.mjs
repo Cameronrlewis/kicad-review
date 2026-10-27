@@ -47,8 +47,16 @@ test('BR02 worker handles empty raw data and recovers after a decode error', asy
   const {self, replies} = worker();
   await self.onmessage({data: {id: 6, bytes: new Uint8Array([1, 2]).buffer, gzip: true}});
   await self.onmessage({data: {id: 7, bytes: new Uint8Array().buffer, gzip: false}});
+  await self.onmessage({data: {id: 8, bytes: Uint8Array.from(gzipSync('default gzip')).buffer}});
+  await self.onmessage({data: {id: 9, b64: ''}});
   assert.ok(replies[0].message.error);
   assert.equal(replies[1].message.id, 7);
   assert.equal(replies[1].message.buffer.byteLength, 0);
   assert.equal(replies[1].transfer[0], replies[1].message.buffer);
+  assert.equal(new TextDecoder().decode(replies[2].message.buffer), 'default gzip');
+  assert.equal(replies[2].message.id, 8);
+  assert.equal(replies[2].transfer[0], replies[2].message.buffer);
+  assert.equal(replies[3].message.id, 9);
+  assert.ok(replies[3].message.error);
+  assert.equal(replies[3].transfer, undefined);
 });
