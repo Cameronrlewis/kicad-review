@@ -1,9 +1,26 @@
 """Self-checks for kicad_review.py. Run: python3 test_kicad_review.py"""
 from kicad_review import is_kicad_file, owner_project
 
-# FAB-01: dated profiles, opt-in settings and copper coverage.
 import copy, json, pathlib, tempfile
 import kicad_review as kr
+
+# FAB-04: waiver eligibility and DRC-scale coordinates.
+settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+settings['fabrication']['check_limits'] = True
+settings['checks']['fab_limits'] = 'required'
+assert 'fab_limits' in kr.WAIVABLE, 'FAB-04 waiver parser accepts fab'
+v = kr.violation({'type':'track_width','severity':'error','description':'too narrow',
+                  'items':[{'uuid':'track','description':'track','pos':{'x':42.5,'y':20}}]},
+                 1, {'board':True})
+c = kr.run_check('fab_limits', settings, [v], None)
+assert c['status'] == 'fail' and c['new_errors'] == 1 and c['fixed'] == 0
+waivers = {'active':{('fab_limits',kr.waiver_key(v)):{'reason':'prototype','by':'reviewer',
+            'until':'2026-12-31','ref':None}}}
+c = kr.run_check('fab_limits', settings, [dict(v)], None, waivers)
+assert c['waived'] == 1 and c['status'] == 'pass' and c['errors'] == 0
+assert c['violations'][0]['pos'] == [42.5,20], 'FAB-04 DRC must not receive ERC scale'
+
+# FAB-01: dated profiles, opt-in settings and copper coverage.
 profiles = kr.fab_profiles()
 assert len(profiles) == 12, "FAB-01 twelve exact profiles"
 assert profiles["jlcpcb-2l"]["values"]["holeToHoleViaMm"] == .2
@@ -3194,7 +3211,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**legacy, "blobs": {}}, separators=(",", ":")) + ";"
             with open("review/issues.json", "w") as fh: _json.dump(issues, fh)
@@ -4457,6 +4474,286 @@ with tempfile.TemporaryDirectory() as td:
             f'[checks]\ndrc = "off"\nfab_limits = "{level}"\n')
         assert kr.fab_enabled(kr.load_settings((str(root),))) is False
 print('ok FAB-03 isolated execution, coverage, cache identity and cmd_render')
+
+def fab_head_only(source):
+    """board_path side effect: the head board exists and the base board does not (so no base audit is compared)."""
+    return lambda p, side: str(source) if side == 'head' else str(source.with_name('no-base.kicad_pcb'))
+
+
+def fab_produced_checks():
+    with tempfile.TemporaryDirectory() as td:
+        p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+        with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+            checks = {c['vendor']: c for c in kr.fab_checks(p,cfg,str(out),{'active':{}})}
+        jl = checks['jlcpcb']
+        assert type(jl['warnings']) is int and jl['warnings'] == 0
+        assert jl['errors'] == 1 and jl['coverageWarnings'] == sections['jlcpcb']['coverageWarnings']
+        assert jl['errors'] + jl['warnings'] == 1, 'FAB-04 numeric v1 contract'
+        assert checks['pcbway']['errors'] == 1 and checks['pcbway']['baselineAvailable'] is False
+        return checks
+
+
+off_cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+off_cfg['fabrication']['check_limits']=True
+off_cfg['checks'].update(drc='off',fab_limits='required')
+try:
+    kr.fab_checks({'name':'Four'},off_cfg,'absent-output')
+    raise AssertionError('FAB-04 report accepted DRC off')
+except ValueError as exc:
+    assert 'requires checks.drc != "off"' in str(exc)
+
+produced_fabs = fab_produced_checks()
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    audit = out/'head'/'fab-limits.json'
+    def write_head(**changes):
+        audit.write_text(json.dumps({'sections':[{**s,**changes} for s in sections.values()]}))
+    with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+        for level,status in (('informational','warn'),('required','fail')):
+            cfg['checks']['fab_limits']=level
+            write_head(layers=8,unsupported='not checked: profile covers 4, 6 layers; board has 8',violations=[])
+            assert all(kr.fab_check(p,cfg,str(out),None,v)['status']==status for v in kr.FAB_VENDORS)
+        cfg['fabrication']['check_limits']=False
+        assert kr.fab_checks(p,cfg,str(out))==[]
+        cfg['fabrication']['check_limits']=True; cfg['checks']['fab_limits']='off'
+        assert kr.fab_checks(p,cfg,str(out))==[]
+        cfg['checks']['fab_limits']='required'
+        audit.unlink()
+        try:
+            kr.fab_checks(p,cfg,str(out))
+            raise AssertionError('FAB-04 missing artifact accepted')
+        except SystemExit as exc:
+            assert 'Fab limits output missing for Four (head)' in str(exc)
+        source.unlink()
+        removed = kr.fab_checks(p,cfg,str(out))
+        assert [c['vendor'] for c in removed] == ['jlcpcb','pcbway']
+        assert all(c['status']=='not_run' and type(c['warnings']) is int for c in removed)
+
+# Contract cases come from the actual producer, including an unsupported present board.
+def fab_contract_cases():
+    with tempfile.TemporaryDirectory() as td:
+        p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+        cfg['fail_on'] = 'new'
+        with patch.object(kr, 'board_path', side_effect=fab_head_only(source)):
+            failed = kr.fab_check(p, cfg, str(out), {'active':{}}, 'jlcpcb')
+            unsupported_sections = [{**s, 'layers':8, 'checked':[], 'violations':[],
+                                     'unsupported':'not checked: profile covers 4, 6 layers; board has 8'}
+                                    for s in sections.values()]
+            (out/'head'/'fab-limits.json').write_text(json.dumps({'sections': unsupported_sections}))
+            unsupported = kr.fab_check(p, cfg, str(out), {'active':{}}, 'jlcpcb')
+            source.unlink()
+            absent = kr.fab_check(p, cfg, str(out), {'active':{}}, 'jlcpcb')
+        return failed, unsupported, absent
+
+
+fab_failed, fab_unsupported, fab_absent = fab_contract_cases()
+assert kr.FAB_TABLE.name == 'fab_limits.json', 'FAB contract: immutable table name'
+assert [c['status'] for c in (fab_failed, fab_unsupported, fab_absent)] == ['fail','fail','not_run']
+assert fab_failed['baselineAvailable'] is False and fab_failed['fixed'] == 0, 'FAB contract: this fixture has no base board'
+assert fab_unsupported['baselineAvailable'] is False and fab_unsupported['fixed'] == 0, 'FAB contract: no base board'
+assert 'baselineAvailable' not in fab_absent and 'fixed' not in fab_absent, 'FAB contract: not_run has no base comparison'
+for c in (fab_failed, fab_unsupported, fab_absent):
+    assert c['name'] == 'fab_limits'
+    assert c['confidence'] == 'deterministic' and c['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+    assert all(v['confidence'] == c['confidence'] and v['evidence_source'] == c['evidence_source']
+               for v in c['violations']), 'FAB contract: explicit finding provenance'
+assert fab_failed['new_errors'] == fab_failed['errors'] == 1
+assert fab_absent['checked'] == [] and fab_absent['reason'] == 'no head board'
+
+# Base/head pairing (Owner decision 2026-10-26): multiset identity, so one base occurrence matches one head occurrence.
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    cfg['fail_on'] = 'new'
+    same, gone, added = fab_test_raw('same'), fab_test_raw('gone'), fab_test_raw('added')
+    def write_audit(side, rows):
+        pathlib.Path(out, side).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(out, side, 'fab-limits.json').write_text(json.dumps(
+            {'sections': [{**s, 'violations': rows} for s in sections.values()]}))
+    write_audit('head', [copy.deepcopy(same), copy.deepcopy(same), copy.deepcopy(added)])
+    write_audit('base', [copy.deepcopy(same), copy.deepcopy(gone)])
+    with patch.object(kr, 'board_path', return_value=str(source)):
+        c = kr.fab_check(p, cfg, str(out), {'active': {}}, 'jlcpcb')
+    assert c['baselineAvailable'] is True
+    assert (c['errors'], c['new_errors'], c['fixed']) == (3, 2, 1), 'FAB pairing: multiset, not set'
+    assert c['status'] == 'fail'
+    assert sorted(v['new'] for v in c['violations']) == [False, True, True]
+    assert [v['new'] for v in c['violations']] == [True, True, False], 'FAB pairing: new findings first'
+
+# Supported base findings are existing; unsupported bases cannot mask new findings.
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    (out/'base').mkdir()
+    base_audit = out/'base'/'fab-limits.json'
+    base_audit.write_bytes((out/'head'/'fab-limits.json').read_bytes())
+    with patch.object(kr, 'board_path', return_value=str(source)):
+        cfg['fail_on'] = 'new'
+        checks = kr.fab_checks(p, cfg, str(out), {'active':{}})
+        assert all(c['status']=='pass' and c['errors']==1 and c['new_errors']==0
+                   and c['baselineAvailable'] and c['fixed']==0 for c in checks)
+        cfg['fail_on'] = 'all'
+        assert all(c['status']=='fail' for c in kr.fab_checks(p, cfg, str(out)))
+        # One fab waiver applies across vendors, but never to ordinary DRC.
+        key = kr.waiver_key(checks[0]['violations'][0])
+        waivers = {'active':{('fab_limits',key):{'reason':'prototype','by':'reviewer',
+                    'until':'2026-12-31','ref':None}}}
+        waived = kr.fab_checks(p, cfg, str(out), waivers)
+        assert all(c['status']=='pass' and c['waived']==1 and c['errors']==0 for c in waived)
+        assert kr.run_check('drc',cfg,[kr.violation(fab_test_raw('track'),1,{'board':True})],
+                            None,waivers)['waived']==0
+        base_audit.write_text(json.dumps({'sections':[{**s,'unsupported':'unsupported base layers'}
+                                                     for s in sections.values()]}))
+        cfg['fail_on'] = 'new'
+        assert all(not c['baselineAvailable'] and c['new_errors']==1 and c['fixed']==0
+                   for c in kr.fab_checks(p, cfg, str(out)))
+        base_audit.unlink()
+        try:
+            kr.fab_checks(p, cfg, str(out))
+            raise AssertionError('FAB missing base audit accepted')
+        except SystemExit as exc:
+            assert 'Fab limits output missing for Four (base)' in str(exc)
+
+# These helpers are owned by 06/09 and do not exist on main 335db72.
+# Standalone 04 runs the producer assertions above; the combined gate must not silently skip.
+if os.environ.get('FAB_CROSS_SPEC') == '1':
+    assert hasattr(kr, 'absolute_checks'), 'FAB integration requires merged spec 06'
+    assert hasattr(kr, 'complete_context_checks'), 'FAB integration requires merged spec 09'
+
+if hasattr(kr, 'absolute_checks'):
+    for original in (fab_failed, fab_unsupported, fab_absent):
+        current = copy.deepcopy(original)
+        kr.absolute_checks([current])
+        expected = copy.deepcopy(original)
+        expected.update(new_errors=0, new_warnings=0)
+        if 'fixed' in expected:
+            expected['fixed'] = 0
+        for v in expected['violations']:
+            v['new'] = False
+        assert json.loads(json.dumps(current)) == expected, 'FAB snapshot: only comparison fields may change'
+    assert fab_failed['new_errors'] == 1 and fab_failed['violations'][0]['new'] is True
+
+if hasattr(kr, 'complete_context_checks'):
+    cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits'] = True
+    cfg['checks']['fab_limits'] = 'required'
+    ledger_keys = ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported',
+                   'coverageWarnings','baselineAvailable','fixed')
+    for original in (fab_failed, fab_unsupported, fab_absent):
+        contexts = kr.complete_context_checks([copy.deepcopy(original)], cfg, True,
+                                               original['status'] != 'not_run')
+        matches = [c for c in contexts if c['name'] == 'fab_limits']
+        assert len(matches) == 1, 'FAB context: supplied check lost or duplicated'
+        current = matches[0]
+        assert current['status'] == original['status'] and current['reason'] == original.get('reason')
+        assert (current['errors'], current['warnings']) == (original['errors'], original['warnings'])
+        assert current['confidence'] == 'deterministic' and current['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+        assert {k:current[k] for k in ledger_keys if k in original} == {k:original[k] for k in ledger_keys if k in original}, 'FAB context: coverage ledger lost'
+        assert len(current['findings']) == len(original['violations'])
+        assert all(v['confidence'] == 'deterministic' and v['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+                   for v in current['findings'])
+    contexts = kr.complete_context_checks(list(copy.deepcopy(produced_fabs).values()), cfg, True, True)
+    assert sorted(c['vendor'] for c in contexts if c['name']=='fab_limits') == ['jlcpcb','pcbway'], 'FAB context: retain both vendors'
+    for opt_in, level in ((False,'required'), (True,'off')):
+        cfg['fabrication']['check_limits'] = opt_in
+        cfg['checks']['fab_limits'] = level
+        assert kr.fab_checks({'name':'Disabled'}, cfg, 'unused') == []
+        contexts = kr.complete_context_checks([], cfg, True, True)
+        assert not any(c['name'] == 'fab_limits' for c in contexts), 'FAB context: disabled check synthesized'
+
+entries,bad = kr.parse_waivers('''
+[[waiver]]
+check = "fab_limits"
+match = "w-0123456789ab"
+reason = "Prototype only"
+by = "reviewer"
+date = 2026-10-25
+until = 2026-12-31
+''', 'fab fixture')
+assert len(entries)==1 and not bad
+raw_v = kr.violation(fab_test_raw('track'),1,{'board':True})
+key = kr.waiver_key(raw_v)
+wrong = {'active':{('drc',key):{'reason':'house only','by':'reviewer','until':'2026-12-31','ref':None}}}
+assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,wrong)['waived']==0
+right = {'active':{('fab_limits',key):wrong['active'][('drc',key)]}}
+assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,right)['waived']==1
+
+# Optional integration fixture is built by CI after its PAGES directory exists.
+if os.environ.get('FAB_REPORT_FIXTURE'):
+    sample = pathlib.Path('ui/sample/review-data.js').read_text()
+    data = json.loads(sample.split('=',1)[1].strip().rstrip(';'))
+    project = next(p for p in data['projects'] if p.get('board',{}).get('layers'))
+    data['fabProducerFixture'] = True
+    project['checks'] = [*project['checks'],*(copy.deepcopy(c) for c in produced_fabs.values())]
+    data.setdefault('settings',{}).setdefault('checks',{})['fab_limits']='required'
+    kr.assign_ids(data['projects'])
+    payload = 'window.REVIEW_DATA = '+json.dumps(data).replace('<','\\u003c')+';'
+    pathlib.Path(os.environ['FAB_REPORT_FIXTURE']).write_text(kr.inline_page(payload),encoding='utf-8')
+
+with tempfile.TemporaryDirectory() as td:
+    cwd=os.getcwd()
+    try:
+        os.chdir(td); pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps({'base':'a'*40,'head':'b'*40,'reason':'fab opt-out','projects':[]}))
+        cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+        with patch.object(kr,'load_settings',return_value=cfg), patch.dict(os.environ,{'GITHUB_OUTPUT':str(pathlib.Path(td,'outputs'))}):
+            kr.cmd_report(None)
+        data=json.loads(pathlib.Path('review/data.json').read_text())
+        assert data['version']==1 and data['projects']==[]
+        assert 'fab_limits' not in data['settings']['checks']
+        assert 'check_limits' not in data['settings']['fabrication']
+        assert cfg['checks']['fab_limits']=='informational' and cfg['fabrication']['check_limits'] is False
+        legacy=copy.deepcopy(cfg)
+        del legacy['checks']['fab_limits']; del legacy['fabrication']['check_limits']
+        with patch.object(kr,'load_settings',return_value=legacy), patch.dict(os.environ,{'GITHUB_OUTPUT':str(pathlib.Path(td,'outputs'))}):
+            kr.cmd_report(None)
+        assert json.loads(pathlib.Path('review/data.json').read_text())==data
+    finally:
+        os.chdir(cwd)
+
+print('ok FAB-04 report producer, multiset baseline, provenance, waivers and legacy opt-out')
+
+
+def fab_four_report(root, board):
+    root.mkdir(parents=True,exist_ok=False)
+    cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits']=True
+    cfg['checks'].update(drc='required',fab_limits='required')
+    p={'name':'Four','dir':'','status':'modified'}
+    # The standalone Task 3 board has no project: KiCad defaults to a 0.2 mm
+    # house minimum and subtracts all three narrow tracks. Give only this synthetic
+    # copy a weaker house minimum so the ledger includes vendor-only findings.
+    source=root/'inputs'/'four.kicad_pcb'
+    source.parent.mkdir()
+    source.write_bytes(board.read_bytes())
+    source.with_suffix('.kicad_pro').write_text(json.dumps(
+        {'board':{'design_settings':{'rules':{'min_track_width':.05}}}}))
+    with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+        kr.render_fab(p,'head',str(root/'head'),cfg)
+        checks=kr.fab_checks(p,cfg,str(root),{'active':{}})
+    sections={s['vendor']:s for s in json.loads((root/'head'/'fab-limits.json').read_text())['sections']}
+    jl=sections['jlcpcb']
+    assert jl['profile']=='jlcpcb-multilayer' and jl['layers']==4
+    assert sections['pcbway']['profile']=='pcbway-std' and sections['pcbway']['unsupported'] is None
+    assert jl['values']['trackWidthOuterMm']==jl['values']['trackWidthInnerMm']==.09
+    check=next(c for c in checks if c['vendor']=='jlcpcb')
+    assert {'trackWidthOuterMm','trackWidthInnerMm'} <= set(check['checked'])
+    assert 'edgeClearanceMm' in check['checked'] and not check['unsupported']
+    for layer in ('F.Cu','In1.Cu','B.Cu'):
+        assert fab_target(jl['violations'],'track_width',['four-'+layer]), layer
+    sample=pathlib.Path('ui/sample/review-data.js').read_text()
+    data=json.loads(sample.split('=',1)[1].strip().rstrip(';'))
+    project=next(p for p in data['projects'] if p.get('board',{}).get('layers'))
+    data['projects']=[project]
+    project['name']='Four'; project['checks']=checks
+    data['fabFourLayerFixture']=True
+    kr.assign_ids(data['projects'])
+    payload='window.REVIEW_DATA = '+json.dumps(data).replace('<','\\u003c')+';'
+    (root/'four-layer.html').write_text(kr.inline_page(payload),encoding='utf-8')
+    print('ok FAB-04 real four-layer report: both vendors, outer/inner tracks and closed outline')
+
+
+if os.environ.get('KICAD_FAB_FOUR_REPORT'):
+    fab_four_report(pathlib.Path(os.environ['KICAD_FAB_FOUR_REPORT']),
+                    pathlib.Path(os.environ['KICAD_FAB_BOARD']))
 
 if os.environ.get('KICAD_FAB_VERIFY') == '1':
     fab_capability_probe(pathlib.Path(os.environ['KICAD_FAB_OUT']))

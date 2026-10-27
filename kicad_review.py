@@ -2434,7 +2434,7 @@ def waiver_key(v):
 
 
 WAIVERS_FILE = "kicad-review-waivers.toml"
-WAIVABLE = ("erc", "drc", "parity")
+WAIVABLE = ("erc", "drc", "parity", "fab_limits")
 
 
 def parse_waivers(text, source):
@@ -2544,6 +2544,77 @@ def run_check(name, settings, head, base, waivers=None):
     return result
 
 
+FAB_EVIDENCE_SOURCE = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
+                       'vendor-only findings paired between head and base by multiset identity; '
+                       'fab_limits.json dated profile; coverage limited to checked limits '
+                       '(see unchecked, unsupported and coverageWarnings)')
+FAB_VENDORS = ('jlcpcb', 'pcbway')
+FAB_VENDOR_LABELS = {'jlcpcb': 'JLCPCB', 'pcbway': 'PCBWay'}
+
+
+def fab_read_audit(out_dir, side, p, vendor):
+    path = pathlib.Path(out_dir, side, 'fab-limits.json')
+    if not path.is_file():
+        sys.exit(f'Fab limits output missing for {p["name"]} ({side})')
+    sections = [s for s in json.loads(path.read_text(encoding='utf-8'))['sections'] if s['vendor'] == vendor]
+    if len(sections) != 1:
+        sys.exit(f'Fab limits output for {p["name"]} ({side}) has no single {vendor} section')
+    return sections[0]
+
+
+def fab_check(p, settings, out_dir, waivers, vendor):
+    if not fab_enabled(settings):
+        return None
+    level = settings['checks']['fab_limits']
+    # Owner decision 2026-10-26: no default comparison values. not_run has no head audit, so it has no base
+    # comparison and carries no baselineAvailable or fixed key. Every other result takes both from the base audit below.
+    empty = {'name':'fab_limits','title':'Fab limits','vendor':vendor,'level':level,
+             'errors':0,'new_errors':0,'warnings':0,'new_warnings':0,'violations':[],
+             'checked':[],'unchecked':[],'coverageWarnings':[],
+             'confidence':'deterministic','evidence_source':FAB_EVIDENCE_SOURCE}
+    head_board = board_path(p, 'head')
+    fab_regular_input(pathlib.Path(head_board))
+    if not os.path.isfile(head_board):
+        return {**empty,'status':'not_run','reason':'no head board','unsupported':'no head board'}
+    head_meta = fab_read_audit(out_dir, 'head', p, vendor)
+    base_board = board_path(p, 'base')
+    fab_regular_input(pathlib.Path(base_board))
+    base_meta = fab_read_audit(out_dir, 'base', p, vendor) if os.path.isfile(base_board) else None
+    # A base comparison needs both audits to be supported; an unsupported side is never compared.
+    baseline = base_meta is not None and not base_meta['unsupported'] and not head_meta['unsupported']
+    head_raw = head_meta['violations']
+    base_raw = base_meta['violations'] if baseline else []
+    new_ids = {id(v) for v in fab_subtract(head_raw, base_raw)} if baseline else {id(v) for v in head_raw}
+    head = []
+    for raw in head_raw:
+        row = {**violation(raw, 1, {'board':True}), 'confidence':'deterministic',
+               'evidence_source':FAB_EVIDENCE_SOURCE}
+        row['_new'] = id(raw) in new_ids
+        head.append(row)
+    # run_check supplies waivers and ordering; its set-based new flags are replaced by the multiset pairing.
+    result = run_check('fab_limits', settings, head, None, waivers)
+    for v in result['violations']:
+        v['new'] = v.pop('_new')
+    result['violations'].sort(key=lambda v: (not v['new'], v['severity'] != 'error', v['type']))
+    live = [v for v in result['violations'] if not v.get('waived')]
+    count = lambda sev, new=False: sum(1 for v in live if v['severity'] == sev and (v['new'] or not new))
+    failing = count('error', new=settings['fail_on'] == 'new') > 0
+    result.update(status='pass' if not failing else 'fail' if level == 'required' else 'warn',
+                  errors=count('error'), warnings=count('warning'),
+                  new_errors=count('error', True), new_warnings=count('warning', True),
+                  fixed=len(fab_subtract(base_raw, head_raw)) if baseline else 0,
+                  baselineAvailable=baseline, confidence='deterministic', evidence_source=FAB_EVIDENCE_SOURCE)
+    for key in ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported','coverageWarnings'):
+        result[key] = head_meta[key]
+    if head_meta['unsupported']:
+        result.update(status='fail' if level == 'required' else 'warn', reason=head_meta['unsupported'])
+    return result
+
+
+def fab_checks(p, settings, out_dir, waivers=None):
+    return [c for c in (fab_check(p, settings, out_dir, waivers, vendor) for vendor in FAB_VENDORS) if c]
+
+
 def project_checks(p, settings, objs, waivers=None):
     out_dir = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
@@ -2577,6 +2648,7 @@ def project_checks(p, settings, objs, waivers=None):
             c = run_check("release", settings, side("head"), side("base"))
             c["package"] = package_summary(f"{out_dir}/head/fab")
             out.append(c)
+    out.extend(fab_checks(p, settings, out_dir, waivers))
     ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}")
     return out + ([ic] if ic else [])
 
@@ -3035,6 +3107,9 @@ def cmd_report(args):
         report_settings.pop("interfaces", None)
     if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
         report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
+    if not fab_enabled(settings):
+        report_settings['checks'] = {k: v for k, v in report_settings['checks'].items() if k != 'fab_limits'}
+        report_settings['fabrication'] = {k: v for k, v in report_settings['fabrication'].items() if k != 'check_limits'}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
