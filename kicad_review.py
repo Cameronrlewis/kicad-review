@@ -1780,6 +1780,104 @@ def cmd_release(args):
         print("release/SHA256SUMS")
 
 
+FAB_START = "# kicad-review fab limits - start"
+FAB_END = "# kicad-review fab limits - end"
+
+
+def fab_owned_rules(text, section):
+    """Replace only our disposable rule section, preserving authored bytes."""
+    starts, ends = text.count(FAB_START), text.count(FAB_END)
+    if starts != ends or starts > 1:
+        raise ValueError("malformed fabrication rule markers")
+    owned = FAB_START + "\n" + section + "\n" + FAB_END
+    if starts:
+        a, end_start = text.index(FAB_START), text.index(FAB_END)
+        if end_start < a:
+            raise ValueError("reversed fabrication rule markers")
+        return text[:a] + owned + text[end_start + len(FAB_END):]
+    return text + ("" if text.endswith("\n") else "\n") + owned + "\n"
+
+
+def fab_identity(v):
+    """Raw DRC identity, independent of rule-limit prose when UUIDs suffice."""
+    items = v.get("items", [])
+    # UUID identity where complete; description fallback can go stale after movement.
+    complete = bool(items) and all(i.get("uuid") for i in items)
+    identity = tuple(sorted(i["uuid"] for i in items)) if complete else tuple(sorted(
+        json.dumps({"uuid": i.get("uuid"), "description": i.get("description", ""),
+                    "pos": i.get("pos")}, sort_keys=True) for i in items))
+    if not items:
+        identity = (v.get("description", ""),)
+    return (v["type"], "uuid" if complete else "fallback", identity)
+
+
+def fab_subtract(after, before):
+    """Subtract one matching occurrence at a time, retaining raw rows in order."""
+    counts = Counter(fab_identity(v) for v in before)
+    out = []
+    for v in after:
+        key = fab_identity(v)
+        if counts[key]:
+            counts[key] -= 1
+        else:
+            out.append(v)
+    return out
+
+
+def fab_rule_section(context):
+    """Generate fixed vendor geometry bounds and an explicit unchecked ledger."""
+    values, n = context["values"], context["layers"]
+    rules, unchecked = [], []
+    plated = "A.Type == 'Via' || (A.Type == 'Pad' && A.Pad_Type != 'NPTH, mechanical')"
+    npth = "A.Type == 'Pad' && A.Pad_Type == 'NPTH, mechanical'"
+    # Fixed vendor geometry only; no generated net-class conditions or escaping surface.
+    mapping = [
+        ("trackWidthOuterMm", "track_width", "outer", "", "min"),
+        ("trackWidthInnerMm", "track_width", "inner", "", "min"),
+        ("clearanceOuterMm", "clearance", "outer", "", "min"),
+        ("clearanceInnerMm", "clearance", "inner", "", "min"),
+        ("drillPlatedMinMm", "hole_size", "", plated, "min"),
+        ("drillPlatedMaxMm", "hole_size", "", plated, "max"),
+        ("drillNpthMinMm", "hole_size", "", npth, "min"),
+        ("annularMinMm", "annular_width", "", plated, "min"),
+        ("edgeClearanceMm", "edge_clearance", "", "", "min"),
+        ("holeToHoleMm", "hole_to_hole", "", "A.Type == 'Pad' && B.Type == 'Pad'", "min"),
+        ("holeToHoleViaMm", "hole_to_hole", "", "A.Type == 'Via' && B.Type == 'Via'", "min"),
+        ("viaDiameterMinMm", "via_diameter", "", "A.Type == 'Via'", "min")]
+    grouped = {}
+    for key, constraint, layer, condition, bound in mapping:
+        if layer == "inner" and n <= 2:
+            continue
+        if key not in values:
+            unchecked.append(key)
+            continue
+        grouped.setdefault((constraint, layer, condition), []).append((bound, values[key]))
+    for (constraint, layer, condition), bounds in grouped.items():
+        suffix = f' (layer {layer})' if layer else ''
+        suffix += f' (condition {json.dumps(condition)})' if condition else ''
+        limits = ' '.join(f'({bound} {value:g}mm)' for bound, value in bounds)
+        rules.append(f'(rule "fab {constraint} {layer}"{suffix} (constraint {constraint} {limits}))')
+    return "\n".join(rules), unchecked + ["holeToHoleMixedMm"]
+
+
+def fab_vendor_rules(context):
+    """Neutralize house bounds only in the disposable vendor attribution pass."""
+    rules, _ = fab_rule_section(context)
+    categories = {
+        'track_width': 'track_width', 'clearance': 'clearance',
+        'hole_size': 'drill_out_of_range', 'annular_width': 'annular_width',
+        'edge_clearance': 'copper_edge_clearance', 'hole_to_hole': 'holes_too_close',
+        'via_diameter': 'via_diameter'}
+    covered = {diagnostic for constraint, diagnostic in categories.items()
+               if '(constraint ' + constraint + ' ' in rules}
+    # Fixed geometry bounds only; 1 km maximum is not a manufacturer limit.
+    neutral = '\n'.join(
+        f'(rule "fab neutral {constraint}" (constraint {constraint} (min 0mm)'
+        + (' (max 1000000mm)' if constraint in ('track_width', 'hole_size', 'via_diameter') else '') + '))'
+        for constraint in categories)
+    return neutral + '\n' + rules, covered
+
+
 def violation(v, scale, where):
     items = v.get("items", [])
     pos = [[round(i["pos"]["x"] * scale, 4), round(i["pos"]["y"] * scale, 4)] for i in items if "pos" in i]

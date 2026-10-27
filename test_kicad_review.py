@@ -48,6 +48,61 @@ with tempfile.TemporaryDirectory() as td:
 
 print("ok FAB-01 profiles, copper coverage and settings")
 
+# FAB-02: owned bytes, grouped bounds and one-to-one raw DRC subtraction.
+raw = lambda ids: {"type": "track_width", "severity": "error", "description": "minimum changed",
+                   "items": [{"uuid": u, "description": u} for u in ids]}
+a, reverse = raw(["a", "b"]), raw(["b", "a"])
+assert kr.fab_subtract([a, reverse, a], [reverse]) == [reverse, a], "FAB-02 multiset, not set"
+no_uuid = {"type": "clearance", "items": [{"description": "Pad 1 of R1"}]}
+assert kr.fab_subtract([no_uuid, no_uuid], [no_uuid]) == [no_uuid]
+assert kr.fab_subtract([raw(["other"])], [a]) == [raw(["other"])]
+assert kr.fab_subtract([a, a], [a, a]) == []
+assert kr.fab_identity(a) == kr.fab_identity({**reverse, "description": "different numeric minimum"})
+assert kr.fab_identity(a) != kr.fab_identity({**a, "type": "clearance"})
+one = {"type": "clearance", "items": [{"description": "pad", "pos": {"x": 1, "y": 2}}]}
+two = {"type": "clearance", "items": [{"description": "pad", "pos": {"x": 9, "y": 2}}]}
+assert kr.fab_subtract([one, two], [one]) == [two]
+partial = {"type": "clearance", "items": [{"uuid": "a", "description": "pad"}, {"description": "via"}]}
+assert kr.fab_identity(partial) == kr.fab_identity({**partial, "items": partial["items"][::-1]})
+assert kr.fab_identity(partial) != kr.fab_identity({**partial, "items": [{"uuid": "b", "description": "pad"}, {"description": "via"}]})
+assert kr.fab_identity({"type": "clearance", "description": "first"}) != kr.fab_identity({"type": "clearance", "description": "second"})
+original = '(version 1)\n# team rules\n(rule "house" (constraint track_width (min .3mm)))\n'
+merged = kr.fab_owned_rules(original, '(rule "fab test" (constraint track_width (min .1mm)))')
+assert original in merged and kr.fab_owned_rules(merged, 'new-section').count('new-section') == 1
+assert kr.fab_owned_rules(merged, 'new-section').startswith(original)
+for malformed in (original + kr.FAB_START + '\n', kr.FAB_END + kr.FAB_START,
+                  kr.FAB_END, kr.FAB_START + kr.FAB_END + kr.FAB_START + kr.FAB_END):
+    try:
+        kr.fab_owned_rules(malformed, '')
+        raise AssertionError('FAB-02 malformed markers accepted')
+    except ValueError:
+        pass
+owned = original + kr.FAB_START + '\nold\n' + kr.FAB_END + '\n# after\n'
+assert kr.fab_owned_rules(owned, 'new') == original + kr.FAB_START + '\nnew\n' + kr.FAB_END + '\n# after\n'
+assert kr.fab_owned_rules('', '') == kr.fab_owned_rules(kr.fab_owned_rules('', ''), '')
+context = {"layers": 2, "values": kr.fab_profiles()["jlcpcb-2l"]["values"]}
+rules, unchecked = kr.fab_rule_section(context)
+assert '(layer outer)' in rules and '(layer inner)' not in rules
+assert '(max 6.3mm)' in rules and 'holeToHoleMixedMm' in unchecked
+assert 'trackWidthInnerMm' not in unchecked, "FAB-02 inner does not apply on 2 layers"
+hole_rules = [line for line in rules.splitlines() if 'constraint hole_size' in line and '(max' in line]
+assert len(hole_rules) == 1 and '(min 0.2mm)' in hole_rules[0] and '(max 6.3mm)' in hole_rules[0]
+assert 'viaDiameterMinMm' in unchecked
+four_rules, four_unchecked = kr.fab_rule_section({"layers": 4, "values": kr.fab_profiles()["jlcpcb-multilayer"]["values"]})
+assert '(layer inner)' in four_rules and 'trackWidthInnerMm' not in four_unchecked
+_, missing_inner = kr.fab_rule_section({"layers": 4, "values": context["values"]})
+assert 'trackWidthInnerMm' in missing_inner and 'clearanceInnerMm' in missing_inner
+vendor_rules, covered = kr.fab_vendor_rules(context)
+assert 'via_diameter' not in covered and 'track_width' in covered
+assert covered == {'track_width', 'clearance', 'drill_out_of_range', 'annular_width',
+                   'copper_edge_clearance', 'holes_too_close'}
+assert vendor_rules.index('fab neutral track_width') < vendor_rules.index('fab track_width')
+assert vendor_rules.endswith(rules)
+assert '(rule "fab neutral hole_size" (constraint hole_size (min 0mm) (max 1000000mm)))' in vendor_rules
+empty_rules, empty_covered = kr.fab_vendor_rules({"layers": 2, "values": {}})
+assert empty_covered == set() and empty_rules.count('(rule "fab neutral ') == 7
+print("ok FAB-02 owned rules, grouping, multiset identity and attribution categories")
+
 dirs = {"", "boards/a", "boards/a/sub", "b"}
 assert owner_project("boards/a/x.kicad_sch", dirs) == "boards/a"
 assert owner_project("boards/a/sub/Libraries/y.kicad_mod", dirs) == "boards/a/sub"
