@@ -4241,6 +4241,19 @@ assert [n['name'] for n in inspection['nets']] == ['12'], inspection['nets']
 assert inspection['tracks'] and all(t['net'] == '12' for t in inspection['tracks'])
 assert {t['layer'] for t in inspection['tracks']} == {'F.Cu', 'In1.Cu'}
 assert all('hidden' in r for r in inspection['tracks'] + inspection['pads'] + inspection['vias'])
+# Inspection preserves hidden copper (including inherited footprint visibility),
+# rather than silently dropping it and changing diagnostic/count provenance.
+hidden_inspection = kr.board_inspect(scene_from_text(inspection_text
+    .replace('(uuid digits)', '(uuid digits) (hide yes)')
+    .replace('(uuid blind)', '(uuid blind) (hide yes)')
+    .replace('(uuid fp)', '(uuid fp) (hide yes)')))
+assert all(p['hidden'] for p in hidden_inspection['pads'])
+assert all(v['hidden'] for v in hidden_inspection['vias'])
+assert all(t['hidden'] == (t['uuid'] == 'digits') for t in hidden_inspection['tracks'])
+assert not any(r['hidden'] for r in inspection['tracks'] + inspection['pads'] + inspection['vias'])
+assert hidden_inspection['stats'] == inspection['stats']
+assert hidden_inspection['unsupported'] == inspection['unsupported']
+print('ok board inspection preserves hidden copper and count provenance')
 straight = [t for t in inspection['tracks'] if t['kind'] == 'track']
 assert len(straight) == 1 and (straight[0]['layer'], straight[0]['x2'], straight[0]['y2']) == ('In1.Cu', 3.0, 4.0), straight
 arc_parts = [t for t in inspection['tracks'] if t['kind'] == 'arc']
