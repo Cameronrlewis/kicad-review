@@ -247,6 +247,25 @@ IMAGE_EXPORT_OPTIONS = {'page_size_mode': '1', 'drill_shape_opt': '0',
                         'check_zones': True, 'themes': ['light', 'dark']}
 
 
+IMAGE_PALETTES = json.loads(pathlib.Path(__file__).with_name('image-palettes.json').read_text(encoding='utf-8'))
+IMAGE_RENDERER = os.environ.get('KICAD_IMAGE') or os.environ.get('KICAD_RENDERER_VERSION', 'local-unverified')
+
+
+def write_image_themes(config_home):
+    """Write renderer-owned KiCad 10 themes from the checked-in canonical inks."""
+    target = pathlib.Path(config_home, '10.0', 'colors')
+    target.mkdir(parents=True, exist_ok=True)
+    for theme, palette in IMAGE_PALETTES.items():
+        data = {'meta': {'name': 'kicad-review-' + theme, 'version': 5}}
+        for key, rgba in palette['colors'].items():
+            parent = data
+            *parts, leaf = key.split('.')
+            for part in parts:
+                parent = parent.setdefault(part, {})
+            parent[leaf] = 'rgb(%d, %d, %d)' % tuple(round(v * 255) for v in rgba[:3])
+        (target / f'kicad-review-{theme}.json').write_text(json.dumps(data, sort_keys=True), encoding='utf-8')
+
+
 def export_board_stats(pcb, out):
     """Optional revision facts: publish validated JSON atomically, or a diagnostic."""
     root = pathlib.Path(out)
@@ -278,16 +297,48 @@ def export_board_stats(pcb, out):
 def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
+    with tempfile.TemporaryDirectory() as cfg:
+        write_image_themes(cfg)
+        previous = os.environ.get('KICAD_CONFIG_HOME')
+        os.environ['KICAD_CONFIG_HOME'] = cfg
+        mapping = {}
+        try:
+            for theme in ('light', 'dark'):
+                suffix = '' if theme == 'light' else '-dark'
+                if os.path.exists(sch):
+                    kicad_cli('sch', 'export', 'svg', '--no-background-color', '--theme', 'kicad-review-' + theme,
+                              '-o', f'{out}/sch{suffix}', sch)
+                    resolved = set()
+                    for pg in sheet_pages(src_dir, name):
+                        light = pathlib.Path(page_svg(out, name, pg))
+                        path = light if theme == 'light' else pathlib.Path(out, 'sch-dark', light.name)
+                        if not path.is_file():
+                            raise ValueError('missing sheet export ' + str(path))
+                        if path in resolved or theme in mapping.get(pg['path'], {}):
+                            raise ValueError('ambiguous sheet export ' + str(path))
+                        resolved.add(path)
+                        path.write_text(simplify_sheet_svg(path.read_text(encoding='utf-8')), encoding='utf-8')
+                        mapping.setdefault(pg['path'], {})[theme] = str(path.relative_to(out))
+                if os.path.exists(pcb):
+                    # Drill marks off; page coordinates keep both revisions aligned in mm.
+                    kicad_cli('pcb', 'export', 'svg', '--mode-multi', '--exclude-drawing-sheet',
+                              '--page-size-mode', '1', '--drill-shape-opt', '0', '--check-zones',
+                              '--layers', ','.join(board_layers(pcb)), '--theme', 'kicad-review-' + theme,
+                              '-o', f'{out}/pcb{suffix}', pcb)
+            pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(out, 'sheet-images.json').write_text(json.dumps(mapping, sort_keys=True), encoding='utf-8')
+            if os.path.exists(pcb):
+                export_board_stats(pcb, out)  # Shared optional facts, once per revision, outside the theme loop.
+        finally:
+            if previous is None:
+                os.environ.pop('KICAD_CONFIG_HOME', None)
+            else:
+                os.environ['KICAD_CONFIG_HOME'] = previous
     if os.path.exists(sch):
-        kicad_cli("sch", "export", "svg", "--no-background-color", "-o", f"{out}/sch", sch)
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
             kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
     if os.path.exists(pcb):
-        # Drill marks off: with them every layer, even an empty one, is full of holes.
-        # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
-        kicad_cli("pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1",
-                  "--drill-shape-opt", "0", "-l", ",".join(board_layers(pcb)), "-o", f"{out}/pcb", pcb)
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
 

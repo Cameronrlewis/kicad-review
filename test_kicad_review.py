@@ -32,7 +32,7 @@ with TemporaryDirectory() as d:
     p = pathlib.Path(d, 'four.kicad_pcb')
     p.write_text(four.read_text().replace('(layers ', '(layers\n '))
     assert kr.board_layers(str(p)) == kr.board_layers(str(four))
-    with patch('kicad_review.kicad_cli') as cli:
+    with patch('kicad_review.kicad_cli') as cli, patch.object(kr, 'export_board_stats'):
         kr.render_side(d, 'four', str(pathlib.Path(d, 'out')))
     svg_call = next(c.args for c in cli.call_args_list if c.args[:3] == ('pcb', 'export', 'svg'))
     layer_flag = '--layers' if '--layers' in svg_call else '-l'
@@ -124,6 +124,105 @@ for mode in ('ok', 'nonzero', 'missing', 'malformed', 'nonobject', 'timeout', 'u
             if mode == 'nonzero':
                 assert 'stats failed' in error
 print('ok optional atomic board statistics: seven outcomes')
+
+# Named export themes come from the entire canonical palette, with no runtime Node dependency.
+import os
+with TemporaryDirectory() as d:
+    kr.write_image_themes(d)
+    for theme in ('light', 'dark'):
+        data = json.loads(pathlib.Path(d, '10.0/colors', f'kicad-review-{theme}.json').read_text())
+        assert data['meta'] == {'name': 'kicad-review-' + theme, 'version': 5}
+        assert data['board']['copper']['f'] == 'rgb(200, 52, 52)'
+        assert data['schematic']['wire'] == 'rgb(0, 150, 0)'
+        for key, rgba in kr.IMAGE_PALETTES[theme]['colors'].items():
+            value = data
+            for part in key.split('.'):
+                value = value[part]
+            assert value == 'rgb(%d, %d, %d)' % tuple(round(v * 255) for v in rgba[:3])
+canonical = subprocess.check_output(['node', '--input-type=module', '-e',
+    'import fs from "node:fs";import vm from "node:vm";const c=vm.createContext({});'
+    'vm.runInContext(fs.readFileSync("ui/kicad-colors.js","utf8"),c);'
+    'console.log(JSON.stringify(c.KicadColors))'], text=True)
+colors = json.loads(canonical)
+assert set(kr.IMAGE_PALETTES) == {'light', 'dark'}
+for theme, palette in kr.IMAGE_PALETTES.items():
+    assert palette['colors'] == colors['themeDefaults'], 'canonical image palette drift'
+    assert palette['sourceRGB'] == {layer: [round(v * 255) for v in colors['themeDefaults'][key][:3]]
+                                    for layer, key in colors['layerThemeKeys'].items()}, 'canonical image palette drift'
+with patch.object(kr, 'kicad_cli') as cli, patch.object(kr.os.path, 'exists', return_value=True), \
+     patch.object(kr, 'board_layers', return_value=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']), \
+     patch.object(kr, 'sheet_pages', return_value=[]), \
+     patch.object(kr, 'export_board_stats', return_value=None) as stats_export:
+    with TemporaryDirectory() as d:
+        kr.render_side(d, 'H', d, netlist=True)
+        stats_export.assert_called_once_with(f'{d}/H.kicad_pcb', d)
+    commands = [call.args for call in cli.call_args_list]
+    sheets = [c for c in commands if c[:3] == ('sch', 'export', 'svg')]
+    boards = [c for c in commands if c[:3] == ('pcb', 'export', 'svg')]
+    assert len(sheets) == len(boards) == 2
+    for theme, sch, pcb in zip(('light', 'dark'), sheets, boards):
+        for c in (sch, pcb):
+            assert c[c.index('--theme') + 1] == 'kicad-review-' + theme
+        assert '--no-background-color' in sch and '--exclude-drawing-sheet' not in sch
+        assert '--mode-multi' in pcb and '--check-zones' in pcb and '--exclude-drawing-sheet' in pcb
+        assert pcb[pcb.index('--layers') + 1] == 'F.Cu,In1.Cu,In2.Cu,B.Cu'
+        assert pcb[pcb.index('--page-size-mode') + 1] == '1'
+        assert pcb[pcb.index('--drill-shape-opt') + 1] == '0'
+    assert sum(c[:2] == ('sch', 'erc') for c in commands) == 1
+    assert sum(c[:2] == ('pcb', 'drc') and '--schematic-parity' in c for c in commands) == 1
+    assert sum(c[:3] == ('sch', 'export', 'netlist') for c in commands) == 1
+    assert not any(c[:3] == ('pcb', 'export', 'stats') for c in commands), 'no fatal or duplicate statistics export'
+print('ok canonical image palettes and dual-theme exports')
+
+# Repeated source sheets resolve by instance UUID path; simplify each theme, restore private config even on failure.
+for failure in (None, 'missing-light', 'missing-dark', 'ambiguous', 'cli'):
+    for prior in (None, '/existing-kicad-config'):
+        with TemporaryDirectory() as d, patch.dict(os.environ):
+            if prior is None:
+                os.environ.pop('KICAD_CONFIG_HOME', None)
+            else:
+                os.environ['KICAD_CONFIG_HOME'] = prior
+            root = pathlib.Path(d)
+            (root / 'H.kicad_sch').write_text('(kicad_sch (uuid root) '
+                '(sheet (uuid a) (property "Sheetname" "One") (property "Sheetfile" "shared.kicad_sch")) '
+                '(sheet (uuid b) (property "Sheetname" "Two") (property "Sheetfile" "shared.kicad_sch")))')
+            (root / 'shared.kicad_sch').write_text('(kicad_sch)')
+            pages = kr.sheet_pages(d, 'H')
+            assert [p['path'] for p in pages] == ['/', '/a/', '/b/']
+            if failure == 'ambiguous':
+                pages[2]['stem'] = pages[1]['stem']
+            configs = []
+            raw = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="red"><path d="M0 0"/><path d="M1 1"/></svg>'
+            def image_cli(*command):
+                if command[:3] != ('sch', 'export', 'svg'):
+                    return
+                cfg = pathlib.Path(os.environ['KICAD_CONFIG_HOME'])
+                configs.append(cfg)
+                assert (cfg / '10.0/colors/kicad-review-light.json').is_file()
+                if failure == 'cli':
+                    raise SystemExit('export failed')
+                dest = pathlib.Path(command[command.index('-o') + 1])
+                dest.mkdir(parents=True, exist_ok=True)
+                for page in pages:
+                    if page['path'] == '/b/' and failure == ('missing-dark' if dest.name == 'sch-dark' else 'missing-light'):
+                        continue
+                    (dest / (page['stem'] + '.svg')).write_text(raw)
+            with patch.object(kr, 'kicad_cli', side_effect=image_cli), patch.object(kr, 'sheet_pages', return_value=pages):
+                try:
+                    kr.render_side(d, 'H', str(root / 'out'))
+                    assert failure is None, 'missing/ambiguous export must fail'
+                except (ValueError, SystemExit):
+                    assert failure is not None
+            assert os.environ.get('KICAD_CONFIG_HOME') == prior
+            assert configs and all(not cfg.exists() for cfg in configs)
+            if failure is None:
+                mapping = json.loads((root / 'out/sheet-images.json').read_text())
+                assert mapping == {p['path']: {theme: f"sch{suffix}/{p['stem']}.svg"
+                    for theme, suffix in (('light', ''), ('dark', '-dark'))} for p in pages}
+                for themes in mapping.values():
+                    for relative in themes.values():
+                        assert len(ET.fromstring((root / 'out' / relative).read_text()).findall('.//s:path', ns)) == 1
+print('ok instance image mappings, missing/ambiguous exports and config cleanup')
 
 # S-expression parsing: quoted strings with escapes, nesting.
 n = parse_sexpr('(a (b "x \\"y\\" z") (c 1 2))')
@@ -335,7 +434,8 @@ with TemporaryDirectory() as t:
     assert [p["page"] for p in kr.sheet_pages(t, "H")] == ["1", "2"]
     write(t, {"P.kicad_sch": '(kicad_sch)'})
     calls = []
-    with patch.object(kr, "kicad_cli", side_effect=lambda *a: calls.append(a)):
+    with patch.object(kr, "kicad_cli", side_effect=lambda *a: calls.append(a)), \
+         patch.object(kr, "sheet_pages", return_value=[]):
         kr.render_side(t, "P", t + "/out")
     sch = next(c for c in calls if c[:3] == ("sch", "export", "svg"))
     assert "--exclude-drawing-sheet" not in sch
@@ -1113,12 +1213,24 @@ def fake_cli(args, **kw):
 kicad_review.subprocess.run = fake_cli
 try:
     render_side(f"{t}/P", "P", f"{t}/render")
-    assert calls == [
-        ["kicad-cli", "sch", "export", "svg", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
-        ["kicad-cli", "sch", "erc", "--format", "json", "--severity-all", "-o", f"{t}/render/erc.json", f"{t}/P/P.kicad_sch"],
-        ["kicad-cli", "pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1", "--drill-shape-opt", "0", "-l", "F.Cu,B.Cu,Edge.Cuts", "-o", f"{t}/render/pcb", f"{t}/P/P.kicad_pcb"],
-        ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity", "-o", f"{t}/render/drc.json", f"{t}/P/P.kicad_pcb"]], "TS-S2 render commands"
-    assert all(pathlib.Path(f"{t}/render/{f}").read_text() == text for f, text in {"sch/P.svg": "<svg/>", "pcb/P.svg": "<svg/>", "erc.json": "{}", "drc.json": "{}"}.items())
+    expected = []
+    for theme, suffix in (('light', ''), ('dark', '-dark')):
+        expected.extend([
+            ['kicad-cli', 'sch', 'export', 'svg', '--no-background-color', '--theme', 'kicad-review-' + theme,
+             '-o', f'{t}/render/sch{suffix}', f'{t}/P/P.kicad_sch'],
+            ['kicad-cli', 'pcb', 'export', 'svg', '--mode-multi', '--exclude-drawing-sheet', '--page-size-mode', '1',
+             '--drill-shape-opt', '0', '--check-zones', '--layers', 'F.Cu,B.Cu,Edge.Cuts', '--theme', 'kicad-review-' + theme,
+             '-o', f'{t}/render/pcb{suffix}', f'{t}/P/P.kicad_pcb']])
+    expected.extend([
+        ['kicad-cli', 'pcb', 'export', 'stats', '--format', 'json', '--units', 'mm', '-o', f'{t}/render/stats.pending.json', f'{t}/P/P.kicad_pcb'],
+        ['kicad-cli', 'sch', 'erc', '--format', 'json', '--severity-all', '-o', f'{t}/render/erc.json', f'{t}/P/P.kicad_sch'],
+        ['kicad-cli', 'pcb', 'drc', '--format', 'json', '--severity-all', '--schematic-parity', '-o', f'{t}/render/drc.json', f'{t}/P/P.kicad_pcb']])
+    assert calls == expected, 'TS-S2 render commands'
+    assert all(pathlib.Path(f'{t}/render/{f}').read_text() == text for f, text in {
+        'sch/P.svg': '<svg />', 'sch-dark/P.svg': '<svg />', 'pcb/P.svg': '<svg/>', 'pcb-dark/P.svg': '<svg/>',
+        'erc.json': '{}', 'drc.json': '{}', 'stats.json': '{}'}.items())
+    assert json.loads(pathlib.Path(f'{t}/render/sheet-images.json').read_text()) == {
+        '/': {'light': 'sch/P.svg', 'dark': 'sch-dark/P.svg'}}
     fail_cli = True
     try:
         render_side(f"{t}/P", "P", f"{t}/render")
@@ -1459,6 +1571,7 @@ with tempfile.TemporaryDirectory() as t:
     try:
         os.chdir(t)
         write(t, {"review/data.json": json.dumps(rdata), "tools/kicad_review.py": tool_source,
+                  "tools/image-palettes.json": json.dumps(kr.IMAGE_PALETTES),
                   "bin/gh": "#!" + sys.executable + "\nimport os, pathlib, sys\nif sys.argv[2] == 'view':\n p = pathlib.Path('view-count'); n = int(p.read_text()) if p.exists() else 0; p.write_text(str(n + 1)); print('changed notes' if n and os.environ['BODY_CHANGED'] == '1' else 'human notes')\nelif sys.argv[2] == 'edit':\n pathlib.Path('edited').write_text('yes')\n"})
         pathlib.Path("bin/gh").chmod(0o755)
         for changed in (False, True):
