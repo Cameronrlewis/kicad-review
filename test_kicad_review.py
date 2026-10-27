@@ -4293,3 +4293,20 @@ with tempfile.TemporaryDirectory() as case, patch("kicad_review.subprocess.run",
     assert not zip_path.exists() and not list(zip_path.parent.glob(".fab-*")), "malformed CPL left archive or staging"
     assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL failure changed release evidence"
 print("ok CPL overflow and malformed CSV fabrication isolation")
+
+# Synthetic board CPL regression: raw KiCad export and committed corrected output (Task 3B, Step 6).
+FIXTURES = pathlib.Path(kr.__file__).with_name("cpl_rotations") / "fixtures"
+with open(FIXTURES / "cpl-rotation-pos-raw.csv", newline="", encoding="utf-8") as f:
+    raw_rows = list(csv.reader(f))
+out = pathlib.Path(tempfile.mkdtemp(), "corrected.csv")
+matched = kr.correct_positions(str(FIXTURES / "cpl-rotation-pos-raw.csv"), str(out), CPL, {})
+assert matched == sum(1 for r in raw_rows[1:] if rule(r[2]) is not None), matched
+assert out.read_bytes() == (FIXTURES / "cpl-rotation-pos-corrected.csv").read_bytes(), "cpl-rotation CPL regression"
+with open(out, newline="", encoding="utf-8") as f:
+    got = list(csv.reader(f))
+assert got[0] == raw_rows[0] == ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"], got[0]
+for before, after in zip(raw_rows[1:], got[1:]):
+    assert (after[0], after[2], after[6]) == (before[0], before[2], before[6]), before
+    if before[6] == "Top" and rule(before[2]) is None:
+        assert after[5] == f"{float(before[5]):.6f}", before  # unmatched top parts keep their angle
+print("ok cpl-rotation CPL regression")
