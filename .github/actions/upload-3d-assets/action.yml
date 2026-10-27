@@ -1,0 +1,5 @@
+name: Upload digest-keyed 3D assets
+description: Run the pinned upload loop with Actions runtime credentials
+runs:
+  using: node24
+  main: index.cjs

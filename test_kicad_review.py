@@ -3965,6 +3965,19 @@ def br02_render_cache_contract():
                 (base_cache/'poster.png').write_bytes(b'')
                 kr.cmd_render(None)
                 assert len(calls) == 4, 'BR02 empty poster invalidates render cache'
+                # A legacy processed-only cache must never be treated as a raw export.
+                (base_cache/'board.raw.glb').unlink()
+                assert not kr.render_cache_complete(base_cache, pr, 'base', settings), 'BR02 raw export required on cache hits'
+                try:
+                    kr.restore_renders()
+                    raise AssertionError('BR02 legacy processed-only cache must invalidate restore')
+                except SystemExit as e:
+                    assert e.code == 1
+                kr.cmd_render(None)
+                assert len(calls) == 6 and (base_cache/'board.raw.glb').read_bytes() == b'glTF'
+                (base_cache/'board.raw.glb').write_bytes(b'')
+                assert not kr.render_cache_complete(base_cache, pr, 'base', settings), 'BR02 empty raw export is not a hit'
+                (base_cache/'board.raw.glb').write_bytes(b'glTF')
                 cache = kr.render_cache(pr, 'base', det, settings)
                 same_revision = {**det, 'head': det['base']}
                 assert cache == kr.render_cache(pr, 'head', same_revision, settings), 'BR02 revision caches are side independent'
@@ -4507,3 +4520,88 @@ def br02_task4a_attachment_contract():
 
 
 br02_task4a_attachment_contract()
+
+# BR02: processing is pair-specific, its integration gate is required, assets are individual files.
+wf = pathlib.Path('.github/workflows/review.yml').read_text()
+assert 'prepare-3d' in wf and '--cache .processed-3d-cache' in wf, 'BR02 pair-specific processing workflow'
+assert 'name: Run 3D processor integration tests' in wf, 'BR02 required integration gate'
+step = wf.split('name: Run 3D processor integration tests', 1)[1].split('\n      - name:', 1)[0]
+assert 'continue-on-error: true' not in step and 'node --test tools/ui/compress3d.test.mjs' in step, 'BR02 integration failures must block workflow'
+assert 'INPUT_ARCHIVE=false' in wf and 'INPUT_RETENTION-DAYS=90' in wf, 'BR02 individual immutable assets'
+assert '_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/dist/upload/index.js' in wf
+assert step.count("steps.detect.outputs.changed == 'true'") == 1 and '&&' not in step.split('run:', 1)[0]
+assert wf.index('name: Install 3D compression dependencies') < wf.index('name: Run 3D processor integration tests') < wf.index('name: Compress 3D board models')
+for name in ('Install 3D compression dependencies', 'Compress 3D board models', 'Upload digest-keyed 3D assets'):
+    block = wf.split('name: ' + name, 1)[1].split('\n      - name:', 1)[0]
+    assert 'continue-on-error: true' not in block, 'BR02 setup and asset upload failures are fatal'
+assert wf.count("'tools/ui/compress3d.cjs', 'base/kicad-review.toml'") == 2, 'BR02 processor source namespaces both raw caches'
+assert '.processed-3d-cache' in wf.split('name: Cache 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
+assert 'uses: ./tools/.github/actions/upload-3d-assets' in wf
+assert 'using: node24' in pathlib.Path('.github/actions/upload-3d-assets/action.yml').read_text()
+assert wf.index('name: Upload report\n') < wf.index('name: Upload digest-keyed 3D assets') < wf.index('name: Screenshots of changed drawings')
+assert 'INPUT_OVERWRITE=false INPUT_INCLUDE-HIDDEN-FILES=false' in wf, 'BR02 bundled action needs explicit boolean defaults'
+print('ok BR02 pair-specific processing workflow, required integration gate and immutable assets')
+
+
+def br02_processed_sample_contract():
+    import base64, gzip, hashlib, json, math, struct, zlib
+    source = pathlib.Path('ui/sample/review-data-3d-processed.js').read_text()
+    assert '<' not in source, 'BR02 sample uses the report producer escaped script'
+    data = json.JSONDecoder().raw_decode(source.split('window.REVIEW_DATA = ', 1)[1])[0]
+    assert data['version'] == 1 and len(data['projects']) == 1
+    project = data['projects'][0]; board = project['board']
+    blob = lambda field, side: gzip.decompress(base64.b64decode(data['blobs'][board[field][side]], validate=True))
+    indexes = {}
+    for side, resistor in (('base', 'R1'), ('head', 'R12')):
+        coverage = board['coverage3dBySide'][side]
+        assert [coverage[k] for k in ('footprints', 'withModel', 'placeholders')] == [6, 3, 3]
+        raw = blob('model3d', side)
+        assert struct.unpack('<4sII', raw[:12]) == (b'glTF', 2, len(raw))
+        length, kind = struct.unpack('<I4s', raw[12:20]); assert kind == b'JSON'
+        gltf = json.loads(raw[20:20+length])
+        assert 'EXT_meshopt_compression' in gltf['extensionsRequired']
+        assert any(n.get('extras', {}).get('batch') == 'ref:' + resistor for n in gltf['nodes'])
+        assert any(n.get('name') == 'parts:merged:top' for n in gltf['nodes'])
+        assert any(n.get('name') == 'parts:merged:bottom' for n in gltf['nodes'])
+        image = blob('poster3d', side)
+        assert image[:8] == b'\x89PNG\r\n\x1a\n' and struct.unpack('>II', image[16:24]) == (1600, 1000)
+        offset = 8; pixels = bytearray()
+        while offset < len(image):
+            size = struct.unpack('>I', image[offset:offset+4])[0]
+            chunk = image[offset+4:offset+8+size]
+            assert zlib.crc32(chunk) == struct.unpack('>I', image[offset+8+size:offset+12+size])[0]
+            if chunk[:4] == b'IDAT': pixels.extend(chunk[4:])
+            offset += size + 12
+        assert len(zlib.decompress(pixels)) == 1000 * (1 + 1600 * 4), 'BR02 real PNG pixels'
+        parts = json.loads(blob('parts3d', side)); indexes[side] = {p['ref']: p for p in parts}
+        assert set(indexes[side]) == {resistor, 'R2', 'J1', 'U3', 'U4', 'LOGO1'}
+        for part in parts:
+            assert len(part['box']) == 6 and all(math.isfinite(v) for v in part['box'])
+        for ref, surface in (('U3', 'top'), ('U4', 'bottom'), ('LOGO1', 'top')):
+            missing = indexes[side][ref]
+            assert not missing['hasModel'] and missing['side'] == surface and missing['reason']
+        # Missing selectable targets must not overlap a model body, even in an overhead ray.
+        for ref in ('U3', 'U4'):
+            a = indexes[side][ref]['box']
+            for body in (p for p in parts if p['hasModel']):
+                b = body['box']
+                assert any(a[i+3] < b[i] or b[i+3] < a[i] for i in (0, 2)), (side, ref, body['ref'])
+        for field, key, suffix in (('model3d', 'model', 'board.glb'), ('parts3d', 'parts', 'board-parts.json')):
+            raw = blob(field, side); asset = board['assets3d'][side][key]
+            digest = hashlib.sha256(raw).hexdigest()
+            assert asset == {'digest': digest, 'artifactName': 'kicad-3d-' + digest + '-' + suffix + '.gz',
+                             'bytes': len(gzip.compress(raw, mtime=0))}
+    for before, after in (('R1', 'R12'), ('U3', 'U3')):
+        a, b = indexes['base'][before], indexes['head'][after]
+        assert a['uuid'] == b['uuid']
+        assert abs(b['box'][0] - a['box'][0] - .001) < 1e-9
+    for ref in ('R2', 'J1', 'U4', 'LOGO1'):
+        assert indexes['base'][ref] == indexes['head'][ref]
+    assert {c['ref'] for c in project['changes']} == {'R12', 'U3'}
+    for side in ('base', 'head'):
+        geometry = json.loads(blob('geometry', side))
+        assert geometry['copperStack'] == ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+    print('ok BR02 real processed sample: renamed/moved UUIDs, isolated missing targets, Meshopt, PNG, indexes and four layers')
+
+
+br02_processed_sample_contract()

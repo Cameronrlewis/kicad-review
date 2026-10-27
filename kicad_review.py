@@ -486,6 +486,10 @@ def render_cache_complete(cache, p, side, settings):
         return False
     need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
     if need_still and pathlib.Path(board_path(p, side)).is_file():
+        if settings["3d"]["enabled"]:
+            raw = cache / "board.raw.glb"
+            if not raw.is_file() or not raw.stat().st_size:
+                return False
         poster = cache / "poster.png"
         return poster_size(poster) == (1600, 1000)
     return True

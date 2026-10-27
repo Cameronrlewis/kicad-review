@@ -82,14 +82,14 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: .render-cache/${{ steps.detect.outputs.base }}
-          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.base }}
+          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/ui/compress3d.cjs', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.base }}
 
       - name: Restore head revision renders
         if: steps.detect.outputs.changed == 'true'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: .render-cache/${{ steps.detect.outputs.head }}
-          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
+          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/ui/compress3d.cjs', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
 
       - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'
@@ -99,58 +99,63 @@ jobs:
               python3 tools/kicad_review.py render
           fi
 
-      - name: Cache 3D compression dependencies
+      - name: Cache 3D compression dependencies and processed models
         if: steps.detect.outputs.changed == 'true'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          path: ~/.cache/kicad-review-meshopt
-          key: meshopt-4.2.1-0.22.0-${{ runner.os }}
+          path: |
+            ~/.cache/kicad-review-meshopt
+            .processed-3d-cache
+          # Save newly processed pairs, not only the first immutable dependency-cache entry.
+          key: meshopt-4.2.1-0.22.0-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: meshopt-4.2.1-0.22.0-${{ runner.os }}-
+
+      - name: Install 3D compression dependencies
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPS="$HOME/.cache/kicad-review-meshopt"
+          mkdir -p "$DEPS"
+          if [ ! -d "$DEPS/node_modules/meshoptimizer" ]; then
+            npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0
+          fi
+
+      - name: Run 3D processor integration tests
+        if: steps.detect.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/br02"; mkdir -p "$OUT"; export OUT
+          PROCESS3D_INTEGRATION=1 NODE_PATH="$HOME/.cache/kicad-review-meshopt/node_modules" node --test tools/ui/compress3d.test.mjs
 
       - name: Compress 3D board models
         if: steps.detect.outputs.changed == 'true'
-        continue-on-error: true
         shell: bash
         run: |
-          shopt -s nullglob
-          models=(review/*/{base,head}/board.glb)
-          [ ${#models[@]} -gt 0 ] || exit 0
-          deps="$HOME/.cache/kicad-review-meshopt"
-          mkdir -p "$deps"
-          if [ ! -d "$deps/node_modules/meshoptimizer" ] && ! npm install --prefix "$deps" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0; then
-            echo "::warning::Meshopt dependencies unavailable; keeping original GLBs."
-            exit 0
-          fi
-          declare -A compressed
-          cache=$(mktemp -d)
-          trap 'rm -rf "$cache"' EXIT
-          for model in "${models[@]}"; do
-            digest=$(sha256sum "$model" | cut -d' ' -f1)
-            if [ -f "$model.meshopt" ] && [ "$(cat "$model.meshopt")" = "$digest" ]; then
-              echo "Meshopt cache hit for $model"
-              continue
-            fi
-            if [ -n "${compressed[$digest]:-}" ]; then
-              cp "${compressed[$digest]}" "$model"
-              sha256sum "$model" | cut -d' ' -f1 > "$model.meshopt"
-              echo "Meshopt reused for $model"
-              continue
-            fi
-            # Write beside the original, replacing it only after a successful export.
-            tmp=$(mktemp -d "${model%/*}/meshopt.XXXXXX") || continue
-            start=$SECONDS
-            before=$(wc -c < "$model")
-            if NODE_PATH="$deps/node_modules" node tools/ui/compress3d.cjs "$model" "$tmp/board.glb" && [ -s "$tmp/board.glb" ]; then
-              if mv "$tmp/board.glb" "$model"; then
-                cp "$model" "$cache/$digest.glb"
-                compressed[$digest]="$cache/$digest.glb"
-                sha256sum "$model" | cut -d' ' -f1 > "$model.meshopt"
-                echo "Meshopt $model: $before -> $(wc -c < "$model") bytes in $((SECONDS - start))s"
-              fi
+          set -euo pipefail
+          DEPS="$HOME/.cache/kicad-review-meshopt"; export DEPS
+          OUT="$RUNNER_TEMP/br02"; mkdir -p "$OUT"; export OUT
+          # Clear restored pair-specific products before preparing this comparison's metadata.
+          while IFS= read -r -d '' model; do
+            dir=$(dirname "$model")
+            cp "$model" "$dir/board.glb"
+            rm -f "$dir/board-parts.json" "$dir/board-stats.json" "$dir/board-processed.json"
+          done < <(find review -name board.raw.glb -print0)
+          python3 tools/kicad_review.py prepare-3d
+          while IFS= read -r -d '' meta; do
+            dir=$(dirname "$meta")
+            test -s "$dir/board.raw.glb" || continue
+            if NODE_PATH="$DEPS/node_modules" node tools/ui/compress3d.cjs "$dir/board.raw.glb" "$dir/board.glb" \
+              --metadata "$meta" --parts "$dir/board-parts.json" --stats "$dir/board-stats.json" \
+              --cache .processed-3d-cache && test -s "$dir/board-processed.json"; then
+              : # The processor installs a validated manifest last.
             else
-              echo "::warning::Meshopt failed for $model; keeping the original GLB."
+              cp "$dir/board.raw.glb" "$dir/board.glb"
+              rm -f "$dir/board-parts.json" "$dir/board-stats.json" "$dir/board-processed.json"
+              echo "::warning::3D processing failed for $dir; keeping the raw GLB."
             fi
-            rm -rf "$tmp"
-          done
+          done < <(find review -name board-3d-input.json -print0)
 
       - name: Cache final rendered outputs
         if: steps.detect.outputs.changed == 'true'
@@ -213,6 +218,27 @@ jobs:
           archive: false
           path: review/${{ steps.report.outputs.name }}
           retention-days: 90
+
+      - name: Upload digest-keyed 3D assets
+        if: steps.detect.outputs.changed == 'true'
+        # A node action receives Actions runtime credentials; a plain run step does not.
+        uses: ./tools/.github/actions/upload-3d-assets
+        env:
+          UPLOAD_SCRIPT: |
+            set -euo pipefail
+            shopt -s nullglob
+            action="$RUNNER_WORKSPACE/../_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/dist/upload/index.js"
+            test -f "$action"
+            # ponytail: invoke the pinned upload action's bundled entrypoint; re-verify its path/input contract whenever the action SHA changes.
+            for asset in review/3d/kicad-3d-*.gz; do
+              output=$(mktemp)
+              env INPUT_NAME="$(basename "$asset")" INPUT_PATH="$PWD/$asset" \
+                INPUT_ARCHIVE=false INPUT_RETENTION-DAYS=90 \
+                INPUT_IF-NO-FILES-FOUND=error INPUT_COMPRESSION-LEVEL=0 \
+                INPUT_OVERWRITE=false INPUT_INCLUDE-HIDDEN-FILES=false \
+                GITHUB_OUTPUT="$output" node "$action"
+              rm -f "$output"
+            done
 
       - name: Screenshots of changed drawings
         if: steps.detect.outputs.changed == 'true'

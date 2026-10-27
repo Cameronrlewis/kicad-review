@@ -4,6 +4,7 @@ import {createRequire} from 'node:module';
 import {mkdtempSync,readFileSync,rmSync,mkdirSync,readdirSync,statSync,writeFileSync,existsSync,utimesSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {join as pathJoin} from 'node:path';
+import {gunzipSync} from 'node:zlib';
 const require=createRequire(import.meta.url), P=require('./compress3d.cjs');
 test('BR02 mask finish and pair-safe cache policy',()=>{
   for(const rgb of [[.7,.02,.01],[.01,.02,.8],[0,0,0],[1,1,1]])
@@ -27,12 +28,16 @@ function quietDocument(document) {
 }
 
 function fixturePaths() {
-  const fs=require('node:fs'), path=require('node:path');
-  const out=process.env.OUT || '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer';
-  const paths=['task1-executor/board.glb','ci-probe-task1-kicad1006/board.glb']
-    .map(p=>path.join(out,p));
-  for(const p of paths) assert.ok(fs.existsSync(p),'Required KiCad integration fixture missing: '+p);
-  return paths;
+  // Task 1's actual exports of ui/fixtures/3d-four-layer.kicad_pcb, not fabricated GLBs.
+  // Preserve both KiCad hierarchies in CI without relying on a developer's scratch folder.
+  assert.ok(process.env.OUT, 'OUT is required for integration test scratch');
+  return ['10.0.0','10.0.6'].map(version=>{
+    const folder=pathJoin(process.env.OUT,'kicad-'+version);
+    mkdirSync(folder,{recursive:true});
+    const file=pathJoin(folder,'board.glb');
+    writeFileSync(file,gunzipSync(readFileSync(new URL('./fixtures/3d-kicad-'+version+'.glb.gz',import.meta.url))));
+    return file;
+  });
 }
 
 function makeDocument(names,copies=1) {
