@@ -3664,3 +3664,23 @@ print("ok per-commit project render cache hits retain both revisions")
 
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
+
+# ---- Spec 07: revision downloads ----
+import copy, csv, hashlib, io, json, os, pathlib, tempfile, types, zipfile
+from unittest.mock import patch
+import kicad_review as kr
+from kicad_review import DEFAULT_SETTINGS, load_settings
+
+assert DEFAULT_SETTINGS["downloads"] == {"enabled": False, "step": True}
+for text, error in (("downloads = true", "downloads must be a table"),
+                    ("[downloads]\nenabled = 1", "downloads.enabled must be true or false"),
+                    ('[downloads]\nstep = "no"', "downloads.step must be true or false")):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        try:
+            load_settings()
+            raise AssertionError("invalid downloads settings accepted")
+        except SystemExit as e:
+            assert str(e) == "kicad-review.toml: " + error, e
+with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(b"[downloads]\nenabled = true\nstep = false\n"), create=True):
+    assert load_settings()["downloads"] == {"enabled": True, "step": False}
+print("ok downloads settings")

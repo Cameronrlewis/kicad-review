@@ -1471,6 +1471,7 @@ DEFAULT_SETTINGS = {
     "release": {"review": False},
     "digikey": {"enabled": False, "site": "US", "currency": "USD", "max_lookups": 100},
     "pdf": {"enabled": False},
+    "downloads": {"enabled": False, "step": True},  # head-revision files for the report's Download dialog
 
     "threads": {"enabled": False, "block_merge": False},
     "issues": {"enabled": False},
@@ -1504,7 +1505,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "downloads"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -1543,6 +1544,9 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: digikey.max_lookups must be an integer from 1 to 900")
     if not isinstance(settings["pdf"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: pdf.enabled must be true or false")
+    for key in ("enabled", "step"):
+        if not isinstance(settings["downloads"][key], bool):
+            sys.exit(f"{SETTINGS_FILE}: downloads.{key} must be true or false")
 
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
