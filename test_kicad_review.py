@@ -3785,3 +3785,184 @@ with tempfile.TemporaryDirectory() as dl_dir:
         missing = export_one("step", args, str(dest))
     assert missing["file"] is None and missing["error"] == "kicad-cli wrote no file" and not dest.is_symlink(), missing
 print("ok export_one isolates operational and cleanup errors")
+
+from kicad_review import export_downloads
+PCB = '(kicad_pcb\n(layers\n(0 "F.Cu" signal)\n(31 "B.Cu" signal)\n(44 "Edge.Cuts" user)\n)\n)'
+def dl_project(root, name, sch=True, pcb=True):
+    src = pathlib.Path(root, "src"); src.mkdir(parents=True, exist_ok=True)
+    (src / f"{name}.kicad_pro").write_text("{}")
+    if sch: (src / f"{name}.kicad_sch").write_text("(kicad_sch)")
+    if pcb: (src / f"{name}.kicad_pcb").write_text(PCB)
+    # 02's raw head export, as its render step would leave it beside the project source.
+    pathlib.Path(root, "out").mkdir(parents=True, exist_ok=True)
+    pathlib.Path(root, "out", "board.raw.glb").write_bytes(b"glTF-raw")
+    return str(src)
+dl_settings = copy.deepcopy(DEFAULT_SETTINGS); dl_settings["downloads"]["enabled"] = True
+kr.subprocess.run = dl_fake
+try:
+    t = tempfile.mkdtemp(); src = dl_project(t, "P"); dl_calls.clear(); dl_mode.clear()
+    entries = export_downloads({"name": "P", "dir": ""}, src, f"{t}/out", dl_settings, "b" * 40)
+    stem, dl = "P-bbbbbbb", f"{t}/out/downloads"
+    assert [e["kind"] for e in entries] == ["fab", "pdf", "step", "glb"] and all(e["error"] is None for e in entries), entries
+    assert [c[0][3] for c in dl_calls] == ["gerbers", "drill", "pos", "bom", "pdf", "step"], "the GLB is copied from 02's raw product, never exported here"
+    assert [e["file"] for e in entries] == [f"fab-{stem}.zip", f"{stem}-schematic.pdf", f"{stem}-board.step", f"{stem}-board.glb"]
+    assert next(c for c in dl_calls if c[0][3] == "step") == (["kicad-cli", "pcb", "export", "step", "--subst-models", "-f", "-o", f"{dl}/{stem}-board.step", f"{src}/P.kicad_pcb"], 120)
+    assert pathlib.Path(dl, f"{stem}-board.glb").read_bytes() == b"glTF-raw", "download GLB must be 02's raw bytes, unchanged"
+    assert next(c[0] for c in dl_calls if c[0][3] == "pdf") == ["kicad-cli", "sch", "export", "pdf", "-o", f"{dl}/{stem}-schematic.pdf", f"{src}/P.kicad_sch"]
+    with zipfile.ZipFile(f"{dl}/fab-{stem}.zip") as z:
+        assert sorted(z.namelist()) == ["P-review-jlcpcb-bom.csv", "P-review-jlcpcb-gerbers.zip", "P-review-jlcpcb-positions.csv"]
+    manifest = json.loads(pathlib.Path(f"{dl}/downloads.json").read_text())
+    assert set(manifest) == {"files", "purpose", "policy"} and manifest["purpose"] == "comparison", manifest.keys()
+    for internal, item in zip(entries, manifest["files"]):
+        data = pathlib.Path(dl, internal["file"]).read_bytes()
+        assert item == {"kind": internal["kind"], "label": internal["label"], "path": internal["file"], "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    # Downloads alone never create shared release evidence. Seed a real release-check
+    # package explicitly, then prove a valid existing package is reused, not rebuilt.
+    assert not pathlib.Path(t, "out/fab").exists()
+    pathlib.Path(t, "out/fab").mkdir()
+    kr.release_project(f"{src}/P.kicad_pro", "review", dl_settings, f"{t}/out/fab", "P")
+    dl_calls.clear()
+    export_downloads({"name": "P", "dir": ""}, src, f"{t}/out", dl_settings, "b" * 40)
+    assert [c[0][3] for c in dl_calls] == ["pdf", "step"], dl_calls
+    # downloads.step = false drops STEP entirely.
+    no_step = copy.deepcopy(dl_settings); no_step["downloads"]["step"] = False
+    dl_calls.clear()
+    assert [e["kind"] for e in export_downloads({"name": "P", "dir": ""}, src, f"{t}/out", no_step, "b" * 40)] == ["fab", "pdf", "glb"]
+    assert not pathlib.Path(f"{t}/out/downloads/{stem}-board.step").exists(), "disabled STEP must not remain staged"
+    (pathlib.Path(src) / "P.kicad_sch").unlink()
+    export_downloads({"name": "P", "dir": ""}, src, f"{t}/out", no_step, "b" * 40)
+    assert not pathlib.Path(f"{t}/out/downloads/{stem}-schematic.pdf").exists(), "removed schematic must not leave stale PDF"
+    # Failure isolation: fab fails, STEP times out; PDF and GLB still arrive and nothing is left half-written.
+    t2 = tempfile.mkdtemp(); src2 = dl_project(t2, "P"); dl_mode.update({"gerbers": "rc", "step": "timeout"})
+    with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+        bad = export_downloads({"name": "P", "dir": ""}, src2, f"{t2}/out", dl_settings, "b" * 40)
+    assert "::warning::P: fabrication export failed" in warnings.getvalue() and "::warning::P: 3D model (STEP): skipped: export took longer than 120 s" in warnings.getvalue(), warnings.getvalue()
+    assert [(e["kind"], e["file"] is None) for e in bad] == [("fab", True), ("pdf", False), ("step", True), ("glb", False)], bad
+    assert bad[0]["error"] == "fabrication export failed" and bad[2]["error"] == "skipped: export took longer than 120 s"
+    assert not os.path.exists(f"{t2}/out/downloads/fab-{stem}.zip") and not os.path.exists(f"{t2}/out/downloads/{stem}-board.step")
+    # A missing 02 raw GLB is recorded as an error and never re-exported; a snapshot call without its trusted policy is refused.
+    os.remove(f"{t2}/out/board.raw.glb")
+    with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+        no_raw = export_downloads({"name": "P", "dir": ""}, src2, f"{t2}/out", dl_settings, "b" * 40)
+    assert "::warning::3D model (GLB): board.raw.glb was not produced" in warnings.getvalue() and "::warning::P: 3D model (GLB): GLB export missing" in warnings.getvalue(), warnings.getvalue()
+    assert [e["error"] for e in no_raw if e["kind"] == "glb"] == ["GLB export missing"], no_raw
+    assert not os.path.exists(f"{t2}/out/downloads/P-bbbbbbb-board.glb") and not any(c[0][3] == "glb" for c in dl_calls)
+    try:
+        export_downloads({"name": "P", "dir": ""}, src2, f"{t2}/out", dl_settings, "b" * 40, purpose="snapshot")
+        raise AssertionError("snapshot downloads accepted comparison settings")
+    except ValueError:
+        pass
+    # No schematic: no PDF. No board: PDF only. A name with spaces is made file-safe.
+    dl_mode.clear(); t3 = tempfile.mkdtemp()
+    only_board = export_downloads({"name": "My Board", "dir": ""}, dl_project(t3, "My Board", sch=False), f"{t3}/out", dl_settings, "b" * 40)
+    assert [e["kind"] for e in only_board] == ["fab", "step", "glb"] and only_board[0]["file"] == "fab-My-Board-bbbbbbb.zip", only_board
+    t4 = tempfile.mkdtemp()
+    only_sch = export_downloads({"name": "S", "dir": ""}, dl_project(t4, "S", pcb=False), f"{t4}/out", dl_settings, "b" * 40)
+    assert [e["kind"] for e in only_sch] == ["pdf"], only_sch
+    # Preset-specific output and header assertions. The KiBot template checks are in the Task 3A block.
+    for preset in ("jlcpcb", "pcbway"):
+        case = tempfile.mkdtemp(); source = dl_project(case, "P")
+        cfg = copy.deepcopy(dl_settings); cfg["fabrication"]["preset"] = preset
+        dl_calls.clear()
+        made = export_downloads({"name": "P", "dir": ""}, source, f"{case}/out", cfg, "b"*40)
+        assert not made[0]["error"], made
+        with zipfile.ZipFile(f"{case}/out/downloads/fab-P-bbbbbbb.zip") as z:
+            assert set(z.namelist()) == {f"P-review-{preset}-{suffix}" for suffix in ("gerbers.zip", "positions.csv", "bom.csv")}
+            assert next(csv.reader(io.StringIO(z.read(f"P-review-{preset}-bom.csv").decode()))) == [label for _, label in kr.PRESETS[preset]["bom"]]
+        gerber_call = next(c[0] for c in dl_calls if c[0][3] == "gerbers")
+        assert ("--subtract-soldermask" in gerber_call) == (preset == "jlcpcb")
+    # Incomplete cached Gerber-only package is rebuilt, not published as-is.
+    dl_mode.clear(); case = tempfile.mkdtemp(); source = dl_project(case, "P")
+    cached = pathlib.Path(case, "out/fab"); cached.mkdir(parents=True)
+    with zipfile.ZipFile(cached / "P-review-jlcpcb-gerbers.zip", "w") as z: z.writestr("old.gbr", "old")
+    dl_calls.clear()
+    assert export_downloads({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)[0]["error"] is None
+    assert "gerbers" in [c[0][3] for c in dl_calls]
+    # Every empty cached output independently invalidates reuse. Rebuilds must not repair
+    # or replace the release-check evidence: only the download zip gets the new outputs.
+    for filename in ("P-review-jlcpcb-positions.csv", "P-review-jlcpcb-bom.csv", "P-review-jlcpcb-gerbers.zip"):
+        kr.release_project(f"{source}/P.kicad_pro", "review", dl_settings, str(cached), "P")
+        (cached / filename).write_bytes(b"")
+        original = {p.name: p.read_bytes() for p in cached.iterdir()}
+        dl_calls.clear()
+        rebuilt = export_downloads({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)
+        assert rebuilt[0]["error"] is None and any(c[0][3] == "gerbers" for c in dl_calls), (filename, rebuilt)
+        assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "download rebuild changed release evidence"
+    # checks.release-enabled runs preserve malformed/incomplete evidence, summary hashes,
+    # and specific release findings whether optional download rebuilding succeeds or fails.
+    release_enabled = copy.deepcopy(dl_settings); release_enabled["checks"]["release"] = "informational"
+    for damage in ("incomplete_gerbers", "malformed_positions"):
+        for rebuild_mode in (None, "rc"):
+            case = tempfile.mkdtemp(); source = dl_project(case, "P"); dl_mode.clear()
+            cached = pathlib.Path(case, "out/fab"); cached.mkdir(parents=True)
+            kr.release_project(f"{source}/P.kicad_pro", "review", release_enabled, str(cached), "P")
+            if damage == "incomplete_gerbers":
+                with zipfile.ZipFile(cached / "P-review-jlcpcb-gerbers.zip", "w") as z:
+                    z.writestr("P-F_Cu.gbr", "data"); z.writestr("P.drl", "data")
+            else:
+                (cached / "P-review-jlcpcb-positions.csv").write_text("Designator,Wrong\nR1,10k\n")
+            original = {p.name: p.read_bytes() for p in cached.iterdir()}
+            before_summary = kr.package_summary(str(cached))
+            before_findings = kr.release_findings(str(cached), "P", "jlcpcb", f"{source}/P.kicad_pcb", {})
+            assert "missing_layer" in {v["type"] for v in before_findings}, before_findings
+            assert "missing_package" not in {v["type"] for v in before_findings}, before_findings
+            if rebuild_mode: dl_mode["gerbers"] = rebuild_mode
+            with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+                rebuilt = export_downloads({"name":"P","dir":""}, source, f"{case}/out", release_enabled, "b"*40)
+            assert ("::warning::P: fabrication export failed" in warnings.getvalue()) == (rebuild_mode == "rc"), warnings.getvalue()
+            assert bool(rebuilt[0]["error"]) == (rebuild_mode == "rc"), rebuilt
+            assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "download rebuild changed release evidence"
+            assert kr.package_summary(str(cached)) == before_summary
+            assert kr.release_findings(str(cached), "P", "jlcpcb", f"{source}/P.kicad_pcb", {}) == before_findings
+            assert not list(pathlib.Path(case, "out/downloads").glob(".fab-*")), "download staging leaked"
+    # rc=0/no Gerbers, no drills, empty BOM, empty positions and missing Side header are nonfatal.
+    for kind, mode in (("gerbers", "nofile"), ("gerbers", "empty"), ("drill", "nofile"), ("bom", "empty"), ("pos", "empty"), ("pos", "badheader")):
+        case = tempfile.mkdtemp(); source = dl_project(case, "P"); dl_mode.clear(); dl_mode[kind] = mode
+        with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+            failed = export_downloads({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)
+        assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+        assert failed[0]["file"] is None and failed[0]["error"] == "fabrication export failed", (kind, failed)
+        assert all(e["file"] for e in failed if e["kind"] in ("pdf", "glb")), failed
+        assert not pathlib.Path(case, "out/downloads/fab-P-bbbbbbb.zip").exists()
+    dl_mode.clear()
+    with patch("kicad_review.release_project", side_effect=ValueError("'Side' is not in list")):
+        case = tempfile.mkdtemp(); source = dl_project(case, "P")
+        with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+            failed = export_downloads({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)
+        assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+        assert failed[0]["error"] and all(e["file"] for e in failed if e["kind"] in ("pdf", "glb"))
+    # Snapshot policy isolation, 4-layer Protel Gerber checks, and zero-byte raw GLB handling.
+    case = tempfile.mkdtemp(); source = dl_project(case, "P")
+    (pathlib.Path(source) / "P.kicad_pcb").write_text('(kicad_pcb\n(layers\n(0 "F.Cu" signal)\n(1 "In1.Cu" signal)\n(2 "In2.Cu" signal)\n(31 "B.Cu" signal)\n(44 "Edge.Cuts" user)\n)\n)')
+    snap_policy = copy.deepcopy(dl_settings); snap_policy["fabrication"]["preset"] = "pcbway"
+    snap_fab = pathlib.Path(case, "out/fab-snapshot"); snap_fab.mkdir(parents=True)
+    with zipfile.ZipFile(snap_fab / "P-review-pcbway-gerbers.zip", "w") as z:
+        for member in ("P-F_Cu.gtl", "P-In1_Cu.g1", "P-In2_Cu.g2", "P-B_Cu.gbl", "P.drl"):
+            z.writestr(member, "G04*\n")
+    (snap_fab / "P-review-pcbway-positions.csv").write_text("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n")
+    (snap_fab / "P-review-pcbway-bom.csv").write_text(",".join(label for _, label in kr.PRESETS["pcbway"]["bom"]) + "\n")
+    dl_calls.clear()
+    snap_entries = export_downloads({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40, policy=snap_policy, purpose="snapshot")
+    assert all(e["error"] is None for e in snap_entries) and [c[0][3] for c in dl_calls] == ["pdf", "step"], (snap_entries, dl_calls)
+    snap_manifest = json.loads(pathlib.Path(case, "out/downloads-snapshot/downloads.json").read_text())
+    assert snap_manifest["purpose"] == "snapshot" and snap_manifest["policy"] == kr.download_policy_key(snap_policy) != kr.download_policy_key(dl_settings)
+    # Missing inner copper layer In2.Cu in cached Gerbers invalidates fab_parts.
+    with zipfile.ZipFile(snap_fab / "P-review-pcbway-gerbers.zip", "w") as z:
+        for member in ("P-F_Cu.gtl", "P-In1_Cu.g1", "P-B_Cu.gbl", "P.drl"):
+            z.writestr(member, "G04*\n")
+    try:
+        kr.fab_parts(f"{source}/P.kicad_pro", "P", snap_policy, str(snap_fab))
+        raise AssertionError("missing In2.Cu Gerber accepted")
+    except ValueError as e:
+        assert "In2.Cu" in str(e), e
+    # Zero-byte board.raw.glb is rejected by glb_entry without invoking kicad-cli.
+    zero_raw = pathlib.Path(case, "out/board.raw.glb"); zero_raw.write_bytes(b"")
+    stale_glb = pathlib.Path(case, "out/downloads-snapshot/P-bbbbbbb-board.glb")
+    assert stale_glb.exists()
+    with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+        glb_bad = kr.glb_entry(str(zero_raw), str(stale_glb))
+    assert glb_bad["file"] is None and glb_bad["error"] == "GLB export missing" and not stale_glb.exists(), glb_bad
+    assert "::warning::3D model (GLB): board.raw.glb was not produced" in warnings.getvalue()
+finally:
+    kr.subprocess.run = dl_real
+print("ok export_downloads commands, reuse, isolation and awkward projects")

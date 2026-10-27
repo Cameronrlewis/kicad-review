@@ -1786,6 +1786,160 @@ def export_one(kind, args, dest, timeout=None):
     return entry
 
 
+def fab_parts(pro, name, settings, fab_dir):
+    """Require outputs for the source types actually present; never equate rc=0 with completeness."""
+    stem = f"{fab_dir}/{name}-review-{settings['fabrication']['preset']}"
+    pcb, sch = pro[:-len(".kicad_pro")] + ".kicad_pcb", pro[:-len(".kicad_pro")] + ".kicad_sch"
+    parts = []
+    def csv_ok(path, header):
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        # ponytail: header-only CSV is valid for a board with no placed parts; assembly readiness remains checks.release's job.
+        if not rows or rows[0] != header or any(len(row) != len(header) for row in rows[1:]):
+            raise ValueError("malformed fabrication CSV")
+    if os.path.isfile(pcb):
+        archive, pos = stem + "-gerbers.zip", stem + "-positions.csv"
+        with zipfile.ZipFile(archive) as z:
+            infos = z.infolist()
+            if not infos or any(i.file_size == 0 or i.is_dir() for i in infos) or z.testzip():
+                raise ValueError("empty or damaged Gerber archive")
+            names = [i.filename.lower() for i in infos]
+            if not any(n.endswith(".drl") for n in names):
+                raise ValueError("missing drill output")
+            # KiCad --no-x2 uses Protel extensions; also accept .gbr naming.
+            for layer in (l for l in board_layers(pcb) if l.endswith(".Cu")):
+                ext = {"F.Cu": ".gtl", "B.Cu": ".gbl"}.get(layer)
+                if layer.startswith("In"):
+                    ext = ".g" + layer[2:-3]
+                if not any(n.endswith("-" + layer.replace(".", "_").lower() + ".gbr") or (ext and n.endswith(ext)) for n in names):
+                    raise ValueError("missing copper Gerber: " + layer)
+        csv_ok(pos, list(POS_COLUMNS.values()))
+        parts += [archive, pos]
+    if os.path.isfile(sch):
+        bom = stem + "-bom.csv"
+        csv_ok(bom, [label for _, label in PRESETS[settings["fabrication"]["preset"]]["bom"]])
+        parts.append(bom)
+    if not parts or any(not os.path.isfile(f) or not os.path.getsize(f) for f in parts):
+        raise ValueError("missing fabrication output")
+    return parts
+
+
+def fab_entry(pro, name, settings, fab_dir, dest):
+    """Read cached release evidence; rebuild only in disposable download staging."""
+    entry = {"kind": "fab", "label": DOWNLOAD_LABELS["fab"], "file": None, "error": None}
+    expected = (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile)
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        with tempfile.TemporaryDirectory(prefix=".fab-", dir=os.path.dirname(dest) or ".") as staging:
+            try:
+                parts = fab_parts(pro, name, settings, fab_dir)
+            except expected:
+                release_project(pro, "review", settings, staging, name)
+                parts = fab_parts(pro, name, settings, staging)
+            with zipfile.ZipFile(dest, "w") as z:
+                for part in parts:
+                    z.write(part, os.path.basename(part))
+        entry["file"] = os.path.basename(dest)
+    except expected:
+        print(f"::warning::{name}: fabrication export failed (incomplete outputs or invalid CSV/archive)")
+        entry["error"] = "fabrication export failed"
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+    return entry
+
+
+def glb_entry(raw, dest):
+    """Copy 02's raw head export; a missing or empty raw file is an error, never a second GLB export here."""
+    entry = {"kind": "glb", "label": DOWNLOAD_LABELS["glb"], "file": None, "error": None}
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        if os.path.isfile(raw) and os.path.getsize(raw) > 0:
+            shutil.copyfile(raw, dest)
+            entry["file"] = os.path.basename(dest)
+        else:
+            print("::warning::3D model (GLB): board.raw.glb was not produced")
+            entry["error"] = "GLB export missing"
+    except OSError as e:
+        print(f"::warning::3D model (GLB): {e}")
+        entry["error"] = f"GLB export unavailable: {e}"
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+    return entry
+
+
+def download_policy_key(policy):
+    """Only byte-affecting export policy; enabled gates collection, not fabrication identity."""
+    value = {"fabrication": policy["fabrication"], "step": policy.get("downloads", {}).get("step", True)}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def download_directory(out, purpose):
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    return f"{out}/" + ("downloads-snapshot" if purpose == "snapshot" else "downloads")
+
+
+def write_download_manifest(dl, entries, *, policy=None, purpose="comparison"):
+    """Additive policy-bound files envelope; never confuse comparison and trusted snapshot exports."""
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    policy = DEFAULT_SETTINGS if policy is None else policy
+    download_directory("", purpose)  # validate before writing
+    files = []
+    for e in entries:
+        item = {"kind": e["kind"], "label": e["label"]}
+        if e["error"]:
+            item["error"] = e["error"]
+        else:
+            path = pathlib.Path(dl, e["file"])
+            with path.open("rb") as f:
+                sha = hashlib.file_digest(f, "sha256").hexdigest()
+            item.update(path=e["file"], bytes=path.stat().st_size, sha256=sha)
+        files.append(item)
+    pathlib.Path(dl, "downloads.json").write_text(json.dumps({"files": files, "purpose": purpose, "policy": download_policy_key(policy)}), encoding="utf-8")
+    return files
+
+
+def export_downloads(p, src, out, settings, head, *, policy=None, purpose="comparison"):
+    """Best-effort exports under an explicit trusted/comparison policy and separate manifest."""
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("head must be the full 40-character SHA")
+    settings = settings if policy is None else policy
+    name, dl = p["name"], download_directory(out, purpose)
+    shutil.rmtree(dl, ignore_errors=True)
+    os.makedirs(dl, exist_ok=True)
+    stem = f"{safe_name(name)}-{head[:7]}"
+    pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
+    entries = []
+    if os.path.exists(pcb):
+        fab_dir = f"{out}/" + ("fab-snapshot" if purpose == "snapshot" else "fab")
+        entries.append(fab_entry(f"{src}/{name}.kicad_pro", name, settings, fab_dir, f"{dl}/fab-{stem}.zip"))
+    if os.path.exists(sch):
+        dest = f"{dl}/{stem}-schematic.pdf"
+        entries.append(export_one("pdf", ["sch", "export", "pdf", "-o", dest, sch], dest))
+    if os.path.exists(pcb):
+        if settings["downloads"]["step"]:
+            dest = f"{dl}/{stem}-board.step"
+            entries.append(export_one("step", ["pcb", "export", "step", "--subst-models", "-f", "-o", dest, pcb], dest, DOWNLOAD_STEP_TIMEOUT))
+        dest = f"{dl}/{stem}-board.glb"  # 02's uncompressed raw export, copied unchanged; never the Meshopt-compressed viewer GLB
+        entries.append(glb_entry(f"{out}/board.raw.glb", dest))
+    for e in entries:
+        if e["error"] and e["kind"] != "fab":
+            print(f"::warning::{name}: {e['label']}: {e['error']}")
+    write_download_manifest(dl, entries, policy=settings, purpose=purpose)
+    return entries
+
+
 def violation(v, scale, where):
     items = v.get("items", [])
     pos = [[round(i["pos"]["x"] * scale, 4), round(i["pos"]["y"] * scale, 4)] for i in items if "pos" in i]
