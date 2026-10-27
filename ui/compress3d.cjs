@@ -88,6 +88,65 @@ function snapshotParts(document,metadata) {
   });
 }
 
-module.exports={maskRGB,padStyle,processorKey,snapshotParts};
+function applyMaterials(document,finish) {
+  const {KHRMaterialsAnisotropy,KHRMaterialsClearcoat}=require('@gltf-transform/extensions');
+  const anisotropy=document.createExtension(KHRMaterialsAnisotropy);
+  const clearcoat=document.createExtension(KHRMaterialsClearcoat);
+  const cache=new Map();
+  for(const n of document.getRoot().listNodes()) {
+    if(!n.getMesh())continue;
+    const role=n.getExtras()?.role, original=n.getMesh(), mesh=original.clone();
+    for(const p of mesh.listPrimitives()) mesh.removePrimitive(p);
+    for(const originalPrimitive of original.listPrimitives()) {
+      const p=originalPrimitive.clone(), source=p.getMaterial();mesh.addPrimitive(p);
+      if(!source||role==='body')continue;
+      let roles=cache.get(source);if(!roles)cache.set(source,roles=new Map());
+      if(!roles.has(role)) {
+        const m=source.clone();roles.set(role,m);
+        if(role==='copper')m.setBaseColorFactor([.78,.63,.39,1]).setMetallicFactor(.5).setRoughnessFactor(.42)
+          .setExtension('KHR_materials_anisotropy',anisotropy.createAnisotropy().setAnisotropyStrength(.3));
+        if(role==='mask')m.setBaseColorFactor([...maskRGB(m.getBaseColorFactor()),.72])
+          .setAlphaMode('BLEND').setRoughnessFactor(.6).setExtension('KHR_materials_clearcoat',
+            clearcoat.createClearcoat().setClearcoatFactor(.6).setClearcoatRoughnessFactor(.18));
+        if(role==='fr4')m.setBaseColorFactor([.2,.205,.125,1]).setMetallicFactor(0).setRoughnessFactor(.85);
+        if(role==='pads') {const s=padStyle(finish);m.setBaseColorFactor(s.color).setMetallicFactor(s.metal).setRoughnessFactor(s.rough);}
+      }
+      p.setMaterial(roles.get(role));
+    }
+    n.setMesh(mesh);
+  }
+}
+
+async function batchDocument(document) {
+  const {PropertyType}=require('@gltf-transform/core');
+  const {flatten,join,weld,dedup,prune}=require('@gltf-transform/functions');
+  // Every mesh descendant already carries reference and role extras.
+  await document.transform(dedup({propertyTypes:[PropertyType.MATERIAL]}),flatten({cleanup:false}));
+  const groups=new Set(document.getRoot().listNodes().filter(n=>n.getMesh()).map(n=>n.getExtras()?.batch).filter(Boolean));
+  for(const batch of groups) {
+    await document.transform(join({cleanup:false,keepNamed:false,filter:n=>n.getExtras()?.batch===batch}));
+    // join preserves the chosen node's extras; fail instead of losing identity.
+    const nodes=document.getRoot().listNodes().filter(n=>n.getMesh()&&n.getExtras()?.batch===batch);
+    if(!nodes.length)throw Error('batch lost role: '+batch);
+    for(const n of nodes) {
+      const extras=n.getExtras()||{};
+      n.setName(batch).setExtras({...extras,
+        ...(batch.startsWith('parts:merged:')?{role:'body',side:batch.slice(13),ref:null}:{}),
+        ...(batch.startsWith('ref:')?{role:'body',ref:batch.slice(4)}:{})});
+    }
+  }
+  for(const scene of document.getRoot().listScenes()) {
+    for(const batch of [...groups].filter(x=>x.startsWith('ref:'))) {
+      const nodes=scene.listChildren().filter(n=>n.getMesh()&&n.getExtras()?.batch===batch);
+      if(!nodes.length)continue;
+      const parent=document.createNode(batch.slice(4));scene.addChild(parent);
+      for(const n of nodes){scene.removeChild(n);parent.addChild(n);}
+    }
+  }
+  await document.transform(weld(),dedup(),prune({keepExtras:true}));
+}
+
+module.exports={maskRGB,padStyle,processorKey,snapshotParts,applyMaterials,batchDocument};
+
 
 if(require.main===module) compress(...process.argv.slice(2)).catch(error=>{console.error(error);process.exitCode=1});

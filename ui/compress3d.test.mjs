@@ -220,3 +220,181 @@ test('BR02 snapshotParts validates duplicates, unclassified meshes and non-finit
   }, /footprint has no finite position/);
 });
 
+test('BR02 240 compatible changed primitives fit the hard changed-part budget', integration, async () => {
+  const {d, metadata} = makeDocument(['R12', 'R2', 'R3'], 240);
+  metadata.keep = ['R12'];
+  const before = P.snapshotParts(d, metadata);
+  P.applyMaterials(d, 'ENIG');
+  await P.batchDocument(d);
+  const kept = d.getRoot().listNodes().filter(n => n.getName() === 'R12');
+  assert.equal(kept.length, 1);
+  const primitiveCalls = d.getRoot().listNodes().reduce((sum, n) => sum + (n.getMesh()?.listPrimitives().length || 0), 0);
+  assert.ok(primitiveCalls < 101, 'BR02 hard draw budget: ' + primitiveCalls);
+  assert.equal(kept[0].listChildren().reduce((s, n) => s + (n.getMesh()?.listPrimitives().length || 0), 0), 1);
+  assert.ok(!d.getRoot().listNodes().some(n => ['R2', 'R3'].includes(n.getName())));
+  assert.equal(before.length, 3);
+  const {getBounds} = require('@gltf-transform/functions');
+  const keptBox = getBounds(kept[0]);
+  const after = [...keptBox.min, ...keptBox.max];
+  const r12Before = before.find(p => p.ref === 'R12').box;
+  for (let i = 0; i < 6; i++) {
+    assert.ok(Math.abs(after[i] - r12Before[i]) <= .00005, 'bounds error <= 0.00005m at ' + i + ': ' + after[i] + ' vs ' + r12Before[i]);
+  }
+  const {NodeIO} = require('@gltf-transform/core'), {ALL_EXTENSIONS} = require('@gltf-transform/extensions');
+  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+  const emitted = await io.readBinary(await io.writeBinary(d));
+  for (const side of ['top', 'bottom']) {
+    const nodes = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getName() === 'parts:merged:' + side);
+    assert.ok(nodes.length, 'BR02 emitted merged ' + side);
+    for (const n of nodes) {
+      assert.deepEqual(
+        {role: n.getExtras().role, side: n.getExtras().side, ref: n.getExtras().ref},
+        {role: 'body', side, ref: null}
+      );
+    }
+  }
+  const changed = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().batch === 'ref:R12');
+  assert.ok(changed.length);
+  assert.ok(changed.every(n => n.getExtras().ref === 'R12'));
+});
+
+test('BR02 board role materials do not mutate source body material', integration, () => {
+  const {d} = makeDocument(['R1']);
+  const body = d.getRoot().listNodes().find(n => n.getMesh());
+  body.setExtras({role: 'body', batch: 'ref:R1', ref: 'R1', side: 'top'});
+  const board = d.createNode('x_copper').setMesh(body.getMesh());
+  d.getRoot().listScenes()[0].addChild(board);
+  board.setExtras({role: 'copper', batch: 'board:copper:top', ref: null, side: 'top'});
+  P.applyMaterials(d, 'ENIG');
+  assert.deepEqual(body.getMesh().listPrimitives()[0].getMaterial().getBaseColorFactor(), [.1, .1, .1, 1]);
+  const m = board.getMesh().listPrimitives()[0].getMaterial();
+  assert.deepEqual(m.getBaseColorFactor(), [.78, .63, .39, 1]);
+  assert.equal(m.getExtension('KHR_materials_anisotropy').getAnisotropyStrength(), .3);
+});
+
+test('BR02 applyMaterials and batchDocument on actual fixture exports', integration, async (t) => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const {NodeIO} = require('@gltf-transform/core');
+  const {ALL_EXTENSIONS} = require('@gltf-transform/extensions');
+  const {getBounds} = require('@gltf-transform/functions');
+  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
+  const metadata = {
+    version: 1, side: 'head', keep: ['R1'], finish: 'ENIG',
+    footprints: [
+      {uuid: '1b544794-fb46-511a-977a-faed594f70e9', ref: 'J1', side: 'bottom', pos: [10, 15, 90], box: [6.46, 14, 11, 16], hasModel: true, reason: null},
+      {uuid: '2acb066f-593c-59df-94fd-657772cd217e', ref: 'U4', side: 'bottom', pos: [5, 15], box: [3.175, 14, 6.825, 16], hasModel: false, reason: 'no model in footprint'},
+      {uuid: '323b0184-73aa-59fc-860f-fd256736dfcd', ref: 'LOGO1', side: 'top', pos: [10, 10], box: [9, 9, 11, 11], hasModel: false, reason: 'no model in footprint'},
+      {uuid: '83c2b909-2e4f-5d21-8983-07e74505caea', ref: 'U3', side: 'top', pos: [15, 15], box: [13.175, 14, 16.825, 16], hasModel: false, reason: 'no model in footprint'},
+      {uuid: 'a39cf55e-cada-50ed-bb1b-c296524eaed4', ref: 'R2', side: 'top', pos: [15, 5], box: [13.175, 4, 16.825, 6], hasModel: true, reason: null},
+      {uuid: 'dbe7150d-b9f2-5094-af11-eb2e8ade7d10', ref: 'R1', side: 'top', pos: [5, 5], box: [3.175, 4, 6.825, 6], hasModel: true, reason: null}
+    ]
+  };
+
+  const outDir = process.env.OUT || '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer';
+  const fixturePaths = [
+    path.join(outDir, 'task1-executor/board.glb'),
+    path.join(outDir, 'ci-probe-task1-kicad1006/board.glb')
+  ];
+
+  const available = fixturePaths.filter(p => fs.existsSync(p));
+  if (available.length === 0) {
+    t.skip(`KiCad 10 fixture exports not found under ${outDir}`);
+    return;
+  }
+
+  for (const p of available) {
+    const doc = await io.read(p);
+    const parts = P.snapshotParts(doc, metadata);
+    const r1Before = parts.find(part => part.ref === 'R1').box;
+
+    P.applyMaterials(doc, 'ENIG');
+    await P.batchDocument(doc);
+
+    // Kept reference R1 has exactly one parent node named R1
+    const kept = doc.getRoot().listNodes().filter(n => n.getName() === 'R1');
+    assert.equal(kept.length, 1, `R1 retained parent node present in ${p}`);
+    assert.ok(kept[0].listChildren().length >= 1, 'R1 has children');
+
+    // Bounds of kept R1 reread with getBounds error <= 0.00005 m
+    const keptBox = getBounds(kept[0]);
+    const after = [...keptBox.min, ...keptBox.max];
+    for (let i = 0; i < 6; i++) {
+      assert.ok(
+        Math.abs(after[i] - r1Before[i]) <= .00005,
+        `R1 bounds error <= 0.00005m at ${i} for ${p}: ${after[i]} vs ${r1Before[i]}`
+      );
+    }
+
+    // Unchanged components R2 and J1 must NOT have retained identity parents
+    assert.ok(!doc.getRoot().listNodes().some(n => ['R2', 'J1'].includes(n.getName())));
+
+    // Emitted binary roundtrip validation
+    const emitted = await io.readBinary(await io.writeBinary(doc));
+
+    // Merged top components exist and have body role and ref: null
+    const mergedTop = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getName() === 'parts:merged:top');
+    assert.ok(mergedTop.length >= 1, `parts:merged:top present in ${p}`);
+    for (const n of mergedTop) {
+      assert.deepEqual(
+        {role: n.getExtras().role, side: n.getExtras().side, ref: n.getExtras().ref},
+        {role: 'body', side: 'top', ref: null}
+      );
+    }
+
+    // Merged bottom components exist (J1 was on bottom)
+    const mergedBottom = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getName() === 'parts:merged:bottom');
+    assert.ok(mergedBottom.length >= 1, `parts:merged:bottom present in ${p}`);
+    for (const n of mergedBottom) {
+      assert.deepEqual(
+        {role: n.getExtras().role, side: n.getExtras().side, ref: n.getExtras().ref},
+        {role: 'body', side: 'bottom', ref: null}
+      );
+    }
+
+    // Retained R1 changed part in emitted output
+    const changed = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().batch === 'ref:R1');
+    assert.ok(changed.length >= 1, `ref:R1 mesh nodes present in ${p}`);
+    assert.ok(changed.every(n => n.getExtras().ref === 'R1'));
+
+    // Verify role materials applied on board nodes
+    const boardNodes = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().role !== 'body');
+    const copperNodes = boardNodes.filter(n => n.getExtras().role === 'copper');
+    assert.ok(copperNodes.length >= 1, 'copper nodes present');
+    for (const n of copperNodes) {
+      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+      assert.deepEqual(mat.getBaseColorFactor(), [.78, .63, .39, 1]);
+      assert.equal(mat.getExtension('KHR_materials_anisotropy').getAnisotropyStrength(), .3);
+    }
+
+    const padNodes = boardNodes.filter(n => n.getExtras().role === 'pads');
+    assert.ok(padNodes.length >= 1, 'pad nodes present');
+    for (const n of padNodes) {
+      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+      assert.deepEqual(mat.getBaseColorFactor(), [1, .78, .34, 1]);
+      assert.equal(mat.getMetallicFactor(), 1);
+      assert.equal(mat.getRoughnessFactor(), .3);
+    }
+
+    const fr4Nodes = boardNodes.filter(n => n.getExtras().role === 'fr4');
+    assert.ok(fr4Nodes.length >= 1, 'fr4 nodes present');
+    for (const n of fr4Nodes) {
+      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+      assert.deepEqual(mat.getBaseColorFactor(), [.2, .205, .125, 1]);
+      assert.equal(mat.getMetallicFactor(), 0);
+      assert.equal(mat.getRoughnessFactor(), .85);
+    }
+
+    const maskNodes = boardNodes.filter(n => n.getExtras().role === 'mask');
+    assert.ok(maskNodes.length >= 1, 'mask nodes present');
+    for (const n of maskNodes) {
+      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+      assert.equal(mat.getRoughnessFactor(), .6);
+      assert.equal(mat.getExtension('KHR_materials_clearcoat').getClearcoatFactor(), .6);
+      assert.equal(mat.getExtension('KHR_materials_clearcoat').getClearcoatRoughnessFactor(), .18);
+    }
+  }
+});
+
+
+
