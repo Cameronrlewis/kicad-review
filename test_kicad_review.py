@@ -3958,6 +3958,40 @@ coords, pins, approximate = kr.symbol_geometry(parts)
 assert pins == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}], pins
 assert [-3.0, 0.0] in coords and [-2.0, -1.0] in coords
 assert not approximate and max(p[0] for p in coords) == 2
+
+# Derived unit 1 selects circle and base rectangle, excluding unit 2 pin
+parts_u1 = kr.symbol_primitives(libs, 'Derived', '1')
+coords_u1, pins_u1, approx_u1 = kr.symbol_geometry(parts_u1)
+assert pins_u1 == []
+assert not approx_u1
+assert max(p[0] for p in coords_u1) == 9 and min(p[0] for p in coords_u1) == -9
+assert max(p[1] for p in coords_u1) == 9 and min(p[1] for p in coords_u1) == -9
+
+# Circle bounds at (c, r) produce its bounding square
+circle_coords, _, circle_approx = kr.symbol_geometry([kr.parse_sexpr('(circle (center 2 3) (radius 4))')])
+assert not circle_approx
+assert sorted(circle_coords) == [[-2.0, -1.0], [-2.0, 7.0], [6.0, -1.0], [6.0, 7.0]]
+
+# Arc bounds through (1, 0), (0, 1), (-1, 0) produce circumcircle bounds [-1, 1] x [-1, 1] with approximate=True
+arc_coords, _, arc_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 1 0) (mid 0 1) (end -1 0))')])
+assert arc_approx
+assert sorted(arc_coords) == [[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]]
+
+# Degenerate collinear arc falls back to control points with approximate=True
+collinear_coords, _, collinear_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 0 0) (mid 1 1) (end 2 2))')])
+assert collinear_approx
+assert collinear_coords == [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
+
+# Bezier control-point hull has approximate=True
+bezier_coords, _, bezier_approx = kr.symbol_geometry([kr.parse_sexpr('(bezier (pts (xy 0 0) (xy 2 5) (xy 4 1)))')])
+assert bezier_approx
+assert bezier_coords == [[0.0, 0.0], [2.0, 5.0], [4.0, 1.0]]
+
+# Polyline points preserve approximate=False
+poly_coords, _, poly_approx = kr.symbol_geometry([kr.parse_sexpr('(polyline (pts (xy 1 2) (xy 3 4)))')])
+assert not poly_approx
+assert poly_coords == [[1.0, 2.0], [3.0, 4.0]]
+
 libs['Base'].append(['extends', 'Derived'])
 try:
     kr.symbol_primitives(libs, 'Derived', '2')
