@@ -2341,13 +2341,13 @@ def net_members(text, objects, commit):
         unknown = False
         for node in nodes:
             ref, pin = node["ref"] or "", node["pin"] or ""
-            if ref.startswith("#"):  # Open Question 4 ruling: power symbols and flags are skipped, never fabricated as pins
+            if ref.startswith("#"):  # Power symbols and flags (ref starts with '#') are skipped; they are not fabricated as component pins
                 continue
             candidates = by_ref.get(ref, [])
             units = [(o["where"]["sheet"], o["props"].get("unit", "1"))
                      for _, o in candidates]
             invalid = not ref or "?" in ref
-            # Open Question 4 ruling: a missing reference has no UUID in the netlist node, so only one candidate is trusted.
+            # A missing or unannotated reference has no UUID in the netlist node, so only a single matching symbol candidate can be disambiguated.
             ambiguous = (not pin or not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
                          or (invalid and len(candidates) != 1))
             if ambiguous:
@@ -2545,6 +2545,7 @@ def diff_board_pins(base, head, base_pads, head_pads, commits):
                                where={"board": True})
             r.update(document="board", pos=h.get("pos"), box=h.get("box"))
             # Derived row does not own scene changeIds. Keep each revision identity separately.
+            # Board anchors carry board=True and omit sheet (PCBs have no sheet; consumed by Task 8.1/8.2).
             for side, uid, o, pad in (("base", bk, b, bp), ("head", hk, h, hp)):
                 r["anchors"][side] = [{"uuid": uid, "padUuid": pad["uuid"], "ref": o["ref"],
                                        "pin": pad["number"], "pos": o.get("pos"),

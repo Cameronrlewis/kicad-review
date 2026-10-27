@@ -3969,6 +3969,7 @@ def test_br03_board_pins():
         for side, uid, commit in (("base","old-fp","b"*40), ("head","new-fp","h"*40)):
             assert r["anchors"][side] == [{"uuid":uid,"padUuid":"c","ref":"D1","pin":"C",
                                            "pos":[0,0],"commit":commit,"board":True}]
+            assert "sheet" not in r["anchors"][side][0]
         assert compare([("c","C",0,"GND")],[("c","C",0,"")],"old","new")[0]["detail"]["after"] == ""
         assert compare([("c","C",0,"")],[("c","C",0,"12")])[0]["detail"]["before"] == ""
         assert compare([("old-pad","C",0,"GND")],[("new-pad","C",0,"12")],"old","new")[0]["detail"]["after"] == "12"
