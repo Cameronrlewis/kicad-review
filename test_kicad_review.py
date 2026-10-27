@@ -3688,4 +3688,12 @@ text = '(export (nets (net (name A) (node (ref R1) (pin 1)) (node (ref R2) (pin 
 nets, anchors, issues = net_members(text, inst, "b"*40)
 assert nets["A"] == {"R1.1","R2.1"} and not issues
 assert anchors["R1.1"][0]["sheet"] != anchors["R2.1"][0]["sheet"]
+# Power symbols (#PWR) are not component pins: skipped without suppressing the rest of the net.
+pwr = '(export (nets (net (name GND) (node (ref U1) (pin 1)) (node (ref "#PWR01") (pin 1)))))'
+nets, anchors, issues = net_members(pwr, {"/a": obj("U1","1","/")}, "c"*40)
+assert nets == {"GND": {"U1.1"}} and not issues
+# A missing reference shared by several symbols has no recoverable UUID: suppressed, never guessed.
+two = {"/a": obj("U?","1","/"), "/b": obj("U?","2","/")}
+nets, anchors, issues = net_members('(export (nets (net (name GND) (node (ref "U?") (pin 2)))))', two, "c"*40)
+assert not nets["GND"] and issues and not anchors
 print("ok BR03 electrical membership")

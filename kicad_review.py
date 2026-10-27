@@ -2322,12 +2322,16 @@ def net_members(text, objects, commit):
     for name, nodes in parsed.items():
         nets[name] = set()
         for node in nodes:
-            ref, pin = node["ref"], node["pin"]
+            ref, pin = node["ref"] or "", node["pin"] or ""
+            if ref.startswith("#"):  # power symbols and flags are not component pins
+                continue
             candidates = by_ref.get(ref, [])
             units = [(o["where"].get("sheet"), o["props"].get("unit", "1"))
                      for _, o in candidates]
-            ambiguous = not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
             invalid = not ref or "?" in ref
+            # A missing reference has no UUID in the netlist node, so only one candidate can be trusted.
+            ambiguous = (not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
+                         or (invalid and len(candidates) != 1))
             if ambiguous:
                 reasons.add("Connectivity identity is ambiguous; schematic membership comparison suppressed")
                 continue
