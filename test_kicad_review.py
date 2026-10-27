@@ -3806,6 +3806,12 @@ def test_br03_where_sheet_contract():
     assert nets2["N"] is None and not anchors2
     assert any(i["unknown"] for i in issues2)
 
+    # Object with where key omitted entirely.
+    bad_obj3 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pos": [1, 2, 0]}
+    nets3, anchors3, issues3 = net_members(text, {"/a": bad_obj3}, "a" * 40)
+    assert nets3["N"] is None and not anchors3
+    assert any(i["unknown"] for i in issues3)
+
 
 def test_br03_multi_unit_pin_resolution():
     # When symbols provide unit pin information, anchors resolve to the exact owning unit.
