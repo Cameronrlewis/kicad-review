@@ -4552,6 +4552,12 @@ assert [c['status'] for c in (fab_failed, fab_unsupported, fab_absent)] == ['fai
 assert fab_failed['baselineAvailable'] is False and fab_failed['fixed'] == 0, 'FAB contract: this fixture has no base board'
 assert fab_unsupported['baselineAvailable'] is False and fab_unsupported['fixed'] == 0, 'FAB contract: no base board'
 assert 'baselineAvailable' not in fab_absent and 'fixed' not in fab_absent, 'FAB contract: not_run has no base comparison'
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    source.unlink()
+    with patch.object(kr, 'board_path', side_effect=fab_head_only(source)):
+        not_run_waived = kr.fab_check(p, cfg, str(out), {'active': {}}, 'jlcpcb')
+    assert not_run_waived['status'] == 'not_run' and not_run_waived['waived'] == 0
 for c in (fab_failed, fab_unsupported, fab_absent):
     assert c['name'] == 'fab_limits'
     assert c['confidence'] == 'deterministic' and c['evidence_source'] == kr.FAB_EVIDENCE_SOURCE

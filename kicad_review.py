@@ -2575,7 +2575,10 @@ def fab_check(p, settings, out_dir, waivers, vendor):
     head_board = board_path(p, 'head')
     fab_regular_input(pathlib.Path(head_board))
     if not os.path.isfile(head_board):
-        return {**empty,'status':'not_run','reason':'no head board','unsupported':'no head board'}
+        result = {**empty,'status':'not_run','reason':'no head board','unsupported':'no head board'}
+        if waivers is not None:
+            result['waived'] = 0
+        return result
     head_meta = fab_read_audit(out_dir, 'head', p, vendor)
     base_board = board_path(p, 'base')
     fab_regular_input(pathlib.Path(base_board))
