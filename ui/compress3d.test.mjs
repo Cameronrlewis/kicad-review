@@ -77,8 +77,9 @@ test('BR02 snapshotParts handles direct mesh on footprint node (KiCad 10.0.0 sty
   assert.equal(r1.getExtras().batch, 'ref:R1');
 });
 
-test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exports', integration, async () => {
+test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exports', integration, async (t) => {
   const fs = require('node:fs');
+  const path = require('node:path');
   const {NodeIO} = require('@gltf-transform/core');
   const io = new NodeIO();
   const metadata = {
@@ -93,14 +94,20 @@ test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exp
     ]
   };
 
+  const outDir = process.env.OUT || '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer';
   const fixturePaths = [
-    '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer/task1-executor/board.glb',
-    '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer/ci-probe-task1-kicad1006/board.glb'
+    path.join(outDir, 'task1-executor/board.glb'),
+    path.join(outDir, 'ci-probe-task1-kicad1006/board.glb')
   ];
 
+  const available = fixturePaths.filter(p => fs.existsSync(p));
+  if (available.length === 0) {
+    t.skip(`KiCad 10 fixture exports not found under ${outDir}`);
+    return;
+  }
+
   let verified = 0;
-  for (const p of fixturePaths) {
-    if (!fs.existsSync(p)) continue;
+  for (const p of available) {
     verified++;
     const doc = await io.read(p);
     const parts = P.snapshotParts(doc, metadata);
@@ -157,7 +164,27 @@ test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exp
     assert.ok(roles.includes('silk'), 'silk role present');
     assert.ok(roles.includes('mask'), 'mask role present');
   }
-  assert.equal(verified, 2, 'both KiCad 10.0.0 and 10.0.6 fixture exports verified');
+  assert.equal(verified, available.length);
+  if (available.length === fixturePaths.length) {
+    assert.equal(verified, 2, 'both KiCad 10.0.0 and 10.0.6 fixture exports verified');
+  }
+});
+
+test('BR02 snapshotParts handles missing or null metadata.keep', integration, () => {
+  const {d, metadata} = makeDocument(['R1']);
+  const metaNoKeep = {...metadata};
+  delete metaNoKeep.keep;
+  const partsNoKeep = P.snapshotParts(d, metaNoKeep);
+  assert.equal(partsNoKeep.length, 1);
+  const r1Node = d.getRoot().listNodes().find(n => n.getExtras()?.ref === 'R1');
+  assert.equal(r1Node.getExtras().batch, 'parts:merged:top');
+
+  const {d: dNull, metadata: metaNull} = makeDocument(['R1']);
+  metaNull.keep = null;
+  const partsNullKeep = P.snapshotParts(dNull, metaNull);
+  assert.equal(partsNullKeep.length, 1);
+  const r1NullNode = dNull.getRoot().listNodes().find(n => n.getExtras()?.ref === 'R1');
+  assert.equal(r1NullNode.getExtras().batch, 'parts:merged:top');
 });
 
 test('BR02 snapshotParts validates duplicates, unclassified meshes and non-finite coordinates', integration, () => {

@@ -65,7 +65,7 @@ function snapshotParts(document,metadata) {
     if(!role) throw Error('unclassified KiCad mesh: '+name);
     const side=f?f.side:b[1]<(top+bottom)/2&&b[4]>(top+bottom)/2?'both':
       (b[1]+b[4])/2>=(top+bottom)/2?'top':'bottom';
-    const batch=f?(metadata.keep.includes(f.ref)?'ref:'+f.ref:'parts:merged:'+side):'board:'+role+':'+side;
+    const batch=f?(metadata.keep?.includes(f.ref)?'ref:'+f.ref:'parts:merged:'+side):'board:'+role+':'+side;
     n.setExtras({...n.getExtras(),role,ref:f?.ref||null,side,batch});
     if(f) {
       const old=boxes.get(f.ref);
