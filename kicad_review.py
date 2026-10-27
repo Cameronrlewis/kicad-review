@@ -2312,38 +2312,51 @@ def parse_netlist(text):
 
 
 def net_members(text, objects, commit):
+    """Return observed members, candidate anchors and net-scoped wiring issues.
+
+    None marks an unknown net, distinct from an observed empty set. Comparers must
+    suppress a net pair if either side is unknown, not treat it as added/removed.
+    Multi-unit anchors are candidates: only the pin manifest can select the owning
+    unit (or units for shared pins); their positions are symbol, not pin, positions.
+    """
     _, parsed = parse_netlist(text)
     by_ref = {}
     for uid, o in objects.items():
         if o["kind"] == "symbol":
             ref = o["props"].get("reference", o["ref"])
             by_ref.setdefault(ref, []).append((uid, o))
-    nets, anchors, reasons = {}, {}, set()
-    for name, nodes in parsed.items():
-        nets[name] = set()
+    nets, anchors, issues = {}, {}, []
+    for name, nodes in sorted(parsed.items()):
+        members, net_anchors, reasons = set(), {}, set()
+        unknown = False
         for node in nodes:
             ref, pin = node["ref"] or "", node["pin"] or ""
             if ref.startswith("#"):  # power symbols and flags are not component pins
                 continue
             candidates = by_ref.get(ref, [])
-            units = [(o["where"].get("sheet"), o["props"].get("unit", "1"))
+            units = [(o["where"]["sheet"], o["props"].get("unit", "1"))
                      for _, o in candidates]
             invalid = not ref or "?" in ref
             # A missing reference has no UUID in the netlist node, so only one candidate can be trusted.
-            ambiguous = (not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
+            ambiguous = (not pin or not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
                          or (invalid and len(candidates) != 1))
             if ambiguous:
-                reasons.add("Connectivity identity is ambiguous; schematic membership comparison suppressed")
+                unknown = True
+                reasons.add(("Connectivity identity is ambiguous; schematic membership comparison suppressed", True))
                 continue
             if invalid:
-                reasons.add("Some connected pins have missing references; using symbol UUID and pin number")
+                reasons.add(("Some connected pins have missing references; using symbol UUID and pin number", False))
             key = f"{candidates[0][0]}:{pin}" if invalid else f"{ref}.{pin}"
-            nets[name].add(key)
-            anchors[key] = [{"uuid":uid.rsplit("/",1)[-1], "ref":ref, "pin":pin,
-                             "sheet":o["where"]["sheet"], "pos":o.get("pos"), "commit":commit}
-                            for uid, o in candidates]
-    return nets, anchors, [{"channel":"wiring", "reason":r,
-                           "unknown":r.startswith("Connectivity identity is ambiguous")} for r in sorted(reasons)]
+            members.add(key)
+            net_anchors[key] = [{"uuid":uid.rsplit("/",1)[-1], "ref":ref, "pin":pin,
+                                 "unit":o["props"].get("unit", "1"), "sheet":o["where"]["sheet"],
+                                 "pos":o.get("pos"), "commit":commit}
+                                for uid, o in candidates]
+        nets[name] = None if unknown else members
+        if not unknown:
+            anchors.update(net_anchors)
+        issues.extend({"channel":"wiring", "net":name, "reason":r, "unknown":u} for r, u in sorted(reasons))
+    return nets, anchors, issues
 
 
 def ohms(value):

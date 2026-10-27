@@ -3697,3 +3697,91 @@ two = {"/a": obj("U?","1","/"), "/b": obj("U?","2","/")}
 nets, anchors, issues = net_members('(export (nets (net (name GND) (node (ref "U?") (pin 2)))))', two, "c"*40)
 assert not nets["GND"] and issues and not anchors
 print("ok BR03 electrical membership")
+
+# BR03 review regressions: independently runnable identity-policy tests.
+def br03_object(ref, unit="1", sheet="/"):
+    return {"kind": "symbol", "ref": ref, "props": {"reference": ref, "unit": unit},
+            "where": {"sheet": sheet}, "pos": [1, 2, 0]}
+
+
+def test_br03_unknown_net():
+    objects = {"/r": br03_object("R1"), "/a": br03_object("U1"), "/b": br03_object("U1")}
+    # An ambiguous node poisons its entire net, regardless of node order; other nets stay usable.
+    for nodes in ('(node (ref R1) (pin 1)) (node (ref U1) (pin 1))',
+                  '(node (ref U1) (pin 1)) (node (ref R1) (pin 1))'):
+        text = '(export (nets (net (name BAD) ' + nodes + ''')
+          (net (name GOOD) (node (ref R1) (pin 2))) (net (name EMPTY))))'''
+        nets, anchors, issues = net_members(text, objects, "a" * 40)
+        assert nets == {"BAD": None, "GOOD": {"R1.2"}, "EMPTY": set()}, nets
+        assert set(anchors) == {"R1.2"}, anchors  # no anchors leaked from partial evidence
+        assert len(issues) == 1 and issues[0]["unknown"] is True, issues
+        assert issues[0]["channel"] == "wiring" and issues[0]["net"] == "BAD", issues
+    # The same shared member remains anchored if independently observed on a trustworthy net.
+    text = '''(export (nets (net (name GOOD) (node (ref R1) (pin 1)))
+      (net (name BAD) (node (ref R1) (pin 1)) (node (ref U1) (pin 1)))))'''
+    nets, anchors, issues = net_members(text, objects, "a" * 40)
+    assert nets == {"GOOD": {"R1.1"}, "BAD": None} and set(anchors) == {"R1.1"}
+    # Every affected net has its own marker, not a deduplicated global reason.
+    text = '''(export (nets (net (name B) (node (ref U1) (pin 1)))
+      (net (name A) (node (ref U1) (pin 2)))))'''
+    nets, anchors, issues = net_members(text, objects, "a" * 40)
+    assert nets == {"A": None, "B": None} and not anchors
+    assert [i["net"] for i in issues if i["unknown"]] == ["A", "B"], issues
+
+
+def test_br03_missing_pin():
+    for pin in ("", '(pin "")'):
+        text = '(export (nets (net (name N) (node (ref U1) ' + pin + '))))'
+        nets, anchors, issues = net_members(text, {"/a": br03_object("U1")}, "a" * 40)
+        assert nets["N"] is None and not anchors, (nets, anchors)
+        assert len(issues) == 1 and issues[0]["unknown"] and issues[0]["net"] == "N", issues
+    # An absent reference with no matching symbol cannot become a fabricated member either.
+    nets, anchors, issues = net_members('(export (nets (net (name N) (node (pin 1)))))',
+                                        {"/a": br03_object("U1")}, "a" * 40)
+    assert nets["N"] is None and not anchors and issues[0]["unknown"]
+
+
+def test_br03_power_policy():
+    # Power refs are ignored even if a symbol candidate exists or its pin is absent.
+    text = '''(export (nets (net (name GND) (node (ref R1) (pin 1))
+      (node (ref "#PWR01") (pin 1)) (node (ref "#FLG01")))
+      (net (name POWER_ONLY) (node (ref "#PWR01") (pin 1)))))'''
+    nets, anchors, issues = net_members(text, {"/r": br03_object("R1"),
+                                              "/p": br03_object("#PWR01")}, "a" * 40)
+    assert nets == {"GND": {"R1.1"}, "POWER_ONLY": set()} and not issues, (nets, issues)
+    assert set(anchors) == {"R1.1"}
+
+
+def test_br03_missing_multi_policy():
+    # Standalone assertion: must fail on 41559c2 independently of the power-symbol regression.
+    objects = {"/a": br03_object("U?"), "/b": br03_object("U?", "2")}
+    text = '(export (nets (net (name N) (node (ref "U?") (pin 2)))))'
+    nets, anchors, issues = net_members(text, objects, "a" * 40)
+    assert not nets["N"] and not anchors and any(i["unknown"] for i in issues), (nets, anchors, issues)
+    # One symbol instance is recoverable, including a genuinely empty reference.
+    for ref in ("U?", ""):
+        text = '(export (nets (net (name N) (node (ref "' + ref + '") (pin 2)))))'
+        nets, anchors, issues = net_members(text, {"/s/a": br03_object(ref, sheet="/s/")}, "a" * 40)
+        assert nets == {"N": {"/s/a:2"}} and set(anchors) == {"/s/a:2"}
+        assert issues and not any(i["unknown"] for i in issues)
+
+
+def test_br03_unit_anchor_candidates():
+    # Membership is REF.PIN, not unit-specific. These are candidate anchors, not proven pin positions.
+    # Task 8 must select the owning unit with its pin manifest; Task 2 must not pick the first unit.
+    objects = {"/s/a": br03_object("U1", "1", "/s/"), "/s/b": br03_object("U1", "2", "/s/")}
+    text = '''(export (nets (net (name N) (node (ref U1) (pin 1))
+      (node (ref U1) (pin 1)) (node (ref U1) (pin 2)))))'''
+    nets, anchors, issues = net_members(text, objects, "b" * 40)
+    assert nets == {"N": {"U1.1", "U1.2"}} and not issues
+    for pin in ("1", "2"):
+        assert anchors["U1." + pin] == [
+            {"uuid": "a", "ref": "U1", "pin": pin, "unit": "1", "sheet": "/s/", "pos": [1, 2, 0], "commit": "b" * 40},
+            {"uuid": "b", "ref": "U1", "pin": pin, "unit": "2", "sheet": "/s/", "pos": [1, 2, 0], "commit": "b" * 40}], anchors
+
+
+# Run the BR03 review regressions in the full plain-assertion suite as well.
+for test in (test_br03_unknown_net, test_br03_missing_pin, test_br03_power_policy,
+             test_br03_missing_multi_policy, test_br03_unit_anchor_candidates):
+    test()
+print("ok BR03 review identity regressions (5 tests)")
