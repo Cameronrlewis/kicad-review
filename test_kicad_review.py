@@ -1117,6 +1117,32 @@ assert diff_parts(new, footprint)[0]["action"] == "footprint", "same value and L
 assert parts_lines({"r": sym("R1", "1k", "C1", ds="HTTPS://x/r.pdf")})[0]["datasheet"] == "HTTPS://x/r.pdf", "scheme is case-insensitive"
 print("ok parts diff")
 
+# BOM view helpers: categories, reference ranges, summary (spec 08).
+from kicad_review import BOM_CATEGORIES, bom_category, bom_summary, ref_ranges
+assert ref_ranges(["R1", "R3", "R7", "R8", "R9", "R10", "R11", "R12", "R17"]) == "R1, R3, R7-R12, R17"
+assert ref_ranges([f"C{n}" for n in (1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 14, 15, 17)]) == "C1-C8, C11-C12, C14-C15, C17"
+assert ref_ranges(["R10", "R2", "R1"]) == "R1-R2, R10", "natural order"
+assert ref_ranges(["R5", "R5A", "R6"]) == "R5, R5A, R6", "a suffix breaks the run and stays literal"
+assert ref_ranges(["U1A", "U1B", "U2"]) == "U1A, U1B, U2", "sub-parts never join"
+assert ref_ranges(["R01", "R02", "R03"]) == "R01, R02, R03", "leading zeros stay literal"
+assert ref_ranges(["R1", "R01", "R2"]) == "R01, R1-R2", "equal natural keys use deterministic literal tie-break; padded references stay separate"
+assert ref_ranges(["R1", "C1", "R2", "C2"]) == "C1-C2, R1-R2", "prefixes stay apart"
+assert ref_ranges(["R1", "R1", "R2"]) == "R1-R2" and ref_ranges([]) == ""
+assert ref_ranges(["TP", "R0", "R1"]) == "R0, R1, TP", "non-numeric and zero references stay literal"
+assert ref_ranges([f"R{n}" for n in range(1, 501)]) == "R1-R500"
+for ref, lib, want in (("R7", None, "Resistors"), ("r7", None, "Resistors"), ("C3", None, "Capacitors"), ("FB1", None, "Inductors & Ferrites"),
+                       ("LED3", None, "Diodes & LEDs"), ("Q2", None, "Transistors"), ("U4", None, "ICs & Modules"), ("P1", None, "Connectors"),
+                       ("TP5", None, "Test Points"), ("MH2", None, "Mechanical"), ("X1", "Device:Crystal", "Other"), ("SW1", "Switch:SW_SPST", "Other"),
+                       ("MOT1", "Device:R_Small", "Resistors"), ("ANT1", "Device:Antenna", "Other"), ("A1", "Connector:USB_C_Receptacle", "Connectors"),
+                       ("ZZ1", "Device:L7805", "Other"), ("", None, "Other"), ("U1", "Connector:Conn_01x02", "ICs & Modules")):
+    assert bom_category(ref, lib) == want, (ref, lib, bom_category(ref, lib))
+summary = bom_summary([{"category": "Other", "refs": ["X1"], "mpn": "TBD"}, {"category": "Resistors", "refs": ["R1", "R2"], "mpn": "RC0805"},
+                       {"category": "Capacitors", "refs": ["C1"], "mpn": None}])
+assert summary == {"components": 4, "unique": 3, "withMpn": 1, "byCategory": {"Resistors": 2, "Capacitors": 1, "Other": 1}}, summary
+assert list(summary["byCategory"]) == [c for c in BOM_CATEGORIES if c in summary["byCategory"]], "chip order"
+assert bom_summary([]) == {"components": 0, "unique": 0, "withMpn": 0, "byCategory": {}}
+print("ok bom helpers")
+
 # Project payload and report settings omit opted-out features; supplier lookup remains deferred.
 import copy
 here = os.getcwd()

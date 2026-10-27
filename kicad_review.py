@@ -2085,6 +2085,68 @@ def parts_lines(objs):
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
 
 
+# ---- BOM view: categories, reference ranges and summary (spec 08). ----
+
+BOM_CATEGORIES = ("Resistors", "Capacitors", "Inductors & Ferrites", "Diodes & LEDs", "Transistors",
+                  "ICs & Modules", "Connectors", "Test Points", "Mechanical", "Other")
+BOM_PREFIXES = {"R": "Resistors", "RN": "Resistors", "RV": "Resistors", "C": "Capacitors", "L": "Inductors & Ferrites",
+                "FB": "Inductors & Ferrites", "D": "Diodes & LEDs", "LED": "Diodes & LEDs", "Q": "Transistors",
+                "U": "ICs & Modules", "IC": "ICs & Modules", "J": "Connectors", "P": "Connectors", "CN": "Connectors",
+                "TP": "Test Points", "H": "Mechanical", "MH": "Mechanical"}
+# KiCad library nicknames that say what a part is when its reference prefix does not.
+BOM_LIBRARY_WORDS = (("connector", "Connectors"), ("testpoint", "Test Points"), ("mountinghole", "Mechanical"),
+                     ("transistor", "Transistors"), ("mcu", "ICs & Modules"), ("regulator", "ICs & Modules"),
+                     ("amplifier", "ICs & Modules"), ("memory", "ICs & Modules"), ("interface", "ICs & Modules"),
+                     ("sensor", "ICs & Modules"), ("rf_module", "ICs & Modules"))
+
+
+def bom_category(ref, lib_id):
+    """Category from the reference prefix (R, C, L/FB, D/LED, Q, U, J/P, TP, H/MH), then the symbol name
+    (Device:R_Small is an R), then the library nickname (Connector_Generic); Other for the rest."""
+    prefix = re.match(r"[A-Za-z]+", ref or "")
+    if prefix and prefix.group(0).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[prefix.group(0).upper()]
+    library, _, item = (lib_id or "").rpartition(":")
+    head = re.match(r"([A-Za-z]+)(?:_|$)", item)  # "R_Small" is an R; "L7805" is not an inductor
+    if head and head.group(1).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[head.group(1).upper()]
+    return next((category for word, category in BOM_LIBRARY_WORDS if word in library.lower()), "Other")
+
+
+def ref_ranges(refs):
+    """['R1','R3','R7','R8','R9','R12'] -> 'R1, R3, R7-R9, R12'. Runs of two or more join. Prefixes stay apart;
+    sub-parts (U1A), suffixes (R5A), leading zeros (R01) and non-numeric references stay literal and break a run."""
+    out, run = [], []
+
+    def flush():
+        out.append(f"{run[0][0]}{run[0][1]}-{run[-1][0]}{run[-1][1]}" if len(run) > 1 else "".join(run[0]))
+        run.clear()
+
+    for ref in sorted(set(refs), key=lambda ref: (natural(ref), ref)):
+        m = re.fullmatch(r"([A-Za-z_]+)([1-9]\d*)", ref)
+        if m and run and run[-1][0] == m.group(1) and int(run[-1][1]) + 1 == int(m.group(2)):
+            run.append(m.groups())
+            continue
+        if run:
+            flush()
+        if m:
+            run.append(m.groups())
+        else:
+            out.append(ref)
+    if run:
+        flush()
+    return ", ".join(out)
+
+
+def bom_summary(lines):
+    """Header numbers of the BOM view; byCategory counts components and keeps BOM_CATEGORIES order."""
+    by = Counter()
+    for line in lines:
+        by[line["category"]] += len(line["refs"])
+    return {"components": sum(by.values()), "unique": len(lines), "withMpn": sum(1 for l in lines if present(l["mpn"])),
+            "byCategory": {c: by[c] for c in BOM_CATEGORIES if by[c]}}
+
+
 def diff_parts(base, head):
     """What a change did to the parts list, per reference designator, grouped back into lines."""
     at = lambda lines: {r: l for l in lines for r in l["refs"]}
