@@ -2541,7 +2541,7 @@ def board_pads(path):
             number = p[1]
             seen[number] += 1
             suffix = "#" + str(seen[number]) if counts[number] > 1 else ""
-            geom = [x for x in p[1:] if not (isinstance(x, list) and x and x[0] in ("net", "uuid", "tstamp"))]
+            geom = [x for x in p[1:] if not (isinstance(x, list) and x and x[0] in ("net", "uuid", "tstamp", "pinfunction", "pintype"))]
             result[uid].append({"uuid": val(p, "uuid") or val(p, "tstamp"), "number": number,
                                 "geom": pad_geometry(geom),
                                 "net": objects[uid]["props"].get("pad " + number + suffix + " net") or ""})

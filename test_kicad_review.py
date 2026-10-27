@@ -4164,6 +4164,12 @@ def test_br03_pad_net_parser():
         p.write_text(modern.replace("(uuid ","(tstamp "))
         assert kr.board_pads(p)["fp"] == expected
 
+        # Pin function/type metadata is descriptive, not physical pad geometry.
+        annotated = modern.replace('(pad "C" smd rect (uuid c)',
+                                  '(pad "C" smd rect (uuid c) (pinfunction "OLD") (pintype "passive")')
+        p.write_text(annotated)
+        assert kr.board_pads(p)["fp"][0]["geom"] == expected[0]["geom"]
+
 
 def test_br03_object_pairs():
     import copy
