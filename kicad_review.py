@@ -2311,6 +2311,37 @@ def parse_netlist(text):
     return comps, nets
 
 
+def net_members(text, objects, commit):
+    _, parsed = parse_netlist(text)
+    by_ref = {}
+    for uid, o in objects.items():
+        if o["kind"] == "symbol":
+            ref = o["props"].get("reference", o["ref"])
+            by_ref.setdefault(ref, []).append((uid, o))
+    nets, anchors, reasons = {}, {}, set()
+    for name, nodes in parsed.items():
+        nets[name] = set()
+        for node in nodes:
+            ref, pin = node["ref"], node["pin"]
+            candidates = by_ref.get(ref, [])
+            units = [(o["where"].get("sheet"), o["props"].get("unit", "1"))
+                     for _, o in candidates]
+            ambiguous = not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
+            invalid = not ref or "?" in ref
+            if ambiguous:
+                reasons.add("Connectivity identity is ambiguous; schematic membership comparison suppressed")
+                continue
+            if invalid:
+                reasons.add("Some connected pins have missing references; using symbol UUID and pin number")
+            key = f"{candidates[0][0]}:{pin}" if invalid else f"{ref}.{pin}"
+            nets[name].add(key)
+            anchors[key] = [{"uuid":uid.rsplit("/",1)[-1], "ref":ref, "pin":pin,
+                             "sheet":o["where"]["sheet"], "pos":o.get("pos"), "commit":commit}
+                            for uid, o in candidates]
+    return nets, anchors, [{"channel":"wiring", "reason":r,
+                           "unknown":r.startswith("Connectivity identity is ambiguous")} for r in sorted(reasons)]
+
+
 def ohms(value):
     if not value or len(value) > 32:
         return None

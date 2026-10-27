@@ -3664,3 +3664,28 @@ print("ok per-commit project render cache hits retain both revisions")
 
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
+
+# BR03: Electrical membership extraction and identity limits.
+from kicad_review import net_members
+nettext = '''(export (components (comp (ref U1)))
+(nets (net (name GND) (node (ref U1) (pin 1))
+(node (ref U1) (pin 1)))))'''
+obj = lambda ref, unit, sheet: {"kind":"symbol", "ref":ref,
+    "props":{"reference":ref,"unit":unit},"where":{"sheet":sheet},"pos":[1,2,0]}
+units = {"/a":obj("U1","1","/"), "/b":obj("U1","2","/")}
+nets, anchors, issues = net_members(nettext, units, "a"*40)
+assert nets == {"GND":{"U1.1"}}
+assert len(anchors["U1.1"]) == 2 and not issues
+bad = {"/a":obj("U1","1","/"), "/b":obj("U1","1","/")}
+nets, anchors, issues = net_members(nettext, bad, "a"*40)
+assert not nets["GND"] and issues and not anchors
+missing = nettext.replace("U1", "R?")
+nets, anchors, issues = net_members(missing, {"/a":obj("R?","1","/")}, "a"*40)
+assert nets["GND"] == {"/a:1"} and issues
+assert anchors["/a:1"][0]["commit"] == "a"*40
+inst = {"/s1/a":obj("R1","1","/s1/"), "/s2/a":obj("R2","1","/s2/")}
+text = '(export (nets (net (name A) (node (ref R1) (pin 1)) (node (ref R2) (pin 1)))))'
+nets, anchors, issues = net_members(text, inst, "b"*40)
+assert nets["A"] == {"R1.1","R2.1"} and not issues
+assert anchors["R1.1"][0]["sheet"] != anchors["R2.1"][0]["sheet"]
+print("ok BR03 electrical membership")
