@@ -238,6 +238,7 @@ test('BR02 snapshotParts validates duplicates, unclassified meshes and non-finit
 
 test('BR02 240 compatible changed primitives fit the hard changed-part budget', integration, async () => {
   const {d, metadata} = makeDocument(['R12', 'R2', 'R3'], 240);
+  d.getRoot().listNodes().find(n => n.getName() === 'R12').setTranslation([.017, .002, -.013]);
   metadata.keep = ['R12'];
   const before = P.snapshotParts(d, metadata);
   P.applyMaterials(d, 'ENIG');
@@ -293,7 +294,6 @@ test('BR02 board role materials do not mutate source body material', integration
 test('BR02 applyMaterials and batchDocument on actual fixture exports', integration, async () => {
   const {NodeIO} = require('@gltf-transform/core');
   const {ALL_EXTENSIONS} = require('@gltf-transform/extensions');
-  const {getBounds} = require('@gltf-transform/functions');
   const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
   const metadata = {
     version: 1, side: 'head', keep: ['R1'], finish: 'ENIG',
@@ -339,7 +339,16 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
     assert.ok(changed.every(n => n.getExtras().ref === 'R1'));
 
     // Verify role materials applied on board nodes
-    const boardNodes = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().role !== 'body');
+    const boardNodes = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().batch?.startsWith('board:'));
+    const boardBatches = new Set();
+    for (const n of boardNodes) {
+      const {role, side, batch} = n.getExtras();
+      assert.match(batch, /^board:[^:]+:[^:]+$/, `board kind and side batch in ${p}`);
+      assert.equal(batch, `board:${role}:${side}`);
+      assert.equal(n.getName(), batch);
+      assert.ok(!boardBatches.has(batch), `one board node per batch: ${batch} in ${p}`);
+      boardBatches.add(batch);
+    }
     const copperNodes = boardNodes.filter(n => n.getExtras().role === 'copper');
     assert.ok(copperNodes.length >= 1, 'copper nodes present');
     for (const n of copperNodes) for (const primitive of n.getMesh().listPrimitives()) {
@@ -371,7 +380,7 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
     for (const n of maskNodes) for (const primitive of n.getMesh().listPrimitives()) {
       const mat = primitive.getMaterial();
       assert.equal(mat.getAlphaMode(), 'BLEND');
-      assert.equal(mat.getBaseColorFactor()[3], .72);
+      assert.deepEqual(mat.getBaseColorFactor(), [.011, .1, .036, .72]);
       assert.equal(mat.getRoughnessFactor(), .6);
       assert.equal(mat.getExtension('KHR_materials_clearcoat').getClearcoatFactor(), .6);
       assert.equal(mat.getExtension('KHR_materials_clearcoat').getClearcoatRoughnessFactor(), .18);
