@@ -98,6 +98,8 @@ jobs:
             docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
               python3 tools/kicad_review.py render
           fi
+          docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+            python3 tools/kicad_review.py copper
 
       - name: Cache 3D compression dependencies
         if: steps.detect.outputs.changed == 'true'

@@ -4444,3 +4444,45 @@ def test_br03_typed_rules():
 
 test_br03_typed_rules()
 print("ok BR03 typed rules, assignments and stackup")
+
+
+def test_br03_cmd_copper():
+    from kicad_review import cmd_copper
+    from unittest.mock import patch
+    import subprocess
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        try:
+            projects = [{"dir": "p", "name": "p"}, {"dir": "q", "name": "q"}]
+            write('review', {'detect.json': json.dumps({'projects': projects})})
+            write('base', {'p/p.kicad_pcb': 'board', 'q/q.kicad_pcb': 'board'})
+            write('head', {'q/q.kicad_pcb': 'board'})
+            ok = subprocess.CompletedProcess([], 0, json.dumps({'rows': [], 'incomplete': []}), '')
+            outcomes = [ok, subprocess.TimeoutExpired('python', 120),
+                        subprocess.CalledProcessError(2, ['python'], stderr='failed'),
+                        OSError('missing interpreter'), subprocess.CompletedProcess([], 0, 'not json', '')]
+            for outcome in outcomes:
+                with patch('kicad_review.subprocess.run', side_effect=[outcome, ok]) as run:
+                    cmd_copper(None)
+                assert run.call_count == 2, 'BR03 copper failure stopped subsequent project'
+                first, second = run.call_args_list
+                assert first.kwargs == {'capture_output': True, 'text': True, 'timeout': 120, 'check': True}
+                assert first.args[0][-2:] == ['base/p/p.kicad_pcb', '-']
+                assert second.args[0][-2:] == ['base/q/q.kicad_pcb', 'head/q/q.kicad_pcb']
+                result = json.loads(pathlib.Path('review/p/copper-diff.json').read_text())
+                assert result['rows'] == []
+                assert bool(result['incomplete']) == (outcome is not ok)
+                if outcome is not ok: assert result['incomplete'][0]['channel'] == 'routing'
+                assert json.loads(pathlib.Path('review/q/copper-diff.json').read_text()) == {'rows': [], 'incomplete': []}
+            pathlib.Path('base/p/p.kicad_pcb').unlink(); write('head', {'p/p.kicad_pcb': 'board'})
+            with patch('kicad_review.subprocess.run', return_value=ok) as run: cmd_copper(None)
+            assert run.call_args_list[0].args[0][-2:] == ['-', 'head/p/p.kicad_pcb']
+        finally: os.chdir(old)
+    w = pathlib.Path('.github/workflows/review.yml').read_text()
+    render = w.index('python3 tools/kicad_review.py render')
+    assert render < w.index('fi', render) < w.index('python3 tools/kicad_review.py copper')
+
+
+import pathlib
+test_br03_cmd_copper()
+print("ok BR03 cmd_copper bounded orchestration")

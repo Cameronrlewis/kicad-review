@@ -292,6 +292,26 @@ def cache_renders(args=None):
                 (cache / ".complete").write_text("complete")
 
 
+def cmd_copper(args):
+    # ponytail: recompute pair-specific copper once per run; 120 s per project, no polygon cache.
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    script = pathlib.Path(__file__).resolve().parent / "tools" / "copper_area.py"
+    for p in det["projects"]:
+        paths = [pathlib.Path(side) / p["dir"] / (p["name"] + ".kicad_pcb") for side in ("base", "head")]
+        out = pathlib.Path("review") / project_id(p["dir"]) / "copper-diff.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        result = {"rows": [], "incomplete": []}
+        if any(f.exists() for f in paths):
+            try:
+                run = subprocess.run([sys.executable, str(script), *[str(f) if f.exists() else "-" for f in paths]],
+                                     capture_output=True, text=True, timeout=120, check=True)
+                result = json.loads(run.stdout)
+            except (subprocess.SubprocessError, ValueError, OSError) as exc:
+                result = {"rows": [], "incomplete": [{"channel": "routing", "reason": f"Copper comparison unavailable: {type(exc).__name__}"}]}
+                print(f"{p['name']}: copper unavailable: {exc}", file=sys.stderr)
+        out.write_text(json.dumps(result, allow_nan=False, separators=(",", ":")), encoding="utf-8")
+
+
 def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
@@ -3737,6 +3757,8 @@ def main():
     p.set_defaults(func=cache_renders)
     p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_render)
+    p = sub.add_parser("copper", help="refilled copper differences of both revisions (run inside the KiCad container)")
+    p.set_defaults(func=cmd_copper)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
     p.add_argument("--tag", required=True)
     p.set_defaults(func=cmd_release)
