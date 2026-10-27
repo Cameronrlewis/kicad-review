@@ -3281,3 +3281,83 @@ test('data with replacement patterns is inserted literally', () => {
   const html = currentReport('<script>window.REVIEW_DATA = {"v":"$& $1 $$"};</script>');
   assert.match(html, /window\.REVIEW_DATA = \{"v":"\$& \$1 \$\$"\};/);
 });
+
+import { deflateRawSync } from 'node:zlib';
+import { zipEntries, zipEntryStream, exactRange } from './zip.js';
+
+function makeZip(files) {
+  const parts = [], central = []; let offset = 0;
+  for (const f of files) {
+    const name = Buffer.from(f.name), body = f.deflate ? deflateRawSync(f.data) : f.data, method = f.deflate ? 8 : 0, extra = Buffer.alloc(4);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(body.length, 18); local.writeUInt32LE(f.data.length, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(extra.length, 28);
+    parts.push(local, name, extra, body);
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0); entry.writeUInt16LE(20, 4); entry.writeUInt16LE(20, 6); entry.writeUInt16LE(method, 10);
+    entry.writeUInt32LE(body.length, 20); entry.writeUInt32LE(f.data.length, 24); entry.writeUInt16LE(name.length, 28); entry.writeUInt32LE(offset, 42);
+    central.push(entry, name);
+    offset += 30 + name.length + extra.length + body.length;
+  }
+  const dir = Buffer.concat(central), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(dir.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, dir, end]);
+}
+const rangeOf = (buf) => async (a, b) => new Response(buf.subarray(a, b + 1), { status: 206, headers: { 'Content-Range': `bytes ${a}-${b}/${buf.length}` } });
+
+test('zip reader lists entries and streams stored and deflated data', async () => {
+  const zip = makeZip([{ name: '0/fab-P-aaaaaaa.zip', data: Buffer.from('PK-stored') },
+    { name: '0/P-aaaaaaa-schematic.pdf', data: Buffer.from('%PDF-1.7 '.repeat(50)), deflate: true }, { name: '1/empty.glb', data: Buffer.alloc(0) }]);
+  const entries = await zipEntries(rangeOf(zip), zip.length);
+  assert.deepEqual(entries.map(e => [e.name, e.method, e.bytes]), [['0/fab-P-aaaaaaa.zip', 0, 9], ['0/P-aaaaaaa-schematic.pdf', 8, 450], ['1/empty.glb', 0, 0]]);
+  assert.equal(await new Response(await zipEntryStream(rangeOf(zip), entries[0])).text(), 'PK-stored');
+  assert.equal(await new Response(await zipEntryStream(rangeOf(zip), entries[1])).text(), '%PDF-1.7 '.repeat(50));
+  assert.equal((await new Response(await zipEntryStream(rangeOf(zip), entries[2])).arrayBuffer()).byteLength, 0);
+});
+
+test('zip reader rejects non-zip, zip64 and truncated input', async () => {
+  const junk = Buffer.from('not a zip at all, long enough to hold a record end');
+  await assert.rejects(zipEntries(rangeOf(junk), junk.length), /not a zip/);
+  const zip = makeZip([{ name: 'a', data: Buffer.from('x') }]);
+  const big = Buffer.from(zip); big.writeUInt32LE(0xffffffff, big.length - 22 + 16);
+  await assert.rejects(zipEntries(rangeOf(big), big.length), /zip64 unsupported/);
+  await assert.rejects(zipEntries(rangeOf(Buffer.alloc(5)), 5), /not a zip/);
+});
+
+test('zip reader validates directory, header and payload boundaries and exact ranges', async () => {
+  const good = makeZip([{ name: '0/a.glb', data: Buffer.from('glTF') }]);
+  const end = good.length - 22, directory = good.readUInt32LE(end + 16);
+  for (const mutate of [
+    b => b.writeUInt16LE(60000, directory + 28),
+    b => b.writeUInt16LE(60000, directory + 30),
+    b => b.writeUInt32LE(directory - 10, directory + 42),
+    b => b.writeUInt32LE(60000, directory + 20),
+    b => b.writeUInt32LE(directory + 1, end + 16),
+    b => b.writeUInt16LE(1, end + 20),
+  ]) {
+    const b = Buffer.from(good); mutate(b);
+    await assert.rejects(zipEntries(rangeOf(b), b.length), /bad|not a zip/);
+  }
+  // Remove an actual central-directory byte while retaining its advertised size/count.
+  const truncated = Buffer.concat([good.subarray(0, directory + 45), good.subarray(directory + 46)]);
+  await assert.rejects(zipEntries(rangeOf(truncated), truncated.length), /bad directory/);
+  for (const mutate of [b => b.writeUInt16LE(60000, 28), b => b.writeUInt16LE(8, 8), b => { b[30] ^= 1; }]) {
+    const b = Buffer.from(good); mutate(b);
+    const [entry] = await zipEntries(rangeOf(b), b.length);
+    await assert.rejects(zipEntryStream(rangeOf(b), entry), /bad entry/);
+  }
+  const [entry] = await zipEntries(rangeOf(good), good.length);
+  const shortHeader = async (a,b) => new Response(good.subarray(a, b === 29 ? 20 : b + 1), { status:206, headers:{'Content-Range':`bytes ${a}-${b}/${good.length}`} });
+  await assert.rejects(zipEntryStream(shortHeader, entry), /bad range length/);
+  const badHeader = async () => new Response('x', { status:206, headers:{'Content-Range':`bytes 1-1/${good.length}`} });
+  await assert.rejects(exactRange(badHeader, 0, 0, good.length), /range not honoured/);
+  const shortRange = async (a,b) => new Response(good.subarray(a,b), { status:206, headers:{'Content-Range':`bytes ${a}-${b}/${good.length}`} });
+  await assert.rejects(zipEntries(shortRange, good.length), /bad range length/);
+  // Payload truncation can happen after headers were sent: body must error, not end successfully.
+  const payloadStart = entry.offset + 30 + Buffer.byteLength(entry.name) + 4;
+  const shortPayload = async (a,b) => a === payloadStart ? shortRange(a,b) : rangeOf(good)(a,b);
+  const stream = await zipEntryStream(shortPayload, entry);
+  await assert.rejects(new Response(stream).arrayBuffer(), /bad range length/);
+});
+
