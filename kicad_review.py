@@ -1840,6 +1840,7 @@ def fab_entry(pro, name, settings, fab_dir, dest):
             with zipfile.ZipFile(dest, "w") as z:
                 for part in parts:
                     z.write(part, os.path.basename(part))
+            fab_notices(name, settings, parts)
         entry["file"] = os.path.basename(dest)
     except expected:
         print(f"::warning::{name}: fabrication export failed (incomplete outputs or invalid CSV/archive)")
@@ -1938,6 +1939,45 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
             print(f"::warning::{name}: {e['label']}: {e['error']}")
     write_download_manifest(dl, entries, policy=settings, purpose=purpose)
     return entries
+
+
+# Pinned KiBot v1.9.1 JLCPCB.kibot.yaml position columns (lines 94-106).
+KIBOT_POSITION_HEADER = ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+# Protel extensions (KiCad --no-x2) for the layers both templates plot (JLCPCB lines 161-167, PCBWay lines 87-93).
+KIBOT_LAYER_SUFFIXES = {"F.Cu": ".gtl", "B.Cu": ".gbl", "F.SilkS": ".gto", "B.SilkS": ".gbo",
+                        "F.Mask": ".gts", "B.Mask": ".gbs", "Edge.Cuts": ".gko"}
+
+
+def kibot_differences(preset, gerber_names, bom_rows):
+    """Only the differences Task 3A checks. Everything else is recorded in kibot_templates/v1.9.1/SOURCE.md."""
+    lower = [n.lower() for n in gerber_names]
+    diffs = [f"missing {layer} ({suffix})" for layer, suffix in KIBOT_LAYER_SUFFIXES.items()
+             if not any(n.endswith(suffix) for n in lower)]
+    if preset == "jlcpcb":
+        if any(n.endswith((".gtp", ".gbp")) for n in lower):
+            diffs.append("stencil layers exported; JLCPCB template excludes them (lines 147-148)")
+        if bom_rows and "LCSC Part #" in bom_rows[0]:
+            lcsc = bom_rows[0].index("LCSC Part #")
+            if any(len(row) <= lcsc or not row[lcsc].strip() for row in bom_rows[1:]):
+                diffs.append("BOM rows without LCSC number; JLCPCB template filters them (line 115)")
+    return diffs
+
+
+def fab_notices(name, settings, parts):
+    """Print checked template differences as notices. They never fail the fabrication entry."""
+    preset = settings["fabrication"]["preset"]
+    archive = next((p for p in parts if p.endswith("-gerbers.zip")), None)
+    if archive is None:  # a schematic-only project has no Gerbers to compare
+        return
+    bom = next((p for p in parts if p.endswith("-bom.csv")), None)
+    with zipfile.ZipFile(archive) as z:
+        names = z.namelist()
+    rows = None
+    if bom:
+        with open(bom, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+    for diff in kibot_differences(preset, names, rows):
+        print(f"::notice::{name}: {preset} fabrication differs from KiBot v1.9.1 template: {diff}")
 
 
 def violation(v, scale, where):

@@ -3966,3 +3966,101 @@ try:
 finally:
     kr.subprocess.run = dl_real
 print("ok export_downloads commands, reuse, isolation and awkward projects")
+
+# ---- Task 3A: pinned KiBot v1.9.1 templates ----
+TEMPLATES = pathlib.Path(kr.__file__).with_name("kibot_templates") / "v1.9.1"
+PINS = {"JLCPCB.kibot.yaml": "9dcc65bf1fa6e8a7e54e708088e37a9a312b06eb01dbfacdf3d19a4a433f8ca6",
+        "PCBWay.kibot.yaml": "6b908fe676409b032004e4d31b421a1772788a310b5365125442bbd505e6b12c"}
+for name, digest in PINS.items():
+    assert hashlib.sha256((TEMPLATES / name).read_bytes()).hexdigest() == digest, name
+assert (TEMPLATES / "SOURCE.md").exists()
+CITED = {"JLCPCB.kibot.yaml": {1: "# Gerber and drill files for JLCPCB, without stencil", 55: "      use_gerber_x2_attributes: false",
+                               58: "      subtract_mask_from_silk: true", 71: "      pth_and_npth_single_file: false", 75: "      map: gerber",
+                               92: "      only_smd: @_KIBOT_POS_ONLY_SMD@", 115: "      exclude_filter: '_only_jlc_parts'",
+                               146: "  _KIBOT_POS_ONLY_SMD: true", 147: "  _KIBOT_F_PASTE: ''", 148: "  _KIBOT_B_PASTE: ''"},
+         "PCBWay.kibot.yaml": {1: "# Gerber and drill files for PCBWay, with stencil (solder paste)", 30: "      use_gerber_x2_attributes: false",
+                               34: "      subtract_mask_from_silk: false", 56: "      pth_and_npth_single_file: false",
+                               77: "  _KIBOT_F_PASTE: ''", 78: "  _KIBOT_B_PASTE: ''"}}
+for name, cited in CITED.items():
+    lines = (TEMPLATES / name).read_text(encoding="utf-8").splitlines()
+    for number, text in cited.items():
+        assert lines[number - 1] == text, (name, number, lines[number - 1])
+P = kr.PRESETS
+assert "--no-x2" in P["jlcpcb"]["gerbers"] and "--no-x2" in P["pcbway"]["gerbers"]
+assert "--subtract-soldermask" in P["jlcpcb"]["gerbers"] and "--subtract-soldermask" not in P["pcbway"]["gerbers"]
+assert "--excellon-separate-th" in P["jlcpcb"]["drill"] and "--excellon-separate-th" not in P["pcbway"]["drill"]
+assert kr.KIBOT_POSITION_HEADER == ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+assert kr.KIBOT_POSITION_HEADER == list(kr.POS_COLUMNS.values()), kr.KIBOT_POSITION_HEADER
+GERBERS = ["p-f_cu.gtl", "p-b_cu.gbl", "p-f_silks.gto", "p-b_silks.gbo", "p-f_mask.gts", "p-b_mask.gbs", "p-edge_cuts.gko"]
+BOM_HEAD = ["Comment", "Designator", "Footprint", "LCSC Part #"]
+assert kr.kibot_differences("jlcpcb", GERBERS, [BOM_HEAD, ["10k", "R1", "R_0603", "C123"]]) == []
+assert kr.kibot_differences("jlcpcb", GERBERS + ["p-f_paste.gtp"], [BOM_HEAD, ["10k", "R1", "R_0603", ""]]) == [
+    "stencil layers exported; JLCPCB template excludes them (lines 147-148)",
+    "BOM rows without LCSC number; JLCPCB template filters them (line 115)"]
+assert kr.kibot_differences("jlcpcb", GERBERS, None) == []
+assert kr.kibot_differences("pcbway", GERBERS + ["p-f_paste.gtp"], None) == []   # PCBWay stencil is not checked
+missing = kr.kibot_differences("pcbway", ["p-f_cu.gtl"], None)
+assert len(missing) == 6 and all(d.startswith("missing ") for d in missing), missing
+import contextlib
+from unittest.mock import patch as _patch
+dl_mode.clear(); case = tempfile.mkdtemp(); source = dl_project(case, "P")
+kr.subprocess.run = dl_fake
+try:
+    notes = io.StringIO()
+    with _patch("kicad_review.kibot_differences", return_value=["probe difference"]), contextlib.redirect_stdout(notes):
+        made = export_downloads({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert not made[0]["error"], made
+    assert "::notice::P: jlcpcb fabrication differs from KiBot v1.9.1 template: probe difference" in notes.getvalue(), notes.getvalue()
+    # Unpatched fab_notices: schematic-only parts emit nothing; complete Protel Gerbers + LCSC BOM emit nothing.
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        kr.fab_notices("P", dl_settings, [f"{case}/P-review-jlcpcb-bom.csv"])
+    assert notes.getvalue() == "", notes.getvalue()
+    complete_fab = pathlib.Path(case, "complete")
+    complete_fab.mkdir()
+    with zipfile.ZipFile(complete_fab / "P-review-jlcpcb-gerbers.zip", "w") as z:
+        for member in GERBERS + ["P.drl"]:
+            z.writestr(member.upper(), "G04*\n")
+    (complete_fab / "P-review-jlcpcb-positions.csv").write_text(
+        "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\nR1,10k,R_0603,10,20,90,Top\n", encoding="utf-8")
+    (complete_fab / "P-review-jlcpcb-bom.csv").write_text(BOM, encoding="utf-8")
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        kr.fab_notices("P", dl_settings, [str(complete_fab / f"P-review-jlcpcb-{s}") for s in ("gerbers.zip", "positions.csv", "bom.csv")])
+    assert notes.getvalue() == "", notes.getvalue()
+    assert kr.kibot_differences("jlcpcb", [m.upper() for m in GERBERS] + ["P-B_Paste.GBP"], [BOM_HEAD, ["10k", "R1", "R_0603", "C123"]]) == [
+        "stencil layers exported; JLCPCB template excludes them (lines 147-148)"]
+    assert kr.kibot_differences("jlcpcb", GERBERS, [BOM_HEAD]) == []  # no placed parts
+    assert kr.kibot_differences("jlcpcb", GERBERS, [BOM_HEAD, ["10k", "R1", "R_0603", "  "]]) == [
+        "BOM rows without LCSC number; JLCPCB template filters them (line 115)"]
+    # Real differences remain notices, never fabrication errors or edits to release evidence.
+    with zipfile.ZipFile(complete_fab / "P-review-jlcpcb-gerbers.zip", "w") as z:
+        for member in [m for m in GERBERS if not m.endswith(".gko")] + ["P.drl", "P-F_Paste.gtp"]:
+            z.writestr(member, "G04*\n")
+    (complete_fab / "P-review-jlcpcb-bom.csv").write_text(
+        chr(0xfeff) + BOM.replace("C123", ""), encoding="utf-8")
+    original = {p.name: p.read_bytes() for p in complete_fab.iterdir()}
+    dl_calls.clear()
+    notes = io.StringIO()
+    dest = pathlib.Path(case, "fab-notices.zip")
+    with contextlib.redirect_stdout(notes):
+        made = kr.fab_entry(f"{source}/P.kicad_pro", "P", dl_settings, str(complete_fab), str(dest))
+    assert made["file"] == dest.name and made["error"] is None, made
+    prefix = "::notice::P: jlcpcb fabrication differs from KiBot v1.9.1 template: "
+    assert notes.getvalue().splitlines() == [prefix + d for d in (
+        "missing Edge.Cuts (.gko)",
+        "stencil layers exported; JLCPCB template excludes them (lines 147-148)",
+        "BOM rows without LCSC number; JLCPCB template filters them (line 115)")], notes.getvalue()
+    assert not dl_calls, "template differences must not trigger a fabrication rebuild"
+    assert {p.name: p.read_bytes() for p in complete_fab.iterdir()} == original
+    with zipfile.ZipFile(dest) as z:
+        assert {name: z.read(name) for name in z.namelist()} == original
+    pcbway = copy.deepcopy(dl_settings); pcbway["fabrication"]["preset"] = "pcbway"
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        kr.fab_notices("P", pcbway, [str(p) for p in complete_fab.iterdir()])
+    assert notes.getvalue().splitlines() == [
+        "::notice::P: pcbway fabrication differs from KiBot v1.9.1 template: missing Edge.Cuts (.gko)"], notes.getvalue()
+finally:
+    kr.subprocess.run = dl_real
+print("ok KiBot v1.9.1 pins and fabrication checks")
