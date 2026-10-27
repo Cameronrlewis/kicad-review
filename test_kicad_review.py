@@ -3837,8 +3837,9 @@ def br02_metadata_contract():
             kr.prepare3d({'dir': 'P', 'name': 'P'})
             import json
             data = {s: json.loads(pathlib.Path('review/P', s, 'board-3d-input.json').read_text()) for s in ('base', 'head')}
-            assert data['base']['keep'] == ['J1', 'R1', 'R2'], data['base']
-            assert data['head']['keep'] == ['J2', 'R2', 'R12'], data['head']
+            # One kept set per comparison, shared by both revisions (kept_refs over base and head).
+            assert data['base']['keep'] == ['J1', 'J2', 'R1', 'R12', 'R2'], data['base']
+            assert data['head']['keep'] == ['J1', 'J2', 'R1', 'R12', 'R2'], data['head']
             assert data['base']['finish'] == 'ENIG' and data['head']['finish'] == 'ENEPIG'
             for side, d in data.items():
                 assert set(d) == {'version', 'side', 'keep', 'finish', 'footprints'}
@@ -4059,3 +4060,103 @@ def br02_poster_dimensions():
 
 
 br02_poster_dimensions()
+
+
+def br02_task2a_metadata_contract():
+    base = {'stable': {'kind':'footprint','ref':'R1','has_model':True,
+        'props':{'layer':'F.Cu','reference':'R1'},'pos':[5,5,0],'box':[4,4,6,6],'where':'board',
+        'match':('footprint','R1')},
+        'bottom': {'kind':'footprint','ref':'J1','has_model':True,
+        'props':{'layer':'B.Cu'},'pos':[10,15,90],'box':[8,14,12,16],'where':'board',
+        'match':('footprint','J1')}}
+    head = {'stable': {**base['stable'],'ref':'R12','match':('footprint','R12'),
+        'props':{'layer':'F.Cu','reference':'R12'}}}
+    assert kicad_review.kept_refs(base,head) == ['J1','R1','R12'], 'BR02 renamed/deleted refs'
+    m = kicad_review.metadata3d('base',base,['R1','R12','J1'],'ENIG',
+        [{'ref':'J1','side':'base','reason':'file not found'}])
+    bottom = next(f for f in m['footprints'] if f['ref']=='J1')
+    assert bottom['uuid']=='bottom' and bottom['side']=='bottom'
+    assert bottom['box']==[8,14,12,16] and not bottom['hasModel']
+    assert bottom['reason']=='file not found', 'BR02 declared model is not coverage'
+    assert m['version'] == 1 and m['side'] == 'base' and m['finish'] == 'ENIG'
+    assert m['keep'] == ['J1', 'R1', 'R12']
+    assert bottom['pos'] == [10,15,90]
+    padless = {'logo': {'kind':'footprint','ref':'LOGO1','has_model':False,
+        'props':{'layer':'F.Cu'},'pos':[7,8,0],'box':None}}
+    logo = kicad_review.metadata3d('head',padless,[], '', [])['footprints'][0]
+    assert logo['box']==[6,7,8,9] and not logo['hasModel'], 'BR02 padless estimate'
+    try:
+        kicad_review.metadata3d('base',{**base,'duplicate':base['stable']},[], '', [])
+        assert False, 'BR02 duplicate reference must fail metadata'
+    except ValueError as e:
+        assert 'duplicate reference' in str(e)
+    # Reference fallback with a changed UUID must keep the old and new identity.
+    replaced = {'new-id': {**base['stable'], 'props': {'layer':'B.Cu'}}}
+    assert kicad_review.kept_refs({'old-id':base['stable']}, replaced) == ['R1']
+    assert kicad_review.kept_refs(base, base) == []
+    for bad_box in (None, [1,2], [0,0,float('inf'),1], [0,0,float('nan'),1]):
+        obj = {**padless['logo'], 'box':bad_box}
+        assert kicad_review.metadata3d('head',{'logo':obj},[], '', [])['footprints'][0]['box'] == [6,7,8,9]
+        try:
+            kicad_review.metadata3d('head',{'logo':{**obj,'pos':[float('nan'),8]}},[], '', [])
+            assert False, 'BR02 missing finite fallback position must fail metadata'
+        except ValueError as error:
+            assert 'finite position' in str(error)
+    both = [{'ref':'R1','side':'both','reason':'file not found'}]
+    assert not kicad_review.metadata3d('head',base,[], '', both)['footprints'][1]['hasModel']
+    print('ok BR02 metadata rename/delete, UUID fallback, bottom models, finite estimates and duplicate rejection')
+
+
+br02_task2a_metadata_contract()
+
+
+def br02_task2a_prepare_contract():
+    import contextlib, pathlib
+    with tempfile.TemporaryDirectory() as t:
+        old = os.getcwd()
+        os.chdir(t)
+        try:
+            pathlib.Path('base/P').mkdir(parents=True)
+            pcb = pathlib.Path('base/P/P.kicad_pcb')
+            pcb.write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            with patch.object(kicad_review.subprocess,'run',side_effect=OSError('missing binary')):
+                kicad_review.export_glb({'dir':'P','name':'P'},'base','review/P/base')
+            assert not pathlib.Path('review/P/base/poster.png').exists()
+            assert 'missing binary' in pathlib.Path('review/P/base/poster.log').read_text()
+            head_meta=pathlib.Path('review/P/head/board-3d-input.json')
+            head_meta.parent.mkdir(parents=True,exist_ok=True)
+            head_meta.write_text('{"stale":true}')
+            kicad_review.prepare3d({'dir':'P','name':'P'})
+            base_meta = pathlib.Path('review/P/base/board-3d-input.json')
+            assert json.loads(base_meta.read_text())['finish']=='ENIG'
+            assert not head_meta.exists(), 'BR02 stale absent-side metadata removed'
+            # Duplicate references disable only processing and remove any old input.
+            pcb.write_text('''(kicad_pcb
+                (footprint "Test" (layer "F.Cu") (uuid "one") (at 7 8)
+                    (property "Reference" "R1"))
+                (footprint "Test" (layer "B.Cu") (uuid "two") (at 9 10)
+                    (property "Reference" "R1")))''')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kicad_review.prepare3d({'dir':'P','name':'P'})
+            assert not base_meta.exists(), 'BR02 invalid metadata removes stale processing input'
+            assert 'P: 3D processing unavailable: duplicate reference: R1' in output.getvalue()
+            # Exercise the actual CLI and the same sanitized directory used by render.
+            project = {'dir':'nested/P', 'name':'P'}
+            source = pathlib.Path('head/nested/P/P.kicad_pcb')
+            source.parent.mkdir(parents=True)
+            source.write_text('(kicad_pcb (setup (stackup (copper_finish "ENEPIG"))))')
+            pathlib.Path('review/detect.json').write_text(json.dumps({'projects':[project]}))
+            proc = subprocess.run([sys.executable, str(pathlib.Path(kicad_review.__file__).resolve()),
+                                   'prepare-3d'], capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr
+            # An absent revision gets no folder: build_project reads folder presence as revision presence.
+            assert not pathlib.Path('review', kicad_review.project_id(project['dir']), 'base').exists()
+            target = pathlib.Path('review', kicad_review.project_id(project['dir']), 'head', 'board-3d-input.json')
+            assert json.loads(target.read_text()) == {
+                'version':1, 'side':'head', 'keep':[], 'finish':'ENEPIG', 'footprints':[]}
+        finally:
+            os.chdir(old)
+    print('ok BR02 prepare-3d failed export, stale absent/invalid sides and sanitized CLI output')
+
+
+br02_task2a_prepare_contract()

@@ -238,40 +238,64 @@ def glb_inputs(p, side):
     return (pcb.read_bytes(), [(str(path.relative_to(side)), path.read_bytes()) for path in models])
 
 
-def prepare3d(p):
-    """Write revision-local processor inputs; footprint geometry is still in board millimetres."""
-    paths = {side: pathlib.Path(board_path(p, side)) for side in ("base", "head")}
-    objs = {side: pcb_objects(path) if path.is_file() else {} for side, path in paths.items()}
-    changes = [c for c in diff_objects(objs["base"], objs["head"]) if c["kind"] == "footprint"]
-    out = pathlib.Path("review") / project_id(p["dir"])
-    missing = model3d_missing(out, objs)
-    for side, path in paths.items():
-        if not path.is_file():
+def kept_refs(base, head):
+    """References of footprints changed between revisions, including UUID renames and deletions."""
+    rows = diff_objects(base, head)
+    ids = {r["uuid"] for r in rows if r["kind"] == "footprint"}
+    ids |= {r["uuid_before"] for r in rows if r["kind"] == "footprint" and r.get("uuid_before")}
+    return sorted({o["ref"] for objects in (base, head) for uid, o in objects.items()
+                   if uid in ids and o["kind"] == "footprint"})
+
+
+def metadata3d(side, objects, keep, finish, missing):
+    """One revision's footprint identity, placement and model coverage, in board millimetres."""
+    reasons = {r["ref"]: r["reason"] for r in missing if r["side"] in (side, "both")}
+    footprints, refs = [], set()
+    for uid, obj in sorted(objects.items()):
+        if obj["kind"] != "footprint":
             continue
-        keep = set()
-        for change in changes:
-            if change["action"] == ("added" if side == "base" else "removed"):
-                continue
-            uid = change.get("uuid_before", change["uuid"]) if side == "base" else change["uuid"]
-            if uid in objs[side]:
-                keep.add(objs[side][uid]["ref"])
-        reasons = {r["ref"]: r["reason"] for r in missing if r["side"] in (side, "both")}
-        footprints = []
-        for uid, obj in sorted(objs[side].items(), key=lambda item: (natural(item[1]["ref"]), item[0])):
-            if obj["kind"] != "footprint":
-                continue
-            reason = "no model in footprint" if not obj.get("has_model") else reasons.get(obj["ref"])
-            footprints.append({"uuid": uid, "ref": obj["ref"],
-                               "side": "bottom" if obj["props"].get("layer") == "B.Cu" else "top",
-                               "pos": obj.get("pos") or [], "box": obj.get("box"),
-                               "hasModel": bool(obj.get("has_model")) and reason is None, "reason": reason})
-        root = parse_sexpr(path.read_text(encoding="utf-8"))
+        ref = obj["ref"]
+        if ref in refs:
+            raise ValueError("duplicate reference: " + ref)
+        refs.add(ref)
+        reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
+        box, pos = obj.get("box"), obj.get("pos")
+        if not (box and len(box) == 4 and all(math.isfinite(v) for v in box)):
+            if not (pos and len(pos) >= 2 and all(math.isfinite(v) for v in pos[:2])):
+                raise ValueError("footprint has no finite position: " + ref)
+            # Padless graphics get a 2 mm estimated box; it is not enclosure clearance.
+            box = [pos[0] - 1, pos[1] - 1, pos[0] + 1, pos[1] + 1]
+        layer = (obj.get("props") or {}).get("layer") or ""
+        footprints.append({"uuid": uid, "ref": ref, "side": "bottom" if layer.startswith("B.") else "top",
+                           "pos": list(pos or []), "box": box,
+                           "hasModel": bool(obj.get("has_model")) and reason is None, "reason": reason})
+    return {"version": 1, "side": side, "keep": sorted(set(keep)), "finish": finish, "footprints": footprints}
+
+
+def prepare3d(p):
+    """Write revision-local processor inputs. One kept set serves both revisions of a comparison."""
+    paths = {side: board_path(p, side) for side in ("base", "head")}
+    objects = {side: pcb_objects(path) if os.path.isfile(path) else {} for side, path in paths.items()}
+    keep = kept_refs(objects["base"], objects["head"])
+    out = f"review/{project_id(p['dir'])}"
+    missing = model3d_missing(out, objects)
+    for side, path in paths.items():
+        target = pathlib.Path(out, side, "board-3d-input.json")
+        if not os.path.isfile(path):
+            # Never create the side folder here: build_project treats an existing folder as a present revision.
+            target.unlink(missing_ok=True)
+            continue
+        root = parse_sexpr(pathlib.Path(path).read_text(encoding="utf-8"))
         stackup = find(find(root, "setup") or [], "stackup") or []
-        metadata = {"version": 1, "side": side, "keep": sorted(keep, key=natural),
-                    "finish": val(stackup, "copper_finish") or "", "footprints": footprints}
-        folder = out / side
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "board-3d-input.json").write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+        finish = val(stackup, "copper_finish") or ""
+        try:
+            metadata = metadata3d(side, objects[side], keep, finish, missing)
+        except ValueError as error:
+            target.unlink(missing_ok=True)
+            print(f"{p['name']}: 3D processing unavailable: {error}")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def cmd_prepare3d(args):
