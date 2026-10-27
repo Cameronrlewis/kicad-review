@@ -1866,7 +1866,7 @@ def fab_vendor_rules(context):
     categories = {
         'track_width': 'track_width', 'clearance': 'clearance',
         'hole_size': 'drill_out_of_range', 'annular_width': 'annular_width',
-        'edge_clearance': 'copper_edge_clearance', 'hole_to_hole': 'holes_too_close',
+        'edge_clearance': 'copper_edge_clearance', 'hole_to_hole': 'hole_to_hole',
         'via_diameter': 'via_diameter'}
     covered = {diagnostic for constraint, diagnostic in categories.items()
                if '(constraint ' + constraint + ' ' in rules}
