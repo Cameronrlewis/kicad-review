@@ -2352,6 +2352,11 @@ def net_members(text, objects, commit):
     Multi-unit anchors resolve to the owning unit when unit pin sets are known;
     otherwise all units on the sheet remain candidate anchors for subsequent manifest
     resolution in Task 8. Their positions are symbol, not pin, positions.
+
+    Per spec and plan prose, power symbols ('#' references) are skipped rather than
+    fabricated into component pins. Per Open Question 4, missing or unannotated
+    references (e.g. 'R?', '') fall back to symbol UUID only when exactly one candidate
+    exists; otherwise connectivity identity is ambiguous and comparison is suppressed.
     """
     _, parsed = parse_netlist(text)
     by_ref = {}

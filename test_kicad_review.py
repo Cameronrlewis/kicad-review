@@ -3771,6 +3771,11 @@ def test_br03_missing_multi_policy():
         nets, anchors, issues = net_members(text, {"/s/a": br03_object(ref, sheet="/s/")}, "a" * 40)
         assert nets == {"N": {"/s/a:2"}} and set(anchors) == {"/s/a:2"}
         assert issues and not any(i["unknown"] for i in issues)
+    # Multiple genuinely empty references cannot be disambiguated either.
+    objects_empty = {"/a": br03_object("", sheet="/s/"), "/b": br03_object("", "2", sheet="/s/")}
+    text_empty = '(export (nets (net (name N) (node (pin 2)))))'
+    nets_em, anchors_em, issues_em = net_members(text_empty, objects_empty, "a" * 40)
+    assert not nets_em["N"] and not anchors_em and any(i["unknown"] for i in issues_em)
 
 
 def test_br03_unit_anchor_candidates():
