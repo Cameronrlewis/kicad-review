@@ -261,12 +261,14 @@ def metadata3d(side, objects, keep, finish, missing):
         reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
         box, pos = obj.get("box"), obj.get("pos")
         valid_pos = (isinstance(pos, (list, tuple)) and len(pos) >= 2
-                     and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in pos[:2]))
+                     and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in pos))
         if not valid_pos:
             raise ValueError("footprint has no finite position: " + ref)
         valid_box = (isinstance(box, (list, tuple)) and len(box) == 4
                      and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in box))
         if not valid_box:
+            if box is not None:
+                print(f"::warning::{ref}: malformed bounding box {box!r}, using estimated bounds")
             # Padless graphics get a 2 mm estimated box; it is not enclosure clearance.
             box = [pos[0] - 1, pos[1] - 1, pos[0] + 1, pos[1] + 1]
         layer = (obj.get("props") or {}).get("layer") or ""
@@ -277,7 +279,14 @@ def metadata3d(side, objects, keep, finish, missing):
 
 
 def prepare3d(p):
-    """Write revision-local processor inputs. One kept set serves both revisions of a comparison."""
+    """Write revision-local processor inputs. One shared keep set serves both revisions of a comparison.
+
+    When both revision boards are present, a parsing failure on either side prevents computing
+    the true comparison diff and shared keep set; in this case both sides are marked unavailable
+    to avoid writing a degenerate keep set. When an absent revision is genuinely missing (e.g. initial
+    revision or single mode), head footprints are treated as additions. When a side has metadata
+    errors after successful comparison diff, only the failing side's input is unlinked.
+    """
     paths = {side: pathlib.Path(board_path(p, side)) for side in ("base", "head")}
     out = pathlib.Path("review", project_id(p["dir"]))
     targets = {side: out / side / "board-3d-input.json" for side in paths}

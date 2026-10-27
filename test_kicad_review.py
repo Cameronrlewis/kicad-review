@@ -4096,16 +4096,18 @@ def br02_task2a_metadata_contract():
     assert kicad_review.kept_refs(base, base) == []
     for bad_box in (None, [1,2], [0,0,float('inf'),1], [0,0,float('nan'),1]):
         obj = {**padless['logo'], 'box':bad_box}
-        assert kicad_review.metadata3d('head',{'logo':obj},[], '', [])['footprints'][0]['box'] == [6,7,8,9]
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert kicad_review.metadata3d('head',{'logo':obj},[], '', [])['footprints'][0]['box'] == [6,7,8,9]
         try:
-            kicad_review.metadata3d('head',{'logo':{**obj,'pos':[float('nan'),8]}},[], '', [])
+            with contextlib.redirect_stdout(io.StringIO()):
+                kicad_review.metadata3d('head',{'logo':{**obj,'pos':[float('nan'),8]}},[], '', [])
             assert False, 'BR02 missing finite fallback position must fail metadata'
         except ValueError as error:
             assert 'finite position' in str(error)
     valid_box = [4, 4, 6, 6]
     for bad_pos in (None, [], [5], [float('nan'), 5], [5, float('nan')], [float('inf'), 5],
                     ['str', 5], [5, 'str'], [None, 5], [5, None], [True, 5], [5, False],
-                    'not_a_seq', 123):
+                    'not_a_seq', 123, [5, 5, 'str'], [5, 5, None], [5, 5, float('nan')]):
         try:
             kicad_review.metadata3d('head', {'r1': {'kind':'footprint', 'ref':'R1', 'has_model':True,
                                                     'props':{'layer':'F.Cu'}, 'box':valid_box, 'pos':bad_pos}},
@@ -4113,12 +4115,19 @@ def br02_task2a_metadata_contract():
             assert False, f'BR02 finite box with invalid pos {bad_pos} must fail metadata'
         except ValueError as error:
             assert 'finite position' in str(error)
-    # Malformed or non-numeric box falls back to finite pos estimate without raising TypeError
-    for bad_box in (['a', 1, 2, 3], [1, 'b', 3, 4], [None, 1, 2, 3], 'bad_box', 42):
-        f = kicad_review.metadata3d('head', {'r1': {'kind':'footprint', 'ref':'R1', 'has_model':True,
-                                                    'props':{'layer':'F.Cu'}, 'box':bad_box, 'pos':[5, 5, 0]}},
-                                    [], '', [])['footprints'][0]
+    # Padless footprint (box is None) falls back to 2 mm estimate without emitting any warning
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        f = kicad_review.metadata3d('head', {'logo': padless['logo']}, [], '', [])['footprints'][0]
+    assert f['box'] == [6, 7, 8, 9] and out.getvalue() == '', 'BR02 padless footprint produces no warning'
+    # Malformed or non-numeric box falls back to finite pos estimate and emits warning
+    for bad_box in (['a', 1, 2, 3], [1, 'b', 3, 4], [None, 1, 2, 3], 'bad_box', 42,
+                    [1, 2], [0, 0, float('inf'), 1], [0, 0, float('nan'), 1]):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            f = kicad_review.metadata3d('head', {'r1': {'kind':'footprint', 'ref':'R1', 'has_model':True,
+                                                        'props':{'layer':'F.Cu'}, 'box':bad_box, 'pos':[5, 5, 0]}},
+                                        [], '', [])['footprints'][0]
         assert f['box'] == [4, 4, 6, 6], f'BR02 non-numeric box fallback: {f["box"]}'
+        assert '::warning::R1: malformed bounding box' in out.getvalue(), f'BR02 warning emitted for bad box {bad_box}'
     both = [{'ref':'R1','side':'both','reason':'file not found'}]
     assert not kicad_review.metadata3d('head',base,[], '', both)['footprints'][1]['hasModel']
     print('ok BR02 metadata rename/delete, UUID fallback, bottom models, finite estimates and duplicate rejection')
@@ -4223,6 +4232,32 @@ def br02_task2a_prepare_contract():
             assert base_p4_meta.exists() and json.loads(base_p4_meta.read_text())['finish'] == 'ENIG', 'BR02 valid base preserved'
             assert not head_p4_meta.exists(), 'BR02 invalid head metadata unlinked'
             assert 'P4: 3D processing unavailable: duplicate reference: R1' in output.getvalue()
+            # Malformed head board unlinks both sides' inputs; comparison keep set cannot be computed.
+            p_head_bad = {'dir': 'badhead/P5', 'name': 'P5'}
+            pathlib.Path('base/badhead/P5').mkdir(parents=True)
+            pathlib.Path('base/badhead/P5/P5.kicad_pcb').write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            stale_base_meta5 = pathlib.Path('review', kicad_review.project_id(p_head_bad['dir']), 'base', 'board-3d-input.json')
+            stale_base_meta5.parent.mkdir(parents=True, exist_ok=True)
+            stale_base_meta5.write_text('{"stale": true}')
+            stale_head_meta5 = pathlib.Path('review', kicad_review.project_id(p_head_bad['dir']), 'head', 'board-3d-input.json')
+            stale_head_meta5.parent.mkdir(parents=True, exist_ok=True)
+            stale_head_meta5.write_text('{"stale": true}')
+            pathlib.Path('head/badhead/P5').mkdir(parents=True)
+            pathlib.Path('head/badhead/P5/P5.kicad_pcb').write_text('(kicad_pcb (unbalanced')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kicad_review.prepare3d(p_head_bad)
+            assert not stale_base_meta5.exists(), 'BR02 malformed head unlinks base input'
+            assert not stale_head_meta5.exists(), 'BR02 malformed head unlinks head input'
+            assert 'P5: 3D processing unavailable:' in output.getvalue()
+            # Absent base revision (new project): head metadata is written with all added footprints in keep.
+            p_new = {'dir': 'newproj/P6', 'name': 'P6'}
+            pathlib.Path('head/newproj/P6').mkdir(parents=True)
+            pathlib.Path('head/newproj/P6/P6.kicad_pcb').write_text('''(kicad_pcb
+                (setup (stackup (copper_finish "ENIG")))
+                (footprint "Test" (layer "F.Cu") (uuid "u1") (at 7 8) (property "Reference" "R1")))''')
+            kicad_review.prepare3d(p_new)
+            new_head_meta = json.loads(pathlib.Path('review', kicad_review.project_id(p_new['dir']), 'head', 'board-3d-input.json').read_text())
+            assert new_head_meta['keep'] == ['R1'], 'BR02 new project marks added footprints in keep'
         finally:
             os.chdir(old)
     print('ok BR02 prepare-3d failed export, stale absent/invalid sides and sanitized CLI output')
