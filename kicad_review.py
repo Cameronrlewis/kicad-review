@@ -221,47 +221,71 @@ def board_path(p, side):
 
 
 def fab_enabled(settings):
-    enabled = settings['fabrication'].get('check_limits', False) and settings['checks'].get('fab_limits') != 'off'
-    if enabled and settings['checks'].get('drc', 'off') == 'off':
-        raise ValueError('fabrication.check_limits requires checks.drc != "off": board findings are the subtraction baseline')
+    enabled = settings["fabrication"].get("check_limits", False) and settings["checks"].get("fab_limits") != "off"
+    if enabled and settings["checks"].get("drc", "off") == "off":
+        raise ValueError("fabrication.check_limits requires checks.drc != \"off\": board findings are the subtraction baseline")
     return enabled
 
 
 def fab_drc(pcb, out):
     out.unlink(missing_ok=True)
-    r = subprocess.run(['kicad-cli','pcb','drc','--format','json','--severity-error',
-                        '--exit-code-violations','-o',str(out),str(pcb)],
+    r = subprocess.run(["kicad-cli","pcb","drc","--format","json","--severity-error",
+                        "--exit-code-violations","-o",str(out),str(pcb)],
                        capture_output=True, text=True)
     if r.returncode not in (0, 5):
-        raise RuntimeError(f'fab DRC failed ({r.returncode}): {r.stdout}\n{r.stderr}')
-    data = json.loads(out.read_text(encoding='utf-8'))
-    if not isinstance(data, dict) or data.get('coordinate_units') != 'mm' or not isinstance(data.get('violations'), list):
-        raise RuntimeError('fab DRC wrote invalid JSON or non-mm coordinates')
-    for row in data['violations']:
-        if (not isinstance(row, dict) or not isinstance(row.get('type'), str) or not row['type']
-                or row.get('severity') != 'error' or not isinstance(row.get('description'), str)
-                or not isinstance(row.get('items'), list)):
-            raise RuntimeError('fab DRC wrote malformed violation')
-        for item in row['items']:
-            if (not isinstance(item, dict) or not isinstance(item.get('description'), str)
-                    or ('uuid' in item and not isinstance(item['uuid'], str))):
-                raise RuntimeError('fab DRC wrote malformed item')
-            if 'pos' in item:
-                pos = item['pos']
+        raise RuntimeError(f"fab DRC failed ({r.returncode}): {r.stdout}\n{r.stderr}")
+    data = json.loads(out.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("coordinate_units") != "mm" or not isinstance(data.get("violations"), list):
+        raise RuntimeError("fab DRC wrote invalid JSON or non-mm coordinates")
+    for row in data["violations"]:
+        if (not isinstance(row, dict) or not isinstance(row.get("type"), str) or not row["type"]
+                or row.get("severity") != "error" or not isinstance(row.get("description"), str)
+                or not isinstance(row.get("items"), list)):
+            raise RuntimeError("fab DRC wrote malformed violation")
+        for item in row["items"]:
+            if (not isinstance(item, dict) or not isinstance(item.get("description"), str)
+                    or ("uuid" in item and not isinstance(item["uuid"], str))):
+                raise RuntimeError("fab DRC wrote malformed item")
+            if "pos" in item:
+                pos = item["pos"]
                 if (not isinstance(pos, dict) or any(type(pos.get(k)) not in (int, float)
-                        or not math.isfinite(pos[k]) for k in ('x', 'y'))):
-                    raise RuntimeError('fab DRC wrote invalid position')
+                        or not math.isfinite(pos[k]) for k in ("x", "y"))):
+                    raise RuntimeError("fab DRC wrote invalid position")
     return data
 
 
 def fab_regular_input(path):
     # ponytail: checkout is immutable during render; this is not a concurrent-write sandbox.
+    # All ancestors are deliberate; resolving here would hide checkout symlinks.
     absolute = path.absolute()
     for part in reversed((absolute, *absolute.parents)):
         if part.is_symlink():
-            raise RuntimeError(f'fab input must not be a symlink: {part}')
+            raise RuntimeError(f"fab input must not be a symlink: {part}")
     if path.exists() and not path.is_file():
-        raise RuntimeError(f'fab input must be a regular file: {path}')
+        raise RuntimeError(f"fab input must be a regular file: {path}")
+
+
+def fab_lint_rules(text):
+    """Reject lexical errors KiCad can silently ignore along with appended rules.
+
+    This is a conservative syntax guard, not a replacement for KiCad's rule engine.
+    Never rewrite authored rules to guess what the author intended.
+    """
+    depth = 0
+    for match in re.finditer(r"#[^\n]*|\"(?:\\.|[^\"\\])*\"|\s+|[()]|[^()\s\"#]+|.", text):
+        token = match.group()
+        if token.startswith(("#", "\"")) and token != "\"":
+            continue
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        elif token == "\"" or re.match(r"[+-]?\.\d", token):
+            raise RuntimeError("fab rules contain an unterminated string or leading-dot numeric literal; use 0.3mm, not .3mm")
+        if depth < 0:
+            raise RuntimeError("fab rules contain unbalanced parentheses")
+    if depth:
+        raise RuntimeError("fab rules contain unbalanced parentheses")
 
 
 def fab_run_drc(source, target, board_bytes, project_bytes, rules_bytes, vendor=None):
@@ -269,59 +293,70 @@ def fab_run_drc(source, target, board_bytes, project_bytes, rules_bytes, vendor=
     target.mkdir(parents=True)
     pcb = target / source.name
     pcb.write_bytes(board_bytes)
-    original = rules_bytes.decode('utf-8') if rules_bytes else '(version 1)\n'
+    original = rules_bytes.decode("utf-8") if rules_bytes else "(version 1)\n"
     if vendor is None:
         if project_bytes:
-            pcb.with_suffix('.kicad_pro').write_bytes(project_bytes)
-        pcb.with_suffix('.kicad_dru').write_text(original, encoding='utf-8')
+            pcb.with_suffix(".kicad_pro").write_bytes(project_bytes)
+        pcb.with_suffix(".kicad_dru").write_text(original, encoding="utf-8")
     else:
         owned_rules, covered = vendor
-        pcb.with_suffix('.kicad_dru').write_text(fab_owned_rules(original, owned_rules), encoding='utf-8')
-        project = json.loads(project_bytes.decode('utf-8')) if project_bytes else {}
-        design = project.setdefault('board', {}).setdefault('design_settings', {})
-        design['drc_exclusions'] = []
-        severities = design.setdefault('rule_severities', {})
-        for name in covered | {'invalid_outline'}:
-            severities[name] = 'error'
-        pcb.with_suffix('.kicad_pro').write_text(json.dumps(project), encoding='utf-8')
-    return fab_drc(pcb, target / 'drc.json')['violations']
+        combined = fab_owned_rules(original, owned_rules)
+        fab_lint_rules(combined)
+        pcb.with_suffix(".kicad_dru").write_text(combined, encoding="utf-8")
+        project = json.loads(project_bytes.decode("utf-8")) if project_bytes else {}
+        if not isinstance(project, dict):
+            raise RuntimeError("fab project must be a JSON object")
+        board = project.setdefault("board", {})
+        if not isinstance(board, dict):
+            raise RuntimeError("fab project board must be a JSON object")
+        design = board.setdefault("design_settings", {})
+        if not isinstance(design, dict):
+            raise RuntimeError("fab project board.design_settings must be a JSON object")
+        severities = design.setdefault("rule_severities", {})
+        if not isinstance(severities, dict):
+            raise RuntimeError("fab project board.design_settings.rule_severities must be a JSON object")
+        design["drc_exclusions"] = []
+        for name in covered | {"invalid_outline"}:
+            severities[name] = "error"
+        pcb.with_suffix(".kicad_pro").write_text(json.dumps(project), encoding="utf-8")
+    return fab_drc(pcb, target / "drc.json")["violations"]
 
 
 def render_fab(p, side, out, settings):
     source = pathlib.Path(board_path(p, side))
-    for path in (source, source.with_suffix('.kicad_pro'), source.with_suffix('.kicad_dru')):
+    for path in (source, source.with_suffix(".kicad_pro"), source.with_suffix(".kicad_dru")):
         fab_regular_input(path)
     pathlib.Path(out).mkdir(parents=True, exist_ok=True)
     if not source.is_file():
-        pathlib.Path(out, 'fab-limits.json').write_text(
-            json.dumps({'sections': [], 'reason': f'no {side} board'}), encoding='utf-8')
+        pathlib.Path(out, "fab-limits.json").write_text(
+            json.dumps({"sections": [], "reason": f"no {side} board"}), encoding="utf-8")
         return
     board_bytes = source.read_bytes()
-    project_bytes = source.with_suffix('.kicad_pro').read_bytes() if source.with_suffix('.kicad_pro').is_file() else b''
-    rules_bytes = source.with_suffix('.kicad_dru').read_bytes() if source.with_suffix('.kicad_dru').is_file() else b''
-    input_hash = hashlib.sha256(b'\0'.join([board_bytes, FAB_TABLE.read_bytes(), project_bytes, rules_bytes])).hexdigest()
+    project_bytes = source.with_suffix(".kicad_pro").read_bytes() if source.with_suffix(".kicad_pro").is_file() else b""
+    rules_bytes = source.with_suffix(".kicad_dru").read_bytes() if source.with_suffix(".kicad_dru").is_file() else b""
+    input_hash = hashlib.sha256(b"\0".join([board_bytes, FAB_TABLE.read_bytes(), project_bytes, rules_bytes])).hexdigest()
     sections = fab_context(source)
     for s in sections:
         s.update(checked=[], violations=[], inputHash=input_hash)
-    supported = [s for s in sections if not s['unsupported']]
+    supported = [s for s in sections if not s["unsupported"]]
     if supported:
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
             # Exact saved fills in every pass, matching ordinary render_side (no --refill-zones).
-            board_rows = fab_run_drc(source, root / 'board', board_bytes, project_bytes, rules_bytes)
+            board_rows = fab_run_drc(source, root / "board", board_bytes, project_bytes, rules_bytes)
             for s in supported:
                 vendor_rules, covered = fab_vendor_rules(s)
                 _, unchecked = fab_rule_section(s)
-                s['unchecked'] = list(unchecked)
-                vendor_rows = fab_run_drc(source, root / s['vendor'], board_bytes, project_bytes,
+                s["unchecked"] = list(unchecked)
+                vendor_rows = fab_run_drc(source, root / s["vendor"], board_bytes, project_bytes,
                                           rules_bytes, (vendor_rules, covered))
-                s['violations'] = [v for v in fab_subtract(vendor_rows, board_rows) if v['type'] in covered]
-                if any(v['type'] == 'invalid_outline' for v in vendor_rows):
-                    s['unchecked'].append('edgeClearanceMm')
-                    s['coverageWarnings'].append('Edge clearance not checked: no valid closed board outline')
-                s['checked'] = [k for k in s['values'] if k not in s['unchecked']
-                                and not (s['layers'] <= 2 and 'Inner' in k)]
-    pathlib.Path(out, 'fab-limits.json').write_text(json.dumps({'sections': sections}, sort_keys=True), encoding='utf-8')
+                s["violations"] = [v for v in fab_subtract(vendor_rows, board_rows) if v["type"] in covered]
+                if any(v["type"] == "invalid_outline" for v in vendor_rows):
+                    s["unchecked"].append("edgeClearanceMm")
+                    s["coverageWarnings"].append("Edge clearance not checked: no valid closed board outline")
+                s["checked"] = [k for k in s["values"] if k not in s["unchecked"]
+                                and not (s["layers"] <= 2 and "Inner" in k)]
+    pathlib.Path(out, "fab-limits.json").write_text(json.dumps({"sections": sections}, sort_keys=True), encoding="utf-8")
 
 
 def board_changed(p):
@@ -363,9 +398,9 @@ def render_cache(p, side, det, settings):
     revision = det.get(side) or ""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
-    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get('KICAD_IMAGE', 'local').encode()
+    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
     if fab_enabled(settings):
-        identity += FAB_TABLE.read_bytes() + (b'fab-head' if side == 'head' else b'fab-base')
+        identity += FAB_TABLE.read_bytes() + (b"fab-head" if side == "head" else b"fab-base")
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -420,7 +455,7 @@ def cmd_render(args):
                 try:
                     render_fab(p, side, out, settings)
                 except (OSError, ValueError, RuntimeError) as exc:
-                    sys.exit(f'Fab limits could not run for {p["name"]}: {exc}')
+                    sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
             if export_3d:
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)

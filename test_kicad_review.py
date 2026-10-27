@@ -4102,6 +4102,50 @@ def fab_profile_probe(root, profile, layers):
 # FAB-03: isolated execution, coverage and revision-only cache identity.
 from unittest.mock import patch
 from types import SimpleNamespace
+# Reject malformed project containers before invoking the vendor CLI.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    for index, project in enumerate(([], None, "project", 1, {"board": []},
+            {"board": None}, {"board": {"design_settings": []}},
+            {"board": {"design_settings": None}},
+            {"board": {"design_settings": {"rule_severities": []}}},
+            {"board": {"design_settings": {"rule_severities": None}}})):
+        with patch.object(kr, "fab_drc") as drc:
+            try:
+                kr.fab_run_drc(root / "b.kicad_pcb", root / str(index), b"(kicad_pcb)",
+                               json.dumps(project).encode(), b"", ("", set()))
+                raise AssertionError("FAB-03 malformed project accepted")
+            except RuntimeError as exc:
+                assert "project" in str(exc)
+            drc.assert_not_called()
+
+# KiCad can silently discard a bad authored rule and every appended vendor rule.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    for index, rules in enumerate((
+            '(version 1)\n(rule "house" (constraint track_width (min .3mm)))',
+            '(version 1)\n(rule "house" (constraint track_width (min -.3mm)))',
+            '(version 1)\n(rule "house" (constraint track_width (min 0.3mm))',
+            '(version 1)\n(rule "unterminated)',
+            '(version 1))',
+            '(version 1)\n# comment\n(rule "house" (constraint track_width (min 0.3mm))))')):
+        with patch.object(kr, "fab_drc") as drc:
+            try:
+                kr.fab_run_drc(root / "b.kicad_pcb", root / str(index), b"(kicad_pcb)",
+                               b"", rules.encode(), ("", set()))
+                raise AssertionError("FAB-03 malformed authored rules accepted")
+            except RuntimeError as exc:
+                assert "rules" in str(exc)
+            drc.assert_not_called()
+    # Quotes/comments may contain parentheses and leading-dot prose, not numeric tokens.
+    valid = ('(version 1)\n# .3mm (comment)\n'
+             '(rule "house .3mm (name)" (condition "A.NetName == \\\".3mm\\\"") '
+             '(constraint track_width (min 0.3mm)))')
+    with patch.object(kr, "fab_drc", return_value={"violations": []}) as drc:
+        assert kr.fab_run_drc(root / "b.kicad_pcb", root / "valid", b"(kicad_pcb)",
+                              b"", valid.encode(), ("", set())) == []
+        drc.assert_called_once()
+
 with tempfile.TemporaryDirectory() as td:
     pcb, out = pathlib.Path(td, 'b.kicad_pcb'), pathlib.Path(td, 'drc.json')
     pcb.write_text('(kicad_pcb)')
@@ -4139,6 +4183,7 @@ def fab_test_raw(uid, kind='track_width'):
 
 
 def fab_test_render(root, outline_severity='error', missing_outline=False):
+    root = root.resolve()
     source = root / 'four.kicad_pcb'
     source.write_text(pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text().replace('(thickness 0.035)', '', 1))
     project = source.with_suffix('.kicad_pro')
@@ -4184,7 +4229,7 @@ def fab_test_render(root, outline_severity='error', missing_outline=False):
 
 
 with tempfile.TemporaryDirectory() as td:
-    root = pathlib.Path(td)
+    root = pathlib.Path(td).resolve()
     pcb, out = root / 'b.kicad_pcb', root / 'drc.json'
     pcb.write_text('(kicad_pcb)')
     for text in ('', '{', '{}', '{"coordinate_units":"in","violations":[]}',
@@ -4306,7 +4351,7 @@ with tempfile.TemporaryDirectory() as td:
         assert kr.render_cache({'dir':''},'head',det,disabled) == kr.render_cache({'dir':''},'base',det,disabled)
 # Subtracting a shared house/vendor error is invalid without the ordinary DRC check.
 with tempfile.TemporaryDirectory() as td:
-    root = pathlib.Path(td)
+    root = pathlib.Path(td).resolve()
     source = root/'four.kicad_pcb'; source.write_text(fab_probe_board(fab_segment('track',width=.08)))
     source.with_suffix('.kicad_dru').write_text('(version 1)\n(rule "house" (constraint track_width (min 0.3mm)))')
     cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
@@ -4350,7 +4395,7 @@ with tempfile.TemporaryDirectory() as td:
         os.chdir(cwd)
 # Missing/unsupported revisions have no fabricated pass or comparison metadata.
 with tempfile.TemporaryDirectory() as td:
-    root = pathlib.Path(td)
+    root = pathlib.Path(td).resolve()
     source = root / 'absent.kicad_pcb'
     cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
     cfg['fabrication']['check_limits'] = True
@@ -4387,7 +4432,7 @@ with tempfile.TemporaryDirectory() as td:
 
 # Both disabled modes permit DRC off at the real settings/report boundary.
 with tempfile.TemporaryDirectory() as td:
-    root = pathlib.Path(td)
+    root = pathlib.Path(td).resolve()
     for enabled, level in ((False, 'required'), (True, 'off')):
         (root / kr.SETTINGS_FILE).write_text(
             f'[fabrication]\ncheck_limits = {str(enabled).lower()}\n'
