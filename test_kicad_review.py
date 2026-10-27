@@ -1273,9 +1273,21 @@ with tempfile.TemporaryDirectory() as d:
         assert args[args.index('--labels') + 1].split(',') == (['Comment', 'Designator', 'Footprint', 'LCSC Part #'] if preset == 'jlcpcb' else list(_bomkr.BOM_PCBWAY_HEADER))
 # Shared cases with the vendored planner: the adapter writes exactly the rows that plan_bom plans.
 import kicad_review as kr
+groups = [kr.vendor_bom_csv.BomGroup("10kΩ", tuple(f"R{n}" for n in range(1, 801)), "R_0805", "C1")]
+planned = [[str(c) for c in row] for row in kr.vendor_bom_csv.plan_bom(groups, None).lines]
+shared = [{"category": "Resistors", "refs": [f"R{n}" for n in range(1, 801)], "value": "10kΩ", "footprint": "R_0805", "lcsc": "C1", "mpn": None, "manufacturer": None, "datasheet": None}]
+# The planner's rule is UTF-8 bytes less the CRLF; ours (owner decision 2026-10-26) counts the CRLF. With LCSC "C1" its 800-reference
+# split has a row of 2,050 bytes with the CRLF, so the adapter refuses the file (fail closed) instead of writing it.
+try:
+    kr.bom_jlcpcb_csv(shared)
+except ValueError as exc:
+    assert "R1" in str(exc) and "2048" in str(exc), exc
+else:
+    raise AssertionError("an 800-reference group whose planner row is 2,050 bytes with its CRLF must be refused")
+# The same 800 references with LCSC "C123" plan within the stricter rule, so the adapter writes exactly the planner's rows.
 groups = [kr.vendor_bom_csv.BomGroup("10kΩ", tuple(f"R{n}" for n in range(1, 801)), "R_0805", "C123")]
 planned = [[str(c) for c in row] for row in kr.vendor_bom_csv.plan_bom(groups, None).lines]
-shared = [{"category": "Resistors", "refs": [f"R{n}" for n in range(1, 801)], "value": "10kΩ", "footprint": "R_0805", "lcsc": "C123", "mpn": None, "manufacturer": None, "datasheet": None}]
+shared = [{**shared[0], "lcsc": "C123"}]
 assert read(kr.bom_jlcpcb_csv(shared))[1:] == planned and read(kr.bom_jlcpcb_csv(shared))[0] == list(kr.vendor_bom_csv.BOM_HEADER)
 # Line edges, measured as written with the CRLF. A value of 2,031 characters gives a 2,048-byte record (written); 2,032 gives 2,049 (refused).
 edge = lambda n: [{"category": "Other", "refs": ["X1"], "value": "v" * n, "footprint": "R_0805", "lcsc": "C1", "mpn": None, "manufacturer": None, "datasheet": None}]

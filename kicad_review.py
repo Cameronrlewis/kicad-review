@@ -2177,7 +2177,9 @@ _VENDOR_SPEC.loader.exec_module(vendor_bom_csv)
 
 
 # ---- BOM files for the report (spec 08): the generic CSV, the JLCPCB file through the vendored planner, and PCBWay. ----
-# ponytail: report-only writers; the release (07) keeps KiCad's own export (Owner decision 2026-10-26: option A).
+# ponytail: ceiling: these writers serve the report only; the release (07) keeps KiCad's own export (Owner decision 2026-10-26:
+# option A). Ceiling of the JLCPCB file: the planner splits by the bytes-less-CRLF rule, so a split that is 2,049-2,050 bytes with its
+# CRLF refuses the whole file (fail closed) rather than re-splitting under the stricter rule.
 
 BOM_LINE_MAX_BYTES = vendor_bom_csv.BOM_LINE_MAX_BYTES  # 2048, the vendored rule; JLCPCB rejects longer designator cells
 BOM_JLCPCB_HEADER = ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
