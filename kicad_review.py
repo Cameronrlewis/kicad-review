@@ -2359,6 +2359,81 @@ def net_members(text, objects, commit):
     return nets, anchors, issues
 
 
+def electrical_row(kind, ref, action="modified", channel="wiring", weight="heavy", detail=None, where=None):
+    return {"kind":kind, "ref":ref, "action":action, "channel":channel, "weight":weight,
+            "detail":detail or {}, "where":where, "pos":None, "box":None,
+            "props":{}, "anchors":{"base":[], "head":[]}, "document":"schematic"}
+
+
+def diff_nets(base, head):
+    """Match equal memberships first, then compare connected overlap components.
+
+    A None from net_members is unknown, not empty: suppress that name on both
+    sides. The producer's issues carry the corresponding incompleteness reason.
+    Anchors remain empty until the caller attaches the side-specific evidence.
+    """
+    unknown = {n for side in (base, head) for n, members in side.items() if members is None}
+    b = {n:members for n, members in base.items() if n not in unknown}
+    h = {n:members for n, members in head.items() if n not in unknown}
+    rows = []
+
+    def emit(kind, bs, hs):
+        before = set().union(*(base[n] for n in bs))
+        after = set().union(*(head[n] for n in hs))
+        action = "added" if not bs else "removed" if not hs else "modified"
+        transitions = []
+        for pin in sorted(before | after):
+            old = sorted(n for n in bs if pin in base[n])
+            new = sorted(n for n in hs if pin in head[n])
+            if old != new:
+                transitions.append({"pin":pin, "before":old, "after":new})
+        detail = {"kind":"members", "added":sorted(after - before), "removed":sorted(before - after),
+                  "beforeNets":sorted(bs), "afterNets":sorted(hs), "transitions":transitions}
+        if kind == "net-renamed":
+            detail["autoNamed"] = any(n.startswith("Net-(") or n.startswith("unconnected-(") for n in [*bs, *hs])
+        rows.append(electrical_row(kind, " + ".join(sorted(hs or bs)), action, detail=detail))
+
+    for bn in sorted(list(b)):
+        matches = [hn for hn in sorted(h) if b[bn] and b[bn] == h[hn]]
+        if len(matches) == 1:
+            hn = matches[0]
+            if bn != hn:
+                emit("net-renamed", [bn], [hn])
+            del b[bn], h[hn]
+
+    edges = {(bn, hn) for bn in b for hn in h if b[bn] & h[hn]}
+    linked_b, linked_h = {bn for bn, hn in edges}, {hn for bn, hn in edges}
+    # A name cannot pre-empt a member overlap, including a join or split.
+    edges |= {(n, n) for n in b.keys() & h.keys() if n not in linked_b and n not in linked_h}
+    while b or h:
+        bs, hs = ({min(b)}, set()) if b else (set(), {min(h)})
+        while True:
+            nb = bs | {bn for bn, hn in edges if hn in hs}
+            nh = hs | {hn for bn, hn in edges if bn in nb}
+            if (nb, nh) == (bs, hs):
+                break
+            bs, hs = nb, nh
+        if not bs:
+            emit("net-added", bs, hs)
+        elif not hs:
+            emit("net-removed", bs, hs)
+        elif len(bs) == len(hs) == 1:
+            bn, hn = next(iter(bs)), next(iter(hs))
+            if bn != hn or b[bn] != h[hn]:
+                emit("net-members", bs, hs)
+        else:
+            if len(bs) > 1:
+                emit("net-joined", bs, hs)
+            if len(hs) > 1:
+                emit("net-split", bs, hs)
+        for n in bs:
+            b.pop(n)
+        for n in hs:
+            h.pop(n)
+        edges = {(bn, hn) for bn, hn in edges if bn in b and hn in h}
+    return rows
+
+
 def ohms(value):
     if not value or len(value) > 32:
         return None

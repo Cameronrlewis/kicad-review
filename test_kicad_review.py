@@ -3792,3 +3792,107 @@ for test in (test_br03_unknown_net, test_br03_missing_pin, test_br03_power_polic
              test_br03_missing_multi_policy, test_br03_unit_anchor_candidates):
     test()
 print("ok BR03 review identity regressions (5 tests)")
+
+# BR03: graph-based membership comparisons (also runnable without the full suite).
+def test_br03_net_graph():
+    from kicad_review import diff_nets
+    kinds = lambda b, h: [r["kind"] for r in diff_nets(b, h)]
+    assert kinds({"old":{"U1.1","R1.1"}}, {"new":{"U1.1","R1.1"}}) == ["net-renamed"]
+    assert kinds({"A":{"U1.1"}}, {"A":{"J1.1"}}) == ["net-members"]
+    assert kinds({"A":{"U1.1"},"B":{"R1.1"}}, {"C":{"U1.1","R1.1"}}) == ["net-joined"]
+    assert kinds({"C":{"U1.1","R1.1"}}, {"A":{"U1.1"},"B":{"R1.1"}}) == ["net-split"]
+    many = diff_nets({"A":{"a","b"},"B":{"c","d"}}, {"C":{"a","c"},"D":{"b","d"}})
+    assert [r["kind"] for r in many] == ["net-joined","net-split"]
+    expected = [{"pin":p,"before":[b],"after":[h]} for p,b,h in
+                [("a","A","C"),("b","A","D"),("c","B","C"),("d","B","D")]]
+    assert all(r["detail"]["transitions"] == expected for r in many)
+    assert all(r["detail"]["added"] == r["detail"]["removed"] == [] for r in many)
+    assert all(r["detail"]["beforeNets"] == ["A","B"] and
+               r["detail"]["afterNets"] == ["C","D"] for r in many)
+    cross = diff_nets({"A":{"a","b"},"B":{"c","d"}}, {"A":{"c","e"},"C":{"a","f"}})
+    assert [(r["kind"],r["detail"]["beforeNets"],r["detail"]["afterNets"]) for r in cross] == [
+        ("net-members",["A"],["C"]),("net-members",["B"],["A"])]
+    assert cross[0]["detail"]["transitions"] == [
+        {"pin":"a","before":["A"],"after":["C"]},
+        {"pin":"b","before":["A"],"after":[]},
+        {"pin":"f","before":[],"after":["C"]}]
+    assert cross[1]["detail"]["transitions"] == [
+        {"pin":"c","before":["B"],"after":["A"]},
+        {"pin":"d","before":["B"],"after":[]},
+        {"pin":"e","before":[],"after":["A"]}]
+    assert diff_nets({"A":{"a"}}, {"A":{"a"}}) == []
+    assert sorted(kinds({"A":{"a"}}, {"B":{"b"}})) == ["net-added","net-removed"]
+    assert kinds({"empty":set()}, {"different":set()}) == ["net-removed","net-added"]
+    assert diff_nets({"empty":set()}, {"empty":set()}) == []
+    r = diff_nets({"A":{"U1.1","R1.1"}}, {"A":{"U1.1","J1.1"}})[0]
+    assert r["detail"]["added"] == ["J1.1"] and r["detail"]["removed"] == ["R1.1"]
+    assert r["weight"] == "heavy" and r["action"] == "modified"
+
+
+def test_br03_net_rows():
+    from kicad_review import diff_nets, electrical_row
+    r = electrical_row("net-members", "A")
+    assert r == {"kind":"net-members", "ref":"A", "action":"modified", "channel":"wiring",
+                 "weight":"heavy", "detail":{}, "where":None, "pos":None, "box":None,
+                 "props":{}, "anchors":{"base":[], "head":[]}, "document":"schematic"}
+    other = electrical_row("wires", "sheet", channel="visual", weight="medium", where={"sheet":"/"})
+    assert other["channel"] == "visual" and other["weight"] == "medium" and other["where"] == {"sheet":"/"}
+    r["anchors"]["base"].append({"uuid":"a"})
+    r["detail"]["x"] = 1
+    assert not other["anchors"]["base"] and not other["detail"]
+    for base, head, action, kind, added, removed in [
+        ({}, {"12":{"U1.1"}}, "added", "net-added", ["U1.1"], []),
+        ({"12":{"U1.1"}}, {}, "removed", "net-removed", [], ["U1.1"])]:
+        r, = diff_nets(base, head)
+        assert (r["ref"], r["action"], r["kind"]) == ("12", action, kind)
+        assert r["detail"]["kind"] == "members"
+        assert r["detail"]["added"] == added and r["detail"]["removed"] == removed
+        assert r["detail"]["transitions"] == [{"pin":"U1.1", "before":list(base), "after":list(head)}]
+        assert r["anchors"] == {"base":[], "head":[]} and r["document"] == "schematic"
+    for name in ("Net-(U1-A)", "unconnected-(U1-A-Pad1)", "MANUAL"):
+        r, = diff_nets({name:{"U1.1"}}, {"new":{"U1.1"}})
+        assert r["detail"]["autoNamed"] is (name != "MANUAL")
+        r, = diff_nets({"old":{"U1.1"}}, {name:{"U1.1"}})
+        assert r["detail"]["autoNamed"] is (name != "MANUAL")
+
+
+def test_br03_net_unknown_pair():
+    from kicad_review import diff_nets
+    # The Task 1 marker is unknown evidence, never an observed empty/disconnected net.
+    for base, head in [({"BAD":None}, {"BAD":{"U1.1"}}),
+                       ({"BAD":{"U1.1"}}, {"BAD":None}),
+                       ({"BAD":None}, {}), ({}, {"BAD":None}),
+                       ({"BAD":None}, {"BAD":None})]:
+        assert diff_nets(base, head) == []
+        rows = diff_nets({**base, "GOOD":{"R1.1"}}, {**head, "GOOD":{"R1.2"}})
+        assert len(rows) == 1 and rows[0]["ref"] == "GOOD", rows
+    # Integration: reject partial known members on an ambiguous net, keep independent changes.
+    text = '''(export (nets (net (name BAD) (node (ref U1) (pin 1)) (node (ref R1) (pin 1)))
+      (net (name GOOD) (node (ref R1) (pin 2)))))'''
+    objects = {"/a":br03_object("U1"), "/b":br03_object("U1"), "/r":br03_object("R1")}
+    base, _, issues = net_members(text, objects, "a" * 40)
+    assert base["BAD"] is None and issues[0]["net"] == "BAD" and issues[0]["unknown"]
+    rows = diff_nets(base, {"BAD":{"R1.1"}, "GOOD":{"R1.3"}})
+    assert len(rows) == 1 and rows[0]["ref"] == "GOOD", rows
+
+
+def test_br03_net_determinism():
+    from kicad_review import diff_nets
+    import copy
+    base = {"Z":{"z"}, "B":{"c","d"}, "A":{"a","b"}, "EMPTY":set()}
+    head = {"D":{"b","d"}, "C":{"a","c"}, "12":{"z"}, "NEW":set()}
+    original = copy.deepcopy((base, head))
+    expected = diff_nets(base, head)
+    assert diff_nets(dict(reversed(list(base.items()))), dict(reversed(list(head.items())))) == expected
+    assert (base, head) == original
+    assert [r["kind"] for r in expected] == ["net-renamed", "net-joined", "net-split", "net-removed", "net-added"]
+    assert expected[1]["ref"] == expected[2]["ref"] == "C + D"
+    # Equal members must win over a same-name edge, even if the names exchanged.
+    swapped = diff_nets({"A":{"a"}, "B":{"b"}}, {"A":{"b"}, "B":{"a"}})
+    assert [r["kind"] for r in swapped] == ["net-renamed", "net-renamed"]
+    assert [(r["detail"]["beforeNets"], r["detail"]["afterNets"]) for r in swapped] == [(["A"],["B"]), (["B"],["A"])]
+
+
+for test in (test_br03_net_graph, test_br03_net_rows, test_br03_net_unknown_pair, test_br03_net_determinism):
+    test()
+print("ok BR03 net graph regressions (4 tests)")
