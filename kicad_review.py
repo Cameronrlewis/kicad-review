@@ -3134,8 +3134,9 @@ def cmd_summary(args):
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
                 "placeholder": "placeholder value", "mpn_footprint_conflict": "one MPN on several footprints",
+                "unit_identity_conflict": "conflicting identities across symbol units",
                 "out_of_stock": "out of stock", "not_found": "not found at DigiKey", "ambiguous": "several DigiKey matches", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
-BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "unit_identity_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
 def parts_markdown(data):

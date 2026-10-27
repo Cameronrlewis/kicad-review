@@ -1283,6 +1283,24 @@ conflict = {"refs": ["R2"], "value": "1k", "lcsc": "C1", "problems": ["lcsc_conf
 m = parts_markdown({"projects": [{"name": "C", "parts": {"lines": [conflict], "supplier": None,
     "changes": [{"action": "added", "refs": ["R2"], "before": None, "after": conflict}]}}]})
 assert "1 with a problem" in m and "R2 one LCSC number on several values" in m, "conflict counts as a problem: " + m
+# Otherwise-valid units must not hide their identity disagreement behind a clean report.
+from kicad_review import BLOCKING, mark_new_problems
+unit_objects = {str(i): {"kind": "symbol", "ref": ref, "props": {
+    "Value": "TL072", "Footprint": "SOIC-8", "LCSC": "C123", "MPN": mpn}}
+    for i, (ref, mpn) in enumerate((("U1", "A"), ("U1 unit 2", "B")))}
+unit_lines = parts_lines(unit_objects)
+assert len(unit_lines) == 1 and unit_lines[0]["refs"] == ["U1"], unit_lines
+assert unit_lines[0]["problems"] == ["unit_identity_conflict"], unit_lines
+assert BLOCKING & set(unit_lines[0]["problems"]), "unit identity conflict blocks ordering"
+unit_parts = {"lines": unit_lines, "changes": diff_parts([], unit_lines), "supplier": None}
+for canonical in (False, True):
+    if canonical:
+        mark_new_problems([], unit_lines)
+    unit_markdown = parts_markdown({"projects": [{"name": "Units", "parts": unit_parts}]})
+    assert "1 line, 1 with a problem." in unit_markdown, unit_markdown
+    assert "1 problem introduced" in unit_markdown, unit_markdown
+    assert "U1 conflicting identities across symbol units" in unit_markdown, unit_markdown
+print("ok unit identity conflict report")
 print("ok parts markdown")
 
 # A large introduced-parts list stays within GitHub's comment limit, preserving checks.

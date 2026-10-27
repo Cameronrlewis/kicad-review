@@ -1169,6 +1169,16 @@ export const CHECKS = [
   parts.supplier = {fetched_at:'invalid <timestamp>'}; renderPanel();
   if (!document.querySelector('.parts-age.stale') || document.querySelector('.parts-age').textContent.includes('NaN')
       || [...document.querySelectorAll('.parts-stock')].some(c => !c.classList.contains('stale') || c.textContent.includes('✔'))) return 'invalid timestamp';
+  const savedLines = parts.lines;
+  parts.lines = [{refs:['U1'], key:'unit-conflict', value:'TL072', footprint:'SOIC-8', lcsc:'C123', mpn:'A',
+    problems:['unit_identity_conflict']}];
+  S.partsFilter.problems = true; renderPanel();
+  const unitRow = document.querySelector('.parts-row');
+  if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 1 · 1 ⚠'
+      || !unitRow?.classList.contains('problem') || !unitRow.children[0].textContent.includes('⚠')
+      || unitRow.querySelector('.problem-tag')?.textContent !== 'UNITS'
+      || unitRow.querySelector('.problem-tag')?.title !== 'conflicting identities across symbol units') return 'unit identity conflict';
+  parts.lines = savedLines; S.partsFilter.problems = false; renderPanel();
   const savedProblems = parts.lines.map(l => l.problems);
   parts.lines.forEach(l => l.problems = ['missing_mpn', 'unavailable']); renderPanel();
   if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 5') return 'zero blocking count';
