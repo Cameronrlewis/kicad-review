@@ -4183,3 +4183,95 @@ print("ok per-commit project render cache hits retain both revisions")
 
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
+
+# Board inspection adapter: derive mm-units inspection graph and facts from retained scene
+scene = {'copperStack':['F.Cu','In1.Cu','In2.Cu','B.Cu'],
+         'nets':[{'id':1,'name':'12'}], 'warnings':[], 'complete':True,
+         'objects':[{'kind':'track','uuid':'t','changeUuid':'t','ref':'12',
+                     'layers':['In1.Cu'],'net':1,'side':None,
+                     'geometry':{'segments':[[0,0,3000,4000,200]]},'box':[0,0,3000,4000]}]}
+g = kr.board_inspect(scene)
+assert g['tracks'][0]['net'] == '12'
+assert g['tracks'][0]['width'] == .2
+assert g['stats']['routedLengthMm'] == 5
+assert g['stats']['copperLayers'] == 4
+assert g['stats']['boardSizeMm'] is None
+assert not any(g['truncated'].values())
+
+
+# Board inspection parser consumer: exact names, physical spans, duplicate pads, custom polygons, arcs, no outline.
+inspection_text = '''(kicad_pcb (version 20260206)
+ (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (2 "B.Cu" signal))
+ (segment (start 0 0) (end 3 4) (width .2) (layer "In1.Cu") (net "12") (uuid digits))
+ (arc (start 0 0) (mid 1 1) (end 2 0) (width .2) (layer "F.Cu") (net "12") (uuid arc1))
+ (via blind (at 1 1) (size .8) (drill .4) (layers "F.Cu" "In1.Cu") (net "12") (uuid blind))
+ (footprint "Test:D" (layer "F.Cu") (at 10 10) (uuid fp)
+  (property "Reference" "U1")
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "12") (uuid p1))
+  (pad "1" smd custom (at 2 0) (size 1 1) (layers "F.Cu") (net "12")
+   (options (clearance outline) (anchor rect))
+   (primitives (gr_poly (pts (xy 0 0) (xy 2 0) (xy 1 2)) (width .1) (fill yes))) (uuid p2))
+  (pad "9" smd star (at 4 0) (size 1 1) (layers "F.Cu") (uuid p3))))'''
+inspection = kr.board_inspect(scene_from_text(inspection_text))
+assert [n['name'] for n in inspection['nets']] == ['12'], inspection['nets']
+assert inspection['tracks'] and all(t['net'] == '12' for t in inspection['tracks'])
+assert {t['layer'] for t in inspection['tracks']} == {'F.Cu', 'In1.Cu'}
+assert all('hidden' in r for r in inspection['tracks'] + inspection['pads'] + inspection['vias'])
+straight = [t for t in inspection['tracks'] if t['kind'] == 'track']
+assert len(straight) == 1 and (straight[0]['layer'], straight[0]['x2'], straight[0]['y2']) == ('In1.Cu', 3.0, 4.0), straight
+arc_parts = [t for t in inspection['tracks'] if t['kind'] == 'arc']
+assert len(arc_parts) > 2, 'arc keeps its tessellation, not one chord'
+arc_length = sum(((t['x2'] - t['x1']) ** 2 + (t['y2'] - t['y1']) ** 2) ** .5 for t in arc_parts)
+assert 3.0 < arc_length < 3.2, arc_length  # semicircle of radius 1 mm
+assert abs(inspection['stats']['routedLengthMm'] - (5 + arc_length)) < 1e-3, inspection['stats']
+via, = inspection['vias']
+assert via['net'] == '12' and via['layers'] == ['F.Cu', 'In1.Cu']
+assert (via['fromLayer'], via['toLayer'], via['diameter'], via['drill']) == ('F.Cu', 'In1.Cu', .8, .4), via
+pads = inspection['pads']
+assert [p['pin'] for p in pads] == ['1', '1'], pads  # duplicate numbers stay distinct records
+assert len({p['uuid'] for p in pads}) == 2 and pads[0]['ref'] == 'U1' and pads[0]['net'] == '12'
+assert pads[1]['shape'] == 'rect' and len(pads[1]['custom']) == 1 and len(pads[1]['custom'][0]) == 3, pads[1]
+assert inspection['unsupported'] == {'pads': 1, 'vias': 0, 'tracks': 0, 'footprintGraphics': 0}, inspection['unsupported']
+assert any('unsupported pad shape star' in w['reason'] for w in inspection['warnings'])
+assert inspection['stats']['boardSizeMm'] is None
+assert inspection['truncated'] == {k: False for k in ('nets', 'pads', 'tracks', 'vias', 'footprintGraphics')}
+
+# Stats: CLI facts decide outline and counts only when present; graph counts and absent sizes are labelled.
+cli = {'board': {'has_outline': True, 'width': '100.0000 mm', 'height': '80 mm'},
+       'pads': {'through_hole': 2, 'smd': 3, 'npth': 1}, 'vias': {'through': 4, 'blind': 1}}
+sized = kr.board_inspect(scene_from_text(inspection_text), cli)
+assert sized['stats']['boardSizeMm'] == [100.0, 80.0]
+assert (sized['stats']['padCount'], sized['stats']['viaCount'], sized['stats']['countsSource']) == (6, 5, 'kicad-cli')
+no_outline = kr.board_inspect(scene_from_text(inspection_text), dict(cli, board={'has_outline': False, 'width': '100 mm', 'height': '80 mm'}))
+assert no_outline['stats']['boardSizeMm'] is None
+graph_only = kr.board_inspect(scene_from_text(inspection_text), {'board': {'has_outline': True, 'width': 'nan', 'height': None}})
+assert graph_only['stats']['boardSizeMm'] is None and graph_only['stats']['countsSource'] == 'inspection-graph'
+assert graph_only['stats']['padCount'] == len(graph_only['pads'])
+assert kr.stats_number('12.5 mm') == 12.5 and kr.stats_number('nan') is None
+print('ok board inspection parser consumer and stats provenance')
+
+# Producer-backed picker records: generated by this checked-in test, never handcrafted.
+fixture_dir = Path(__file__).parent / 'ui' / 'fixtures'
+board = (fixture_dir / 'vf-order-4.kicad_pcb').read_text()
+# Declare mask only in this writable synthetic source; the order fixture has copper only.
+board = board.replace('(layers ', '(layers (1 "F.Mask" user) ', 1)
+pick_pads = [
+ '(pad "1" smd rect (at 10 10) (size 2 2) (layers "F.Cu" "F.Mask") (solder_mask_margin 0.2))',
+ '(pad "2" thru_hole circle (at 20 10) (size 2 2) (drill 0.5) (layers "*.Cu" "*.Mask"))',
+ '(pad "3" thru_hole oval (at 30 10) (size 2 3) (drill oval 0.5 1.0) (layers "*.Cu" "*.Mask"))',
+ '(pad "4" smd custom (at 40 10) (size 1 1) (layers "F.Cu") (options (clearance outline) (anchor rect)) (primitives (gr_line (start 0 0) (end 5 0) (width 0.4))))',
+ '(pad "5" smd custom (at 50 10) (size 1 1) (layers "F.Cu") (options (clearance outline) (anchor rect)) (primitives (gr_arc (start 3 0) (mid 4 1) (end 3 2) (width 0.4))))',
+ '(pad "6" smd custom (at 60 10) (size 1 1) (layers "F.Cu") (options (clearance outline) (anchor rect)) (primitives (gr_poly (pts (xy 3 0) (xy 5 0) (xy 4 2)) (width 0.4) (fill no))))']
+pick_footprint = '(footprint "picker" (layer "F.Cu") (at 0 0) (uuid "picker") (property "Reference" "J1") ' + ''.join(pick_pads) + ')'
+with TemporaryDirectory() as d:
+    source = Path(d, 'picker.kicad_pcb')
+    source.write_text(board.rstrip()[:-1] + pick_footprint + ')')
+    records = kr.board_inspect(kr.board_geometry(source))
+by_pin = {r['pin']: r for r in records['pads']}
+assert by_pin['1']['geometry']['primitive'] and by_pin['1']['geometry']['layerPrimitives']['F.Mask']
+for pin in ('2', '3'):
+    drill = by_pin[pin]['geometry']['drill']
+    assert 'shape' not in drill and set(('center', 'size', 'angle', 'plated')) <= drill.keys()
+for pin in ('4', '5', '6'): assert by_pin[pin]['geometry']['segments']
+(fixture_dir / 'image-pick-records.json').write_text(json.dumps(records, sort_keys=True))
+print('ok producer-backed image pick records')

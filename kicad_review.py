@@ -1488,7 +1488,9 @@ def board_geometry(pcb_path):
                     counts[child[1]] += 1
                     child_uid = val(child, "uuid") or val(child, "tstamp") or f"{uid}/pad:{child[1]}:{counts[child[1]]}"
                     geometry, ls = pad_geometry(child, node, fp_at, child_uid)
-                    children.append(emit("pad", child_uid, uid, ref, ls, net_id(child), side, "pads", geometry, parent["hidden"] or hidden(child)))
+                    record = emit("pad", child_uid, uid, ref, ls, net_id(child), side, "pads", geometry, parent["hidden"] or hidden(child))
+                    record.update(pin=child[1], attr=child[2])
+                    children.append(record)
                 elif (child_kind in ("fp_text", "fp_text_box", "fp_line", "fp_arc", "fp_circle",
                                       "fp_rect", "fp_poly", "fp_curve", "image", "zone", "dimension", "table")
                       or (child_kind == "property" and all(find(child, key) for key in ("at", "layer", "effects")))):
@@ -1510,6 +1512,77 @@ def board_geometry(pcb_path):
             raise ValueError("board geometry outside supported integer range")
     check_numbers(scene)
     return scene
+
+
+def stats_number(value):
+    if value is None:
+        return None
+    m = re.match(r'^\s*([-+]?\d+(?:\.\d+)?)', str(value))
+    return float(m.group(1)) if m else None
+
+
+def board_inspect(scene, stats=None):
+    names = {n['id']: n['name'] for n in scene['nets']}
+    out = {'version': 1, 'units': 'mm', 'layers': scene['copperStack'],
+           'nets': [{'name': n['name'], 'netClass': None} for n in scene['nets'] if n['name']],
+           'pads': [], 'tracks': [], 'vias': [], 'footprintGraphics': [],
+           'warnings': list(scene['warnings']),
+           'truncated': dict.fromkeys(('nets', 'pads', 'tracks', 'vias', 'footprintGraphics'), False)}
+    unsupported = dict.fromkeys(('pads', 'vias', 'tracks', 'footprintGraphics'), 0)
+    length = 0.0
+    for o in scene['objects']:
+        # Scene tracks and arcs carry the net name; pads and vias carry the numeric net id.
+        net = o.get('net')
+        common = {k: o.get(k) for k in ('uuid', 'changeUuid', 'layers', 'side')}
+        common.update(net=names.get(net, net if isinstance(net, str) else ''), hidden=bool(o.get('hidden')),
+                      geometry=o['geometry'])
+        geom = o['geometry']
+        layers = o.get('layers') or []
+        if o['kind'] in ('track', 'arc'):
+            segments = geom.get('segments', [])
+            if not segments:
+                unsupported['tracks'] += 1
+            length += sum(math.hypot(s[2] - s[0], s[3] - s[1]) / 1000 for s in segments)
+            for i, s in enumerate(segments):
+                out['tracks'].append(dict(common, kind=o['kind'], segment=i, layer=layers[0] if layers else '',
+                                          x1=s[0] / 1000, y1=s[1] / 1000, x2=s[2] / 1000, y2=s[3] / 1000, width=s[4] / 1000))
+        elif o['kind'] in ('pad', 'via'):
+            if not geom.get('primitive'):
+                unsupported['pads' if o['kind'] == 'pad' else 'vias'] += 1
+            elif o['kind'] == 'via':
+                p, drill = geom['primitive'], geom.get('drill')
+                out['vias'].append(dict(common, x=p['center'][0] / 1000, y=p['center'][1] / 1000,
+                                        diameter=p['size'][0] / 1000,
+                                        fromLayer=layers[0] if layers else '', toLayer=layers[-1] if layers else '',
+                                        drill=drill['size'][0] / 1000 if drill else None))
+            else:
+                p, drill = geom['primitive'], geom.get('drill')
+                out['pads'].append(dict(common, ref=o.get('ref'), pin=o.get('pin', ''), attr=o.get('attr', ''),
+                                        x=p['center'][0] / 1000, y=p['center'][1] / 1000,
+                                        width=p['size'][0] / 1000, height=p['size'][1] / 1000,
+                                        shape=p['shape'], angle=p['angle'] / 1000,
+                                        radiusRatio=p.get('radius', 0) / min(p['size']) if min(p['size']) else 0,
+                                        custom=geom.get('rings', []), hole=drill))
+        elif o.get('ref') and o['kind'] in ('shape', 'text'):
+            if geom:
+                out['footprintGraphics'].append(dict(common, ref=o['ref'], kind=o['kind']))
+            else:
+                unsupported['footprintGraphics'] += 1
+    out['unsupported'] = unsupported
+    board = (stats or {}).get('board', {})
+    width, height = stats_number(board.get('width')), stats_number(board.get('height'))
+    cli = {key: (stats or {}).get(key) for key in ('pads', 'vias')}
+    def counted(key, fallback):
+        group = cli[key]
+        if isinstance(group, dict) and group:
+            return sum(v for v in group.values() if isinstance(v, (int, float)) and not isinstance(v, bool))
+        return fallback
+    out['stats'] = {'copperLayers': len(out['layers']), 'routedLengthMm': round(length, 6),
+                    'boardSizeMm': [width, height] if board.get('has_outline') is True and width is not None and height is not None else None,
+                    'padCount': counted('pads', len(out['pads'])), 'viaCount': counted('vias', len(out['vias'])),
+                    'netCount': len(out['nets']),
+                    'countsSource': 'kicad-cli' if all(isinstance(v, dict) and v for v in cli.values()) else 'inspection-graph'}
+    return out
 
 
 def pad_points(fp, a):
