@@ -10,7 +10,10 @@
     revoke:url=>URL.revokeObjectURL(url)
   }) {
     let generation=0, disposed=false, node=null, appliedSource=null;
-    const owned=new Set(), release=url=>{if(owned.delete(url))env.revoke(url);};
+    const owned=new Set(), release=(url,image)=>{
+      if(image)image.removeAttribute?.('src');
+      if(owned.delete(url))env.revoke(url);
+    };
     let activeURL=null;
     return {
       get node(){return node;}, get source(){return source;},
@@ -26,8 +29,8 @@
           next.dataset.imageArtwork=''; next.dataset.side=options.side; next.src=url;
           await next.decode();
         }
-        catch(error){release(url); if(disposed||ticket!==generation)return false; throw error;}
-        if(disposed||ticket!==generation){release(url);return false;}
+        catch(error){release(url,next); if(disposed||ticket!==generation)return false; throw error;}
+        if(disposed||ticket!==generation){release(url,next);return false;}
         const previous=node, previousURL=activeURL;
         node=next; activeURL=url; appliedSource=text;
         if(previous?.isConnected)previous.replaceWith(next);

@@ -5,15 +5,17 @@ import vm from 'node:vm';
 const ctx = {console,setTimeout,clearTimeout,TextEncoder}; vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(new URL('./image-view.js', import.meta.url), 'utf8'), ctx);
 test('only final appearance survives navigation; all URLs released', async () => {
-  const jobs=[], revoked=[], made=[];
+  const jobs=[], revoked=[], made=[], nodes=[];
   const env={create:text=>{made.push(text);return 'blob:'+made.length;}, revoke:u=>revoked.push(u),
-    make:()=>{const n={dataset:{},remove(){this.removed=true;},replaceWith(other){this.replaced=other;}};
+    make:()=>{const n={dataset:{},remove(){this.removed=true;},removeAttribute(name){if(name==='src')this.src='';},replaceWith(other){this.replaced=other;}}; nodes.push(n);
       n.decode=()=>new Promise(resolve=>jobs.push(resolve)); return n;}};
   const c=ctx.ImageView.controller('<svg><path fill="#009600"/></svg>',{side:'head',layer:'sheet'},env);
   const first=c.setAppearance(new Map([['#009600','#111111']]));
   const second=c.setAppearance(new Map([['#009600','#222222']]));
   jobs[1](); assert.equal(await second,true);
   const current=c.node; jobs[0](); assert.equal(await first,false);
+  assert.equal(nodes[0].src,'');
+  assert.equal(made.length,2);
   assert.equal(c.node,current); assert.ok(c.appliedSource.includes('#222222'));
   const third=c.setAppearance(new Map([['#009600','#333333']]));
   c.dispose(); jobs[2](); assert.equal(await third,false);
@@ -28,7 +30,8 @@ function harness() {
     revoke(url){revoked.push(url);},
     make(){
       const n={dataset:{},isConnected:false,
-        remove(){this.removed=true;},replaceWith(other){this.replaced=other;}};
+        remove(){this.removed=true;},replaceWith(other){this.replaced=other;},
+        removeAttribute(name){if(name==='src')this.src='';}};
       n.decode=()=>new Promise((resolve,reject)=>jobs.push({resolve,reject}));
       nodes.push(n);return n;
     }
