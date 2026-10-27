@@ -1258,8 +1258,12 @@ MM_RULE_KEYS = {"min_clearance", "min_track_width", "min_via_diameter", "min_thr
                 "min_text_height", "min_text_thickness", "solder_mask_to_copper_clearance"}
 
 
-def rule_values(root: str, name: str) -> dict[str, object]:
-    """Read rule sources without flatten's stringification; absent revisions are empty."""
+def rule_values(root: str, name: str, board_tree=None) -> dict[str, object]:
+    """Read rule sources without flatten's stringification; absent revisions are empty.
+
+    Callers that already parsed the board can pass its S-expression tree to avoid
+    parsing the same board again solely for stackup extraction.
+    """
     out = {}
 
     def walk(value, key):
@@ -1275,8 +1279,10 @@ def rule_values(root: str, name: str) -> dict[str, object]:
     pro = pathlib.Path(root) / (name + ".kicad_pro")
     if pro.exists():
         data = json.loads(pro.read_text(encoding="utf-8"))
-        walk(data.get("board", {}).get("design_settings", {}).get("rules", {}), "rules")
-        net_settings = data.get("net_settings", {})
+        board = data.get("board") or {}
+        design_settings = board.get("design_settings") or {}
+        walk(design_settings.get("rules") or {}, "rules")
+        net_settings = data.get("net_settings") or {}
         if "classes" in net_settings:
             walk(net_settings["classes"], "net_settings.classes")
         # Pattern order is meaningful, unlike named class order. Keep assignments intact.
@@ -1286,7 +1292,12 @@ def rule_values(root: str, name: str) -> dict[str, object]:
     if dru.exists():
         out["custom rules"] = dru.read_text(encoding="utf-8").replace("\r\n", "\n")
     pcb = pathlib.Path(root) / (name + ".kicad_pcb")
-    if pcb.exists():
+    if board_tree is not None:
+        setup = find(board_tree, "setup") or []
+        stack = find(setup, "stackup")
+        if stack:
+            out["stackup"] = stack
+    elif pcb.exists():
         setup = find(parse_sexpr(pcb.read_text(encoding="utf-8")), "setup") or []
         stack = find(setup, "stackup")
         if stack:

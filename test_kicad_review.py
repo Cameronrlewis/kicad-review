@@ -4235,6 +4235,10 @@ def test_br03_typed_rules():
         b, h = pathlib.Path(td)/"base", pathlib.Path(td)/"head"
         b.mkdir(); h.mkdir()
         assert rule_values(b, "p") == {} and diff_rules(b, h, "p") == []
+        for data in ({"board": None, "net_settings": None},
+                     {"board": {"design_settings": None}, "net_settings": None}):
+            (b/"p.kicad_pro").write_text(json.dumps(data), encoding="utf-8")
+            assert rule_values(b, "p") == {}
 
         def pair(before, after):
             for root, data in ((b, before), (h, after)):
@@ -4247,7 +4251,7 @@ def test_br03_typed_rules():
         pro = {**rulepro({"min_clearance": .2}), "net_settings": {
             "classes": [{"name": "Default", "clearance": .2}],
             "netclass_patterns": [{"pattern": "USB*", "netclass": "Default"}]}}
-        pair(pro, pro)
+        assert pair(pro, pro) == []
         pro["board"]["design_settings"]["rules"]["min_clearance"] = .25
         pro["net_settings"]["netclass_patterns"][0]["netclass"] = "Fast"
         (h/"p.kicad_pro").write_text(json.dumps(pro), encoding="utf-8")
@@ -4301,6 +4305,16 @@ def test_br03_typed_rules():
         assert row['detail'] == {'kind': 'text',
                                  'before': ['stackup', ['layer', 'dielectric 1', ['thickness', '.2']]],
                                  'after': ['stackup', ['layer', 'dielectric 1', ['thickness', '.3']]]}
+        # Passing parsed board trees avoids re-reading the PCB when callers already parsed it.
+        (b/'p.kicad_pro').write_text(json.dumps({}), encoding='utf-8')
+        (h/'p.kicad_pro').write_text(json.dumps({}), encoding='utf-8')
+        from kicad_review import parse_sexpr
+        base_tree = parse_sexpr((b/'p.kicad_pcb').read_text())
+        head_tree = parse_sexpr((h/'p.kicad_pcb').read_text())
+        from unittest.mock import patch
+        with patch('kicad_review.parse_sexpr', side_effect=AssertionError('unexpected PCB parse')):
+            assert __import__('kicad_review').rule_values(b, 'p', base_tree)['stackup'] == ['stackup', ['layer', 'dielectric 1', ['thickness', '.2']]]
+            assert __import__('kicad_review').rule_values(h, 'p', head_tree)['stackup'] == ['stackup', ['layer', 'dielectric 1', ['thickness', '.3']]]
         (h/'p.kicad_pro').write_text('{invalid', encoding='utf-8')
         try:
             rule_values(h, 'p')
