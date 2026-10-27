@@ -610,9 +610,65 @@ test('BR02 CLI preserves legacy compression and supports metadata keep override'
     assert.ok(final.getRoot().listNodes().some(n=>n.getExtras().batch==='ref:R1'));
     const coverage=JSON.parse(readFileSync(stats));
     assert.deepEqual({triangles:coverage.triangles,primitives:coverage.primitives},P.geometryCounts(final));
-    const before=readFileSync(output);
+    const cache=pathJoin(dir,'cache');
+    const cached=run([input,output,'--metadata',meta,'--keep','R1','--parts',parts,'--stats',stats,'--cache',cache]);
+    assert.equal(cached.status,0,cached.stderr);
+    assert.ok(existsSync(pathJoin(dir,'board-processed.json')));
+    assert.ok((await io.read(output)).getRoot().listNodes().some(n=>n.getName()==='R1'));
+    const before=readFileSync(output),beforeParts=readFileSync(parts),beforeStats=readFileSync(stats);
+    const beforeManifest=readFileSync(pathJoin(dir,'board-processed.json'));
+    for(const args of [
+      [input,output,'--cache',cache],
+      [input,output,'--metadata',meta,'--cache',cache],
+      [input,output,'--metadata',meta,'--parts',parts,'--cache',cache],
+      [input,output,'--metadata',meta,'--stats',stats,'--cache',cache]
+    ]) {
+      const invalid=run(args);assert.notEqual(invalid.status,0);
+      assert.match(invalid.stderr,/requires metadata|requires --parts and --stats/);
+      assert.deepEqual(readFileSync(output),before);
+      assert.deepEqual(readFileSync(parts),beforeParts);assert.deepEqual(readFileSync(stats),beforeStats);
+      assert.deepEqual(readFileSync(pathJoin(dir,'board-processed.json')),beforeManifest);
+    }
     const missing=run([input,output,'--metadata',meta]);assert.notEqual(missing.status,0);
     assert.match(missing.stderr,/requires --parts and --stats/);
     assert.deepEqual(readFileSync(output),before);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('BR02 restored raw pair A B A and corrupt cache cannot cross indexes',integration,async()=>{
+  const {NodeIO}=require('@gltf-transform/core');
+  const dir=mkdtempSync(pathJoin(process.env.OUT,'pair-cache-'));
+  try {
+    const {d,metadata}=makeDocument(['R12','U3']);const io=new NodeIO();
+    const input=pathJoin(dir,'board.raw.glb'),output=pathJoin(dir,'board.glb');await io.write(input,d);
+    const original=readFileSync(input),parts=pathJoin(dir,'board-parts.json'),stats=pathJoin(dir,'board-stats.json');
+    const cache=pathJoin(dir,'cache');
+    await assert.rejects(P.cachedCompress(input,input,metadata,parts,stats,cache),/must be distinct/);
+    await assert.rejects(P.cachedCompress(input,output,metadata,output,stats,cache),/must be distinct/);
+    assert.deepEqual(readFileSync(input),original);
+    assert.equal(existsSync(output),false);
+    for(const keep of [['R12'],['U3'],['R12']]) {
+      assert.equal(await P.cachedCompress(input,output,{...metadata,keep},parts,stats,cache),true);
+      const final=await new NodeIO().registerExtensions(require('@gltf-transform/extensions').ALL_EXTENSIONS)
+        .registerDependencies({'meshopt.decoder':require('meshoptimizer').MeshoptDecoder}).read(output);
+      assert.ok(final.getRoot().listNodes().some(n=>n.getName()===keep[0]));
+      assert.ok(!final.getRoot().listNodes().some(n=>n.getName()===(keep[0]==='R12'?'U3':'R12')));
+      assert.equal(JSON.parse(readFileSync(parts)).length,2);assert.deepEqual(readFileSync(input),original);
+      const {createHash}=require('node:crypto');
+      const manifest=JSON.parse(readFileSync(pathJoin(dir,'board-processed.json')));
+      for(const [file,destination] of [['board.glb',output],['parts.json',parts],['stats.json',stats]])
+        assert.equal(manifest.hashes[file],createHash('sha256').update(readFileSync(destination)).digest('hex'));
+    }
+    const key=P.processorKey(original,{...metadata,keep:['R12']},readFileSync(new URL('./compress3d.cjs',import.meta.url)));
+    writeFileSync(pathJoin(cache,key,'parts.json'),'[]');
+    assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true);
+    assert.equal(JSON.parse(readFileSync(parts)).length,2);
+    assert.equal(JSON.parse(readFileSync(pathJoin(cache,key,'parts.json'))).length,2);
+    assert.deepEqual(readFileSync(input),original);
+    writeFileSync(input,'corrupt');
+    assert.equal(await P.cachedCompress(input,output,metadata,parts,stats,cache),false);
+    assert.deepEqual(readFileSync(output),Buffer.from('corrupt'));
+    for(const file of [parts,stats,pathJoin(dir,'board-processed.json')])assert.equal(existsSync(file),false);
+    assert.ok(!readdirSync(cache).some(p=>p.startsWith('.build-')));
   } finally {rmSync(dir,{recursive:true,force:true});}
 });

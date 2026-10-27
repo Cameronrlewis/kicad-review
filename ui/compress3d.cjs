@@ -221,10 +221,56 @@ async function compress(input,output,metadata,partsPath,statsPath) {
 }
 Object.assign(module.exports,{geometryCounts,simplifyBodies,processDocument,compress});
 
+// ponytail: one sequential processor per Actions workspace; use a cache-entry lock only if concurrent writers are introduced.
+async function cachedCompress(input,output,metadata,partsPath,statsPath,cacheRoot) {
+  const fs=require('node:fs/promises'),path=require('node:path');
+  if(!metadata||!Array.isArray(metadata.keep)||!Array.isArray(metadata.footprints))
+    throw Error('cache requires metadata with keep and footprints arrays');
+  if(!partsPath||!statsPath)throw Error('metadata requires --parts and --stats paths');
+  const manifestPath=path.join(path.dirname(output),'board-processed.json');
+  const files=['board.glb','parts.json','stats.json'],destinations=[output,partsPath,statsPath];
+  const paths=[input,...destinations,manifestPath].map(file=>path.resolve(file));
+  if(new Set(paths).size!==paths.length)throw Error('raw input and processed destinations must be distinct');
+  const sha=b=>createHash('sha256').update(b).digest('hex');
+  const raw=await fs.readFile(input),key=processorKey(raw,metadata,await fs.readFile(__filename));
+  const entry=path.join(cacheRoot,key);
+  const valid=async()=>{
+    try {
+      const m=JSON.parse(await fs.readFile(path.join(entry,'manifest.json'),'utf8'));
+      if(m.key!==key)return false;
+      for(const file of files)if(m.hashes[file]!==sha(await fs.readFile(path.join(entry,file))))return false;
+      return true;
+    } catch{return false;}
+  };
+  try {
+    await fs.rm(manifestPath,{force:true});
+    if(!await valid()) {
+      await fs.mkdir(cacheRoot,{recursive:true});
+      const temp=await fs.mkdtemp(path.join(cacheRoot,'.build-'));
+      try {
+        await compress(input,path.join(temp,files[0]),metadata,path.join(temp,files[1]),path.join(temp,files[2]));
+        const hashes={};for(const file of files)hashes[file]=sha(await fs.readFile(path.join(temp,file)));
+        await fs.writeFile(path.join(temp,'manifest.json'),JSON.stringify({key,hashes}));
+        await fs.rm(entry,{recursive:true,force:true});await fs.rename(temp,entry);
+      } finally {await fs.rm(temp,{recursive:true,force:true});}
+    }
+    for(let i=0;i<files.length;i++)await fs.copyFile(path.join(entry,files[i]),destinations[i]);
+    await fs.copyFile(path.join(entry,'manifest.json'),manifestPath);return true;
+  } catch(error) {
+    await fs.writeFile(output,raw);
+    await Promise.all([partsPath,statsPath,manifestPath].map(file=>fs.rm(file,{force:true})));
+    console.error('3D optimization unavailable: '+error.message);return false;
+  }
+}
+module.exports.cachedCompress=cachedCompress;
+
 if(require.main===module)(async()=>{
   const [input,output,...args]=process.argv.slice(2);
   const option=name=>{const i=args.indexOf(name);return i<0?null:args[i+1]};
   const meta=option('--metadata')?JSON.parse(require('node:fs').readFileSync(option('--metadata'),'utf8')):null;
   if(meta&&option('--keep'))meta.keep=option('--keep').split(',').filter(Boolean);
-  await compress(input,output,meta,option('--parts'),option('--stats'));
+  if(meta&&(!option('--parts')||!option('--stats')))
+    throw Error('metadata requires --parts and --stats paths');
+  if(option('--cache'))await cachedCompress(input,output,meta,option('--parts'),option('--stats'),option('--cache'));
+  else await compress(input,output,meta,option('--parts'),option('--stats'));
 })().catch(error=>{console.error(error);process.exitCode=1});
