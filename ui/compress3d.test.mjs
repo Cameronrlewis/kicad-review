@@ -17,9 +17,24 @@ test('BR02 mask finish and pair-safe cache policy',()=>{
   assert.notEqual(key,P.processorKey(Buffer.from('raw'),m,Buffer.from('v2')));
 });
 
+// Suppress transform progress only; warnings and errors must remain visible.
+function quietDocument(document) {
+  const {Logger}=require('@gltf-transform/core');
+  return document.setLogger(new Logger(Logger.Verbosity.WARN));
+}
+
+function fixturePaths() {
+  const fs=require('node:fs'), path=require('node:path');
+  const out=process.env.OUT || '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer';
+  const paths=['task1-executor/board.glb','ci-probe-task1-kicad1006/board.glb']
+    .map(p=>path.join(out,p));
+  for(const p of paths) assert.ok(fs.existsSync(p),'Required KiCad integration fixture missing: '+p);
+  return paths;
+}
+
 function makeDocument(names,copies=1) {
   const {Document}=require('@gltf-transform/core');
-  const d=new Document(), scene=d.createScene(), buffer=d.createBuffer();
+  const d=quietDocument(new Document()), scene=d.createScene(), buffer=d.createBuffer();
   const material=d.createMaterial('body').setBaseColorFactor([.1,.1,.1,1]);
   const footprints=[];
   names.forEach((ref,i)=>{
@@ -37,7 +52,10 @@ function makeDocument(names,copies=1) {
   });
   return {d,metadata:{version:1,side:'head',finish:'ENIG',keep:[],footprints}};
 }
-const integration={skip:process.env.PROCESS3D_INTEGRATION!=='1'};
+// Policy tests stay dependency-free. Full verification must explicitly opt in.
+const integration={skip:process.env.PROCESS3D_INTEGRATION!=='1'
+  ? 'Opt in with NODE_PATH="$DEPS/node_modules" PROCESS3D_INTEGRATION=1 node --test ui/compress3d.test.mjs (requires both KiCad fixtures under OUT)'
+  : false};
 test('BR02 captures descendants bounds and missing bottom footprint without double rotation',integration,()=>{
   const {d,metadata}=makeDocument(['R1','J1']);
   const j=d.getRoot().listNodes().find(n=>n.getName()==='J1');
@@ -77,9 +95,7 @@ test('BR02 snapshotParts handles direct mesh on footprint node (KiCad 10.0.0 sty
   assert.equal(r1.getExtras().batch, 'ref:R1');
 });
 
-test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exports', integration, async (t) => {
-  const fs = require('node:fs');
-  const path = require('node:path');
+test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exports', integration, async () => {
   const {NodeIO} = require('@gltf-transform/core');
   const io = new NodeIO();
   const metadata = {
@@ -94,22 +110,12 @@ test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exp
     ]
   };
 
-  const outDir = process.env.OUT || '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer';
-  const fixturePaths = [
-    path.join(outDir, 'task1-executor/board.glb'),
-    path.join(outDir, 'ci-probe-task1-kicad1006/board.glb')
-  ];
-
-  const available = fixturePaths.filter(p => fs.existsSync(p));
-  if (available.length === 0) {
-    t.skip(`KiCad 10 fixture exports not found under ${outDir}`);
-    return;
-  }
+  const available = fixturePaths();
 
   let verified = 0;
   for (const p of available) {
     verified++;
-    const doc = await io.read(p);
+    const doc = quietDocument(await io.read(p));
     const parts = P.snapshotParts(doc, metadata);
     assert.equal(parts.length, 6);
     assert.ok(parts.every(part => part.box.length === 6 && part.box.every(Number.isFinite)));
@@ -165,9 +171,7 @@ test('BR02 snapshotParts handles both KiCad 10.0.0 and 10.0.6 actual fixture exp
     assert.ok(roles.includes('mask'), 'mask role present');
   }
   assert.equal(verified, available.length);
-  if (available.length === fixturePaths.length) {
-    assert.equal(verified, 2, 'both KiCad 10.0.0 and 10.0.6 fixture exports verified');
-  }
+  assert.equal(verified, 2, 'both KiCad 10.0.0 and 10.0.6 fixture exports verified');
 });
 
 test('BR02 snapshotParts handles missing or null metadata.keep', integration, () => {
@@ -272,9 +276,7 @@ test('BR02 board role materials do not mutate source body material', integration
   assert.equal(m.getExtension('KHR_materials_anisotropy').getAnisotropyStrength(), .3);
 });
 
-test('BR02 applyMaterials and batchDocument on actual fixture exports', integration, async (t) => {
-  const fs = require('node:fs');
-  const path = require('node:path');
+test('BR02 applyMaterials and batchDocument on actual fixture exports', integration, async () => {
   const {NodeIO} = require('@gltf-transform/core');
   const {ALL_EXTENSIONS} = require('@gltf-transform/extensions');
   const {getBounds} = require('@gltf-transform/functions');
@@ -291,20 +293,10 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
     ]
   };
 
-  const outDir = process.env.OUT || '/Users/cameron/Code/kicad-review-study/tmp/02-3d-viewer';
-  const fixturePaths = [
-    path.join(outDir, 'task1-executor/board.glb'),
-    path.join(outDir, 'ci-probe-task1-kicad1006/board.glb')
-  ];
-
-  const available = fixturePaths.filter(p => fs.existsSync(p));
-  if (available.length === 0) {
-    t.skip(`KiCad 10 fixture exports not found under ${outDir}`);
-    return;
-  }
+  const available = fixturePaths();
 
   for (const p of available) {
-    const doc = await io.read(p);
+    const doc = quietDocument(await io.read(p));
     const parts = P.snapshotParts(doc, metadata);
     const r1Before = parts.find(part => part.ref === 'R1').box;
 
