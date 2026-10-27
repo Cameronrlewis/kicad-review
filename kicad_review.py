@@ -2744,8 +2744,12 @@ def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
     for side in allowed_sides:
         folder = pathlib.Path(out,side)
         poster = folder / 'poster.png'
-        if poster.is_file() and poster.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'):
-            board['poster3d'][side] = add_blob(blobs,poster.read_bytes())
+        try:
+            poster_raw = poster.read_bytes()
+            if poster_raw.startswith(b'\x89PNG\r\n\x1a\n'):
+                board['poster3d'][side] = add_blob(blobs, poster_raw)
+        except OSError:
+            pass
         try:
             manifest = json.loads((folder/'board-processed.json').read_text())
             files = {'board.glb':folder/'board.glb','parts.json':folder/'board-parts.json',
@@ -2757,11 +2761,14 @@ def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
             parts = json.loads(raw['parts.json'])
             stats = json.loads(raw['stats.json'])
             fields = ('footprints','withModel','placeholders','triangles','primitives')
-            if not isinstance(parts,list) or not isinstance(stats,dict) or any(
+            if not isinstance(parts,list) or any(not isinstance(part,dict) for part in parts) or not isinstance(stats,dict) or any(
                     type(stats.get(k)) is not int or stats[k]<0 for k in fields):
                 raise ValueError('invalid coverage')
+            if not isinstance(stats.get('warnings'), list) or any(not isinstance(item, str) for item in stats['warnings']):
+                raise ValueError('invalid coverage warnings')
             if stats['footprints']!=len(parts) or stats['withModel']+stats['placeholders']!=len(parts):
                 raise ValueError('inconsistent coverage')
+            stats = {key: stats[key] for key in (*fields, 'warnings') if key in stats}
             board['parts3d'][side] = add_blob(blobs,raw['parts.json'])
             board['coverage3dBySide'][side] = stats
             board['assets3d'][side] = {'model':artifact3d(raw['board.glb'],'board.glb'),
@@ -2774,11 +2781,11 @@ def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
         board['coverage3d'] = coverage
 
 
-def model3d_missing(out, objs):
+def model3d_missing(out, objs, allowed_sides=('base', 'head')):
     """Missing 3D models from KiCad's export log and footprints without a model declaration."""
     missing = {}
     add = lambda ref, side, reason: missing.setdefault((ref, reason), set()).add(side)
-    for side in ("base", "head"):
+    for side in allowed_sides:
         log = f"{out}/{side}/glb.log"
         if os.path.exists(log):
             with open(log, encoding="utf-8") as fh:
@@ -2791,7 +2798,7 @@ def model3d_missing(out, objs):
     for (ref, reason), sides in sorted(missing.items(), key=lambda e: (natural(e[0][0]), e[0][1])):
         side = "both" if sides == {"base", "head"} else next(iter(sides))
         # The block is rendered from the footprint's board-space data, including unchanged parts.
-        obj = next((o for s in ("head", "base") for o in objs[s].values()
+        obj = next((o for s in allowed_sides for o in objs[s].values()
                     if o["kind"] == "footprint" and o["ref"] == ref and s in sides), None)
         row = {"ref": ref, "side": side, "reason": reason}
         if obj:
@@ -2880,10 +2887,10 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
                             for side, path in models.items()}
         board["model3d"].update({"enabled": True,
-                                 "changed": board["model3d"]["base"] != board["model3d"]["head"],
-                                 "errors": {side: "3D export unavailable" for side in ("base", "head")
-                                            if has[side] and not board["model3d"][side]}})
-        board["no_model"] = model3d_missing(out, objs)
+                                 "changed": board["model3d"].get("base") != board["model3d"].get("head"),
+                                 "errors": {side: "3D export unavailable" for side in allowed_sides
+                                            if has[side] and not board["model3d"].get(side)}})
+        board["no_model"] = model3d_missing(out, objs, allowed_sides)
     if settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False):
         attach3d(board, out, blobs, allowed_sides)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(

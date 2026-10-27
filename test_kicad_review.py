@@ -4469,6 +4469,29 @@ def br02_task4a_attachment_contract():
             model_id = project['board'].get('model3d', {}).get(side)
             if model_id:
                 assert gzip.decompress(base64.b64decode(restored['blobs'][model_id])).startswith(b'glTF')
+    # Hardening: strict coverage shape and fail-closed poster reads.
+    with tempfile.TemporaryDirectory() as t:
+        root = pathlib.Path(t)
+        (root/'head').mkdir()
+        for invalid in ({'footprints': 0, 'withModel': 0, 'placeholders': 0, 'triangles': 0,
+                         'primitives': 0, 'warnings': 'not-a-list'},):
+            folder = root/'head'
+            parts = b'[]'; glb = b'glTF-model'; stats_raw = json.dumps(invalid).encode()
+            values = {'board.glb': glb, 'parts.json': parts, 'stats.json': stats_raw}
+            (folder/'board.glb').write_bytes(glb); (folder/'board-parts.json').write_bytes(parts)
+            (folder/'board-stats.json').write_bytes(stats_raw)
+            (folder/'board-processed.json').write_text(json.dumps({'hashes': {
+                name: hashlib.sha256(value).hexdigest() for name, value in values.items()}}))
+            result = {}; kr.attach3d(result, str(root), {})
+            assert result['coverage3dBySide']['head'] is None
+        original = pathlib.Path.read_bytes
+        def unreadable(path, *args, **kwargs):
+            if path.name == 'poster.png':
+                raise PermissionError('test')
+            return original(path, *args, **kwargs)
+        with patch.object(pathlib.Path, 'read_bytes', unreadable):
+            result = {}; kr.attach3d(result, str(root), {})
+            assert result['poster3d']['head'] is None
     print('ok BR02 verified coverage, digest assets, head-only/poster-only attachments and legacy offline v1')
 
 
