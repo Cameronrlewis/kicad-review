@@ -2219,11 +2219,13 @@ def bom_fabrication_lines(lines, objects, part_field, preset):
     selected = (part_field.strip().lower(),) if part_field else (LCSC_FIELDS if preset == "jlcpcb" else MPN_FIELDS)
     by_ref = {}
     for obj in objects.values():
-        if obj["kind"] == "symbol":
-            number = field(obj["props"], selected)
-            if preset == "jlcpcb" and not part_field:
-                number = number.upper() if number else None  # same normalization as parts_lines
-            by_ref.setdefault((obj.get("ref") or "").split(" unit ")[0], number)
+        identity = bom_identity(obj)
+        if not identity["included"] or identity["ref"] in by_ref:
+            continue  # match parts_lines: the first eligible unit supplies each reference's fields
+        number = field(obj["props"], selected)
+        if preset == "jlcpcb" and not part_field:
+            number = number.upper() if number else None  # same normalization as parts_lines
+        by_ref[identity["ref"]] = number
     out = []
     for line in lines:
         groups = {}

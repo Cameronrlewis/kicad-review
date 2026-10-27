@@ -1241,6 +1241,30 @@ for preset in ('jlcpcb', 'pcbway'):
     assert len(displayed) == 1 and displayed[0]['mpn'] == 'display-mpn' and displayed[0]['lcsc'] is None
     default = bom_exports(displayed, preset, None, objs)
     assert read(default['fab'])[1][3] == ('' if preset == 'jlcpcb' else 'display-mpn')
+# Fabrication ordering follows the same first eligible unit as the displayed BOM.
+for rejected_props in ({'in_bom': 'no'}, {'dnp': 'yes'}):
+    excluded_unit = sym2('U1 unit 2', 'TL072', 'EXCLUDED-MPN')
+    excluded_unit['props'].update(rejected_props, LCSC='C999', **{'Order Code': 'EXCLUDED-ORDER'})
+    fitted_unit = sym2('U1', 'TL072', 'FITTED-MPN')
+    fitted_unit['props'].update(LCSC='c123', **{'Order Code': 'FITTED-ORDER'})
+    later_unit = sym2('U1 unit 3', 'TL072', 'LATER-MPN')
+    later_unit['props'].update(LCSC='C456', **{'Order Code': 'LATER-ORDER'})
+    unit_objects = {'excluded': excluded_unit, 'fitted': fitted_unit, 'later': later_unit}
+    displayed = parts_lines(unit_objects)
+    assert len(displayed) == 1 and displayed[0]['refs'] == ['U1']
+    assert (displayed[0]['mpn'], displayed[0]['lcsc']) == ('FITTED-MPN', 'C123')
+    for preset, default_order in (('jlcpcb', 'C123'), ('pcbway', 'FITTED-MPN')):
+        for part_field, want in ((None, default_order), ('Order Code', 'FITTED-ORDER')):
+            exported = bom_exports(displayed, preset, part_field, unit_objects)
+            assert exported['fabError'] is None, exported
+            rows = read(exported['fab'])
+            assert len(rows) == 2 and rows[1][3] == want, (rejected_props, preset, part_field, rows)
+            assert rows[1][1 if preset == 'jlcpcb' else 0] == 'U1'
+            assert rows[1][4 if preset == 'jlcpcb' else 1] == '1'
+            assert read(exported['csv'])[1][5:7] == ['FITTED-MPN', 'C123']
+    assert (displayed[0]['mpn'], displayed[0]['lcsc']) == ('FITTED-MPN', 'C123')
+    assert 'orderingPart' not in displayed[0], 'fabrication fields must remain transient'
+print('ok bom eligible-unit ordering')
 # The build_project path passes objects; all supported aliases must survive that path.
 from kicad_review import LCSC_FIELDS, MPN_FIELDS
 for lcsc_alias in LCSC_FIELDS:
