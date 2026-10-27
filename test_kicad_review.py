@@ -3787,11 +3787,87 @@ def test_br03_unit_anchor_candidates():
             {"uuid": "b", "ref": "U1", "pin": pin, "unit": "2", "sheet": "/s/", "pos": [1, 2, 0], "commit": "b" * 40}], anchors
 
 
+def test_br03_where_sheet_contract():
+    # Missing where or missing sheet attribute is safely handled without KeyError/TypeError.
+    bad_obj = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "where": None, "pos": [1, 2, 0]}
+    text = '(export (nets (net (name N) (node (ref U1) (pin 1)))))'
+    nets, anchors, issues = net_members(text, {"/a": bad_obj}, "a" * 40)
+    assert nets["N"] is None and not anchors
+    assert any(i["unknown"] for i in issues)
+
+    # Empty where dictionary without sheet key.
+    bad_obj2 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "where": {}, "pos": [1, 2, 0]}
+    nets2, anchors2, issues2 = net_members(text, {"/a": bad_obj2}, "a" * 40)
+    assert nets2["N"] is None and not anchors2
+    assert any(i["unknown"] for i in issues2)
+
+
+def test_br03_multi_unit_pin_resolution():
+    # When symbols provide unit pin information, anchors resolve to the exact owning unit.
+    u1_unit1 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pins": {"1", "2"},
+                "where": {"sheet": "/"}, "pos": [1, 2, 0]}
+    u1_unit2 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "2"}, "pins": {"3", "4"},
+                "where": {"sheet": "/"}, "pos": [3, 4, 0]}
+    objects = {"/a": u1_unit1, "/b": u1_unit2}
+    text = '''(export (nets
+      (net (name NET_A) (node (ref U1) (pin 1)))
+      (net (name NET_B) (node (ref U1) (pin 3)))))'''
+    nets, anchors, issues = net_members(text, objects, "c" * 40)
+    assert nets == {"NET_A": {"U1.1"}, "NET_B": {"U1.3"}} and not issues
+    assert len(anchors["U1.1"]) == 1 and anchors["U1.1"][0]["unit"] == "1" and anchors["U1.1"][0]["uuid"] == "a"
+    assert len(anchors["U1.3"]) == 1 and anchors["U1.3"][0]["unit"] == "2" and anchors["U1.3"][0]["uuid"] == "b"
+
+    # Shared pin across multiple units (e.g. power pin on both unit 1 and unit 2).
+    u1_unit1_shared = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pins": {"1", "VCC"},
+                       "where": {"sheet": "/"}, "pos": [1, 2, 0]}
+    u1_unit2_shared = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "2"}, "pins": {"3", "VCC"},
+                       "where": {"sheet": "/"}, "pos": [3, 4, 0]}
+    shared_objs = {"/a": u1_unit1_shared, "/b": u1_unit2_shared}
+    text_shared = '(export (nets (net (name VCC) (node (ref U1) (pin VCC)))))'
+    nets_s, anchors_s, issues_s = net_members(text_shared, shared_objs, "c" * 40)
+    assert nets_s == {"VCC": {"U1.VCC"}} and not issues_s
+    assert len(anchors_s["U1.VCC"]) == 2
+    assert all(a.get("shared") is True for a in anchors_s["U1.VCC"])
+
+    # Querying a pin not declared on any unit of a pin-annotated symbol is ambiguous.
+    text_bad_pin = '(export (nets (net (name N) (node (ref U1) (pin 99)))))'
+    nets_bp, anchors_bp, issues_bp = net_members(text_bad_pin, objects, "c" * 40)
+    assert nets_bp["N"] is None and not anchors_bp
+    assert any(i["unknown"] for i in issues_bp)
+
+
+def test_br03_lib_unit_pins_real_parser():
+    # The real producer reads unit pin ownership from embedded lib_symbols; unit 0 is shared.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    pin = lambda n: '(pin passive line (at 0 0 0) (length 1) (name "x") (number "' + n + '"))'
+    with tempfile.TemporaryDirectory() as td:
+        (pathlib.Path(td) / "t.kicad_sch").write_text(
+            '(kicad_sch (uuid root) (lib_symbols (symbol "L:Dual" '
+            '(symbol "Dual_0_1" ' + pin("VCC") + ') (symbol "Dual_1_1" ' + pin("1") + pin("2") + ') '
+            '(symbol "Dual_2_1" ' + pin("3") + ')))'
+            '(symbol (lib_id "L:Dual") (uuid ua) (unit 1) (at 1 2 0) (property "Reference" "U1"))'
+            '(symbol (lib_id "L:Dual") (uuid ub) (unit 2) (at 5 2 0) (property "Reference" "U1"))'
+            '(symbol (lib_id "L:Other") (uuid uc) (unit 1) (at 9 2 0) (property "Reference" "R1")))')
+        objects = kr.sch_objects(td, "t")
+        assert objects["/ua"]["pins"] == {"VCC", "1", "2"} and objects["/ub"]["pins"] == {"VCC", "3"}
+        assert "pins" not in objects["/uc"]  # no embedded definition: ownership unknown, not guessed
+        text = ('(export (nets (net (name A) (node (ref U1) (pin 1))) (net (name B) (node (ref U1) (pin 3))) '
+                '(net (name P) (node (ref U1) (pin VCC))) (net (name Z) (node (ref U1) (pin 9)))))')
+        nets, anchors, issues = net_members(text, objects, "d" * 40)
+        assert [a["uuid"] for a in anchors["U1.1"]] == ["ua"] and [a["uuid"] for a in anchors["U1.3"]] == ["ub"]
+        assert sorted(a["uuid"] for a in anchors["U1.VCC"]) == ["ua", "ub"] and all(a["shared"] for a in anchors["U1.VCC"])
+        assert nets["Z"] is None and any(i["net"] == "Z" and i["unknown"] for i in issues)  # pin on no unit
+
+
 # Run the BR03 review regressions in the full plain-assertion suite as well.
 for test in (test_br03_unknown_net, test_br03_missing_pin, test_br03_power_policy,
-             test_br03_missing_multi_policy, test_br03_unit_anchor_candidates):
+             test_br03_missing_multi_policy, test_br03_unit_anchor_candidates,
+             test_br03_where_sheet_contract, test_br03_multi_unit_pin_resolution,
+             test_br03_lib_unit_pins_real_parser):
     test()
-print("ok BR03 review identity regressions (5 tests)")
+print("ok BR03 review identity regressions (8 tests)")
 
 # BR03: graph-based membership comparisons (also runnable without the full suite).
 def test_br03_net_graph():
@@ -3925,6 +4001,11 @@ def test_br03_wires():
                    {"b":wire((0,0),(1,0),sheet="/b/")})
     assert r["detail"] == {"kind":"wires", "drawn":1, "erased":1}
     assert wire_counts({"ignored":{"kind":"bus"}}) == {}
+    # Synthetic wires without points_mm using props.points string
+    syn_wire = lambda pts: {"kind": "wire", "where": {"sheet": "/"}, "props": {"points": pts}}
+    r_syn, = diff_wires({"a": syn_wire("(0, 0) (1, 0)"), "b": syn_wire("(1, 0) (0, 0)")},
+                        {"c": syn_wire("(1.0004, 0) (0, 0)")})
+    assert r_syn["detail"] == {"kind": "wires", "drawn": 0, "erased": 1}
 
 
 def test_br03_wire_parser():

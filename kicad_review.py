@@ -508,6 +508,23 @@ def title_block(root, where):
     return {f"meta:title_block:{where}": {"kind": "title block", "ref": where, "props": props, "where": None}}
 
 
+def lib_unit_pins(root):
+    """Pin numbers per unit from a schematic's embedded lib_symbols: {lib name: {unit: {number}}}.
+
+    Unit "0" holds the pins common to every unit. A symbol without an embedded
+    definition is absent, so callers treat its pin ownership as unknown.
+    """
+    result = {}
+    for lib in findall(find(root, "lib_symbols") or [], "symbol"):
+        units = result.setdefault(lib[1], {})
+        for sub in findall(lib, "symbol"):
+            parts = sub[1].rsplit("_", 2)
+            unit = parts[-2] if len(parts) == 3 and parts[-2].isdigit() else "0"
+            units.setdefault(unit, set()).update(val(p, "number") for p in findall(sub, "pin") if val(p, "number"))
+        units.setdefault("0", set()).update(val(p, "number") for p in findall(lib, "pin") if val(p, "number"))
+    return result
+
+
 def sch_objects(proj_dir, name):
     objs = {}
     root_uuid = None
@@ -522,6 +539,7 @@ def sch_objects(proj_dir, name):
             objs.update(title_block(root, "schematic"))
         inst_path = f"/{root_uuid}{page['path'].rstrip('/')}" if page["parent"] else f"/{root_uuid}"
         where = {"sheet": page["path"]}
+        lib_pins = lib_unit_pins(root)
         for n in root[1:]:
             if not isinstance(n, list) or not n:
                 continue
@@ -548,6 +566,9 @@ def sch_objects(proj_dir, name):
                           "on_board": val(n, "on_board")})
                 objs[key] = {"kind": "symbol", "ref": ref if unit == "1" else f"{ref} unit {unit}",
                              "match": ("symbol", ref, unit), "props": p, "pos": a, "where": where}
+                units = lib_pins.get(val(n, "lib_name") or val(n, "lib_id"))
+                if units is not None:  # pin numbers this unit owns: unit 0 is shared by every unit
+                    objs[key]["pins"] = frozenset(units.get("0", set()) | units.get(unit, set()))
             elif kind in ("wire", "bus"):
                 pts = points(n)
                 objs[key] = {"kind": kind, "ref": "", "props": {"points": " ".join(fmt_at(p) for p in pts)},
@@ -2326,8 +2347,9 @@ def net_members(text, objects, commit):
 
     None marks an unknown net, distinct from an observed empty set. Comparers must
     suppress a net pair if either side is unknown, not treat it as added/removed.
-    Multi-unit anchors are candidates: only the pin manifest can select the owning
-    unit (or units for shared pins); their positions are symbol, not pin, positions.
+    Multi-unit anchors resolve to the owning unit when unit pin sets are known;
+    otherwise all units on the sheet remain candidate anchors for subsequent manifest
+    resolution in Task 8. Their positions are symbol, not pin, positions.
     """
     _, parsed = parse_netlist(text)
     by_ref = {}
@@ -2344,24 +2366,36 @@ def net_members(text, objects, commit):
             if ref.startswith("#"):  # Power symbols and flags (ref starts with '#') are skipped; they are not fabricated as component pins
                 continue
             candidates = by_ref.get(ref, [])
-            units = [(o["where"]["sheet"], o["props"].get("unit", "1"))
+            units = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1"))
                      for _, o in candidates]
             invalid = not ref or "?" in ref
             # A missing or unannotated reference has no UUID in the netlist node, so only a single matching symbol candidate can be disambiguated.
-            ambiguous = (not pin or not candidates or len(units) != len(set(units)) or len({s for s, _ in units}) != 1
+            ambiguous = (not pin or not candidates
+                         or any(s is None for s, _ in units)
+                         or len(units) != len(set(units))
+                         or len({s for s, _ in units}) != 1
                          or (invalid and len(candidates) != 1))
             if ambiguous:
                 unknown = True
                 reasons.add(("Connectivity identity is ambiguous; schematic membership comparison suppressed", True))
                 continue
+            has_pin_info = any(o.get("pins") for _, o in candidates)
+            matching = [(uid, o) for uid, o in candidates if not o.get("pins") or pin in o["pins"]]
+            if has_pin_info and not matching:
+                unknown = True
+                reasons.add(("Connectivity identity is ambiguous; schematic membership comparison suppressed", True))
+                continue
+            unit_candidates = matching if matching else candidates
+            is_shared = has_pin_info and len(unit_candidates) > 1
             if invalid:
                 reasons.add(("Some connected pins have missing references; using symbol UUID and pin number", False))
             key = f"{candidates[0][0]}:{pin}" if invalid else f"{ref}.{pin}"
             members.add(key)
             net_anchors[key] = [{"uuid":uid.rsplit("/",1)[-1], "ref":ref, "pin":pin,
-                                 "unit":o["props"].get("unit", "1"), "sheet":o["where"]["sheet"],
-                                 "pos":o.get("pos"), "commit":commit}
-                                for uid, o in candidates]
+                                 "unit":o["props"].get("unit", "1"), "sheet":(o.get("where") or {}).get("sheet"),
+                                 "pos":o.get("pos"), "commit":commit,
+                                 **({"shared": True} if is_shared else {})}
+                                for uid, o in unit_candidates]
         nets[name] = None if unknown else members
         if not unknown:
             anchors.update(net_anchors)
@@ -2450,9 +2484,14 @@ def wire_counts(objects):
     for o in objects.values():
         if o["kind"] != "wire":
             continue
-        pts = [tuple(round(x, 3) + 0.0 for x in p) for p in o["points_mm"]]
+        raw_pts = o.get("points_mm")
+        if raw_pts is None:
+            values = [float(x) for x in re.findall(r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", o.get("props", {}).get("points", ""))]
+            raw_pts = [values[i:i + 2] for i in range(0, len(values), 2)]
+        pts = [tuple(round(x, 3) + 0.0 for x in p) for p in raw_pts]
+        sheet = (o.get("where") or {}).get("sheet", "/")
         for a, b in zip(pts, pts[1:]):
-            result[(o["where"]["sheet"], *sorted((a, b)))] += 1
+            result[(sheet, *sorted((a, b)))] += 1
     return result
 
 
