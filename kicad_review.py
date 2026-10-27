@@ -3544,7 +3544,19 @@ def checks_markdown(data):
     for p in data["projects"]:
         for c in p["checks"]:
             lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
-                         f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
+                         f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c.get('fixed', '—')} |")
+    for p in data['projects']:
+        for c in p['checks']:
+            if c['name'] != 'fab_limits':
+                continue
+            vendor = FAB_VENDOR_LABELS.get(c.get('vendor'))
+            label = f'Fab limits ({vendor})' if vendor else 'Fab limits'
+            prefix = f"**{md(p['name'])}**: " if len(data['projects']) > 1 else ''
+            if c.get('unsupported') or c['status'] == 'not_run':
+                text = f"{label}: not checked — {md(c.get('unsupported') or c.get('reason', 'unavailable'))}."
+            else:
+                text = f"{label}: {c['errors'] + c['warnings']} violations" + (f" ({c['waived']} waived)" if c.get('waived') else '') + '. Eligible limits only; see coverage in Checks.'
+            lines += ['', prefix + text]
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error" and not v.get("waived")]
     if news:
@@ -3726,7 +3738,8 @@ def check_runs(data):
                 raise KeyError(c["status"])
             r["conclusions"].append(rank)
             r["new"] += c["new_errors"]
-            r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
+            project_label = md(p['name']) + (f" ({FAB_VENDOR_LABELS[c['vendor']]})" if c.get('vendor') in FAB_VENDOR_LABELS else '')
+            r["rows"].append(f"| {project_label} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
     out = []
     for r in runs.values():
         _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]

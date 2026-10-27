@@ -4509,6 +4509,57 @@ def fab_produced_checks():
         return checks
 
 
+# FAB-06: summarize actual produced audits, including every vendor and project.
+produced = fab_produced_checks()
+jl, pw = produced['jlcpcb'], produced['pcbway']
+assert type(jl['warnings']) is int and isinstance(jl['coverageWarnings'],list)
+assert jl['warnings'] == 0 and jl['coverageWarnings']
+project = lambda name,checks: {'name':name,'dir':'','status':'modified','changes':[],
+                              'sheets':[],'board':{'changed':False},'checks':checks}
+jl_other = copy.deepcopy(jl)
+jl_other.update(errors=2,new_errors=2,status='fail')
+data = {'base':'a'*40,'head':'b'*40,'reason':'fab regression','links':{},
+        'settings':copy.deepcopy(kr.DEFAULT_SETTINGS),
+        'projects':[project('First',[jl,pw]),project('Second',[jl_other])]}
+block = kr.checks_markdown(data)
+assert block.startswith('\n### Checks\n')
+expected = ('**First**: Fab limits (JLCPCB): 1 violations',
+            '**First**: Fab limits (PCBWay): 1 violations',
+            '**Second**: Fab limits (JLCPCB): 2 violations')
+assert all(text in block for text in expected), 'FAB-06 every vendor section of every project is summarized'
+body = kr.comment_markdown(data,[], '')
+start = body.index('### Checks')
+assert all(body.index(text)>start for text in expected)
+assert not any(text in body[:start] for text in expected)
+runs = [r for r in kr.check_runs(data) if r['name']=='kicad-review / Fab limits']
+assert len(runs)==1 and runs[0]['conclusion']=='failure'
+summary = runs[0]['output']['summary']
+assert '| First (JLCPCB) |' in summary and '| First (PCBWay) |' in summary, 'FAB-06 vendor-qualified check-run rows'
+assert '| 0 (0) |' in summary, 'warning count is numeric in check-run output'
+assert all(w not in block for w in jl['coverageWarnings']), 'coverage belongs to ledger, not numeric counts'
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, _ = fab_test_render(pathlib.Path(td))
+    source.unlink()
+    with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+        removed = kr.fab_checks(p,cfg,str(out),{'active':{}})
+line = kr.checks_markdown({**data,'projects':[project('Removed board',removed)]})
+assert 'Fab limits (JLCPCB): not checked' in line and 'Fab limits (PCBWay): not checked' in line
+no_vendor = {k:v for k,v in removed[0].items() if k != 'vendor'}
+assert 'Fab limits: not checked' in kr.checks_markdown({**data,'projects':[project('Legacy',[no_vendor])]}), 'FAB-06 vendor-neutral only without vendor'
+legacy = {**data,'projects':[project('Old',[kr.run_check('drc',kr.DEFAULT_SETTINGS,[],[])])]}
+assert 'Fab limits' not in kr.comment_markdown(legacy,[], '')
+print('ok FAB-06 produced vendor summaries, placement, check run and removed board')
+
+readme = pathlib.Path('README.md').read_text()
+example = pathlib.Path('examples/kicad-review.toml').read_text()
+config = kr.tomllib.loads(example)
+assert config['checks']['fab_limits']=='informational' and config['fabrication']['check_limits'] is False
+assert 'checks.fab_limits' in readme and 'fabrication.check_limits' in readme
+assert 'coverageWarnings' in readme and 'integer' in readme
+assert 'server Run button' not in readme
+assert len(kr.fab_profiles())==12
+print('ok FAB-06 documentation defaults and coverage contract')
+
 off_cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
 off_cfg['fabrication']['check_limits']=True
 off_cfg['checks'].update(drc='off',fab_limits='required')

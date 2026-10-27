@@ -56,13 +56,15 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `fail_on` | `"new"` | `"new"`: a required check fails only on errors the change introduced. `"all"`: any error fails it. |
 | `checks.erc`, `checks.drc`, `checks.parity` | `"required"` | `required`, `informational` or `off` |
 | `checks.bom` | `"informational"` | as above |
+| `checks.fab_limits` | `"informational"` | as above; eligible vendor geometry limits when opted in |
 | `checks.interfaces` | `"off"` | as above; design-review rules on the schematic netlist |
 | `interfaces.<rule>` | built-in names | net or pin-function names for a rule (`uart_tx`, `i2c_sda`, `i2c_scl`, `can_h`, `can_l`, `esd_parts`; `spi` is accepted for compatibility but unused) |
 | `checks.release` | `"off"` | as above; builds and checks the fabrication package (adds about 2–4 s per board) |
 | `bom.required_fields` | `["Value", "Footprint"]` | symbol fields every BOM part must have (DNP and excluded-from-BOM parts are skipped) |
 | `bom.critical_prefixes` | `["U", "J", "Q", "D", "Y", "X", "K", "F"]` | reference prefixes whose datasheet coverage is shown separately |
 | `bom.order_ready_fields` | preset's fields | fields every part needs to count as order-ready (JLCPCB: Value, Footprint, LCSC; PCBWay: Value, Footprint, MPN) |
-| `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
+| `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway`; downloads and BOM preset, not the fab-limit vendor |
+| `fabrication.check_limits` | `false` | opt in to both JLCPCB and PCBWay limit checks; requires ordinary DRC (`checks.drc != "off"`) |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
 | `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
@@ -78,7 +80,7 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `libraries.enabled` | `false` | Review local symbol and footprint libraries: drawings, pin/pad changes, used-by references, and warnings |
 | `github.check_runs` | `false` | also publish one GitHub check run per check (`kicad-review / ERC`, `… / DRC`, …); the caller needs `checks: write` |
 | `threads.block_merge` | `false` | fail the review while any blocking thread is open; needs `threads.enabled`; creating, resolving or reopening a blocking thread in the review site re-runs the review |
-| `waivers.enabled` | `false` | read `kicad-review-waivers.toml`; a waived ERC, DRC or parity finding stays listed but no longer fails its check |
+| `waivers.enabled` | `false` | read `kicad-review-waivers.toml`; a waived ERC, DRC, parity or fab-limit finding stays listed but no longer fails its check |
 
 With `checks.release` on, each review also builds the fabrication package for the chosen preset and checks it: a Gerber for every copper layer and the outline, mask and paste on sides with SMD parts, drill files when the board has holes, a position file when SMD parts are fitted, and BOM and position file agreeing on references. Tagged releases also get a `SHA256SUMS` file so the files sent to the fab can be checked against the release.
 
@@ -87,6 +89,31 @@ For pull requests the base revision's settings file wins, so a change cannot rel
 Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL to make review comments link to its report page.
 
 Review history is off by default. Set the Actions variable `KICAD_REVIEW_HISTORY` to exactly `true` to keep the newest 50 review runs in the PR comment. The log records errors (new errors), not warnings. Failed or cancelled runs add no row; the previous log is carried over.
+
+## Fabrication limit checks (optional)
+
+Opt in to required checks with:
+
+```toml
+[checks]
+fab_limits = "required"
+
+[fabrication]
+preset = "jlcpcb"
+check_limits = true
+```
+
+Enabled fabrication limits require ordinary DRC (`checks.drc != "off"`); the incompatible combination is rejected. The default is opt-out (`fabrication.check_limits = false`) with `checks.fab_limits = "informational"`. Setting the check to `off` also disables it. Both JLCPCB and PCBWay are checked on every enabled review; `fabrication.preset` still chooses only the fabrication downloads and BOM preset. JLCPCB uses `jlcpcb-2l` for two copper layers and `jlcpcb-multilayer` for four or six; PCBWay uses `pcbway-std` for two, four or six. Other layer counts are explicitly not checked, never a clean pass. With `github.check_runs = true`, both vendor sections aggregate into one stable `kicad-review / Fab limits` check run, with vendor-qualified project rows.
+
+Both base and head revisions are audited. Fab findings are paired as new, existing or fixed, so `fail_on = "new"` counts only fab errors absent from the base audit, rather than all newly audited errors. Without a usable base audit (for example, an added board or unsupported base layers), every head finding is newly audited and `baselineAvailable` is `false`. Other comparison-mode checks still label newly audited findings rather than claiming historical newness. In spec 06 single-mode presentation, absolute current `errors`/`warnings` are shown and comparison-only new/fixed labels are suppressed; status, `baselineAvailable: false` when supplied, and the full coverage ledger are retained. This includes zero-count unsupported failures and no-board `not_run` results: zero is not proof of a pass. A no-board `not_run` has no `baselineAvailable` or `fixed` field because no head audit exists.
+
+The ordinary board DRC remains authoritative and unchanged. Each disposable vendor pass neutralizes house bounds, then enforces the vendor profile constraints; exclusions are cleared only in that temporary copy. Only ordinary-visible findings are subtracted from the vendor pass. An excluded house finding is not itself a vendor failure, while genuine vendor geometry remains checked despite authored Ignore severities or exclusions. Keeping the ordinary results and vendor-only additions preserves stricter house checks without rewriting the original board or rules. Temporary rules own only the section between `# kicad-review fab limits - start` and `# kicad-review fab limits - end`; authored rules outside it stay intact.
+
+The immutable versioned table `fab_limits.json` beside the CLI is distinct from the generated per-project audits `review/<project-id>/head/fab-limits.json` and `review/<project-id>/base/fab-limits.json`. The check name is `fab_limits`: one section per vendor, distinguished by `vendor` (`jlcpcb` or `pcbway`). Explicit `confidence: "deterministic"` and `evidence_source` on checks and findings describe KiCad evidence for checked geometry, not certified vendor capabilities or complete coverage. `warnings` remains the existing integer violation count; optional `coverageWarnings: list[str]` carries nonwaivable uncertainty messages, also stored in cached metadata. The report's Checks ledger separates checked, unchecked and unsupported limits from numeric findings.
+
+Profiles assume 1 oz copper (`assumedCopperOz = 1`, 0.035 mm). Missing/unknown stackup copper thickness or nonstandard thickness produces a coverage warning; these limits do not establish suitability for 2 oz copper. Without a valid closed outline, edge clearance is not checked. Mixed pad–via hole spacing is not checked; pad–pad and via–via checks apply only where the profile supplies their respective limits. Missing profile values, ambiguous mixed-pair limits and otherwise unsupported checks remain visible as unchecked. Retained limits without fresh publication support are explicitly identified as active study assumptions in the provenance section below. This is not a fabrication guarantee; confirm manufacturing options and uncertain study assumptions with the vendor. The provenance section below preserves the 2026-10-24 study values and records the fresh 2026-10-27 vendor-page check and per-profile `checkedOn` dates.
+
+Fab findings can be waived like DRC findings. Waived counts remain visible, and one waiver applies to the same geometry in both vendor sections; uncertainty/coverage warnings cannot be waived. Re-running uses the existing GitHub review workflow (or the connected site's re-run action), not an offline check or a new service. The downloaded report embeds its results and does not fetch profiles or run DRC.
 
 ## Fabrication profile provenance
 
@@ -190,7 +217,7 @@ When enabled, the workflow's "Collect review threads" step reads the pull reques
 
 ## Waivers (optional)
 
-A waiver accepts one specific ERC, DRC or parity finding: for example a deliberate clearance under a connector shield. BOM-field findings cannot be waived; fix their fields in the schematic. Waivers are off by default. Enable them with `enabled = true` under `[waivers]` in `kicad-review.toml` on the default branch. Settings still come from the review's base revision, so open pull requests pick up that setting after merging the default branch into their head.
+A waiver accepts one specific ERC, DRC, parity or fab-limit finding: for example a deliberate clearance under a connector shield. For fab limits, the same geometry is waived in both vendor sections, and waived counts remain visible; coverage uncertainty cannot be waived. BOM-field findings cannot be waived; fix their fields in the schematic. Waivers are off by default. Enable them with `enabled = true` under `[waivers]` in `kicad-review.toml` on the default branch. Settings still come from the review's base revision, so open pull requests pick up that setting after merging the default branch into their head.
 
 Press **Waive…** on a finding in the report to get a TOML snippet, not an automatic waiver. Fill in `reason` and `by`, and add the entry to `kicad-review-waivers.toml` at the repository root through a separate pull request to the target branch. See the fully commented [example file](examples/kicad-review-waivers.toml). Once that merges, re-run the review that had the finding.
 
