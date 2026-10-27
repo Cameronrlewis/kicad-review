@@ -3949,7 +3949,8 @@ print("ok per-commit project render cache hits retain both revisions")
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
 
-# Inherited symbol geometry: a derived symbol draws its base's shared body and selected unit only.
+# Task 2.1: Inherited symbol geometry before manifest integration (test_kicad_review.py:3952-4020+).
+# Placed after render-cache tests per brief update (lines 156-195 in 335db72 planning snapshot are occupied by Task 1 tests).
 libs = {
     'Base': kr.parse_sexpr('(symbol "Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))) (symbol "Base_2_1" (pin input line (at -5 0 0) (length 2) (name "B") (number "3"))))'),
     'Derived': kr.parse_sexpr('(symbol "Derived" (extends "Base") (symbol "Derived_1_1" (circle (center 0 0) (radius 9))))')}
@@ -3966,6 +3967,24 @@ assert pins_u1 == []
 assert not approx_u1
 assert max(p[0] for p in coords_u1) == 9 and min(p[0] for p in coords_u1) == -9
 assert max(p[1] for p in coords_u1) == 9 and min(p[1] for p in coords_u1) == -9
+
+# Multi-level inheritance: Grandchild extends Derived extends Base with inherited bodies first
+libs['Grandchild'] = kr.parse_sexpr('(symbol "Grandchild" (extends "Derived") (symbol "Grandchild_0_1" (rectangle (start -10 -10) (end 10 10))))')
+parts_gc = kr.symbol_primitives(libs, 'Grandchild', '2')
+coords_gc, pins_gc, approx_gc = kr.symbol_geometry(parts_gc)
+assert pins_gc == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}]
+assert not approx_gc
+assert max(p[0] for p in coords_gc) == 10 and min(p[0] for p in coords_gc) == -10
+# Base rectangle (-2..2), Base pin (-5..-3), Grandchild rectangle (-10..10)
+assert parts_gc[0][0] == 'rectangle' and kr.find(parts_gc[0], 'start')[1] == '-2'
+assert parts_gc[-1][0] == 'rectangle' and kr.find(parts_gc[-1], 'start')[1] == '-10'
+
+# Alternate body style (style='2') vs default (style='1')
+libs['Alt'] = kr.parse_sexpr('(symbol "Alt" (symbol "Alt_1_1" (circle (center 0 0) (radius 1))) (symbol "Alt_1_2" (circle (center 0 0) (radius 5))))')
+parts_alt1 = kr.symbol_primitives(libs, 'Alt', '1', style='1')
+parts_alt2 = kr.symbol_primitives(libs, 'Alt', '1', style='2')
+assert len(parts_alt1) == 1 and float(kr.val(parts_alt1[0], 'radius')) == 1.0
+assert len(parts_alt2) == 1 and float(kr.val(parts_alt2[0], 'radius')) == 5.0
 
 # Circle bounds at (c, r) produce its bounding square
 circle_coords, _, circle_approx = kr.symbol_geometry([kr.parse_sexpr('(circle (center 2 3) (radius 4))')])
@@ -4006,15 +4025,24 @@ try:
 except KeyError:
     pass
 
+# Parent extends missing symbol raises KeyError
+libs_broken = {'Broken': kr.parse_sexpr('(symbol "Broken" (extends "MissingParent"))')}
+try:
+    kr.symbol_primitives(libs_broken, 'Broken', '1')
+    assert False, 'broken parent inheritance must raise KeyError'
+except KeyError:
+    pass
+
 # Empty primitives produce empty coordinates and pins without approximation
 assert kr.symbol_geometry([]) == ([], [], False)
 
-# Angled pin rotates endpoint correctly (90 degrees: along +y)
-rotated_pin = kr.parse_sexpr('(pin input line (at 10 20 90) (length 5) (name "CLK") (number "1"))')
-rot_coords, rot_pins, rot_approx = kr.symbol_geometry([rotated_pin])
-assert not rot_approx
-assert rot_pins == [{'number': '1', 'name': 'CLK', 'x': 10.0, 'y': 20.0}]
-assert rot_coords[0] == [10.0, 20.0]
-assert abs(rot_coords[1][0] - 10.0) < 1e-6 and abs(rot_coords[1][1] - 25.0) < 1e-6
+# Angled pin rotates endpoint correctly across all cardinal orientations
+for angle, (dx, dy) in [(0, (4.0, 0.0)), (90, (0.0, 4.0)), (180, (-4.0, 0.0)), (270, (0.0, -4.0))]:
+    p_node = kr.parse_sexpr(f'(pin input line (at 10 20 {angle}) (length 4) (name "P") (number "1"))')
+    p_coords, p_pins, p_approx = kr.symbol_geometry([p_node])
+    assert not p_approx
+    assert p_pins == [{'number': '1', 'name': 'P', 'x': 10.0, 'y': 20.0}]
+    assert p_coords[0] == [10.0, 20.0]
+    assert abs(p_coords[1][0] - (10.0 + dx)) < 1e-6 and abs(p_coords[1][1] - (20.0 + dy)) < 1e-6
 
 print('ok inherited symbol geometry')
