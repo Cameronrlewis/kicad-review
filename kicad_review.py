@@ -1824,8 +1824,109 @@ def fab_parts(pro, name, settings, fab_dir):
     return parts
 
 
+CPL_TABLE = pathlib.Path(__file__).with_name("cpl_rotations") / "jlcpcb_cpl_rotations.csv"
+CPL_TABLE_SHA256 = "fce26b890863fa56c6fc8d91a44241d9f3b420c78da28a10bc13204903542698"
+CPL_OVERRIDE_HEADER = ["Designator", "Rotation", "Offset X", "Offset Y"]
+
+
+def load_cpl_table(path=CPL_TABLE):
+    """Rows of matthewlai/JLCKicadTools cpl_rotations_db.csv in file order: (compiled pattern, degrees, dx, dy)."""
+    data = pathlib.Path(path).read_bytes()
+    if hashlib.sha256(data).hexdigest() != CPL_TABLE_SHA256:
+        raise SystemExit(f"{path}: not the pinned CPL rotation table")
+    rows = list(csv.reader(data.decode("utf-8").splitlines()))
+    if rows[0][0] != "Footprint pattern":  # the header cells are quoted in the source; only the first cell is checked
+        raise SystemExit(f"{path}: unexpected CPL rotation table header")
+    table = []
+    for row in rows[1:]:
+        dx = float(row[2]) if len(row) > 2 else 0.0
+        dy = float(row[3]) if len(row) > 3 else 0.0
+        table.append((re.compile(row[0]), int(row[1]), dx, dy))
+    return table
+
+
+def cpl_rule(table, package):
+    """Last matching row wins, as in JLCKicadTools' FixRotations. re.match anchors only the start of the Package column."""
+    hit = None
+    for pattern, degrees, dx, dy in table:
+        if pattern.match(package):
+            hit = (degrees, dx, dy)
+    return hit
+
+
+def jlc_position(side, rotation, x, y, rule):
+    """One CPL row with the arithmetic of cpl_fix_rotations.py FixRotations (JLCKicadTools cdd504e, lines 121-173).
+    ponytail: the bottom-side mirror is the July 2022 rule the pinned code documents; unverified against JLCPCB's current behaviour (see cpl_rotations/SOURCE.md)."""
+    bottom = side == "Bottom"
+    if bottom and x < 0:
+        x = -x
+    if rule is not None:
+        degrees, dx, dy = rule
+        rotation = (rotation - degrees) % 360 if bottom else (rotation + degrees) % 360
+        x, y = x + dx, y + dy
+    if bottom:
+        rotation = (-rotation + 180) % 360
+    return rotation, x, y
+
+
+def load_cpl_overrides(path):
+    """Per-part overrides from <project folder>/<name>.cpl-overrides.csv. A listed Designator replaces its table rule."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if not rows or rows[0] != CPL_OVERRIDE_HEADER:
+        raise ValueError("CPL overrides header must be Designator,Rotation,Offset X,Offset Y")
+    overrides = {}
+    for row in rows[1:]:
+        if len(row) != 4 or not row[0]:
+            raise ValueError("malformed CPL override row")
+        if row[0] in overrides:
+            raise ValueError("duplicate CPL override for " + row[0])
+        dx, dy = float(row[2]), float(row[3])
+        if not (math.isfinite(dx) and math.isfinite(dy)):
+            raise ValueError("CPL override offset is not finite")
+        overrides[row[0]] = (int(row[1]), dx, dy)
+    return overrides
+
+
+def correct_positions(src, dest, table, overrides):
+    """Write the JLCPCB CPL with corrected rotation and offsets. Returns how many rows matched an override or a table rule."""
+    with open(src, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    col = {name: rows[0].index(name) for name in ("Designator", "Package", "Mid X", "Mid Y", "Rotation", "Layer")}
+    matched = 0
+    with open(dest, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(rows[0])
+        for row in rows[1:]:
+            side = row[col["Layer"]]
+            if side not in ("Top", "Bottom"):
+                raise ValueError("unexpected CPL side: " + side)
+            rule = overrides.get(row[col["Designator"]]) or cpl_rule(table, row[col["Package"]])
+            if rule is not None:
+                matched += 1
+            rot, x, y = jlc_position(side, float(row[col["Rotation"]]), float(row[col["Mid X"]]), float(row[col["Mid Y"]]), rule)
+            row[col["Rotation"]], row[col["Mid X"]], row[col["Mid Y"]] = f"{rot:.6f}", f"{x:.6f}", f"{y:.6f}"
+            w.writerow(row)
+    return matched
+
+
+def cpl_for_download(pro, name, settings, raw, dest):
+    """Corrected CPL for the download zip only. Release evidence and checks.release keep KiCad's raw export."""
+    overrides_path = os.path.join(os.path.dirname(pro), f"{name}.cpl-overrides.csv")
+    if settings["fabrication"]["preset"] != "jlcpcb":
+        if os.path.exists(overrides_path):
+            raise ValueError("CPL rotation overrides apply to the jlcpcb preset only")
+        shutil.copyfile(raw, dest)  # no PCBWay rotation source is pinned, so PCBWay positions stay KiCad's
+        return dest
+    matched = correct_positions(raw, dest, load_cpl_table(), load_cpl_overrides(overrides_path))
+    print(f"::notice::{name}: JLCPCB CPL rotation rules matched {matched} rows (JLCKicadTools table, pinned)")
+    return dest
+
+
 def fab_entry(pro, name, settings, fab_dir, dest):
-    """Read cached release evidence; rebuild only in disposable download staging."""
+    """Read raw release evidence; correct only the download zip's disposable CPL copy."""
     entry = {"kind": "fab", "label": DOWNLOAD_LABELS["fab"], "file": None, "error": None}
     expected = (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile)
     try:
@@ -1839,11 +1940,14 @@ def fab_entry(pro, name, settings, fab_dir, dest):
                 parts = fab_parts(pro, name, settings, staging)
             with zipfile.ZipFile(dest, "w") as z:
                 for part in parts:
-                    z.write(part, os.path.basename(part))
+                    base = os.path.basename(part)
+                    if base.endswith("-positions.csv"):
+                        part = cpl_for_download(pro, name, settings, part, os.path.join(staging, "cpl-" + base))
+                    z.write(part, base)
             fab_notices(name, settings, parts)
         entry["file"] = os.path.basename(dest)
     except expected:
-        print(f"::warning::{name}: fabrication export failed (incomplete outputs or invalid CSV/archive)")
+        print(f"::warning::{name}: fabrication export failed (incomplete outputs, invalid CSV/archive or CPL overrides)")
         entry["error"] = "fabrication export failed"
         try:
             if os.path.lexists(dest):

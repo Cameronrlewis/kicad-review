@@ -3796,7 +3796,9 @@ def dl_export(*args, **kwargs):
         result = export_downloads(*args, **kwargs)
     lines = output.getvalue().splitlines()
     notices = [line for line in lines if line.startswith("::notice::")]
-    assert all("fabrication differs from KiBot v1.9.1 template:" in line for line in notices), lines
+    assert all("fabrication differs from KiBot v1.9.1 template:" in line or
+               re.fullmatch(r"::notice::.+: JLCPCB CPL rotation rules matched \d+ rows \(JLCKicadTools table, pinned\)", line)
+               for line in notices), lines
     assert all(line.startswith(("::notice::", "::warning::")) for line in lines), lines
     for line in lines:
         if line.startswith("::warning::"):
@@ -4062,14 +4064,21 @@ try:
         made = kr.fab_entry(f"{source}/P.kicad_pro", "P", dl_settings, str(complete_fab), str(dest))
     assert made["file"] == dest.name and made["error"] is None, made
     prefix = "::notice::P: jlcpcb fabrication differs from KiBot v1.9.1 template: "
-    assert notes.getvalue().splitlines() == [prefix + d for d in (
+    assert notes.getvalue().splitlines() == ["::notice::P: JLCPCB CPL rotation rules matched 0 rows (JLCKicadTools table, pinned)"] + [prefix + d for d in (
         "missing Edge.Cuts (.gko)",
         "stencil layers exported; JLCPCB template excludes them (lines 147-148)",
         "BOM rows without LCSC number; JLCPCB template filters them (line 115)")], notes.getvalue()
     assert not dl_calls, "template differences must not trigger a fabrication rebuild"
     assert {p.name: p.read_bytes() for p in complete_fab.iterdir()} == original
     with zipfile.ZipFile(dest) as z:
-        assert {name: z.read(name) for name in z.namelist()} == original
+        assert set(z.namelist()) == set(original)
+        for member, raw in original.items():
+            if member.endswith("-positions.csv"):
+                assert z.read(member).decode() == (
+                    "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\r\n"
+                    "R1,10k,R_0603,10.000000,20.000000,90.000000,Top\r\n")
+            else:
+                assert z.read(member) == raw
     pcbway = copy.deepcopy(dl_settings); pcbway["fabrication"]["preset"] = "pcbway"
     notes = io.StringIO()
     with contextlib.redirect_stdout(notes):
@@ -4079,3 +4088,144 @@ try:
 finally:
     kr.subprocess.run = dl_real
 print("ok KiBot v1.9.1 pins and fabrication checks")
+
+# ---- Task 3B: JLCPCB CPL rotation correction ----
+import math
+CPL = kr.load_cpl_table()
+assert hashlib.sha256(kr.CPL_TABLE.read_bytes()).hexdigest() == kr.CPL_TABLE_SHA256
+assert len(CPL) == 59 and CPL[0][0].pattern == "^R_Array_Convex_" and CPL[-1][0].pattern == "^^WSON-8-1EP_6x5mm_P1.27mm"
+def rule(package):
+    return kr.cpl_rule(CPL, package)
+# Known parts, each row's expected value worked out from the pinned arithmetic.
+assert kr.jlc_position("Top", 0, 1.0, 2.0, rule("SOT-23-5")) == (270, 1.0, 2.0)               # ^SOT-23 is -90
+assert kr.jlc_position("Bottom", 0, 1.0, 2.0, rule("SOT-23-5")) == (90, 1.0, 2.0)            # bottom subtracts -90, then mirrors
+assert kr.jlc_position("Top", 350, 0.0, 0.0, rule("SOT-23-5")) == (260, 0.0, 0.0)            # modulo 360
+assert kr.jlc_position("Top", 0, 1.0, 1.0, rule("SOT-223-3_TabPin2")) == (180, 1.0, 1.0)     # ^SOT-223 is not ^SOT-23
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("SOP-8_3.9x4.9mm_P1.27mm")) == (270, 0.0, 0.0)
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("SOP-18_3.9x4.9mm_P1.27mm")) == (0, 0.0, 0.0)  # ^SOP-18_ is 0 degrees
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("SOP-4_3.9x4.9mm_P1.27mm")) == (270, 0.0, 0.0) # ^SOP-4_ and ^SOP-(?!18_) both match; last wins
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("QFN-16-1EP_4x4mm")) == (270, 0.0, 0.0)
+rot, x, y = kr.jlc_position("Top", 0, 10.0, 20.0, rule("PinHeader_2x05_P1.27mm_Vertical"))  # row with offsets 2.54, 0.635
+assert rot == 90 and math.isclose(x, 12.54) and math.isclose(y, 20.635), (rot, x, y)
+assert kr.jlc_position("Bottom", 0, -3.0, 4.0, rule("R_0805_2012Metric")) == (180, 3.0, 4.0)  # unmatched bottom: flip X, mirror
+assert kr.jlc_position("Top", 45, 1.0, 1.0, rule("R_0805_2012Metric")) == (45, 1.0, 1.0)      # unmatched top: unchanged
+# Overrides: a valid file parses; each bad file is refused.
+ov = pathlib.Path(tempfile.mkdtemp(), "P.cpl-overrides.csv")
+ov.write_text("Designator,Rotation,Offset X,Offset Y\nU1,90,0.5,0\n", encoding="utf-8")
+assert kr.load_cpl_overrides(str(ov)) == {"U1": (90, 0.5, 0.0)}
+assert kr.load_cpl_overrides(str(ov.with_name("missing.cpl-overrides.csv"))) == {}
+for text in ("Ref,Rotation,Offset X,Offset Y\nU1,90,0,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90.5,0,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,nan,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,0,0\nU1,0,0,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,,0\n"):
+    ov.write_text(text, encoding="utf-8")
+    try:
+        kr.load_cpl_overrides(str(ov))
+    except ValueError:
+        continue
+    raise AssertionError("accepted bad overrides: " + repr(text))
+# Download zip: corrected positions, overrides, PCBWay exemption, and untouched release evidence.
+kr.subprocess.run = dl_fake
+try:
+    dl_mode.clear(); case = tempfile.mkdtemp(); source = dl_project(case, "P")
+    cached = pathlib.Path(case, "out/fab"); cached.mkdir(parents=True)
+    kr.release_project(f"{source}/P.kicad_pro", "review", dl_settings, str(cached), "P")
+    RAW = ("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+           "Q1,BSS138,SOT-23-5,10.000000,20.000000,0.000000,Top\n"
+           "Q2,BSS138,SOT-23-5,5.000000,6.000000,0.000000,Bottom\n"
+           "R1,10k,R_0603,10.000000,20.000000,90.000000,Top\n")
+    (cached / "P-review-jlcpcb-positions.csv").write_text(RAW, encoding="utf-8")
+    original = {p.name: p.read_bytes() for p in cached.iterdir()}
+    os.makedirs(f"{case}/out/downloads", exist_ok=True)
+    HEADER = ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+    def zipped_cpl(entry):
+        with zipfile.ZipFile(f"{case}/out/downloads/{entry['file']}") as z:
+            return list(csv.reader(io.StringIO(z.read("P-review-jlcpcb-positions.csv").decode("utf-8"))))
+    def cpl_fab(settings, cache, filename, matched=None, failed=False):
+        notes = io.StringIO()
+        with contextlib.redirect_stdout(notes):
+            entry = kr.fab_entry(f"{source}/P.kicad_pro", "P", settings, str(cache), f"{case}/out/downloads/{filename}")
+        lines = notes.getvalue().splitlines()
+        if matched is not None:
+            assert f"::notice::P: JLCPCB CPL rotation rules matched {matched} rows (JLCKicadTools table, pinned)" in lines, lines
+        assert any(line.startswith("::warning::P: fabrication export failed") for line in lines) == failed, lines
+        assert all(line.startswith(("::notice::", "::warning::")) for line in lines), lines
+        return entry
+    first = cpl_fab(dl_settings, cached, "fab-P-bbbbbbb.zip", matched=2)
+    assert first["error"] is None, first
+    assert zipped_cpl(first) == [HEADER,
+        ["Q1", "BSS138", "SOT-23-5", "10.000000", "20.000000", "270.000000", "Top"],
+        ["Q2", "BSS138", "SOT-23-5", "5.000000", "6.000000", "90.000000", "Bottom"],
+        ["R1", "10k", "R_0603", "10.000000", "20.000000", "90.000000", "Top"]], zipped_cpl(first)
+    assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL correction changed release evidence"
+    # A per-project override replaces the table rule for its Designator (Q1 loses its -90), and adds to R1.
+    pathlib.Path(source, "P.cpl-overrides.csv").write_text("Designator,Rotation,Offset X,Offset Y\nR1,180,0,0\nQ1,0,0,0\n", encoding="utf-8")
+    second = cpl_fab(dl_settings, cached, "fab-P-ccccccc.zip", matched=3)
+    assert zipped_cpl(second) == [HEADER,
+        ["Q1", "BSS138", "SOT-23-5", "10.000000", "20.000000", "0.000000", "Top"],
+        ["Q2", "BSS138", "SOT-23-5", "5.000000", "6.000000", "90.000000", "Bottom"],
+        ["R1", "10k", "R_0603", "10.000000", "20.000000", "270.000000", "Top"]], zipped_cpl(second)
+    # PCBWay: positions are copied unchanged; overrides there are refused for that fabrication entry only.
+    pcb_settings = copy.deepcopy(dl_settings); pcb_settings["fabrication"]["preset"] = "pcbway"
+    pcb_cache = pathlib.Path(case, "out/fab-pcbway"); pcb_cache.mkdir(parents=True)
+    kr.release_project(f"{source}/P.kicad_pro", "review", pcb_settings, str(pcb_cache), "P")
+    pcb_pos = (pcb_cache / "P-review-pcbway-positions.csv").read_bytes()
+    os.remove(f"{source}/P.cpl-overrides.csv")
+    third = cpl_fab(pcb_settings, pcb_cache, "fab-P-ddddddd.zip")
+    assert third["error"] is None, third
+    with zipfile.ZipFile(f"{case}/out/downloads/{third['file']}") as z:
+        assert z.read("P-review-pcbway-positions.csv") == pcb_pos, "PCBWay positions must not be corrected"
+    pathlib.Path(source, "P.cpl-overrides.csv").write_text("Designator,Rotation,Offset X,Offset Y\nR1,180,0,0\n", encoding="utf-8")
+    refused = cpl_fab(pcb_settings, pcb_cache, "fab-P-eeeeeee.zip", failed=True)
+    assert refused["error"] == "fabrication export failed" and not os.path.exists(f"{case}/out/downloads/fab-P-eeeeeee.zip"), refused
+    # A malformed overrides file fails only the fabrication entry: PDF and GLB still arrive.
+    pathlib.Path(source, "P.cpl-overrides.csv").write_text("Designator,Rotation,Offset X,Offset Y\nR1,90.5,0,0\n", encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+    assert made[0]["error"] == "fabrication export failed" and all(e["file"] for e in made if e["kind"] in ("pdf", "glb")), made
+    assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL overrides changed release evidence"
+    assert not list(pathlib.Path(case, "out/downloads").glob(".fab-*")), "CPL staging leaked"
+finally:
+    kr.subprocess.run = dl_real
+print("ok CPL rotation rules, overrides and download zip")
+
+# Synthetic CSV regression: coordinates, offsets, overrides, bottom mirroring and row count.
+with tempfile.TemporaryDirectory() as cpl_dir:
+    raw = pathlib.Path(cpl_dir, "raw.csv")
+    corrected = pathlib.Path(cpl_dir, "corrected.csv")
+    raw.write_text("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+                   "J1,Header,PinHeader_2x05_P1.27mm_Vertical,10,20,90,Top\n"
+                   "J2,Header,PinHeader_2x05_P1.27mm_Vertical,-10,20,90,Bottom\n"
+                   "R1,10k,R_0805_2012Metric,-3,4,0,Bottom\n"
+                   "R2,10k,R_0805_2012Metric,1,2,45,Top\n"
+                   "Q1,BSS138,SOT-23-5,-5,6,30,Bottom\n", encoding="utf-8")
+    original = raw.read_bytes()
+    assert kr.correct_positions(raw, corrected, CPL, {"Q1": (90, 0.5, -1.5)}) == 3
+    assert list(csv.reader(io.StringIO(corrected.read_text()))) == [
+        ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"],
+        ["J1", "Header", "PinHeader_2x05_P1.27mm_Vertical", "12.540000", "20.635000", "180.000000", "Top"],
+        ["J2", "Header", "PinHeader_2x05_P1.27mm_Vertical", "12.540000", "20.635000", "180.000000", "Bottom"],
+        ["R1", "10k", "R_0805_2012Metric", "3.000000", "4.000000", "180.000000", "Bottom"],
+        ["R2", "10k", "R_0805_2012Metric", "1.000000", "2.000000", "45.000000", "Top"],
+        ["Q1", "BSS138", "SOT-23-5", "5.500000", "4.500000", "240.000000", "Bottom"]]
+    assert raw.read_bytes() == original
+    # Even a valid CSV is refused when it is not the pinned table.
+    wrong = pathlib.Path(cpl_dir, "table.csv")
+    wrong.write_bytes(kr.CPL_TABLE.read_bytes() + b"\n")
+    try:
+        kr.load_cpl_table(wrong)
+        raise AssertionError("accepted unpinned CPL table")
+    except SystemExit as error:
+        assert "not the pinned CPL rotation table" in str(error), error
+    override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
+    for row in ("U1,90,inf,0", "U1,90,0,-inf", ",90,0,0", "U1,90,0,0,extra", "U1,90,0,0\n\n"):
+        override.write_text("Designator,Rotation,Offset X,Offset Y\n" + row + "\n", encoding="utf-8")
+        try:
+            kr.load_cpl_overrides(override)
+            raise AssertionError("accepted malformed CPL override: " + row)
+        except ValueError:
+            pass
+print("ok synthetic CPL CSV regression and pin validation")
