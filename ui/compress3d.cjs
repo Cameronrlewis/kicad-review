@@ -95,7 +95,7 @@ function applyMaterials(document,finish) {
   const cache=new Map();
   for(const n of document.getRoot().listNodes()) {
     if(!n.getMesh())continue;
-    const role=n.getExtras()?.role, original=n.getMesh(), mesh=original.clone();
+    const role=n.getExtras().role, original=n.getMesh(), mesh=original.clone();
     for(const p of mesh.listPrimitives()) mesh.removePrimitive(p);
     for(const originalPrimitive of original.listPrimitives()) {
       const p=originalPrimitive.clone(), source=p.getMaterial();mesh.addPrimitive(p);
@@ -122,14 +122,16 @@ async function batchDocument(document) {
   const {flatten,join,weld,dedup,prune}=require('@gltf-transform/functions');
   // Every mesh descendant already carries reference and role extras.
   await document.transform(dedup({propertyTypes:[PropertyType.MATERIAL]}),flatten({cleanup:false}));
-  const groups=new Set(document.getRoot().listNodes().filter(n=>n.getMesh()).map(n=>n.getExtras()?.batch).filter(Boolean));
+  const meshNodes=document.getRoot().listNodes().filter(n=>n.getMesh());
+  for(const n of meshNodes) if(!n.getExtras().batch) throw Error('unstamped mesh node: '+n.getName());
+  const groups=new Set(meshNodes.map(n=>n.getExtras().batch));
   for(const batch of groups) {
-    await document.transform(join({cleanup:false,keepNamed:false,filter:n=>n.getExtras()?.batch===batch}));
+    await document.transform(join({cleanup:false,keepNamed:false,filter:n=>n.getExtras().batch===batch}));
     // join preserves the chosen node's extras; fail instead of losing identity.
-    const nodes=document.getRoot().listNodes().filter(n=>n.getMesh()&&n.getExtras()?.batch===batch);
+    const nodes=document.getRoot().listNodes().filter(n=>n.getMesh()&&n.getExtras().batch===batch);
     if(!nodes.length)throw Error('batch lost role: '+batch);
     for(const n of nodes) {
-      const extras=n.getExtras()||{};
+      const extras=n.getExtras();
       n.setName(batch).setExtras({...extras,
         ...(batch.startsWith('parts:merged:')?{role:'body',side:batch.slice(13),ref:null}:{}),
         ...(batch.startsWith('ref:')?{role:'body',ref:batch.slice(4)}:{})});
@@ -137,7 +139,7 @@ async function batchDocument(document) {
   }
   for(const scene of document.getRoot().listScenes()) {
     for(const batch of [...groups].filter(x=>x.startsWith('ref:'))) {
-      const nodes=scene.listChildren().filter(n=>n.getMesh()&&n.getExtras()?.batch===batch);
+      const nodes=scene.listChildren().filter(n=>n.getMesh()&&n.getExtras().batch===batch);
       if(!nodes.length)continue;
       const parent=document.createNode(batch.slice(4));scene.addChild(parent);
       for(const n of nodes){scene.removeChild(n);parent.addChild(n);}

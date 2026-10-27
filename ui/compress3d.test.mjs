@@ -38,7 +38,7 @@ function makeDocument(names,copies=1) {
   const material=d.createMaterial('body').setBaseColorFactor([.1,.1,.1,1]);
   const footprints=[];
   names.forEach((ref,i)=>{
-    const parent=d.createNode(ref).setTranslation([i*.004,.002,0]);scene.addChild(parent);
+    const parent=d.createNode(ref).setTranslation([i*.004,.002,i*.003]);scene.addChild(parent);
     const mesh=d.createMesh();
     for(let j=0;j<copies;j++) {
       const p=d.createAccessor().setType('VEC3').setBuffer(buffer)
@@ -51,6 +51,18 @@ function makeDocument(names,copies=1) {
       box:[i*4-1,-1,i*4+1,1],hasModel:true,reason:null});
   });
   return {d,metadata:{version:1,side:'head',finish:'ENIG',keep:[],footprints}};
+}
+function assertBounds(node, box, label) {
+  const {getBounds}=require('@gltf-transform/functions');
+  const bounds=getBounds(node), actual=[...bounds.min,...bounds.max];
+  for(let i=0;i<6;i++) assert.ok(Math.abs(actual[i]-box[i])<=.00005, `${label} bounds error at ${i}: ${actual[i]} vs ${box[i]}`);
+}
+function assertMerged(emitted) {
+  for(const side of ['top','bottom']) {
+    const nodes=emitted.getRoot().listNodes().filter(n=>n.getMesh()&&n.getName()==='parts:merged:'+side);
+    assert.ok(nodes.length, 'BR02 emitted merged '+side);
+    for(const n of nodes) assert.deepEqual({role:n.getExtras().role,side:n.getExtras().side,ref:n.getExtras().ref},{role:'body',side,ref:null});
+  }
 }
 // Policy tests stay dependency-free. Full verification must explicitly opt in.
 const integration={skip:process.env.PROCESS3D_INTEGRATION!=='1'
@@ -237,29 +249,31 @@ test('BR02 240 compatible changed primitives fit the hard changed-part budget', 
   assert.equal(kept[0].listChildren().reduce((s, n) => s + (n.getMesh()?.listPrimitives().length || 0), 0), 1);
   assert.ok(!d.getRoot().listNodes().some(n => ['R2', 'R3'].includes(n.getName())));
   assert.equal(before.length, 3);
-  const {getBounds} = require('@gltf-transform/functions');
-  const keptBox = getBounds(kept[0]);
-  const after = [...keptBox.min, ...keptBox.max];
-  const r12Before = before.find(p => p.ref === 'R12').box;
-  for (let i = 0; i < 6; i++) {
-    assert.ok(Math.abs(after[i] - r12Before[i]) <= .00005, 'bounds error <= 0.00005m at ' + i + ': ' + after[i] + ' vs ' + r12Before[i]);
-  }
+  assertBounds(kept[0], before.find(p => p.ref === 'R12').box, 'R12');
   const {NodeIO} = require('@gltf-transform/core'), {ALL_EXTENSIONS} = require('@gltf-transform/extensions');
   const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
   const emitted = await io.readBinary(await io.writeBinary(d));
-  for (const side of ['top', 'bottom']) {
-    const nodes = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getName() === 'parts:merged:' + side);
-    assert.ok(nodes.length, 'BR02 emitted merged ' + side);
-    for (const n of nodes) {
-      assert.deepEqual(
-        {role: n.getExtras().role, side: n.getExtras().side, ref: n.getExtras().ref},
-        {role: 'body', side, ref: null}
-      );
-    }
-  }
+  assertMerged(emitted);
   const changed = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().batch === 'ref:R12');
   assert.ok(changed.length);
   assert.ok(changed.every(n => n.getExtras().ref === 'R12'));
+});
+
+test('BR02 batchDocument rejects unstamped mesh nodes', integration, async () => {
+  const {d}=makeDocument(['R1']);
+  d.getRoot().listNodes().find(n=>n.getMesh()).setExtras({});
+  await assert.rejects(P.batchDocument(d), /unstamped mesh node: model-body/);
+});
+
+test('BR02 distinct appearance materials remain separate primitives', integration, async () => {
+  const {d}=makeDocument(['R1'],2);
+  const node=d.getRoot().listNodes().find(n=>n.getMesh());
+  node.setExtras({role:'body',batch:'ref:R1',ref:'R1',side:'top'});
+  node.getMesh().listPrimitives()[1].setMaterial(d.createMaterial('distinct').setBaseColorFactor([.9,.1,.2,1]));
+  P.applyMaterials(d,'ENIG'); await P.batchDocument(d);
+  const retained=d.getRoot().listNodes().find(n=>n.getName()==='R1');
+  const count=retained.listChildren().reduce((sum,n)=>sum+(n.getMesh()?.listPrimitives().length||0),0);
+  assert.equal(count,2);
 });
 
 test('BR02 board role materials do not mutate source body material', integration, () => {
@@ -309,14 +323,7 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
     assert.ok(kept[0].listChildren().length >= 1, 'R1 has children');
 
     // Bounds of kept R1 reread with getBounds error <= 0.00005 m
-    const keptBox = getBounds(kept[0]);
-    const after = [...keptBox.min, ...keptBox.max];
-    for (let i = 0; i < 6; i++) {
-      assert.ok(
-        Math.abs(after[i] - r1Before[i]) <= .00005,
-        `R1 bounds error <= 0.00005m at ${i} for ${p}: ${after[i]} vs ${r1Before[i]}`
-      );
-    }
+    assertBounds(kept[0], r1Before, `R1 in ${p}`);
 
     // Unchanged components R2 and J1 must NOT have retained identity parents
     assert.ok(!doc.getRoot().listNodes().some(n => ['R2', 'J1'].includes(n.getName())));
@@ -324,25 +331,7 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
     // Emitted binary roundtrip validation
     const emitted = await io.readBinary(await io.writeBinary(doc));
 
-    // Merged top components exist and have body role and ref: null
-    const mergedTop = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getName() === 'parts:merged:top');
-    assert.ok(mergedTop.length >= 1, `parts:merged:top present in ${p}`);
-    for (const n of mergedTop) {
-      assert.deepEqual(
-        {role: n.getExtras().role, side: n.getExtras().side, ref: n.getExtras().ref},
-        {role: 'body', side: 'top', ref: null}
-      );
-    }
-
-    // Merged bottom components exist (J1 was on bottom)
-    const mergedBottom = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getName() === 'parts:merged:bottom');
-    assert.ok(mergedBottom.length >= 1, `parts:merged:bottom present in ${p}`);
-    for (const n of mergedBottom) {
-      assert.deepEqual(
-        {role: n.getExtras().role, side: n.getExtras().side, ref: n.getExtras().ref},
-        {role: 'body', side: 'bottom', ref: null}
-      );
-    }
+    assertMerged(emitted);
 
     // Retained R1 changed part in emitted output
     const changed = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().batch === 'ref:R1');
@@ -353,16 +342,16 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
     const boardNodes = emitted.getRoot().listNodes().filter(n => n.getMesh() && n.getExtras().role !== 'body');
     const copperNodes = boardNodes.filter(n => n.getExtras().role === 'copper');
     assert.ok(copperNodes.length >= 1, 'copper nodes present');
-    for (const n of copperNodes) {
-      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+    for (const n of copperNodes) for (const primitive of n.getMesh().listPrimitives()) {
+      const mat = primitive.getMaterial();
       assert.deepEqual(mat.getBaseColorFactor(), [.78, .63, .39, 1]);
       assert.equal(mat.getExtension('KHR_materials_anisotropy').getAnisotropyStrength(), .3);
     }
 
     const padNodes = boardNodes.filter(n => n.getExtras().role === 'pads');
     assert.ok(padNodes.length >= 1, 'pad nodes present');
-    for (const n of padNodes) {
-      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+    for (const n of padNodes) for (const primitive of n.getMesh().listPrimitives()) {
+      const mat = primitive.getMaterial();
       assert.deepEqual(mat.getBaseColorFactor(), [1, .78, .34, 1]);
       assert.equal(mat.getMetallicFactor(), 1);
       assert.equal(mat.getRoughnessFactor(), .3);
@@ -370,8 +359,8 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
 
     const fr4Nodes = boardNodes.filter(n => n.getExtras().role === 'fr4');
     assert.ok(fr4Nodes.length >= 1, 'fr4 nodes present');
-    for (const n of fr4Nodes) {
-      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+    for (const n of fr4Nodes) for (const primitive of n.getMesh().listPrimitives()) {
+      const mat = primitive.getMaterial();
       assert.deepEqual(mat.getBaseColorFactor(), [.2, .205, .125, 1]);
       assert.equal(mat.getMetallicFactor(), 0);
       assert.equal(mat.getRoughnessFactor(), .85);
@@ -379,8 +368,10 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
 
     const maskNodes = boardNodes.filter(n => n.getExtras().role === 'mask');
     assert.ok(maskNodes.length >= 1, 'mask nodes present');
-    for (const n of maskNodes) {
-      const mat = n.getMesh().listPrimitives()[0].getMaterial();
+    for (const n of maskNodes) for (const primitive of n.getMesh().listPrimitives()) {
+      const mat = primitive.getMaterial();
+      assert.equal(mat.getAlphaMode(), 'BLEND');
+      assert.equal(mat.getBaseColorFactor()[3], .72);
       assert.equal(mat.getRoughnessFactor(), .6);
       assert.equal(mat.getExtension('KHR_materials_clearcoat').getClearcoatFactor(), .6);
       assert.equal(mat.getExtension('KHR_materials_clearcoat').getClearcoatRoughnessFactor(), .18);
