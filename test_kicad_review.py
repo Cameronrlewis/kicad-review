@@ -3835,6 +3835,24 @@ def test_br03_multi_unit_pin_resolution():
     assert nets_bp["N"] is None and not anchors_bp
     assert any(i["unknown"] for i in issues_bp)
 
+    # Empty unit pin set (frozenset()) must not match every pin or mark other-unit pins as shared.
+    u1_u1 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pins": frozenset({"1", "2"}),
+             "where": {"sheet": "/"}, "pos": [1, 2, 0]}
+    u1_u2_empty = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "2"}, "pins": frozenset(),
+                   "where": {"sheet": "/"}, "pos": [3, 4, 0]}
+    empty_unit_objs = {"/a": u1_u1, "/b": u1_u2_empty}
+    text_u1_pin = '(export (nets (net (name NET_1) (node (ref U1) (pin 1)))))'
+    nets_ep, anchors_ep, issues_ep = net_members(text_u1_pin, empty_unit_objs, "c" * 40)
+    assert nets_ep == {"NET_1": {"U1.1"}} and not issues_ep
+    assert len(anchors_ep["U1.1"]) == 1 and anchors_ep["U1.1"][0]["uuid"] == "a"
+    assert "shared" not in anchors_ep["U1.1"][0]
+
+    # Nonexistent pin with an empty-unit candidate must be detected as unknown, not matched to the empty unit.
+    text_nonexistent = '(export (nets (net (name NET_NONE) (node (ref U1) (pin 99)))))'
+    nets_ne, anchors_ne, issues_ne = net_members(text_nonexistent, empty_unit_objs, "c" * 40)
+    assert nets_ne["NET_NONE"] is None and not anchors_ne
+    assert any(i["net"] == "NET_NONE" and i["unknown"] for i in issues_ne)
+
 
 def test_br03_lib_unit_pins_real_parser():
     # The real producer reads unit pin ownership from embedded lib_symbols; unit 0 is shared.
@@ -3859,6 +3877,14 @@ def test_br03_lib_unit_pins_real_parser():
         assert [a["uuid"] for a in anchors["U1.1"]] == ["ua"] and [a["uuid"] for a in anchors["U1.3"]] == ["ub"]
         assert sorted(a["uuid"] for a in anchors["U1.VCC"]) == ["ua", "ub"] and all(a["shared"] for a in anchors["U1.VCC"])
         assert nets["Z"] is None and any(i["net"] == "Z" and i["unknown"] for i in issues)  # pin on no unit
+
+        # lib_id takes priority over lib_name when looking up lib_pins
+        (pathlib.Path(td) / "alias.kicad_sch").write_text(
+            '(kicad_sch (uuid root) (lib_symbols (symbol "Lib:Part" '
+            '(symbol "Part_1_1" ' + pin("1") + ')))'
+            '(symbol (lib_id "Lib:Part") (lib_name "Part_Alias") (uuid u_alias) (unit 1) (at 1 2 0) (property "Reference" "U2")))')
+        objects_alias = kr.sch_objects(td, "alias")
+        assert "pins" in objects_alias["/u_alias"] and objects_alias["/u_alias"]["pins"] == {"1"}
 
 
 # Run the BR03 review regressions in the full plain-assertion suite as well.

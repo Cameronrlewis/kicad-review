@@ -566,7 +566,9 @@ def sch_objects(proj_dir, name):
                           "on_board": val(n, "on_board")})
                 objs[key] = {"kind": "symbol", "ref": ref if unit == "1" else f"{ref} unit {unit}",
                              "match": ("symbol", ref, unit), "props": p, "pos": a, "where": where}
-                units = lib_pins.get(val(n, "lib_name") or val(n, "lib_id"))
+                units = lib_pins.get(val(n, "lib_id"))
+                if units is None:
+                    units = lib_pins.get(val(n, "lib_name"))
                 if units is not None:  # pin numbers this unit owns: unit 0 is shared by every unit
                     objs[key]["pins"] = frozenset(units.get("0", set()) | units.get(unit, set()))
             elif kind in ("wire", "bus"):
@@ -2379,8 +2381,8 @@ def net_members(text, objects, commit):
                 unknown = True
                 reasons.add(("Connectivity identity is ambiguous; schematic membership comparison suppressed", True))
                 continue
-            has_pin_info = any(o.get("pins") for _, o in candidates)
-            matching = [(uid, o) for uid, o in candidates if not o.get("pins") or pin in o["pins"]]
+            has_pin_info = any(o.get("pins") is not None for _, o in candidates)
+            matching = [(uid, o) for uid, o in candidates if o.get("pins") is None or pin in o["pins"]]
             if has_pin_info and not matching:
                 unknown = True
                 reasons.add(("Connectivity identity is ambiguous; schematic membership comparison suppressed", True))
