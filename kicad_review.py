@@ -1749,6 +1749,43 @@ def cmd_release(args):
         print("release/SHA256SUMS")
 
 
+# ---- Downloads: head-revision files for the report's Download dialog (downloads.enabled). ----
+
+DOWNLOAD_STEP_TIMEOUT = 120  # seconds; a slower STEP export is skipped and the reason recorded
+DOWNLOAD_LABELS = {"fab": "For fabrication", "pdf": "Schematic PDF", "step": "3D model (STEP)", "glb": "3D model (GLB)"}
+
+
+def safe_name(text):
+    """File-name-safe label: the Worker route and the gh command only ever see [A-Za-z0-9_.-]."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("-.") or "project"
+
+
+def export_one(kind, args, dest, timeout=None):
+    """Run one kicad-cli export; record failed, slow or empty exports instead of raising."""
+    entry = {"kind": kind, "label": DOWNLOAD_LABELS[kind], "file": None, "error": None}
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        r = subprocess.run(["kicad-cli", *args], capture_output=True, text=True, timeout=timeout)
+        if r.returncode:
+            entry["error"] = f"kicad-cli exited {r.returncode}"
+        elif not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+            entry["error"] = "kicad-cli wrote no file"  # KiCad can exit 0 after printing an error (pcb export odb does)
+    except subprocess.TimeoutExpired:
+        entry["error"] = f"skipped: export took longer than {timeout} s"
+    except OSError as e:
+        entry["error"] = f"kicad-cli unavailable: {e}"
+    if entry["error"]:
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError as e:
+            entry["error"] += f"; cannot remove output: {e}"
+    else:
+        entry["file"] = os.path.basename(dest)
+    return entry
+
+
 def violation(v, scale, where):
     items = v.get("items", [])
     pos = [[round(i["pos"]["x"] * scale, 4), round(i["pos"]["y"] * scale, 4)] for i in items if "pos" in i]

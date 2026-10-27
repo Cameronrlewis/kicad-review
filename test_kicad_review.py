@@ -3704,3 +3704,84 @@ for text, expected in (("", {"enabled": False, "step": True}),
 with patch("kicad_review.os.path.exists", return_value=False):
     assert load_settings()["downloads"] == {"enabled": False, "step": True}
 print("ok downloads defaults and load isolation")
+
+# Downloads: one export is recorded, never raised; partial files are removed.
+from kicad_review import export_one, safe_name
+assert safe_name("a b/c") == "a-b-c" and safe_name("...") == "project" and safe_name("Thermal_Camera") == "Thermal_Camera"
+POS = "Ref,Val,Package,PosX,PosY,Rot,Side\nR1,10k,R_0603,10,20,90,top\n"
+BOM = "Comment,Designator,Footprint,LCSC Part #\n10k,R1,R_0603,C123\n"
+dl_real, dl_calls, dl_mode = kr.subprocess.run, [], {}
+def dl_fake(args, **kw):
+    if not args[0].endswith("kicad-cli"):
+        return dl_real(args, **kw)
+    dl_calls.append((args, kw.get("timeout")))
+    kind = args[3]
+    out = pathlib.Path(args[args.index("-o") + 1])
+    mode = dl_mode.get(kind)
+    if mode == "rc":
+        return types.SimpleNamespace(returncode=7, stdout="", stderr="boom")
+    if mode != "nofile":
+        if kind in ("gerbers", "drill"):
+            out = out / ("P.drl" if kind == "drill" else "P-F_Cu.gbr")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "bom":
+            labels = args[args.index("--labels") + 1]
+            out.write_text("" if mode == "empty" else labels + "\n")
+        else:
+            out.write_text("" if mode == "empty" else {"pos": "Ref,Val\nR1,10k\n" if mode == "badheader" else POS}.get(kind, "data"))
+        if kind == "gerbers" and mode != "empty":
+            (out.parent / "P-B_Cu.gbr").write_text("data")
+    if mode == "timeout":
+        raise kr.subprocess.TimeoutExpired(args, kw.get("timeout"))
+    return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+kr.subprocess.run = dl_fake
+try:
+    t = tempfile.mkdtemp()
+    ok = export_one("pdf", ["sch", "export", "pdf", "-o", f"{t}/a.pdf"], f"{t}/a.pdf")
+    assert ok == {"kind": "pdf", "label": "Schematic PDF", "file": "a.pdf", "error": None}, ok
+    dl_mode["pdf"] = "rc"
+    bad = export_one("pdf", ["sch", "export", "pdf", "-o", f"{t}/b.pdf"], f"{t}/b.pdf")
+    assert bad["file"] is None and bad["error"] == "kicad-cli exited 7", bad
+    dl_mode["pdf"] = "nofile"
+    stale = f"{t}/stale.pdf"; pathlib.Path(stale).write_bytes(b"previous success")
+    empty = export_one("pdf", ["sch", "export", "pdf", "-o", stale], stale)
+    assert empty["file"] is None and empty["error"] == "kicad-cli wrote no file" and not pathlib.Path(stale).exists(), empty
+    dl_mode["pdf"] = "empty"
+    zero = export_one("pdf", ["sch", "export", "pdf", "-o", f"{t}/zero.pdf"], f"{t}/zero.pdf")
+    assert zero["file"] is None and zero["error"] == "kicad-cli wrote no file" and not os.path.exists(f"{t}/zero.pdf")
+    dl_mode.pop("pdf")
+    dl_mode["step"] = "timeout"
+    slow = export_one("step", ["pcb", "export", "step", "-o", f"{t}/d.step"], f"{t}/d.step", 120)
+    assert slow["file"] is None and slow["error"] == "skipped: export took longer than 120 s", slow
+    assert dl_calls[-1][1] == 120 and not os.path.exists(f"{t}/d.step"), "partial STEP must be deleted"
+finally:
+    kr.subprocess.run = dl_real
+print("ok export_one records failures instead of raising")
+
+# Operational errors and failed-output cleanup must not abort report generation.
+assert kr.DOWNLOAD_STEP_TIMEOUT == 120
+assert kr.DOWNLOAD_LABELS == {"fab": "For fabrication", "pdf": "Schematic PDF", "step": "3D model (STEP)", "glb": "3D model (GLB)"}
+with tempfile.TemporaryDirectory() as dl_dir:
+    dest = pathlib.Path(dl_dir) / "board.step"
+    args = ["pcb", "export", "step", "-o", str(dest)]
+    with patch("kicad_review.subprocess.run", side_effect=FileNotFoundError("missing kicad-cli")):
+        unavailable = export_one("step", args, str(dest))
+    assert unavailable["file"] is None and unavailable["error"].startswith("kicad-cli unavailable:"), unavailable
+
+    def dl_partial_failure(command, **kw):
+        dest.write_bytes(b"partial STEP")
+        return types.SimpleNamespace(returncode=7)
+
+    with patch("kicad_review.subprocess.run", side_effect=dl_partial_failure):
+        failed = export_one("step", args, str(dest))
+    assert failed["file"] is None and failed["error"] == "kicad-cli exited 7" and not dest.exists(), failed
+    with patch("kicad_review.subprocess.run", side_effect=dl_partial_failure), patch("kicad_review.os.remove", side_effect=PermissionError("output locked")):
+        locked = export_one("step", args, str(dest))
+    assert locked["file"] is None and "cannot remove output:" in locked["error"], locked
+    dest.unlink()
+    # A broken stale symlink must also be removed before exporting.
+    dest.symlink_to(pathlib.Path(dl_dir) / "missing.step")
+    with patch("kicad_review.subprocess.run", return_value=types.SimpleNamespace(returncode=0)):
+        missing = export_one("step", args, str(dest))
+    assert missing["file"] is None and missing["error"] == "kicad-cli wrote no file" and not dest.is_symlink(), missing
+print("ok export_one isolates operational and cleanup errors")
