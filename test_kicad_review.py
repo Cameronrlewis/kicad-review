@@ -4182,7 +4182,8 @@ def fab_test_raw(uid, kind='track_width'):
             'items':[{'uuid':uid,'description':uid,'pos':{'x':42.5,'y':20}}]}
 
 
-def fab_test_render(root, outline_severity='error', missing_outline=False):
+def fab_test_render(root, outline_severity='error', missing_outline=False,
+                    rules_text='(version 1)\n# house bytes\n'):
     root = root.resolve()
     source = root / 'four.kicad_pcb'
     source.write_text(pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text().replace('(thickness 0.035)', '', 1))
@@ -4190,7 +4191,7 @@ def fab_test_render(root, outline_severity='error', missing_outline=False):
     project.write_text(json.dumps({'board':{'design_settings':{'drc_exclusions':['unrelated-house-exclusion'],
         'rule_severities':{'invalid_outline':outline_severity,'via_diameter':'ignore'}}}}))
     rule = source.with_suffix('.kicad_dru')
-    rule.write_text('(version 1)\n# house bytes\n')
+    rule.write_text(rules_text)
     originals = {f:f.read_bytes() for f in (source,project,rule)}
     settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
     settings['fabrication']['check_limits'] = True
@@ -4227,6 +4228,23 @@ def fab_test_render(root, outline_severity='error', missing_outline=False):
         assert not any(v['type']=='invalid_outline' for v in meta['violations'])
     return p, source, root / 'report', settings, sections
 
+
+# Lexically valid authored files are not proof that KiCad loaded appended rules.
+# Track that residual risk even when the fake CLI returns valid geometry results.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    for index, rules in enumerate(('', '(version 1)\n',
+            '(version 1)\n(rule "house" (constraint unknown_constraint (min 0.3mm)))',
+            '(version 1)\n(rule "house" (constraint track_width (min 0.3 mm)))',
+            '(version 1)\n(rule "house" (condition "not a condition") (constraint track_width (min 0.3mm)))')):
+        case = root / str(index); case.mkdir()
+        _, _, _, _, sections = fab_test_render(case, rules_text=rules)
+        for meta in sections.values():
+            notices = [w for w in meta['coverageWarnings'] if 'rule loading' in w]
+            assert bool(notices) == bool(rules.strip()), 'FAB-03 authored-rule loading risk hidden'
+            if notices:
+                assert 'not independently verified' in notices[0]
+            assert len(meta['violations']) == 1, 'FAB-03 uncertainty changed violation counts'
 
 with tempfile.TemporaryDirectory() as td:
     root = pathlib.Path(td).resolve()
@@ -4336,7 +4354,9 @@ with tempfile.TemporaryDirectory() as td:
         kr.fab_regular_input(parent/'b.kicad_pcb')
         raise AssertionError('FAB-03 symlinked parent accepted')
     except RuntimeError as exc:
-        assert 'symlink' in str(exc)
+        assert str(parent) in str(exc) and 'physical checkout path' in str(exc)
+        assert '/private/tmp' in str(exc), 'FAB-03 symlink recovery guidance missing'
+    kr.fab_regular_input((parent/'b.kicad_pcb').resolve())
     table = root/'profiles.json'; table.write_bytes(kr.FAB_TABLE.read_bytes())
     det = {'base':'a'*40,'head':'a'*40}
     with patch.object(kr,'FAB_TABLE',table):

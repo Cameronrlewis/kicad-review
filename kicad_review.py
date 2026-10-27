@@ -260,7 +260,9 @@ def fab_regular_input(path):
     absolute = path.absolute()
     for part in reversed((absolute, *absolute.parents)):
         if part.is_symlink():
-            raise RuntimeError(f"fab input must not be a symlink: {part}")
+            raise RuntimeError(f"fab input must not be a symlink: {part}; "
+                               "use a physical checkout path with no symlink ancestors "
+                               "(on macOS, /private/tmp rather than /tmp and /private/var rather than /var)")
     if path.exists() and not path.is_file():
         raise RuntimeError(f"fab input must be a regular file: {path}")
 
@@ -269,6 +271,9 @@ def fab_lint_rules(text):
     """Reject lexical errors KiCad can silently ignore along with appended rules.
 
     This is a conservative syntax guard, not a replacement for KiCad's rule engine.
+    Units, constraint names and condition semantics are not validated here. KiCad
+    may silently discard appended rules for those errors; render_fab exposes this
+    residual risk in coverageWarnings whenever an authored rule file is present.
     Never rewrite authored rules to guess what the author intended.
     """
     depth = 0
@@ -338,6 +343,11 @@ def render_fab(p, side, out, settings):
     sections = fab_context(source)
     for s in sections:
         s.update(checked=[], violations=[], inputHash=input_hash)
+        if rules_bytes.strip():
+            s["coverageWarnings"].append(
+                "Authored rule file present: rule loading is not independently verified; "
+                "lexical lint does not validate units, constraint names or conditions, "
+                "and KiCad may silently ignore appended vendor rules")
     supported = [s for s in sections if not s["unsupported"]]
     if supported:
         with tempfile.TemporaryDirectory() as td:
