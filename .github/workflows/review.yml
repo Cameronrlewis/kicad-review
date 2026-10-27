@@ -82,14 +82,14 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: .render-cache/${{ steps.detect.outputs.base }}
-          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.base }}
+          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/fab_limits.json', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.base }}
 
       - name: Restore head revision renders
         if: steps.detect.outputs.changed == 'true'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: .render-cache/${{ steps.detect.outputs.head }}
-          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
+          key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/fab_limits.json', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
 
       - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'

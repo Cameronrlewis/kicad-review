@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
 KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
+FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
 
 
 def git(*args, check=True):
@@ -219,6 +220,110 @@ def board_path(p, side):
     return posixpath.join(side, p["dir"], f"{p['name']}.kicad_pcb")
 
 
+def fab_enabled(settings):
+    enabled = settings['fabrication'].get('check_limits', False) and settings['checks'].get('fab_limits') != 'off'
+    if enabled and settings['checks'].get('drc', 'off') == 'off':
+        raise ValueError('fabrication.check_limits requires checks.drc != "off": board findings are the subtraction baseline')
+    return enabled
+
+
+def fab_drc(pcb, out):
+    out.unlink(missing_ok=True)
+    r = subprocess.run(['kicad-cli','pcb','drc','--format','json','--severity-error',
+                        '--exit-code-violations','-o',str(out),str(pcb)],
+                       capture_output=True, text=True)
+    if r.returncode not in (0, 5):
+        raise RuntimeError(f'fab DRC failed ({r.returncode}): {r.stdout}\n{r.stderr}')
+    data = json.loads(out.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or data.get('coordinate_units') != 'mm' or not isinstance(data.get('violations'), list):
+        raise RuntimeError('fab DRC wrote invalid JSON or non-mm coordinates')
+    for row in data['violations']:
+        if (not isinstance(row, dict) or not isinstance(row.get('type'), str) or not row['type']
+                or row.get('severity') != 'error' or not isinstance(row.get('description'), str)
+                or not isinstance(row.get('items'), list)):
+            raise RuntimeError('fab DRC wrote malformed violation')
+        for item in row['items']:
+            if (not isinstance(item, dict) or not isinstance(item.get('description'), str)
+                    or ('uuid' in item and not isinstance(item['uuid'], str))):
+                raise RuntimeError('fab DRC wrote malformed item')
+            if 'pos' in item:
+                pos = item['pos']
+                if (not isinstance(pos, dict) or any(type(pos.get(k)) not in (int, float)
+                        or not math.isfinite(pos[k]) for k in ('x', 'y'))):
+                    raise RuntimeError('fab DRC wrote invalid position')
+    return data
+
+
+def fab_regular_input(path):
+    # ponytail: checkout is immutable during render; this is not a concurrent-write sandbox.
+    absolute = path.absolute()
+    for part in reversed((absolute, *absolute.parents)):
+        if part.is_symlink():
+            raise RuntimeError(f'fab input must not be a symlink: {part}')
+    if path.exists() and not path.is_file():
+        raise RuntimeError(f'fab input must be a regular file: {path}')
+
+
+def fab_run_drc(source, target, board_bytes, project_bytes, rules_bytes, vendor=None):
+    """One isolated DRC pass. vendor is None for the board-only pass, or (owned_rules_text, covered_types)."""
+    target.mkdir(parents=True)
+    pcb = target / source.name
+    pcb.write_bytes(board_bytes)
+    original = rules_bytes.decode('utf-8') if rules_bytes else '(version 1)\n'
+    if vendor is None:
+        if project_bytes:
+            pcb.with_suffix('.kicad_pro').write_bytes(project_bytes)
+        pcb.with_suffix('.kicad_dru').write_text(original, encoding='utf-8')
+    else:
+        owned_rules, covered = vendor
+        pcb.with_suffix('.kicad_dru').write_text(fab_owned_rules(original, owned_rules), encoding='utf-8')
+        project = json.loads(project_bytes.decode('utf-8')) if project_bytes else {}
+        design = project.setdefault('board', {}).setdefault('design_settings', {})
+        design['drc_exclusions'] = []
+        severities = design.setdefault('rule_severities', {})
+        for name in covered | {'invalid_outline'}:
+            severities[name] = 'error'
+        pcb.with_suffix('.kicad_pro').write_text(json.dumps(project), encoding='utf-8')
+    return fab_drc(pcb, target / 'drc.json')['violations']
+
+
+def render_fab(p, side, out, settings):
+    source = pathlib.Path(board_path(p, side))
+    for path in (source, source.with_suffix('.kicad_pro'), source.with_suffix('.kicad_dru')):
+        fab_regular_input(path)
+    pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+    if not source.is_file():
+        pathlib.Path(out, 'fab-limits.json').write_text(
+            json.dumps({'sections': [], 'reason': f'no {side} board'}), encoding='utf-8')
+        return
+    board_bytes = source.read_bytes()
+    project_bytes = source.with_suffix('.kicad_pro').read_bytes() if source.with_suffix('.kicad_pro').is_file() else b''
+    rules_bytes = source.with_suffix('.kicad_dru').read_bytes() if source.with_suffix('.kicad_dru').is_file() else b''
+    input_hash = hashlib.sha256(b'\0'.join([board_bytes, FAB_TABLE.read_bytes(), project_bytes, rules_bytes])).hexdigest()
+    sections = fab_context(source)
+    for s in sections:
+        s.update(checked=[], violations=[], inputHash=input_hash)
+    supported = [s for s in sections if not s['unsupported']]
+    if supported:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            # Exact saved fills in every pass, matching ordinary render_side (no --refill-zones).
+            board_rows = fab_run_drc(source, root / 'board', board_bytes, project_bytes, rules_bytes)
+            for s in supported:
+                vendor_rules, covered = fab_vendor_rules(s)
+                _, unchecked = fab_rule_section(s)
+                s['unchecked'] = list(unchecked)
+                vendor_rows = fab_run_drc(source, root / s['vendor'], board_bytes, project_bytes,
+                                          rules_bytes, (vendor_rules, covered))
+                s['violations'] = [v for v in fab_subtract(vendor_rows, board_rows) if v['type'] in covered]
+                if any(v['type'] == 'invalid_outline' for v in vendor_rows):
+                    s['unchecked'].append('edgeClearanceMm')
+                    s['coverageWarnings'].append('Edge clearance not checked: no valid closed board outline')
+                s['checked'] = [k for k in s['values'] if k not in s['unchecked']
+                                and not (s['layers'] <= 2 and 'Inner' in k)]
+    pathlib.Path(out, 'fab-limits.json').write_text(json.dumps({'sections': sections}, sort_keys=True), encoding='utf-8')
+
+
 def board_changed(p):
     """Whether the project's board bytes differ between the two checked-out revisions."""
     paths = [board_path(p, side) for side in ("base", "head")]
@@ -258,7 +363,9 @@ def render_cache(p, side, det, settings):
     revision = det.get(side) or ""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
-    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
+    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get('KICAD_IMAGE', 'local').encode()
+    if fab_enabled(settings):
+        identity += FAB_TABLE.read_bytes() + (b'fab-head' if side == 'head' else b'fab-base')
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -309,6 +416,11 @@ def cmd_render(args):
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
+            if fab_enabled(settings):
+                try:
+                    render_fab(p, side, out, settings)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    sys.exit(f'Fab limits could not run for {p["name"]}: {exc}')
             if export_3d:
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
@@ -1482,9 +1594,6 @@ DEFAULT_SETTINGS = {
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package", "fab_limits": "Fab limits"}
 
 
-FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
-
-
 def fab_profiles():
     return json.loads(FAB_TABLE.read_text(encoding="utf-8"))
 
@@ -1556,7 +1665,7 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
     if type(settings["fabrication"]["check_limits"]) is not bool:
         sys.exit(f"{SETTINGS_FILE}: fabrication.check_limits must be true or false")
-    if settings["fabrication"]["check_limits"] and settings["checks"]["drc"] == "off":
+    if settings["fabrication"]["check_limits"] and settings["checks"]["fab_limits"] != "off" and settings["checks"]["drc"] == "off":
         sys.exit(f'{SETTINGS_FILE}: fabrication.check_limits requires checks.drc != "off"')
     if settings["fail_on"] not in ("new", "all"):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")

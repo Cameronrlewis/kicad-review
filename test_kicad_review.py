@@ -4083,5 +4083,301 @@ def fab_profile_probe(root, profile, layers):
     return {'profile': profile, 'layers': layers, 'covered': sorted(covered),
             'checked': checked, 'unchecked': unchecked, 'cases': len(manifest)}
 
+# FAB-03: isolated execution, coverage and revision-only cache identity.
+from unittest.mock import patch
+from types import SimpleNamespace
+with tempfile.TemporaryDirectory() as td:
+    pcb, out = pathlib.Path(td, 'b.kicad_pcb'), pathlib.Path(td, 'drc.json')
+    pcb.write_text('(kicad_pcb)')
+    def cli_ok(args, **kwargs):
+        out.write_text(json.dumps({'coordinate_units':'mm','violations':[]}))
+        return SimpleNamespace(returncode=5, stdout='', stderr='')
+    with patch.object(kr.subprocess, 'run', side_effect=cli_ok) as runner:
+        assert kr.fab_drc(pcb, out)['violations'] == []
+        assert '--exit-code-violations' in runner.call_args.args[0]
+        assert '--refill-zones' not in runner.call_args.args[0]
+    for rc in (1, 2, 137):
+        with patch.object(kr.subprocess, 'run', return_value=SimpleNamespace(returncode=rc,stdout='',stderr='broken')):
+            try:
+                kr.fab_drc(pcb, out)
+                raise AssertionError('FAB-03 crash accepted')
+            except RuntimeError:
+                pass
+    def cli_clean(args, **kwargs):
+        result = cli_ok(args, **kwargs)
+        result.returncode = 0
+        return result
+    with patch.object(kr.subprocess, 'run', side_effect=cli_clean):
+        assert kr.fab_drc(pcb, out)['violations'] == [], 'FAB-03 clean exit accepted'
+    with patch.object(kr.subprocess, 'run', return_value=SimpleNamespace(returncode=0,stdout='',stderr='')):
+        out.write_text(json.dumps({'coordinate_units':'mm','violations':[]}))
+        try:
+            kr.fab_drc(pcb, out)
+            raise AssertionError('FAB-03 absent output reused stale JSON')
+        except (RuntimeError, OSError):
+            pass
+
+def fab_test_raw(uid, kind='track_width'):
+    return {'type':kind,'severity':'error','description':'too narrow',
+            'items':[{'uuid':uid,'description':uid,'pos':{'x':42.5,'y':20}}]}
+
+
+def fab_test_render(root, outline_severity='error', missing_outline=False):
+    source = root / 'four.kicad_pcb'
+    source.write_text(pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text().replace('(thickness 0.035)', '', 1))
+    project = source.with_suffix('.kicad_pro')
+    project.write_text(json.dumps({'board':{'design_settings':{'drc_exclusions':['unrelated-house-exclusion'],
+        'rule_severities':{'invalid_outline':outline_severity,'via_diameter':'ignore'}}}}))
+    rule = source.with_suffix('.kicad_dru')
+    rule.write_text('(version 1)\n# house bytes\n')
+    originals = {f:f.read_bytes() for f in (source,project,rule)}
+    settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    settings['fabrication']['check_limits'] = True
+    settings['checks']['fab_limits'] = 'required'
+    ordinary, extra = fab_test_raw('house'), fab_test_raw('track')
+    calls = []
+    def fake_drc(pcb, out):
+        mode = pcb.parent.name
+        calls.append(mode)
+        severities = json.loads(pcb.with_suffix('.kicad_pro').read_text())['board']['design_settings']['rule_severities']
+        assert severities['invalid_outline'] == ('error' if mode != 'board' else outline_severity)
+        design = json.loads(pcb.with_suffix('.kicad_pro').read_text())['board']['design_settings']
+        assert design['drc_exclusions'] == ([] if mode != 'board' else ['unrelated-house-exclusion'])
+        assert severities['via_diameter'] == 'ignore', 'unpublished dimension promoted'
+        if mode != 'board':
+            text = pcb.with_suffix('.kicad_dru').read_text()
+            assert text.index('fab neutral track_width') < text.index('fab track_width')
+        rows = [ordinary, extra] if mode != 'board' else [ordinary]
+        if missing_outline and mode != 'board':
+            rows += [{'type':'invalid_outline','severity':'error','description':'no outline','items':[]}]
+        return {'coordinate_units':'mm','violations':rows}
+    p = {'name':'Four','dir':'','status':'modified'}
+    output = root / 'report' / 'head'
+    with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_drc',side_effect=fake_drc):
+        kr.render_fab(p,'head',str(output),settings)
+    assert calls == ['board','jlcpcb','pcbway'], 'FAB-03 both vendor passes and one board pass'
+    assert all(f.read_bytes() == text for f,text in originals.items()), 'FAB-03 source mutated'
+    sections = {s['vendor']: s for s in json.loads((output / 'fab-limits.json').read_text())['sections']}
+    assert set(sections) == {'jlcpcb','pcbway'}
+    for meta in sections.values():
+        assert meta['violations'] == [extra] and meta['coverageWarnings']
+        assert ('edgeClearanceMm' in meta['unchecked']) == missing_outline
+        assert ('edgeClearanceMm' in meta['checked']) != missing_outline
+        assert not any(v['type']=='invalid_outline' for v in meta['violations'])
+    return p, source, root / 'report', settings, sections
+
+
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td)
+    pcb, out = root / 'b.kicad_pcb', root / 'drc.json'
+    pcb.write_text('(kicad_pcb)')
+    for text in ('', '{', '{}', '{"coordinate_units":"in","violations":[]}',
+                 '{"coordinate_units":"mm"}', '{"coordinate_units":"mm","violations":{}}'):
+        def bad_json(args, **kwargs):
+            out.write_text(text)
+            return SimpleNamespace(returncode=0,stdout='',stderr='')
+        with patch.object(kr.subprocess,'run',side_effect=bad_json):
+            try:
+                kr.fab_drc(pcb,out)
+                raise AssertionError('FAB-03 malformed output accepted: '+text)
+            except (ValueError, RuntimeError):
+                pass
+    invalid_rows = [None, {}, {**fab_test_raw('x'),'type':''},
+                    {**fab_test_raw('x'),'severity':'banana'},
+                    {**fab_test_raw('x'),'description':None},
+                    {**fab_test_raw('x'),'items':'not an array'},
+                    {**fab_test_raw('x'),'items':[None]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','uuid':3}]},
+                    {**fab_test_raw('x'),'items':[{'description':None}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':1}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':1,'y':float('inf')}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':None}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':'1','y':2}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':float('nan'),'y':2}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':True,'y':2}}]}]
+    for row in invalid_rows:
+        def malformed_row(args, **kwargs):
+            out.write_text(json.dumps({'coordinate_units':'mm','violations':[row]}))
+            return SimpleNamespace(returncode=5,stdout='',stderr='')
+        with patch.object(kr.subprocess,'run',side_effect=malformed_row):
+            try:
+                kr.fab_drc(pcb,out)
+                raise AssertionError('FAB-03 malformed row became clean check')
+            except RuntimeError:
+                pass
+    # Unit attribution negatives: inspect the actual disposable project/rules.
+    for label, objects, house, kind in (
+        ('ignored-unpublished-via',fab_via('via',size=.6,drill=.3),
+         '(rule "house" (constraint via_diameter (min 0.8mm)))','via_diameter'),
+        ('ignored-stricter-house',fab_segment('track',width=.12),
+         '(rule "house" (constraint track_width (min 0.3mm)))','track_width')):
+        case=root/label; case.mkdir()
+        source=case/'four.kicad_pcb'; source.write_text(fab_probe_board(objects))
+        source.with_suffix('.kicad_dru').write_text('(version 1)\n'+house)
+        source.with_suffix('.kicad_pro').write_text(json.dumps({'board':{'design_settings':{
+            'rule_severities':{kind:'ignore'},'drc_exclusions':['excluded-unrelated-house']}}}))
+        cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+        cfg['fabrication']['check_limits']=True; cfg['checks']['fab_limits']='required'
+        def attribution_drc(pcb,out):
+            design=json.loads(pcb.with_suffix('.kicad_pro').read_text())['board']['design_settings']
+            if pcb.parent.name=='board':
+                assert design['rule_severities'][kind]=='ignore'
+                return {'coordinate_units':'mm','violations':[]}
+            assert design['drc_exclusions']==[]
+            generated=pcb.with_suffix('.kicad_dru').read_text()
+            constraint='via_diameter' if kind=='via_diameter' else 'track_width'
+            assert house in generated
+            assert generated.index('fab neutral '+constraint) > generated.index('rule "house"')
+            if kind=='via_diameter':
+                assert design['rule_severities'][kind]=='ignore'
+                # Even an unrelated diagnostic emitted by the tool must not be attributed.
+                rows=[fab_test_raw('via',kind)]
+            else:
+                assert design['rule_severities'][kind]=='error'
+                assert generated.index('fab neutral track_width') < generated.index('fab track_width')
+                rows=[]  # .12 mm passes .09 mm vendor; real gate independently proves this.
+            return {'coordinate_units':'mm','violations':rows}
+        with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_drc',side_effect=attribution_drc):
+            kr.render_fab({'name':'Four'},'head',str(case/'out'),cfg)
+        sections=json.loads((case/'out'/'fab-limits.json').read_text())['sections']
+        for meta in sections:
+            assert meta['violations']==[], (label, meta['vendor'])
+        if kind=='via_diameter':
+            assert 'viaDiameterMinMm' in next(m for m in sections if m['vendor']=='jlcpcb')['unchecked']
+    for severity in ('error','warning','ignore'):
+        case = root / severity; case.mkdir()
+        fab_test_render(case,severity,missing_outline=True)
+    complete = root / 'complete'; complete.mkdir()
+    _, _, _, settings, _ = fab_test_render(complete)
+    for suffix, dangling in ((s,d) for s in ('.kicad_pcb','.kicad_pro','.kicad_dru') for d in (False,True)):
+        case = root / ('link'+suffix+str(dangling)); case.mkdir()
+        source = case / 'b.kicad_pcb'; source.write_text('(kicad_pcb)')
+        target = case / 'secret'
+        if not dangling:
+            target.write_text('must not read target')
+        link = source.with_suffix(suffix); link.unlink(missing_ok=True); link.symlink_to(target)
+        with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_context') as context, patch.object(kr,'fab_drc') as drc, patch.object(pathlib.Path,'read_text') as read_text, patch.object(pathlib.Path,'read_bytes') as read_bytes:
+            try:
+                kr.render_fab({'name':'B'},'head',str(case/'out'),settings)
+                raise AssertionError('FAB-03 symlink accepted: '+suffix)
+            except RuntimeError as exc:
+                assert 'symlink' in str(exc)
+            context.assert_not_called(); drc.assert_not_called()
+            read_text.assert_not_called(); read_bytes.assert_not_called()
+        if not dangling:
+            assert target.read_text() == 'must not read target'
+        else:
+            assert not target.exists()
+    actual = root / 'actual'; actual.mkdir()
+    (actual/'b.kicad_pcb').write_text('(kicad_pcb)')
+    parent = root/'linked-parent'; parent.symlink_to(actual, target_is_directory=True)
+    try:
+        kr.fab_regular_input(parent/'b.kicad_pcb')
+        raise AssertionError('FAB-03 symlinked parent accepted')
+    except RuntimeError as exc:
+        assert 'symlink' in str(exc)
+    table = root/'profiles.json'; table.write_bytes(kr.FAB_TABLE.read_bytes())
+    det = {'base':'a'*40,'head':'a'*40}
+    with patch.object(kr,'FAB_TABLE',table):
+        before = kr.render_cache({'dir':''},'head',det,settings)
+        values = json.loads(table.read_text()); values['jlcpcb-2l']['checkedOn']='2026-10-25'
+        table.write_text(json.dumps(values))
+        assert kr.render_cache({'dir':''},'head',det,settings) != before
+        assert kr.render_cache({'dir':''},'base',det,settings) != kr.render_cache({'dir':''},'head',det,settings)
+    disabled = copy.deepcopy(settings)
+    disabled['fabrication']['check_limits'] = False
+    with patch.object(kr,'FAB_TABLE',root / 'absent-table.json'):
+        assert kr.render_cache({'dir':''},'head',det,disabled) == kr.render_cache({'dir':''},'base',det,disabled)
+# Subtracting a shared house/vendor error is invalid without the ordinary DRC check.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td)
+    source = root/'four.kicad_pcb'; source.write_text(fab_probe_board(fab_segment('track',width=.08)))
+    source.with_suffix('.kicad_dru').write_text('(version 1)\n(rule "house" (constraint track_width (min 0.3mm)))')
+    cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits']=True; cfg['checks'].update(drc='off',fab_limits='required')
+    with patch.object(kr,'board_path',return_value=str(source)):
+        try:
+            if kr.fab_enabled(cfg):
+                kr.render_fab({'name':'Four'},'head',str(root/'out'),cfg)
+            raise AssertionError('FAB-03 DRC off accepted')
+        except ValueError as exc:
+            assert 'requires checks.drc != "off"' in str(exc)
+    cfg['fabrication']['check_limits']=False
+    assert kr.fab_enabled(cfg) is False
+workflow = pathlib.Path('.github/workflows/review.yml').read_text()
+outer = "hashFiles('tools/kicad_review.py', 'tools/fab_limits.json', 'base/kicad-review.toml', 'head/kicad-review.toml')"
+assert workflow.count(outer) == 2, 'FAB-03 outer cache omits profile bytes'
+
+# Exercise the actual cmd_render boundary, not merely fab_enabled.
+with tempfile.TemporaryDirectory() as td:
+    cwd = os.getcwd()
+    try:
+        os.chdir(td); pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps({'projects':[{'dir':'','name':'B','status':'modified'}]}))
+        for enabled, level, expected in ((False,'required',0),(True,'off',0),(True,'informational',2),(True,'required',2)):
+            cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            cfg['fabrication']['check_limits'] = enabled; cfg['checks']['fab_limits'] = level
+            with patch.object(kr,'load_settings',return_value=cfg), patch.object(kr,'render_cache',return_value=None), patch.object(kr,'render_side'), patch.object(kr,'render_fab') as fab:
+                kr.cmd_render(SimpleNamespace())
+                assert fab.call_count == expected
+                if expected:
+                    assert sorted(c.args[1] for c in fab.call_args_list) == ['base', 'head'], 'FAB-03 both revisions render'
+        for error in (OSError('missing output'), ValueError('malformed JSON'), RuntimeError('tool crash')):
+            with patch.object(kr,'load_settings',return_value=cfg), patch.object(kr,'render_cache',return_value=None), patch.object(kr,'render_side'), patch.object(kr,'render_fab',side_effect=error), patch.object(kr,'cache_renders') as cache:
+                try:
+                    kr.cmd_render(SimpleNamespace())
+                    raise AssertionError('FAB-03 failed audit completed render cache')
+                except SystemExit as exc:
+                    assert str(exc) == f'Fab limits could not run for B: {error}'
+                cache.assert_not_called()
+    finally:
+        os.chdir(cwd)
+# Missing/unsupported revisions have no fabricated pass or comparison metadata.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td)
+    source = root / 'absent.kicad_pcb'
+    cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits'] = True
+    with patch.object(kr, 'board_path', return_value=str(source)), patch.object(kr, 'fab_drc') as drc:
+        for side in ('base', 'head'):
+            kr.render_fab({'name':'Absent'}, side, str(root / side), cfg)
+            assert json.loads((root / side / 'fab-limits.json').read_text()) == {
+                'sections': [], 'reason': f'no {side} board'}
+        source.write_text('(kicad_pcb (layers (0 "F.Cu" signal)))')
+        kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'unsupported'), cfg)
+        sections = json.loads((root / 'unsupported' / 'fab-limits.json').read_text())['sections']
+        assert [s['vendor'] for s in sections] == ['jlcpcb', 'pcbway']
+        assert all(s['unsupported'] and s['checked'] == [] and s['violations'] == [] for s in sections)
+        assert all('baselineAvailable' not in s and 'fixed' not in s for s in sections)
+        drc.assert_not_called()
+    # Each adjacent input and the profile bytes are in the deterministic input hash.
+    for suffix in ('.kicad_pcb', '.kicad_pro', '.kicad_dru'):
+        path = source.with_suffix(suffix)
+        if not path.exists():
+            path.write_text('')
+    table = root / 'profiles.json'; table.write_bytes(kr.FAB_TABLE.read_bytes())
+    def audit_hash():
+        with patch.object(kr, 'board_path', return_value=str(source)), patch.object(kr, 'FAB_TABLE', table):
+            kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'hash'), cfg)
+        return json.loads((root / 'hash' / 'fab-limits.json').read_text())['sections'][0]['inputHash']
+    before = audit_hash()
+    assert before == audit_hash()
+    for path in (source, source.with_suffix('.kicad_pro'), source.with_suffix('.kicad_dru'), table):
+        original = path.read_bytes()
+        path.write_bytes(original + b'\n')
+        assert audit_hash() != before, path.suffix
+        path.write_bytes(original)
+        assert audit_hash() == before
+
+# Both disabled modes permit DRC off at the real settings/report boundary.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td)
+    for enabled, level in ((False, 'required'), (True, 'off')):
+        (root / kr.SETTINGS_FILE).write_text(
+            f'[fabrication]\ncheck_limits = {str(enabled).lower()}\n'
+            f'[checks]\ndrc = "off"\nfab_limits = "{level}"\n')
+        assert kr.fab_enabled(kr.load_settings((str(root),))) is False
+print('ok FAB-03 isolated execution, coverage, cache identity and cmd_render')
+
 if os.environ.get('KICAD_FAB_VERIFY') == '1':
     fab_capability_probe(pathlib.Path(os.environ['KICAD_FAB_OUT']))
