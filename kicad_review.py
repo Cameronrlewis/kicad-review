@@ -2878,7 +2878,10 @@ def write_image_assets(blobs, assets, directory):
     # Validate and decode the complete batch before publishing any entry.
     pending = []
     for key, meta in assets.items():
-        if not re.fullmatch(r'[0-9a-f]{12}', key) or meta['kind'] not in ('svg', 'json'):
+        if (not re.fullmatch(r'[0-9a-f]{12}', key)
+                or not isinstance(meta, dict)
+                or meta.get('kind') not in ('svg', 'json')
+                or key not in blobs):
             raise ValueError('invalid image asset')
         pending.append((f"{key}.{meta['kind']}.gz", base64.b64decode(blobs[key], validate=True)))
     dest = pathlib.Path(directory)
