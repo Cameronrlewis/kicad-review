@@ -245,9 +245,15 @@ async function cachedCompress(input,output,metadata,partsPath,statsPath,cacheRoo
   try {
     await fs.rm(manifestPath,{force:true});
     await fs.mkdir(cacheRoot,{recursive:true});
-    // Recover temporary builds abandoned by a terminated prior processor.
-    for(const name of await fs.readdir(cacheRoot))
-      if(name.startsWith('.build-'))await fs.rm(path.join(cacheRoot,name),{recursive:true,force:true});
+    // Recover only abandoned builds; a shared cache may have live writers.
+    const staleBefore=Date.now()-60*60*1000;
+    for(const name of await fs.readdir(cacheRoot)) if(name.startsWith('.build-')) {
+      const tempPath=path.join(cacheRoot,name);
+      try {if((await fs.stat(tempPath)).mtimeMs<staleBefore)
+        await fs.rm(tempPath,{recursive:true,force:true});} catch(error) {
+        if(error.code!=='ENOENT')throw error;
+      }
+    }
     if(!await valid()) {
       const temp=await fs.mkdtemp(path.join(cacheRoot,'.build-'));
       try {

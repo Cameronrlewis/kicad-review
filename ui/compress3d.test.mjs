@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {mkdtempSync,readFileSync,rmSync,mkdirSync,readdirSync,statSync,writeFileSync,existsSync} from 'node:fs';
+import {mkdtempSync,readFileSync,rmSync,mkdirSync,readdirSync,statSync,writeFileSync,existsSync,utimesSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {join as pathJoin} from 'node:path';
 const require=createRequire(import.meta.url), P=require('./compress3d.cjs');
@@ -666,20 +666,28 @@ test('BR02 restored raw pair A B A and corrupt cache cannot cross indexes',integ
         assert.equal(manifest.hashes[file],createHash('sha256').update(readFileSync(destination)).digest('hex'));
     }
     const key=P.processorKey(original,{...metadata,keep:['R12']},readFileSync(new URL('./compress3d.cjs',import.meta.url)));
-    writeFileSync(pathJoin(cache,key,'parts.json'),'[]');
-    assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true);
-    assert.equal(JSON.parse(readFileSync(parts)).length,2);
-    assert.equal(JSON.parse(readFileSync(pathJoin(cache,key,'parts.json'))).length,2);
-    assert.deepEqual(readFileSync(input),original);
+    for(const tampered of ['board.glb','parts.json','stats.json']) {
+      writeFileSync(pathJoin(cache,key,tampered),tampered==='board.glb'?'invalid':'[]');
+      assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true);
+      assert.equal(JSON.parse(readFileSync(parts)).length,2);
+      assert.equal(JSON.parse(readFileSync(stats)).footprints,2);
+      const manifest=JSON.parse(readFileSync(pathJoin(dir,'board-processed.json')));
+      for(const [file,destination] of [['board.glb',output],['parts.json',parts],['stats.json',stats]])
+        assert.equal(manifest.hashes[file],createHash('sha256').update(readFileSync(destination)).digest('hex'));
+      assert.deepEqual(readFileSync(input),original);
+    }
     writeFileSync(input,'corrupt');
     assert.equal(await P.cachedCompress(input,output,metadata,parts,stats,cache),false);
     assert.deepEqual(readFileSync(output),Buffer.from('corrupt'));
     for(const file of [parts,stats,pathJoin(dir,'board-processed.json')])assert.equal(existsSync(file),false);
     assert.ok(!readdirSync(cache).some(p=>p.startsWith('.build-')));
-    const stale=pathJoin(cache,'.build-abandoned');mkdirSync(stale);writeFileSync(pathJoin(stale,'partial'),'x');
-    // Restore a valid raw input and ensure startup removes abandoned temp builds.
+    const stale=pathJoin(cache,'.build-abandoned'),live=pathJoin(cache,'.build-live');
+    mkdirSync(stale);writeFileSync(pathJoin(stale,'partial'),'x');
+    mkdirSync(live);writeFileSync(pathJoin(live,'partial'),'x');
+    const old=new Date(Date.now()-2*60*60*1000);utimesSync(stale,old,old);
+    // Sweep abandoned builds only, preserving a concurrent live temp build.
     writeFileSync(input,original);
     assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true);
-    assert.equal(existsSync(stale),false);
+    assert.equal(existsSync(stale),false);assert.equal(existsSync(live),true);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
