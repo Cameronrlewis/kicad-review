@@ -3780,7 +3780,7 @@ def test_br03_missing_multi_policy():
 
 def test_br03_unit_anchor_candidates():
     # Membership is REF.PIN, not unit-specific. These are candidate anchors, not proven pin positions.
-    # Without library ownership evidence, only the UI hotspot manifest can resolve these candidates.
+    # Only the UI hotspot manifest can resolve these candidates to owning units.
     objects = {"/s/a": br03_object("U1", "1", "/s/"), "/s/b": br03_object("U1", "2", "/s/")}
     text = '''(export (nets (net (name N) (node (ref U1) (pin 1))
       (node (ref U1) (pin 1)) (node (ref U1) (pin 2)))))'''
@@ -3813,96 +3813,51 @@ def test_br03_where_sheet_contract():
     assert any(i["unknown"] for i in issues3)
 
 
-def test_br03_multi_unit_pin_resolution():
-    # When symbols provide unit pin information, anchors resolve to the exact owning unit.
-    u1_unit1 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pins": {"1", "2"},
-                "where": {"sheet": "/"}, "pos": [1, 2, 0]}
-    u1_unit2 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "2"}, "pins": {"3", "4"},
-                "where": {"sheet": "/"}, "pos": [3, 4, 0]}
-    objects = {"/a": u1_unit1, "/b": u1_unit2}
-    text = '''(export (nets
-      (net (name NET_A) (node (ref U1) (pin 1)))
-      (net (name NET_B) (node (ref U1) (pin 3)))))'''
-    nets, anchors, issues = net_members(text, objects, "c" * 40)
-    assert nets == {"NET_A": {"U1.1"}, "NET_B": {"U1.3"}} and not issues
-    assert len(anchors["U1.1"]) == 1 and anchors["U1.1"][0]["unit"] == "1" and anchors["U1.1"][0]["uuid"] == "a"
-    assert len(anchors["U1.3"]) == 1 and anchors["U1.3"][0]["unit"] == "2" and anchors["U1.3"][0]["uuid"] == "b"
-
-    # Shared pin across multiple units (e.g. power pin on both unit 1 and unit 2).
-    u1_unit1_shared = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pins": {"1", "VCC"},
-                       "where": {"sheet": "/"}, "pos": [1, 2, 0]}
-    u1_unit2_shared = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "2"}, "pins": {"3", "VCC"},
-                       "where": {"sheet": "/"}, "pos": [3, 4, 0]}
-    shared_objs = {"/a": u1_unit1_shared, "/b": u1_unit2_shared}
-    text_shared = '(export (nets (net (name VCC) (node (ref U1) (pin VCC)))))'
-    nets_s, anchors_s, issues_s = net_members(text_shared, shared_objs, "c" * 40)
-    assert nets_s == {"VCC": {"U1.VCC"}} and not issues_s
-    assert len(anchors_s["U1.VCC"]) == 2
-    assert all(a.get("shared") is True for a in anchors_s["U1.VCC"])
-
-    # Querying a pin not declared on any unit of a pin-annotated symbol is ambiguous.
-    text_bad_pin = '(export (nets (net (name N) (node (ref U1) (pin 99)))))'
-    nets_bp, anchors_bp, issues_bp = net_members(text_bad_pin, objects, "c" * 40)
-    assert nets_bp["N"] is None and not anchors_bp
-    assert any(i["unknown"] for i in issues_bp)
-
-    # Empty unit pin set (frozenset()) must not match every pin or mark other-unit pins as shared.
-    u1_u1 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pins": frozenset({"1", "2"}),
-             "where": {"sheet": "/"}, "pos": [1, 2, 0]}
-    u1_u2_empty = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "2"}, "pins": frozenset(),
-                   "where": {"sheet": "/"}, "pos": [3, 4, 0]}
-    empty_unit_objs = {"/a": u1_u1, "/b": u1_u2_empty}
-    text_u1_pin = '(export (nets (net (name NET_1) (node (ref U1) (pin 1)))))'
-    nets_ep, anchors_ep, issues_ep = net_members(text_u1_pin, empty_unit_objs, "c" * 40)
-    assert nets_ep == {"NET_1": {"U1.1"}} and not issues_ep
-    assert len(anchors_ep["U1.1"]) == 1 and anchors_ep["U1.1"][0]["uuid"] == "a"
-    assert "shared" not in anchors_ep["U1.1"][0]
-
-    # Nonexistent pin with an empty-unit candidate must be detected as unknown, not matched to the empty unit.
-    text_nonexistent = '(export (nets (net (name NET_NONE) (node (ref U1) (pin 99)))))'
-    nets_ne, anchors_ne, issues_ne = net_members(text_nonexistent, empty_unit_objs, "c" * 40)
-    assert nets_ne["NET_NONE"] is None and not anchors_ne
-    assert any(i["net"] == "NET_NONE" and i["unknown"] for i in issues_ne)
+def test_br03_manifest_owns_pin_resolution():
+    # Backend membership and candidate anchors must not depend on optional pin metadata.
+    objects = {"/a": br03_object("U1", "1", "/"), "/b": br03_object("U1", "2", "/")}
+    text = ('(export (nets (net (name A) (node (ref U1) (pin 1))) '
+            '(net (name P) (node (ref U1) (pin VCC))) '
+            '(net (name Z) (node (ref U1) (pin 99)))))')
+    expected = net_members(text, objects, "c" * 40)
+    objects["/a"]["pins"] = {"1", "VCC"}
+    objects["/b"]["pins"] = {"3", "VCC"}
+    assert net_members(text, objects, "c" * 40) == expected
+    objects["/b"]["pins"] = frozenset()
+    assert net_members(text, objects, "c" * 40) == expected
+    nets, anchors, issues = expected
+    assert nets == {"A": {"U1.1"}, "P": {"U1.VCC"}, "Z": {"U1.99"}} and not issues
+    for pin in ("1", "VCC", "99"):
+        assert [a["uuid"] for a in anchors["U1." + pin]] == ["a", "b"]
+        assert all("shared" not in a for a in anchors["U1." + pin])
 
 
-def test_br03_lib_unit_pins_real_parser():
-    # The real producer reads unit pin ownership from embedded lib_symbols; unit 0 is shared.
-    import pathlib
-    import tempfile
-    import kicad_review as kr
-    pin = lambda n: '(pin passive line (at 0 0 0) (length 1) (name "x") (number "' + n + '"))'
+def test_br03_parser_preserves_unit_candidates():
+    # Embedded definitions (including lib_name overrides) are not a second pin manifest.
+    pin = lambda n: '(pin passive line (number "' + n + '"))'
     with tempfile.TemporaryDirectory() as td:
         (pathlib.Path(td) / "t.kicad_sch").write_text(
             '(kicad_sch (uuid root) (lib_symbols (symbol "L:Dual" '
-            '(symbol "Dual_0_1" ' + pin("VCC") + ') (symbol "Dual_1_1" ' + pin("1") + pin("2") + ') '
-            '(symbol "Dual_2_1" ' + pin("3") + ')))'
+            '(symbol "Dual_1_1" ' + pin("1") + ')) (symbol "Modified" '
+            '(symbol "Modified_2_1" ' + pin("3") + ')))'
             '(symbol (lib_id "L:Dual") (uuid ua) (unit 1) (at 1 2 0) (property "Reference" "U1"))'
-            '(symbol (lib_id "L:Dual") (uuid ub) (unit 2) (at 5 2 0) (property "Reference" "U1"))'
-            '(symbol (lib_id "L:Other") (uuid uc) (unit 1) (at 9 2 0) (property "Reference" "R1")))')
+            '(symbol (lib_id "L:Dual") (lib_name "Modified") (uuid ub) (unit 2) '
+            '(at 5 2 0) (property "Reference" "U1")))')
         objects = kr.sch_objects(td, "t")
-        assert objects["/ua"]["pins"] == {"VCC", "1", "2"} and objects["/ub"]["pins"] == {"VCC", "3"}
-        assert "pins" not in objects["/uc"]  # no embedded definition: ownership unknown, not guessed
-        text = ('(export (nets (net (name A) (node (ref U1) (pin 1))) (net (name B) (node (ref U1) (pin 3))) '
-                '(net (name P) (node (ref U1) (pin VCC))) (net (name Z) (node (ref U1) (pin 9)))))')
+        assert all("pins" not in o for o in objects.values())
+        text = '(export (nets (net (name N) (node (ref U1) (pin 1)) (node (ref U1) (pin 99)))))'
         nets, anchors, issues = net_members(text, objects, "d" * 40)
-        assert [a["uuid"] for a in anchors["U1.1"]] == ["ua"] and [a["uuid"] for a in anchors["U1.3"]] == ["ub"]
-        assert sorted(a["uuid"] for a in anchors["U1.VCC"]) == ["ua", "ub"] and all(a["shared"] for a in anchors["U1.VCC"])
-        assert nets["Z"] is None and any(i["net"] == "Z" and i["unknown"] for i in issues)  # pin on no unit
-
-        # lib_id takes priority over lib_name when looking up lib_pins
-        (pathlib.Path(td) / "alias.kicad_sch").write_text(
-            '(kicad_sch (uuid root) (lib_symbols (symbol "Lib:Part" '
-            '(symbol "Part_1_1" ' + pin("1") + ')))'
-            '(symbol (lib_id "Lib:Part") (lib_name "Part_Alias") (uuid u_alias) (unit 1) (at 1 2 0) (property "Reference" "U2")))')
-        objects_alias = kr.sch_objects(td, "alias")
-        assert "pins" in objects_alias["/u_alias"] and objects_alias["/u_alias"]["pins"] == {"1"}
+        assert nets == {"N": {"U1.1", "U1.99"}} and not issues
+        for member in nets["N"]:
+            assert [a["uuid"] for a in anchors[member]] == ["ua", "ub"]
+            assert all("shared" not in a for a in anchors[member])
 
 
 # Run the BR03 review regressions in the full plain-assertion suite as well.
 for test in (test_br03_unknown_net, test_br03_missing_pin, test_br03_power_policy,
              test_br03_missing_multi_policy, test_br03_unit_anchor_candidates,
-             test_br03_where_sheet_contract, test_br03_multi_unit_pin_resolution,
-             test_br03_lib_unit_pins_real_parser):
+             test_br03_where_sheet_contract, test_br03_manifest_owns_pin_resolution,
+             test_br03_parser_preserves_unit_candidates):
     test()
 print("ok BR03 review identity regressions (8 tests)")
 

@@ -1,0 +1,73 @@
+Task 3 fix-round test evidence
+Base: 873a615ee890bf37aaf58e3ebb4abee2a447f30e
+Working directory: /Users/cameron/Code/kicad-review-worktrees/03-net-and-copper-changes
+
+RED/GREEN reproduction command (no source edits or history rewrite):
+For RED, set REV=873a615ee890bf37aaf58e3ebb4abee2a447f30e.
+For GREEN, set REV= (empty).
+
+REV=873a615ee890bf37aaf58e3ebb4abee2a447f30e python3 - <<'PY'
+import ast, os, pathlib, subprocess, tempfile, types
+import kicad_review as kr
+if os.environ.get('REV'):
+    source = subprocess.check_output(['git', 'show', os.environ['REV'] + ':kicad_review.py'], text=True)
+    kr = types.ModuleType('baseline_kicad_review')
+    kr.__file__ = str(pathlib.Path('kicad_review.py').resolve())
+    exec(compile(source, 'baseline_kicad_review.py', 'exec'), kr.__dict__)
+ns = dict(kr=kr, pathlib=pathlib, tempfile=tempfile, net_members=kr.net_members)
+names = ('br03_object', 'test_br03_unit_anchor_candidates', 'test_br03_manifest_owns_pin_resolution', 'test_br03_parser_preserves_unit_candidates', 'test_br03_where_sheet_contract')
+for node in ast.parse(pathlib.Path('test_kicad_review.py').read_text()).body:
+    if isinstance(node, ast.FunctionDef) and node.name in names:
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'test_kicad_review.py', 'exec'), ns)
+failed = 0
+for name in names[1:]:
+    try:
+        ns[name]()
+    except AssertionError:
+        failed += 1
+        print('FAIL ' + name + ': AssertionError')
+    else:
+        print('PASS ' + name)
+raise SystemExit(bool(failed))
+PY
+
+RED output (exit 1):
+PASS test_br03_unit_anchor_candidates
+FAIL test_br03_manifest_owns_pin_resolution: AssertionError
+FAIL test_br03_parser_preserves_unit_candidates: AssertionError
+PASS test_br03_where_sheet_contract
+
+The expected failures detect baseline ownership narrowing, the shared flag, the
+pin-on-no-unit suppression, and the extra sch_objects pins field. The tests were
+also run before the production changes and both raised AssertionError.
+
+GREEN output (same command, REV=, exit 0):
+PASS test_br03_unit_anchor_candidates
+PASS test_br03_manifest_owns_pin_resolution
+PASS test_br03_parser_preserves_unit_candidates
+PASS test_br03_where_sheet_contract
+
+Full suite command:
+python3 test_kicad_review.py
+Exit: 0
+Relevant output:
+Ran 8 tests ... OK
+Ran 6 tests ... OK
+Ran 10 tests ... OK
+ok quoted numeric net names and older numbered references
+ok BR03 electrical membership
+ok BR03 review identity regressions (8 tests)
+ok BR03 net graph regressions (4 tests)
+ok BR03 physical pads and wires (10 tests)
+ok BR03 typed rules, assignments and stackup
+
+The physical-pad/wire count is 10, including test_br03_pad_metadata_fallback.
+This run covers the current amended source, not only the earlier 9-test version.
+
+Harness correction: an initial historical-module reproduction omitted __file__
+and exited with NameError before testing. The command above supplies __file__;
+its RED result is from the two expected assertion failures, not that setup error.
+
+Whitespace command:
+git diff --check
+Exit: 0; no output.
