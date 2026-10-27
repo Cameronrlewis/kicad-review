@@ -3684,3 +3684,18 @@ for text, error in (("downloads = true", "downloads must be a table"),
 with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(b"[downloads]\nenabled = true\nstep = false\n"), create=True):
     assert load_settings()["downloads"] == {"enabled": True, "step": False}
 print("ok downloads settings")
+
+# Partial tables retain defaults, and callers cannot mutate later loads or defaults.
+for text, expected in (("", {"enabled": False, "step": True}),
+                       ("[downloads]", {"enabled": False, "step": True}),
+                       ("[downloads]\nenabled = true", {"enabled": True, "step": True}),
+                       ("[downloads]\nstep = false", {"enabled": False, "step": False})):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        loaded = load_settings()["downloads"]
+        assert loaded == expected, (text, loaded)
+        loaded["enabled"] = not loaded["enabled"]
+        loaded["step"] = not loaded["step"]
+    assert DEFAULT_SETTINGS["downloads"] == {"enabled": False, "step": True}
+with patch("kicad_review.os.path.exists", return_value=False):
+    assert load_settings()["downloads"] == {"enabled": False, "step": True}
+print("ok downloads defaults and load isolation")
