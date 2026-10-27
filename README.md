@@ -88,6 +88,39 @@ Set the Actions variable `KICAD_REVIEW_SITE` to your companion review site's URL
 
 Review history is off by default. Set the Actions variable `KICAD_REVIEW_HISTORY` to exactly `true` to keep the newest 50 review runs in the PR comment. The log records errors (new errors), not warnings. Failed or cancelled runs add no row; the previous log is carried over.
 
+## Fabrication profile provenance
+
+`fab_limits.json` keeps all twelve study profiles. Only `jlcpcb-2l`, `jlcpcb-multilayer` and `pcbway-std` were re-read on **2026-10-27**; the other nine retain their study date. A fresh `checkedOn` means the page was reviewed, not that every stored limit is published or that the board is vendor-certified. All limits below are millimetres and apply to the profile's assumed copper weight, not every manufacturing option.
+
+Changes from the **2026-10-24 study values** (each URL was read on 2026-10-27):
+
+- `jlcpcb-2l.drillPlatedMinMm`: 0.2 -> 0.15 (https://jlcpcb.com/capabilities/pcb-capabilities, 2026-10-27). Drill Diameter: “2-layer: 0.15 – 6.3 mm”.
+- `jlcpcb-multilayer.drillPlatedMinMm`: 0.2 -> 0.15 (https://jlcpcb.com/capabilities/pcb-capabilities, 2026-10-27). Drill Diameter: “Multilayer: 0.15 – 6.3 mm”.
+- `pcbway-std.drillPlatedMinMm`: 0.2 -> 0.15 (https://www.pcbway.com/capabilities.html, 2026-10-27). Standard Drill Sizes (CNC): “Min drill size is 0.15mm, max drill is 6.0mm.”
+- `pcbway-std.holeToHoleMm`: 0.4064 -> 0.45 (https://www.pcbway.com/helpcenter/Engineering_Questions/limited_holes_spacing.html, 2026-10-27). “For standard 1oz copper thickness” and “Currently, the minimum spacing for different nets we can support is 0.45 mm for plated through holes and 0.30 mm for vias.” This supplementary source, not the main standard capability table, supports the change. The existing pad–pad rule does not distinguish nets, so it also conservatively applies the published different-net minimum to same-net pairs. The published via minimum is not added as a new profile field in this refresh; via–via remains unchecked for this profile.
+
+Unchanged limits were compared with the following first-party text, all read on **2026-10-27**. Grouped keys share the quoted source, not an inferred numerical conversion.
+
+| Profile and keys | Retained value | Exact source text | Source URL |
+|---|---|---|---|
+| `jlcpcb-2l`: `trackWidthOuterMm`, `clearanceOuterMm` | 0.1 | “Min. track width and spacing (1 oz)” / “1- and 2-layer: 0.10 / 0.10 mm (4 / 4 mil)” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-multilayer`: `trackWidthOuterMm`, `trackWidthInnerMm`, `clearanceOuterMm`, `clearanceInnerMm` | 0.09 | “Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs.” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `drillPlatedMaxMm` | 6.3 | “2-layer: 0.15 – 6.3 mm”; “Multilayer: 0.15 – 6.3 mm”; “Holes with diameter ≥ 6.3 mm are CNC routed from a smaller drilled hole.” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `drillNpthMinMm` | 0.5 | “Min. Non-plated holes” / “0.50mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`: `annularMinMm` | 0.18 | “PTH annular ring” / “2-layer:” / “1 oz: Recommended 0.25 mm or above; absolute minimum 0.18 mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-multilayer`: `annularMinMm` | 0.15 | “PTH annular ring” / “Multilayer:” / “1 oz: Recommended 0.20 mm or above; absolute minimum 0.15 mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `edgeClearanceMm` | 0.2 | “Copper clearance from routed board edges: ≧0.2 mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `holeToHoleMm` | 0.45 | “Pad Hole-to-Hole Spacing” / “0.45mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `jlcpcb-2l`, `jlcpcb-multilayer`: `holeToHoleViaMm` | 0.2 | “Via Hole-to-Hole Spacing” / “0.2mm” | https://jlcpcb.com/capabilities/pcb-capabilities |
+| `pcbway-std`: `trackWidthOuterMm`, `trackWidthInnerMm` | 0.1 | “Min manufacturable trace is 4mil(0.1mm), Please view the below \"Advanced PCB\" or contact us if your board exceeds these.” | https://www.pcbway.com/capabilities.html |
+| `pcbway-std`: `clearanceOuterMm`, `clearanceInnerMm` | 0.1 | “Min manufacturable spacing is 4mil(0.1mm), Please view the below \"Advanced PCB\" or contact us if your board exceeds these.” | https://www.pcbway.com/capabilities.html |
+| `pcbway-std`: `drillPlatedMaxMm` | 6 | “Min drill size is 0.15mm, max drill is 6.0mm. Any holes greater than 6mm or smaller than 0.2mm will be subject to extra charges.” | https://www.pcbway.com/capabilities.html |
+| `pcbway-std`: `annularMinMm` | 0.15 | “Min Width of Annular Ring” / “0.15mm(6mil)” / “For pads with vias in the middle, Min width for Annular Ring is 0.15mm(6mil).” | https://www.pcbway.com/capabilities.html |
+
+**Unverified study values retained, not freshly substantiated:** `pcbway-std.drillNpthMinMm = 0.45` and `pcbway-std.edgeClearanceMm = 0.25`. On 2026-10-27, https://www.pcbway.com/capabilities.html did not publish a separate standard-tier NPTH minimum or standard-tier edge-clearance limit supporting these study values. There is no supporting standard-tier quote for either value. The generic drill-size range does not separately identify NPTH, and the “Line to board edge distance” row is in the advanced table. https://www.pcbway.com/advanced-pcb-capabilities.html was also read on 2026-10-27, but its advanced-tier values are not used for `pcbway-std`. These two stored constraints remain active study assumptions, not verified vendor minima; obtain vendor confirmation before relying on them for fabrication sign-off.
+
+Scope cautions: the lower JLCPCB drill option is conditional; the quoted general range above is used instead. JLCPCB's routed-edge limit does not cover V-cuts. PCBWay's hole-to-trace page (https://www.pcbway.com/helpcenter/Engineering_Questions/the_spacing_from_hole_to_trace.html, read 2026-10-27) says “min 0.2 mm from non-plated hole to trace, and min 0.35 mm from plated hole to trace”; neither is a hole-to-hole or board-edge limit, so neither replaces a profile value. The refreshed drill minima describe capability, not the preferred economical drilling option, and a drill exactly at the minimum is not a guaranteed fab finding.
+
 ## Interface checks (optional)
 
 With `checks.interfaces` set to `informational` or `required` (default `off`), each review exports the schematic netlist and applies these rules:

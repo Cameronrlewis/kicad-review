@@ -10,6 +10,22 @@ assert profiles["jlcpcb-2l"]["values"]["holeToHoleViaMm"] == .2
 assert profiles["pcbway-std"]["values"]["drillPlatedMaxMm"] == 6
 assert all(p["checkedOn"] >= "2026-10-24" and p["source"].startswith("https://")
            for p in profiles.values()), "FAB-01 dated provenance (Task 8 may later move the three sign-off profiles to a newer date)"
+# FAB-08: refresh only the three sign-off profiles from current vendor pages.
+FRESH_VENDOR_PROFILES = ('jlcpcb-2l', 'jlcpcb-multilayer', 'pcbway-std')
+FRESH_VENDOR_SOURCES = {'https://jlcpcb.com/capabilities/pcb-capabilities',
+                        'https://www.pcbway.com/capabilities.html'}
+profiles = kr.fab_profiles()
+for key in FRESH_VENDOR_PROFILES:
+    assert profiles[key]['checkedOn'] >= '2026-10-26', key + ' still has the study date'
+    assert profiles[key]['source'] in FRESH_VENDOR_SOURCES, key + ' cites an unlisted page'
+assert all(profiles[k]['checkedOn'] == '2026-10-24' for k in profiles if k not in FRESH_VENDOR_PROFILES), 'other nine profiles keep the study date'
+# Published changes and deliberately unverified study assumptions; sources in README.
+assert all(profiles[k]['values']['drillPlatedMinMm'] == .15 for k in FRESH_VENDOR_PROFILES)
+assert profiles['pcbway-std']['values']['holeToHoleMm'] == .45
+assert profiles['pcbway-std']['values']['drillNpthMinMm'] == .45
+assert profiles['pcbway-std']['values']['edgeClearanceMm'] == .25
+assert 'holeToHoleViaMm' not in profiles['pcbway-std']['values']
+
 assert kr.DEFAULT_SETTINGS["fabrication"]["check_limits"] is False
 assert kr.DEFAULT_SETTINGS["checks"]["fab_limits"] == "informational"
 with tempfile.TemporaryDirectory() as td:
@@ -86,7 +102,7 @@ assert '(layer outer)' in rules and '(layer inner)' not in rules
 assert '(max 6.3mm)' in rules and 'holeToHoleMixedMm' in unchecked
 assert 'trackWidthInnerMm' not in unchecked, "FAB-02 inner does not apply on 2 layers"
 hole_rules = [line for line in rules.splitlines() if 'constraint hole_size' in line and '(max' in line]
-assert len(hole_rules) == 1 and '(min 0.2mm)' in hole_rules[0] and '(max 6.3mm)' in hole_rules[0]
+assert len(hole_rules) == 1 and '(min 0.15mm)' in hole_rules[0] and '(max 6.3mm)' in hole_rules[0]
 assert 'viaDiameterMinMm' in unchecked
 four_rules, four_unchecked = kr.fab_rule_section({"layers": 4, "values": kr.fab_profiles()["jlcpcb-multilayer"]["values"]})
 assert '(layer inner)' in four_rules and 'trackWidthInnerMm' not in four_unchecked
