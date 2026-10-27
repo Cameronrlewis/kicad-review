@@ -260,9 +260,13 @@ def metadata3d(side, objects, keep, finish, missing):
         refs.add(ref)
         reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
         box, pos = obj.get("box"), obj.get("pos")
-        if not (pos and len(pos) >= 2 and all(math.isfinite(v) for v in pos[:2])):
+        valid_pos = (isinstance(pos, (list, tuple)) and len(pos) >= 2
+                     and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in pos[:2]))
+        if not valid_pos:
             raise ValueError("footprint has no finite position: " + ref)
-        if not (box and len(box) == 4 and all(math.isfinite(v) for v in box)):
+        valid_box = (isinstance(box, (list, tuple)) and len(box) == 4
+                     and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in box))
+        if not valid_box:
             # Padless graphics get a 2 mm estimated box; it is not enclosure clearance.
             box = [pos[0] - 1, pos[1] - 1, pos[0] + 1, pos[1] + 1]
         layer = (obj.get("props") or {}).get("layer") or ""
@@ -281,29 +285,40 @@ def prepare3d(p):
         if not path.is_file():
             # Never create the side folder here: build_project treats an existing folder as a present revision.
             targets[side].unlink(missing_ok=True)
+    objects = {}
+    for side, path in paths.items():
+        if not path.is_file():
+            objects[side] = {}
+            continue
+        try:
+            objects[side] = pcb_objects(path)
+        except Exception as error:
+            objects[side] = None
+            targets[side].unlink(missing_ok=True)
+            print(f"{p['name']}: 3D processing unavailable: {error}")
     try:
-        objects = {side: pcb_objects(path) if path.is_file() else {} for side, path in paths.items()}
-        keep = kept_refs(objects["base"], objects["head"])
-        missing = model3d_missing(str(out), objects)
-        for side, path in paths.items():
-            target = targets[side]
-            if not path.is_file():
-                continue
-            try:
-                root = parse_sexpr(path.read_text(encoding="utf-8"))
-                stackup = find(find(root, "setup") or [], "stackup") or []
-                finish = val(stackup, "copper_finish") or ""
-                metadata = metadata3d(side, objects[side], keep, finish, missing)
-            except Exception as error:
-                target.unlink(missing_ok=True)
-                print(f"{p['name']}: 3D processing unavailable: {error}")
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+        valid_objects = {s: o or {} for s, o in objects.items()}
+        keep = kept_refs(valid_objects["base"], valid_objects["head"])
+        missing = model3d_missing(str(out), valid_objects)
     except Exception as error:
         for target in targets.values():
             target.unlink(missing_ok=True)
         print(f"{p['name']}: 3D processing unavailable: {error}")
+        return
+    for side, path in paths.items():
+        target = targets[side]
+        if not path.is_file() or objects[side] is None:
+            continue
+        try:
+            root = parse_sexpr(path.read_text(encoding="utf-8"))
+            stackup = find(find(root, "setup") or [], "stackup") or []
+            finish = val(stackup, "copper_finish") or ""
+            metadata = metadata3d(side, objects[side], keep, finish, missing)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+        except Exception as error:
+            target.unlink(missing_ok=True)
+            print(f"{p['name']}: 3D processing unavailable: {error}")
 
 
 def cmd_prepare3d(args):
