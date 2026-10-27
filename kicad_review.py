@@ -768,6 +768,118 @@ def sch_objects(proj_dir, name):
     return objs
 
 
+def sheet_point(point, placed):
+    """A library-symbol point (y up) as a sheet point (y down) for the symbol's placement: mirror, rotate, translate."""
+    x, y = map(float, point[:2])
+    mirror = val(placed, 'mirror', '')
+    if mirror == 'x':
+        y = -y
+    elif mirror == 'y':
+        x = -x
+    pos = at(placed)
+    angle = math.radians(pos[2] if len(pos) > 2 else 0)
+    c, s = math.cos(angle), math.sin(angle)
+    return [round(pos[0] + c * x - s * y, 6),
+            round(pos[1] - s * x - c * y, 6)]
+
+
+def hotspot_box(points):
+    if not points:
+        return None
+    return [min(p[0] for p in points), min(p[1] for p in points),
+            max(p[0] for p in points), max(p[1] for p in points)]
+
+
+def library_index(lib_symbols):
+    """Embedded library symbols by qualified name and, when unique, by unqualified name (`extends` uses the latter)."""
+    libraries = {str(n[1]): n for n in findall(lib_symbols, 'symbol')}
+    for key in list(libraries):
+        short = key.split(':')[-1]
+        matches = [v for k, v in libraries.items() if k.split(':')[-1] == short]
+        if short not in libraries and len(matches) == 1:
+            libraries[short] = libraries[key]
+    return libraries
+
+
+def sheet_hotspots(proj_dir, name):
+    """Per-sheet-instance hotspot manifest: symbols with bounding boxes and pin endpoints, labels, no-connects, wires (mm)."""
+    views, warnings = [], []
+    pages = sheet_pages(proj_dir, name)
+    if any(p['path'].count('/') > 33 for p in pages):
+        raise ValueError('recursive schematic hierarchy')
+    root_uuid = None
+    for page in pages:
+        view = {'sheet': page['path'], 'file': page['file'], 'viewBox': None,
+                'elements': [], 'labels': [], 'noConnects': [], 'wires': []}
+        views.append(view)
+        full = pathlib.Path(proj_dir, page['file'])
+        if not full.is_file():
+            warnings.append({'sheet': page['path'], 'reason': 'sheet file missing'})
+            continue
+        root = parse_sexpr(full.read_text(encoding='utf-8'))
+        if page['parent'] is None:
+            root_uuid = val(root, 'uuid')
+        libraries = library_index(find(root, 'lib_symbols') or [])
+        # Instance paths are the root UUID plus the sheet UUID path; without a root identity use the properties.
+        inst_path = ('/' + str(root_uuid) + page['path'].rstrip('/')) if root_uuid else None
+        for n in root[1:]:
+            if not isinstance(n, list) or not n:
+                continue
+            uid = val(n, 'uuid')
+            if not uid:
+                continue
+            uid, kind = str(uid), n[0]
+            if kind == 'symbol':
+                props = {str(k): str(v) for k, v in properties(n).items()}
+                unit = str(val(n, 'unit', '1'))
+                ref = props.get('Reference', '?')
+                if inst_path:
+                    projects = findall(find(n, 'instances') or [], 'project')
+                    # Prefer this project's record; renamed projects keep older records for the same path.
+                    for project in sorted(projects, key=lambda p: p[1] != name):
+                        paths = [p for p in findall(project, 'path') if p[1].rstrip('/') == inst_path]
+                        if paths:
+                            ref = str(val(paths[0], 'reference', ref))
+                            break
+                props['Reference'] = ref
+                if not at(n):
+                    warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'symbol has no position'})
+                    continue
+                lib_id = str(val(n, 'lib_id', ''))
+                style = str(val(n, 'body_style', val(n, 'convert', '1')))
+                try:
+                    coords, pins, approximate = symbol_geometry(symbol_primitives(
+                        libraries, str(val(n, 'lib_name', lib_id)), unit, style))
+                except KeyError:
+                    coords, pins, approximate = [], [], True
+                    warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'library unavailable'})
+                if not coords:
+                    coords, approximate = [[-1, -1], [1, 1]], True
+                placed_pins = []
+                for pin in pins:
+                    x, y = sheet_point([pin['x'], pin['y']], n)
+                    placed_pins.append(dict(pin, x=x, y=y))
+                view['elements'].append({
+                    'uuid': uid, 'ref': ref, 'unit': unit, 'lib_id': lib_id,
+                    'value': props.get('Value', ''), 'footprint': props.get('Footprint', ''),
+                    'datasheet': props.get('Datasheet', ''), 'fields': props,
+                    'bbox': hotspot_box([sheet_point(p, n) for p in coords]), 'pins': placed_pins,
+                    'confidence': 'approximate' if approximate else 'exact'})
+            elif kind in ('label', 'global_label', 'hierarchical_label', 'no_connect'):
+                pos = at(n)
+                if not pos:
+                    continue
+                row = {'uuid': uid, 'x': pos[0], 'y': pos[1]}
+                if kind == 'no_connect':
+                    view['noConnects'].append(row)
+                else:
+                    view['labels'].append(dict(row, text=str(n[1]), kind=kind))
+            elif kind in ('wire', 'bus'):
+                pts = [list(p) for p in points(n)]
+                view['wires'].append({'uuid': uid, 'points': pts, 'bbox': hotspot_box(pts)})
+    return {'version': 1, 'units': 'mm', 'views': views, 'warnings': warnings}
+
+
 def pcb_objects(path):
     with open(path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())

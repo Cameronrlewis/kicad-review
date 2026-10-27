@@ -490,6 +490,241 @@ with TemporaryDirectory() as t:
     assert "--no-background-color" in sch
 print("ok SCH6 instance pages and transparent framed export")
 
+# Inherited symbol geometry: a derived symbol draws its base's shared body and selected unit only.
+libs = {
+    'Base': kr.parse_sexpr('(symbol "Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))) (symbol "Base_2_1" (pin input line (at -5 0 0) (length 2) (name "B") (number "3"))))'),
+    'Derived': kr.parse_sexpr('(symbol "Derived" (extends "Base") (symbol "Derived_1_1" (circle (center 0 0) (radius 9))))')}
+parts = kr.symbol_primitives(libs, 'Derived', '2')
+coords, pins, approximate = kr.symbol_geometry(parts)
+assert pins == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}], pins
+assert [-3.0, 0.0] in coords and [-2.0, -1.0] in coords
+assert not approximate and max(p[0] for p in coords) == 2
+
+# Derived unit 1 selects circle and base rectangle, excluding unit 2 pin
+parts_u1 = kr.symbol_primitives(libs, 'Derived', '1')
+coords_u1, pins_u1, approx_u1 = kr.symbol_geometry(parts_u1)
+assert pins_u1 == []
+assert not approx_u1
+assert max(p[0] for p in coords_u1) == 9 and min(p[0] for p in coords_u1) == -9
+assert max(p[1] for p in coords_u1) == 9 and min(p[1] for p in coords_u1) == -9
+
+# Multi-level inheritance: Grandchild extends Derived extends Base with inherited bodies first
+libs['Grandchild'] = kr.parse_sexpr('(symbol "Grandchild" (extends "Derived") (symbol "Grandchild_0_1" (rectangle (start -10 -10) (end 10 10))))')
+parts_gc = kr.symbol_primitives(libs, 'Grandchild', '2')
+coords_gc, pins_gc, approx_gc = kr.symbol_geometry(parts_gc)
+assert pins_gc == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}]
+assert not approx_gc
+assert max(p[0] for p in coords_gc) == 10 and min(p[0] for p in coords_gc) == -10
+# Base rectangle (-2..2), Base pin (-5..-3), Grandchild rectangle (-10..10)
+assert parts_gc[0][0] == 'rectangle' and kr.find(parts_gc[0], 'start')[1] == '-2'
+assert parts_gc[-1][0] == 'rectangle' and kr.find(parts_gc[-1], 'start')[1] == '-10'
+
+# Alternate body style (style='2') vs default (style='1')
+libs['Alt'] = kr.parse_sexpr('(symbol "Alt" (symbol "Alt_1_1" (circle (center 0 0) (radius 1))) (symbol "Alt_1_2" (circle (center 0 0) (radius 5))))')
+parts_alt1 = kr.symbol_primitives(libs, 'Alt', '1', style='1')
+parts_alt2 = kr.symbol_primitives(libs, 'Alt', '1', style='2')
+assert len(parts_alt1) == 1 and float(kr.val(parts_alt1[0], 'radius')) == 1.0
+assert len(parts_alt2) == 1 and float(kr.val(parts_alt2[0], 'radius')) == 5.0
+
+# Circle bounds at (c, r) produce its bounding square
+circle_coords, _, circle_approx = kr.symbol_geometry([kr.parse_sexpr('(circle (center 2 3) (radius 4))')])
+assert not circle_approx
+assert sorted(circle_coords) == [[-2.0, -1.0], [-2.0, 7.0], [6.0, -1.0], [6.0, 7.0]]
+
+# Arc bounds through (1, 0), (0, 1), (-1, 0) produce circumcircle bounds [-1, 1] x [-1, 1] with approximate=True
+arc_coords, _, arc_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 1 0) (mid 0 1) (end -1 0))')])
+assert arc_approx
+assert sorted(arc_coords) == [[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]]
+
+# Degenerate collinear arc falls back to control points with approximate=True
+collinear_coords, _, collinear_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 0 0) (mid 1 1) (end 2 2))')])
+assert collinear_approx
+assert collinear_coords == [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
+
+# Bezier control-point hull has approximate=True
+bezier_coords, _, bezier_approx = kr.symbol_geometry([kr.parse_sexpr('(bezier (pts (xy 0 0) (xy 2 5) (xy 4 1)))')])
+assert bezier_approx
+assert bezier_coords == [[0.0, 0.0], [2.0, 5.0], [4.0, 1.0]]
+
+# Polyline points preserve approximate=False
+poly_coords, _, poly_approx = kr.symbol_geometry([kr.parse_sexpr('(polyline (pts (xy 1 2) (xy 3 4)))')])
+assert not poly_approx
+assert poly_coords == [[1.0, 2.0], [3.0, 4.0]]
+
+libs['Base'].append(['extends', 'Derived'])
+try:
+    kr.symbol_primitives(libs, 'Derived', '2')
+    assert False, 'inheritance cycle must fail'
+except ValueError as error:
+    assert 'symbol inheritance cycle' in str(error)
+
+# Missing definition raises KeyError per interface contract
+try:
+    kr.symbol_primitives(libs, 'NonExistent', '1')
+    assert False, 'missing definition must raise KeyError'
+except KeyError:
+    pass
+
+# Parent extends missing symbol raises KeyError
+libs_broken = {'Broken': kr.parse_sexpr('(symbol "Broken" (extends "MissingParent"))')}
+try:
+    kr.symbol_primitives(libs_broken, 'Broken', '1')
+    assert False, 'broken parent inheritance must raise KeyError'
+except KeyError:
+    pass
+
+# Empty primitives produce empty coordinates and pins without approximation
+assert kr.symbol_geometry([]) == ([], [], False)
+
+# Angled pin rotates endpoint correctly across all cardinal orientations
+for angle, (dx, dy) in [(0, (4.0, 0.0)), (90, (0.0, 4.0)), (180, (-4.0, 0.0)), (270, (0.0, -4.0))]:
+    p_node = kr.parse_sexpr(f'(pin input line (at 10 20 {angle}) (length 4) (name "P") (number "1"))')
+    p_coords, p_pins, p_approx = kr.symbol_geometry([p_node])
+    assert not p_approx
+    assert p_pins == [{'number': '1', 'name': 'P', 'x': 10.0, 'y': 20.0}]
+    assert p_coords[0] == [10.0, 20.0]
+    assert abs(p_coords[1][0] - (10.0 + dx)) < 1e-6 and abs(p_coords[1][1] - (20.0 + dy)) < 1e-6
+
+print('ok inherited symbol geometry')
+
+# Task 2.2: hotspot manifests resolve by sheet-instance path, never by export name.
+def hotspot_regressions():
+    import base64, gzip, json, math
+    import xml.etree.ElementTree as ET
+
+    with TemporaryDirectory() as root:
+        root_sch = ('(kicad_sch (uuid root) (paper A4) ' +
+                    sheet('Left', 'shared.kicad_sch', 'left') +
+                    sheet('Right', 'shared.kicad_sch', 'right') + ')')
+        shared = '''(kicad_sch (uuid child) (paper A4)
+          (lib_symbols (symbol "Test:Op"
+            (symbol "Op_0_1" (rectangle (start -1 -1) (end 1 1)))
+            (symbol "Op_1_1" (pin input line (at -5 0 0) (length 2)
+              (name "A") (number "1")))
+            (symbol "Op_2_1" (pin input line (at -5 0 0) (length 2)
+              (name "B") (number "3")))))
+          (symbol (uuid placed) (lib_id "Test:Op") (unit 2)
+            (at 100 50 90) (mirror x)
+            (property "Reference" "U?") (property "Value" "Op")
+            (instances (project "Board"
+              (path "/root/left" (reference "U1") (unit 2))
+              (path "/root/right" (reference "U2") (unit 2)))))
+          (label "SIGNAL" (uuid lab) (at 10 20 0))
+          (no_connect (uuid nc) (at 10 20))
+          (wire (uuid wire) (pts (xy 1 2) (xy 3 4))))'''
+        write(root, {'Board.kicad_sch': root_sch, 'shared.kicad_sch': shared})
+        m = kr.sheet_hotspots(root, 'Board')
+        assert m['version'] == 1 and m['units'] == 'mm' and m['warnings'] == []
+        by_sheet = {v['sheet']: v for v in m['views']}
+        assert sorted(by_sheet) == ['/', '/left/', '/right/']
+        assert by_sheet['/']['elements'] == [] and by_sheet['/']['viewBox'] is None
+        assert by_sheet['/left/']['file'] == by_sheet['/right/']['file'] == 'shared.kicad_sch'
+        assert by_sheet['/left/']['elements'][0]['ref'] == 'U1'
+        assert by_sheet['/right/']['elements'][0]['ref'] == 'U2'
+        a = by_sheet['/left/']['elements'][0]
+        assert a['uuid'] == by_sheet['/right/']['elements'][0]['uuid'] == 'placed'
+        assert a['unit'] == '2' and [p['number'] for p in a['pins']] == ['3']
+        assert a['lib_id'] == 'Test:Op' and a['value'] == 'Op' and a['confidence'] == 'exact'
+        assert a['fields']['Reference'] == 'U1', 'fields carry the instance reference, not the U? placeholder'
+        assert all(math.isfinite(v) for v in a['bbox'])
+        assert by_sheet['/left/']['noConnects'][0]['x'] == 10.0
+        assert by_sheet['/left/']['labels'] == [{'uuid': 'lab', 'x': 10.0, 'y': 20.0, 'text': 'SIGNAL', 'kind': 'label'}]
+        assert len(by_sheet['/left/']['wires'][0]['points']) == 2
+        assert by_sheet['/left/']['wires'][0]['bbox'] == [1.0, 2.0, 3.0, 4.0]
+        # Review Focus 1: same file and UUID under two sheet instances, resolved by instance path.
+        assert a['pins'] == [{'number': '3', 'name': 'B', 'x': 100.0, 'y': 55.0}]
+        assert by_sheet['/right/']['elements'][0]['pins'] == a['pins']
+        assert by_sheet['/right/']['sheet'] != by_sheet['/left/']['sheet']
+        assert a['bbox'][0] <= 100 <= a['bbox'][2]
+        # Body corners land at x 99..101, y 49..51; the pin runs from its endpoint (100, 55) to (100, 53).
+        assert a['bbox'] == [99.0, 49.0, 101.0, 55.0], a['bbox']
+        json.dumps(m)  # plain JSON types only
+
+    # Placement transform: library y-up to sheet y-down, mirror before rotation.
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50 90))')) == [97, 48]
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50 90) (mirror x))')) == [103, 48]
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50 0) (mirror y))')) == [98, 47]
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50))')) == [102, 47]
+    assert kr.hotspot_box([]) is None and kr.hotspot_box([[1, 5], [-2, 3]]) == [-2, 3, 1, 5]
+
+    # A nonzero-origin viewBox survives blob serialization and decode exactly.
+    # Task 4 owns mapped_viewbox(); this pins the same parse and the blob round trip it relies on.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) (paper A4))',
+                     'export/Board.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 40 30"><path d="M0 0"/></svg>'})
+        manifest = kr.sheet_hotspots(root, 'Board')
+        svg_root = ET.parse(pathlib.Path(root, 'export/Board.svg')).getroot()
+        manifest['views'][0]['viewBox'] = [float(n) for n in svg_root.get('viewBox').replace(',', ' ').split()]
+        blobs = {}
+        key = kr.add_blob(blobs, json.dumps(manifest, sort_keys=True))
+        decoded = json.loads(gzip.decompress(base64.b64decode(blobs[key])))
+        assert decoded['views'][0]['viewBox'] == [10, 20, 40, 30]
+
+    # Missing library symbol: approximate placeholder box, no pins, one warning.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) (lib_symbols) (symbol (uuid s1) (lib_id "X:Y") (at 10 10 0) (property "Reference" "R1")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        e = m['views'][0]['elements'][0]
+        assert e['confidence'] == 'approximate' and e['pins'] == [] and e['bbox'] == [9.0, 9.0, 11.0, 11.0], e
+        assert e['ref'] == 'R1' and e['unit'] == '1'
+        assert m['warnings'] == [{'sheet': '/', 'uuid': 's1', 'reason': 'library unavailable'}], m['warnings']
+
+    # Inherited symbols: embedded keys are qualified, `extends` names the unqualified parent.
+    lib = '''(lib_symbols
+      (symbol "L:Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))))
+      (symbol "L:Derived" (extends "Base")
+        (symbol "Derived_1_1" (pin input line (at -4 0 0) (length 1) (name "P") (number "7")))))'''
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + lib +
+                     '(symbol (uuid s1) (lib_id "L:Derived") (at 0 0 0) (property "Reference" "U1")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        e = m['views'][0]['elements'][0]
+        assert m['warnings'] == [] and e['confidence'] == 'exact'
+        assert e['bbox'] == [-4.0, -1.0, 2.0, 1.0], e['bbox']
+        assert e['pins'] == [{'number': '7', 'name': 'P', 'x': -4.0, 'y': 0.0}]
+    # Two parents sharing an unqualified name make the suffix ambiguous: never guess one.
+    ambiguous = lib.replace('(symbol "L:Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))))',
+                            '(symbol "A:Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1)))) '
+                            '(symbol "B:Base" (symbol "Base_0_1" (rectangle (start -9 -9) (end 9 9))))')
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + ambiguous +
+                     '(symbol (uuid s1) (lib_id "L:Derived") (at 0 0 0) (property "Reference" "U1")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        e = m['views'][0]['elements'][0]
+        assert e['confidence'] == 'approximate' and e['pins'] == [] and len(m['warnings']) == 1, m
+
+    # lib_name selects the embedded variant of a library symbol.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) (lib_symbols (symbol "Op_1" (symbol "Op_1_0_1" (rectangle (start -3 -3) (end 3 3))))) '
+                     '(symbol (uuid s1) (lib_id "Lib:Op") (lib_name "Op_1") (at 0 0 0) (property "Reference" "U1")))'})
+        e = kr.sheet_hotspots(root, 'Board')['views'][0]['elements'][0]
+        assert e['confidence'] == 'exact' and e['bbox'] == [-3.0, -3.0, 3.0, 3.0] and e['lib_id'] == 'Lib:Op'
+
+    # Without a root UUID there is no instance path: fall back to the property, never throw.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (lib_symbols) (symbol (uuid s1) (lib_id "X:Y") (at 1 1 0) (property "Reference" "R9")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        assert m['views'][0]['elements'][0]['ref'] == 'R9'
+
+    # A sheet file that cannot be read keeps its view and records a warning.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + sheet('Gone', 'gone.kicad_sch', 'g') + ')'})
+        m = kr.sheet_hotspots(root, 'Board')
+        assert [v['sheet'] for v in m['views']] == ['/', '/g/'] and m['views'][1]['elements'] == []
+        assert m['warnings'] == [{'sheet': '/g/', 'reason': 'sheet file missing'}], m['warnings']
+
+    # A sheet that contains itself is rejected rather than expanded forever.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + sheet('Again', 'Board.kicad_sch', 'again') + ')'})
+        try:
+            kr.sheet_hotspots(root, 'Board')
+            raise AssertionError('recursive hierarchy must be rejected')
+        except ValueError as error:
+            assert 'recursive schematic hierarchy' in str(error)
+
+hotspot_regressions()
+print('ok instance-aware sheet hotspots and pins')
+
 # Unchanged drawings remain viewable, deduplicate blobs, and prefer head metadata.
 with TemporaryDirectory() as t:
     old_cwd = os.getcwd()
@@ -3948,101 +4183,3 @@ print("ok per-commit project render cache hits retain both revisions")
 
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
-
-# Task 2.1: Inherited symbol geometry before manifest integration (test_kicad_review.py:3952-4020+).
-# Placed after render-cache tests per brief update (lines 156-195 in 335db72 planning snapshot are occupied by Task 1 tests).
-libs = {
-    'Base': kr.parse_sexpr('(symbol "Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))) (symbol "Base_2_1" (pin input line (at -5 0 0) (length 2) (name "B") (number "3"))))'),
-    'Derived': kr.parse_sexpr('(symbol "Derived" (extends "Base") (symbol "Derived_1_1" (circle (center 0 0) (radius 9))))')}
-parts = kr.symbol_primitives(libs, 'Derived', '2')
-coords, pins, approximate = kr.symbol_geometry(parts)
-assert pins == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}], pins
-assert [-3.0, 0.0] in coords and [-2.0, -1.0] in coords
-assert not approximate and max(p[0] for p in coords) == 2
-
-# Derived unit 1 selects circle and base rectangle, excluding unit 2 pin
-parts_u1 = kr.symbol_primitives(libs, 'Derived', '1')
-coords_u1, pins_u1, approx_u1 = kr.symbol_geometry(parts_u1)
-assert pins_u1 == []
-assert not approx_u1
-assert max(p[0] for p in coords_u1) == 9 and min(p[0] for p in coords_u1) == -9
-assert max(p[1] for p in coords_u1) == 9 and min(p[1] for p in coords_u1) == -9
-
-# Multi-level inheritance: Grandchild extends Derived extends Base with inherited bodies first
-libs['Grandchild'] = kr.parse_sexpr('(symbol "Grandchild" (extends "Derived") (symbol "Grandchild_0_1" (rectangle (start -10 -10) (end 10 10))))')
-parts_gc = kr.symbol_primitives(libs, 'Grandchild', '2')
-coords_gc, pins_gc, approx_gc = kr.symbol_geometry(parts_gc)
-assert pins_gc == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}]
-assert not approx_gc
-assert max(p[0] for p in coords_gc) == 10 and min(p[0] for p in coords_gc) == -10
-# Base rectangle (-2..2), Base pin (-5..-3), Grandchild rectangle (-10..10)
-assert parts_gc[0][0] == 'rectangle' and kr.find(parts_gc[0], 'start')[1] == '-2'
-assert parts_gc[-1][0] == 'rectangle' and kr.find(parts_gc[-1], 'start')[1] == '-10'
-
-# Alternate body style (style='2') vs default (style='1')
-libs['Alt'] = kr.parse_sexpr('(symbol "Alt" (symbol "Alt_1_1" (circle (center 0 0) (radius 1))) (symbol "Alt_1_2" (circle (center 0 0) (radius 5))))')
-parts_alt1 = kr.symbol_primitives(libs, 'Alt', '1', style='1')
-parts_alt2 = kr.symbol_primitives(libs, 'Alt', '1', style='2')
-assert len(parts_alt1) == 1 and float(kr.val(parts_alt1[0], 'radius')) == 1.0
-assert len(parts_alt2) == 1 and float(kr.val(parts_alt2[0], 'radius')) == 5.0
-
-# Circle bounds at (c, r) produce its bounding square
-circle_coords, _, circle_approx = kr.symbol_geometry([kr.parse_sexpr('(circle (center 2 3) (radius 4))')])
-assert not circle_approx
-assert sorted(circle_coords) == [[-2.0, -1.0], [-2.0, 7.0], [6.0, -1.0], [6.0, 7.0]]
-
-# Arc bounds through (1, 0), (0, 1), (-1, 0) produce circumcircle bounds [-1, 1] x [-1, 1] with approximate=True
-arc_coords, _, arc_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 1 0) (mid 0 1) (end -1 0))')])
-assert arc_approx
-assert sorted(arc_coords) == [[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]]
-
-# Degenerate collinear arc falls back to control points with approximate=True
-collinear_coords, _, collinear_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 0 0) (mid 1 1) (end 2 2))')])
-assert collinear_approx
-assert collinear_coords == [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
-
-# Bezier control-point hull has approximate=True
-bezier_coords, _, bezier_approx = kr.symbol_geometry([kr.parse_sexpr('(bezier (pts (xy 0 0) (xy 2 5) (xy 4 1)))')])
-assert bezier_approx
-assert bezier_coords == [[0.0, 0.0], [2.0, 5.0], [4.0, 1.0]]
-
-# Polyline points preserve approximate=False
-poly_coords, _, poly_approx = kr.symbol_geometry([kr.parse_sexpr('(polyline (pts (xy 1 2) (xy 3 4)))')])
-assert not poly_approx
-assert poly_coords == [[1.0, 2.0], [3.0, 4.0]]
-
-libs['Base'].append(['extends', 'Derived'])
-try:
-    kr.symbol_primitives(libs, 'Derived', '2')
-    assert False, 'inheritance cycle must fail'
-except ValueError as error:
-    assert 'symbol inheritance cycle' in str(error)
-
-# Missing definition raises KeyError per interface contract
-try:
-    kr.symbol_primitives(libs, 'NonExistent', '1')
-    assert False, 'missing definition must raise KeyError'
-except KeyError:
-    pass
-
-# Parent extends missing symbol raises KeyError
-libs_broken = {'Broken': kr.parse_sexpr('(symbol "Broken" (extends "MissingParent"))')}
-try:
-    kr.symbol_primitives(libs_broken, 'Broken', '1')
-    assert False, 'broken parent inheritance must raise KeyError'
-except KeyError:
-    pass
-
-# Empty primitives produce empty coordinates and pins without approximation
-assert kr.symbol_geometry([]) == ([], [], False)
-
-# Angled pin rotates endpoint correctly across all cardinal orientations
-for angle, (dx, dy) in [(0, (4.0, 0.0)), (90, (0.0, 4.0)), (180, (-4.0, 0.0)), (270, (0.0, -4.0))]:
-    p_node = kr.parse_sexpr(f'(pin input line (at 10 20 {angle}) (length 4) (name "P") (number "1"))')
-    p_coords, p_pins, p_approx = kr.symbol_geometry([p_node])
-    assert not p_approx
-    assert p_pins == [{'number': '1', 'name': 'P', 'x': 10.0, 'y': 20.0}]
-    assert p_coords[0] == [10.0, 20.0]
-    assert abs(p_coords[1][0] - (10.0 + dx)) < 1e-6 and abs(p_coords[1][1] - (20.0 + dy)) < 1e-6
-
-print('ok inherited symbol geometry')
