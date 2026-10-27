@@ -23,7 +23,9 @@ import os
 import pathlib
 import posixpath
 import re
+import struct
 import subprocess
+import zlib
 import sys
 import tempfile
 import tomllib
@@ -289,6 +291,101 @@ def poster_argv(pcb, folder):
             "--rotate", "-45,0,45", "-w", "1600", "-h", "1000", "-o", str(folder / "poster.png"), pcb]
 
 
+def poster_size(path):
+    """Read a PNG's actual canvas size, including when checking cached stills."""
+    try:
+        with pathlib.Path(path).open('rb') as stream:
+            header = stream.read(24)
+        if len(header) == 24 and header[:16] == b'\x89PNG\r\n\x1a\n\0\0\0\rIHDR':
+            return struct.unpack('>II', header[16:24])
+    except OSError:
+        pass
+    return None
+
+
+def normalize_poster(path):
+    """Losslessly center KiCad's smaller drawable area on the shared 1600x1000 canvas.
+
+    KiCad 10 on macOS can return a smaller drawable area than the requested size.
+    Keep the prescribed argv and pixels; transparent padding avoids distortion.
+    KiCad emits non-interlaced 8-bit RGB(A). Reject other/corrupt output rather
+    than advertising a nonconforming successful still. No image dependency.
+    """
+    png = path.read_bytes()
+    if png[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError('not a PNG')
+    offset, chunks, compressed = 8, [], bytearray()
+    while offset < len(png):
+        if offset + 12 > len(png):
+            raise ValueError('truncated PNG chunk')
+        size = struct.unpack('>I', png[offset:offset+4])[0]
+        end = offset + 12 + size
+        if end > len(png):
+            raise ValueError('truncated PNG payload')
+        kind, data = png[offset+4:offset+8], png[offset+8:end-4]
+        if zlib.crc32(kind + data) != struct.unpack('>I', png[end-4:end])[0]:
+            raise ValueError('invalid PNG checksum')
+        chunks.append((kind, data))
+        if kind == b'IDAT':
+            compressed.extend(data)
+        offset = end
+    if not chunks or chunks[0][0] != b'IHDR' or len(chunks[0][1]) != 13 or chunks[-1] != (b'IEND', b''):
+        raise ValueError('missing PNG header/end')
+    width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', chunks[0][1])
+    if not (0 < width <= 1600 and 0 < height <= 1000):
+        raise ValueError(f'unsupported poster size {width}x{height}')
+    if depth != 8 or color not in (2, 6) or (compression, filtering, interlace) != (0, 0, 0):
+        raise ValueError('unsupported poster PNG format')
+    channels = 4 if color == 6 else 3
+    stride = width * channels
+    decoder = zlib.decompressobj()
+    raw = decoder.decompress(compressed, (stride+1)*height+1)
+    if len(raw) != (stride+1)*height or not decoder.eof or decoder.unused_data:
+        raise ValueError('invalid PNG image data')
+    if (width, height) == (1600, 1000):
+        return
+    previous = bytearray(stride)
+    output = bytearray((1+1600*4)*1000)  # filter 0, transparent RGBA border
+    left, top = (1600-width)//2, (1000-height)//2
+    for y in range(height):
+        start = y*(stride+1)
+        filter_type = raw[start]
+        row = bytearray(raw[start+1:start+1+stride])
+        if filter_type not in range(5):
+            raise ValueError('invalid PNG row filter')
+        if filter_type:
+            for i in range(stride):
+                a = row[i-channels] if i >= channels else 0
+                b = previous[i]
+                c = previous[i-channels] if i >= channels else 0
+                if filter_type == 1:
+                    predictor = a
+                elif filter_type == 2:
+                    predictor = b
+                elif filter_type == 3:
+                    predictor = (a+b)//2
+                else:
+                    p = a+b-c
+                    pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
+                    predictor = a if pa <= pb and pa <= pc else b if pb <= pc else c
+                row[i] = (row[i]+predictor) & 255
+        previous = row
+        if channels == 3:
+            rgba = bytearray(b'\xff'*(width*4))
+            for channel in range(3):
+                rgba[channel::4] = row[channel::3]
+        else:
+            rgba = row
+        dest = (top+y)*(1+1600*4)+1+left*4
+        output[dest:dest+width*4] = rgba
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind+data))
+    header = struct.pack('>IIBBBBB', 1600, 1000, 8, 6, 0, 0, 0)
+    # Retain colour-space metadata, not offsets/backgrounds tied to the old canvas.
+    metadata = b''.join(chunk(kind, data) for kind, data in chunks if kind in (b'sRGB', b'gAMA', b'cHRM', b'iCCP'))
+    path.write_bytes(png[:8] + chunk(b'IHDR', header) + metadata + chunk(b'IDAT', zlib.compress(output)) + chunk(b'IEND', b''))
+
+
 def export_glb(p, side, out, *, model=True):
     """Best-effort raw/fallback model and shared still; render warnings never affect coverage."""
     pcb = board_path(p, side)
@@ -313,7 +410,13 @@ def export_glb(p, side, out, *, model=True):
             shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
         else:
             (folder / "board.glb").unlink(missing_ok=True)
-    run(poster_argv(pcb, folder), "poster.png", "poster.log")
+    if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
+        try:
+            normalize_poster(folder / "poster.png")
+        except (OSError, ValueError, zlib.error) as error:
+            (folder / "poster.png").unlink(missing_ok=True)
+            with (folder / "poster.log").open('a', encoding='utf-8') as log:
+                log.write(f'\nPoster normalization failed: {error}\n')
 
 
 def render_tool_identity():
@@ -335,7 +438,7 @@ def render_cache_complete(cache, p, side, settings):
     need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
     if need_still and pathlib.Path(board_path(p, side)).is_file():
         poster = cache / "poster.png"
-        return poster.is_file() and poster.stat().st_size > 0
+        return poster_size(poster) == (1600, 1000)
     return True
 
 

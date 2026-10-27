@@ -1,6 +1,32 @@
 """Self-checks for kicad_review.py. Run: python3 test_kicad_review.py"""
 from kicad_review import is_kicad_file, owner_project
 
+
+def br02_png(width=1600, height=1000, *, channels=4, filter_type=0):
+    """Real, tiny-compressed RGB(A) fixture; all PNG row filters, no image dependency."""
+    import struct, zlib
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+    pixel = bytes((31, 73, 119, 255)[:channels])
+    row = pixel * width
+    rows = []
+    previous = bytes(len(row))
+    for _ in range(height):
+        filtered = bytearray()
+        for i, value in enumerate(row) if filter_type else ():
+            left = row[i-channels] if i >= channels else 0
+            above = previous[i]
+            corner = previous[i-channels] if i >= channels else 0
+            p = left + above - corner
+            distances = (abs(p-left), abs(p-above), abs(p-corner))
+            paeth = (left, above, corner)[distances.index(min(distances))]
+            predictor = (0, left, above, (left+above)//2, paeth)[filter_type]
+            filtered.append((value-predictor) & 255)
+        rows.append(bytes([filter_type]) + (filtered if filter_type else row))
+        previous = row
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8,
+            6 if channels == 4 else 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b''.join(rows))) + chunk(b'IEND', b''))
+
 dirs = {"", "boards/a", "boards/a/sub", "b"}
 assert owner_project("boards/a/x.kicad_sch", dirs) == "boards/a"
 assert owner_project("boards/a/sub/Libraries/y.kicad_mod", dirs) == "boards/a/sub"
@@ -1789,7 +1815,9 @@ with tempfile.TemporaryDirectory() as d:
     kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
     try:
         os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
-        cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        with patch('builtins.print') as warning:
+            cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        warning.assert_called_once_with('::warning::PDF report failed: Chrome unavailable, failed or timed out')
     finally:
         kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
     assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
@@ -1838,8 +1866,9 @@ with tempfile.TemporaryDirectory() as d:
         pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
-                with patch("kicad_review.subprocess.run", side_effect=failure):
+                with patch("kicad_review.subprocess.run", side_effect=failure), patch("builtins.print") as warning:
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+                warning.assert_called_once_with("::warning::PDF report failed: Chrome unavailable, failed or timed out")
                 assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
     finally:
         os.chdir(old_cwd)
@@ -3741,7 +3770,7 @@ def br02_export_contract():
             flag = '-o' if '-o' in args else '--output'
             dest = pathlib.Path(args[args.index(flag) + 1])
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(b'glTF' if 'glb' in args else b'\x89PNG\r\n\x1a\n')
+            dest.write_bytes(b'glTF' if 'glb' in args else br02_png(1568, 984))
             return subprocess.CompletedProcess(args, 0, 'export stdout\n', 'stderr\n')
         out = pathlib.Path(t, 'new/output')
         with patch.object(kr, 'board_path', return_value=__file__), patch.object(kr.subprocess, 'run', cli):
@@ -3753,7 +3782,8 @@ def br02_export_contract():
         assert (out/'board.raw.glb').read_bytes() == (out/'board.glb').read_bytes() == b'glTF'
         assert calls[1] == ['kicad-cli', 'pcb', 'render', '--quality', 'basic', '--perspective',
                             '--rotate', '-45,0,45', '-w', '1600', '-h', '1000', '-o', str(out/'poster.png'), __file__]
-        assert (out/'poster.png').read_bytes().startswith(b'\x89PNG')
+        import struct
+        assert struct.unpack('>II', (out/'poster.png').read_bytes()[16:24]) == (1600, 1000), 'BR02 actual poster dimensions'
         assert (out/'glb.log').read_text() == (out/'poster.log').read_text() == 'export stdout\nstderr\n'
     print('ok BR02 raw copper export and exact poster argv')
 
@@ -3766,14 +3796,14 @@ def br02_poster_only_contract():
         calls = []
         def cli(args, **kw):
             calls.append(args)
-            pathlib.Path(args[args.index('-o')+1]).write_bytes(b'\x89PNG\r\n\x1a\nhead')
+            pathlib.Path(args[args.index('-o')+1]).write_bytes(br02_png(1568, 984))
             return subprocess.CompletedProcess(args, 0, '', '')
         with patch.object(kr.subprocess, 'run', cli):
             kr.export_glb({'dir': 'P', 'name': 'P'}, 'head', t, model=False)
         assert len(calls) == 1 and calls[0][1:3] == ['pcb', 'render'], 'BR02 design-only still'
         assert calls[0][calls[0].index('-w')+1] == '1600'
         assert calls[0][calls[0].index('-h')+1] == '1000'
-        assert pathlib.Path(t, 'poster.png').read_bytes().endswith(b'head')
+        assert kr.poster_size(pathlib.Path(t, 'poster.png')) == (1600, 1000)
         assert not pathlib.Path(t, 'board.raw.glb').exists() and not pathlib.Path(t, 'board.glb').exists()
     print('ok BR02 design-only still')
 
@@ -3909,7 +3939,7 @@ def br02_render_cache_contract():
             calls = []
             def cli(args, **kw):
                 calls.append(args)
-                pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else b'PNG')
+                pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
                 return subprocess.CompletedProcess(args, 0, 'GLB log' if 'glb' in args else 'poster log', '')
             with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side'), \
                  patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.0'), patch.object(kr.subprocess, 'run', cli):
@@ -3929,6 +3959,8 @@ def br02_render_cache_contract():
                     assert e.code == 1
                 kr.cmd_render(None)
                 assert len(calls) == 2 and (head_cache/'poster.png').is_file(), 'BR02 repair poster by copying identical Base'
+                (base_cache/'poster.png').write_bytes(br02_png(1568, 984))
+                assert not kr.render_cache_complete(base_cache, pr, 'base', settings), 'undersized posters cannot be cache hits'
                 (base_cache/'poster.png').write_bytes(b'')
                 kr.cmd_render(None)
                 assert len(calls) == 4, 'BR02 empty poster invalidates render cache'
@@ -3977,3 +4009,53 @@ def br02_render_cache_contract():
 
 br02_export_failures()
 br02_render_cache_contract()
+
+
+def br02_poster_dimensions():
+    import pathlib, struct, subprocess, tempfile, zlib
+    from unittest.mock import patch
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as t:
+        dest = pathlib.Path(t, 'poster.png')
+        # Every PNG filter must preserve RGB(A) pixels exactly, not just change IHDR.
+        for channels in (3, 4):
+            for filter_type in range(5):
+                dest.write_bytes(br02_png(4, 2, channels=channels, filter_type=filter_type))
+                kr.normalize_poster(dest)
+                png = dest.read_bytes()
+                assert struct.unpack('>II', png[16:24]) == (1600, 1000)
+                data = bytearray()
+                offset = 8
+                while offset < len(png):
+                    size = struct.unpack('>I', png[offset:offset+4])[0]
+                    kind = png[offset+4:offset+8]
+                    payload = png[offset+8:offset+8+size]
+                    assert zlib.crc32(kind+payload) == struct.unpack('>I', png[offset+8+size:offset+12+size])[0]
+                    if kind == b'IDAT':
+                        data.extend(payload)
+                    offset += 12+size
+                raw = zlib.decompress(data)
+                stride = 1+1600*4
+                assert len(raw) == stride*1000
+                pixel = bytes((31, 73, 119, 255))
+                for y in range(1000):
+                    row = raw[y*stride:(y+1)*stride]
+                    expected = bytes(798*4)+pixel*4+bytes(798*4) if y in (499, 500) else bytes(1600*4)
+                    assert row == b'\0'+expected, (channels, filter_type, y)
+        # Already conforming stills are left byte-identical.
+        exact = br02_png()
+        dest.write_bytes(exact)
+        kr.normalize_poster(dest)
+        assert dest.read_bytes() == exact
+        for bad in (b'not PNG', br02_png()[:-10], br02_png(1601, 1)):
+            def cli(args, **kw):
+                pathlib.Path(args[args.index('-o')+1]).write_bytes(bad)
+                return subprocess.CompletedProcess(args, 0, 'render stdout\n', '')
+            with patch.object(kr.subprocess, 'run', cli):
+                kr.export_glb({'dir': 'P', 'name': 'P'}, 'head', t, model=False)
+            assert not dest.exists(), 'invalid or oversized still is not a successful product'
+            assert 'Poster normalization failed' in pathlib.Path(t, 'poster.log').read_text()
+    print('ok BR02 1600x1000 poster dimensions, all PNG filters, pixel preservation and invalid cleanup')
+
+
+br02_poster_dimensions()
