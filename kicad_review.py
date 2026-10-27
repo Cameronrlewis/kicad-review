@@ -2866,6 +2866,23 @@ def add_blob(blobs, content):
     return key
 
 
+def image_pair(base, head):
+    return {'base': base, 'head': head}
+
+
+def write_image_assets(blobs, assets, directory):
+    # Validate and decode the complete batch before publishing any entry.
+    pending = []
+    for key, meta in assets.items():
+        if not re.fullmatch(r'[0-9a-f]{12}', key) or meta['kind'] not in ('svg', 'json'):
+            raise ValueError('invalid image asset')
+        pending.append((f"{key}.{meta['kind']}.gz", base64.b64decode(blobs[key], validate=True)))
+    dest = pathlib.Path(directory)
+    dest.mkdir(parents=True, exist_ok=True)
+    for filename, payload in pending:
+        (dest / filename).write_bytes(payload)
+
+
 def model3d_missing(out, objs):
     """Missing 3D models from KiCad's export log and footprints without a model declaration."""
     missing = {}
@@ -3024,6 +3041,43 @@ def review_links(env, det):
 UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
 
 
+def image_asset_declarations(projects):
+    """Declare only optional image capabilities; legacy drawings stay embedded."""
+    assets = {}
+    # Shared content has one descriptor. Prefer board roles explicitly, not by
+    # traversal order, preserving the established layer/inspection filenames.
+    priority = {'sheet.svg': 0, 'layer.svg': 1,
+                'sheet-hotspots.json': 0, 'board-inspect.json': 1}
+
+    def declare(pair, kind, name):
+        for key in (pair or {}).values():
+            if key:
+                previous = assets.get(key)
+                if previous and previous['kind'] != kind:
+                    raise ValueError('conflicting image asset kinds')
+                if not previous or priority[name] > priority[previous['name']]:
+                    assets[key] = {'kind': kind, 'name': name}
+
+    for project in projects:
+        for sheet in project.get('sheets', []):
+            declare(sheet.get('hotspots'), 'json', 'sheet-hotspots.json')
+            for pair in sheet.get('svgThemes', {}).values():
+                declare(pair, 'svg', 'sheet.svg')
+        declare(project.get('board', {}).get('inspect'), 'json', 'board-inspect.json')
+        for layer in project.get('board', {}).get('layers', []):
+            for pair in layer.get('svgThemes', {}).values():
+                declare(pair, 'svg', 'layer.svg')
+    return assets
+
+
+def finalize_report(data, assets_dir):
+    """Share hosted declarations and sidecars without removing any offline blob."""
+    data['assets'] = image_asset_declarations(data['projects'])
+    write_image_assets(data['blobs'], data['assets'], assets_dir)
+    payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
+    return inline_page(f'window.REVIEW_DATA = {payload};')
+
+
 def inline_page(data_js):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
     read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
@@ -3165,8 +3219,7 @@ def cmd_report(args):
         data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
                            "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
-    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
-    html = inline_page(f"window.REVIEW_DATA = {payload};")
+    html = finalize_report(data, "review/assets")
     with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")

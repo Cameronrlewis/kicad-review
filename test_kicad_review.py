@@ -3578,8 +3578,9 @@ with tempfile.TemporaryDirectory() as t:
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
                       "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+            legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
-            assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**legacy, "blobs": {}}, separators=(",", ":")) + ";"
+            assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
             with open("review/issues.json", "w") as fh: _json.dump(issues, fh)
             with patch("sys.stdout", new_callable=io.StringIO): cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
             assert open("review/comment.md").read() == comment_markdown(legacy, [], "")
@@ -4275,3 +4276,90 @@ for pin in ('2', '3'):
 for pin in ('4', '5', '6'): assert by_pin[pin]['geometry']['segments']
 (fixture_dir / 'image-pick-records.json').write_text(json.dumps(records, sort_keys=True) + '\n')
 print('ok producer-backed image pick records')
+
+# Task 4: write_image_assets and image_pair
+blobs = {}
+key = kr.add_blob(blobs, '{"version":1,"units":"mm","views":[]}')
+raw = gzip.decompress(base64.b64decode(blobs[key]))
+assert json.loads(raw)['version'] == 1
+with tempfile.TemporaryDirectory() as d:
+    kr.write_image_assets(blobs, {key:{'kind':'json','name':'sheet-hotspots.json'}}, d)
+    assert pathlib.Path(d, key+'.json.gz').read_bytes() == base64.b64decode(blobs[key])
+assert kr.image_pair(None, 'head-id') == {'base':None, 'head':'head-id'}
+
+
+import copy
+blobs={}
+svg_id=kr.add_blob(blobs,'<svg viewBox="0 0 10 10"></svg>')
+json_id=kr.add_blob(blobs,'{"version":1,"views":[]}')
+for head_only in (False,True):
+    pair=lambda key: {'base':None if head_only else key,'head':key}
+    data={'version':1,'base':None if head_only else 'a'*40,'head':'b'*40,
+          'projects':[{'sheets':[{'svg':pair(svg_id),'svgThemes':{'light':pair(svg_id)},
+                                  'hotspots':pair(json_id)}],
+                       'board':{'layers':[{'svg':pair(svg_id),'svgThemes':{'light':pair(svg_id)}}],
+                                'inspect':pair(json_id)}}], 'blobs':copy.deepcopy(blobs)}
+    if head_only: data['mode']='single'
+    with TemporaryDirectory() as d, patch.object(kr,'inline_page',side_effect=lambda script:script):
+        html=kr.finalize_report(data,d)
+        embedded=json.loads(html.removeprefix('window.REVIEW_DATA = ').removesuffix(';'))
+        assert embedded['assets']=={svg_id:{'kind':'svg','name':'layer.svg'},
+                                    json_id:{'kind':'json','name':'board-inspect.json'}}
+        assert embedded['blobs']==blobs and embedded['base']==data['base']
+        assert pathlib.Path(d,svg_id+'.svg.gz').read_bytes()==base64.b64decode(blobs[svg_id])
+        assert pathlib.Path(d,json_id+'.json.gz').read_bytes()==base64.b64decode(blobs[json_id])
+        assert set(p.name for p in pathlib.Path(d).iterdir())=={svg_id+'.svg.gz',json_id+'.json.gz'}
+with TemporaryDirectory() as d, patch.object(kr,'inline_page',side_effect=lambda script:script):
+    legacy={'version':1,'projects':[{'sheets':[],'board':{'layers':[]}}],'blobs':{}}
+    kr.finalize_report(legacy,d)
+    assert legacy['assets']=={} and legacy['blobs']=={}
+
+# The command delegates finalization exactly once, before metadata drops offline blobs.
+old = os.getcwd()
+try:
+    with TemporaryDirectory() as directory:
+        os.chdir(directory)
+        write('.', {'review/detect.json': json.dumps({'base': 'a'*40, 'head': 'b'*40, 'reason': 'fixture', 'projects': []})})
+        with patch.object(kr, 'finalize_report', wraps=kr.finalize_report) as finalized:
+            kr.cmd_report(None)
+        assert finalized.call_count == 1
+        assert finalized.call_args.args[1] == 'review/assets'
+        assert json.loads(pathlib.Path('review/data.json').read_text())['assets'] == {}
+        assert pathlib.Path('review/assets').is_dir()
+finally:
+    os.chdir(old)
+print('ok report command shares image finalization')
+
+
+def image_asset_contract_regressions():
+    blobs = {}
+    key = kr.add_blob(blobs, '<svg viewBox="0 0 1 1"/>')
+    valid = {key: {'kind': 'svg', 'name': 'sheet.svg'}}
+    # A later malformed declaration must not publish an earlier valid entry.
+    for invalid_key, kind in (('../escape', 'svg'), ('a'*12, 'html')):
+        with TemporaryDirectory() as directory:
+            try:
+                kr.write_image_assets(blobs, {**valid, invalid_key: {'kind': kind}}, directory)
+            except ValueError:
+                assert not list(Path(directory).iterdir()), 'partial assets published'
+            else:
+                raise AssertionError('invalid asset accepted')
+    # Shared artwork gets one explicit role-priority name, regardless of traversal.
+    sheet_project = {'sheets': [{'svgThemes': {'light': {'head': key}}}], 'board': {'layers': []}}
+    layer_project = {'sheets': [], 'board': {'layers': [{'svgThemes': {'light': {'head': key}}}]}}
+    expected = {key: {'kind': 'svg', 'name': 'layer.svg'}}
+    assert kr.image_asset_declarations([sheet_project, layer_project]) == expected
+    assert kr.image_asset_declarations([layer_project, sheet_project]) == expected
+    # Old reports have real artwork but none of the optional new fields.
+    legacy = {'version': 1, 'projects': [{'sheets': [{'svg': {'base': None, 'head': key}}],
+              'board': {'layers': [{'name': 'F_Cu', 'svg': {'base': None, 'head': key}}]}}],
+              'blobs': blobs.copy()}
+    assert kr.image_asset_declarations(legacy['projects']) == {}
+    with TemporaryDirectory() as directory, patch.object(kr, 'inline_page', side_effect=lambda script: script):
+        html = kr.finalize_report(legacy, directory)
+        embedded = json.loads(html.removeprefix('window.REVIEW_DATA = ').removesuffix(';'))
+        assert embedded['assets'] == {} and embedded['blobs'] == blobs
+        assert not list(Path(directory).iterdir())
+    print('ok atomic asset validation, deterministic names, legacy artwork finalization')
+
+image_asset_contract_regressions()
