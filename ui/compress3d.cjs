@@ -12,30 +12,6 @@ function processorKey(raw,metadata,source) {
     ...metadata,keep:[...new Set(metadata.keep)].sort()})).digest('hex');
 }
 
-async function compress(input, output) {
-  const { NodeIO } = require('@gltf-transform/core');
-  const { ALL_EXTENSIONS } = require('@gltf-transform/extensions');
-  const { meshopt } = require('@gltf-transform/functions');
-  const { MeshoptEncoder, MeshoptDecoder } = require('meshoptimizer');
-
-  await MeshoptEncoder.ready;
-  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({
-    'meshopt.encoder': MeshoptEncoder, 'meshopt.decoder': MeshoptDecoder,
-  });
-  const document = await io.read(input);
-  // Quantization changes mesh-node transforms. Keep component names and original
-  // pivots on parents, so top/bottom classification and old-position ghosts agree.
-  for (const node of document.getRoot().listNodes()) {
-    if (/^[A-Z]+\d+$/.test(node.getName()) && node.getMesh()) {
-      const geometry = document.createNode().setMesh(node.getMesh());
-      node.setMesh(null).addChild(geometry);
-    }
-  }
-  // No flatten/join/instance: those operations would lose reference/layer names.
-  await document.transform(meshopt({ encoder: MeshoptEncoder, level: 'high' }));
-  await io.write(output, document);
-}
-
 function snapshotParts(document,metadata) {
   const {getBounds}=require('@gltf-transform/functions');
   const refs=new Map(metadata.footprints.map(f=>[f.ref,f]));
@@ -150,5 +126,96 @@ async function batchDocument(document) {
 
 module.exports={maskRGB,padStyle,processorKey,snapshotParts,applyMaterials,batchDocument};
 
+function budgetWarnings(counts,metadata) {
+  const warnings=[];
+  if(counts.triangles>600000)warnings.push('triangle budget exceeded after one body-only pass');
+  const changed=new Set(metadata.footprints.filter(f=>metadata.keep?.includes(f.ref)).map(f=>f.uuid)).size;
+  if(counts.primitives>=100+changed)warnings.push('hard draw-call budget exceeded: owner decision required');
+  return warnings;
+}
 
-if(require.main===module) compress(...process.argv.slice(2)).catch(error=>{console.error(error);process.exitCode=1});
+function geometryCounts(document) {
+  let triangles=0,primitives=0;
+  for(const scene of document.getRoot().listScenes())scene.traverse(n=>{
+    for(const p of n.getMesh()?.listPrimitives()||[]) {
+      primitives++;
+      if(p.getMode()===4)triangles+=(p.getIndices()||p.getAttribute('POSITION')).getCount()/3;
+    }
+  });
+  return {triangles,primitives};
+}
+async function simplifyBodies(document) {
+  if(geometryCounts(document).triangles<=600000)return;
+  const {simplifyPrimitive,weldPrimitive}=require('@gltf-transform/functions');
+  const {MeshoptSimplifier}=require('meshoptimizer');await MeshoptSimplifier.ready;
+  for(const n of document.getRoot().listNodes()) {
+    if(n.getExtras().role!=='body'||!n.getMesh())continue;
+    const mesh=n.getMesh().clone();
+    for(const p of mesh.listPrimitives())mesh.removePrimitive(p);
+    for(const original of n.getMesh().listPrimitives()) {
+      const p=original.clone();mesh.addPrimitive(p);
+      for(const semantic of p.listSemantics())p.setAttribute(semantic,p.getAttribute(semantic).clone());
+      if(p.getIndices())p.setIndices(p.getIndices().clone());
+      if(p.getMode()===4) {
+        if(!p.getIndices())weldPrimitive(p); // index only this isolated body primitive
+        simplifyPrimitive(p,{simplifier:MeshoptSimplifier,ratio:.5,error:.0005});
+      }
+    }
+    n.setMesh(mesh);
+  }
+}
+async function processDocument(document,metadata) {
+  const parts=snapshotParts(document,metadata); // identities only; not final stats
+  applyMaterials(document,metadata.finish);
+  await batchDocument(document);await simplifyBodies(document);
+  const withModel=parts.filter(p=>p.hasModel).length,counts=geometryCounts(document),warnings=[];
+  warnings.push(...budgetWarnings(counts,metadata));
+  return {parts,stats:{footprints:parts.length,withModel,placeholders:parts.length-withModel,
+    ...counts,warnings}};
+}
+async function compress(input,output,metadata,partsPath,statsPath) {
+  if(metadata&&(!partsPath||!statsPath))throw Error('metadata requires --parts and --stats paths');
+  const fs=require('node:fs/promises'),path=require('node:path');
+  const {NodeIO}=require('@gltf-transform/core'),{ALL_EXTENSIONS}=require('@gltf-transform/extensions');
+  const {meshopt}=require('@gltf-transform/functions');
+  const {MeshoptEncoder,MeshoptDecoder}=require('meshoptimizer');
+  await Promise.all([MeshoptEncoder.ready,MeshoptDecoder.ready]);
+  const io=new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({
+    'meshopt.encoder':MeshoptEncoder,'meshopt.decoder':MeshoptDecoder});
+  const document=await io.read(input);
+  if(!metadata) {
+    // Quantization changes mesh-node transforms. Keep component names and original
+    // pivots on parents, so top/bottom classification and old-position ghosts agree.
+    for (const node of document.getRoot().listNodes()) {
+      if (/^[A-Z]+\d+$/.test(node.getName()) && node.getMesh()) {
+        const geometry = document.createNode().setMesh(node.getMesh());
+        node.setMesh(null).addChild(geometry);
+      }
+    }
+    await document.transform(meshopt({encoder:MeshoptEncoder,level:'high'}));
+    await io.write(output,document);return;
+  }
+  const result=await processDocument(document,metadata);
+  await document.transform(meshopt({encoder:MeshoptEncoder,level:'high'}));
+  const temp=await fs.mkdtemp(path.join(path.dirname(output),'.3d-'));
+  try {
+    const model=path.join(temp,'board.glb');await io.write(model,document);
+    Object.assign(result.stats,geometryCounts(await io.read(model)));
+    result.stats.warnings=budgetWarnings(result.stats,metadata);
+    await fs.writeFile(path.join(temp,'parts.json'),JSON.stringify(result.parts));
+    await fs.writeFile(path.join(temp,'stats.json'),JSON.stringify(result.stats));
+    // Caller validates/install manifest last; no partial set is a valid cache hit.
+    await fs.rename(model,output);
+    await fs.rename(path.join(temp,'parts.json'),partsPath);
+    await fs.rename(path.join(temp,'stats.json'),statsPath);
+  } finally {await fs.rm(temp,{recursive:true,force:true});}
+}
+Object.assign(module.exports,{geometryCounts,simplifyBodies,processDocument,compress});
+
+if(require.main===module)(async()=>{
+  const [input,output,...args]=process.argv.slice(2);
+  const option=name=>{const i=args.indexOf(name);return i<0?null:args[i+1]};
+  const meta=option('--metadata')?JSON.parse(require('node:fs').readFileSync(option('--metadata'),'utf8')):null;
+  if(meta&&option('--keep'))meta.keep=option('--keep').split(',').filter(Boolean);
+  await compress(input,output,meta,option('--parts'),option('--stats'));
+})().catch(error=>{console.error(error);process.exitCode=1});

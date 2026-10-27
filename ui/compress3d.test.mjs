@@ -317,6 +317,20 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
     P.applyMaterials(doc, 'ENIG');
     await P.batchDocument(doc);
 
+    // Exercise the actual encoded delivery pipeline on both KiCad hierarchies.
+    const {MeshoptDecoder}=require('meshoptimizer');await MeshoptDecoder.ready;
+    const deliveryIO=new NodeIO().registerExtensions(ALL_EXTENSIONS)
+      .registerDependencies({'meshopt.decoder':MeshoptDecoder});
+    const dir=mkdtempSync(pathJoin(process.env.OUT,'fixture-processed-'));
+    try {
+      await P.compress(p,pathJoin(dir,'out.glb'),metadata,pathJoin(dir,'parts.json'),pathJoin(dir,'stats.json'));
+      const stats=JSON.parse(readFileSync(pathJoin(dir,'stats.json')));
+      const shipped=await deliveryIO.read(pathJoin(dir,'out.glb'));
+      assert.deepEqual({triangles:stats.triangles,primitives:stats.primitives},P.geometryCounts(shipped));
+      assert.deepEqual(JSON.parse(readFileSync(pathJoin(dir,'parts.json'))),parts,'raw world boxes survive encoding');
+      assert.deepEqual([stats.footprints,stats.withModel,stats.placeholders],[6,3,3]);
+    } finally {rmSync(dir,{recursive:true,force:true});}
+
     // Kept reference R1 has exactly one parent node named R1
     const kept = doc.getRoot().listNodes().filter(n => n.getName() === 'R1');
     assert.equal(kept.length, 1, `R1 retained parent node present in ${p}`);
@@ -390,3 +404,179 @@ test('BR02 applyMaterials and batchDocument on actual fixture exports', integrat
 
 
 
+
+
+import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {join as pathJoin} from 'node:path';
+test('BR02 shipped coverage equals reread processed GLB counts',integration,async()=>{
+  const {NodeIO}=require('@gltf-transform/core');
+  const {ALL_EXTENSIONS}=require('@gltf-transform/extensions');
+  const {MeshoptDecoder}=require('meshoptimizer');await MeshoptDecoder.ready;
+  const dir=mkdtempSync(pathJoin(process.env.OUT,'processor-'));
+  try {
+    const {d,metadata}=makeDocument(['R1','R2','R12'],20);metadata.keep=['R12'];
+    const io=new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({'meshopt.decoder':MeshoptDecoder});
+    await io.write(pathJoin(dir,'in.glb'),d);
+    await P.compress(pathJoin(dir,'in.glb'),pathJoin(dir,'out.glb'),metadata,
+      pathJoin(dir,'parts.json'),pathJoin(dir,'stats.json'));
+    const stats=JSON.parse(readFileSync(pathJoin(dir,'stats.json')));
+    const final=await io.read(pathJoin(dir,'out.glb'));
+    assert.deepEqual({triangles:stats.triangles,primitives:stats.primitives},P.geometryCounts(final));
+    assert.ok(stats.primitives<60,'BR02 coverage must be post-batching');
+    assert.equal(JSON.parse(readFileSync(pathJoin(dir,'parts.json'))).length,3);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+function gridDocument(n,nonindexed=false) {
+  const {d}=makeDocument(['R1']),body=d.getRoot().listNodes().find(n=>n.getMesh());
+  body.setExtras({role:'body'});const primitive=body.getMesh().listPrimitives()[0];
+  const positions=[],indices=[];
+  for(let z=0;z<=n;z++)for(let x=0;x<=n;x++)positions.push(x/n,0,z/n);
+  for(let z=0;z<n;z++)for(let x=0;x<n;x++) {
+    const a=z*(n+1)+x,b=a+1,c=a+n+1,e=c+1;indices.push(a,c,b,b,c,e);
+  }
+  primitive.getAttribute('POSITION').setArray(new Float32Array(nonindexed?
+    indices.flatMap(i=>positions.slice(i*3,i*3+3)):positions));
+  if(nonindexed)primitive.setIndices(null);
+  else primitive.getIndices().setArray(new Uint32Array(indices));
+  return {d,body,primitive};
+}
+const arrays=p=>[...p.listSemantics().map(k=>[k,p.getAttribute(k).getArray()]),
+  ['indices',p.getIndices()?.getArray()]].map(([k,a])=>[k,a?Buffer.from(a.buffer,a.byteOffset,a.byteLength).toString('hex'):null]);
+for(const nonindexed of [false,true])test('BR02 reducible body shrinks and board bytes stay exact '+nonindexed,integration,async()=>{
+  const {d,body,primitive}=gridDocument(550,nonindexed);
+  const board=['copper','pads','fr4','mask','silk'].map(role=> {
+    const n=d.createNode('x_'+role).setMesh(body.getMesh()).setExtras({role});
+    d.getRoot().listScenes()[0].addChild(n);return n;
+  });
+  const before=arrays(primitive), triangles=nonindexed?primitive.getAttribute('POSITION').getCount()/3:primitive.getIndices().getCount()/3;
+  await P.simplifyBodies(d);
+  const reduced=body.getMesh().listPrimitives()[0];
+  assert.ok(reduced.getIndices().getCount()/3<triangles,'BR02 component triangles must decrease');
+  for(const n of board)assert.deepEqual(arrays(n.getMesh().listPrimitives()[0]),before);
+});
+test('BR02 below budget stays unchanged',integration,async()=>{
+  const {d,body,primitive}=gridDocument(8),before=arrays(primitive),mesh=body.getMesh();
+  await P.simplifyBodies(d);assert.equal(body.getMesh(),mesh);assert.deepEqual(arrays(primitive),before);
+});
+test('BR02 copper dominated workload warns truthfully',integration,async()=>{
+  const {d}=gridDocument(550);const node=d.getRoot().listNodes().find(n=>n.getMesh());
+  node.setName('large_copper');node.getParentNode().removeChild(node);
+  d.getRoot().listScenes()[0].addChild(node);
+  const {metadata}=makeDocument(['R1']);metadata.footprints=[];
+  const {stats}=await P.processDocument(d,metadata);
+  assert.ok(stats.triangles>600000);assert.ok(stats.warnings.includes('triangle budget exceeded after one body-only pass'));
+  assert.equal(stats.triangles,550*550*2,'copper triangles remain above budget');
+});
+
+
+
+test('BR02 padless footprint does not discard processed board',integration,async()=>{
+  const {d,metadata}=makeDocument(['R1','R2']);
+  metadata.footprints.push({ref:'LOGO1',uuid:'id-LOGO1',side:'top',pos:[7,8,0],box:null,hasModel:false});
+  const {parts,stats}=await P.processDocument(d,metadata);
+  assert.equal(stats.footprints,3);assert.equal(stats.withModel,2);
+  assert.deepEqual(parts.find(p=>p.ref==='LOGO1').box.filter((_,i)=>i!==1&&i!==4),[.006,.007,.008,.009]);
+  assert.ok(d.getRoot().listNodes().some(n=>n.getName().startsWith('parts:merged:')));
+});
+for(const rgb of [[.7,.02,.01],[.01,.02,.8],[0,0,0],[1,1,1],[.08,.2,.14],[.0627,.16,.1129]])
+ test('BR02 processed emitted mask '+rgb,integration,async()=>{
+  const {d,metadata}=makeDocument(['R1']);
+  const source=d.getRoot().listNodes().find(n=>n.getMesh()).getMesh().listPrimitives()[0];
+  const material=d.createMaterial('custom-mask').setBaseColorFactor([...rgb,1]);
+  const mesh=d.createMesh().addPrimitive(source.clone().setMaterial(material));
+  d.getRoot().listScenes()[0].addChild(d.createNode('sample_soldermask').setMesh(mesh));
+  await P.processDocument(d,metadata);
+  const {NodeIO}=require('@gltf-transform/core'),{ALL_EXTENSIONS}=require('@gltf-transform/extensions');
+  const io=new NodeIO().registerExtensions(ALL_EXTENSIONS),emitted=await io.readBinary(await io.writeBinary(d));
+  const masks=emitted.getRoot().listNodes().filter(n=>n.getMesh()&&n.getExtras().role==='mask');
+  assert.ok(masks.length);
+  const expected=[.08,.0627].includes(rgb[0])?[.011,.1,.036]:rgb;
+  for(const n of masks)for(const p of n.getMesh().listPrimitives()) {
+    const m=p.getMaterial(),rgba=m.getBaseColorFactor(),coat=m.getExtension('KHR_materials_clearcoat');
+    assert.ok(expected.every((v,i)=>Math.abs(v-rgba[i])<1e-6),'custom RGB or mapped green');
+    assert.equal(rgba[3],.72);assert.equal(m.getAlphaMode(),'BLEND');assert.equal(m.getRoughnessFactor(),.6);
+    assert.equal(coat.getClearcoatFactor(),.6);assert.equal(coat.getClearcoatRoughnessFactor(),.18);
+  }
+ });
+
+
+
+test('BR02 incompatible changed appearances diagnose but never waive the hard gate',integration,async()=>{
+  const {d,metadata}=makeDocument(['R12'],240);metadata.keep=['R12'];
+  const mesh=d.getRoot().listNodes().find(n=>n.getMesh()).getMesh();
+  mesh.listPrimitives().forEach((p,i)=>p.setMaterial(d.createMaterial('appearance-'+i)
+    .setBaseColorFactor([i/240,.2,.4,1])));
+  const {stats,parts}=await P.processDocument(d,metadata);
+  assert.equal(parts[0].ref,'R12');assert.equal(stats.primitives,240);
+  assert.ok(stats.warnings.some(w=>w.includes('hard draw-call budget exceeded')));
+  assert.equal(stats.primitives<100+1,false,'workload must remain an acceptance failure');
+});
+
+
+test('BR02 counts scene instances, indexed and nonindexed triangles, but not lines',integration,()=>{
+  const {d}=makeDocument(['R1']);
+  const body=d.getRoot().listNodes().find(n=>n.getMesh());
+  const mesh=body.getMesh(), source=mesh.listPrimitives()[0];
+  mesh.addPrimitive(source.clone().setIndices(null));
+  mesh.addPrimitive(source.clone().setMode(1));
+  d.getRoot().listScenes()[0].addChild(d.createNode('instance').setMesh(mesh));
+  // Unattached geometry is not submitted to the renderer.
+  d.createNode('unused').setMesh(mesh);
+  assert.deepEqual(P.geometryCounts(d),{triangles:4,primitives:6});
+});
+
+test('BR02 rejects corrupt input and missing sidecar paths without touching outputs',integration,async()=>{
+  const {writeFileSync,existsSync,readdirSync}=require('node:fs');
+  const dir=mkdtempSync(pathJoin(process.env.OUT,'invalid-processor-'));
+  try {
+    const input=pathJoin(dir,'bad.glb'),output=pathJoin(dir,'out.glb');
+    const parts=pathJoin(dir,'parts.json'),stats=pathJoin(dir,'stats.json');
+    for(const p of [output,parts,stats])writeFileSync(p,'sentinel');
+    writeFileSync(input,'not a glb');
+    const {metadata}=makeDocument(['R1']);
+    await assert.rejects(P.compress(input,output,metadata,null,stats),/requires --parts and --stats/);
+    await assert.rejects(P.compress(input,output,metadata,parts,null),/requires --parts and --stats/);
+    await assert.rejects(P.compress(input,output,metadata,parts,stats));
+    for(const p of [output,parts,stats])assert.equal(readFileSync(p,'utf8'),'sentinel');
+    const {NodeIO}=require('@gltf-transform/core');
+    const {d}=makeDocument(['R1']);
+    await new NodeIO().write(input,d);
+    const invalid={...metadata,footprints:[...metadata.footprints,{ref:'U9',uuid:'bad',side:'top',box:null,pos:[null,0]}]};
+    await assert.rejects(P.compress(input,output,invalid,parts,stats),/finite position/);
+    for(const p of [output,parts,stats])assert.equal(readFileSync(p,'utf8'),'sentinel');
+    assert.ok(!readdirSync(dir).some(p=>p.startsWith('.3d-')));
+    assert.ok(existsSync(input));
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('BR02 CLI preserves legacy compression and supports metadata keep override',integration,async()=>{
+  const {spawnSync}=require('node:child_process'),{writeFileSync}=require('node:fs');
+  const {NodeIO}=require('@gltf-transform/core'),{ALL_EXTENSIONS}=require('@gltf-transform/extensions');
+  const {MeshoptDecoder}=require('meshoptimizer');await MeshoptDecoder.ready;
+  const io=new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({'meshopt.decoder':MeshoptDecoder});
+  const dir=mkdtempSync(pathJoin(process.env.OUT,'cli-processor-'));
+  try {
+    const {d,metadata}=makeDocument(['R1','R2']);
+    // Legacy direct footprint geometry must retain its named parent pivot.
+    const r1=d.getRoot().listNodes().find(n=>n.getName()==='R1');
+    const child=r1.listChildren()[0];r1.setMesh(child.getMesh());child.dispose();
+    const input=pathJoin(dir,'in.glb'),output=pathJoin(dir,'out.glb'),meta=pathJoin(dir,'meta.json');
+    const parts=pathJoin(dir,'parts.json'),stats=pathJoin(dir,'stats.json');
+    await io.write(input,d);writeFileSync(meta,JSON.stringify(metadata));
+    const run=args=>spawnSync(process.execPath,[new URL('./compress3d.cjs',import.meta.url).pathname,...args],{encoding:'utf8'});
+    const legacy=run([input,output]);assert.equal(legacy.status,0,legacy.stderr);
+    const emitted=await io.read(output),kept=emitted.getRoot().listNodes().find(n=>n.getName()==='R1');
+    assert.ok(kept&&!kept.getMesh()&&kept.listChildren().some(n=>n.getMesh()));
+    assert.deepEqual(kept.getTranslation(),r1.getTranslation());
+    const processed=run([input,output,'--metadata',meta,'--keep','R1','--parts',parts,'--stats',stats]);
+    assert.equal(processed.status,0,processed.stderr);
+    const final=await io.read(output);
+    assert.ok(final.getRoot().listNodes().some(n=>n.getExtras().batch==='ref:R1'));
+    const coverage=JSON.parse(readFileSync(stats));
+    assert.deepEqual({triangles:coverage.triangles,primitives:coverage.primitives},P.geometryCounts(final));
+    const before=readFileSync(output);
+    const missing=run([input,output,'--metadata',meta]);assert.notEqual(missing.status,0);
+    assert.match(missing.stderr,/requires --parts and --stats/);
+    assert.deepEqual(readFileSync(output),before);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
