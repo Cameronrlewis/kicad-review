@@ -1,0 +1,39 @@
+Task 3 preserved RED/GREEN evidence
+===================================
+Controller ruling: record evidence in the task ledger; do not rewrite history.
+This is a retrospective transcription of preserved outputs, not a new Task 3 run.
+
+Original Task 3 cycle
+Working directory: /Users/cameron/Code/kicad-review-worktrees/03-net-and-copper-changes
+Command for RED and GREEN: python3 test_kicad_review.py
+
+RED source: /Users/cameron/Code/kicad-review-study/tmp/03-net-and-copper-changes/task3-red.txt
+Relevant failure before implementation:
+  File "test_kicad_review.py", line 3909, in test_br03_wires
+    from kicad_review import diff_wires, wire_counts
+ImportError: cannot import name 'diff_wires' from 'kicad_review'
+
+GREEN source: /Users/cameron/Code/kicad-review-study/tmp/03-net-and-copper-changes/task3-green-attempt1.txt
+Relevant final output after implementation (no traceback):
+ok BR03 electrical membership
+ok BR03 review identity regressions (5 tests)
+ok BR03 net graph regressions (4 tests)
+ok BR03 physical pads and wires (6 tests)
+
+Review fix cycle recorded by the prior Task 3 implementer
+Command: cd /Users/cameron/Code/kicad-review-study/tmp/03-net-and-copper-changes/fix2-red && python3 run_red.py
+RED mutation: restore pinfunction/pintype to the physical pad geometry key in
+an isolated scratch copy. Recorded result: exit 1, AssertionError in
+ test_br03_pad_net_parser comparing annotated and baseline geometry.
+GREEN after restoring the committed implementation: PASS test_br03_pad_net_parser
+
+The prior implementer also recorded exit 0 for the full suite:
+Command: cd /Users/cameron/Code/kicad-review-worktrees/03-net-and-copper-changes && python3 test_kicad_review.py
+Output source: /Users/cameron/Code/kicad-review-study/tmp/03-net-and-copper-changes/task3-fix2-full-test.log
+Relevant final output:
+ok BR03 electrical membership
+ok BR03 review identity regressions (8 tests)
+ok BR03 net graph regressions (4 tests)
+ok BR03 physical pads and wires (9 tests)
+
+No Task 3 production code or history was changed while preserving this evidence.

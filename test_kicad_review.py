@@ -1,4 +1,49 @@
 """Self-checks for kicad_review.py. Run: python3 test_kicad_review.py"""
+import os
+
+# Only the KiCad interpreter imports pcbnew; ordinary host checks stay dependency-free.
+if os.environ.get("BR03_PCBNEW_TEST") == "1":
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("copper_area", "tools/copper_area.py")
+    copper = importlib.util.module_from_spec(spec); spec.loader.exec_module(copper)
+    import pcbnew
+
+    def square(x0, y0, x1, y1):
+        p = pcbnew.SHAPE_POLY_SET(); p.NewOutline()
+        for x, y in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]:
+            p.Append(int(x*1e6), int(y*1e6))
+        return p
+
+    a, b = square(0, 0, 2, 2), square(1, 0, 3, 2)
+    result = copper.compare({("F.Cu", "GND"): a}, {("F.Cu", "GND"): b})["rows"][0]
+    assert result["addedMm2"] == result["removedMm2"] == 2.0
+    assert result["addedContours"] and result["removedContours"]
+    u = square(0, 0, 2, 2); u.BooleanAdd(square(1, 0, 3, 2)); u.Simplify()
+    assert abs(u.Area()/1e12 - 6) < 1e-9
+    hole = square(0, 0, 4, 4); hole.BooleanSubtract(square(1, 1, 3, 3))
+    assert len(copper.contours(hole)) == 2
+    assert not copper.compare({("F.Cu", "A"): square(0, 0, 1, 1)},
+                              {("F.Cu", "A"): square(0, 0, 1.05, 1)})["rows"]
+    # Strict threshold, deterministic rows, missing sides, and numeric-looking names.
+    assert copper.collect("-") == {}
+    assert copper.compare({}, {}) == {"rows": [], "incomplete": []}
+    before = (a.Area(), b.Area())
+    assert copper.compare({("F.Cu", "GND"): a}, {("F.Cu", "GND"): b})["rows"][0] == result
+    assert (a.Area(), b.Area()) == before, "BR03 compare mutated input polygons"
+    tiny = square(0, 0, 1.050001, 1)
+    assert copper.compare({("F.Cu", "A"): square(0, 0, 1, 1)},
+                          {("F.Cu", "A"): tiny})["rows"]
+    polys = {("In1.Cu", "12"): square(-2, -1, 0, 0), ("F.Cu", ""): a}
+    added = copper.compare({}, polys)
+    removed = copper.compare(polys, {})
+    assert [(r["layer"], r["net"]) for r in added["rows"]] == [("F.Cu", ""), ("In1.Cu", "12")]
+    assert [r["addedMm2"] for r in added["rows"]] == [4.0, 2.0]
+    assert all(r["removedMm2"] == 0 and not r["removedContours"] for r in added["rows"])
+    assert [r["removedMm2"] for r in removed["rows"]] == [4.0, 2.0]
+    assert all(r["addedMm2"] == 0 and not r["addedContours"] for r in removed["rows"])
+    assert [-2.0, -1.0] in added["rows"][1]["addedContours"][0]
+    print("ok BR03 signed copper polygons")
+
 from kicad_review import is_kicad_file, owner_project
 
 dirs = {"", "boards/a", "boards/a/sub", "b"}
