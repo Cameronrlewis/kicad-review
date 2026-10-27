@@ -2764,8 +2764,10 @@ def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
             if not isinstance(parts,list) or any(not isinstance(part,dict) for part in parts) or not isinstance(stats,dict) or any(
                     type(stats.get(k)) is not int or stats[k]<0 for k in fields):
                 raise ValueError('invalid coverage')
-            if not isinstance(stats.get('warnings'), list) or any(not isinstance(item, str) for item in stats['warnings']):
+            warnings = stats.get('warnings', [])
+            if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
                 raise ValueError('invalid coverage warnings')
+            stats['warnings'] = warnings
             if stats['footprints']!=len(parts) or stats['withModel']+stats['placeholders']!=len(parts):
                 raise ValueError('inconsistent coverage')
             stats = {key: stats[key] for key in (*fields, 'warnings') if key in stats}

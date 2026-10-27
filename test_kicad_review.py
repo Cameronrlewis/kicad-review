@@ -4484,6 +4484,17 @@ def br02_task4a_attachment_contract():
                 name: hashlib.sha256(value).hexdigest() for name, value in values.items()}}))
             result = {}; kr.attach3d(result, str(root), {})
             assert result['coverage3dBySide']['head'] is None
+        # Older valid producer stats may omit warnings; preserve coverage with an empty list.
+        folder = root/'head'
+        stats = {'footprints': 0, 'withModel': 0, 'placeholders': 0, 'triangles': 0, 'primitives': 0}
+        parts = b'[]'; glb = b'glTF-model'; stats_raw = json.dumps(stats).encode()
+        values = {'board.glb': glb, 'parts.json': parts, 'stats.json': stats_raw}
+        (folder/'board.glb').write_bytes(glb); (folder/'board-parts.json').write_bytes(parts)
+        (folder/'board-stats.json').write_bytes(stats_raw)
+        (folder/'board-processed.json').write_text(json.dumps({'hashes': {
+            name: hashlib.sha256(value).hexdigest() for name, value in values.items()}}))
+        result = {}; kr.attach3d(result, str(root), {})
+        assert result['coverage3dBySide']['head']['warnings'] == []
         original = pathlib.Path.read_bytes
         def unreadable(path, *args, **kwargs):
             if path.name == 'poster.png':
