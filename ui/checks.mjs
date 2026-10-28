@@ -261,9 +261,11 @@ export const CHECKS = [
     if(!document.querySelector('#image-results').textContent.includes('Try'))return 'empty search guidance';
     input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
     await applyState({...S,v:'board',m:'side'});
-    if(!document.querySelector('#board-facts').textContent.includes('4 copper layers'))return 'Board facts missing';
-    if(!document.querySelector('#board-facts').textContent.includes('Size unavailable'))return 'null outline fabricated';
+    if(!document.querySelector('#image-board-facts').textContent.includes('4 copper layers'))return 'Board facts missing';
+    if(!document.querySelector('#image-board-facts').textContent.includes('Size unavailable'))return 'null outline fabricated';
     const graph=currentImageGraph('head'),originalNets=graph.nets,track=graph.tracks[0],originalNet=track.net;
+    const facts=document.querySelector('#image-board-facts').textContent;
+    if(!facts.includes(graph.stats.countsSource)||!facts.includes(graph.warnings.length+' warnings')||!facts.includes('truncated: '+Object.values(graph.truncated).some(Boolean)))return 'Board facts provenance missing';
     try {
       graph.nets=[{name:'AGND'},{name:'GND2'},{name:'GND'},{name:'12'},{name:'unconnected-U1-Pad2'}];
       track.net='12';
@@ -287,6 +289,19 @@ export const CHECKS = [
     pickImageAt(vp,new MouseEvent('click',{clientX:origin.left+p.x,clientY:origin.top+p.y}));
     if(S.imageSelection?.kind!=='pin'||S.imageSelection.ref!=='U2'||S.imageSelection.sheet!=='/right/')return 'numeric pin selection missing';
     if(!document.querySelector('#inspector').textContent.includes('U2'))return 'image inspector missing';
+    const search=document.querySelector('#image-search input');if(!search)return 'search host missing';
+    search.value='U2';search.dispatchEvent(new Event('input',{bubbles:true}));
+    const results=[...document.querySelectorAll('#image-search-results button')];
+    if(!results.length||!results[0].textContent.includes('U2')||results.length>20)return 'bounded search results';
+    search.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+    if(document.activeElement!==results[0])return 'search keyboard focus';
+    results[0].click();if(S.imageSelection?.ref!=='U2')return 'search selection not inspected';
+    search.value='absent-reference';search.dispatchEvent(new Event('input',{bubbles:true}));
+    if(document.querySelectorAll('#image-search-results button').length)return 'stale empty results';
+    const count=document.querySelector('#image-search-count');
+    if(count?.getAttribute('aria-live')!=='polite'||!count.textContent.includes('0 results'))return 'live empty result count';
+    search.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    if(search.value||S.imageSelection||document.activeElement!==search)return 'Escape did not reset search selection';
     return true;
   `],
   gestureLifecycleCheck,
@@ -5287,6 +5302,17 @@ CHECKS.push(['images inspection complete-screen','',`
   if(box.left<0||box.right>innerWidth+1||stage.height<=0||host.scrollWidth>host.clientWidth+1)return 'search screen overflow';
   const result=document.querySelector('#image-results button');
   if(result.getBoundingClientRect().height<44)return 'search touch target';
+  if(innerWidth<900) {
+    const controls=[...document.querySelectorAll('#toolbar > .tb-grp')];
+    if(controls.some(e=>e.getBoundingClientRect().bottom>box.top+1))return 'phone search did not wrap below toolbar controls';
+  }
+  for(const tab of ['changes','checks','parts','threads']) {
+    const button=document.querySelector('#panel [data-tab="'+tab+'"]');
+    if(!button)return 'review tab missing '+tab;
+    if(button.disabled) { if(!button.title)return 'review tab unavailable without explanation '+tab; continue; }
+    button.click();
+    if(document.querySelector('#panel [data-tab="'+tab+'"]')?.getAttribute('aria-selected')!=='true')return 'review tab unreachable '+tab;
+  }
   if(!document.querySelector('#inspector').textContent.includes('U2')||!document.querySelector('.image-selection'))return 'proof selection';
   if(document.querySelectorAll('*').length>=2000)return 'proof DOM budget';
   return true;

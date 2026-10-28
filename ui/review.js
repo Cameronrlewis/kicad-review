@@ -1521,6 +1521,9 @@ function imageSearchRows() {
   const side=imageSearchState.side;
   return S.v==='board'?currentImageGraph(side)?.nets||[]:sheetImageElements(side);
 }
+function mountImageSearch() {
+  renderImageSearch();
+}
 function renderImageSearch() {
   const host=$('#image-search');if(!host)return;
   const board=S.v==='board',sheet=S.v?.startsWith('sheet:');
@@ -1543,11 +1546,11 @@ function renderImageSearch() {
   const missing=['base','head'].some(side=>sideSelect.options[side==='base'?0:1].disabled);
   $('#image-search-note').textContent=!ok?'Inspection unavailable for this report. Artwork and review lists remain available.':
     imageSearchState.note|| (partial?'Partial inspection: some geometry is unavailable.':missing?'Inspection available for '+imageSearchState.side+' only.':'');
-  const facts=$('#board-facts');facts.hidden=!graph;
+  const facts=$('#image-board-facts');facts.hidden=!graph;
   if(graph) {
     const stats=graph.stats,size=stats.boardSizeMm;
     facts.textContent='Board facts · '+imageSearchState.side+' · '+(size?size.join(' × ')+' mm':'Size unavailable')+
-      ' · '+stats.copperLayers+' copper layers · '+stats.netCount+' nets · '+stats.padCount+' pads · '+stats.viaCount+' vias · '+stats.routedLengthMm+' mm routed';
+      ' · '+stats.copperLayers+' copper layers · '+stats.netCount+' nets · '+stats.padCount+' pads · '+stats.viaCount+' vias · '+stats.routedLengthMm+' mm routed · '+stats.countsSource+' · '+graph.warnings.length+' warnings · truncated: '+Object.values(graph.truncated).some(Boolean);
   }
   renderImageResults();
 }
@@ -1557,15 +1560,29 @@ function closeImageResults(focus=false) {
 }
 let renderedImageResults=null;
 function renderImageResults() {
+  const board=S.v==='board',source=imageSearchRows();
+  const rows=board?ImageView.searchNets(source,imageSearchState.query):ImageView.searchComponents(source,imageSearchState.query);
+  $('#image-search-count').textContent=$('#image-query').disabled?'':board?rows.length+' net results':source.length+' components · '+rows.length+' results';
   const host=$('#image-results');host.hidden=!imageSearchState.open||$('#image-query').disabled;
   if(host.hidden){host.replaceChildren();renderedImageResults=null;return;}
-  const board=S.v==='board',rows=board?ImageView.searchNets(imageSearchRows(),imageSearchState.query):ImageView.searchComponents(imageSearchRows(),imageSearchState.query);
-  const html=rows.length?'<ul>'+rows.map((r,i)=>'<li><button type="button" data-image-result="'+i+'">'+esc(board?r.name:r.ref+' · '+(r.value||'')+(r.unit?' · unit '+r.unit:''))+'</button></li>').join('')+'</ul>':
-    '<p>No matches. Try '+(board?'a net name or part of its name.':'a reference, value, footprint or field.')+'</p>';
-  const key=JSON.stringify([imageSearchState.context,imageSearchState.side,imageSearchState.query,html]);
+  const key=JSON.stringify([imageSearchState.context,imageSearchState.side,imageSearchState.query]);
   // Retain focused buttons across appearance redraws and asynchronous image mounts.
   if(renderedImageResults?.key===key&&rows.length===renderedImageResults.rows.length&&rows.every((r,i)=>r===renderedImageResults.rows[i]))return;
-  renderedImageResults={key,rows};host.innerHTML=html;
+  renderedImageResults={key,rows};host.replaceChildren();
+  if(rows.length) {
+    const list=document.createElement('ul');
+    rows.forEach((r,i)=>{
+      const item=document.createElement('li'),button=document.createElement('button');
+      button.type='button';button.dataset.imageResult=i;
+      button.textContent=board?r.name:r.ref+' · '+(r.value||'')+(r.unit?' · unit '+r.unit:'');
+      item.append(button);list.append(item);
+    });
+    host.append(list);
+  } else {
+    const note=document.createElement('p');
+    note.textContent='No matches. Try '+(board?'a net name or part of its name.':'a reference, value, footprint or field.');
+    host.append(note);
+  }
   for(const button of host.querySelectorAll('button')) {
     button.onclick=()=>{
       const row=rows[Number(button.dataset.imageResult)],side=imageSearchState.side;
@@ -1592,15 +1609,19 @@ function renderImageResults() {
       const buttons=[...host.querySelectorAll('button')],i=buttons.indexOf(button);
       if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();buttons[(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}
       if(e.key==='Home'||e.key==='End'){e.preventDefault();buttons[e.key==='Home'?0:buttons.length-1]?.focus();}
-      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeImageResults(true);}
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();resetImageSearch();}
     };
   }
+}
+function resetImageSearch() {
+  imageSearchState.query='';imageSearchState.note='';$('#image-query').value='';
+  clearImageSelection();closeImageResults(true);
 }
 $('#image-query').oninput=e=>{imageSearchState.note='';imageSearchState.query=e.target.value;imageSearchState.open=true;renderImageResults();};
 $('#image-query').onfocus=()=>{imageSearchState.open=true;renderImageResults();};
 $('#image-query').onkeydown=e=>{
-  if(e.key==='ArrowDown'){e.preventDefault();imageSearchState.open=true;renderImageResults();$('#image-results button')?.focus();}
-  if(e.key==='Escape'){e.preventDefault();e.stopPropagation();imageSearchState.open=false;renderImageResults();}
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();imageSearchState.open=true;renderImageResults();const buttons=[...document.querySelectorAll('#image-results button')];buttons[e.key==='ArrowDown'?0:buttons.length-1]?.focus();}
+  if(e.key==='Escape'){e.preventDefault();e.stopPropagation();resetImageSearch();}
   if(e.key==='Enter'&&imageSearchState.open){e.preventDefault();$('#image-results button')?.click();}
 };
 $('#image-search-side').onchange=e=>{clearImageSelection();imageSearchState.note='';imageSearchState.side=e.target.value;imageSearchState.open=false;renderImageSearch();};
@@ -1644,10 +1665,9 @@ function mountImageMarks(world,view) {
   world.append(marks);
 }
 function afterDraw(view) {
-  renderImageSearch();
   renderInspector();
   syncMarkStyles();
-  if (!view) return;
+  if (!view) { mountImageSearch(); return; }
   refreshAppearance();
   const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
   for (const w of document.querySelectorAll("#stage .world")) {
@@ -1699,6 +1719,7 @@ function afterDraw(view) {
   refreshAppearance();
   drawImageSelection();
   drawPins();
+  mountImageSearch();
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.

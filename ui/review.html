@@ -15,6 +15,11 @@
   <div class="tb-grp" role="group" aria-label="View"><span class="cap">View</span><div id="modes" role="group" aria-label="Comparison mode"></div></div>
   <div class="tb-grp" id="change-nav" role="group" aria-label="Change navigation"><span class="cap">Change</span><button type="button" data-step="-1" aria-label="Previous change" title="Previous change (k)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-prev"></use></svg></button><span id="change-count" class="pct" title="Selected change / total" aria-label="Selected change of total"></span><button type="button" data-step="1" aria-label="Next change" title="Next change (j)"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-next"></use></svg></button></div>
   <div class="tb-grp" role="group" aria-label="Zoom"><span class="cap">Zoom</span><div id="zoombar" role="group" aria-label="Zoom"></div></div>
+  <section id="image-search" aria-label="Design search" hidden>
+    <div class="image-search-tools"><label id="image-search-label" for="image-query">Components</label><select id="image-search-side" aria-label="Search revision"><option value="base">Base</option><option value="head">Head</option></select><input id="image-query" type="search" autocomplete="off" aria-describedby="image-search-count image-search-note" aria-controls="image-results"><button type="button" id="image-search-clear">Clear selection</button></div>
+    <span id="image-search-count" aria-live="polite"></span><p id="image-board-facts" hidden></p><p id="image-search-note" class="muted" role="status"></p>
+    <div id="image-search-results"><div id="image-results" aria-label="Search results" hidden></div></div>
+  </section>
   <div class="tb-grp mark-styles" role="radiogroup" aria-label="Change mark style"><span class="cap">Marks</span>
     <button type="button" id="mark-style" data-mark-style="outline" role="radio" aria-checked="true" title="Outline: box each change with shape and glyph" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-outline"></use></svg><span>Outline</span></button><button type="button" data-mark-style="recolour" role="radio" aria-checked="false" tabindex="-1" title="Recolour: repaint changed objects in diff colours" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-recolour"></use></svg><span>Recolour</span></button>
   </div>
@@ -26,11 +31,7 @@
 </div>
 <div id="app">
   <nav id="nav" aria-label="Projects, sheets and layers"></nav>
-  <div id="center"><section id="image-search" aria-label="Drawing search" hidden>
-    <div class="image-search-tools"><label id="image-search-label" for="image-query">Components</label><select id="image-search-side" aria-label="Search revision"><option value="base">Base</option><option value="head">Head</option></select><input id="image-query" type="search" autocomplete="off" aria-describedby="image-search-note" aria-controls="image-results"><button type="button" id="image-search-clear">Clear selection</button></div>
-    <p id="board-facts" hidden></p><p id="image-search-note" class="muted" role="status"></p>
-    <div id="image-results" aria-label="Search results" hidden></div>
-  </section><main id="stage" aria-label="Drawing"></main>
+  <div id="center"><main id="stage" aria-label="Drawing"></main>
   <div id="insp-split" role="separator" aria-orientation="horizontal" aria-label="Resize inspector" aria-controls="inspector" tabindex="0"></div>
   <section id="inspector" aria-label="Inspector"></section></div>
   <aside id="panel" aria-label="Review inspector"></aside>
