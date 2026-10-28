@@ -1540,7 +1540,7 @@ function renderPanel() {
 function encodeState(s = S) {
   const q = new URLSearchParams();
   q.set("p", s.p); q.set("v", s.v); q.set("m", s.m);
-  if (["base", "head"].includes(s.revision)) q.set("revision", s.revision);
+  if (s.revision === "base") q.set("revision", s.revision);
   if (s.layout === "phone") q.set("layout", s.layout);
   for (const k of ["x", "y", "z"]) if (Number.isFinite(s[k])) q.set(k, +s[k].toFixed(3));
   if (s.s) q.set("s", s.s);

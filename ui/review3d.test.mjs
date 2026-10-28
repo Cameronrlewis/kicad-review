@@ -7,11 +7,12 @@ import {runInNewContext} from 'node:vm';
 function cache() {
   const window = {};
   const document = {createElement: () => ({}), head: {appendChild() {}}};
-  const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8')
-    .replace('return {show,', 'return {parseByDigest,show,');
-  runInNewContext(source, {window, document, DOMException});
+  const module = {exports:{}};
+  const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8');
+  runInNewContext(source, {window, document, DOMException, module});
+  assert.equal('parseByDigest' in window.Review3D, false, 'cache helper stays out of the browser API');
   const owner = {parses:new Map(), decodedScenes:[], dead:false, state:{parseCount:0}};
-  return {owner, parseByDigest:(digest, bytes, parser) => window.Review3D.parseByDigest(owner, digest, bytes, parser)};
+  return {owner, parseByDigest:(digest, bytes, parser) => module.exports.parseByDigest(owner, digest, bytes, parser)};
 }
 
 test('BR02 parseByDigest shares equal promises and separates distinct digests', async () => {

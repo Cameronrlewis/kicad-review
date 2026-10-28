@@ -144,6 +144,8 @@ window.Review3D = (() => {
     if (s.dead) return;
     s.state.errorsBySide[side] = message;
     const host = s.hostsBySide[side];
+    // A partially built view must not hide its fallback on the next frame.
+    for (const v of s.views) if (v.host === host) { v.failed = true; v.visible = false; }
     host.querySelector('.loading')?.remove();
     if (s.state.posterBySide[side]) s.state.posterBySide[side].hidden = false;
     let notice = host.querySelector('.error3d');
@@ -168,7 +170,7 @@ window.Review3D = (() => {
     r.setScissorTest(false); r.clear(); r.setScissorTest(true);
     const visible = s.views.filter(v => v.visible);
     for (const v of visible) {
-      const b = v.host.getBoundingClientRect(); if (!b.width || !b.height) continue;
+      const b = v.host.getBoundingClientRect(); if (!b.width || !b.height) { v.calls = 0; continue; }
       const x = b.left - outer.left, y = outer.bottom - b.bottom;
       v.rect = {x, y, width:b.width, height:b.height};
       r.setViewport(x, y, b.width, b.height); r.setScissor(x, y, b.width, b.height);
@@ -225,7 +227,7 @@ window.Review3D = (() => {
         }
         if (empty) empty.hidden = !!s.available[side];
       }
-      for (const v of s.views) v.visible = !singleSide || v.side === s.revision;
+      for (const v of s.views) v.visible = !v.failed && (!singleSide || v.side === s.revision);
       s.state.visibleSides = singleSide ? [s.revision] : s.allowedSides.filter(side => s.available[side]);
     } else {
       s.state.visibleSides = s.allowedSides.filter(side => s.available[side]);
@@ -244,7 +246,7 @@ window.Review3D = (() => {
     const b = s.stage.getBoundingClientRect(); if (!b.width || !b.height) return;
     s.renderer.setSize(b.width, b.height, false);
     for (const v of s.views) {
-      const r = v.host.getBoundingClientRect(); v.visible = !v.host.hidden && r.width > 0 && r.height > 0;
+      const r = v.host.getBoundingClientRect(); v.visible = !v.failed && !v.host.hidden && r.width > 0 && r.height > 0;
       if (v.visible) { v.camera.aspect = r.width / r.height; v.camera.updateProjectionMatrix(); }
     }
     render();
@@ -259,9 +261,11 @@ window.Review3D = (() => {
     const s = active; let roles = s.comparisonMaterials.get(source);
     if (!roles) { roles = new Map(); s.comparisonMaterials.set(source, roles); }
     if (!roles.has(role)) {
-      const n = source.clone();
+      // Ghosts keep the baseline flat tint, without source lighting or textures.
+      const n = role === 'ghost'
+        ? new window.THREE3D.THREE.MeshBasicMaterial({color:tint('removed'), transparent:true, opacity:.45, depthTest:false})
+        : source.clone();
       if (role === 'fade') { n.transparent = true; n.opacity = .12; n.color?.set('#a8a8a8'); }
-      else if (role === 'ghost') { n.color?.copy(tint('removed')); n.transparent = true; n.opacity = .45; n.depthTest = false; }
       else if (change) { const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; } }
       roles.set(role, n); s.materials.add(n);
     }
@@ -438,30 +442,34 @@ window.Review3D = (() => {
     });
     if (mode === 'side' || single) {
       for (const [i, side] of sides.entries()) {
-        const host = session.hostsBySide[side]; host.querySelector('.loading')?.remove();
-        // Empty revisions still own a camera and input host, never a peer model/poster.
-        const v = view(host, roots[i] ? [roots[i]] : [], side); if (roots[i]) highlight(side, v);
+        try {
+          const host = session.hostsBySide[side]; host.querySelector('.loading')?.remove();
+          // Empty revisions still own a camera and input host, never a peer model/poster.
+          const v = view(host, roots[i] ? [roots[i]] : [], side); if (roots[i]) highlight(side, v);
+        } catch (error) { failure(session, side, error.message); }
       }
     } else {
       const side = head ? 'head' : 'base', host = session.hostsBySide[side], otherSide = side === 'head' ? 'base' : 'head';
-      session.hostsBySide[otherSide].hidden = !state.errorsBySide[otherSide];
-      host.classList.toggle('one', session.hostsBySide[otherSide].hidden);
-      host.querySelector('.tag').textContent = mode === 'overlay' ? 'Base position (red ghost) · Changed now (amber)' : mode === 'semantic' ? 'Changes only' : 'Base ↔ Head';
-      const v = view(host, mode === 'blend' ? roots.filter(Boolean) : head ? [head] : base ? [base] : []);
-      if (mode === 'overlay') {
-        highlight(head ? 'head' : 'base', v);
-        session.changes.filter(c => c.action === 'removed' || c.action === 'modified').forEach(c => {
-          const n = base?.getObjectByName(c.ref);
-          if (n) { const g = n.clone(true); cloneMaterials(g, null, false, 'ghost'); v.scene.add(g); state.ghosts.push({ref:c.ref, object:g, translation:n.getWorldPosition(new T.THREE.Vector3()).add(new T.THREE.Vector3(0, .01, 0)).toArray()}); }
-        });
-      } else if (mode === 'blend') {
-        const bm = cloneMaterials(base, null, false, 'blend:base').materials, hm = cloneMaterials(head, null, false, 'blend:head').materials;
-        session.blend = {base:[...new Set(bm)], head:[...new Set(hm)], value:appState.blend ?? .5}; setBlend(session.blend.value);
-      } else if (mode === 'semantic') {
-        const refs = new Set(session.changes.filter(c => c.action !== 'removed').map(c => c.ref)); state.faded = [];
-        head?.traverse(n => { if (n.name && !refs.has(n.name) && /^[A-Z]+\d+/.test(n.name)) { const f = cloneMaterials(n, null, true); state.faded.push({ref:n.name, materials:f.materials}); } });
-        highlight(head ? 'head' : 'base', v);
-      }
+      try {
+        session.hostsBySide[otherSide].hidden = !state.errorsBySide[otherSide];
+        host.classList.toggle('one', session.hostsBySide[otherSide].hidden);
+        host.querySelector('.tag').textContent = mode === 'overlay' ? 'Base position (red ghost) · Changed now (amber)' : mode === 'semantic' ? 'Changes only' : 'Base ↔ Head';
+        const v = view(host, mode === 'blend' ? roots.filter(Boolean) : head ? [head] : base ? [base] : []);
+        if (mode === 'overlay') {
+          highlight(head ? 'head' : 'base', v);
+          session.changes.filter(c => c.action === 'removed' || c.action === 'modified').forEach(c => {
+            const n = base?.getObjectByName(c.ref);
+            if (n) { const g = n.clone(true); cloneMaterials(g, null, false, 'ghost'); v.scene.add(g); state.ghosts.push({ref:c.ref, object:g, translation:n.getWorldPosition(new T.THREE.Vector3()).add(new T.THREE.Vector3(0, .01, 0)).toArray()}); }
+          });
+        } else if (mode === 'blend') {
+          const bm = cloneMaterials(base, null, false, 'blend:base').materials, hm = cloneMaterials(head, null, false, 'blend:head').materials;
+          session.blend = {base:[...new Set(bm)], head:[...new Set(hm)], value:appState.blend ?? .5}; setBlend(session.blend.value);
+        } else if (mode === 'semantic') {
+          const refs = new Set(session.changes.filter(c => c.action !== 'removed').map(c => c.ref)); state.faded = [];
+          head?.traverse(n => { if (n.name && !refs.has(n.name) && /^[A-Z]+\d+/.test(n.name)) { const f = cloneMaterials(n, null, true); state.faded.push({ref:n.name, materials:f.materials}); } });
+          highlight(head ? 'head' : 'base', v);
+        }
+      } catch (error) { failure(session, side, error.message); }
     }
     if (!single && model.base && model.head && (model.changed === false || model.base === model.head)) {
       const notice = document.createElement('p'); notice.className = 'no-change-notice'; notice.textContent = 'No 3D changes';
@@ -469,11 +477,13 @@ window.Review3D = (() => {
     }
     for (const side of sides) session.hostsBySide[side].querySelector('.loading')?.remove();
     setHidden(appState.hidden3d); resize(); frame('3d'); if (appState.camera3d) setCameraState(appState.camera3d);
-    const signal = session.abort.signal; window.addEventListener('resize', resize, {signal});
+    const signal = session.abort.signal;
     const media = matchMedia('(prefers-color-scheme: dark)'); let signature = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|');
     const theme = () => { const next = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|'); if (signature !== next) { signature = next; recolour(); } };
     document.addEventListener('kr-theme-change', theme, {signal}); media.addEventListener('change', theme, {signal}); session.themeTimer = setInterval(theme, 250);
     if (appState.s) { const c = session.changes.find(c => c.id === appState.s); if (c) focus(c, !appState.camera3d); }
   }
+  // Node contracts consume the unchanged helper; the browser API stays private.
+  if (typeof module === 'object' && module.exports) module.exports = {parseByDigest};
   return {show,dispose,cameraBar,frame,focus,setHidden,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
 })();

@@ -4474,6 +4474,87 @@ CHECKS.push(
  `]
 );
 
+CHECKS.push(
+  ...['side-base', 'side-head', 'side-highlight', 'overlay', 'blend', 'semantic'].map(fault => [
+    'BR02 processed view build failure ' + fault, 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const stage=document.querySelector('#stage'), T=THREE3D.THREE;
+    const controls=THREE3D.OrbitControls, clone=T.Material.prototype.clone;
+    const mode='${fault}'.startsWith('side-')?'side':'${fault}', side=['side-base','side-highlight'].includes('${fault}')?'base':'head';
+    let calls=0, clones=0;
+    try {
+      THREE3D.OrbitControls=class extends controls {
+        constructor(...args){
+          if(++calls===('${fault}'==='side-base'?1:2)&&mode==='side'&&'${fault}'!=='side-highlight')throw Error('injected view build');
+          super(...args);
+          // Inject only after renderer construction and GLTF parsing complete.
+          if(mode!=='side'||'${fault}'==='side-highlight')T.Material.prototype.clone=function(){
+            if('${fault}'!=='side-highlight'||++clones===1)throw Error('injected view build');
+            return clone.call(this);
+          };
+        }
+      };
+      await Review3D.show(stage,proj(),{...S,m:mode,phone:false,s:null});
+      const st=Review3D.state, host=Review3D.session().hostsBySide[side];
+      if(st.renderers.length!==1||!st.decodedScenes.length||!calls)return 'fault injected before view construction';
+      if(!st.errorsBySide[side]?.includes('injected view build'))return 'build error not reported';
+      if(st.loading||host.querySelector('.loading'))return 'build failure left loading';
+      if(!host.querySelector('[data-3d-retry]')||!host.querySelector('[data-poster]:not([hidden])'))return 'build failure lost fallback or retry';
+      if(mode==='side'&&!st.firstFrame)return 'healthy peer did not render: '+JSON.stringify({errors:st.errorsBySide,views:st.views.map(v=>({side:v.side,failed:v.failed,visible:v.visible,calls:v.calls}))});
+      if(mode!=='side'&&st.firstFrame)return 'failed combined view claims ready';
+    } finally {THREE3D.OrbitControls=controls;T.Material.prototype.clone=clone;}
+    await Review3D.show(stage,proj(),{...S,m:mode,s:null});
+    return Review3D.state.firstFrame&&!Object.keys(Review3D.state.errorsBySide).length||'build retry failed';
+  `]),
+  ['BR02 processed stage observer owns viewer resize', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const add=window.addEventListener, stage=document.querySelector('#stage');let registrations=0;
+    try {
+      window.addEventListener=function(type,...args){if(type==='resize')registrations++;return add.call(this,type,...args);};
+      await Review3D.show(stage,proj(),S);
+      if(registrations)return 'viewer registered redundant window resize';
+      if(!Review3D.session().resizeObserver)return 'stage observer missing';
+      const width=stage.style.width;
+      try {
+        stage.style.width='500px';
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        const canvas=stage.querySelector('canvas');
+        return canvas.width===Math.floor(500*Math.min(devicePixelRatio,2))||'stage layout change missed without window resize';
+      } finally {stage.style.width=width;}
+    } finally {window.addEventListener=add;}
+  `],
+  ['BR02 processed collapsed pane resets draw counters', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, v=st.views.find(v=>v.visible&&v.calls>0);
+    if(!v)return 'fixture has no drawn viewport';
+    const rect=v.host.getBoundingClientRect;
+    try {
+      v.host.getBoundingClientRect=()=>({left:0,bottom:0,width:0,height:0});
+      await Review3D.sampleFrame();
+      const i=st.views.filter(v=>v.visible).indexOf(v);
+      if(v.calls!==0||st.drawCallsByViewport[i]!==0)return 'collapsed pane retained stale calls';
+      return st.drawCalls===st.views.filter(other=>other.visible&&other!==v).reduce((n,other)=>n+other.calls,0)||'frame total includes collapsed pane';
+    } finally {v.host.getBoundingClientRect=rect;}
+  `],
+  ['BR02 processed overlay ghosts retain flat unlit tint', 'v=3d&m=overlay', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, source=new Set(), ghosts=[];
+    st.decodedScenes.forEach(root=>root.traverse(n=>{for(const m of [n.material].flat().filter(Boolean))source.add(m);}));
+    st.ghosts.forEach(g=>g.object.traverse(n=>{if(n.isMesh)ghosts.push(...[n.material].flat());}));
+    if(!ghosts.length)return 'fixture has no ghosts';
+    const tint=new THREE3D.THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--removed').trim());
+    return ghosts.every(m=>m.isMeshBasicMaterial&&!m.map&&m.color.equals(tint)&&m.opacity===.45&&m.transparent&&!m.depthTest&&!source.has(m))||'ghost appearance changed or source mutated';
+  `],
+  ['BR02 processed default revision omitted from share hash', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    for(const v of ['board','3d',...proj().sheets.map(s=>'sheet:'+s.path)]) {
+      if(new URLSearchParams(encodeState({...S,v,revision:'head'})).has('revision'))return 'default Head persisted in '+v;
+    }
+    const base=decodeState(encodeState({...S,revision:'base',layout:'phone'}));
+    return base.revision==='base'&&base.layout==='phone'||'explicit compatibility state lost';
+  `]
+);
+
 CHECKS.push(['BR02 processed compatibility phone predicate fractional widths', 'v=3d&m=side', `
  if(!proj().board.parts3d)return 'skip';
  const frame=document.createElement('iframe');frame.style.cssText='position:absolute;left:-2000px;height:40px;border:0';document.body.appendChild(frame);
