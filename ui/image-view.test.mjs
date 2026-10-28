@@ -248,3 +248,74 @@ test('reach uses CSS pixels with a 0.15 mm floor, and rejects invalid camera inp
   for(const point of [[NaN,0],[0,Infinity],[],[0]])assert.equal(hit(g,point),null);
   assert.equal(hit(graph(),[0,0]),null);
 });
+
+test('paint replacement is exact and simultaneous', () => {
+  const source = '<svg><path fill="#009600" stroke="#abcdef"/><path style="stroke:#840000;fill:none"/></svg>';
+  const out = ctx.ImageView.replacePaints(source, new Map([['#009600','#840000'],['#840000','#123456']]));
+  assert.ok(out.includes('fill="#840000" stroke="#abcdef"'));
+  assert.ok(out.includes('stroke:#123456;fill:none'));
+});
+
+function mountHarness() {
+  const jobs=[], made=[], revoked=[];
+  ctx.Blob=class {constructor(parts){this.parts=parts;}};
+  ctx.URL={createObjectURL(blob){made.push(blob.parts.join(''));return 'blob:'+made.length;},revokeObjectURL(url){revoked.push(url);}};
+  ctx.document={createElement(tag){assert.equal(tag,'img');return {dataset:{},remove(){},removeAttribute(){},
+    decode:()=>new Promise((resolve,reject)=>jobs.push({resolve,reject}))};}};
+  return {jobs,made,revoked};
+}
+test('mount decodes before returning and disposeAll releases successful and pending mounts', async()=>{
+  const {jobs,made,revoked}=mountHarness();
+  let returned=false;
+  const first=ctx.ImageView.mount('<svg/>',[10,10],{side:'head',layer:'sheet'}).then(c=>{returned=true;return c;});
+  assert.equal(returned,false);assert.equal(jobs.length,1);
+  jobs[0].resolve();const c=await first;
+  assert.equal(c.source,'<svg/>');assert.equal(c.node.dataset.imageArtwork,'');
+  const pending=ctx.ImageView.mount('<svg/>',[10,10],{side:'base',layer:'sheet'});
+  ctx.ImageView.disposeAll();jobs[1].resolve();const stale=await pending;
+  assert.equal(c.node,null);assert.equal(stale.node,null);
+  ctx.ImageView.disposeAll();c.dispose();stale.dispose();
+  assert.equal(made.length,2);assert.deepEqual(revoked,['blob:1','blob:2']);
+});
+test('failed initial mount releases its URL and is removed from global ownership', async()=>{
+  const {jobs,revoked}=mountHarness();
+  const failure=new Error('decode unavailable'),pending=ctx.ImageView.mount('<svg/>',[10,10],{side:'head',layer:'sheet'});
+  const rejected=assert.rejects(pending,error=>error===failure);jobs[0].reject(failure);await rejected;
+  assert.deepEqual(revoked,['blob:1']);ctx.ImageView.disposeAll();assert.deepEqual(revoked,['blob:1']);
+});
+
+test('board original RGB only, once per source; custom paint and alpha retained',()=>{
+  const src='<svg><path fill="#f00" stroke="rgb(255, 0, 0)" opacity=".4"/><path style="fill:#FF0000!important;stroke:#abcdef"/><path fill="none"/></svg>';
+  const out=ctx.ImageView.layerPaints(src,[255,0,0],[18,52,86]);
+  assert.equal((out.match(/#123456/g)||[]).length,3);
+  assert.ok(out.includes('stroke:#abcdef')); assert.ok(out.includes('opacity=".4"'));
+  assert.ok(out.includes('!important')); assert.ok(out.includes('fill="none"'));
+  assert.ok(src.includes('#f00'));
+});
+
+test('layer adapter applies imported RGB to original, never to prior rewrite',async()=>{
+  const wrapper={style:{},hidden:false,replaceChildren(n){this.child=n;}};
+  const revoked=[], env={create:s=>s,revoke:u=>revoked.push(u),make:()=>({dataset:{},decode:async()=>{},remove(){}})};
+  const a=ctx.ImageView.boardLayer('<svg><path fill="#ff0000"/><path fill="#abcdef"/></svg>',[255,0,0],wrapper,{side:'head',layer:'F.Cu'},env);
+  await a.setAppearance({color:[1,2,3,.5],opacity:.5});
+  await a.setAppearance({color:[4,5,6,1],opacity:1});
+  assert.ok(a.controller.appliedSource.includes('#040506'));
+  assert.ok(a.controller.appliedSource.includes('#abcdef'));
+  assert.equal(wrapper.style.opacity,'1'); a.dispose(); assert.equal(revoked.length,2);
+});
+
+test('layer adapter keeps alpha and visibility on wrapper through delayed replacement and disposal',async()=>{
+  const jobs=[],revoked=[],wrapper={style:{},hidden:false,replaceChildren(n){this.child=n;}};
+  const adapter=ctx.ImageView.boardLayer('<svg fill="#F00" opacity=".4"/>',[255,0,0],wrapper,{side:'base',layer:'F.Cu'},{
+    create:s=>s,revoke:u=>revoked.push(u),make:()=>({dataset:{},remove(){},decode:()=>new Promise(resolve=>jobs.push(resolve))})
+  });
+  const first=adapter.setAppearance({color:[18,52,86,.5],opacity:.5,visible:false});
+  assert.equal(wrapper.style.opacity,'0.25');assert.equal(wrapper.hidden,true);
+  const second=adapter.setAppearance({color:[65,43,21,1],opacity:1,visible:true});
+  jobs[1]();assert.equal(await second,true);const current=wrapper.child;
+  jobs[0]();assert.equal(await first,false);assert.equal(wrapper.child,current);
+  assert.equal(wrapper.hidden,false);assert.equal(wrapper.style.opacity,'1');
+  assert.ok(adapter.controller.appliedSource.includes('opacity=".4"'));
+  const third=adapter.setAppearance({color:[1,2,3,1],opacity:1});adapter.dispose();
+  jobs[2]();assert.equal(await third,false);assert.equal(new Set(revoked).size,3);
+});

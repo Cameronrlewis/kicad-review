@@ -344,6 +344,7 @@ assert "window.REVIEW_DATA = {\"version\": 1};" in html and "<style>" in html
 assert "http://" not in html and "https://fonts" not in html
 for asset in ('board-gl.js', 'appearance-state.js', 'appearance.js', 'board-marks.js', 'board-diff.js'):
     assert not re.search(r'''(?:src|href)=["']''' + re.escape(asset), html), asset
+assert 'globalThis.ImageView' in inline_page('window.REVIEW_DATA={};')
 assert 'window.BoardMarks' in html and 'window.BoardDiff' in html
 assert html.index('window.BoardMarks') < html.index('window.BoardDiff') < html.index('const D = window.REVIEW_DATA')
 assert not re.search(r'<script[^>]+src=', html)
@@ -4096,7 +4097,7 @@ print("ok production geometry typed change IDs, unchanged isolation and multi-pr
 # SCH6: schematic rendering and styles ship inside the offline report.
 page = kr.inline_page('window.REVIEW_DATA={"version":1};')
 assert '--sch-paper:#f5f4ef' in page
-assert 'function themeSchematic(' in page
+assert 'function schematicPaints(' in page
 assert 'function schematicGridPlan(' in page
 assert not re.search(r'<script[^>]+src=["\'](?!data:)', page)
 assert not re.search(r'<link[^>]+href=["\'](?:https?:|tokens\.css|review\.css)', page)
@@ -4497,8 +4498,8 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
                 for page in kr.sheet_pages(f'{side}/images', 'Images'):
                     mapping[page['path']] = {}
                     for theme, folder in (('light', 'sch'), ('dark', 'sch-dark')):
-                        color = '#009600' if theme == 'light' else '#00ff00'
-                        text = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 297 210">'
+                        color = '#009600'  # real exports share inks; data-theme keeps blobs distinct
+                        text = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 297 210" data-theme="{theme}">'
                                 f'<rect x="{x-1}" y="54" width="2" height="2" fill="none" stroke="{color}"/>'
                                 f'<path d="M{x-5} 55h2" stroke="{color}"/></svg>')
                         rel = f'{folder}/{page["stem"]}.svg'

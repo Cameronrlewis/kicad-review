@@ -46,6 +46,33 @@
     };
   }
 
+  const rgbHex=rgb=>'#'+rgb.slice(0,3).map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+  function layerPaints(text,original,rgb) {
+    const expected=rgbHex(original).toLowerCase(), replacement=rgbHex(rgb);
+    return text.replace(/(\b(?:fill|stroke)\s*(?:=\s*["']|:\s*))((?:#[\da-f]{3}(?:[\da-f]{3})?|rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)))(?=\s*(?:!important)?[;"'])/gi,
+      (all,prefix,paint)=>{
+        let hex=paint.toLowerCase();
+        if(hex.startsWith('rgb'))hex=rgbHex(hex.match(/\d+/g).map(Number));
+        else if(hex.length===4)hex='#'+[...hex.slice(1)].map(c=>c+c).join('');
+        return prefix+(hex===expected?replacement:paint);
+      });
+  }
+  function boardLayer(source,original,wrapper,options,env) {
+    // Always substitute from the immutable selected export, not a prior rewrite.
+    const normalized=layerPaints(source,original,original);
+    const c=controller(normalized,options,env);
+    return {controller:c,
+      async setAppearance(look){
+        wrapper.style.opacity=String(look.color[3]*look.opacity);
+        wrapper.hidden=look.visible===false;
+        const applied=await c.setAppearance(new Map([[rgbHex(original),rgbHex(look.color)]]));
+        if(applied&&!c.node.isConnected)wrapper.replaceChildren(c.node);
+        return applied;
+      },
+      dispose(){c.dispose();}
+    };
+  }
+
   // Geometry is retained in micrometres, already in board/world coordinates.
   function segmentDistance(p,a,b) {
     const dx=b[0]-a[0],dy=b[1]-a[1],d=dx*dx+dy*dy;
@@ -127,5 +154,14 @@
       smallest(vias.filter(v=>v.d<=reach))||nearest(tracks.filter(v=>v.d<=reach))||null;
   }
 
-  globalThis.ImageView={replacePaints,controller,segmentDistance,polygonDistance,primitiveDistance,inspectHit};
+  const live = new Set();
+  async function mount(text, size, options) {
+    const c=controller(text,options), dispose=c.dispose.bind(c);
+    c.dispose=()=>{dispose();live.delete(c);}; live.add(c);
+    try {await c.setAppearance(new Map());return c;}
+    catch(error){c.dispose();throw error;}
+  }
+  globalThis.ImageView={replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,
+    disposeAll(){for(const c of [...live])c.dispose();},
+    segmentDistance,polygonDistance,primitiveDistance,inspectHit};
 })();

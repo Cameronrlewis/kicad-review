@@ -3265,6 +3265,9 @@ import { currentReport } from './report-shell.js';
 import { execFileSync } from 'node:child_process';
 const inlinePage = data => execFileSync('python3', ['-c', 'import runpy,sys;sys.stdout.write(runpy.run_path("kicad_review.py")["inline_page"](sys.stdin.read()))'],
   { cwd: new URL('..', import.meta.url), input: data, encoding: 'utf8', maxBuffer: 1 << 28 });
+test('image artwork controller is bundled into hosted reports', () => {
+  assert.ok(currentReport('<script>window.REVIEW_DATA = {};</script>').includes('globalThis.ImageView'));
+});
 test('stored reports are re-dressed exactly as kicad_review.py builds the current report', () => {
   for (const sample of ['review-data-2.js', 'review-data-3d.js']) {
     const data = readFileSync(new URL(`../ui/sample/${sample}`, import.meta.url), 'utf8');

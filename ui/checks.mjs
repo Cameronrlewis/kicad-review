@@ -44,13 +44,225 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["images fallback appearance", "", `
+const oldCreate=BoardGL.create;
+BoardGL.create=()=>null;
+try {
+  boardView.failed=S.p; // Do not reuse a previously mounted GL comparison.
+  await applyState({...S,v:'board',m:'side'});
+  // Only the generated images fixture carries the unknown object paint.
+  if(![...appearanceBoardImages].some(a=>a.layer==='F.Cu'&&a.controller.source.toLowerCase().includes('#abcdef')))return 'skip';
+  changeBoardAppearance({layers:{'F.Cu':{color:[18,52,86,.5],opacity:.5}}});
+  await Promise.all([...appearanceBoardImages].map(a=>a.setAppearance(Appearance.get().layers[a.layer])));
+  const front=[...appearanceBoardImages].find(a=>a.layer==='F.Cu');
+  if(!front?.controller.appliedSource.includes('#123456'))return 'fallback custom RGB';
+  if(!front.controller.appliedSource.includes('#abcdef'))return 'unknown paint lost';
+  const wrapper=front.controller.node.parentElement;
+  if(Number(wrapper.style.opacity)!==.25)return 'alpha applied twice';
+  const n=front.controller.node, c=document.createElement('canvas');c.width=400;c.height=200;
+  const x=c.getContext('2d');x.drawImage(n,0,0,c.width,c.height);
+  const svg=new DOMParser().parseFromString(front.controller.appliedSource,'image/svg+xml').documentElement;
+  const [vx,vy,vw,vh]=svg.getAttribute('viewBox').trim().split(/[ ,]+/).map(Number);
+  const sample=(sx,sy)=>x.getImageData(Math.floor((sx-vx)/vw*c.width),Math.floor((sy-vy)/vh*c.height),1,1).data;
+  const a=sample(vx+.15*vw,vy+.5*vh),b=sample(vx+.3*vw,vy+.5*vh);
+  if(a[3]!==255||b[3]!==255)return 'missing opaque fixture coverage';
+  if([a,b].some(p=>p[0]!==18||p[1]!==52||p[2]!==86))return 'wrong covered layer RGB';
+  if(a[3]!==b[3])return 'per-shape opacity';
+Appearance.import(JSON.stringify({meta:{version:5,name:'Image fallback regression'},
+  board:{copper:{f:'rgb(65, 43, 21)'}}}));
+await Promise.all([...appearanceBoardImages].map(a=>a.setAppearance(Appearance.get().layers[a.layer])));
+const imported=[...appearanceBoardImages].find(a=>a.layer==='F.Cu');
+if(!imported?.controller.appliedSource.includes('#412b15'))return 'imported fallback layer RGB';
+if(!imported.controller.appliedSource.includes('#abcdef'))return 'import changed custom object paint';
+
+} finally {BoardGL.create=oldCreate;}
+
+return true;
+  `],
+  ["images fallback honors supplied appearance snapshot", "", `
+    const original=BoardGL.create;BoardGL.create=()=>null;
+    try {
+      boardView.failed=S.p;await applyState({...S,v:'board',m:'side'});
+      const snapshot=Appearance.get(),saved=JSON.stringify(snapshot);
+      snapshot.colors['board.copper.f']=[18/255,52/255,86/255,.5];
+      snapshot.layerOpacity['F.Cu']=.5;
+      await applyAppearance(snapshot);
+      const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+      if(!fronts.length||!fronts.every(a=>a.controller.appliedSource.includes('#123456')&&Number(a.controller.node.parentElement.style.opacity)===.25))return 'fallback ignored supplied snapshot';
+      return JSON.stringify(Appearance.get())===saved||'appearance application mutated store';
+    } finally {BoardGL.create=original;await applyAppearance(Appearance.get());}
+  `],
+  ["images legacy fallback appearance", "", `
+    const p=D.projects.findIndex(p=>p.board.layers.some(l=>l.svg?.base&&l.svg?.head));
+    if(p<0)return 'fixture needs two-sided legacy board';
+    const original=BoardGL.create;BoardGL.create=()=>null;
+    try {
+      boardView.failed=p;
+      await applyState({...S,p,v:'board',m:'side'});
+      if(appearanceBoards.size||!appearanceBoardImages.size)return 'not image fallback';
+      if(document.querySelector('#stage .layer svg'))return 'live board artwork';
+      Appearance.import(JSON.stringify({meta:{version:5},board:{copper:{f:'rgb(65, 43, 21)'}}}));
+      await applyAppearance(Appearance.get());
+      const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+      if(fronts.length!==2||!fronts.every(a=>a.controller.node.complete&&a.controller.appliedSource.includes('#412b15')))return 'legacy RGB import';
+      for(const a of appearanceBoardImages)if(!a.controller.node.complete||!a.controller.node.naturalWidth)return 'legacy decode';
+      const old=[...appearanceBoardImages];
+      await applyState({...S,v:'sheet:'+proj().sheets[0].path});
+      if(appearanceBoardImages.size||old.some(a=>a.controller.node))return 'board adapters leaked';
+      // Leave the whole-screen proof on the fallback board.
+      await applyState({...S,v:'board'});
+      return true;
+    } finally {BoardGL.create=original;}
+  `],
+  ["images screen and legacy appearance", "", `
+    // Use the first two-sided project when present. The legacy added-project's
+    // unfiltered Changes dock alone exceeds the artwork DOM budget.
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg?.base&&s.svg?.head));
+    const project=D.projects[p<0?S.p:p],sheet=project.sheets.find(s=>s.svg?.base||s.svg?.head);
+    if(!sheet)return 'fixture has no sheet';
+    await applyState({...S,p:p<0?S.p:p,v:'sheet:'+sheet.path,m:'side'});
+    const images=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')];
+    const expected=['base','head'].filter(side=>sheet.svg[side]).length;
+    if(images.length!==expected)return 'artwork images '+images.length+' expected '+expected;
+    if(document.querySelector('#stage .layer svg'))return 'live artwork SVG';
+    if(!images.every(i=>i.complete&&i.naturalWidth>0))return 'image not decoded';
+    if(document.querySelectorAll('*').length>=2000)return 'DOM budget '+document.querySelectorAll('*').length;
+    if(document.querySelector('#stage').dataset.view!==S.v)return 'stale view generation';
+    const pane=document.querySelector('#stage .vp'), r=pane.getBoundingClientRect();
+    if(r.width<=0||r.height<=0||r.left<0||r.right>innerWidth+1)return 'drawing outside whole screen';
+    const paper=getComputedStyle(pane).backgroundColor;
+    if(!paper||paper==='rgba(0, 0, 0, 0)')return 'missing paper';
+    const camera=[S.x,S.y,S.z],theme=KRTheme.get();
+    const pixels=async image=>{const c=new OffscreenCanvas(400,300),x=c.getContext('2d');x.drawImage(image,0,0,400,300);return x.getImageData(0,0,400,300).data;};
+    // Rasterizing the multi-megabyte legacy sheet takes seconds; compare pixels only on small artwork.
+    const sources=images.map(i=>i.imageOwner.source),cheap=sources[0].length<2e5,before=cheap&&await pixels(images[0]);
+    for(const t of ['light','dark',theme]) {
+      KRTheme.set(t);await themeDraw;await applyAppearance(Appearance.get());
+      if(![...appearanceSchematics].every(c=>c.node.complete&&c.node.naturalWidth>0))return 'theme decode';
+      for(const c of appearanceSchematics) {
+        const side=c.node.dataset.side;
+        if(c.source!==await svgText(sheet.svgThemes?.[t]?.[side]||sheet.svg[side]))return 'wrong '+t+' theme source';
+      }
+    }
+    sessionStorage.setItem('image-screen-appearance',JSON.stringify(Appearance.get()));
+    Appearance.import(JSON.stringify({meta:{version:5},schematic:{wire:'#135724'}}));
+    await applyAppearance(Appearance.get());
+    const current=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')];
+    if(!current.every((i,n)=>i.imageOwner.source===sources[n]&&i.imageOwner.appliedSource.includes('rgba(19,87,36,1)')))return 'custom source palette';
+    const after=cheap&&await pixels(current[0]);if(cheap&&before.every((v,i)=>v===after[i]))return 'custom palette did not change pixels';
+    if(JSON.stringify(camera)!==JSON.stringify([S.x,S.y,S.z]))return 'appearance moved camera';
+    if(document.querySelector('#stage').dataset.imageReady!=='true')return 'image not ready';
+    sessionStorage.setItem('image-screen-camera',JSON.stringify(camera.map(n=>+n.toFixed(3))));history.replaceState(null,'','#'+encodeState()); // saveHash is debounced; reload follows at once
+    return true;
+  `, {afterReload:`
+    // reviewReady can precede the first image draw of a large sheet.
+    for(const end=performance.now()+12000;document.querySelector('#stage').dataset.imageReady!=='true'&&performance.now()<end;)await new Promise(r=>setTimeout(r,50));
+    await document.querySelector('#stage').appearancePending;
+    if(document.querySelector('#stage').dataset.view!==S.v||document.querySelector('#stage').dataset.imageReady!=='true')return 'reload readiness';
+    if(![...appearanceSchematics].every(c=>c.node.complete&&c.node.naturalWidth>0&&c.appliedSource.includes('rgba(19,87,36,1)')))return 'reload palette';
+    const now=JSON.stringify([S.x,S.y,S.z].map(n=>+n.toFixed(3)));
+    const result=sessionStorage.getItem('image-screen-camera')===now||'reload camera '+sessionStorage.getItem('image-screen-camera')+' vs '+now;
+    // Keep this persistence check from seeding later palette regressions.
+    const original=JSON.parse(sessionStorage.getItem('image-screen-appearance'));
+    Appearance.set(original);await applyAppearance(original);
+    return result;
+  `}],
+  ["images loading notice ends on 3D navigation", "", `
+    const original=window.Review3D,state={...S};
+    window.Review3D={dispose(){},async show(stage){stage.textContent='3D lifecycle probe';}};
+    try {
+      S.v='3d';await draw();
+      const stage=document.querySelector('#stage');
+      if(stage.dataset.imageReady!=='false')return 'image readiness used for 3D';
+      return document.querySelector('#statusbar .status-message').textContent!=='Loading drawing…'||'image loading notice leaked into 3D';
+    } finally {window.Review3D=original;await applyState(state);}
+  `],
+  ["images detached stacks keep private owners", "", `
+    const view=currentView('board');
+    if(!view)return 'fixture has no board';
+    const owners=new Set(appearanceBoardImages),st=await stack('head',view);
+    try {
+      if(!st.imageOwners.length)return 'fixture has no board artwork';
+      return appearanceBoardImages.size===owners.size&&[...appearanceBoardImages].every(a=>owners.has(a))||'detached board owners registered globally';
+    } finally {for(const owner of st.imageOwners)owner.dispose();}
+  `],
+  ["images readiness publishes current navigation", "", `
+    const sheet=proj().sheets.find(s=>s.svg?.base||s.svg?.head);
+    if(!sheet)return 'fixture has no sheet';
+    await applyState({...S,v:'sheet:'+sheet.path,m:'side',x:100,y:70,z:2});
+    clearTimeout(hashTimer);
+    history.replaceState(null,'','#v=board');
+    await draw();
+    const stage=document.querySelector('#stage');
+    if(stage.dataset.imageReady!=='true')return 'image not ready';
+    return new URLSearchParams(location.hash.slice(1)).get('v')===stage.dataset.view||'ready before navigation published';
+  `],
+  ["images appearance readiness waits for latest decode", "", `
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg?.base&&s.svg?.head));
+    if(p<0)return 'fixture needs two-sided sheet';
+    await applyState({...S,p,v:'sheet:'+D.projects[p].sheets[0].path,m:'side'});
+    const stage=document.querySelector('#stage'),before=Appearance.get(),decode=HTMLImageElement.prototype.decode;
+    const jobs=[];HTMLImageElement.prototype.decode=async function(){await new Promise(resolve=>jobs.push(resolve));return decode.call(this);};
+    let older,latest,last=[],returned=false;
+    try {
+      Appearance.patch({colors:{'schematic.wire':[1,0,0,1]}});
+      older=applyAppearance(Appearance.get()).then(()=>returned=true);
+      Appearance.patch({colors:{'schematic.wire':[0,0,1,1]}});
+      latest=applyAppearance(Appearance.get());
+      if(stage.dataset.imageReady!=='false')return 'ready during appearance decode';
+      // Finish older decodes only. Their awaiter must follow the latest jobs.
+      last=jobs.splice(jobs.length-appearanceSchematics.size);
+      for(const resume of jobs.splice(0))resume();
+      await new Promise(r=>setTimeout(r,30));
+      if(returned||stage.dataset.imageReady!=='false')return 'older decode claimed readiness';
+      for(const resume of last)resume();await Promise.all([older,latest]);
+      return stage.dataset.imageReady==='true'&&[...appearanceSchematics].every(c=>c.appliedSource.includes('rgba(0,0,255,1)')&&c.node.complete)||'latest appearance not ready';
+    } finally {
+      for(const resume of [...jobs,...last])resume();
+      HTMLImageElement.prototype.decode=decode;
+      Appearance.set(before);await applyAppearance(before);
+      await Promise.allSettled([older,latest].filter(Boolean));
+    }
+  `],
+  ["images delayed decode navigation releases only owned URLs", "", `
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg?.base&&s.svg?.head));
+    const index=p<0?S.p:p,P=D.projects[index],sheet=P.sheets.find(s=>s.svg?.base||s.svg?.head);
+    if(!sheet)return 'fixture has no sheet';
+    await applyState({...S,p:index,v:'sheet:'+sheet.path,m:'side'});
+    const other={...sheet,path:'/__image_race__/'};P.sheets.push(other);
+    const decode=HTMLImageElement.prototype.decode,create=URL.createObjectURL,revoke=URL.revokeObjectURL;
+    const made=new Set(),released=new Set();let resume,started,hold=true;
+    const entered=new Promise(r=>started=r),gate=new Promise(r=>resume=r),pending=[];
+    const theme=KRTheme.get();
+    URL.createObjectURL=function(...args){const url=create.apply(this,args);made.add(url);return url;};
+    URL.revokeObjectURL=function(url){if(made.has(url)){if(released.has(url))throw Error('URL released twice');released.add(url);}return revoke.call(this,url);};
+    HTMLImageElement.prototype.decode=async function(){if(hold){hold=false;started();await gate;}return decode.call(this);};
+    try {
+      pending.push(draw());await entered;
+      for(const [i,t] of ['dark','light','dark'].entries()) {
+        KRTheme.set(t);pending.push(themeDraw);
+        S.v=i===2?'sheet:'+other.path:'sheet:'+sheet.path;pending.push(draw());
+      }
+      await pending.at(-1);
+      const final=document.querySelector('#stage');
+      if(final.dataset.view!=='sheet:'+other.path||final.dataset.imageReady!=='true')return 'final view not ready';
+      resume();await Promise.all(pending);
+      if(document.querySelector('#stage')!==final||[...final.querySelectorAll('img[data-image-artwork]')].some(i=>!i.complete||!i.naturalWidth||released.has(i.src)))return 'stale draw replaced/disposed current artwork';
+      S.v='sheet:/__image_absent__/';await draw();
+      return made.size>0&&made.size===released.size||'URL ownership '+made.size+'/'+released.size;
+    } finally {
+      resume();await Promise.allSettled(pending);
+      HTMLImageElement.prototype.decode=decode;URL.createObjectURL=create;URL.revokeObjectURL=revoke;
+      P.sheets.pop();KRTheme.set(theme);await themeDraw;
+    }
+  `],
   ...['added-sheet','removed-sheet','added-board','removed-board'].map(name=>[
   'images missing '+name, '', `
   const index=D.projects.findIndex(p=>p.dir===${JSON.stringify(name)});
-  if(index<0)return 'missing producer project';
+  if(index<0)return 'skip';
   const P=D.projects[index], side=${JSON.stringify(name.startsWith('added')?'head':'base')};
-  const sheet=P.sheets[0], board=P.board, saved=board.inspect;
-  const maps=P.sheets.map(s=>s.hotspots);P.sheets.forEach(s=>delete s.hotspots);delete board.inspect;
+  const sheet=P.sheets[0], board=P.board, saved=board.inspect, geometry=board.geometry;
+  const maps=P.sheets.map(s=>s.hotspots);P.sheets.forEach(s=>delete s.hotspots);delete board.inspect;delete board.geometry;
   try {
     await applyState({...S,p:index,v:${JSON.stringify(name.endsWith('board')?'board':null)}||'sheet:'+sheet.path,m:'side'});
     const images=[...document.querySelectorAll('#stage img[data-image-artwork]')];
@@ -61,61 +273,47 @@ export const CHECKS = [
     if(!point||!hitTest([row],point[0],point[1],null,side))return 'present side not pickable';
     if(S.imageSelection)return 'fabricated inspection selection';
     return true;
-  } finally {P.sheets.forEach((s,i)=>{if(maps[i])s.hotspots=maps[i];});if(saved)board.inspect=saved;}
+  } finally {P.sheets.forEach((s,i)=>{if(maps[i])s.hotspots=maps[i];});if(saved)board.inspect=saved;if(geometry)board.geometry=geometry;}
 `])
 ,
   ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
-    const id = '__sch6_palette_probe__';
-    const source = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
-    cache[id] = source;
-    const view = {kind:'sheet', size:[10,10], layers:[{name:'probe', svg:{base:id,head:id}}]};
+    const id='__sch6_palette_probe__';
+    const source='<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
+    cache[id]=Promise.resolve({text:source});
+    const view={kind:'sheet',size:[10,10],layers:[{name:'F.Cu',svg:{base:id,head:id}}]}, owners=[];
     try {
-      const sheet = await stack('head', view);
-      const svg = sheet.querySelector('svg'), path = svg.querySelector('path');
-      if (svg.style.stroke !== 'var(--sch-ink-a90000, #a90000)'
-        || path.style.getPropertyPriority('fill') !== 'important'
-        || !path.getAttribute('style').includes('var(--sch-ink-009600')) return false;
-      const themed = svg.outerHTML; themeSchematic(svg);
-      if (svg.outerHTML !== themed) return false;
-      document.documentElement.style.setProperty('--sch-ink-009600', '#135724');
-      for (const kind of ['board','lib']) {
-        const other = await stack('head', {...view, kind});
-        if (other.querySelector('svg').outerHTML.includes('--sch-ink-')) return false;
+      const sheet=await stack('head',view);owners.push(...sheet.imageOwners);
+      const image=sheet.querySelector('img'),c=image?.imageOwner;
+      if(!image?.complete||!image.naturalWidth||sheet.querySelector('svg'))return 'not decoded image';
+      if(!c.appliedSource.includes('fill:rgba(0,150,0,1)!important;stroke:none'))return 'exact paints/important';
+      await c.setAppearance(new Map([['#009600','#135724']]));
+      if(!c.appliedSource.includes('fill:#135724!important;stroke:none')||c.source!==source)return 'original source lost';
+      for(const kind of ['board','lib']) {
+        const other=await stack('head',{...view,kind});owners.push(...other.imageOwners);
+        if(kind==='board' ? other.imageOwners[0].controller.appliedSource!==source : other.querySelector('svg').outerHTML.includes('rgba('))return kind+' palette leaked';
       }
-      const pixels = await raster('head', view, 10, 10);
-      return await svgText(id) === source && pixels[0] === 0 && pixels[1] === 150
-        && pixels[2] === 0 && pixels[3] === 255
-        && schematicPaint('#A90000') === schematicPaint('#a90000')
-        && schematicPaint('#F5F4EF') === '#F5F4EF';
-    } finally {
-      delete cache[id]; document.documentElement.style.removeProperty('--sch-ink-009600');
-    }
+      const pixels=await raster('head',view,10,10);
+      return await svgText(id)===source&&pixels[0]===0&&pixels[1]===150&&pixels[2]===0&&pixels[3]===255;
+    } finally {delete cache[id];for(const c of owners)c.dispose();}
   `],
-["SCH6 exact paints preserve opacity unknown colours and geometry", "", `
-  const host = document.createElement('div');
-  host.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><g style="stroke:#009600;fill:none;stroke-opacity:.4"><path d="M1 1L9 9" fill="#FFFFC2"/><text opacity="0" stroke-opacity="0">Hidden</text></g><path fill="#123456" stroke="none"/><path style="fill:rgb(0,150,0);stroke:#009601"/></svg>';
-  const svg = host.firstChild, before = svg.querySelector('path').getAttribute('d');
-  document.body.append(host);
-  try {
-    themeSchematic(svg);
-    const g = svg.querySelector('g'), unknown = svg.querySelectorAll('path')[1];
-    document.documentElement.style.setProperty('--sch-ink-009600', '#135724');
-    const first = getComputedStyle(svg.querySelector('path')).stroke;
-    document.documentElement.style.setProperty('--sch-ink-009600', '#246813');
-    const second = getComputedStyle(svg.querySelector('path')).stroke;
-    return first === 'rgb(19, 87, 36)' && second === 'rgb(36, 104, 19)'
-      && g.style.fill === 'none' && g.style.strokeOpacity === '0.4'
-      && svg.querySelector('text').getAttribute('opacity') === '0'
-      && unknown.getAttribute('fill') === '#123456'
-      && unknown.getAttribute('stroke') === 'none'
-      && svg.querySelector('path').getAttribute('d') === before
-      && schematicPaint('rgb(0,150,0)') === 'rgb(0,150,0)'
-      && schematicPaint('#009601') === '#009601'
-      && schematicPaint('#009600') === schematicPaint('#009600'.toLowerCase());
-  } finally {
-    document.documentElement.style.removeProperty('--sch-ink-009600'); host.remove();
-  }
-`],
+  ["SCH6 exact paints preserve opacity unknown colours and geometry", "", `
+    const source='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><g style="stroke:#009600;fill:none;stroke-opacity:.4"><path d="M1 1L9 9" fill="#FFFFC2"/><text opacity="0" stroke-opacity="0">Hidden</text></g><path fill="#123456" stroke="none"/><path style="fill:rgb(0,150,0);stroke:#009601"/></svg>';
+    const c=await ImageView.mount(source,[10,10],{side:'head',layer:'probe'});
+    try {
+      await c.setAppearance(new Map([['#009600','#135724'],['#ffffc2','rgba(1,2,3,.5)']]));
+      if(!c.appliedSource.includes('stroke:#135724'))return 'first paint';
+      await c.setAppearance(new Map([['#009600','#246813'],['#ffffc2','rgba(1,2,3,.5)']]));
+      const svg=new DOMParser().parseFromString(c.appliedSource,'image/svg+xml').documentElement;
+      const g=svg.querySelector('g'),unknown=svg.querySelectorAll('path')[1];
+      return c.node.complete&&c.node.naturalWidth>0&&c.source===source
+        &&g.style.stroke==='rgb(36, 104, 19)'&&g.style.fill==='none'&&g.style.strokeOpacity==='0.4'
+        &&svg.querySelector('path').getAttribute('fill')==='rgba(1,2,3,.5)'
+        &&svg.querySelector('text').getAttribute('opacity')==='0'&&svg.querySelector('text').getAttribute('stroke-opacity')==='0'
+        &&unknown.getAttribute('fill')==='#123456'&&unknown.getAttribute('stroke')==='none'
+        &&svg.querySelector('path').getAttribute('d')==='M1 1L9 9'
+        &&svg.querySelectorAll('path')[2].getAttribute('style')==='fill:rgb(0,150,0);stroke:#009601';
+    } finally {c.dispose();}
+  `],
 
   ["Stage 1 dock tabs remain readable and reachable at 1600", "", `
     const P=proj();
@@ -492,7 +690,7 @@ export const CHECKS = [
     return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x);`],
   ["sheet draws base and head, side by side", "p=1", `
     await new Promise(r => setTimeout(r, 800));
-    return document.querySelectorAll("#stage .vp").length === 2 && document.querySelectorAll("#stage svg").length >= 2;`],
+    return document.querySelectorAll("#stage .vp").length === 2 && document.querySelectorAll("#stage img[data-image-artwork]").length >= 2;`],
   ["wheel zoom keeps both panes in step", "", `
     await new Promise(r => setTimeout(r, 800));
     const vp = document.querySelector("#stage .vp"), before = S.z;
@@ -527,9 +725,9 @@ export const CHECKS = [
     for (const vp of document.querySelectorAll("#stage .vp")) {
       const R = vp.getBoundingClientRect();
       for (const l of vp.querySelectorAll(".layer")) {
-        let u = null;
-        for (const g of l.querySelectorAll("svg > g")) { const r = g.getBoundingClientRect(); if (!r.width && !r.height) continue;
-          u = u ? [Math.min(u[0], r.left), Math.min(u[1], r.top), Math.max(u[2], r.right), Math.max(u[3], r.bottom)] : [r.left, r.top, r.right, r.bottom]; }
+        const image=l.querySelector('img[data-image-artwork]'), r=image?.getBoundingClientRect();
+        if(!image?.complete||!image.naturalWidth||!r.width||!r.height)return 'missing decoded '+l.dataset.layer;
+        const u=[r.left,r.top,r.right,r.bottom];
         if (u && (u[0] < R.left - 1 || u[1] < R.top - 1 || u[2] > R.right + 1 || u[3] > R.bottom + 1)) bad.push(l.dataset.layer + " " + u.map(Math.round) + " in " + [R.left, R.top, R.right, R.bottom].map(Math.round));
       }
     }
@@ -539,7 +737,7 @@ export const CHECKS = [
     return S.m === "${m}" && document.querySelector("#stage").classList.contains("mode-${m}")
       && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}"
       && (typeof boardDiff!=='undefined' && boardDiff ? boardDiff.panes.every((p,i)=>p.canvas.width>0&&p.canvas.height>0&&p.renderer.stats.draws>0&&boardDiff.readPixel(i,10,10).length===4)
-        : [...document.querySelectorAll('#stage svg path, #stage svg line, #stage svg rect, #stage svg circle, #stage svg polyline, #stage svg polygon, #stage svg text')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; }));`]),
+        : [...document.querySelectorAll('#stage img[data-image-artwork]')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; }));`]),
   ["wipe divider exposes its current keyboard position", "m=wipe", `
     await new Promise(r => setTimeout(r, 800));
     const d = document.querySelector('#stage .divider[role="slider"]'), before = S.wipe;
@@ -634,7 +832,7 @@ export const CHECKS = [
     }
     return getComputedStyle(document.querySelector("#stage .stack.head")).opacity === "0.2";`],
   ["added project draws its one side in every mode", "p=0&m=overlay", `
-    await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head svg").length > 0;`],
+    await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head img[data-image-artwork]").length > 0;`],
   ["layer list grouped, changed layers marked", "p=1&v=board&t=appearance", `
     await new Promise(r => setTimeout(r, 800));
     const L = document.querySelector("#appearance-root");
@@ -813,7 +1011,7 @@ export const CHECKS = [
     return S.p === 1 && S.v === "board" && S.m === "overlay" && S.x === 158.8 && S.z === 12;`],
   ["stale or malformed address falls back to first change", "p=9&v=sheet:/nope/&x=abc&s=c99999", `
     await new Promise(r => setTimeout(r, 1200));
-    return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x) && document.querySelectorAll("#stage svg").length > 0;`],
+    return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x) && document.querySelectorAll("#stage img[data-image-artwork]").length > 0;`],
   ["j and k step through changes in list order", "p=1", `
     const ids = [...document.querySelectorAll("#panel .card")].map(c => c.dataset.id);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "j" })); await new Promise(r => setTimeout(r, 900));
@@ -930,7 +1128,7 @@ export const CHECKS = [
     const bad = [];
     for (const v of [P.sheets[0] && "sheet:" + P.sheets[0].path, "board"]) for (const m of Object.keys(MODE_NAMES)) {
       S.m = m; S.v = v; S.x = S.y = S.z = null; await draw();
-      const vis = [...document.querySelectorAll("#stage .stack.base svg")].some(e => e.getBoundingClientRect().width > 0);
+      const vis = [...document.querySelectorAll("#stage .stack.base img[data-image-artwork]")].some(e => e.getBoundingClientRect().width > 0);
       if (!vis) bad.push(v + " " + m);
     }
     return bad.length ? bad.join(", ") : true;`],
@@ -1750,11 +1948,10 @@ export const CHECKS = [
       return JSON.stringify(A.get()) === before && A.defaults(["F.Cu"]).objects.zones.opacity === .6 && A.normalize(null).contrast === "normal" && calls === 4 || "reset " + calls;
     } finally { off(); A.reset(); }`],
   ["board layer paint preserves custom colours and store snapshots", "v=board", `
-    const d=document.createElement('div'); d.innerHTML='<svg><path fill="none" stroke="rgb(200,52,52)" style="opacity:.3"/><path fill="#123456" stroke="#c83434"/></svg>';
-    recolorLayer(d,{color:[1,2,3,1],opacity:.5},KicadColors.layers['F.Cu']);
-    const [a,b]=d.querySelectorAll('path');
-    if(a.getAttribute('fill')!=='none' || a.getAttribute('stroke')!=='#010203' || a.style.opacity!=='.3' && a.style.opacity!=='0.3') return 'layer paint';
-    if(b.getAttribute('fill')!=='#123456' || b.getAttribute('stroke')!=='#010203') return 'custom paint overwritten';
+    const src='<svg><path fill="none" stroke="rgb(200,52,52)" style="opacity:.3"/><path fill="#123456" stroke="#c83434"/></svg>';
+    const out=ImageView.layerPaints(src,KicadColors.layers['F.Cu'].slice(0,3),[1,2,3]);
+    if(!out.includes('fill="none" stroke="#010203" style="opacity:.3"')) return 'layer paint';
+    if(!out.includes('fill="#123456" stroke="#010203"')) return 'custom paint overwritten';
     const look=Appearance.get(), old=look.flip; look.flip=!old;
     if(Appearance.get().flip!==old) { Appearance.patch({flip:old}); return 'mutable snapshot'; }
     return true;`],
@@ -1769,7 +1966,7 @@ export const CHECKS = [
         const layer=document.querySelector('.stack .layer'); if(!layer) return 'no SVG '+m;
         const name=canon(layer.dataset.layer);
         Appearance.patch({layers:{[name]:{visible:false}}}); await draw();
-        if([...document.querySelectorAll('.stack .layer')].some(l=>canon(l.dataset.layer)===name)) return 'eye ignored '+m;
+        if([...document.querySelectorAll('.stack .layer')].some(l=>canon(l.dataset.layer)===name&&getComputedStyle(l).display!=='none')) return 'eye ignored '+m;
         Appearance.patch({layers:{[name]:before.layers[name]}});
       }
       return true;
@@ -1801,9 +1998,10 @@ export const CHECKS = [
       const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
       S.v='sheet:'+sheet.path; await draw();
       if(!appearanceSchematics.size||appearanceBoards.size) return 'stale lifecycle';
-      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('18,52,86')) return 'wire stale';
+      for(const c of appearanceSchematics) if(!c.appliedSource.includes('rgba(18,52,86,1)')||!c.node.complete) return 'wire stale';
       store.patch({colors:{'schematic.wire':[1,0,0,1]}});
-      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('255,0,0')) return 'mounted wire stale';
+      await applyAppearance(store.get());
+      for(const c of appearanceSchematics) if(!c.appliedSource.includes('rgba(255,0,0,1)')||!c.node.complete) return 'mounted wire stale';
       S.v='board'; await draw();
       if(appearanceSchematics.size || !appearanceBoards.size) return 'stale schematic after board mount';
       return location.hash===hash || 'appearance changed deep link';
@@ -2508,7 +2706,7 @@ export const CHECKS = [
     const create=BoardGL.create;
     try {
       disposeBoardRenderers();BoardGL.create=()=>null;boardView.failed=null;await draw();
-      if(boardView.useGL || !document.querySelector('#stage .world svg') || !boardView.note) return 'authoritative SVG fallback missing offline';
+      if(boardView.useGL || !document.querySelector('#stage .world img[data-image-artwork]') || !boardView.note) return 'authoritative SVG fallback missing offline';
       console.log('BOARD_PROOF '+JSON.stringify({offline:true,selection:row.id,fallback:true}));
       return true;
     } finally {BoardGL.create=create;boardView.failed=null;}
@@ -2958,7 +3156,7 @@ export const CHECKS = [
     if(!row) return 'sample needs schematic change';
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; S.s=row.id; await draw(); fit();
-      if(!document.querySelector('#stage .vp.sheet .layer svg')) return mode+' SVG';
+      if(!document.querySelector('#stage .vp.sheet .layer img[data-image-artwork]')) return mode+' SVG';
       if(!document.querySelector('#stage .marker.sel')) return mode+' selection';
       if(getComputedStyle(document.querySelector('#stage .vp.sheet')).backgroundColor!=='rgb(245, 244, 239)') return mode+' paper';
       if(!document.querySelector('#stage .sch-grid')) return mode+' grid';
@@ -2972,7 +3170,7 @@ export const CHECKS = [
       for(const mode of ['side','overlay','wipe','blend','semantic']) {
         S.m=mode; await draw();
         const stack=document.querySelector('#stage .stack.'+(missing==='base'?'head':'base'));
-        if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' '+missing+' hid survivor';
+        if(!stack?.querySelector('img[data-image-artwork]')||getComputedStyle(stack).display==='none') return mode+' '+missing+' hid survivor';
         if(!document.querySelector('#stage .marker.sel')||!document.querySelector('#stage .sch-grid')) return mode+' '+missing+' lost selection/grid';
       }
     }} finally {sheet.svg=svg;}
@@ -3037,7 +3235,7 @@ export const CHECKS = [
     if(!sheet) return 'Thermal real schematic change required';
     S.v='sheet:'+sheet.path; S.m='${mode}'; S.s=proj().changes.find(r=>r.where?.sheet===sheet.path&&rowBox(r,'head')).id;
     S.grid=true; Appearance.patch({markStyle:'recolour'}); renderNav(); renderModes(); renderPanel(); await draw(); fit();
-    return !!document.querySelector('#stage .vp.sheet svg')&&!!document.querySelector('#stage .marker.sel');
+    return !!document.querySelector('#stage .vp.sheet img[data-image-artwork]')&&!!document.querySelector('#stage .marker.sel');
   `]),
   ["SCH6 removed-only schematic fixture preserves region cues in every mode", "", `
     const p=proj(), sheet=p.sheets.find(s=>s.svg?.base||s.svg?.head);
@@ -3051,7 +3249,7 @@ export const CHECKS = [
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; renderNav(); renderModes(); renderPanel(); await draw(); fit();
       const stack=document.querySelector('#stage .stack.base'), mark=document.querySelector('#stage .marker.sel.removed');
-      if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' survivor';
+      if(!stack?.querySelector('img[data-image-artwork]')||getComputedStyle(stack).display==='none') return mode+' survivor';
       const semantic=BoardMarks.styles.removed;
       if(!mark||mark.dataset.glyph!==semantic.glyph||getComputedStyle(mark).borderTopStyle!==semantic.dash
         ||!mark.querySelector('.sch-mark-label')?.textContent.includes(semantic.word)
@@ -3076,7 +3274,7 @@ export const CHECKS = [
       }
       await Promise.all(pending);
       const stage=document.querySelector('#stage'), m=stage.querySelector('.marker.sel.violation');
-      return stage.classList.contains('mode-semantic')&&!!stage.querySelector('.stack.head svg')
+      return stage.classList.contains('mode-semantic')&&!!stage.querySelector('.stack.head img[data-image-artwork]')
         &&!!m&&m.dataset.glyph==='!'&&m.getAttribute('aria-label')==='finding U1'
         &&getComputedStyle(stage.querySelector('.vp.sheet')).backgroundColor==='rgb(245, 244, 239)';
     } finally {sheet.svg=svg; p.sheets.pop(); p.checks.pop(); KRTheme.set(theme);}
@@ -3100,7 +3298,8 @@ export const CHECKS = [
   if (!n) return 'no cards';
   if (document.querySelector('#change-count').textContent.split(' / ')[1] !== String(n)) return 'total ' + document.querySelector('#change-count').textContent;
   document.querySelector('#change-nav [data-step="1"]').click();
-  await new Promise(r => setTimeout(r, 50));
+  // Selecting a change redraws the view; image decoding can delay the panel update.
+  for (const end = performance.now() + 5000; !/^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) && performance.now() < end;) await new Promise(r => setTimeout(r, 50));
   return /^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) || document.querySelector('#change-count').textContent;`],
   ["board context loss retains state and requires explicit retry", "v=board", `
     const realGeometry=!!proj().board.geometry;
@@ -3114,8 +3313,8 @@ export const CHECKS = [
     const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
     if(!ext) throw Error('WebGL context-loss extension unavailable');
     ext.loseContext();
-    for(let n=0;n<100 && !document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
-    if(boardDiff || !document.querySelector('#stage .stack svg') || !old.panes.every(p=>p.renderer.stats.disposed)) return 'context loss did not dispose and fall back';
+    for(let n=0;n<100 && !document.querySelector('#stage .stack img[data-image-artwork]');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack img[data-image-artwork]') || !old.panes.every(p=>p.renderer.stats.disposed)) return 'context loss did not dispose and fall back';
     if(JSON.stringify([S.x,S.y,S.z,S.s,S.m,S.layers])!==before) return 'state lost';
     if(!/WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent)) return 'missing fallback notice';
     for(let n=0;n<3;n++) await draw();
@@ -3141,7 +3340,7 @@ export const CHECKS = [
     ${BOARD_LIFECYCLE_FIXTURE}
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; await draw();
-      if(boardDiff || !document.querySelector('#stage .stack svg')) return 'no SVG '+mode;
+      if(boardDiff || !document.querySelector('#stage .stack img[data-image-artwork]')) return 'no SVG '+mode;
       if(S.x!==5 || S.y!==5 || S.z!==20) return 'camera lost '+mode;
     }
     return window.__webglAcquisitions>0 && /WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent);
@@ -3220,8 +3419,8 @@ export const CHECKS = [
     const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
     if(!ext) throw Error('WebGL context-loss extension unavailable');
     ext.loseContext();
-    for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
-    if(boardDiff || !document.querySelector('#stage .stack svg')) return 'did not fall back';
+    for(let n=0;n<100&&!document.querySelector('#stage .stack img[data-image-artwork]');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack img[data-image-artwork]')) return 'did not fall back';
     const next=structuredClone(proj()); next.dir+='-restored'; next.name+=' restored'; D.projects.push(next);
     S.p=D.projects.length-1; await draw();
     return !!boardDiff && boardDiff!==old && boardView.failed===null && old.panes.every(p=>p.renderer.stats.disposed)
@@ -3234,8 +3433,8 @@ export const CHECKS = [
     const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m]);
     try {
       pane.targets[0].width=-1; gl.createTexture=()=>null; old.render();
-      for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
-      return !boardDiff && !!document.querySelector('#stage .stack svg') && boardView.failed===S.p
+      for(let n=0;n<100&&!document.querySelector('#stage .stack img[data-image-artwork]');n++) await new Promise(r=>setTimeout(r,25));
+      return !boardDiff && !!document.querySelector('#stage .stack img[data-image-artwork]') && boardView.failed===S.p
         && old.panes.every(p=>p.renderer.stats.disposed) && JSON.stringify([S.x,S.y,S.z,S.s,S.m])===before
         || 'allocation failure did not preserve SVG state';
     } finally {gl.createTexture=create;}
@@ -3243,26 +3442,21 @@ export const CHECKS = [
   ["SCH6 proof framed page", "v=sheet:/&m=side", `
     await draw(); fit();
     await new Promise(resolve => requestAnimationFrame(resolve));
-    const svg=document.querySelector('#stage .vp.sheet .layer svg');
-    return !!svg && svg.querySelectorAll('path').length>100 && currentView().kind==='sheet'
-      && svg.getBoundingClientRect().width>0;
+    const image=document.querySelector('#stage .vp.sheet .layer img[data-image-artwork]');
+    return image?.complete&&image.naturalWidth>0&&image.imageOwner.source.includes('<path')&&currentView().kind==='sheet'
+      && image.getBoundingClientRect().width>0;
   `],
   ["SCH6 proof live palette status and comparison controls", "v=sheet:/&m=side", `
     await draw(); fit();
-    const svg=document.querySelector('#stage .vp.sheet .layer svg');
-    const wire=[...svg.querySelectorAll('[style]')].find(e=>e.style.stroke.includes('--sch-ink-009600'));
-    const frame=[...svg.querySelectorAll('[style]')].find(e=>e.style.stroke.includes('--sch-ink-840000'));
-    if(!wire||!frame) return 'KiCad wire/frame paints required';
-    const root=svg, original=root.style.getPropertyValue('--sch-ink-009600');
-    const frameColour=getComputedStyle(frame).stroke;
+    const image=document.querySelector('#stage .vp.sheet .layer img[data-image-artwork]'), c=image.imageOwner;
+    const original=Appearance.get(), source=c.source;
+    if(!source.toLowerCase().includes('#009600')||!source.toLowerCase().includes('#840000'))return 'KiCad wire/frame paints required';
     try {
-      root.style.setProperty('--sch-ink-009600','#135724');
-      if(getComputedStyle(wire).stroke!=='rgb(19, 87, 36)'||getComputedStyle(frame).stroke!==frameColour)
-        return 'loaded SVG palette';
-    } finally {
-      if(original) root.style.setProperty('--sch-ink-009600',original);
-      else root.style.removeProperty('--sch-ink-009600');
-    }
+      Appearance.patch({colors:{'schematic.wire':[19/255,87/255,36/255,1]}});
+      await applyAppearance(Appearance.get());
+      const expected=ImageView.replacePaints(source,schematicPaints(KrAppearance.resolve(Appearance.get())));
+      if(!c.node.complete||c.appliedSource!==expected||c.source!==source)return 'decoded image palette';
+    } finally {Appearance.set(original);await applyAppearance(original);}
     for(const vp of document.querySelectorAll('#stage .vp.sheet')) {
       const r=vp.getBoundingClientRect();
       updateCoordinates(vp,{clientX:r.left+r.width/2,clientY:r.top+r.height/2});
@@ -3388,11 +3582,11 @@ export const CHECKS = [
   return !!document.querySelector('#toolbar #zoombar') && !!document.querySelector('#panel-tabs')
     && ['x','y'].every(axis=> /^-?\\d+\\.\\d+$/.test(document.querySelector('#statusbar [data-coordinate='+axis+']').textContent))
     && (boardView.useGL ? boardDiff?.panes.length===2 && document.querySelectorAll('#stage canvas').length===2
-      : !document.querySelector('#stage canvas') && !!document.querySelector('#stage svg'));`],
+      : !document.querySelector('#stage canvas') && !!document.querySelector('#stage img[data-image-artwork]'));`],
   ["chrome offline controls preserve SVG modes links theme and modal", "p=1&v=board", `
   for (const mode of ['side','overlay','wipe','blend','semantic']) {
     await applyState({p:1,v:'board',m:mode}); fit();
-    if (S.m!==mode || !document.querySelector('#stage svg')) return 'mode '+mode;
+    if (S.m!==mode || !document.querySelector('#stage img[data-image-artwork]')) return 'mode '+mode;
   }
   const theme=KRTheme.get(); document.querySelector('[data-theme-set='+(theme==='dark'?'light':'dark')+']').click();
   if (KRTheme.get()===theme) return 'theme switch'; KRTheme.set(theme);
@@ -3983,7 +4177,7 @@ CHECKS.push(['vf-avail unchanged board full design and Appearance hash', 'v=boar
   if(!document.querySelector('#appearance-root'))throw Error('Appearance unavailable');
   if(!document.querySelector('#stage').textContent.includes('No layout changes'))throw Error('missing no-change notice');
   for(const layer of proj().board.layers){if(!document.querySelector('#appearance-root [data-layer="'+canon(layer.name)+'"]'))throw Error('missing layer '+layer.name);}
-  if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('no board drawing');
+  if(!boardView.renderers.length&&!document.querySelector('#stage img[data-image-artwork]'))throw Error('no board drawing');
   console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',layers:proj().board.layers.length,renderers:boardView.renderers.length,theme:KRTheme.get()}));return true;
 `]);
 
@@ -3992,7 +4186,7 @@ CHECKS.push(['vf-avail unchanged board modes checks threads and full hash', 'v=b
   for(const mode of ['side','overlay','wipe','blend','semantic']) {
     S.m=mode;await draw();
     if(!document.querySelector('#stage .no-change-notice')||!currentView())throw Error('unchanged board unavailable in '+mode);
-    if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('full board missing in '+mode);
+    if(!boardView.renderers.length&&!document.querySelector('#stage img[data-image-artwork]'))throw Error('full board missing in '+mode);
   }
   const violation=allViolations().find(v=>v.where?.board&&v.pos);
   if(!violation)throw Error('real board finding required');
@@ -4021,7 +4215,7 @@ CHECKS.push(['vf-avail unchanged schematic sheet full design', '', `
   const sheet=D.projects[p].sheets.find(s=>s.svg.base&&s.svg.head);
   sheet.status='unchanged';sheet.svg.head=sheet.svg.base;
   await applyState({p,v:'sheet:'+sheet.path,m:'side'});
-  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
+  if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
 `]);
 
 CHECKS.push(['vf-avail several projects retained in full', '', `
@@ -4031,7 +4225,7 @@ CHECKS.push(['vf-avail several projects retained in full', '', `
   for(let p=0;p<D.projects.length;p++){
     await applyState({p,v:'board',m:'side',t:'appearance'});
     if(!currentView()||!document.querySelector('#appearance-root'))throw Error('project board unavailable '+p);
-    for(const sheet of proj().sheets){await applyState({p,v:'sheet:'+sheet.path,m:'side'});if(document.querySelectorAll('#stage svg').length!==2)throw Error('sheet revision unavailable '+sheet.path);}
+    for(const sheet of proj().sheets){await applyState({p,v:'sheet:'+sheet.path,m:'side'});if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2)throw Error('sheet revision unavailable '+sheet.path);}
     if(modelAvailable()){await applyState({p,v:'3d',m:'side'});if(window.Review3D.state.roots.filter(Boolean).length!==2)throw Error('project 3D unavailable '+p);}
   }
   await applyState({p:unchanged,v:'board',m:'side',t:'appearance'});
@@ -4040,12 +4234,12 @@ CHECKS.push(['vf-avail several projects retained in full', '', `
 CHECKS.push(['vf-avail board-only unchanged schematic proof', '', `
   const p=D.projects.findIndex(p=>p.board.changed&&p.sheets.every(s=>s.status==='unchanged'));if(p<0)return 'skip';
   await applyState({p,v:'sheet:'+D.projects[p].sheets[0].path,m:'side'});
-  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('board-only edit hid unchanged schematic');return true;
+  if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('board-only edit hid unchanged schematic');return true;
 `]);
 CHECKS.push(['vf-avail one-sheet change retains unchanged sibling proof', '', `
   const p=D.projects.findIndex(p=>p.sheets.some(s=>s.status!=='unchanged')&&p.sheets.some(s=>s.status==='unchanged'));if(p<0)return 'skip';
   await applyState({p,v:'sheet:'+D.projects[p].sheets.find(s=>s.status==='unchanged').path,m:'side'});
-  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
+  if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
 `]);
 CHECKS.push(['bench polish Fit stays centred after dock resize and Widen has a label', 'v=board', `
   const w=ms=>new Promise(r=>setTimeout(r,ms));
@@ -4160,10 +4354,12 @@ CHECKS.push(['zoom-burst deep zoom no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}
 `]);
 // simplifySchematic: < 3,000 painted elements; joined strokes lighten thin text at fit, limits ~1.5x measured (fit mean 1.66, 18% moved; 28x 0.12, 2%).
 CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=sheet:/', `
-  const svgs = [...document.querySelectorAll('#stage svg[data-appearance-schematic]')];
-  const painted = svgs.map(s => s.querySelectorAll('path,line,polyline,polygon,rect,circle,ellipse').length);
-  if (!svgs.length || painted.some(n => n >= 3000)) return 'painted ' + painted;
-  const raw = await svgText(currentView().layers[0].svg.head), size = currentView().size;
+  const images=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')];
+  if(!images.length||images.some(i=>!i.complete||!i.naturalWidth)||document.querySelector('#stage .layer svg'))return 'decoded images required';
+  const {raw,simplified}=window.__sheetSimplification,size=currentView().size;
+  const parsed=new DOMParser().parseFromString(simplified,'image/svg+xml');
+  const painted=[parsed.querySelectorAll('path,line,polyline,polygon,rect,circle,ellipse').length];
+  if(painted.some(n=>n>=3000))return 'producer painted '+painted;
   const render = async (markup, vb, W, H) => {
     const d = new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement;
     d.setAttribute('viewBox', vb.join(' ')); d.setAttribute('width', W); d.setAttribute('height', H);
@@ -4172,7 +4368,7 @@ CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=she
   const out = {painted};
   // [name, viewBox mm, px, mean limit, share of ink pixels allowed to move > 32/255]
   for (const [name, vb, W, H, meanMax, moveMax] of [['fit', [0, 0, size[0], size[1]], 1600, Math.round(1600 * size[1] / size[0]), 2.5, 0.25], ['28x', [60, 125, 1600 / 28 / 3.78, 900 / 28 / 3.78], 1600, 900, 0.25, 0.03]]) {
-    const a = await render(raw.slice(raw.indexOf('<svg')), vb, W, H), b = await render(simpleSheet(raw), vb, W, H);
+    const a = await render(raw.slice(raw.indexOf('<svg')), vb, W, H), b = await render(simplified, vb, W, H);
     let sum = 0, moved = 0, ink = 0;
     for (let i = 0; i < a.length; i += 4) { const m = Math.max(Math.abs(a[i]-b[i]), Math.abs(a[i+1]-b[i+1]), Math.abs(a[i+2]-b[i+2])); sum += m; if (m > 32) moved++; if (Math.min(a[i], a[i+1], a[i+2]) < 200) ink++; }
     out[name] = {mean: +(sum / (a.length / 4)).toFixed(2), moved: +(moved / ink).toFixed(3)};

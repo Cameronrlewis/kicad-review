@@ -13,6 +13,7 @@ import boardGl from '../ui/board-gl.js';
 import appearance from '../ui/appearance.js';
 import boardMarks from '../ui/board-marks.js';
 import boardDiff from '../ui/board-diff.js';
+import imageView from '../ui/image-view.js';
 import reviewJs from '../ui/review.js';
 import review3d from '../ui/review3d.js';
 
@@ -20,7 +21,7 @@ const DATA = '<script>window.REVIEW_DATA = ';
 const BUNDLE = /<script type="application\/octet-stream" id="three-bundle">[^<]*<\/script>/;
 const assets = {
   'kicad-colors.js': kicadColors, 'appearance-state.js': appearanceState, 'board-gl.js': boardGl,
-  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff,
+  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff, 'image-view.js': imageView,
 };
 // String.replace with a function: `$` sequences in the inserted code stay literal.
 const put = (html, tag, text) => html.replace(tag, () => text);

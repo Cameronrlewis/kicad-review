@@ -43,7 +43,12 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .world, .stack, .layer { position: absolute; left: 0; top: 0; }
 .world { transform-origin: 0 0; }
 .layer { width: 100%; height: 100%; }   /* else the svg falls back to its own mm width (3.78 px/mm), not the stack's PX */
-.layer svg { width: 100%; height: 100%; display: block; }
+.layer svg { width: 100%; height: 100%; display: block; } /* library artwork only */
+.layer > img { display:block; width:100%; height:100%; user-select:none; }
+.layer > img[hidden] { display:none; }
+.marks { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+.marks [data-hotspot] { pointer-events:all; fill:transparent; }
+.image-error { color:var(--text); background:var(--surface); border:1px solid var(--line); padding:var(--space-2); }
 .tag { position: absolute; top: 0; left: 0; background: var(--surface); font: 11px var(--font-mono); padding: 0 var(--space-1); }
 .mode-overlay .world { isolation: isolate; background: #fff; }
 .mode-overlay .base .layer { filter: url(#tint-del); }

@@ -405,12 +405,17 @@ function assetRetry(stage) {
 }
 let boardDiff = null;
 const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
-const appearanceBoards = new Set(), appearanceSchematics = new Set();
+const appearanceBoards = new Set(), appearanceSchematics = new Set(), appearanceBoardImages = new Set();
 const appearanceStore = () => Appearance;
 function applyAppearance(snapshot) {
+  const stage = $("#stage"), ticket = (stage.appearanceGeneration || 0) + 1;
+  stage.appearanceGeneration = ticket;
   const resolved = KrAppearance.resolve(snapshot);
   for (const board of appearanceBoards) board.setAppearance(glAppearance(resolved));
-  for (const root of appearanceSchematics) setSchematicAppearance(root, resolved);
+  const imageJobs = [];
+  for (const adapter of appearanceBoardImages) imageJobs.push(adapter.setAppearance(resolved.layers[adapter.layer]));
+  for (const c of appearanceSchematics) imageJobs.push(c.setAppearance(schematicPaints(resolved)));
+  if (imageJobs.length) { stage.dataset.imageReady = "false"; stage.setAttribute("aria-busy", "true"); }
   for (const vp of document.querySelectorAll('#stage .vp.board')) vp.style.background = cssAppearance(resolved.boardBackground);
   for (const vp of document.querySelectorAll('#stage .vp.sheet')) vp.style.background = cssAppearance(resolved.schematicBackground);
   for (const vp of document.querySelectorAll('#stage .vp')) {
@@ -422,6 +427,15 @@ function applyAppearance(snapshot) {
       vp.style.setProperty('--halo-'+action,cssAppearance(mark.halo));
     }
   }
+  stage.appearancePending = Promise.all(imageJobs).then(result => {
+    // A draw waiting on a superseded decode must wait for the latest palette too.
+    if (ticket !== stage.appearanceGeneration) return stage.appearancePending;
+    if (stage.isConnected && stage.imageMounted && stage.dataset.view === S.v && !stage.querySelector('.image-error')) {
+      stage.dataset.imageReady = "true"; stage.setAttribute("aria-busy", "false");
+    }
+    return result;
+  });
+  return stage.appearancePending;
 }
 const boardAppearance = () => Appearance.get();
 // A layer eye keeps the l= hash list in step, so links and the Appearance dock agree.
@@ -508,7 +522,13 @@ for (const b of document.querySelectorAll('button[data-mark-style]')) {
 }
 Appearance.subscribe(snapshot => {
   syncMarkStyles();
-  applyAppearance(snapshot);
+  const stage = $("#stage");
+  applyAppearance(snapshot).catch(error => {
+    if (!stage.isConnected) return;
+    stage.dataset.imageReady = "false"; stage.setAttribute("aria-busy", "false");
+    const message = $("#statusbar .status-message");
+    if (message) message.textContent = `Image appearance unavailable: ${error.message}`;
+  });
   refreshAppearance();
   updateStatus();
   if (currentView()?.kind === "sheet") {
@@ -553,18 +573,7 @@ function currentView(v = S.v) {   // Availability is independent of change statu
     return c && (c.svg.base || c.svg.head) ? { kind: "lib", size: c.size, layers: [{ name: "item", changed: true, svg: c.svg }] } : null;
   }
   const pg = p.sheets.find(s => `sheet:${s.path}` === v);
-  return pg && pg.svg ? { kind: "sheet", size: pg.size, layers: [{ name: "sheet", changed: true, svg: pg.svg }] } : null;
-}
-// KiCad 10, builtin_color_themes.h:31–81; data provenance in NOTICE.
-const SCH_PAINTS = new Set([
-  '000000','000084','ffffc2','840000','840084','b5b5b5','c2c2c2',
-  '009600','725600','0f0f0f','484848','ff0000','0000c2','4848ff',
-  '006464','a90000','840032','e0000c'
-]);
-function schematicPaint(value) {
-  const hex = value.trim().toLowerCase();
-  return /^#[0-9a-f]{6}$/.test(hex) && SCH_PAINTS.has(hex.slice(1))
-    ? `var(--sch-ink-${hex.slice(1)}, ${hex})` : value;
+  return pg && pg.svg ? { kind: "sheet", size: pg.size, layers: [{ ...pg, name: "sheet", changed: true }] } : null;
 }
 const cssAppearance = rgba => `rgba(${rgba.slice(0,3).map(v=>Math.round(v*255)).join(',')},${rgba[3]})`;
 // Exported paths sharing a source RGB cannot be distinguished semantically.
@@ -579,90 +588,46 @@ const SCH_THEME_KEYS = {
   '4848ff':'schematic.private_note','006464':'schematic.pin_name','a90000':'schematic.pin_number',
   '840032':'schematic.op_voltages','e0000c':'schematic.op_currents'
 };
-function setSchematicAppearance(svg, appearance) {
-  for (const [hex,key] of Object.entries(SCH_THEME_KEYS))
-    svg.style.setProperty('--sch-ink-'+hex, cssAppearance(appearance.colors[key]));
-  svg.style.setProperty('--sch-background', cssAppearance(appearance.schematicBackground));
+function schematicPaints(resolved) {
+  return new Map(Object.entries(SCH_THEME_KEYS).map(([hex,key])=>['#'+hex,cssAppearance(resolved.colors[key])]));
 }
-function themeSchematic(svg) {
-  for (const el of [svg, ...svg.querySelectorAll('[style],[fill],[stroke]')]) {
-    if (el.hasAttribute('style')) {
-      el.setAttribute('style', el.getAttribute('style').replace(
-        /(^|;)\s*(fill|stroke)\s*:\s*(#[0-9a-f]{6})(\s*(?:!important)?\s*)(?=;|$)/gi,
-        (all, separator, property, value, suffix) =>
-          `${separator}${property}:${schematicPaint(value)}${suffix}`));
-    }
-    for (const property of ['fill', 'stroke']) {
-      if (el.hasAttribute(property)) {
-        el.setAttribute(property, schematicPaint(el.getAttribute(property)));
-      }
-    }
-  }
-}
-
-// kicad-cli strokes each glyph segment as its own <path d> (~25k on a dense sheet), and Chrome repaints
-// them all when a zoom settles. Join runs of sibling attribute-less paths under an unfilled group into one
-// path: same inherited style, near-identical pixels (overlapping strokes no longer double their edge), ~10x fewer elements. Nothing addresses these paths individually.
-function simplifySchematic(svg) {
-  const walk = (g, unfilled) => {
-    const m = /(?:^|;)\s*fill\s*:\s*([^;]+)/i.exec(g.getAttribute('style') || '') || (g.hasAttribute('fill') && [, g.getAttribute('fill')]);
-    if (m) unfilled = m[1].trim() === 'none';
-    let run = null, d = [];
-    const flush = () => { if (run && d.length > 1) run.setAttribute('d', d.join(' ')); run = null; d = []; };
-    for (const el of [...g.children]) {
-      if (unfilled && el.localName === 'path' && el.attributes.length === 1 && /^\s*M/.test(el.getAttribute('d') || '')) {   // absolute start: joining cannot shift it
-        d.push(el.getAttribute('d')); if (run) el.remove(); else run = el;
-      } else if (el.localName === 'desc') continue;
-      else { flush(); if (el.localName === 'g') walk(el, unfilled); }
-    }
-    flush();
-  };
-  walk(svg, false);
-}
-const simpleSheets = new Map();   // raw sheet SVG text -> simplified markup; only sheets actually shown get here
-function simpleSheet(t) {
-  if (!simpleSheets.has(t)) { const d = document.createElement('div'); d.innerHTML = t.slice(t.indexOf('<svg')); simplifySchematic(d.firstElementChild); simpleSheets.set(t, d.innerHTML); }
-  return simpleSheets.get(t);
-}
-
-// SVG fallback: replace only the original layer RGB; retain custom object/diff paint and none;
-// existing inline opacity stays, the colour's alpha and the layer opacity become the layer's own opacity.
-function recolorLayer(div, look, original) {
-  const [r, g, b, a] = look.color, hex = "#" + [r, g, b].map(n => n.toString(16).padStart(2, "0")).join("");
-  const same = original && look.color.every((v, i) => v === original[i]);
-  if (!same) {
-    const source = original && "#" + original.slice(0, 3).map(n => n.toString(16).padStart(2, "0")).join("");
-    const paint = v => {
-      let rgb = v.trim().toLowerCase().replace(/\s/g, "");
-      if (/^#[0-9a-f]{3}$/.test(rgb)) rgb = "#" + [...rgb.slice(1)].map(c => c + c).join("");
-      return rgb === source || original && rgb === `rgb(${original.slice(0, 3).join(",")})` ? hex : v;
-    };
-    for (const el of [div.querySelector("svg"), ...div.querySelectorAll("[style],[fill],[stroke]")]) {
-      for (const prop of ["fill", "stroke"]) if (el.hasAttribute(prop)) el.setAttribute(prop, paint(el.getAttribute(prop)));
-      if (el.hasAttribute("style")) el.setAttribute("style", el.getAttribute("style").replace(/(^|;)\s*(fill|stroke)\s*:\s*([^;]+)/gi, (all, sep, prop, value) => `${sep}${prop}:${paint(value)}`));
-    }
-  }
-  if (a * look.opacity !== 1) div.style.opacity = a * look.opacity;
+function releaseImageStage(stage) {
+  for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) c.dispose();
 }
 async function stack(side, view) {
+  const st=document.createElement('div'); st.className=`stack ${side}`; st.imageOwners=[];
   const generation = gen;
-  const st = document.createElement("div");
-  st.className = `stack ${side}`;
-  st.style.width = `${view.size[0] * PX}px`; st.style.height = `${view.size[1] * PX}px`;
-  const look = view.kind === "board" ? Appearance.get().layers : {};
+  st.style.width=`${view.size[0]*PX}px`; st.style.height=`${view.size[1]*PX}px`;
+  const theme=document.documentElement.dataset.theme==='light'?'light':'dark';
   for (const l of view.layers) {
     if (generation !== gen) break;
-    const t = await svgText(l.svg[side]);
-    if (!t || look[canon(l.name)]?.visible === false) continue;
-    const d = document.createElement("div");
-    d.className = "layer"; d.dataset.layer = l.name;
-    d.innerHTML = view.kind === 'sheet' ? simpleSheet(t) : t.slice(t.indexOf("<svg"));
-    if (view.kind === 'sheet') {
-      const svg = d.querySelector('svg'); themeSchematic(svg); svg.dataset.appearanceSchematic = '';
-      setSchematicAppearance(svg, KrAppearance.resolve(Appearance.get()));
+    if (!l.svg?.[side]) continue;
+    const d=document.createElement('div'); d.className='layer'; d.dataset.layer=l.name;
+    try {
+      const sourceTheme=l.svgThemes?.[theme]?.[side]?theme:'light';
+      const t=await svgText(l.svgThemes?.[theme]?.[side] || l.svg[side]); if (!t) continue;
+      if (view.kind==='lib') {d.innerHTML=t.slice(t.indexOf('<svg'));st.append(d);continue;}
+      if(view.kind==='board') {
+        const originalRGB=l.sourceRGBThemes?.[sourceTheme]||KicadColors.layers[canon(l.name)].slice(0,3);
+        const adapter=ImageView.boardLayer(t,originalRGB,d,{side,layer:l.name});
+        adapter.layer=canon(l.name);
+        const dispose=adapter.dispose.bind(adapter);
+        adapter.dispose=()=>{appearanceBoardImages.delete(adapter);dispose();};
+        st.imageOwners.push(adapter); // Own even if initial appearance decoding fails.
+        await adapter.setAppearance(Appearance.get().layers[adapter.layer]);
+        st.append(d);continue;
+      }
+      const c=await ImageView.mount(t,view.size,{side,layer:l.name});
+      st.imageOwners.push(c); // Own before appearance decode, which can reject.
+      const change=c.setAppearance.bind(c);
+      c.setAppearance=async paints=>{const ok=await change(paints);if(ok)c.node.imageOwner=c;return ok;};
+      c.node.imageOwner=c; c.sheet=view.kind==='sheet'; c.layer=canon(l.name);
+      if (c.sheet) await c.setAppearance(schematicPaints(KrAppearance.resolve(Appearance.get())));
+      d.append(c.node); st.append(d);
+    } catch(error) {
+      const message=document.createElement('p'); message.className='image-error'; message.setAttribute('role','status');
+      message.textContent=`${side} image unavailable: ${error.message}`; st.append(message);
     }
-    if (look[canon(l.name)]) recolorLayer(d, look[canon(l.name)], KicadColors.layers[canon(l.name)]);
-    st.appendChild(d);
   }
   return st;
 }
@@ -689,11 +654,16 @@ async function draw() {
   resetCoordinates();
   const my = ++gen, view = currentView(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
+  stage.dataset.view = S.v; stage.dataset.imageReady = "false";
+  $("#stage").setAttribute("aria-busy", "true");
+  statusText('.status-message', 'Loading drawing…');
   if (S.v === '3d') {
     disposeBoardRenderers();
     appearanceSchematics.clear();
+    releaseImageStage($("#stage"));
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
     await window.Review3D.show(stage, proj(), S);
+    if (my === gen && stage.isConnected) statusText('.status-message', 'Ready');
     return;
   }
   window.Review3D?.dispose();
@@ -713,8 +683,9 @@ async function draw() {
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
   if (boardView.useGL) {
     appearanceSchematics.clear();
-    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { noChangeNotice($("#stage")); if (!placed()) fit(); else apply(); afterDraw(view); return; }
+    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { $("#stage").setAttribute("aria-busy", "false"); noChangeNotice($("#stage")); if (!placed()) fit(); else apply(); afterDraw(view); return; }
     disposeBoardRenderers();
+    releaseImageStage($("#stage"));
     $("#stage").replaceWith(stage);
     try {
       const project = S.p;
@@ -748,16 +719,30 @@ async function draw() {
   assetRetry(stage);
   if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
   noChangeNotice(stage);
-  if (my !== gen) return;
+  if (my !== gen) { releaseImageStage(stage); return; }
+  releaseImageStage($("#stage"));
   $("#stage").replaceWith(stage);
   appearanceSchematics.clear();
-  for (const svg of stage.querySelectorAll('svg[data-appearance-schematic]')) appearanceSchematics.add(svg);
-  applyAppearance(Appearance.get());
+  for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) {
+    if (c.sheet) appearanceSchematics.add(c);
+    else if (c.controller) appearanceBoardImages.add(c);
+  }
+  try { await applyAppearance(Appearance.get()); }
+  catch (error) {
+    if (my !== gen) { releaseImageStage(stage); return; }
+    const message = document.createElement("p"); message.className = "image-error";
+    message.setAttribute("role", "status"); message.textContent = `Image appearance unavailable: ${error.message}`;
+    stage.append(message);
+  }
+  if (my !== gen) { releaseImageStage(stage); return; }
   const msg = $("#statusbar .status-message");
-  if (msg) msg.textContent = S.v === "board" && boardView.note ? boardView.note : "Ready";
+  if (msg) msg.textContent = stage.querySelector(".image-error")?.textContent || (S.v === "board" && boardView.note ? boardView.note : "Ready");
   if (view && !placed()) fit(); else apply(); afterDraw(view);
   for (const vp of document.querySelectorAll("#stage .vp.sheet")) schematicResize.observe(vp);
   refreshAppearance();
+  saveHash(true); // Navigation must be reflected in the address before readiness.
+  stage.imageMounted = true; stage.setAttribute("aria-busy", "false");
+  if (view && view.kind !== "lib" && !stage.querySelector(".image-error")) stage.dataset.imageReady = "true";
 }
 function noChangeNotice(stage) {
   const text = S.v === "board" ? (!proj().board.changed && "No layout changes") :
@@ -883,7 +868,14 @@ function drawSchematicGrids() {
 }
 function updateSchematicStatus() { updateStatus(); }
 const schematicResize = new ResizeObserver(() => apply());
-window.addEventListener("kr-theme-change", () => { for (const c of document.querySelectorAll("#stage .sch-grid")) c.dataset.key = ""; drawSchematicGrids(); });
+let themeDraw = Promise.resolve();
+document.addEventListener("kr-theme-change", () => {
+  for (const c of document.querySelectorAll("#stage .sch-grid")) c.dataset.key = "";
+  drawSchematicGrids();
+  // A theme selects another immutable export and its own original RGB palette.
+  if (S.v === "board" && !boardView.useGL || currentView()?.kind === "sheet")
+    themeDraw = draw().catch(error => console.warn("Themed drawing unavailable:", error));
+});
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
@@ -1675,7 +1667,11 @@ function encodeState(s = S) {
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
-function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); }, 200); }
+function saveHash(immediate = false) {
+  clearTimeout(hashTimer);
+  const publish = () => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); };
+  if (immediate) publish(); else hashTimer = setTimeout(publish, 200);
+}
 function stepIds() {
   const sel = S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : S.t === "threads" ? "#panel .thread-card[data-thread]" : "#panel .card[data-id]";
   return [...document.querySelectorAll(sel)].map(e => e.dataset.id || e.dataset.thread);

@@ -1,8 +1,9 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
 // Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark|--theme dark|light] [--width N] [--dpr N] [--offline]
+// --pixel-7 uses 412×915 DPR 2.625 mobile emulation.
 // --gpu uses Metal; --mode side|overlay|wipe|blend|semantic selects board proof mode.
 // Theme proof: --persist-check --vision none|deuteranopia|protanopia|tritanopia --appearance-fixture theme.json --mark-style outline|recolour
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname, basename, extname } from "node:path";
@@ -18,6 +19,7 @@ if (!["dark", "light"].includes(theme)) throw new Error("Invalid theme");
 const dark = theme === "dark";
 const vision = opt("--vision") || "none";
 if (!["none", "deuteranopia", "protanopia", "tritanopia"].includes(vision)) throw new Error("Invalid vision type");
+const forceImageFallback=args.includes("--image-fallback"); if(forceImageFallback)args.splice(args.indexOf("--image-fallback"),1);
 const persistCheck = args.includes("--persist-check"); if (persistCheck) args.splice(args.indexOf("--persist-check"), 1);
 const fixturePath = opt("--appearance-fixture"), markStyle = opt("--mark-style") || "outline";
 if (!["outline", "recolour"].includes(markStyle)) throw new Error("Invalid mark style");
@@ -26,9 +28,11 @@ if (fixtureText !== null && Buffer.byteLength(fixtureText, "utf8") > 1048576) th
 const mode = opt("--mode");
 if (mode && !["side", "overlay", "wipe", "blend", "semantic"].includes(mode)) throw Error("Invalid mode");
 const gpu = args.includes("--gpu"); if (gpu) args.splice(args.indexOf("--gpu"), 1);
-const width = Number(opt("--width") || 1920);
-const height = Number(opt("--height") || 1080); // bench-t7: exact viewport proofs
-const dpr = Number(opt("--dpr") || 1);
+const repoRoot=new URL('..',import.meta.url);
+const pixel7=args.includes('--pixel-7');if(pixel7)args.splice(args.indexOf('--pixel-7'),1);
+const width = Number(opt("--width") || (pixel7?412:1920));
+const height = Number(opt("--height") || (pixel7?915:1080)); // bench-t7: exact viewport proofs
+const dpr = Number(opt("--dpr") || (pixel7?2.625:1));
 const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
 const perf = process.env.CHECK_PERF === "1";
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
@@ -78,7 +82,9 @@ const evaluate = async expr => (await send("Runtime.evaluate", { expression: exp
 async function setupTab() {
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
-await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: false });
+await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: pixel7 });
+await send("Emulation.setTouchEmulationEnabled", { enabled: pixel7, maxTouchPoints: pixel7 ? 5 : 1 });
+await send("Emulation.setCPUThrottlingRate", { rate: pixel7 ? 4 : 1 });
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 await send("Page.enable"); await send("DOMStorage.enable");
 const visionResult = await send("Emulation.setEmulatedVisionDeficiency", { type: vision });
@@ -193,6 +199,12 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
     } else if(prepare.exceptionDetails) throw Error(prepare.exceptionDetails.exception?.description);
   }
   if (name === "Themes reload seed" && persistCheck) initialAppearance = (await evaluate("localStorage.getItem('kr.appearance.v1')")).result.value;
+  if (name === 'simplify largest sheet few elements, near-same pixels') {
+    const raw=(await evaluate("svgText(currentView().layers[0].svg.head)")).result.value;
+    const simplified=execFileSync('python3',['-c','import sys,kicad_review as k;sys.stdout.write(k.simplify_sheet_svg(sys.stdin.read()))'],
+      {cwd:repoRoot,input:raw,encoding:'utf8',maxBuffer:1<<26});
+    await evaluate(`window.__sheetSimplification=${JSON.stringify({raw,simplified})}`);
+  }
   let r = await evaluate(`(async () => { ${expr} })()`);
   if (r.result?.value === true && name === "Themes reload seed" && persistCheck) {
     const expected = (await evaluate("JSON.stringify(appearanceStore().get())")).result.value;
@@ -207,10 +219,21 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
         const a=JSON.parse(expected), b=JSON.parse(restored);
         throw new Error("Appearance did not survive " + view + " reload: " + Object.keys(a).filter(k=>JSON.stringify(a[k])!==JSON.stringify(b[k])).join(', '));
       }
+      if(view==='board' && forceImageFallback) {
+        const fallback=await evaluate(`(async()=>{
+          const original=BoardGL.create;BoardGL.create=()=>null;
+          try {
+            boardView.failed=S.p;await draw();
+            const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+            return fronts.length===2&&fronts.every(a=>a.controller.appliedSource.includes('#1f578f')&&a.controller.node.complete);
+          } finally {BoardGL.create=original;}
+        })()`);
+        if(fallback.result?.value!==true)throw Error('Fallback board palette did not survive reload');
+      }
       const rendered = await evaluate(`(()=>{
         if (${JSON.stringify(view)} === 'board' ? S.v !== 'board' : !S.v.startsWith('sheet:')) return false;
-        if(S.v==='board')return appearanceBoards.size===2&&[...appearanceBoards].every(b=>b.appearance.colors['board.copper.f'][0]===.12);
-        return appearanceSchematics.size===2&&[...appearanceSchematics].every(s=>s.style.getPropertyValue('--sch-ink-009600').includes('18,52,86'));
+        if(S.v==='board')return ${forceImageFallback} ? appearanceBoards.size===0&&[...appearanceBoardImages].filter(a=>a.layer==='F.Cu').length===2&&[...appearanceBoardImages].filter(a=>a.layer==='F.Cu').every(a=>a.controller.appliedSource.includes('#1f578f')&&a.controller.node.complete) : appearanceBoards.size===2&&[...appearanceBoards].every(b=>b.appearance.colors['board.copper.f'][0]===.12);
+        return appearanceSchematics.size===2&&[...appearanceSchematics].every(c=>c.node?.complete&&c.appliedSource.includes('rgba(18,52,86,1)'));
       })()`);
       if (rendered.result?.value !== true) throw new Error("Both revisions did not restore " + view + " palette");
     }
