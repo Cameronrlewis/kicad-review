@@ -3943,16 +3943,19 @@ export const CHECKS = [
   return (innerWidth<900 || off && !document.querySelector('#nav').classList.contains('left-collapsed')) || 'dock toggle';`],
   ["bench toolbar 3D camera presets fit all modes", "v=3d", `
     if (!window.Review3D) return 'skip';
-    const t=document.querySelector('#toolbar');
+    const t=document.querySelector('#toolbar'), started=performance.now();
+    const trace=phase=>{if(window.__CHECK_PERF)console.log('BOARD_PROOF toolbar '+phase+' '+(performance.now()-started).toFixed(1)+'ms firstFrame='+!!Review3D.state?.firstFrame);};
+    trace('start');
     for(const mode of ['side','overlay','blend','semantic']) {
       S.m=mode;renderModes();renderZoombar();
+      trace(mode);
       if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return mode+' overflow '+t.scrollWidth+'>'+t.clientWidth;
     }
     const menu=t.querySelector('.camera-presets'); menu.open=true;
     await new Promise(r=>setTimeout(r,50));
     const popup=menu.querySelector('.camera-menu').getBoundingClientRect();
     if(popup.top<t.getBoundingClientRect().bottom || popup.right>innerWidth) return 'clipped camera menu';
-    menu.querySelector('[data-3d-camera=top]').click();
+    trace('before-camera');menu.querySelector('[data-3d-camera=top]').click();trace('after-camera');
     return !menu.open && document.activeElement===menu.querySelector('summary');`],
   ["bench-t2 single offline chrome and framed suppression", "#v=board", `
     const visible = selector => [...document.querySelectorAll(selector)].filter(n => n.getBoundingClientRect().height > 0);
@@ -4678,8 +4681,15 @@ CHECKS.push(
     const st=Review3D.state, s=Review3D.session(), seen=[];
     const meshes=g=>s.groups.filter(x=>x.groups.includes(g));
     if(!meshes('bodies').length)return 'fixture has no component bodies';
-    document.addEventListener('x',()=>{}); Review3D.onStateChange=e=>seen.push(e);
+    const change=s.changes.find(c=>c.ref&&st.roots.some(r=>r?.getObjectByName(c.ref)));
+    if(!change)return 'fixture has no focusable changed component';
+    Review3D.focus(change,false);
+    if(!st.selected.length||st.selected.some(o=>!o.visible))return 'selection outline missing before bare';
+    Review3D.onStateChange=e=>seen.push(e);
     document.querySelector('[data-3d-assembled]').click();
+    if(st.selected.some(o=>o.visible))return 'selection outline remains in bare mode';
+    Review3D.focus(change,false);
+    if(!st.selected.length||st.selected.some(o=>o.visible))return 'focus recreated visible bare outline';
     if(st.assembled!==false||document.querySelector('[data-3d-assembled]').getAttribute('aria-pressed')!=='false')return 'toggle state';
     if(meshes('bodies').some(x=>x.object.visible))return 'bodies still visible when bare';
     if(!meshes('board').every(x=>x.object.visible))return 'board hidden when bare';
@@ -4688,7 +4698,7 @@ CHECKS.push(
     Review3D.setHidden(['silk']);
     if(meshes('bodies').some(x=>x.object.visible))return 'hidden groups re-showed bodies';
     Review3D.setAssembled(true);
-    return (meshes('bodies').every(x=>x.object.visible)&&meshes('silk').every(x=>!x.object.visible))||'assemble did not restore';
+    return (st.selected.every(o=>o.visible)&&meshes('bodies').every(x=>x.object.visible)&&meshes('silk').every(x=>!x.object.visible))||'assemble did not restore';
   `],
   ['BR02 processed 3D tools whole screen reachable', 'v=3d&m=side', `
     if(!proj().board.parts3d)return 'skip';
@@ -4716,3 +4726,61 @@ CHECKS.push(
     return true;
   `]
 );
+
+CHECKS.push(
+  ['BR02 processed rendered top lamp orientation', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const T=THREE3D.THREE, st=Review3D.state, r=st.renderers[0];
+    const scene=new T.Scene();scene.environment=st.views[0].scene.environment;
+    const material=new T.MeshStandardMaterial({color:0x808080,metalness:0,roughness:1});
+    const geometry=new T.BoxGeometry(2,.05,2);scene.add(new T.Mesh(geometry,material));
+    const camera=new T.OrthographicCamera(-1.1,1.1,1.1,-1.1,.1,10), target=new T.WebGLRenderTarget(64,64);
+    const previous=r.getRenderTarget(), viewport=r.getViewport(new T.Vector4()), scissor=r.getScissor(new T.Vector4()), scissorTest=r.getScissorTest();
+    const sample=side=>{
+      camera.position.set(0,side*3,0);camera.up.set(0,0,-side);camera.lookAt(0,0,0);camera.updateMatrixWorld();
+      r.setRenderTarget(target);r.setViewport(0,0,64,64);r.setScissorTest(false);r.clear();r.render(scene,camera);
+      const pixels=new Uint8Array(64*64*4);r.readRenderTargetPixels(target,0,0,64,64,pixels);
+      let sum=0;for(let y=16;y<48;y++)for(let x=16;x<48;x++){const i=(y*64+x)*4;sum+=.2126*pixels[i]+.7152*pixels[i+1]+.0722*pixels[i+2];}
+      return sum/1024;
+    };
+    let top,bottom;
+    try{top=sample(1);bottom=sample(-1);}finally{
+      r.setRenderTarget(previous);r.setViewport(viewport);r.setScissor(scissor);r.setScissorTest(scissorTest);
+      target.dispose();material.dispose();geometry.dispose();
+    }
+    console.log('BOARD_PROOF rendered studio top='+top.toFixed(2)+' bottom='+bottom.toFixed(2));
+    if(!(top>bottom*1.2))return 'top lamp became underlighting: '+top+' vs '+bottom;
+    Review3D.frame('top');await new Promise(resolve=>setTimeout(resolve,350));
+    const pixels=await Review3D.sampleFrame();return pixels.opaquePixels>0||'top board frame empty';
+  `],
+  ['BR02 processed rendered bottom board comparison', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    Review3D.frame('bottom');await new Promise(resolve=>setTimeout(resolve,350));
+    const pixels=await Review3D.sampleFrame();return pixels.opaquePixels>0||'bottom board frame empty';
+  `]
+);
+
+CHECKS.push(['BR02 processed lighting failure rolls back controls and recovers', 'v=3d&m=side', `
+  if(!proj().board.parts3d)return 'skip';
+  const T=THREE3D.THREE, s=Review3D.session(), st=Review3D.state, r=st.renderers[0], before=st.lighting;
+  const environments=st.views.map(v=>v.scene.environment), count=s.environments.size, events=[];
+  const original=T.PMREMGenerator.prototype.fromEquirectangular, onStateChange=Review3D.onStateChange;
+  const menu=document.querySelector('.light3d');menu.open=true;
+  menu.scrollIntoView({inline:'center',block:'nearest'});
+  await new Promise(resolve=>setTimeout(resolve,50));
+  try{
+    Review3D.onStateChange=e=>events.push(e);
+    T.PMREMGenerator.prototype.fromEquirectangular=()=>{throw Error('Synthetic PMREM failure');};
+    const select=menu.querySelector('[data-3d-rig]');select.value='photo';select.dispatchEvent(new Event('change',{bubbles:true}));
+    if(st.lighting!==before||s.lighting!==before||r.toneMappingExposure!==before.exposure||events.length)return 'failed lighting published success';
+    if(st.views.some((v,i)=>v.scene.environment!==environments[i])||s.environments.size!==count)return 'failed lighting changed environment';
+    const notice=menu.querySelector('[data-3d-light-error]');
+    if(!st.lightingError||notice.hidden||notice.getAttribute('role')!=='alert'||!notice.textContent.includes('Synthetic PMREM failure'))return 'failure not announced';
+    if(select.value!==before.rig||+menu.querySelector('[data-3d-exposure]').value!==before.exposure)return 'failed controls not rolled back';
+    T.PMREMGenerator.prototype.fromEquirectangular=original;
+    select.value='photo';select.dispatchEvent(new Event('change',{bubbles:true}));
+    if(st.lighting.rig!=='photo'||r.toneMappingExposure!==1.2||events.length!==1||st.lightingError||!notice.hidden)return 'lighting recovery retained stale error';
+    if(st.views.some((v,i)=>v.scene.environment===environments[i]))return 'recovery did not replace environment';
+    return (await Review3D.sampleFrame()).opaquePixels>0||'recovered frame empty';
+  }finally{T.PMREMGenerator.prototype.fromEquirectangular=original;Review3D.onStateChange=onStateChange;}
+`]);
