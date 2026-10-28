@@ -1602,6 +1602,30 @@ for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'n
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
+# Image and supplemental fixture commands stay literal: CI and this contract change together.
+for command in (
+    'node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance"',
+    'node ui/check.mjs --no-skip "images compare and four copper layers" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images gesture lifecycle" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images fallback appearance" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images manifests and home" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images active gesture pixels" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing added-sheet" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing removed-sheet" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing added-board" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing removed-board" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images inspect search and anchors" --page "$PAGES/images.html"',
+    'node ui/check.mjs --persist-check --image-fallback --no-skip "Themes reload seed" --page "$PAGES/images.html"',
+    'node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance" --phone --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance" --phone --dark --page "$PAGES/images.html"',
+):
+    assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
+assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"
 print("ok TS-S1 CI browser matrix")
 print("ok")
 

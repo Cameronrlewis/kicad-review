@@ -1,6 +1,6 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
 // Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark|--theme dark|light] [--width N] [--dpr N] [--offline]
-// --pixel-7 uses 412×915 DPR 2.625 mobile emulation.
+// --phone (alias --pixel-7) uses 412×915 DPR 2.625 mobile/touch emulation and 4× CPU slowdown.
 // --softness-dir DIR retains the 1×–64× full/crop screenshots and glyph metrics.
 // --gpu uses Metal; --mode side|overlay|wipe|blend|semantic selects board proof mode.
 // Theme proof: --persist-check --vision none|deuteranopia|protanopia|tritanopia --appearance-fixture theme.json --mark-style outline|recolour
@@ -30,10 +30,13 @@ const mode = opt("--mode");
 if (mode && !["side", "overlay", "wipe", "blend", "semantic"].includes(mode)) throw Error("Invalid mode");
 const gpu = args.includes("--gpu"); if (gpu) args.splice(args.indexOf("--gpu"), 1);
 const repoRoot=new URL('..',import.meta.url);
+const phone=args.includes('--phone');if(phone)args.splice(args.indexOf('--phone'),1);
 const pixel7=args.includes('--pixel-7');if(pixel7)args.splice(args.indexOf('--pixel-7'),1);
-const width = Number(opt("--width") || (pixel7?412:1920));
-const height = Number(opt("--height") || (pixel7?915:1080)); // bench-t7: exact viewport proofs
-const dpr = Number(opt("--dpr") || (pixel7?2.625:1));
+const mobile=phone||pixel7;
+const screenProfile=args.some(a=>a.includes("images screen and legacy appearance"));
+const width = Number(opt("--width") || (mobile?412:screenProfile?1440:1920));
+const height = Number(opt("--height") || (mobile?915:screenProfile?900:1080)); // bench-t7: exact viewport proofs
+const dpr = Number(opt("--dpr") || (mobile?2.625:screenProfile?2:1));
 const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
 const perf = process.env.CHECK_PERF === "1";
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
@@ -96,15 +99,15 @@ async function setupTab() {
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
 await send("Runtime.addBinding", { name:"__checkMouseClick" });
-await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: pixel7 });
-await send("Emulation.setTouchEmulationEnabled", { enabled: pixel7, maxTouchPoints: pixel7 ? 5 : 1 });
-await send("Emulation.setCPUThrottlingRate", { rate: pixel7 ? 4 : 1 });
+await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile });
+await send("Emulation.setTouchEmulationEnabled", { enabled: mobile, maxTouchPoints: mobile ? 5 : 1 });
+await send("Emulation.setCPUThrottlingRate", { rate: mobile ? 4 : 1 });
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 await send("Page.enable"); await send("DOMStorage.enable");
 const visionResult = await send("Emulation.setEmulatedVisionDeficiency", { type: vision });
 if (visionResult.error) throw new Error(visionResult.error.message);
 await send("Page.addScriptToEvaluateOnNewDocument", { source:
-  `window.__appearanceFixtureText=${JSON.stringify(fixtureText)};window.__appearanceMarkStyle=${JSON.stringify(markStyle)};` });
+  `window.__checkDeviceProfile=${JSON.stringify({width,height,dpr,mobile})};window.__appearanceFixtureText=${JSON.stringify(fixtureText)};window.__appearanceMarkStyle=${JSON.stringify(markStyle)};` });
 }
 await openTab(tab); await setupTab();
 // A check that blocks storage before startup leaves its renderer unable to persist on some Chrome builds
@@ -285,7 +288,7 @@ if(name==='images active gesture pixels') {
       if(scale===64&&(metrics.topology[1].components!==6||metrics.topology[1].holes!==3))
         throw Error('cropped SVG did not restore R16 10k glyph detail: '+JSON.stringify(metrics.topology));
     }
-    const evidence={browser:(await send('Browser.getVersion')).result,theme,profile:pixel7?'Pixel 7 emulation':'desktop',
+    const evidence={browser:(await send('Browser.getVersion')).result,theme,profile:mobile?'Pixel 7 emulation':'desktop',
       width,height,dpr,gpu,automaticCrop:false,measurements};
     if(softnessDir)writeFileSync(join(softnessDir,'measurements.json'),JSON.stringify(evidence,null,2)+'\n');
     console.log('SOFTNESS '+JSON.stringify(evidence));

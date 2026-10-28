@@ -282,6 +282,7 @@ export const CHECKS = [
     return true;
   `],
   ['images inspect search and anchors','',`
+    if(D.repo!=='fixture/images')return 'skip';
     await applyState({...S,v:'sheet:/right/',m:'side'});
     const vp=document.querySelector('#stage .stack.head').closest('.vp');
     const world=vp.querySelector('.world'),origin=world.parentElement.getBoundingClientRect();
@@ -983,6 +984,7 @@ return true;
     } finally {BoardGL.create=original;}
   `],
   ['images manifests and home','',`
+    if(D.repo!=='fixture/images')return 'skip';
     const sheet=proj().sheets.find(s=>s.hotspots?.head);if(!sheet)return 'fixture lacks manifest';
     await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
     if(!decodedSheetHotspots.has(sheet.hotspots.head))return 'manifest not decoded before readiness';
@@ -996,6 +998,7 @@ return true;
     return document.querySelector('#stage').dataset.imageReady==='true'||'manifest readiness missing';
   `],
   ['images malformed manifests preserve artwork','',`
+    if(D.repo!=='fixture/images')return 'skip';
     const P=proj(),sheet=P.sheets.find(s=>s.hotspots?.head&&s.svg?.base&&s.svg?.head);
     if(!sheet||!P.board.inspect?.head)return 'fixture lacks manifests';
     const oldSheet=sheet.hotspots,oldInspect=P.board.inspect,oldGeometry=P.board.geometry;
@@ -1045,6 +1048,7 @@ return true;
     }
   `],
   ['images manifest decode navigation generation','',`
+    if(D.repo!=='fixture/images')return 'skip';
     const P=proj(),sheet=P.sheets.find(s=>s.hotspots?.head),other=P.sheets.find(s=>s!==sheet&&s.svg?.head);
     if(!sheet||!other)return 'fixture lacks sheets';
     const original=jsonAsset,old=sheet.hotspots,id='delayed_manifest';
@@ -1064,6 +1068,14 @@ return true;
     } finally {sheet.hotspots=old;release();if(pending)await pending;jsonAsset=original;decodedSheetHotspots.delete(id);}
   `],
   ["images screen and legacy appearance", "", `
+    const profile=window.__checkDeviceProfile;
+    if(!profile)return 'screen check missing runner device profile';
+    // Mobile layout overflow can enlarge innerWidth; CDP screen metrics remain
+    // the emulated device size. Phone chrome clipping belongs to the layout spec.
+    const width=profile.mobile?screen.width:innerWidth,height=profile.mobile?screen.height:innerHeight;
+    if(width!==profile.width||height!==profile.height||devicePixelRatio!==profile.dpr)
+      return 'screen metrics mismatch '+JSON.stringify({width,height,dpr:devicePixelRatio,expected:profile});
+    if(navigator.maxTouchPoints!==(profile.mobile?5:0))return 'screen touch profile '+navigator.maxTouchPoints;
     // Use the first two-sided project when present. The legacy added-project's
     // unfiltered Changes dock alone previously exceeded the artwork DOM budget.
     // The every-sheet check also covers that large project with paginated Changes.
