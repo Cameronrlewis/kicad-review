@@ -305,6 +305,24 @@ test('layer adapter applies imported RGB to original, never to prior rewrite',as
   assert.equal(wrapper.style.opacity,'1'); a.dispose(); assert.equal(revoked.length,2);
 });
 
+test('layer adapter uses noncanonical export RGB without cascading through custom paint',async()=>{
+  const source='<svg><path fill="#123456" stroke="rgb(18, 52, 86)" opacity=".4"/><path fill="#abcdef"/><path fill="none"/></svg>';
+  const wrapper={style:{},replaceChildren(n){this.child=n;}},revoked=[];
+  const adapter=ctx.ImageView.boardLayer(source,[18,52,86],wrapper,{side:'base',layer:'In1.Cu'},{
+    create:s=>s,revoke:u=>revoked.push(u),make:()=>({dataset:{},decode:async()=>{},remove(){}})
+  });
+  await adapter.setAppearance({color:[171,205,239,.5],opacity:.5});
+  assert.equal((adapter.controller.appliedSource.match(/#abcdef/g)||[]).length,3);
+  await adapter.setAppearance({color:[65,43,21,1],opacity:.75});
+  assert.equal((adapter.controller.appliedSource.match(/#412b15/g)||[]).length,2);
+  assert.ok(adapter.controller.appliedSource.includes('<path fill="#abcdef"/>'));
+  assert.ok(adapter.controller.appliedSource.includes('opacity=".4"'));
+  assert.ok(adapter.controller.appliedSource.includes('fill="none"'));
+  assert.equal(wrapper.style.opacity,'0.75');
+  assert.equal(source.includes('rgb(18, 52, 86)'),true);
+  adapter.dispose();assert.equal(revoked.length,2);
+});
+
 test('layer hide between controller decode and adapter continuation never remounts stale artwork',async()=>{
   const jobs=[],revoked=[],wrapper={style:{},replaceChildren(n){this.child=n;}};
   const adapter=ctx.ImageView.boardLayer('<svg fill="#ff0000"/>',[255,0,0],wrapper,{side:'head',layer:'F.Cu'},{

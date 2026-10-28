@@ -140,10 +140,51 @@ await Promise.all([...appearanceBoardImages].map(a=>a.setAppearance(Appearance.g
 const imported=[...appearanceBoardImages].find(a=>a.layer==='F.Cu');
 if(!imported?.controller.appliedSource.includes('#412b15'))return 'imported fallback layer RGB';
 if(!imported.controller.appliedSource.includes('#abcdef'))return 'import changed custom object paint';
+const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+if(fronts.length!==2)return 'import missing revision';
+for(const adapter of fronts) {
+  if(!adapter.controller.appliedSource.includes('#412b15')||!adapter.controller.appliedSource.includes('#abcdef'))return 'import revision paint';
+  x.clearRect(0,0,c.width,c.height);x.drawImage(adapter.controller.node,0,0,c.width,c.height);
+  const pixel=sample(vx+.3*vw,vy+.5*vh);
+  if(pixel[0]!==65||pixel[1]!==43||pixel[2]!==21||pixel[3]!==255)return 'import revision pixel';
+}
 
 } finally {BoardGL.create=oldCreate;}
 
 return true;
+  `],
+  ["images fallback selected export palettes", "", `
+    const originalText=svgText,theme=KRTheme.get(),stacks=[];
+    const sources={
+      'palette-light':'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><path fill="#123456" d="M0 0H100V50H0Z"/><path fill="#abcdef" d="M80 0H100V10H80Z"/></svg>',
+      'palette-dark':'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><path fill="rgb(101, 67, 33)" d="M0 0H100V50H0Z"/><path fill="#abcdef" d="M80 0H100V10H80Z"/></svg>'
+    };
+    const layer={name:'In1_Cu',svg:{base:'palette-light',head:'palette-light'},
+      svgThemes:{light:{base:'palette-light',head:'palette-light'},dark:{base:'palette-dark',head:null}},
+      sourceRGBThemes:{light:[18,52,86],dark:[101,67,33]}};
+    try {
+      svgText=async id=>sources[id]||originalText(id);
+      for(const selected of ['light','dark','light']) {
+        KRTheme.set(selected);await themeDraw;
+        for(const side of ['base','head']) {
+          const stackNode=await stack(side,{kind:'board',size:[100,50],layers:[layer]});stacks.push(stackNode);
+          const adapter=stackNode.imageOwners[0],darkSource=selected==='dark'&&side==='base';
+          if(!adapter||stackNode.querySelector('.image-error'))return 'selected export did not decode';
+          const source=adapter.controller.source;
+          if(!source.includes(darkSource?'#654321':'#123456'))return 'wrong selected export RGB '+selected+' '+side;
+          await adapter.setAppearance({color:[65,43,21,.5],opacity:.5});
+          if(!adapter.controller.appliedSource.includes('#412b15')||!adapter.controller.appliedSource.includes('#abcdef'))return 'selected export recolour '+selected+' '+side;
+          if(adapter.controller.source!==source||Number(adapter.controller.node.parentElement.style.opacity)!==.25)return 'source or wrapper alpha changed';
+          const canvas=document.createElement('canvas');canvas.width=100;canvas.height=50;
+          const context=canvas.getContext('2d');context.drawImage(adapter.controller.node,0,0,100,50);
+          if(context.getImageData(20,20,1,1).data.join()!=='65,43,21,255')return 'selected export pixel '+selected+' '+side;
+        }
+      }
+      return true;
+    } finally {
+      for(const node of stacks)for(const owner of node.imageOwners)owner.dispose();
+      svgText=originalText;KRTheme.set(theme);await themeDraw;
+    }
   `],
   ["images fallback honors supplied appearance snapshot", "", `
     const original=BoardGL.create;BoardGL.create=()=>null;
