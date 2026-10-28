@@ -18,3 +18,27 @@ test('BR02 bright lamps sit above the horizon, not below',()=>{
   const up=Math.max(...Array.from({length:h/2},(_,i)=>lum(h/2+i))), down=Math.max(...Array.from({length:h/2},(_,i)=>lum(i)));
   assert.ok(up>down*2,'top key lamp outshines underlight '+up+' vs '+down);
 });
+test('BR02 nine versus ten slow rotating frames and two idle seconds',()=>{
+  let now=0;const ratios=[],p=window.ThreeStudio.framePolicy(2,()=>now,n=>ratios.push(n));
+  for(let i=0;i<9;i++)p.rotating(34);assert.deepEqual(ratios,[]);
+  p.rotating(34);assert.deepEqual(ratios,[1.5]);
+  p.idle();now=1999;p.poll();assert.deepEqual(ratios,[1.5]);
+  now=2000;p.poll();assert.deepEqual(ratios,[1.5,2]);
+  for(let i=0;i<9;i++)p.rotating(34);p.rotating(20);p.rotating(34);
+  assert.deepEqual(ratios,[1.5,2]);p.dispose();now=9999;p.poll();
+  assert.deepEqual(ratios,[1.5,2]);
+});
+test('BR02 frame policy resets idle on movement, restores once, and respects low caps',()=>{
+  let now=0;const ratios=[],p=window.ThreeStudio.framePolicy(2,()=>now,n=>ratios.push(n));
+  for(let i=0;i<10;i++)p.rotating(34);
+  p.idle();now=1500;p.idle();now=1999;p.poll();assert.deepEqual(ratios,[1.5]);
+  p.rotating(33);now=2000;p.poll();assert.deepEqual(ratios,[1.5]);
+  p.idle();now=3999;p.poll();assert.deepEqual(ratios,[1.5]);
+  now=4000;p.poll();p.poll();assert.deepEqual(ratios,[1.5,2]);
+  for(let i=0;i<10;i++)p.rotating(34);p.idle();p.dispose();now=9000;
+  p.poll();p.rotating(34);p.idle();assert.deepEqual(ratios,[1.5,2,1.5]);
+  for(const cap of [1,1.5]) {
+    const low=window.ThreeStudio.framePolicy(cap,()=>now,()=>assert.fail('increased low DPR cap'));
+    for(let i=0;i<20;i++)low.rotating(34);low.idle();now+=2000;low.poll();low.dispose();
+  }
+});

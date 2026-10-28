@@ -804,7 +804,7 @@ export const CHECKS = [
       // including its explicit empty state. The spec's Base/Head switch reaches Base;
       // an absent Head must never silently draw Base or count it as Head's first frame.
       if(st.firstFrame||hosts[1].hidden||!hosts[0].hidden||st.visibleSides.join()!=='head')return 'absent requested Head drew the Base revision';
-      Review3D.setRevision('base');
+      Review3D.setRevision('base');await Review3D.sampleFrame();
       if(hosts[0].hidden||!hosts[1].hidden||st.visibleSides.join()!=='base')return 'available Base could not be reached';
     }
     return st.firstFrame&&st.posterBySide.base.hidden||'available Base never drew a genuine frame';
@@ -4759,7 +4759,7 @@ CHECKS.push(
    if(Review3D.state.revision!=='head'||Review3D.state.visibleSides.join(',')!=='head')return 'requested absent Head changed revision';
    const host=stage.querySelector('.view3d:not([hidden])');
    if(!host?.textContent.includes('Board not in this revision')||host.querySelector('[data-poster]'))return 'empty Head borrowed Base content';
-   Review3D.setRevision('base');
+   Review3D.setRevision('base');await Review3D.sampleFrame();
    if(Review3D.state.visibleSides.join(',')!=='base'||!Review3D.state.firstFrame)return 'Base revision inaccessible';
    if(S.revision!=='base')return 'app state not synchronized';
    Review3D.setRevision('head');
@@ -5126,3 +5126,87 @@ CHECKS.push(...['removed','base-only'].map(input=>[
  Review3D.setAssembled(false);if(g.object.parent||st.highlights.some(h=>!h.marker.el.hidden))return 'base ghost or marker survived bare';
  Review3D.setAssembled(true);return !!g.object.parent||'base ghost not restored';
  `]));
+
+CHECKS.push(
+  ["BR02 processed idle and offscreen stop drawing", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ await new Promise(r=>setTimeout(r,2600));const a=Review3D.state.drawCount;
+ await new Promise(r=>setTimeout(r,250));
+ if(Review3D.state.drawCount!==a)return 'settled idle still drawing';
+ const stage=document.querySelector('#stage'),before=stage.style.transform;
+ try {
+   stage.style.transform='translateX(-200vw)';await new Promise(r=>setTimeout(r,100));
+   const b=Review3D.state.drawCount;Review3D.frame('top');await new Promise(r=>setTimeout(r,200));
+   if(Review3D.state.drawCount!==b)return 'offscreen viewer still drawing';
+ } finally {stage.style.transform=before;}
+ await new Promise(r=>setTimeout(r,150));
+ return Review3D.state.drawCount>a||'onscreen viewer did not resume';
+ `],
+  ['BR02 processed rotation damping moves then settles', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const s=Review3D.session(),v=s.views.find(v=>v.visible),h=v.host,b=h.getBoundingClientRect();
+ const start=v.camera.position.clone(),capture=h.setPointerCapture,release=h.releasePointerCapture;
+ // Shorten the test's settling tail on software WebGL; this is not a timing benchmark.
+ const damping=v.controls.dampingFactor;v.controls.dampingFactor=.2;
+ // Synthetic pointer events exercise OrbitControls without claiming trusted-input performance.
+ h.setPointerCapture=()=>{};h.releasePointerCapture=()=>{};
+ try {
+   const event=(type,x)=>h.dispatchEvent(new PointerEvent(type,{pointerId:1,pointerType:'mouse',button:0,buttons:type==='pointerup'?0:1,clientX:x,clientY:b.top+b.height/2,bubbles:true}));
+   event('pointerdown',b.left+b.width/2);event('pointermove',b.left+b.width/2+40);event('pointerup',b.left+b.width/2+40);
+ } finally {h.setPointerCapture=capture;h.releasePointerCapture=release;}
+ const released=v.camera.position.clone();
+ if(start.distanceTo(released)<1e-7)return 'rotation did not move camera';
+ await new Promise(r=>setTimeout(r,150));
+ if(v.controls.enableDamping&&released.distanceTo(v.camera.position)<1e-7)return 'damping did not move camera after release';
+ for(let i=0;i<100&&s.raf;i++)await new Promise(r=>setTimeout(r,100));
+ const count=s.state.drawCount;
+ await new Promise(r=>setTimeout(r,250));
+ if(count!==s.state.drawCount||s.raf)return 'damping never settled '+JSON.stringify({count,draws:s.state.drawCount,raf:s.raf,camera:v.camera.position.toArray(),delta:v.controls._sphericalDelta});
+ const before=s.state.drawCount;const pixels=await Review3D.sampleFrame();
+ if(s.state.drawCount<=before||!pixels.opaquePixels)return 'pixel sample did not draw a fresh frame';
+ v.controls.dampingFactor=damping;return true;
+ `]
+);
+
+CHECKS.push(
+  ['BR02 processed adaptive DPR restores once then stays idle', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const s=Review3D.session(),r=s.renderer,cap=Math.min(devicePixelRatio,2),ratios=[],original=r.setPixelRatio;
+ await new Promise(r=>setTimeout(r,100));
+ r.setPixelRatio=function(n){ratios.push(n);return original.call(this,n);};
+ try {
+   for(let i=0;i<9;i++)s.policy.rotating(34);
+   if(ratios.length)return 'DPR changed before tenth slow frame';
+   s.policy.rotating(34);
+   if(JSON.stringify(ratios)!==JSON.stringify(cap>1.5?[1.5]:[]))return 'tenth-frame DPR';
+   await new Promise(r=>setTimeout(r,2600));
+   if(JSON.stringify(ratios)!==JSON.stringify(cap>1.5?[1.5,cap]:[]))return 'idle DPR restore count '+JSON.stringify(ratios);
+   const a=s.state.drawCount;await new Promise(r=>setTimeout(r,250));
+   return s.state.drawCount===a||'restore kept drawing';
+ } finally {r.setPixelRatio=original;}
+ `],
+  ['BR02 processed hidden document pauses and disposal cancels scheduler', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const s=Review3D.session(),descriptor=Object.getOwnPropertyDescriptor(document,'hidden');
+ try {
+   Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));
+   const count=s.state.drawCount;Review3D.frame('top');await new Promise(r=>setTimeout(r,150));
+   if(s.raf||s.state.drawCount!==count)return 'hidden document kept drawing';
+   Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));
+   await new Promise(r=>setTimeout(r,150));
+   if(s.state.drawCount===count)return 'visible document did not resume';
+   Review3D.frame('bottom');Review3D.dispose();const closed=s.state.drawCount;
+   await new Promise(r=>setTimeout(r,150));
+   return s.state.drawCount===closed&&s.animationFrames.size===0||'disposed scheduler still active';
+ } finally {if(descriptor)Object.defineProperty(document,'hidden',descriptor);else delete document.hidden;}
+ `],
+  ['BR02 processed reduced motion disables damping', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const original=window.matchMedia;
+ try {
+   window.matchMedia=query=>query==='(prefers-reduced-motion: reduce)'?{matches:true}:original.call(window,query);
+   await Review3D.show(document.querySelector('#stage'),proj(),S);
+   return Review3D.state.controls.every(c=>!c.enableDamping)||'reduced motion still damps';
+ } finally {window.matchMedia=original;}
+ `]
+);

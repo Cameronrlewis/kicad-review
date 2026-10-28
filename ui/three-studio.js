@@ -49,5 +49,15 @@ function pixels(name,bearing,w=256,h=128) {
   }
   return out;
 }
-return {LIGHT_RIGS,PRESETS,radiance,snapBearing,pixels};
+function framePolicy(cap,now,onDpr) {
+  let slow=0,ratio=cap,idleAt=null,dead=false;
+  return {
+    rotating(ms){if(dead)return;idleAt=null;slow=ms>33?slow+1:0;
+      if(slow>=10&&ratio>1.5){ratio=1.5;onDpr(ratio);}},
+    idle(){if(!dead&&idleAt===null)idleAt=now();slow=0;},
+    poll(){if(!dead&&idleAt!==null&&now()-idleAt>=2000&&ratio!==cap){ratio=cap;onDpr(cap);}},
+    dispose(){dead=true;}
+  };
+}
+return {LIGHT_RIGS,PRESETS,radiance,snapBearing,pixels,framePolicy};
 })();

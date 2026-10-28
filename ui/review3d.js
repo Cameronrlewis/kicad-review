@@ -12,14 +12,16 @@ window.Review3D = (() => {
       return value;
     });
   }
+  function settleFrame(s) { s.frameReady?.(); s.frameReady = null; }
   function closeSession(s) {
     if (s.dead) return;
-    s.dead = true; s.abort.abort();
+    s.dead = true; s.abort.abort(); settleFrame(s);
     for (const {reject} of s.pending.values()) reject(new DOMException('Viewer closed', 'AbortError'));
     s.pending.clear(); s.worker?.terminate(); s.worker = null;
     for (const url of s.urls) URL.revokeObjectURL(url);
-    s.urls.clear(); clearTimeout(s.idleTimer); cancelAnimationFrame(s.raf);
-    for (const id of s.animationFrames) cancelAnimationFrame(id);
+    s.urls.clear(); clearTimeout(s.idleTimer); cancelAnimationFrame(s.raf); s.raf = 0;
+    s.policy?.dispose();
+    document.removeEventListener('visibilitychange', s.visibility);
     s.animationFrames.clear();
     s.pixelSample?.reject(new DOMException('Viewer closed', 'AbortError')); s.pixelSample = null;
     s.resizeObserver?.disconnect(); s.intersectionObserver?.disconnect();
@@ -257,8 +259,9 @@ window.Review3D = (() => {
     bar.querySelector("[data-3d-exposure]").oninput = () => setLighting(light());
     bar.querySelectorAll("[data-3d-camera]").forEach(b => b.onclick = () => { frame(b.dataset["3dCamera"]); window.Review3D.onCameraEnd?.(); menu.open = false; menu.querySelector("summary").focus(); });
   }
-  function render() {
-    const s = active; if (!s || s.dead || s.contextLost || !s.visible || !s.renderer) return;
+  function render() { active?.invalidate?.(); }
+  function drawFrame() {
+    const s = active; if (!s || s.dead || s.contextLost || !s.visible || document.hidden || !s.renderer) return;
     const r = s.renderer, outer = s.canvas.getBoundingClientRect();
     r.setScissorTest(false); r.clear(); r.setScissorTest(true);
     const visible = s.views.filter(v => v.visible);
@@ -299,8 +302,53 @@ window.Review3D = (() => {
     });
   }
   function animateFrame(s, tick) {
-    const id = requestAnimationFrame(now => { s.animationFrames.delete(id); tick(now); });
-    s.animationFrames.add(id);
+    s.animationFrames.add(tick); s.invalidate();
+  }
+  // One RAF owns controls, camera transitions, and drawing for the whole session.
+  function installScheduler(session) {
+    let dirty = false, lastTick = null;
+    const policy = session.policy = ThreeStudio.framePolicy(Math.min(devicePixelRatio, 2), () => performance.now(), dpr => {
+      if (session.dead) return;
+      session.renderer.setPixelRatio(dpr); resize(); render();
+    });
+    session.invalidate = () => {
+      dirty = true;
+      if (!session.dead && !session.contextLost && !session.inTick && session.visible && !document.hidden && !session.raf)
+        session.raf = requestAnimationFrame(tick);
+    };
+    function tick(time) {
+      session.raf = 0;
+      if (session.dead || session.contextLost || !session.visible || document.hidden) { lastTick = null; settleFrame(session); return; }
+      let moving = false; session.inTick = true;
+      try {
+        const animations = [...session.animationFrames]; session.animationFrames.clear();
+        for (const animate of animations) animate(time);
+        for (const v of session.views) {
+          const before = [...v.camera.position.toArray(), ...v.camera.quaternion.toArray(), ...v.controls.target.toArray()];
+          v.controls.update();
+          const after = [...v.camera.position.toArray(), ...v.camera.quaternion.toArray(), ...v.controls.target.toArray()];
+          moving ||= before.some((n, i) => Math.abs(n - after[i]) > 1e-7);
+        }
+      } finally { session.inTick = false; }
+      if (dirty || moving) { dirty = false; drawFrame(); }
+      if (moving || session.animationFrames.size) {
+        clearTimeout(session.idleTimer);
+        if (lastTick !== null) policy.rotating(time - lastTick);
+        lastTick = time; render();
+      } else {
+        lastTick = null; policy.idle(); clearTimeout(session.idleTimer);
+        session.idleTimer = setTimeout(() => { if (!session.dead) policy.poll(); }, 2000);
+      }
+      settleFrame(session);
+    }
+    const pause = () => { cancelAnimationFrame(session.raf); session.raf = 0; lastTick = null; settleFrame(session); };
+    session.visibility = () => { if (!document.hidden) render(); else pause(); };
+    document.addEventListener('visibilitychange', session.visibility);
+    session.intersectionObserver = new IntersectionObserver(entries => {
+      session.visible = entries.some(e => e.isIntersecting);
+      if (session.visible) render(); else pause();
+    }, {threshold:1e-5});
+    session.intersectionObserver.observe(session.stage);
   }
   function setCamera(v, centre, radius, animate) { const { THREE } = window.THREE3D, dir = v.camera.position.clone().sub(v.controls.target).normalize(), vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect), distance = Math.max(radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.25, .02), target = centre.clone(), position = centre.clone().addScaledVector(dir, distance);
     const owner=active, startP=v.camera.position.clone(), startT=v.controls.target.clone(), start=performance.now(), length=animate&&!matchMedia("(prefers-reduced-motion: reduce)").matches?400:0; const tick=now=>{ if(owner.dead)return; const t=length?Math.min(1,(now-start)/length):1, e=1-(1-t)*(1-t); v.camera.position.lerpVectors(startP,position,e); v.controls.target.lerpVectors(startT,target,e); if(!length){v.camera.near=distance/100;v.camera.far=distance*100;} v.camera.updateProjectionMatrix(); v.controls.update(); if(length)render(); if(t<1) animateFrame(owner,tick); }; if(length)animateFrame(owner,tick);else tick(start);
@@ -407,7 +455,7 @@ window.Review3D = (() => {
     const camera = new THREE.PerspectiveCamera(35, 1, .01, 1000), controls = new OrbitControls(camera, host);
     const v = {host, canvas:s.canvas, renderer:s.renderer, camera, scene, controls, side, visible:true,
       sides:side ? [side] : s.allowedSides.filter(side => roots.includes(sideRoot(s, side)))};
-    controls.enableDamping = true;
+    controls.enableDamping = !matchMedia('(prefers-reduced-motion: reduce)').matches;
     controls.addEventListener('change', () => {
       if (s.dead || s.syncing) return; s.syncing = true;
       for (const other of s.views) if (other !== v) {
@@ -726,6 +774,7 @@ window.Review3D = (() => {
         session.pixelSample?.reject(Error('WebGL context lost')); session.pixelSample = null;
         for (const side of sides) { state.loadingBySide[side] = false; if (session.available[side]) failure(session, side, 'WebGL context lost. Retry.'); }
       }, {signal:session.abort.signal});
+      installScheduler(session);
       session.resizeObserver = new ResizeObserver(resize); session.resizeObserver.observe(stage);
     } catch (error) {
       state.loading = false; state.firstFrame = false;
@@ -849,6 +898,9 @@ window.Review3D = (() => {
     const theme = () => { const next = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|'); if (signature !== next) { signature = next; recolour(); } };
     document.addEventListener('kr-theme-change', theme, {signal}); media.addEventListener('change', theme, {signal}); session.themeTimer = setInterval(theme, 250);
     if (appState.s) { const c = session.changes.find(c => c.id === appState.s); if (c) focus(c, !appState.camera3d); }
+    // Preserve show()'s ready-on-return contract without bypassing the scheduler.
+    // Offscreen/hidden sessions and navigation settle this wait without drawing.
+    if (session.raf) await new Promise(resolve => { session.frameReady = resolve; });
   }
   // Node contracts consume the unchanged helper; the browser API stays private.
   if (typeof module === 'object' && module.exports) module.exports = {parseByDigest};
