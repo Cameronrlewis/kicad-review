@@ -49,7 +49,8 @@ body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto var(--b
 .marks { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 .marks [data-hotspot] { pointer-events:all; fill:transparent; }
 .image-error { color:var(--text); background:var(--surface); border:1px solid var(--line); padding:var(--space-2); }
-.inspection-unavailable { position:absolute; top:28px; left:8px; right:8px; z-index:5; margin:0; padding:6px 12px; background:var(--surface); color:var(--text); border:1px solid var(--line); pointer-events:none; }
+/* Anchor to the stage bottom, independent of revision-label height. */
+.inspection-unavailable { position:absolute; bottom:var(--space-2); left:var(--space-2); right:var(--space-2); z-index:5; margin:0; padding:var(--space-2) var(--space-3); background:var(--surface); color:var(--text); border:1px solid var(--line); pointer-events:none; }
 .tag { position: absolute; top: 0; left: 0; background: var(--surface); font: 11px var(--font-mono); padding: 0 var(--space-1); }
 .mode-overlay .world { isolation: isolate; background: #fff; }
 .mode-overlay .base .layer { filter: url(#tint-del); }

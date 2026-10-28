@@ -346,12 +346,12 @@ function validateImageManifest(m, kind) {
   const box = v => vector(v, 4) && v[2] >= v[0] && v[3] >= v[1];
   const nonnegative = v => finite(v) && v >= 0;
   const list = (v, test) => Array.isArray(v) && v.every(test);
-  const require = ok => { if (!ok) throw Error('Invalid ' + kind + ' inspection manifest'); };
+  const assertValid = ok => { if (!ok) throw Error('Invalid ' + kind + ' inspection manifest'); };
   const warnings = v => list(v, w => object(w) && text(w.reason));
-  require(object(m) && m.version === 1 && m.units === 'mm' && warnings(m.warnings));
+  assertValid(object(m) && m.version === 1 && m.units === 'mm' && warnings(m.warnings));
   if (kind === 'sheet') {
     const paths = new Set();
-    require(list(m.views, v => {
+    assertValid(list(m.views, v => {
       if (!object(v) || !text(v.sheet) || !v.sheet.startsWith('/') || paths.has(v.sheet) ||
           !text(v.file) || !v.file || !vector(v.viewBox, 4) || v.viewBox[2] <= 0 || v.viewBox[3] <= 0) return false;
       paths.add(v.sheet);
@@ -367,7 +367,7 @@ function validateImageManifest(m, kind) {
     return m;
   }
   const copper = KicadColors.appearanceOrder.filter(l => l.endsWith('.Cu'));
-  require(list(m.layers, l => copper.includes(l)) && m.layers.length > 0 &&
+  assertValid(list(m.layers, l => copper.includes(l)) && m.layers.length > 0 &&
     m.layers.every((l, i) => !i || copper.indexOf(l) > copper.indexOf(m.layers[i - 1])));
   // The copper stack defines physical spans; pads/graphics also carry technical layers.
   const knownLayer = l => text(l) && (m.layers.includes(l) || !l.endsWith('.Cu') && Object.hasOwn(KicadColors.layers, l));
@@ -394,21 +394,21 @@ function validateImageManifest(m, kind) {
   };
   const record = o => object(o) && text(o.uuid) && !!o.uuid && text(o.net) && span(o.layers) &&
     typeof o.hidden === 'boolean' && geometry(o.geometry);
-  require(list(m.pads, o => record(o) && text(o.ref) && text(o.pin) &&
+  assertValid(list(m.pads, o => record(o) && text(o.ref) && text(o.pin) &&
     [o.x, o.y, o.angle].every(finite) && [o.width, o.height, o.radiusRatio].every(nonnegative) &&
     text(o.shape) && !!o.geometry.primitive));
-  require(list(m.tracks, o => record(o) && ['track', 'arc'].includes(o.kind) &&
+  assertValid(list(m.tracks, o => record(o) && ['track', 'arc'].includes(o.kind) &&
     [o.x1, o.y1, o.x2, o.y2].every(finite) && nonnegative(o.width) &&
     o.layers.includes(o.layer) && o.layers.every(l => m.layers.includes(l)) && !!o.geometry.segments?.length));
-  require(list(m.vias, o => record(o) && [o.x, o.y].every(finite) && nonnegative(o.diameter) &&
+  assertValid(list(m.vias, o => record(o) && [o.x, o.y].every(finite) && nonnegative(o.diameter) &&
     (o.drill === null || nonnegative(o.drill)) && !!o.geometry.primitive &&
     o.fromLayer === o.layers[0] && o.toLayer === o.layers.at(-1) && o.layers.every(l => m.layers.includes(l)) &&
     o.layers.every((l, i) => !i || m.layers.indexOf(l) === m.layers.indexOf(o.layers[i - 1]) + 1)));
-  require(list(m.nets, n => object(n) && text(n.name) && (n.netClass === null || text(n.netClass))));
-  require(object(m.stats) && ['copperLayers', 'routedLengthMm', 'padCount', 'viaCount', 'netCount'].every(k => nonnegative(m.stats[k])) &&
+  assertValid(list(m.nets, n => object(n) && text(n.name) && (n.netClass === null || text(n.netClass))));
+  assertValid(object(m.stats) && ['copperLayers', 'routedLengthMm', 'padCount', 'viaCount', 'netCount'].every(k => nonnegative(m.stats[k])) &&
     (m.stats.boardSizeMm === null || vector(m.stats.boardSizeMm, 2) && m.stats.boardSizeMm.every(nonnegative)));
-  require(object(m.truncated) && ['nets', 'pads', 'tracks', 'vias', 'footprintGraphics'].every(k => typeof m.truncated[k] === 'boolean'));
-  require(list(m.footprintGraphics, o => object(o) && text(o.uuid) && text(o.ref) && span(o.layers) && geometry(o.geometry)));
+  assertValid(object(m.truncated) && ['nets', 'pads', 'tracks', 'vias', 'footprintGraphics'].every(k => typeof m.truncated[k] === 'boolean'));
+  assertValid(list(m.footprintGraphics, o => object(o) && text(o.uuid) && text(o.ref) && span(o.layers) && geometry(o.geometry)));
   return m;
 }
 async function loadImageManifests(P) {

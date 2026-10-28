@@ -223,7 +223,17 @@ return true;
         await applyState({...S,v:kind==='sheet'?'sheet:'+sheet.path:'board',m:'side'});
         const stage=document.querySelector('#stage'),images=[...stage.querySelectorAll('img[data-image-artwork]')];
         if(stage.dataset.imageReady!=='true')return 'malformed '+i+' blocked readiness';
-        if(!stage.querySelector('.inspection-unavailable[role="status"]'))return 'malformed '+i+' lacks unavailable notice';
+        const notice=stage.querySelector('.inspection-unavailable[role="status"]');
+        if(!notice)return 'malformed '+i+' lacks unavailable notice';
+        const bounds=notice.getBoundingClientRect(),frame=stage.getBoundingClientRect();
+        const gap=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--space-2'));
+        if(Math.abs(frame.bottom-bounds.bottom-gap)>1)return 'inspection notice not anchored to stage bottom spacing';
+        if(bounds.left<frame.left||bounds.right>frame.right||bounds.top<frame.top)return 'inspection notice outside stage';
+        if(notice.hasAttribute('style'))return 'inspection notice has inline styling';
+        for(const tag of stage.querySelectorAll('.tag')){
+          const label=tag.getBoundingClientRect();
+          if(bounds.left<label.right&&bounds.right>label.left&&bounds.top<label.bottom&&bounds.bottom>label.top)return 'inspection notice overlaps revision label';
+        }
         if((kind==='sheet'?decodedSheetHotspots:decodedBoardInspect).has(id))return 'malformed '+i+' cached';
         if(!['base','head'].every(side=>images.some(img=>img.dataset.side===side&&img.complete&&img.naturalWidth>0)))return 'malformed '+i+' lost revision artwork';
         if(stage.querySelector('.image-error'))return 'manifest failure became image failure';
