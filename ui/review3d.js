@@ -22,7 +22,6 @@ window.Review3D = (() => {
     s.urls.clear(); clearTimeout(s.idleTimer); cancelAnimationFrame(s.raf); s.raf = 0;
     s.policy?.dispose();
     for (const remove of s.motionPreferences || []) remove();
-    s.motionPreferences?.clear?.();
     document.removeEventListener('visibilitychange', s.visibility);
     s.animationFrames.clear();
     s.pixelSample?.reject(new DOMException('Viewer closed', 'AbortError')); s.pixelSample = null;
@@ -337,13 +336,10 @@ window.Review3D = (() => {
         clearTimeout(session.idleTimer);
         if (lastTick !== null) policy.rotating(time - lastTick);
         lastTick = time; render();
-      } else if (session.animationFrames.size) {
-        lastTick = null; policy.idle(); clearTimeout(session.idleTimer);
-        session.idleTimer = setTimeout(() => { if (!session.dead) policy.poll(); }, 2000);
-        render();
       } else {
         lastTick = null; policy.idle(); clearTimeout(session.idleTimer);
         session.idleTimer = setTimeout(() => { if (!session.dead) policy.poll(); }, 2000);
+        if (session.animationFrames.size) render();
       }
       settleFrame(session);
     }
