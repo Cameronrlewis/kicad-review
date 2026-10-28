@@ -4213,6 +4213,34 @@ def fab_test_raw(uid, kind='track_width'):
             'items':[{'uuid':uid,'description':uid,'pos':{'x':42.5,'y':20}}]}
 
 
+def fab_assert_multiset():
+    a = fab_test_raw('a'); b = fab_test_raw('b')
+    assert kr.fab_subtract([a,a,b],[a]) == [a,b], 'FAB mutation: multiset regression escaped'
+
+
+def fab_assert_exit_one():
+    with tempfile.TemporaryDirectory() as td:
+        pcb=pathlib.Path(td,'b.kicad_pcb'); pcb.write_text('(kicad_pcb)')
+        with patch.object(kr.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout='',stderr='broken')):
+            try:
+                kr.fab_drc(pcb,pathlib.Path(td,'out.json'))
+            except RuntimeError:
+                return
+        raise AssertionError('FAB mutation: exit 1 accepted')
+
+
+fab_assert_multiset(); fab_assert_exit_one()
+for name, mutation, assertion, diagnostic in (
+    ('fab_subtract',lambda after,before:before,fab_assert_multiset,'FAB mutation: multiset regression escaped'),
+    ('fab_drc',lambda pcb,out:{'violations':[]},fab_assert_exit_one,'FAB mutation: exit 1 accepted')):
+    with patch.object(kr,name,side_effect=mutation):
+        try:
+            assertion()
+            raise AssertionError('mutation did not trigger its regression')
+        except AssertionError as exc:
+            assert str(exc)==diagnostic
+
+
 def fab_test_render(root, outline_severity='error', missing_outline=False,
                     rules_text='(version 1)\n# house bytes\n'):
     root = root.resolve()
