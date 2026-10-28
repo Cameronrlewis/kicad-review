@@ -3545,10 +3545,12 @@ test('JSON asset corruption is tagged at decode, evicted, shown unavailable and 
   const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
   const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
   const body = source.slice(source.indexOf('  if (!view) stage.innerHTML'), source.indexOf('  assetRetry(stage);'));
-  for (const hosted of [false, true]) {
+  for (const transport of ['embedded', 'hosted', 'legacy']) {
+    const hosted = transport === 'hosted';
     let attempts = 0;
     const D = hosted ? { assetDescriptors: { [imageId]: { kind: 'json' } } }
-      : { assets: { [imageId]: { kind: 'json' } }, blobs: { [imageId]: gzipSync('{bad json').toString('base64') } };
+      : { blobs: { [imageId]: gzipSync('{bad json').toString('base64') },
+        ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
     const messages = [], cache = {};
     const context = { D, cache, atob, Uint8Array, Blob, Response, DecompressionStream, messages,
       repaired: gzipSync('{"version":1}').toString('base64'),
@@ -3557,17 +3559,43 @@ test('JSON asset corruption is tagged at decode, evicted, shown unavailable and 
     await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
       for(let i=0;i<2;i++) {
         const view={}, S={m:'side'}, stage={append:m=>messages.push(m)},
-          MODES={side:async()=>{JSON.parse(await svgText('${imageId}'));}};
+          MODES={side:async()=>{await jsonAsset('${imageId}');}};
         ${body}
         if('${imageId}' in cache)throw Error('corrupt JSON cached');
       }
       if(D.blobs)D.blobs['${imageId}']=repaired;
-      if(JSON.parse(await svgText('${imageId}')).version!==1)throw Error('retry failed');
+      if((await jsonAsset('${imageId}')).version!==1)throw Error('retry failed');
     })()`, context);
-    assert.equal(messages.length, 2, hosted ? 'hosted' : 'embedded');
+    assert.equal(messages.length, 2, transport);
     for (const message of messages) assert.match(message.textContent, /Image unavailable: Asset unavailable/);
     if (hosted) assert.equal(attempts, 3);
     assert.ok(cache[imageId], 'successful retry is cached');
+  }
+});
+
+test('JSON assets share one parsed value with mode consumers and keep the text API', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const scene = source.slice(source.indexOf('const boardSceneCache ='), source.indexOf('const HIDE_LAYERS ='));
+  for (const transport of ['embedded', 'hosted', 'legacy']) {
+    const text = '{"version":1}', D = transport === 'hosted'
+      ? { assetDescriptors: { [imageId]: { kind: 'json' } } }
+      : { blobs: { [imageId]: gzipSync(text).toString('base64') },
+        ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
+    let parses = 0, requests = 0, validations = 0;
+    const context = { D, cache: {}, atob, Uint8Array, Blob, Response, DecompressionStream,
+      JSON: { parse: value => { parses++; return JSON.parse(value); } },
+      assetClient: { request: async () => { requests++; return text; } },
+      BoardGL: { validateScene: value => { validations++; assert.equal(value.version, 1); } } };
+    await runInNewContext(`${errorClass}\n${decode}\n${scene}\n(async()=>{
+      if(await svgText('${imageId}')!==${JSON.stringify(text)})throw Error('text API changed');
+      const values=await Promise.all([loadBoardScene('${imageId}'),jsonAsset('${imageId}'),loadBoardScene('${imageId}')]);
+      if(values.some(value=>value!==values[0]) || values[0].version!==1)throw Error('parsed value not reused');
+    })()`, context);
+    assert.equal(parses, 1, `${transport}: validation and mode must share the parse`);
+    assert.equal(validations, 1);
+    assert.equal(requests, transport === 'hosted' ? 1 : 0);
   }
 });
 

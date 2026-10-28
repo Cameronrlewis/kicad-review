@@ -329,6 +329,26 @@ const assetClient = createAssetClient(D);
 addEventListener('pagehide', () => assetClient.dispose());
 // Cache promises so concurrent draws share one gzip stream or parent request.
 function svgText(id) {
+  return decodedAsset(id).then(asset => asset?.text ?? null);
+}
+async function jsonAsset(id) {
+  const pending = decodedAsset(id), asset = await pending;
+  if (!asset) return null;
+  // Legacy scene blobs have no declaration; parse them at this same data boundary.
+  if (!Object.hasOwn(asset, 'json')) {
+    try { asset.json = parseAssetJSON(asset.text); }
+    catch (error) { if (cache[id] === pending) delete cache[id]; throw error; }
+  }
+  return asset.json;
+}
+function parseAssetJSON(text) {
+  try { return JSON.parse(text); }
+  catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new AssetUnavailableError();
+  }
+}
+function decodedAsset(id) {
   if (!id) return Promise.resolve(null);
   if (!(id in cache)) {
     const decode = async () => {
@@ -343,16 +363,11 @@ function svgText(id) {
           text = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
         } catch { throw new AssetUnavailableError(); }
       }
-      // Validate declared JSON before caching text: corrupt data must fail as an asset,
-      // not later as a mode-render bug, and a retry must request/decode it again.
-      if ((D.assetDescriptors?.[id] || D.assets?.[id])?.kind === 'json') {
-        try { JSON.parse(text); }
-        catch (error) {
-          if (!(error instanceof SyntaxError)) throw error;
-          throw new AssetUnavailableError();
-        }
-      }
-      return text;
+      // Keep text compatibility and share the parsed JSON with mode consumers.
+      // Corruption fails before caching and remains retryable, not a render bug.
+      const asset = { text };
+      if ((D.assetDescriptors?.[id] || D.assets?.[id])?.kind === 'json') asset.json = parseAssetJSON(text);
+      return asset;
     };
     const promise = cache[id] = decode();
     promise.catch(() => { if (cache[id] === promise) delete cache[id]; });
@@ -488,11 +503,11 @@ Appearance.subscribe(snapshot => {
   }
 });
 const boardSceneCache = new Map(), decodedBoardScenes = new Map();
-// Scene blobs reuse svgText's gzip decode; the text is JSON, never given to the SVG loader.
+// Scene blobs share the validated JSON value, never given to the SVG loader.
 async function loadBoardScene(key) {
   if (!key) return null;
   if (!boardSceneCache.has(key)) boardSceneCache.set(key, (async () => {
-    const scene = JSON.parse(await svgText(key));
+    const scene = await jsonAsset(key);
     BoardGL.validateScene(scene);
     decodedBoardScenes.set(key,scene);
     return scene;
