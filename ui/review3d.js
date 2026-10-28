@@ -354,30 +354,51 @@ window.Review3D = (() => {
     const s = active; let roles = s.comparisonMaterials.get(source);
     if (!roles) { roles = new Map(); s.comparisonMaterials.set(source, roles); }
     if (!roles.has(role)) {
-      // Ghosts keep the baseline flat tint, without source lighting or textures, shared across the session.
-      if (role === 'ghost') {
-        s.ghostMaterial ||= new window.THREE3D.THREE.MeshBasicMaterial({color:tint('removed'), transparent:true, opacity:.45, depthTest:false});
-        roles.set(role, s.ghostMaterial); s.materials.add(s.ghostMaterial);
-      } else {
-        const n = source.clone();
-        if (role === 'fade') { n.transparent = true; n.opacity = .12; n.color?.set('#a8a8a8'); }
-        else if (change) { const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; } }
-        roles.set(role, n); s.materials.add(n);
-      }
+      const n = source.clone();
+      if (change) { const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; } }
+      roles.set(role, n); s.materials.add(n);
     }
     return roles.get(role);
   }
-  function cloneMaterials(root, change, fade = false, role = null) {
+  function cloneMaterials(root, change) {
     const original = [], changed = [];
     root?.traverse(o => {
       if (!o.isMesh) return;
-      const before = materials(o), after = before.map(m => comparisonMaterial(m, role || (fade ? 'fade' : 'highlight:' + change.action), change));
+      const before = materials(o), after = before.map(m => comparisonMaterial(m, 'highlight:' + change.action, change));
       original.push(...before); changed.push(...after); o.material = Array.isArray(o.material) ? after : after[0];
     });
     return {original, materials:changed};
   }
+  // Revision-local caches never mutate shared decoded materials or share comparison alpha.
+  function partitionMaterials(root, kind, amount) {
+    const cache=new Map(), original=[], materials=[];
+    const side=active.allowedSides.find(side=>sideRoot(active,side)===root);
+    root?.traverse(n=>{
+      if(!n.isMesh)return; const role=n.userData.role||'body';
+      if(kind==='semantic') {
+        if(role!=='body'||n.userData.ref)return;
+        // Legacy nodes have no role/ref extras; keep their changed named ancestors intact.
+        if(!active.indexedSides.has(side)) {
+          if(!active.groups.some(g=>g.object===n&&g.groups.includes('bodies')))return;
+          for(let p=n;p&&p!==root;p=p.parent)if(active.changesByRef[side]?.has(p.name))return;
+        }
+      }
+      const next=(Array.isArray(n.material)?n.material:[n.material]).map(source=>{
+        let roles=cache.get(source);if(!roles)cache.set(source,roles=new Map());
+        if(!roles.has(role)) {
+          const m=source.clone();m.userData={...m.userData,alpha3d:source.opacity};
+          m.transparent=true;m.opacity=kind==='semantic'?.12:source.opacity*amount;
+          if(kind==='semantic')m.color.set('#a8a8a8');
+          roles.set(role,m);original.push(source);materials.push(m);active.materials.add(m);
+        }
+        return roles.get(role);
+      });
+      n.material=Array.isArray(n.material)?next:next[0];
+    });
+    return {original,materials};
+  }
   function recolour() { if(!active)return; const st=window.Review3D.state; st.highlights.forEach(h=>{const c=tint(h.action);h.materials.forEach((m,i)=>{if(m.color)m.color.copy(h.original[i].color).lerp(c,.7);if(m.emissive)m.emissive.copy(c);});});st.ghosts.forEach(g=>g.object.traverse(o=>{if(o.isMesh)materials(o).forEach(m=>m.color.copy(tint("removed")));}));active.selected.forEach(o=>o.material.color.set(css("--accent")));render(); }
-  function marker(v,node,change,bounds) { const { THREE }=window.THREE3D,b=bounds||new THREE.Box3().setFromObject(node),position=b.getCenter(new THREE.Vector3()),el=document.createElement("span");position.y=b.max.y+.004;el.className=`marker3d ${change.action}`;el.dataset.ref=change.ref;el.textContent=`${change.action === "added" ? "＋" : change.action === "removed" ? "−" : "≡"} ${change.ref||""}`;el.style.color=`var(--${change.action})`;v.host.appendChild(el);const m={position,el};(v.labels ||= []).push(m); return m; }
+  function marker(v,node,change,bounds) { const { THREE }=window.THREE3D,b=bounds||new THREE.Box3().setFromObject(node),position=b.getCenter(new THREE.Vector3()),el=document.createElement("span");position.y=b.max.y+.004;el.className=`marker3d ${change.action}`;el.dataset.ref=change.ref;el.textContent=`${change.action === "added" ? "＋" : change.action === "removed" ? "−" : "≡"} ${change.ref||""}`;el.style.color=`var(--${change.action})`;v.host.appendChild(el);const m={position,el,side:change.side};(v.labels ||= []).push(m); return m; }
   function view(host, roots, side = null) {
     const {THREE, OrbitControls} = window.THREE3D, s = active, scene = new THREE.Scene();
     scene.environment = environment(s, s.lighting); scene.add(...roots);
@@ -523,8 +544,15 @@ window.Review3D = (() => {
     render();
   }
   function tooltip(v,text,x,y,ms){ let el=v.host.querySelector(".tip3d");if(!el){el=document.createElement("span");el.className="tip3d";v.host.appendChild(el);}el.textContent=text;el.style.left=`${x}px`;el.style.top=`${y}px`;clearTimeout(v.tip);if(ms)v.tip=setTimeout(()=>el.remove(),ms); }
-  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);if(!own)return [];const line=outline(v.scene,own,css("--accent"));line.ref=change.ref;line.side=active.allowedSides.find(side=>sideRoot(active,side)?.getObjectByName(change.ref)===own);return [line];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
-  function setBlend(value){if(!active?.blend)return;active.blend.value=value;active.blend.base.forEach(m=>{m.transparent=true;m.opacity=1-value;});active.blend.head.forEach(m=>{m.transparent=true;m.opacity=value;});window.Review3D.state.blend=value;render();}
+  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.filter(v=>v.visible).flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);if(!own)return [];const line=outline(v.scene,own,css("--accent"));line.ref=change.ref;line.side=active.allowedSides.find(side=>sideRoot(active,side)?.getObjectByName(change.ref)===own);return [line];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
+  function setBlend(value) {
+    if(!active?.blend)return;
+    value=Number.isFinite(value)?Math.max(0,Math.min(1,value)):.5;
+    active.blend.value=value;
+    for(const [list,weight] of [[active.blend.base,1-value],[active.blend.head,value]])
+      for(const m of list){m.transparent=true;m.opacity=m.userData.alpha3d*weight;}
+    window.Review3D.state.blend=value;render();
+  }
   function toggleBlend(){setBlend(active.blend.value<.5?1:0);}
   // Bare board hides every component: bodies, no-model blocks, change markers and baseline ghosts. No second file.
   function applyBodyVisibility() {
@@ -569,7 +597,7 @@ window.Review3D = (() => {
   // Resize only changes viewport routing, not the bodies/groups' physical visibility.
   function applyMarkerVisibility() {
     const s=active;
-    for(const h of s.state.highlights)if(h.marker)h.marker.el.hidden=h.marker.physicalVisible===false||!s.views.some(v=>v.visible&&(!v.side||v.side===h.side));
+    for(const h of s.state.highlights)if(h.marker)h.marker.el.hidden=h.marker.physicalVisible===false||!s.views.some(v=>v.visible&&(!v.side||v.side===h.side)&&sideRoot(s,h.side)?.parent===v.scene);
   }
   function setHidden(hidden = []) {
     if (!active) return;
@@ -762,7 +790,7 @@ window.Review3D = (() => {
     roots.forEach(classify); state.groups = session.groups;
     const highlight = (side, v) => session.changes.filter(c => side === 'head' ? c.action !== 'removed' : c.action !== 'added').forEach(c => {
       const ref=ThreeParts.reference(c,side,state.parts[side]),n = sideRoot(session, side)?.getObjectByName(ref),p=state.parts[side].find(p=>p.ref===ref);
-      if (n||p&&!p.hasModel) { const h = n?cloneMaterials(n, c):{original:[],materials:[]}, m = marker(v, n, {...c,ref},p?.bounds); state.highlights.push({ref, action:c.action, side, original:h.original, materials:h.materials, marker:m}); }
+      if (n||p&&!p.hasModel) { const h = n?cloneMaterials(n, c):{original:[],materials:[]}, m = marker(v, n, {...c,ref,side},p?.bounds); state.highlights.push({ref, action:c.action, side, original:h.original, materials:h.materials, marker:m}); }
     });
     if (mode === 'side' || single) {
       for (const [i, side] of sides.entries()) {
@@ -783,15 +811,28 @@ window.Review3D = (() => {
           highlight(head ? 'head' : 'base', v);
           session.changes.filter(c => c.action === 'removed' || c.action === 'modified').forEach(c => {
             const ref=ThreeParts.reference(c,'base',state.parts.base),n = base?.getObjectByName(ref);
-            if (n) { const g = n.clone(true); cloneMaterials(g, null, false, 'ghost'); v.scene.add(g); state.ghosts.push({ref, side:'base', object:g, translation:n.getWorldPosition(new T.THREE.Vector3()).add(new T.THREE.Vector3(0, .01, 0)).toArray()}); }
+            if (n) {
+              base.updateMatrixWorld(true);
+              const ghost=n.clone(true),cache=new Map();ghost.matrix.copy(n.matrixWorld);ghost.matrixAutoUpdate=false;
+              ghost.traverse(o=>{if(!o.isMesh)return;
+                const cloned=materials(o).map(source=>{
+                  if(!cache.has(source)) {
+                    const m=new T.THREE.MeshBasicMaterial({color:tint('removed'),transparent:true,opacity:source.opacity*.45,depthTest:false});
+                    cache.set(source,m);session.materials.add(m);
+                  }
+                  return cache.get(source);
+                });o.material=Array.isArray(o.material)?cloned:cloned[0];
+              });
+              ghost.userData={...ghost.userData,role:'ghost',side:'base'};
+              v.scene.add(ghost);state.ghosts.push({ref,side:'base',object:ghost});
+            }
           });
         } else if (mode === 'blend') {
-          const bm = cloneMaterials(base, null, false, 'blend:base').materials, hm = cloneMaterials(head, null, false, 'blend:head').materials;
+          const bm = partitionMaterials(base, 'blend', 1).materials, hm = partitionMaterials(head, 'blend', 1).materials;
           session.blend = {base:[...new Set(bm)], head:[...new Set(hm)], value:appState.blend ?? .5}; setBlend(session.blend.value);
         } else if (mode === 'semantic') {
-          const refs = new Set(session.changes.filter(c => c.action !== 'removed').map(c => c.ref)); state.faded = [];
-          head?.traverse(n => { if (n.name && !refs.has(n.name) && /^[A-Z]+\d+/.test(n.name)) { const f = cloneMaterials(n, null, true); state.faded.push({ref:n.name, materials:f.materials}); } });
-          highlight(head ? 'head' : 'base', v);
+          state.faded = roots.filter(Boolean).map(root=>partitionMaterials(root,'semantic',.12));
+          for(const side of sides)if(sideRoot(session,side))highlight(side,v);
         }
       } catch (error) { failure(session, side, error.message); }
     }

@@ -930,7 +930,12 @@ export const CHECKS = [
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const d = window.Review3D.state, g = d.ghosts.find(x => x.ref === "J2"), h = d.highlights.find(x => x.ref === "J2" && x.side === "head");
-    return !!g && !!h && Math.hypot(...g.translation.map((v, i) => v - h.marker.position.toArray()[i])) > .001;`],
+    if(!g||!h)return 'ghost or head marker absent';
+    const base=d.roots[0].getObjectByName('J2'),head=d.roots[1].getObjectByName('J2');
+    d.roots.forEach(r=>r.updateMatrixWorld(true));g.object.updateMatrixWorld(true);
+    const same=base.matrixWorld.elements.every((v,i)=>Math.abs(v-g.object.matrixWorld.elements[i])<1e-7);
+    const box=new THREE3D.THREE.Box3().setFromObject(head),position=box.getCenter(new THREE3D.THREE.Vector3());position.y=box.max.y+.004;
+    return same&&position.distanceTo(h.marker.position)<1e-7||'ghost offset or head marker moved';`],
   ["3D Blend slider and B switch cross-fade without moving camera", "v=3d&m=blend", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
@@ -940,7 +945,8 @@ export const CHECKS = [
   ["3D Changes only fades unchanged components and disables Wipe", "v=3d&m=semantic", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
-    const u = (window.Review3D.state.faded || []).find(x => x.ref === "U4"), faded = u?.materials.some(m => m.opacity === .12);
+    const u = window.Review3D.state.roots[1]?.getObjectByName('U4'), m=[];
+    u?.traverse(n=>{if(n.isMesh)m.push(...[n.material].flat());});const faded=m.length&&m.every(m=>m.opacity===.12);
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
@@ -1525,7 +1531,7 @@ export const CHECKS = [
     history.replaceState(null, "", saved); S.s = null; S.camera3d = null; await start();
     await new Promise(r => setTimeout(r, 700));
     const actual = Review3D.cameraState(), st = Review3D.state, {THREE} = THREE3D;
-    const outlined = st.selected?.length === 2 && st.selected.every((o, i) => o.position.distanceTo(new THREE.Box3().setFromObject(st.roots[i].getObjectByName(row.ref)).getCenter(new THREE.Vector3())) < 1e-4);
+    const outlined = st.selected?.length === st.visibleSides.length && st.selected.every(o => o.position.distanceTo(new THREE.Box3().setFromObject(st.roots[o.side==='base'?0:1].getObjectByName(row.ref)).getCenter(new THREE.Vector3())) < 1e-4);
     return S.s === row.id && outlined && camera.every((n, i) => Math.abs(n - actual[i]) < .2) || JSON.stringify({saved, camera, actual, outlined, selection:S.s});
   `],
   ["3D change card keeps 3D and frames J2", "v=3d", `
@@ -1541,7 +1547,7 @@ export const CHECKS = [
     document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, sel = st.selected || [];
     const j2 = r => { let f; r.traverse(o => { if (!f && o.name === "J2") f = o; }); return new THREE.Box3().setFromObject(f).getCenter(new THREE.Vector3()); };
-    return sel.length === 2 && [0, 1].every(i => sel[i].position.distanceTo(j2(st.roots[i])) < 1e-4);`],
+    return sel.length === st.visibleSides.length && sel.every(o => o.position.distanceTo(j2(st.roots[o.side==='base'?0:1])) < 1e-4);`],
   ["3D no-model U3 block sits on the board, overlaps its footprint and is not hidden by silkscreen", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
@@ -4853,8 +4859,14 @@ CHECKS.push(
     st.ghosts.forEach(g=>g.object.traverse(n=>{if(n.isMesh)ghosts.push(...[n.material].flat());}));
     if(!ghosts.length)return 'fixture has no ghosts';
     const tint=new THREE3D.THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--removed').trim());
-    if(new Set(ghosts).size!==1)return 'ghosts do not share a single material';
-    return ghosts.every(m=>m.isMeshBasicMaterial&&!m.map&&m.color.equals(tint)&&m.opacity===.45&&m.transparent&&!m.depthTest&&!source.has(m))||'ghost appearance changed or source mutated';
+    for(const g of st.ghosts) {
+      const node=st.roots[0].getObjectByName(g.ref),before=[],after=[];
+      node.traverse(n=>{if(n.isMesh)before.push(...[n.material].flat());});
+      g.object.traverse(n=>{if(n.isMesh)after.push(...[n.material].flat());});
+      if(after.some((m,i)=>Math.abs(m.opacity-before[i].opacity*.45)>1e-7))return 'ghost alpha replaced';
+      if(new Set(after).size!==new Set(before).size)return 'ghost material partition lost';
+    }
+    return ghosts.every(m=>m.isMeshBasicMaterial&&!m.map&&m.color.equals(tint)&&m.transparent&&!m.depthTest&&!source.has(m))||'ghost appearance changed or source mutated';
   `],
   ['BR02 processed default revision omitted from share hash', 'v=3d&m=side', `
     if(!proj().board.parts3d)return 'skip';
@@ -5028,3 +5040,75 @@ CHECKS.push(['BR02 processed lighting failure rolls back controls and recovers',
     return (await Review3D.sampleFrame()).opaquePixels>0||'recovered frame empty';
   }finally{T.PMREMGenerator.prototype.fromEquirectangular=original;Review3D.onStateChange=onStateChange;}
 `]);
+
+CHECKS.push(
+["BR02 processed semantic partitions", "v=3d&m=semantic", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state;
+ if(!st.faded?.some(x=>x.materials.some(m=>m.opacity===.12)))return 'merged semantic fade absent';
+ const bodies=[];st.roots[1].traverse(n=>{if(n.isMesh&&n.userData.role==='body'&&!n.userData.ref)
+   bodies.push(...(Array.isArray(n.material)?n.material:[n.material]));});
+ if(!bodies.length||!bodies.every(m=>m.opacity===.12))return 'unchanged material partition not faded';
+ if(st.faded.length!==2||st.faded.some(p=>new Set(p.materials).size!==p.materials.length))return 'revision partition clone ownership lost';
+ const base=st.highlights.filter(h=>h.side==='base'),head=st.highlights.filter(h=>h.side==='head');
+ if(!base.length||base.some(h=>!h.marker.el.hidden)||!head.some(h=>!h.marker.el.hidden))return 'detached semantic markers visible';
+ if(st.highlights.some(h=>h.marker.side!==h.side))return 'marker revision missing';
+ return st.highlights.some(h=>h.ref==='R12'&&h.materials.every(m=>m.opacity===1))||'changed highlight lost';
+`],
+["BR02 processed blend preserves mask alpha", "v=3d&m=blend", `
+ if(!proj().board.parts3d)return 'skip';
+ Review3D.setBlend(.25);
+ for(const [i,weight] of [[0,.75],[1,.25]]) {
+   const masks=[];Review3D.state.roots[i].traverse(n=>{if(n.isMesh&&n.userData.role==='mask')
+     masks.push(...(Array.isArray(n.material)?n.material:[n.material]));});
+   if(!masks.length||!masks.every(m=>Math.abs(m.opacity-.72*weight)<1e-6))return 'mask alpha replaced';
+ }
+ Review3D.setBlend(.75);Review3D.setBlend(.25);
+ for(const [i,weight] of [[0,.75],[1,.25]]) {
+   let bad=false;Review3D.state.roots[i].traverse(n=>{if(n.isMesh&&n.userData.role==='mask')
+     bad||=[n.material].flat().some(m=>Math.abs(m.opacity-.72*weight)>1e-6);});
+   if(bad)return 'blend compounded saved alpha';
+ }
+ return true;
+`],
+["BR02 processed overlay preserves base world matrix", "v=3d&m=overlay", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,g=st.ghosts.find(g=>g.ref==='R1');if(!g)return 'changed ghost missing';
+ st.roots[0].updateMatrixWorld(true);
+ const n=st.roots[0].getObjectByName('R1');g.object.updateMatrixWorld(true);
+ return n.matrixWorld.elements.every((v,i)=>Math.abs(v-g.object.matrixWorld.elements[i])<1e-7)
+   ||'ghost lost base world transform';
+`]
+
+);
+
+CHECKS.push(["BR02 processed overlay bare board hides ghosts and markers", "v=3d&m=overlay", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,g=st.ghosts[0],h=st.highlights.find(h=>h.marker&&!h.marker.el.hidden);
+ if(!g?.object.parent||!h)return 'initial ghost or marker absent';
+ Review3D.setAssembled(false);
+ if(st.ghosts.some(g=>g.object.parent&&(()=>{let visible=false;g.object.traverse(n=>{if(n.isMesh&&n.visible)visible=true;});return visible;})()))return 'bare ghost visible';
+ if(st.highlights.some(h=>h.marker&&!h.marker.el.hidden))return 'bare marker visible';
+ const bodies=[];st.roots.forEach(r=>r?.traverse(n=>{if(n.isMesh&&n.userData.role==='body')bodies.push(n);}));
+ if(!bodies.length||bodies.some(n=>n.visible))return 'bare body visible';
+ Review3D.setAssembled(true);
+ if(!g.object.parent||!g.object.visible||h.marker.el.hidden)return 'overlay representation not restored';
+ Review3D.focus(proj().changes.find(c=>c.ref==='R12'),false);await Review3D.sampleFrame();
+ console.log('BOARD_PROOF '+JSON.stringify({mode:'overlay',phone:S.phone,calls:st.drawCallsByViewport,changedParts:st.changedParts}));
+ return st.drawCallsByViewport.every(n=>n<100+st.changedParts)||'comparison call budget exceeded';
+`]);
+
+CHECKS.push(...['removed','base-only'].map(input=>[
+ 'BR02 processed overlay world ghosts '+input,'v=3d&m=overlay', `
+ if(!proj().board.parts3d)return 'skip';
+ const p=structuredClone(proj()),c=p.changes.find(c=>c.ref==='R12');
+ if('${input}'==='removed')c.action='removed';
+ else for(const key of ['model3d','parts3d','assets3d','poster3d','coverage3dBySide'])delete p.board[key]?.head;
+ await Review3D.show(document.querySelector('#stage'),p,{...S,m:'overlay',s:null});
+ const st=Review3D.state,g=st.ghosts.find(g=>g.ref==='R1');if(!g?.object.parent)return 'base ghost absent';
+ const n=st.roots[0].getObjectByName('R1');st.roots[0].updateMatrixWorld(true);g.object.updateMatrixWorld(true);
+ if(!n.matrixWorld.elements.every((v,i)=>Math.abs(v-g.object.matrixWorld.elements[i])<1e-7))return 'base ghost misplaced';
+ if('${input}'==='base-only'&&!st.highlights.some(h=>h.side==='base'&&!h.marker.el.hidden))return 'base-only marker hidden';
+ Review3D.setAssembled(false);if(g.object.parent||st.highlights.some(h=>!h.marker.el.hidden))return 'base ghost or marker survived bare';
+ Review3D.setAssembled(true);return !!g.object.parent||'base ghost not restored';
+ `]));
