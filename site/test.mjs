@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
+import { threeClient } from './three-client.js';
 import { fixturePages } from './proof.mjs';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
@@ -3293,4 +3294,146 @@ test('BR02 report embeds the decode worker and permits only blob workers', () =>
   assert.match(reportCsp, /(?:^|; )worker-src blob:(?:;|$)/);
   assert.match(reportCsp, /connect-src 'none'/);
   assert.doesNotMatch(reportCsp, /allow-same-origin|unsafe-eval|https?:|connect-src (?!'none')/);
+});
+
+test('BR02 broker enforces source and names and has a valid positive control',async()=>{
+  const listeners=[],sent=[],fetches=[], digest='a'.repeat(64);
+  const child={postMessage:(message,origin,transfer)=>sent.push({message,origin,transfer})};
+  const window={addEventListener:(name,fn)=>{if(name==='message')listeners.push(fn)}};
+  const document={querySelector:selector=>{assert.equal(selector,'#review-report');return {contentWindow:child};}};
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window,document,Map,Number,ArrayBuffer,Uint8Array,Error,
+    fetch:async(url,options)=>{fetches.push({url,options});return {
+      ok:true,arrayBuffer:async()=>new Uint8Array([103,108,84,70]).buffer};}
+  });
+  const valid={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest,kind:'board.glb'};
+  await listeners[0]({source:{},data:valid,origin:'null'});
+  assert.equal(fetches.length,0,'wrong window with valid asset must not fetch');
+  assert.equal(sent.length,0,'wrong window receives no reply');
+  for(const data of [{...valid,digest:'../secret'},{...valid,kind:'https://evil/model'},
+                     {...valid,id:0},{...valid,digest:'A'.repeat(64)},{...valid,nonce:null},{...valid,nonce:'old'},
+                     {...valid,digest:[digest]},{...valid,id:1.5},{...valid,id:Number.MAX_SAFE_INTEGER+1},
+                     {...valid,kicad3d:0},{...valid,kind:'board.raw.glb'},null])
+    await listeners[0]({source:child,data,origin:'null'});
+  assert.equal(fetches.length,0,'correct child invalid names must not fetch');
+  assert.equal(sent.length,0);
+  await listeners[0]({source:child,data:valid,origin:'null'});
+  assert.equal(fetches.length,1);
+  assert.equal(fetches[0].url,'/r/o/r/a/12/3d/'+digest+'/board.glb');
+  assert.equal(fetches[0].options.credentials,'same-origin');
+  assert.equal(fetches[0].options.redirect,'error');
+  assert.equal(sent.length,1);assert.equal(sent[0].message.id,1);assert.equal(sent[0].message.nonce,valid.nonce);
+  assert.equal(sent[0].message.kicad3d,1);assert.equal(sent[0].message.gzip,false);
+  assert.deepEqual([...new Uint8Array(sent[0].message.bytes)],[103,108,84,70]);
+  assert.equal(sent[0].transfer[0],sent[0].message.bytes);assert.equal(sent[0].origin,'*');
+});
+
+test('BR02 broker deduplicates inflight requests and replies on fetch failure',async()=>{
+  let listener,release,count=0;const replies=[];
+  const child={postMessage:m=>replies.push(m)};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    Map,Number,ArrayBuffer,Error,fetch:async()=>{count++;await gate;return {ok:false}}});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'b'.repeat(64),kind:'board-parts.json'};
+  const a=listener({source:child,data}),b=listener({source:child,data:{...data,id:2}});
+  release();await Promise.all([a,b]);assert.equal(count,1);
+  assert.equal(replies.length,2);assert.ok(replies.every(r=>r.error==='Model unavailable. Retry.'&&!r.bytes&&r.nonce===data.nonce));
+  assert.deepEqual(replies.map(r=>r.id),[1,2]);
+  await listener({source:child,data:{...data,id:3}});
+  assert.equal(count,2,'failed asset can be retried');
+});
+
+test('BR02 broker limits distinct inflight assets and transfers independent deduplicated buffers',async()=>{
+  let listener,release;const fetches=[],sent=[],buffers=[];
+  const child={postMessage:(message,origin,transfer)=>{
+    assert.equal(origin,'*');
+    if(message.bytes){
+      assert.equal(transfer[0],message.bytes);
+      buffers.push(message.bytes);
+      // A real transfer detaches the sender buffer. The next reply must still work.
+      message=structuredClone(message,{transfer});
+    }
+    sent.push(message);
+  }};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    Map,Number,ArrayBuffer,Error,fetch:async url=>{
+      fetches.push(url);await gate;
+      return {ok:true,arrayBuffer:async()=>new Uint8Array([1,2,3]).buffer};
+    }});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'c'.repeat(64),kind:'board.glb'};
+  const requests=[listener({source:child,data})];
+  for(let i=2;i<=4;i++)requests.push(listener({source:child,data:{...data,id:i,digest:String(i).repeat(64)}}));
+  requests.push(listener({source:child,data:{...data,id:5}}));
+  await listener({source:child,data:{...data,id:6,kind:'board-parts.json'}});
+  assert.equal(fetches.length,4,'duplicate shares a slot; different kind needs its own slot');
+  assert.equal(sent.length,1);assert.equal(sent[0].id,6);
+  assert.equal(sent[0].error,'Too many model requests. Retry.');
+  release();await Promise.all(requests);
+  const replies=sent.filter(m=>m.bytes);
+  assert.equal(replies.length,5);assert.equal(new Set(buffers).size,5);
+  assert.ok(buffers.every(b=>b.byteLength===0),'each reply buffer was transferred');
+  assert.ok(replies.every(m=>m.nonce===data.nonce&&m.gzip===false));
+  for(const reply of replies)assert.deepEqual([...new Uint8Array(reply.bytes)],[1,2,3]);
+  await listener({source:child,data:{...data,id:7,kind:'board-parts.json'}});
+  assert.equal(fetches.length,5,'settled assets release their slots');
+  assert.equal(sent.at(-1).id,7);assert.ok(sent.at(-1).bytes);
+});
+
+test('BR02 broker drops success and error replies when the report frame changes',async()=>{
+  for(const outcome of ['success','http','network','body']){
+    let listener,release;const sent=[];
+    const child={postMessage:message=>sent.push(message)};
+    let frame={contentWindow:child};
+    const gate=new Promise(r=>release=r);
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>frame},
+      Map,Number,ArrayBuffer,Error,fetch:async()=>{
+        await gate;
+        if(outcome==='network')throw Error('network failure');
+        return {ok:outcome!=='http',arrayBuffer:async()=>{
+          if(outcome==='body')throw Error('body failure');
+          return new ArrayBuffer(4);
+        }};
+      }});
+    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'d'.repeat(64),kind:'board.glb'};
+    const pending=listener({source:child,data});
+    frame={contentWindow:{postMessage:message=>sent.push(message)}};
+    release();await pending;
+    assert.equal(sent.length,0,outcome);
+    frame=null;
+    await listener({source:child,data});
+    assert.equal(sent.length,0,'removed frame ignored');
+  }
+});
+
+test('BR02 broker reports network and body errors and allows retry',async()=>{
+  for(const outcome of ['network','body']){
+    let listener,count=0;const replies=[];
+    const child={postMessage:m=>replies.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      Map,Number,ArrayBuffer,Error,fetch:async()=>{
+        count++;
+        if(count===1&&outcome==='network')throw Error('network failure');
+        return {ok:true,arrayBuffer:async()=>{
+          if(count===1)throw Error('body failure');
+          return new ArrayBuffer(4);
+        }};
+      }});
+    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'e'.repeat(64),kind:'board.glb'};
+    await listener({source:child,data});
+    assert.equal(replies[0].error,outcome+' failure');
+    assert.equal(replies[0].nonce,data.nonce);assert.equal(replies[0].id,1);assert.ok(!replies[0].bytes);
+    await listener({source:child,data:{...data,id:2}});
+    assert.equal(count,2);assert.equal(replies[1].id,2);assert.ok(replies[1].bytes);
+  }
+});
+
+test('BR02 broker rejects endpoints outside the authenticated model route',()=>{
+  for(const endpoint of ['https://evil/model/','//evil/','/r/o/r/a/12/raw','/r/o/r/a/no/3d/','/s/token/3d/']){
+    assert.throws(()=>runInNewContext(`(${threeClient.toString()})(${JSON.stringify({endpoint})})`,{Error}),/invalid model endpoint/);
+  }
 });
