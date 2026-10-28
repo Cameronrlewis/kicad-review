@@ -743,3 +743,16 @@ html[data-theme="dark"] #stage.mode-3d { background:var(--bg); }
 .light-menu label:has(input[type=range]) { grid-template-columns:5.5em 1fr; } .light-menu input[type=range] { grid-column:1/-1; width:100%; }
 .light-menu select { font:inherit; color:var(--tx); background:var(--module); border:1px solid var(--hair); border-radius:3px; padding:2px 6px; min-height:24px; }
 @media(max-width:700px) { #toolbar .tools3d { gap:8px; } #toolbar .tools3d button, #toolbar .light3d summary { min-height:44px; } .light-menu select { min-height:44px; } .light-menu input[type=range] { min-height:44px; } }
+
+/* Narrow offline reports keep both chrome rows and native menus reachable, without page overflow. */
+@media(max-width:700px) {
+  :root { --statusbar-h:auto; }
+  .report-head { flex-wrap:wrap; height:auto; gap:4px 8px; padding:4px 8px; }
+  .report-head #hdr { flex:1 1 100%; order:1; overflow-wrap:anywhere; }
+  .report-head .bench-state { margin-left:auto; }
+  .report-head .bench-menu > summary { min-height:44px; }
+  .report-chrome .review-bar { flex-wrap:wrap; height:auto; gap:4px 8px; padding:4px 8px; }
+  .report-chrome .bench-merge { margin-left:0; }
+  .report-chrome .bench-popover { position:fixed; top:auto; left:8px; right:8px; width:auto; min-width:0; max-width:none; max-height:60dvh; overflow:auto; box-sizing:border-box; }
+  body:has(#stage.mode-3d) { --bar-h:52px; }
+}

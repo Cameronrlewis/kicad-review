@@ -42,6 +42,26 @@ const MARK_STYLE_FIXTURE = `
     for(const p of boardDiff.panes) trackAppearanceBoard(p.renderer,p.canvas);
     syncMarkStyles();
 `;
+// Mesh-miss setup runs once, before real CDP input; assertions never mutate the scene.
+export const BR02_MESH_MISS_PREPARE = `
+ if(!proj().board.parts3d)return null;
+ const st=Review3D.state,{THREE:T}=THREE3D,v=st.views.find(v=>v.visible&&(!v.side||v.side==='head'));
+ if(!v)return 'missing head viewport';
+ const root=st.roots[1],changed=st.parts.head.find(p=>p.ref==='R12'),unchanged=st.parts.head.find(p=>p.ref==='R2');
+ root.traverse(n=>{if(n.isMesh)n.visible=false});
+ const center=unchanged.bounds.getCenter(new T.Vector3());
+ v.controls.target.copy(center);v.camera.position.copy(center).add(new T.Vector3(0,.1,0));
+ v.camera.up.set(0,0,-1);v.camera.lookAt(center);v.camera.updateMatrixWorld(true);
+ changed.bounds=unchanged.bounds.clone().expandByScalar(.001);
+ // Triangle is inside the overlapping changed AABB but away from the centre ray.
+ const size=unchanged.bounds.getSize(new T.Vector3()),x=center.x+size.x*.4,z=center.z;
+ const g=new T.BufferGeometry().setAttribute('position',new T.Float32BufferAttribute([
+   x,center.y+.001,z,x+size.x*.05,center.y+.001,z,x,center.y+.001,z+size.z*.05],3));
+ const mesh=new T.Mesh(g,new T.MeshBasicMaterial({side:T.DoubleSide}));
+ mesh.userData={role:'body',side:changed.side,ref:'R12'};root.add(mesh);window.__br02MeshMissMesh=mesh;
+ // Named \`BR02 processed mesh miss\` branch in ui/check.mjs sends a real CDP mouse press/release here.
+`;
+
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
 ["BR02 processed unchanged focus and missing batch", "v=3d&m=side", `
@@ -110,21 +130,8 @@ export const CHECKS = [
 
 ["BR02 processed overlapping box misses changed mesh", "v=3d&m=side", `
  if(!proj().board.parts3d)return 'skip';
- const st=Review3D.state,{THREE:T}=THREE3D,v=st.views.find(v=>v.visible&&(!v.side||v.side==='head'));
- if(!v)return 'missing head viewport';
- const root=st.roots[1],changed=st.parts.head.find(p=>p.ref==='R12'),unchanged=st.parts.head.find(p=>p.ref==='R2');
- root.traverse(n=>{if(n.isMesh)n.visible=false});
- const center=unchanged.bounds.getCenter(new T.Vector3());
- v.controls.target.copy(center);v.camera.position.copy(center).add(new T.Vector3(0,.1,0));
- v.camera.up.set(0,0,-1);v.camera.lookAt(center);v.camera.updateMatrixWorld(true);
- changed.bounds=unchanged.bounds.clone().expandByScalar(.001);
- // Triangle is inside the overlapping changed AABB but away from the centre ray.
- const size=unchanged.bounds.getSize(new T.Vector3()),x=center.x+size.x*.4,z=center.z;
- const g=new T.BufferGeometry().setAttribute('position',new T.Float32BufferAttribute([
-   x,center.y+.001,z,x+size.x*.05,center.y+.001,z,x,center.y+.001,z+size.z*.05],3));
- const mesh=new T.Mesh(g,new T.MeshBasicMaterial({side:T.DoubleSide}));
- mesh.userData={role:'body',side:changed.side,ref:'R12'};root.add(mesh);
- // Named \`BR02 processed mesh miss\` branch in ui/check.mjs sends a real CDP mouse press/release here.
+ const unchanged=Review3D.state.parts.head.find(p=>p.ref==='R2');
+ if(!window.__br02MeshMissMesh?.visible)return 'mesh-miss triangle hidden or not prepared';
  if(!window.__br02MeshMissInput)return 'CDP mesh-miss input was not prepared';
  return S.part3d?.uuid===unchanged.uuid||'changed AABB stole mesh-miss ray';
 `],
@@ -172,6 +179,52 @@ export const CHECKS = [
     }
     return true;
   `],
+  ...['bare','bodies','own side','other side','redraw'].map(action=>[
+    'BR02 processed inspector visibility '+action,'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const part=Review3D.state.parts.head.find(p=>p.ref==='U4');
+    Review3D.setRevision('head');Review3D.onPartPick({...part,side:'head'});Review3D.focusPart(part.ref,'head',false);
+    if('${action}'==='bare')Review3D.setAssembled(false);
+    if('${action}'==='bodies')Review3D.setHidden(['bodies']);
+    if('${action}'==='own side')Review3D.setHidden([part.side]);
+    if('${action}'==='other side')Review3D.setHidden([part.side==='top'?'bottom':'top']);
+    if('${action}'==='redraw'){S.m='overlay';await draw();}
+    const selected=Review3D.state.selected,inspector=document.querySelector('[data-part3d-inspector]');
+    if('${action}'==='other side')return selected.length>0&&S.part3d?.uuid===part.uuid&&!!inspector||'visible opposite-side selection cleared';
+    return !selected.length&&!S.part3d&&!inspector||'invisible part retained inspector or outline';
+  `]),
+  ["BR02 processed change ownership uses revision-local references", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),parts=Review3D.state.parts;
+    p.changes.push({id:'added-u4',kind:'footprint',action:'added',ref:'U4',uuid:parts.head.find(p=>p.ref==='U4').uuid},
+      {id:'removed-r2',kind:'footprint',action:'removed',ref:'R2',uuid:parts.base.find(p=>p.ref==='R2').uuid});
+    await Review3D.show(document.querySelector('#stage'),p,S);
+    for(const [ref,side,id] of [['R1','base','c1'],['R12','head','c1'],['R12','base',null],['R1','head',null],
+      ['U4','head','added-u4'],['U4','base',null],['R2','base','removed-r2'],['R2','head',null]]) {
+      if((Review3D.changeForPart(ref,side)?.id||null)!==id)return 'wrong change owner: '+side+' '+ref;
+    }
+    return true;
+  `],
+  ["BR02 processed indexed missing focus tooltip", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const change=proj().changes.find(c=>c.ref==='U3');Review3D.focus(change,false);
+    for(const side of Review3D.state.visibleSides) {
+      const v=Review3D.state.views.find(v=>v.visible&&(!v.side||v.side===side));
+      if(!v.host.querySelector('.tip3d')?.textContent.includes('U3 · no 3D model'))return 'indexed missing focus lost tooltip';
+    }
+    Review3D.setAssembled(false);
+    return !document.querySelector('.tip3d')||'hidden missing focus retained tooltip';
+  `],
+  ["BR02 processed resize does not rescan body visibility", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    let visits=0;const st=Review3D.state,restore=[];
+    for(const root of st.roots.filter(Boolean)) {
+      const traverse=root.traverse;restore.push(()=>root.traverse=traverse);
+      root.traverse=function(...args){visits++;return traverse.apply(this,args)};
+    }
+    try {Review3D.resize();return visits===0||'resize rescanned body groups';}
+    finally {restore.forEach(f=>f());}
+  `],
   ["BR02 processed inspector identity is text and clears on navigation", "v=3d&m=side", `
     if(!proj().board.parts3d)return 'skip';
     const part=Review3D.state.parts.head.find(p=>p.ref==='R2');
@@ -179,7 +232,8 @@ export const CHECKS = [
     Review3D.onPartPick({...part,ref,side:'head'});
     const inspector=document.querySelector('[data-part3d-inspector]');
     if(inspector.querySelector('img')||!inspector.textContent.includes(ref))return 'index text interpreted as markup';
-    if(!inspector.textContent.includes('X bounds (mm)')||!inspector.textContent.includes('14.2'))return 'world bounds not shown in board mm';
+    const expected=part.box.map(n=>round3(n*1000));
+    if(!inspector.textContent.includes('X bounds (mm)')||!inspector.textContent.includes(expected[0]+' … '+expected[3]))return 'world bounds not shown in board mm';
     await goTo(proj().changes[0].id);
     if(S.part3d||document.querySelector('[data-part3d-inspector]'))return 'changed selection retained part identity';
     Review3D.onPartPick({...part,side:'head'});
@@ -188,13 +242,34 @@ export const CHECKS = [
     Review3D.onPartPick({...part,side:'head'});S.v='board';await draw();
     return !S.part3d&&!document.querySelector('[data-part3d-inspector]')||'navigation retained stale 3D identity';
   `],
+  ["BR02 processed phone chrome and tools stay reachable", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    if(innerWidth>700)return true;
+    const inside=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight};
+    if(document.documentElement.scrollWidth>innerWidth)return 'phone shell overflow';
+    const status=document.querySelector('#statusbar');
+    if(status.scrollHeight>status.clientHeight)return 'phone status controls clipped';
+    for(const menu of document.querySelectorAll('.report-chrome details')) {
+      const summary=menu.querySelector('summary');summary.focus();
+      if(!inside(summary)||document.activeElement!==summary)return 'phone header action unreachable';
+      menu.open=true;
+      if(!inside(menu.querySelector('.bench-popover')))return 'phone header popup outside viewport';
+      menu.open=false;
+    }
+    for(const control of document.querySelectorAll('#zoombar [data-3d-assembled],#zoombar .light3d summary')) {
+      control.focus();control.scrollIntoView({block:'nearest',inline:'nearest'});
+      if(!inside(control)||control.getBoundingClientRect().height<44||document.activeElement!==control)return 'phone 3D tool unreachable';
+    }
+    return document.documentElement.scrollWidth<=innerWidth||'phone tool focus caused page overflow';
+  `],
   ["BR02 processed inspector whole screen", "v=3d&m=side", `
     if(!proj().board.parts3d)return 'skip';
     const st=Review3D.state,part=st.parts.head.find(p=>p.ref==='R2'),widthBefore=document.documentElement.scrollWidth;
     Review3D.setRevision('head');Review3D.onPartPick({...part,side:'head'});Review3D.focusPart(part.ref,'head',false);
     // The shared shell belongs to 05: record its existing overflow, reject any added by this inspector.
+    // Fix-round acceptance also requires the whole shell to fit; no baseline overflow exemption.
     console.log('BOARD_PROOF part inspector '+JSON.stringify({width:innerWidth,before:widthBefore,after:document.documentElement.scrollWidth}));
-    if(document.documentElement.scrollWidth>widthBefore)return 'part inspector introduced horizontal overflow';
+    if(document.documentElement.scrollWidth>innerWidth)return 'part inspector whole screen overflow';
     const inspector=document.querySelector('[data-part3d-inspector]'),r=inspector.getBoundingClientRect();
     if(r.left<0||r.right>innerWidth||r.bottom>innerHeight||inspector.scrollWidth>inspector.clientWidth)return 'part inspector outside screen';
     const toggle=document.querySelector('#insp-toggle');toggle.focus();
@@ -721,7 +796,13 @@ export const CHECKS = [
     delete p.board.parts3d.head;delete p.board.assets3d;
     await Review3D.show(document.querySelector('#stage'),p,S);
     const hosts=document.querySelectorAll('#stage .view3d'),st=Review3D.state;
-    return !st.loading&&!st.roots[1]&&st.roots[0]&&st.firstFrame&&hosts[1].textContent.includes('Board not in this revision')&&!hosts[1].querySelector('img')||'absent revision borrowed model/poster';
+    if(st.loading||st.roots[1]||!st.roots[0]||!hosts[1].textContent.includes('Board not in this revision')||hosts[1].querySelector('img'))return 'absent revision borrowed model/poster';
+    if(S.phone) {
+      if(st.firstFrame||hosts[1].hidden||!hosts[0].hidden||st.visibleSides.join()!=='head')return 'absent requested Head drew the Base revision';
+      Review3D.setRevision('base');
+      if(hosts[0].hidden||!hosts[1].hidden||st.visibleSides.join()!=='base')return 'available Base could not be reached';
+    }
+    return st.firstFrame&&st.posterBySide.base.hidden||'available Base never drew a genuine frame';
   `],
   ["BR02 processed cancelled vendor decode cannot revive session", "", `
     if(!proj().board.parts3d)return 'skip';
@@ -760,9 +841,9 @@ export const CHECKS = [
       if('${fault}'==='worker-start')window.Worker=class {constructor(){throw Error('3D worker unavailable. Retry.')}};
       await Review3D.show(document.querySelector('#stage'),proj(),S);
       if('${fault}'==='context-loss')document.querySelector('#stage canvas').dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
-      const button=document.querySelector('[data-3d-retry]');button?.focus();
+      const button=[...document.querySelectorAll('[data-3d-retry]')].find(b=>b.getClientRects().length);button?.focus();
       const rect=button?.getBoundingClientRect();
-      return document.documentElement.scrollWidth<=innerWidth&&rect&&rect.width>0&&rect.left>=0&&rect.right<=innerWidth&&rect.top>=0&&rect.bottom<=innerHeight&&document.activeElement===button&&!!document.querySelector('[role="alert"]')||JSON.stringify({scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,rect:rect?.toJSON(),focused:document.activeElement===button,alert:!!document.querySelector('[role="alert"]')});
+      return document.documentElement.scrollWidth<=innerWidth&&rect&&rect.width>0&&rect.left>=0&&rect.right<=innerWidth&&rect.top>=0&&rect.bottom<=innerHeight&&document.activeElement===button&&!!document.querySelector('[role="alert"]')||JSON.stringify({scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,rect:rect?.toJSON(),focused:document.activeElement===button,alert:!!document.querySelector('[role="alert"]'),overflow:[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,12).map(e=>({tag:e.tagName,id:e.id,class:e.className,right:e.getBoundingClientRect().right}))});
     } finally {window.Worker=Worker;}
   `]),
   ["3D bad model data settles and keeps the valid side", "v=3d", `

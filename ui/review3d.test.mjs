@@ -109,6 +109,53 @@ test('BR02 failed lighting is atomic, announced, and recovers without stale erro
   assert.equal(s.environments.size, 1);
 });
 
+for (const indexed of [true, false]) test(`BR02 hiding one physical side preserves its visible peer (${indexed ? 'indexed' : 'legacy'})`, () => {
+  const {api, s, events} = viewer();
+  s.state.parts = {head:indexed ? [{ref:'bottom-part', side:'bottom'}] : []};
+  s.allowedSides = ['base', 'head'];
+  const node = {};
+  if (!indexed) {
+    s.roots = [null, {getObjectByName:() => node, traverse() {}}];
+    s.groups = [{object:{parent:node}, groups:['bodies', 'bottom']}];
+  }
+  let detached = 0, disposed = 0;
+  const line = {ref:'bottom-part', side:'head', removeFromParent() { detached++; }, traverse(free) {
+    free({geometry:{dispose() { disposed++; }}});
+  }};
+  s.selected.push(line);
+  api.setHidden(['top']);
+  assert.equal(s.selected.length, 1);
+  assert.equal(s.selected[0], line);
+  assert.equal(detached, 0);
+  api.setHidden(['bottom']);
+  assert.equal(s.selected.length, 0);
+  assert.equal(s.state.selected, s.selected);
+  assert.equal(detached, 1);
+  assert.equal(disposed, 1);
+  assert.equal(events.at(-1).hiddenGroups[0], 'bottom');
+});
+
+test('BR02 resize reuses physical marker visibility without indexed or legacy body scans', () => {
+  const {api, s} = viewer();
+  const host = {getBoundingClientRect:() => ({width:412, height:500})};
+  s.appState = {phone:true}; s.mode = 'side'; s.revision = 'head';
+  s.allowedSides = ['base', 'head']; s.available = {base:true, head:true};
+  s.hostsBySide = Object.fromEntries(s.allowedSides.map(side => [side, {...host, querySelector:() => null, classList:{toggle() {}}}]));
+  s.stage = host; s.renderer.setSize = () => {};
+  s.views = [{side:'head', host:s.hostsBySide.head, camera:{updateProjectionMatrix() {}}}];
+  s.groups = {forEach() { throw Error('resize scanned legacy groups'); }};
+  s.state.parts = {head:{find() { throw Error('resize scanned indexed parts'); }}};
+  const marker = {el:{}, physicalVisible:false};
+  s.state.highlights = [{ref:'hidden-part', side:'head', marker}];
+  api.resize();
+  assert.equal(marker.el.hidden, true);
+  marker.physicalVisible = true;
+  api.resize();
+  assert.equal(marker.el.hidden, false);
+  api.setRevision('base');
+  assert.equal(marker.el.hidden, true, 'routing hides the peer marker without recomputing physical visibility');
+});
+
 test('BR02 bare board releases independent outlines without resurrecting hidden selection', () => {
   const {api, s} = viewer();
   let detached = 0, geometries = 0, materials = 0;

@@ -1142,7 +1142,16 @@ function pickAt(vp, e) {
 function markSelected() { S.part3d = null; S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onPartPick = part => {
   S.s = null; markSelected(); S.part3d = {...part,box:part.box.slice()}; renderInspector(); saveHash();
-}; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled, lighting}) => { if (revision) S.revision = revision; if (assembled !== undefined) S.assembled3d = assembled; if (lighting) S.lighting3d = lighting; saveHash(); }; }
+}; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled, lighting, hiddenGroups, partSelection}) => {
+  if (revision) S.revision = revision;
+  if (assembled !== undefined) S.assembled3d = assembled;
+  if (lighting) S.lighting3d = lighting;
+  const part=S.part3d&&window.Review3D.state?.parts[S.part3d.side]?.find(p=>p.uuid===S.part3d.uuid);
+  if(S.part3d&&(partSelection===null||assembled===false||hiddenGroups?.some(g=>g==='bodies'||g===part?.side))) {
+    S.part3d=null;renderInspector();
+  }
+  saveHash();
+}; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
@@ -1542,7 +1551,7 @@ function renderPanel() {
     const side=row.side==='both'?(S.revision||'head'):row.side;
     const part=window.Review3D?.state?.parts[side]?.find(x=>x.ref===row.ref);
     if(part) {
-      const change=p.changes.find(c=>c.kind==='footprint'&&(side==='base'?(c.uuid_before||c.uuid):c.uuid)===part.uuid);
+      const change=window.Review3D.changeForPart(part.ref,side);
       if(change)window.Review3D.onPick(change.id);
       else {window.Review3D.onPartPick({...part,side});window.Review3D.focusPart(part.ref,side);}
     } else window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" });

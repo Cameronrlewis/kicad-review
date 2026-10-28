@@ -7,7 +7,7 @@ import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname, basename, extname } from "node:path";
 import { createServer } from "node:http";
-import { CHECKS } from "./checks.mjs";
+import { CHECKS, BR02_MESH_MISS_PREPARE } from "./checks.mjs";
 
 const args = process.argv.slice(2);
 const opt = k => { const i = args.indexOf(k); if (i < 0) return null; if (!args[i + 1] || args[i + 1].startsWith('--')) throw Error('Missing value for ' + k); return args.splice(i, 2)[1]; };
@@ -182,7 +182,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   }
   // BR02 processed mesh miss: prepare the overlapping geometry before real host-centre input.
   if (name === "BR02 processed overlapping box misses changed mesh") {
-    const prepared=await evaluate(`(async()=>{${expr}})()`);
+    const prepared=await evaluate(`(async()=>{${BR02_MESH_MISS_PREPARE}})()`);
     if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception?.description);
     const q=(await evaluate(`(()=>{if(!proj().board.parts3d)return null;const v=Review3D.state.views.find(v=>v.visible&&(!v.side||v.side==='head')),b=v.host.getBoundingClientRect();window.__br02PointerUp=new Promise(resolve=>v.host.addEventListener('pointerup',()=>resolve(true),{once:true}));return {x:b.left+b.width/2,y:b.top+b.height/2}})()`)).result?.value;
     if(q) {

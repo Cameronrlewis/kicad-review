@@ -342,7 +342,7 @@ window.Review3D = (() => {
       const r = v.host.getBoundingClientRect(); v.visible = !v.failed && !v.host.hidden && r.width > 0 && r.height > 0;
       if (v.visible) { v.camera.aspect = r.width / r.height; v.camera.updateProjectionMatrix(); }
     }
-    applyVisibility(); render();
+    applyMarkerVisibility(); render();
   }
   function boxEdges(size) {
     const {THREE} = window.THREE3D, box = new THREE.BoxGeometry(size.x, size.y, size.z);
@@ -410,6 +410,8 @@ window.Review3D = (() => {
   }
   function visibleNode(n) { for (; n; n = n.parent) if (!n.visible) return false; return true; }
   function visiblePart(p) { return active.assembled !== false && !active.hiddenBodies && !active.hiddenGroups.has(p.side); }
+  // One revision-local owner map serves picking, retained-mesh policy and the missing-model list.
+  function changeForPart(ref, side) { return active?.changesByRef[side]?.get(ref) || null; }
   function indexedHit(v, event) {
     const {THREE:T} = THREE3D, b = v.host.getBoundingClientRect(), ray = new T.Raycaster();
     ray.setFromCamera(new T.Vector2((event.clientX-b.left)/b.width*2-1, -(event.clientY-b.top)/b.height*2+1), v.camera);
@@ -417,9 +419,7 @@ window.Review3D = (() => {
       if (v.side && v.side !== side || !active.indexedSides.has(side)) return [];
       const root = sideRoot(active, side);
       if (!root || root.parent !== v.scene || !visibleNode(root)) return [];
-      const parts = active.state.parts[side], changed = new Set(active.changes
-        .filter(c => side === 'base' ? c.action !== 'added' : c.action !== 'removed')
-        .map(c => ThreeParts.reference(c, side, parts)));
+      const parts = active.state.parts[side], changed = active.changesByRef[side];
       const p = nearestPart(ray.ray, parts.filter(p => !p.hasModel || !changed.has(p.ref)), visiblePart);
       const point = p && ray.ray.intersectBox(p.bounds, new T.Vector3());
       const candidates = p ? [{...p, revision:side, distance:point.distanceTo(ray.ray.origin), meshHit:false}] : [];
@@ -446,8 +446,7 @@ window.Review3D = (() => {
     if(!active)return;
     const p=indexedHit(v,e);
     if(p) {
-      const c=active.changes.find(c=>ThreeParts.reference(c,p.revision,active.state.parts[p.revision])===p.ref&&
-        (p.revision==='base'?c.action!=='added':c.action!=='removed'));
+      const c=changeForPart(p.ref,p.revision);
       if(c)window.Review3D.onPick?.(c.id);
       else { window.Review3D.onPartPick?.({uuid:p.uuid,ref:p.ref,side:p.revision,box:p.box,hasModel:p.hasModel}); focusPart(p.ref,p.revision,false); }
       const b=v.host.getBoundingClientRect();
@@ -499,18 +498,24 @@ window.Review3D = (() => {
     render();
   }
   function focusIndexedChange(change,moveCamera=true) {
-    clearPartSelection();const {THREE:T}=THREE3D,box=new T.Box3();
+    clearPartSelection();clearPartTooltips();const {THREE:T}=THREE3D,box=new T.Box3();
     for(const side of active.state.visibleSides) {
       if(side==='base'&&change.action==='added'||side==='head'&&change.action==='removed')continue;
       const ref=ThreeParts.reference(change,side,active.state.parts[side]);
       if(active.indexedSides.has(side)) {
-        const b=appendPartOutline(ref,side);if(b)box.union(b);
+        const b=appendPartOutline(ref,side);if(b) {
+          box.union(b);
+          const part=active.state.parts[side].find(p=>p.ref===ref);
+          if(!part.hasModel)for(const v of active.views.filter(v=>v.visible&&(!v.side||v.side===side)))
+            tooltip(v,`${ref} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);
+        }
       } else if(physicalVisible(ref,side)) {
         const node=sideRoot(active,side)?.getObjectByName(ref);
         for(const v of active.views.filter(v=>v.visible&&(!v.side||v.side===side)&&node?.parent)) {
           const line=outline(v.scene,node,css('--accent'));line.ref=ref;line.side=side;
           line.userData={revision:side,uuid:side==='base'?(change.uuid_before||change.uuid):change.uuid};active.selected.push(line);
           box.union(new T.Box3().setFromObject(node));
+          if(node.userData.noModel)tooltip(v,`${ref} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);
         }
       }
     }
@@ -518,7 +523,7 @@ window.Review3D = (() => {
     render();
   }
   function tooltip(v,text,x,y,ms){ let el=v.host.querySelector(".tip3d");if(!el){el=document.createElement("span");el.className="tip3d";v.host.appendChild(el);}el.textContent=text;el.style.left=`${x}px`;el.style.top=`${y}px`;clearTimeout(v.tip);if(ms)v.tip=setTimeout(()=>el.remove(),ms); }
-  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);return own?[outline(v.scene,own,css("--accent"))]:[];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
+  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);if(!own)return [];const line=outline(v.scene,own,css("--accent"));line.ref=change.ref;line.side=active.allowedSides.find(side=>sideRoot(active,side)?.getObjectByName(change.ref)===own);return [line];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
   function setBlend(value){if(!active?.blend)return;active.blend.value=value;active.blend.base.forEach(m=>{m.transparent=true;m.opacity=1-value;});active.blend.head.forEach(m=>{m.transparent=true;m.opacity=value;});window.Review3D.state.blend=value;render();}
   function toggleBlend(){setBlend(active.blend.value<.5?1:0);}
   // Bare board hides every component: bodies, no-model blocks, change markers and baseline ghosts. No second file.
@@ -558,13 +563,25 @@ window.Review3D = (() => {
       else if(!shown)g.object.removeFromParent();
       g.object.visible=shown;g.object.traverse(n=>{if(n.isMesh)n.visible=shown;});
     }
-    for(const h of s.state.highlights)if(h.marker)h.marker.el.hidden=!physicalVisible(h.ref,h.side)||!s.views.some(v=>v.visible&&(!v.side||v.side===h.side));
+    for(const h of s.state.highlights)if(h.marker)h.marker.physicalVisible=physicalVisible(h.ref,h.side);
+    applyMarkerVisibility();
+  }
+  // Resize only changes viewport routing, not the bodies/groups' physical visibility.
+  function applyMarkerVisibility() {
+    const s=active;
+    for(const h of s.state.highlights)if(h.marker)h.marker.el.hidden=h.marker.physicalVisible===false||!s.views.some(v=>v.visible&&(!v.side||v.side===h.side));
   }
   function setHidden(hidden = []) {
     if (!active) return;
     active.hidden = hidden;active.hiddenGroups=new Set(hidden);active.hiddenBodies=active.hiddenGroups.has('bodies');
-    if(hidden.some(g=>['bodies','top','bottom'].includes(g))){clearPartSelection();clearPartTooltips();}
-    applyVisibility(); render();
+    if(hidden.some(g=>['bodies','top','bottom'].includes(g))) {
+      active.selected=active.selected.filter(o=>{
+        if(physicalVisible(o.ref,o.side))return true;
+        o.removeFromParent();o.traverse(free);return false;
+      });
+      active.state.selected=active.selected;clearPartTooltips();
+    }
+    applyVisibility();window.Review3D.onStateChange?.({hiddenGroups:hidden});render();
   }
   function cameraState() { const v=active?.views[0]; return v ? [...v.camera.position.toArray(), ...v.controls.target.toArray()].map(n => Math.round(n * 10000) / 10) : null; }
   function setCameraState(c) { if (!active || !Array.isArray(c) || c.length !== 6) return; active.views.forEach(v => { v.camera.position.set(c[0]/1000,c[1]/1000,c[2]/1000); v.controls.target.set(c[3]/1000,c[4]/1000,c[5]/1000); v.controls.update(); }); render(); }
@@ -612,11 +629,12 @@ window.Review3D = (() => {
   }
 
   async function show(stage, project, appState, {single = false} = {}) {
+    window.Review3D.onStateChange?.({partSelection:null});
     dispose();
     const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m;
     const session = active = {
       views:[], roots:[], changes:project.changes.filter(c => c.kind === 'footprint'),
-      refs:new Set(), indexedSides:new Set(), hiddenGroups:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
+      refs:new Set(), changesByRef:{}, indexedSides:new Set(), hiddenGroups:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
       revision:single ? 'head' : ['base', 'head'].includes(appState.revision) ? appState.revision : 'head',
       abort:new AbortController(), partWarn:new Set(), pending:new Map(), urls:new Set(), worker:null, nextId:0,
       assetId:0, assetNonce:crypto.randomUUID(), animationFrames:new Set(),
@@ -717,7 +735,12 @@ window.Review3D = (() => {
     };
     const [roots, ...parts] = await Promise.all([Promise.all(sides.map(loadSide)), ...sides.map(side => loadPartIndex(project.board, side, session))]);
     if (session.dead) return;
-    sides.forEach((side, i) => { state.parts[side] = parts[i]; });
+    sides.forEach((side, i) => {
+      state.parts[side] = parts[i];
+      session.changesByRef[side]=new Map(session.changes
+        .filter(c=>side==='base'?c.action!=='added':c.action!=='removed')
+        .map(c=>[ThreeParts.reference(c,side,parts[i]),c]));
+    });
     session.roots = state.roots = roots;
     const base = single ? null : roots[0], head = roots[sides.indexOf('head')], logicalRoots = [base, head];
     const box = new T.THREE.Box3(); roots.forEach(r => r && box.union(new T.THREE.Box3().setFromObject(r)));
@@ -786,5 +809,5 @@ window.Review3D = (() => {
   }
   // Node contracts consume the unchanged helper; the browser API stays private.
   if (typeof module === 'object' && module.exports) module.exports = {parseByDigest};
-  return {show,dispose,cameraBar,frame,focus,focusPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
+  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
 })();
