@@ -3540,6 +3540,37 @@ test('mode rendering handles only tagged asset failures and rethrows programming
   assert.match(context.messages[0].textContent, /Image unavailable: Asset unavailable/);
 });
 
+test('JSON asset corruption is tagged at decode, evicted, shown unavailable and retryable', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const body = source.slice(source.indexOf('  if (!view) stage.innerHTML'), source.indexOf('  assetRetry(stage);'));
+  for (const hosted of [false, true]) {
+    let attempts = 0;
+    const D = hosted ? { assetDescriptors: { [imageId]: { kind: 'json' } } }
+      : { assets: { [imageId]: { kind: 'json' } }, blobs: { [imageId]: gzipSync('{bad json').toString('base64') } };
+    const messages = [], cache = {};
+    const context = { D, cache, atob, Uint8Array, Blob, Response, DecompressionStream, messages,
+      repaired: gzipSync('{"version":1}').toString('base64'),
+      assetClient: { request: async () => ++attempts < 3 ? '{bad json' : '{"version":1}' },
+      document: { createElement: () => ({ setAttribute() {} }) } };
+    await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+      for(let i=0;i<2;i++) {
+        const view={}, S={m:'side'}, stage={append:m=>messages.push(m)},
+          MODES={side:async()=>{JSON.parse(await svgText('${imageId}'));}};
+        ${body}
+        if('${imageId}' in cache)throw Error('corrupt JSON cached');
+      }
+      if(D.blobs)D.blobs['${imageId}']=repaired;
+      if(JSON.parse(await svgText('${imageId}')).version!==1)throw Error('retry failed');
+    })()`, context);
+    assert.equal(messages.length, 2, hosted ? 'hosted' : 'embedded');
+    for (const message of messages) assert.match(message.textContent, /Image unavailable: Asset unavailable/);
+    if (hosted) assert.equal(attempts, 3);
+    assert.ok(cache[imageId], 'successful retry is cached');
+  }
+});
+
 test('asset decode failures are tagged and evicted so the next attempt can retry', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
   const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));

@@ -332,15 +332,27 @@ function svgText(id) {
   if (!id) return Promise.resolve(null);
   if (!(id in cache)) {
     const decode = async () => {
+      let text;
       if (typeof D.blobs?.[id] !== 'string') {
-        if (D.assetDescriptors?.[id]) return assetClient.request(id);
-        throw new AssetUnavailableError();
+        if (!D.assetDescriptors?.[id]) throw new AssetUnavailableError();
+        text = await assetClient.request(id);
+      } else {
+        // Only the untrusted base64/gzip decode boundary turns failures into asset errors.
+        try {
+          const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
+          text = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+        } catch { throw new AssetUnavailableError(); }
       }
-      // Only the untrusted base64/gzip decode boundary turns failures into asset errors.
-      try {
-        const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
-        return await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
-      } catch { throw new AssetUnavailableError(); }
+      // Validate declared JSON before caching text: corrupt data must fail as an asset,
+      // not later as a mode-render bug, and a retry must request/decode it again.
+      if ((D.assetDescriptors?.[id] || D.assets?.[id])?.kind === 'json') {
+        try { JSON.parse(text); }
+        catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+          throw new AssetUnavailableError();
+        }
+      }
+      return text;
     };
     const promise = cache[id] = decode();
     promise.catch(() => { if (cache[id] === promise) delete cache[id]; });
