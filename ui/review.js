@@ -798,9 +798,10 @@ async function draw() {
     if (boardView.useGL) gate?.finish(target.querySelectorAll('canvas[data-board-renderer]').length);
     else gate?.images([...target.querySelectorAll('img[data-image-artwork]')],mounts.expected,mounts.failed);
     target.setAttribute('aria-busy', 'false');
-    statusText('.status-message', target.querySelector('.image-error')?.textContent ||
-      (target.dataset.boardReady === String(my) ? boardView.note || 'Ready' :
-        mounts.failed ? 'Drawing unavailable' : mounts.expected === 0 ? (view ? 'No visible board artwork' : 'This drawing is unavailable in both revisions.') : 'Drawing unavailable'));
+    const drawingStatus = target.dataset.boardReady === String(my) ? boardView.note || 'Ready' :
+      mounts.failed || mounts.expected > 0 ? 'Drawing unavailable' :
+        view ? 'No visible board artwork' : 'This drawing is unavailable in both revisions.';
+    statusText('.status-message', target.querySelector('.image-error')?.textContent || drawingStatus);
   };
   $("#stage").setAttribute("aria-busy", "true");
   statusText('.status-message', 'Loading drawing…');
