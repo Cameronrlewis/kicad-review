@@ -1,3 +1,82 @@
+// These dependency-free browser functions are shared by CDP and Safari WebDriver
+// calibration. Compare actual composited screenshots, not a second SVG renderer.
+export async function softnessProbe(phase, scale) {
+  if (D.repo !== 'fixture/images') throw Error('image fixture required');
+  if (phase === 'full') {
+    await applyState({...S,v:'sheet:/left/',m:'side'});fit();
+    setT({x:140,y:109.8,z:S.z*scale});
+  } else {
+    const c=imageOwners()[0],vp=c.node.closest('.vp'),w=vp.clientWidth,h=vp.clientHeight;
+    c.endGesture(ImageView.cropRegion([S.x-w/(2*S.z),S.y-h/(2*S.z),w/S.z,h/S.z],[0,0,...currentView().size],c.viewBox));
+    for(let i=0;i<200&&!c.cropNode;i++)await new Promise(r=>setTimeout(r,10));
+    if(!c.cropNode?.complete)throw Error('vector crop not decoded');
+  }
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect();
+  return {left:r.left+vp.clientWidth/2+(138.5-S.x)*S.z,top:r.top+vp.clientHeight/2+(109.35-S.y)*S.z,
+    width:3*S.z,height:.85*S.z,zoom:S.z,viewport:[innerWidth,innerHeight],dpr:devicePixelRatio,userAgent:navigator.userAgent};
+}
+
+export async function softnessCompare(raw, rect) {
+  const images=await Promise.all(raw.map(async data=>{
+    const i=new Image();i.src='data:image/png;base64,'+data;await i.decode();
+    const c=document.createElement('canvas');c.width=i.width;c.height=i.height;
+    const x=c.getContext('2d');x.drawImage(i,0,0);
+    return {data:x.getImageData(0,0,c.width,c.height).data,w:c.width,h:c.height};
+  }));
+  const [a,b]=images,d=a.w/(visualViewport?.width||innerWidth);
+  if(a.w!==b.w||a.h!==b.h)throw Error('calibration screenshot dimensions changed');
+  let samples=0,changed=0,absoluteError=0,inkUnion=0,inkDisagreement=0,maxChannelError=0;
+  const counts=[0,0],bounds=[[Infinity,Infinity,-Infinity,-Infinity],[Infinity,Infinity,-Infinity,-Infinity]];
+  const masks=[new Set(),new Set()];
+  for(let y=Math.max(0,Math.floor(rect.top*d)-2);y<Math.min(a.h,Math.ceil((rect.top+rect.height)*d)+2);y++)
+    for(let x=Math.max(0,Math.floor(rect.left*d)-2);x<Math.min(a.w,Math.ceil((rect.left+rect.width)*d)+2);x++){
+      const k=(y*a.w+x)*4,ink=images.map(i=>i.data[k+1]>i.data[k]+30&&i.data[k+1]>i.data[k+2]+30);
+      samples++;
+      if(ink[0]||ink[1])inkUnion++;
+      if(ink[0]!==ink[1])inkDisagreement++;
+      let delta=0;
+      for(let j=0;j<3;j++){const error=Math.abs(a.data[k+j]-b.data[k+j]);absoluteError+=error;delta=Math.max(delta,error);}
+      if(delta>12)changed++;
+      maxChannelError=Math.max(maxChannelError,delta);
+      ink.forEach((present,i)=>{if(present){masks[i].add(y*a.w+x);counts[i]++;bounds[i][0]=Math.min(bounds[i][0],x);bounds[i][1]=Math.min(bounds[i][1],y);bounds[i][2]=Math.max(bounds[i][2],x);bounds[i][3]=Math.max(bounds[i][3],y);}});
+    }
+  if(!samples)throw Error('tiny-text region outside screenshot');
+  // Lost counters or merged/split strokes expose glyph-detail loss even when
+  // aggregate ink area and bounds happen to match. Low-scale subpixel glyphs
+  // are retained as observations, not mistaken for a raster-cap crossover.
+  const topology=masks.map((mask,i)=>{
+    if(!mask.size)return {components:0,holes:0};
+    const [x0,y0,x1,y1]=bounds[i],visited=new Set();let components=0,holes=0;
+    for(let y=y0-1;y<=y1+1;y++)for(let x=x0-1;x<=x1+1;x++){
+      const key=y*a.w+x;if(visited.has(key))continue;
+      const foreground=mask.has(key),todo=[[x,y]];let outside=false;visited.add(key);
+      while(todo.length){const [px,py]=todo.pop();
+        if(px===x0-1||px===x1+1||py===y0-1||py===y1+1)outside=true;
+        for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1],...(foreground?[[-1,-1],[-1,1],[1,-1],[1,1]]:[])]){
+          const nx=px+dx,ny=py+dy,n=ny*a.w+nx;
+          if(nx<x0-1||nx>x1+1||ny<y0-1||ny>y1+1||visited.has(n)||mask.has(n)!==foreground)continue;
+          visited.add(n);todo.push([nx,ny]);
+        }
+      }
+      if(foreground)components++;else if(!outside)holes++;
+    }
+    return {components,holes};
+  });
+  const regions=images.map(image=>{
+    const c=document.createElement('canvas'),x0=Math.max(0,Math.floor(rect.left*d)-2),y0=Math.max(0,Math.floor(rect.top*d)-2);
+    c.width=Math.min(image.w-x0,Math.ceil(rect.width*d)+4);c.height=Math.min(image.h-y0,Math.ceil(rect.height*d)+4);
+    const source=document.createElement('canvas');source.width=image.w;source.height=image.h;
+    source.getContext('2d').putImageData(new ImageData(image.data,image.w,image.h),0,0);
+    c.getContext('2d').drawImage(source,x0,y0,c.width,c.height,0,0,c.width,c.height);
+    return c.toDataURL('image/png').split(',')[1];
+  });
+  return {samples,changed,changedFraction:changed/samples,meanChannelError:absoluteError/(samples*3),maxChannelError,
+    inkUnion,inkDisagreement,inkDisagreementFraction:inkUnion?inkDisagreement/inkUnion:0,counts,bounds,topology,regions,
+    // This is a pixel-difference observation, not a universal softness trigger.
+    pixelIdentical:maxChannelError===0};
+}
+
 const BOARD_POINT_PROBE = `
     const occupied=({id,layer}={})=>{
       for(const pane of boardDiff.panes) for(const [side,scene] of Object.entries(pane.scenes)) {
@@ -59,6 +138,7 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
   if(snapshots.some(c=>!c.closest('.layer')||!c.closest('.stack')))return 'snapshot outside revision/layer';
   await wait(250);
   if(document.querySelector('.gesture-snapshot')||imageOwners().some(o=>o.node.hidden))return 'gesture did not restore source artwork';
+  if(imageOwners().some(o=>o.cropNode))return 'uncalibrated environment enabled automatic cropping';
   let picks=0;const pick=pickAt;pickAt=()=>picks++;
   try {
     const before=S.z;
@@ -127,7 +207,9 @@ export const CHECKS = [
     const parsed=new DOMParser().parseFromString(await (await fetch(owner.cropNode.src)).text(),'image/svg+xml');
     if(parsed.documentElement.getAttribute('viewBox')!==region.source.join(' '))return 'crop lost nonzero source origin';
     if(owner.cropNode.parentElement!==owner.node.parentElement||!owner.cropNode.closest('.stack.base'))return 'crop escaped revision/layer clipping';
-    if(!owner.cropNode.style.transform.startsWith('translate('+region.world[0]*PX+'px'))return 'crop lost world position';
+    const transform=new DOMMatrix(owner.cropNode.style.transform);
+    if(Math.abs(transform.m41-region.world[0]*PX)>1e-4||Math.abs(transform.m42-region.world[1]*PX)>1e-4||
+      Math.abs(transform.m11-PX/S.z)>1e-5||Math.abs(transform.m22-PX/S.z)>1e-5)return 'crop lost world position';
     owner.invalidateGesture();
     if(owner.node.hidden||vp.querySelector('[data-crop-view]'))return 'crop invalidation left stale artwork';
     setT({x:100,y:55,z:15});

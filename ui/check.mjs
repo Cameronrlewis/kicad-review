@@ -1,14 +1,15 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
 // Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark|--theme dark|light] [--width N] [--dpr N] [--offline]
 // --pixel-7 uses 412×915 DPR 2.625 mobile emulation.
+// --softness-dir DIR retains the 1×–64× full/crop screenshots and glyph metrics.
 // --gpu uses Metal; --mode side|overlay|wipe|blend|semantic selects board proof mode.
 // Theme proof: --persist-check --vision none|deuteranopia|protanopia|tritanopia --appearance-fixture theme.json --mark-style outline|recolour
 import { spawn, execFileSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdtempSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname, basename, extname } from "node:path";
 import { createServer } from "node:http";
-import { CHECKS } from "./checks.mjs";
+import { CHECKS, softnessProbe, softnessCompare } from "./checks.mjs";
 import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
@@ -36,6 +37,8 @@ const dpr = Number(opt("--dpr") || (pixel7?2.625:1));
 const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
 const perf = process.env.CHECK_PERF === "1";
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
+// Calibration evidence is opt-in and stays outside the source tree.
+const softnessDir = opt('--softness-dir');
 const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), filter = args[0] || "";
 if (args.length > 1 || args.some(a => a.startsWith("--"))) throw Error("Unknown arguments: " + args.join(" "));
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
@@ -246,29 +249,35 @@ if(name==='images active gesture pixels') {
   }
 }
   if(name==='images deep vector crop pixels') {
-    const prepared=await evaluate(`(async()=>{
-      if(D.repo!=='fixture/images')throw Error('image fixture required');
-      await applyState({...S,v:'sheet:/left/',m:'side'});fit();
-      setT({x:140,y:109.8,z:S.z*64});await new Promise(r=>setTimeout(r,50));return true;})()`);
-    if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception.description);
-    const before=(await send('Page.captureScreenshot',{format:'png'})).result.data;
-    const cropped=await evaluate(`(async()=>{
-      const c=imageOwners()[0],vp=c.node.closest('.vp'),w=vp.clientWidth,h=vp.clientHeight;
-      c.endGesture(ImageView.cropRegion([S.x-w/(2*S.z),S.y-h/(2*S.z),w/S.z,h/S.z],[0,0,...currentView().size],c.viewBox));
-      for(let i=0;i<200&&!c.cropNode;i++)await new Promise(r=>setTimeout(r,10));
-      if(!c.cropNode?.complete)throw Error('extreme crop not decoded');
-      const r=vp.getBoundingClientRect();return {left:r.left+w/2+(138.5-S.x)*S.z,top:r.top+h/2+(109.35-S.y)*S.z,width:3*S.z,height:.85*S.z};})()`);
-    if(cropped.exceptionDetails)throw Error(cropped.exceptionDetails.exception.description);
-    const after=(await send('Page.captureScreenshot',{format:'png'})).result.data;
-    const result=await evaluate(`(async()=>{
-      const read=async raw=>{const i=new Image();i.src='data:image/png;base64,'+raw;await i.decode();const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {data:x.getImageData(0,0,c.width,c.height).data,w:c.width,h:c.height};};
-      const images=await Promise.all(${JSON.stringify([before,after])}.map(read)),r=${JSON.stringify(cropped.result.value)};
-      return images.map(a=>{const d=a.w/(visualViewport?.width||innerWidth);let n=0,x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
-        for(let y=Math.max(0,Math.floor(r.top*d)-2);y<Math.min(a.h,Math.ceil((r.top+r.height)*d)+2);y++)for(let x=Math.max(0,Math.floor(r.left*d)-2);x<Math.min(a.w,Math.ceil((r.left+r.width)*d)+2);x++){
-          const k=(y*a.w+x)*4;if(a.data[k+1]>a.data[k]+30&&a.data[k+1]>a.data[k+2]+30){n++;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
-        }return {n,box:[x0,y0,x1,y1]};});})()`);
-    const [a,b]=result.result?.value||[];
-    if(!a?.n||!b?.n||Math.abs(a.n-b.n)/a.n>.05||a.box.some((v,i)=>Math.abs(v-b.box[i])>2))throw Error('extreme vector crop pixels: '+JSON.stringify([a,b]));
+    const measurements=[];
+    if(softnessDir)mkdirSync(softnessDir,{recursive:true});
+    for(const scale of [1,2,4,8,16,32,64]) {
+      const prepared=await evaluate(`(${softnessProbe.toString()})('full',${scale})`);
+      if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception.description);
+      const before=(await send('Page.captureScreenshot',{format:'png'})).result.data;
+      const cropped=await evaluate(`(${softnessProbe.toString()})('crop',${scale})`);
+      if(cropped.exceptionDetails)throw Error(cropped.exceptionDetails.exception.description);
+      const after=(await send('Page.captureScreenshot',{format:'png'})).result.data;
+      const result=await evaluate(`(${softnessCompare.toString()})(${JSON.stringify([before,after])},${JSON.stringify(prepared.result.value)})`);
+      if(result.exceptionDetails)throw Error(result.exceptionDetails.exception.description);
+      const pixels=result.result?.value;
+      if(!pixels?.samples||!pixels.counts[0]||!pixels.counts[1])throw Error('missing tiny-text ink at '+scale+'x: '+JSON.stringify(pixels));
+      const {regions,...metrics}=pixels;
+      measurements.push({scale,...prepared.result.value,pixels:metrics});
+      if(softnessDir)for(const [kind,data] of [['full',before],['crop',after],['full-glyphs',regions[0]],['crop-glyphs',regions[1]]])
+        writeFileSync(join(softnessDir,`${scale}x-${kind}.png`),Buffer.from(data,'base64'));
+      // Preserve the extreme-zoom crop registration regression independently of
+      // softness classification; sharpening must not move or drop the glyphs.
+      if(scale===64&&(Math.abs(metrics.counts[0]-metrics.counts[1])/metrics.counts[0]>.05||
+        metrics.bounds[0].some((v,i)=>Math.abs(v-metrics.bounds[1][i])>2)))
+        throw Error('extreme vector crop registration: '+JSON.stringify(metrics));
+      if(scale===64&&(metrics.topology[1].components!==6||metrics.topology[1].holes!==3))
+        throw Error('cropped SVG did not restore R16 10k glyph detail: '+JSON.stringify(metrics.topology));
+    }
+    const evidence={browser:(await send('Browser.getVersion')).result,theme,profile:pixel7?'Pixel 7 emulation':'desktop',
+      width,height,dpr,gpu,automaticCrop:false,measurements};
+    if(softnessDir)writeFileSync(join(softnessDir,'measurements.json'),JSON.stringify(evidence,null,2)+'\n');
+    console.log('SOFTNESS '+JSON.stringify(evidence));
   }
   let r = await evaluate(`(async () => { ${expr} })()`);
   if (r.result?.value === true && name === "Themes reload seed" && persistCheck) {

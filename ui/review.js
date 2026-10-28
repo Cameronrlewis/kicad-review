@@ -741,7 +741,9 @@ function configureImageGesture(owner,size) {
       const zoom=S.z,view=S.v,crop=await owner.crop(region.source),node=crop.node;
       crop.region=region;node.dataset.cropView=view;
       // Size at the capture zoom and translate in the compositor to avoid paint snapping.
-      node.style.cssText=`position:absolute;left:0;top:0;width:${region.world[2]*zoom}px;height:${region.world[3]*zoom}px;transform-origin:0 0;transform:translate(${region.world[0]*PX}px,${region.world[1]*PX}px) scale(${PX/zoom})`;
+      // Safari otherwise rasterizes the inverse scale before the world magnifies
+      // it again. Promote only this crop, preserving the revision/layer owners.
+      node.style.cssText=`position:absolute;left:0;top:0;width:${region.world[2]*zoom}px;height:${region.world[3]*zoom}px;transform-origin:0 0;transform:translate3d(${region.world[0]*PX}px,${region.world[1]*PX}px,0) scale(${PX/zoom})`;
       const dispose=crop.dispose.bind(crop);
       crop.dispose=()=>{if(owner.cropNode===node){owner.cropNode=null;if(owner.node)owner.node.hidden=false;}dispose();};
       return crop;
