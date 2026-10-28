@@ -3599,6 +3599,75 @@ test('JSON assets share one parsed value with mode consumers and keep the text A
   }
 });
 
+test('JSON asset caches retain only the parsed value without losing exact text access', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  for (const transport of ['embedded', 'hosted', 'legacy']) {
+    for (const textFirst of [true, false]) {
+      const text = ' { "version": 1, "items": [1, 2] }\n', cache = {};
+      const D = transport === 'hosted' ? { assetDescriptors: { [imageId]: { kind: 'json' } } }
+        : { blobs: { [imageId]: gzipSync(text).toString('base64') },
+          ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
+      let requests = 0, parses = 0;
+      const context = { D, cache, atob, Uint8Array, Blob, Response, DecompressionStream,
+        JSON: { parse: value => { parses++; return JSON.parse(value); } },
+        assetClient: { request: async () => { requests++; return text; } } };
+      await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+        const jobs=${textFirst ? `[svgText('${imageId}'),jsonAsset('${imageId}')]` : `[jsonAsset('${imageId}'),svgText('${imageId}')]`};
+        const values=await Promise.all(jobs), json=values[${textFirst ? 1 : 0}];
+        if(values[${textFirst ? 0 : 1}]!==${JSON.stringify(text)})throw Error('concurrent text changed');
+        const asset=await cache['${imageId}'];
+        if(Object.hasOwn(asset,'text'))throw Error('JSON cache retains source text');
+        if(Object.keys(asset).join()!=='json' || asset.json!==json)throw Error('parsed value not retained');
+        if(assetTextLoads.size)throw Error('settled text load retained');
+        if(await svgText('${imageId}')!==${JSON.stringify(text)})throw Error('late text access changed');
+        if(await jsonAsset('${imageId}')!==json)throw Error('late text access displaced parsed value');
+        if(assetTextLoads.size)throw Error('late text load retained');
+      })()`, context);
+      assert.equal(parses, 1, `${transport}: ${textFirst ? 'text' : 'JSON'} first shares one parse`);
+      // An explicit late text request decodes again instead of retaining a second large representation.
+      assert.equal(requests, transport === 'hosted' ? 2 : 0);
+    }
+  }
+  // SVG text is still cached; the memory policy applies only to parsed JSON.
+  let requests = 0;
+  const context = { D: { assetDescriptors: { [imageId]: { kind: 'svg' } } }, cache: {},
+    assetClient: { request: async () => { requests++; return imageText; } } };
+  await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+    if(await svgText('${imageId}')!==${JSON.stringify(imageText)})throw Error('SVG changed');
+    if(await svgText('${imageId}')!==${JSON.stringify(imageText)})throw Error('cached SVG changed');
+  })()`, context);
+  assert.equal(requests, 1);
+});
+
+test('asset text loads are discarded synchronously on view disposal', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const jobs = new Map();
+  let requests = 0;
+  const context = { D: { assetDescriptors: { [imageId]: { kind: 'json' } } }, cache: {},
+    assetClient: {
+      request(id) { requests++; return new Promise((resolve, reject) => jobs.set(id, { resolve, reject })); },
+      dispose() { const ids = [...jobs.keys()]; for (const job of jobs.values()) job.reject(new Error('disposed')); jobs.clear(); return ids; },
+    }, repair() { jobs.get(imageId).resolve('{"version":1}'); jobs.delete(imageId); } };
+  await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+    const stale=svgText('${imageId}'), rejected=stale.catch(()=>null);
+    disposeAssets();
+    if(assetTextLoads.size || '${imageId}' in cache)throw Error('disposed load retained');
+    const fresh=jsonAsset('${imageId}');
+    await rejected;
+    if(!assetTextLoads.has('${imageId}') || !('${imageId}' in cache))throw Error('stale rejection removed fresh load');
+    repair();
+    if((await fresh).version!==1)throw Error('new view could not load asset');
+    if(assetTextLoads.size)throw Error('settled new load retained');
+  })()`, context);
+  assert.equal(requests, 2, 'new view starts fresh transport before old rejection settles');
+  assert.match(source, /addEventListener\('pagehide', disposeAssets\)/);
+  assert.match(source.slice(source.indexOf('async function draw(')), /\n  disposeAssets\(\);/);
+});
+
 test('asset decode failures are tagged and evicted so the next attempt can retry', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
   const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));

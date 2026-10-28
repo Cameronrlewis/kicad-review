@@ -326,17 +326,21 @@ function createAssetClient(data) {
   };
 }
 const assetClient = createAssetClient(D);
-addEventListener('pagehide', () => assetClient.dispose());
+addEventListener('pagehide', disposeAssets);
 // Cache promises so concurrent draws share one gzip stream or parent request.
 function svgText(id) {
-  return decodedAsset(id).then(asset => asset?.text ?? null);
+  if (!id) return Promise.resolve(null);
+  if (assetTextLoads.has(id)) return Promise.all([assetTextLoads.get(id), decodedAsset(id)]).then(([text]) => text);
+  if (id in cache) return cache[id].then(asset => Object.hasOwn(asset, 'text') ? asset.text : assetText(id));
+  // Share the in-flight text with validation, without retaining it in a JSON cache record.
+  return Promise.all([assetText(id), decodedAsset(id)]).then(([text]) => text);
 }
 async function jsonAsset(id) {
   const pending = decodedAsset(id), asset = await pending;
   if (!asset) return null;
   // Legacy scene blobs have no declaration; parse them at this same data boundary.
   if (!Object.hasOwn(asset, 'json')) {
-    try { asset.json = parseAssetJSON(asset.text); }
+    try { asset.json = parseAssetJSON(asset.text); delete asset.text; }
     catch (error) { if (cache[id] === pending) delete cache[id]; throw error; }
   }
   return asset.json;
@@ -348,31 +352,49 @@ function parseAssetJSON(text) {
     throw new AssetUnavailableError();
   }
 }
+// Text lives here only while transport/decompression is in flight. Explicit text access
+// after JSON parsing decodes again, preserving exact source text without double retention.
+const assetTextLoads = new Map();
+function assetText(id) {
+  if (!assetTextLoads.has(id)) {
+    const load = async () => {
+      if (typeof D.blobs?.[id] !== 'string') {
+        if (!D.assetDescriptors?.[id]) throw new AssetUnavailableError();
+        return assetClient.request(id);
+      }
+      // Only the untrusted base64/gzip decode boundary turns failures into asset errors.
+      try {
+        const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
+        return await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      } catch { throw new AssetUnavailableError(); }
+    };
+    const promise = load();
+    assetTextLoads.set(id, promise);
+    const clear = () => { if (assetTextLoads.get(id) === promise) assetTextLoads.delete(id); };
+    promise.then(clear, clear);
+  }
+  return assetTextLoads.get(id);
+}
 function decodedAsset(id) {
   if (!id) return Promise.resolve(null);
   if (!(id in cache)) {
     const decode = async () => {
-      let text;
-      if (typeof D.blobs?.[id] !== 'string') {
-        if (!D.assetDescriptors?.[id]) throw new AssetUnavailableError();
-        text = await assetClient.request(id);
-      } else {
-        // Only the untrusted base64/gzip decode boundary turns failures into asset errors.
-        try {
-          const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
-          text = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
-        } catch { throw new AssetUnavailableError(); }
-      }
-      // Keep text compatibility and share the parsed JSON with mode consumers.
-      // Corruption fails before caching and remains retryable, not a render bug.
-      const asset = { text };
-      if ((D.assetDescriptors?.[id] || D.assets?.[id])?.kind === 'json') asset.json = parseAssetJSON(text);
-      return asset;
+      const text = await assetText(id);
+      // Share the parsed JSON alone with mode consumers; corruption stays retryable.
+      return (D.assetDescriptors?.[id] || D.assets?.[id])?.kind === 'json'
+        ? { json: parseAssetJSON(text) } : { text };
     };
     const promise = cache[id] = decode();
     promise.catch(() => { if (cache[id] === promise) delete cache[id]; });
   }
   return cache[id];
+}
+function disposeAssets() {
+  for (const id of assetClient.dispose()) {
+    delete cache[id];
+    // Rejecting transport is synchronous; do not let the next view reuse its old promise.
+    assetTextLoads.delete(id);
+  }
 }
 function assetRetry(stage) {
   for (const message of stage.querySelectorAll('.image-error')) {
@@ -660,7 +682,7 @@ function viewport(stage, label, kind) {
 }
 let gen = 0;
 async function draw() {
-  for (const id of assetClient.dispose()) delete cache[id];
+  disposeAssets();
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
   Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
   schematicResize.disconnect();
