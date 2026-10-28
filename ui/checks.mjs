@@ -1304,6 +1304,9 @@ return true;
       if(document.querySelector('[data-coordinate=x]').textContent!=='-10.875' ||
          document.querySelector('[data-coordinate=y]').textContent!=='33.625') return 'mapping';
     }
+    // Publish the camera before checking that leaving the drawing preserves it.
+    // Image draws publish readiness and the hash together, before the debounce.
+    saveHash(true);
     const hash=location.hash; resetCoordinates();
     // Bench: leaving the drawing keeps the last reading, greyed as off canvas.
     if(!document.querySelector('.status-coordinates.off-canvas')) return 'stale';
@@ -2060,7 +2063,14 @@ return true;
   ["added footprint card shows its footprint and layer", "p=0", `
     const r = REVIEW_DATA.projects[0].changes.find(r => r.kind === "footprint" && r.action === "added" && r.props.layer);
     // Bench: property dumps moved from the card to the bottom inspector.
-    document.querySelector('#panel .card[data-id="' + r.id + '"]').click(); await new Promise(res => setTimeout(res, 1500));
+    // Find the card through the public page controls, not only the first page.
+    let card;
+    while (!(card=document.querySelector('#panel .card[data-id="' + r.id + '"]'))) {
+      const next=document.querySelector('#panel [data-change-page="next"]:not(:disabled)');
+      if(!next)return 'added footprint card missing from Changes pages';
+      next.click();
+    }
+    card.click(); await new Promise(res => setTimeout(res, 1500));
     const t = document.querySelector('#inspector').textContent;
     return t.includes(r.props.footprint) && t.includes(r.props.layer);`],
   ["address with selection and position keeps the position", "p=1&v=board&x=150&y=100&z=8&s=c600", `
@@ -2866,14 +2876,18 @@ return true;
     const scene = c => ({version:1,units:"um",complete:c,warnings:[],bounds:[0,0,8000,5000],layers:[{id:0,name:"F.Cu",type:"signal",enabled:true}],nets:[{id:0,name:""}],objects:[]});
     D.blobs.glOk = await gz(JSON.stringify(scene(true))); D.blobs.glPart = await gz(JSON.stringify(scene(false))); D.blobs.glBad = await gz("{nope");
     const saved = p.board.geometry, create = BoardGL.create, status = () => document.querySelector("#statusbar .status-message").textContent;
-    const svgOk = () => !!document.querySelector(".stack .layer") && !document.querySelector(".board-gl");
+    const svgOk = () => {
+      const stage=document.querySelector('#stage'),images=[...stage.querySelectorAll('img[data-image-artwork]')];
+      return images.length>0 && images.every(i=>i.complete&&i.naturalWidth>0) && !stage.querySelector('.board-gl')
+        && stage.dataset.boardBackend==='images' && stage.dataset.boardReady===stage.dataset.generation;
+    };
     try {
       S.v = "board"; S.m = "side";
       delete p.board.geometry;
       for (const m of ["side","overlay","wipe","blend","semantic"]) { S.m = m; await draw(); if (!svgOk()) return "no geometry " + m; }
       S.m = "side"; p.board.geometry = {base:"glOk", head:"glOk"};
       BoardGL.create = () => null; boardView.failed = null; await draw();
-      if (!svgOk() || !status().includes("WebGL unavailable")) return "missing WebGL2 " + status();
+      if (!svgOk() || !status().includes("WebGL unavailable")) return "missing WebGL2 " + status() + ' ' + JSON.stringify({expected:boardMountState.expected,failed:boardMountState.failed,images:document.querySelectorAll('#stage img[data-image-artwork]').length,note:boardView.note});
       BoardGL.create = create; boardView.failed = null;
       for (const [key, g] of [["corrupt", {base:"glBad", head:"glOk"}], ["incomplete", {base:"glOk", head:"glPart"}]]) {
         p.board.geometry = g; await draw();
@@ -3638,7 +3652,7 @@ return true;
   ["board side camera retains textures and buffers", "v=board&m=side", `
     const P=proj(), saved=P.board.geometry;
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,1000,1000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[]};
-    const key='__retained_side_proof__';cache[key]=JSON.stringify(scene);P.board.geometry={base:key,head:key};
+    const key='__retained_side_proof__';cache[key]=Promise.resolve({json:scene});P.board.geometry={base:key,head:key};
     try {
       S.v='board';S.m='side';await draw();fit();
       if(boardView.renderers.length!==2) return 'two retained renderers required';
@@ -3650,10 +3664,10 @@ return true;
   ["board comparison cameras retain revision net textures", "v=board&m=side", `
     const P=proj(), saved=P.board.geometry, keys=['__camera_base__','__camera_head__'];
     if(!saved) {
-      for(const [i,key] of keys.entries()) cache[key]=JSON.stringify({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,4000,4000],
+      for(const [i,key] of keys.entries()) cache[key]=Promise.resolve({json:{version:1,units:'um',complete:true,warnings:[],bounds:[0,0,4000,4000],
         layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''},{id:1,name:i?'VCC':'GND'}],
         objects:[{kind:'track',uuid:key,changeUuid:key,ref:'',layers:['F.Cu'],net:1,category:'tracks',side:null,hidden:false,
-          box:[0,0,4000,1000],geometry:{segments:[[500,500,3500,500,500]]}}]});
+          box:[0,0,4000,1000],geometry:{segments:[[500,500,3500,500,500]]}}]}});
       P.board.geometry={base:keys[0],head:keys[1]};
     }
     try { for(const mode of ['side','overlay','wipe','blend','semantic']) {
@@ -5075,7 +5089,7 @@ return true;
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,20000,10000],copperStack:names,
       layers:names.map((name,id)=>({id,name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
       objects:[track('back','B.Cu',1000,19000,4000),track('inner','In1.Cu',1000,19000,4000),track('single','In2.Cu',2000,14000),track('overlap','In2.Cu',10000,18000)]};
-    cache.vfopacity=JSON.stringify(scene);proj().board.geometry={base:'vfopacity',head:'vfopacity'};
+    cache.vfopacity=Promise.resolve({json:scene});proj().board.geometry={base:'vfopacity',head:'vfopacity'};
     boardView.failed=null;Appearance.reset();Object.assign(S,{v:'board',m:'side',t:'appearance',x:10,y:5,z:40});renderPanel();await draw();
     Appearance.patch({activeLayer:'In2.Cu'});
     const row=document.querySelector('#appearance-root [data-layer="In2.Cu"]');if(!row)throw Error('missing In2.Cu row');

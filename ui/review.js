@@ -904,8 +904,12 @@ async function draw() {
   if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
   noChangeNotice(stage);
   if (my !== gen) { releaseImageStage(stage); return; }
-  releaseImageStage($("#stage"));
-  $("#stage").replaceWith(stage);
+  // A failed GL mount already connected this stage. Keep its new fallback images.
+  const previous = $("#stage");
+  if (previous !== stage) {
+    releaseImageStage(previous);
+    previous.replaceWith(stage);
+  }
   appearanceSchematics.clear();
   for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) {
     if (c.sheet) appearanceSchematics.add(c);
