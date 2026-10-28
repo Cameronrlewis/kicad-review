@@ -30,6 +30,7 @@ jobs:
       - run: node ui/check.mjs
       - run: node ui/check.mjs --dark
       - run: node ui/check.mjs --no-skip "Waivers"
+      - run: node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "selection-only address"
       - run: node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"
       - run: node ui/check.mjs --no-skip "passing checks with baseline findings"

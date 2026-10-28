@@ -155,6 +155,8 @@ return true;
   `],
   ["images fallback selected export palettes", "", `
     const originalText=svgText,theme=KRTheme.get(),stacks=[];
+    // The 100x50 synthetic full-bleed fixture makes (20,20) a stable RGB sample.
+    // Missing dark head intentionally selects the light export and its light source RGB.
     const sources={
       'palette-light':'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><path fill="#123456" d="M0 0H100V50H0Z"/><path fill="#abcdef" d="M80 0H100V10H80Z"/></svg>',
       'palette-dark':'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><path fill="rgb(101, 67, 33)" d="M0 0H100V50H0Z"/><path fill="#abcdef" d="M80 0H100V10H80Z"/></svg>'
