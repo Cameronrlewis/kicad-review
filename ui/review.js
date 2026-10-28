@@ -59,7 +59,7 @@ addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
   const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
   const [x, y] = p?.point || toWorld(vp, e);
-  const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp))
+  const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp),e.pointerType==='touch')
     : boardDiff ? (hit ? geometryAnchor(hit) : p?.side && pointAnchor(x,y,p.side))
     : anchorAt(x,y,sideOf(vp));
   if (anchor && anchor.file) parent.postMessage({ kicadReviewPin: anchor }, "*");
@@ -1454,10 +1454,14 @@ function visibleImageLayers(graph) {
   const layers=glAppearance().layers;
   return new Set(graph.layers.filter(l=>{const a=layers[canon(l)];return a&&a.visible!==false&&a.color[3]*a.opacity>0;}));
 }
+function sheetPinAt(side,point,touch=false) {
+  const reach=Math.max(.15,(touch?12:6)/S.z);
+  return sheetImageElements(side).flatMap(e=>(e.pins||[]).map(p=>({e,p,d:Math.hypot(p.x-point[0],p.y-point[1])})))
+    .filter(p=>p.d<=reach).sort((a,b)=>a.d-b.d)[0];
+}
 function pickImageAt(vp,event) {
   const point=boardDiff?.point(vp,event)?.point||toWorld(vp,event);
   const sides=boardDiff?boardDiff.sidesAt(vp,point):imageSides(vp,point);
-  const reach=Math.max(.15,(event.pointerType==='touch'?12:6)/S.z);
   for(const side of sides) {
     if(S.v==='board') {
       const g=currentImageGraph(side);if(!g)continue;
@@ -1465,8 +1469,7 @@ function pickImageAt(vp,event) {
       if(record){chooseImage(record,side,g.pads.includes(record)?'pad':g.vias.includes(record)?'via':'track',point);return true;}
     } else if(S.v.startsWith('sheet:')) {
       const elements=sheetImageElements(side);
-      const pin=elements.flatMap(e=>(e.pins||[]).map(p=>({e,p,d:Math.hypot(p.x-point[0],p.y-point[1])})))
-        .filter(p=>p.d<=reach).sort((a,b)=>a.d-b.d)[0];
+      const pin=sheetPinAt(side,point,event.pointerType==='touch');
       if(pin){chooseImage(pin.e,side,'pin',[pin.p.x,pin.p.y],pin.p);return true;}
       const e=elements.filter(e=>point[0]>=e.bbox[0]&&point[0]<=e.bbox[2]&&point[1]>=e.bbox[1]&&point[1]<=e.bbox[3])
         .sort((a,b)=>(a.bbox[2]-a.bbox[0])*(a.bbox[3]-a.bbox[1])-(b.bbox[2]-b.bbox[0])*(b.bbox[3]-b.bbox[1]))[0];
@@ -1824,7 +1827,7 @@ function hotspotViews(P,side) {
   const ids=new Set(P.sheets.map(s=>s.hotspots?.[side]).filter(Boolean));
   return [...ids].flatMap(id=>decodedSheetHotspots.get(id)?.views||[]);
 }
-function anchorAt(x, y, side) {
+function anchorAt(x, y, side, touch=false) {
   const P = proj();
   if (!S.v || S.v === "3d") return null;
   const file = viewFile(P, S.v);
@@ -1836,10 +1839,11 @@ function anchorAt(x, y, side) {
               side, commit: side === "base" ? D.base : D.head, severity: "comment" };
   const selection=S.imageSelection;
   if(selection?.kind==='pin'&&selection.side===side&&selection.sheet===S.v.slice(6)) {
-    if(Math.hypot(x-selection.point[0],y-selection.point[1])>.002)return {...a,target:"point",uuid:null,kind:null,ref:null,x:round3(x),y:round3(y)};
-    const pin=hotspotViews(P,side).find(v=>v.sheet===selection.sheet)?.elements
-      .find(e=>e.uuid===selection.uuid&&e.unit===selection.unit)?.pins
-      .find(p=>p.number===selection.pin&&Math.hypot(p.x-selection.point[0],p.y-selection.point[1])<=.002);
+    // Use inspection's pointer reach; .002 mm only validates the stored endpoint geometry.
+    const picked=sheetPinAt(side,[x,y],touch);
+    const pin=picked?.e.uuid===selection.uuid&&picked.e.unit===selection.unit&&picked.p.number===selection.pin
+      &&Math.hypot(picked.p.x-selection.point[0],picked.p.y-selection.point[1])<=.002?picked.p:null;
+    if(!pin)return {...a,target:"point",uuid:null,kind:null,ref:null,x:round3(x),y:round3(y)};
     if(pin)return {...a,target:'object',uuid:selection.uuid,kind:'symbol',ref:selection.ref,
       x:round3(pin.x),y:round3(pin.y)};
   }
@@ -1872,7 +1876,9 @@ function resolveAnchor(a) {
     if(pin){
       if(Math.hypot(pin.pos[0]-a.x,pin.pos[1]-a.y)>.01)notes.push(`moved since ${short(a.commit)}`);
       const basePin=ImageView.pinPosition(a,source,hotspotViews(P,'base'));
-      return {view:'sheet:'+a.sheet,side:destination,pos:pin.pos,pos_before:basePin?.pos,notes:[...notes,...pin.notes]};}
+      const hasBase=!!basePin&&!basePin.notes.length;
+      return {view:'sheet:'+a.sheet,side:destination,pos:pin.pos,pos_before:hasBase?basePin.pos:undefined,
+        added:!hasBase,notes:[...notes,...pin.notes]};}
     // No positive source-pin match: fall through to the unchanged ordinary object resolver.
     // v1 has no pin discriminator; absence of source geometry is not evidence of a pin.
   }

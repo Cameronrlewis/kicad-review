@@ -316,41 +316,86 @@ export const CHECKS = [
       } finally {P.objects=oldObjects;P.sheets.forEach((s,i)=>{if(oldMaps[i])s.hotspots=oldMaps[i];});}
     }
     {
-      await applyState({...S,v:'sheet:/right/',m:'side'});
-      // Keep synthetic MouseEvent integer-pixel rounding within the .002 mm endpoint tolerance.
-      setT({x:100,y:55,z:1000});
-      S.imageSelection={kind:'pin',side:'base',sheet:'/right/',uuid:'placed',ref:'U2',unit:'2',pin:'3',point:[100,55]};
-      const vp=document.querySelector('#stage .stack.base')?.closest('.vp');
-      if(!vp)return 'base schematic viewport missing';
-      const r=vp.getBoundingClientRect(), posted=[], oldPost=parent.postMessage;
-      const world=vp.querySelector('.world'), wr=world.getBoundingClientRect();
-      const point=new DOMPoint(100*PX,55*PX).matrixTransform(new DOMMatrix(getComputedStyle(world).transform));
-      const origin=world.parentElement.getBoundingClientRect();
+      const saved={...S}, oldPost=parent.postMessage;
       try {
-        parent.postMessage=(message)=>posted.push(message);
-        proposePin(vp,new MouseEvent('click',{clientX:origin.left+point.x,clientY:origin.top+point.y}));
-      } finally {parent.postMessage=oldPost;}
-      const anchor=posted.find(m=>m.kicadReviewPin)?.kicadReviewPin;
-      if(!anchor||anchor.uuid!=='placed'||anchor.sheet!=='/right/'||anchor.x!==100||anchor.y!==55)return 'posted pin moved to symbol origin';
-      acceptThreads([{id:'image-pin-reopen',anchor,resolved:false,comments:[]}]);
-      await openThread('image-pin-reopen');drawPins();
-      const resolved=resolveAnchor(anchor);
-      if(!resolved.notes.some(n=>n.startsWith('moved since')))return 'moved pin note missing';
-      const background=anchorAt(99,49,'base');
-      if(background.target!=='point'||background.uuid!==null)return 'stale selected pin captured background placement';
-      if(resolved.pos[0]!==102.54||resolved.pos[1]!==55||resolved.view!=='sheet:/right/')return 'reopened pin misplaced';
-      // Existing drawPins uses millimetres through PX on .pin buttons; compare the bottom-center tip screen position
-      // to the reopened resolver position via its world transform, not to symbol placement.
-      const headViewport=document.querySelector('#stage .stack.head')?.closest('.vp');
-      const button=headViewport?.querySelector('.world .pin[data-thread="image-pin-reopen"]');
-      if(!button)return 'reopened pin not drawn';
-      const b=button.getBoundingClientRect(), pinWorld=button.closest('.world');
-      const expected=new DOMPoint(resolved.pos[0]*PX,resolved.pos[1]*PX).matrixTransform(new DOMMatrix(getComputedStyle(pinWorld).transform));
-      const pinRect=pinWorld.parentElement.getBoundingClientRect();
-      if(Math.hypot((b.left+b.right)/2-pinRect.left-expected.x,b.bottom-pinRect.top-expected.y)>2)return 'rendered thread pin not at endpoint';
-      const selected=hotspotViews(proj(),'head').find(v=>v.sheet==='/right/').elements.find(e=>e.uuid==='placed');
-      chooseImage(selected,'head','pin',resolved.pos,selected.pins.find(p=>p.number==='3'));
-      if(!document.querySelector('#inspector').textContent.includes('U2'))return 'reopened pin inspector missing';
+        await applyState({...S,v:'sheet:/right/',m:'side',x:100,y:55,z:8});
+        const vp=document.querySelector('#stage .stack.base')?.closest('.vp');
+        if(!vp)return 'base schematic viewport missing';
+        const posted=[];
+        const world=vp.querySelector('.world');
+        const point=new DOMPoint(100*PX,55*PX).matrixTransform(new DOMMatrix(getComputedStyle(world).transform));
+        const origin=world.parentElement.getBoundingClientRect();
+        try {
+          parent.postMessage=(message)=>posted.push(message);
+          if(typeof window.__checkMouseClick!=='function')return 'trusted mouse input unavailable';
+          const click=(x,y,button='left')=>new Promise(resolve=>{
+            window.__checkMouseDone=resolve;window.__checkMouseClick(JSON.stringify({x,y,button}));
+          });
+          const x=origin.left+point.x+3,y=origin.top+point.y+2;
+          let trusted=false;vp.addEventListener('click',e=>{trusted=e.isTrusted;},{once:true});
+          await click(x,y);
+          if(!trusted||S.imageSelection?.kind!=='pin'||S.imageSelection.side!=='base')return 'trusted pin inspection missing';
+          S.placing=true;
+          await click(x,y);
+          if(S.placing)return 'trusted placement click missed viewport';
+          // The context action uses the same raw pointer, not the selected world point.
+          const oldThreads=THREADS_ON;
+          try {
+            THREADS_ON=true;await click(x,y,'right');
+            const comment=[...document.querySelectorAll('.bench-context button')].find(b=>b.textContent==='Comment here');
+            if(!comment)return 'pin context comment missing';
+            const r=comment.getBoundingClientRect();await click(r.left+r.width/2,r.top+r.height/2);
+          } finally {THREADS_ON=oldThreads;closeBenchMenu(false);}
+          if(posted.filter(m=>m.kicadReviewPin).length!==2)return 'both pin posting entry points required';
+          if(posted.filter(m=>m.kicadReviewPin).some(m=>m.kicadReviewPin.x!==100||m.kicadReviewPin.y!==55||m.kicadReviewPin.uuid!=='placed'))return 'context pin endpoint misplaced';
+        } finally {parent.postMessage=oldPost;}
+        if(anchorAt(100+9/S.z,55,'base').target!=='point')return 'mouse reach exceeded';
+        if(anchorAt(100+9/S.z,55,'base',true).uuid!=='placed')return 'touch pin reach missing';
+        if(anchorAt(100+13/S.z,55,'base',true).target!=='point')return 'touch reach exceeded';
+        const element=sheetImageElements('base').find(e=>e.uuid==='placed'), oldPins=element.pins;
+        try {
+          element.pins=[...oldPins,{number:'other',name:'other',x:100.5,y:55}];
+          if(anchorAt(100.45,55,'base').target!=='point')return 'selected pin stole nearer endpoint';
+        } finally {element.pins=oldPins;}
+        const anchor=posted.find(m=>m.kicadReviewPin)?.kicadReviewPin;
+        if(!anchor||anchor.uuid!=='placed'||anchor.sheet!=='/right/'||anchor.x!==100||anchor.y!==55)return 'posted pin moved to symbol origin';
+        const P=proj(), oldMaps=P.sheets.map(s=>s.hotspots);
+        try {
+          P.sheets.forEach(s=>{s.hotspots={...s.hotspots};delete s.hotspots.base;});
+          const headOnly=resolveAnchor({...anchor,commit:D.head,side:'head',x:102.54});
+          if(headOnly.pos_before!==undefined||!headOnly.added)return 'unavailable base fabricated before pin';
+          acceptThreads([{id:'image-pin-head-only',anchor:{...anchor,commit:D.head,side:'head',x:102.54},resolved:false,comments:[]}]);
+          drawPins();
+          if(vp.querySelector('.pin[data-thread="image-pin-head-only"]'))return 'unavailable base pin marker drawn';
+          if(!document.querySelector('#stage .stack.head').closest('.vp').querySelector('.pin[data-thread="image-pin-head-only"]'))return 'head-only pin marker missing';
+        } finally {P.sheets.forEach((s,i)=>{s.hotspots=oldMaps[i];});}
+        acceptThreads([{id:'image-pin-reopen',anchor,resolved:false,comments:[]}]);
+        await openThread('image-pin-reopen');drawPins();
+        const resolved=resolveAnchor(anchor);
+        if(!resolved.notes.some(n=>n.startsWith('moved since')))return 'moved pin note missing';
+        const background=anchorAt(99,49,'base');
+        if(background.target!=='point'||background.uuid!==null)return 'stale selected pin captured background placement';
+        if(resolved.pos[0]!==102.54||resolved.pos[1]!==55||resolved.view!=='sheet:/right/')return 'reopened pin misplaced';
+        // Existing drawPins uses millimetres through PX on .pin buttons; compare the bottom-center tip screen position
+        // to the reopened resolver position via its world transform, not to symbol placement.
+        const headViewport=document.querySelector('#stage .stack.head')?.closest('.vp');
+        const button=headViewport?.querySelector('.world .pin[data-thread="image-pin-reopen"]');
+        if(!button)return 'reopened pin not drawn';
+        const b=button.getBoundingClientRect(), pinWorld=button.closest('.world');
+        const expected=new DOMPoint(resolved.pos[0]*PX,resolved.pos[1]*PX).matrixTransform(new DOMMatrix(getComputedStyle(pinWorld).transform));
+        const pinRect=pinWorld.parentElement.getBoundingClientRect();
+        if(Math.hypot((b.left+b.right)/2-pinRect.left-expected.x,b.bottom-pinRect.top-expected.y)>2)return 'rendered thread pin not at endpoint';
+        const selected=hotspotViews(proj(),'head').find(v=>v.sheet==='/right/').elements.find(e=>e.uuid==='placed');
+        chooseImage(selected,'head','pin',resolved.pos,selected.pins.find(p=>p.number==='3'));
+        if(!document.querySelector('#inspector').textContent.includes('U2'))return 'reopened pin inspector missing';
+      } finally {
+        parent.postMessage=oldPost;delete window.__checkMouseDone;
+        document.body.classList.toggle('placing',!!saved.placing);
+        for(const key of Object.keys(S))if(!Object.hasOwn(saved,key))delete S[key];
+        Object.assign(S,saved);
+        await applyState(saved);Object.assign(S,saved);
+        renderPanel();renderInspector();drawImageSelection();drawPins();saveHash();
+      }
     }
     return true;
   `],

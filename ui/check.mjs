@@ -74,6 +74,16 @@ let id = 0, navigations = 0; const pend = {}, errors = [];
 const onMessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
   if (m.method === "Page.frameNavigated" && !m.params.frame.parentId) navigations++;
   if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate(`window.KRTheme.set(${JSON.stringify(m.params.payload)}); window.__themeFlipped()`)); }
+  if (m.method === "Runtime.bindingCalled" && m.params.name === "__checkMouseClick") {
+    const {x,y,button='left'}=JSON.parse(m.params.payload);
+    (async()=>{
+      for(const type of ['mouseMoved','mousePressed','mouseReleased']) {
+        const result=await send('Input.dispatchMouseEvent',{type,x,y,button,buttons:type==='mousePressed'?(button==='right'?2:1):0,clickCount:1});
+        if(result.error)throw Error(result.error.message);
+      }
+      await evaluate('window.__checkMouseDone()');
+    })().catch(error=>{errors.push(error.message);evaluate('window.__checkMouseDone()');});
+  }
   if (m.method === "Runtime.consoleAPICalled") {
     const text = m.params.args.map(a => a.value ?? "").join(" ");
     if (/^BOARD_(FPS|PROOF) /.test(text)) console.log(text);
@@ -85,6 +95,7 @@ const evaluate = async expr => (await send("Runtime.evaluate", { expression: exp
 async function setupTab() {
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
+await send("Runtime.addBinding", { name:"__checkMouseClick" });
 await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: pixel7 });
 await send("Emulation.setTouchEmulationEnabled", { enabled: pixel7, maxTouchPoints: pixel7 ? 5 : 1 });
 await send("Emulation.setCPUThrottlingRate", { rate: pixel7 ? 4 : 1 });
