@@ -75,6 +75,39 @@ function viewer() {
   return {api:window.Review3D, s, previous, controls, events, fail:value => fail = value, disposed:() => disposed};
 }
 
+test('BR02 comparison clones separate source and action while reusing identical pairs', () => {
+  class Color {
+    constructor(value) { this.value = value; }
+    lerp(c, weight) { this.value = `${this.value}:${c.value}:${weight}`; return this; }
+    copy(c) { this.value = c.value; return this; }
+  }
+  const material = () => ({color:new Color('original'), emissive:new Color('black'), opacity:.72,
+    clone() { return {...this, color:new Color(this.color.value), emissive:new Color(this.emissive.value)}; }});
+  const window = {THREE3D:{THREE:{Color}}};
+  const document = {createElement:() => ({}), head:{appendChild() {}}};
+  const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8')
+    .replace('let active = null, bundle;', 'let active = null, bundle; window.testComparison = (s, root, c) => {active=s; return cloneMaterials(root,c);};');
+  runInNewContext(source, {window, document, DOMException,
+    getComputedStyle:() => ({getPropertyValue:key => key})});
+  const s = {comparisonMaterials:new Map(), materials:new Set()}, shared = material(), other = material();
+  const highlight = (original, action) => {
+    const mesh = {isMesh:true, material:original};
+    return window.testComparison(s, {traverse:fn => fn(mesh)}, {action}).materials[0];
+  };
+  const clones = ['added', 'removed', 'modified'].map(action => highlight(shared, action));
+  assert.equal(new Set(clones).size, 3, 'different actions must not share a tinted clone');
+  for (const [i, action] of ['added', 'removed', 'modified'].entries()) {
+    assert.equal(clones[i], highlight(shared, action), 'same source/action reuses its clone');
+    assert.equal(clones[i].color.value, `original:--${action}:0.7`);
+    assert.equal(clones[i].emissive.value, `--${action}`);
+    assert.equal(clones[i].opacity, .72);
+  }
+  assert.notEqual(highlight(other, 'added'), clones[0], 'distinct sources remain separate');
+  assert.equal(s.materials.size, 4, 'each clone registered once for disposal');
+  assert.equal(shared.color.value, 'original');
+  assert.equal(shared.emissive.value, 'black');
+});
+
 test('BR02 lighting normalization rejects inherited rig keys', () => {
   const {api} = viewer();
   for (const rig of ['toString', 'constructor', '__proto__']) {

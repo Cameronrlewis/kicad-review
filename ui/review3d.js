@@ -351,11 +351,14 @@ window.Review3D = (() => {
   // Selection outline: the part's bounding box in --accent, drawn over everything. ponytail: box, not silhouette; per-mesh edges were an unreadable tangle.
   function outline(scene, node, colour) { const { THREE }=window.THREE3D, b=new THREE.Box3().setFromObject(node), size=b.getSize(new THREE.Vector3()), e=new THREE.LineSegments(boxEdges(size),new THREE.LineBasicMaterial({color:colour,depthTest:false})); e.position.copy(b.getCenter(new THREE.Vector3())); e.renderOrder=10;e.raycast=()=>{}; scene.add(e); return e; }
   function comparisonMaterial(source, change) {
-    const s = active; let n = s.comparisonMaterials.get(source);
+    const s = active;
+    let actions = s.comparisonMaterials.get(source);
+    if (!actions) s.comparisonMaterials.set(source, actions = new Map());
+    let n = actions.get(change.action);
     if (!n) {
       n = source.clone();
       const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; }
-      s.comparisonMaterials.set(source, n); s.materials.add(n);
+      actions.set(change.action, n); s.materials.add(n);
     }
     return n;
   }
