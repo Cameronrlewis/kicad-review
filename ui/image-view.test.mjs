@@ -672,3 +672,41 @@ test('pin endpoint matching isolates sheets and units and rejects changed or amb
   assert.equal(ctx.ImageView.pinPosition({...a,kind:'footprint'},source,target),null);
   assert.equal(ctx.ImageView.pinPosition(a,[{sheet:'/left/',elements:[element]}],target),null);
 });
+
+test('asset client ignores foreign window and releases pending on navigation',async()=>{
+  let listener,sent;const scope={addEventListener:(_,fn)=>listener=fn,removeEventListener(){listener=null;}};
+  const host={postMessage:m=>sent=m};
+  const c=ctx.ImageView.assetClient(host,{abcdef123456:{kind:'svg'}},scope);
+  let settled=false;const value=c.get('abcdef123456','svg').then(v=>{settled=true;return v;});
+  listener({source:{},data:{kicadReviewAssetResult:{...sent.kicadReviewAsset,text:'forged'}}});
+  await Promise.resolve();assert.equal(settled,false);
+  listener({source:host,data:{kicadReviewAssetResult:{...sent.kicadReviewAsset,text:'<svg/>'}}});
+  assert.equal(await value,'<svg/>');
+  const pending=c.get('abcdef123456','svg');c.dispose();
+  await assert.rejects(pending,/disposed/);assert.equal(listener,null);
+  await assert.rejects(c.get('../../secret','svg'),/unavailable/);
+});
+
+test('asset client bounds jobs and bytes, times out, and isolates replacement views',async()=>{
+  const timers=new Map(),listeners=new Set(),sent=[];let serial=0;
+  const local={TextEncoder,setTimeout:(fn,ms)=>{assert.equal(ms,15000);timers.set(++serial,fn);return serial;},clearTimeout:id=>timers.delete(id)};
+  vm.createContext(local);vm.runInContext(fs.readFileSync(new URL('./image-view.js',import.meta.url),'utf8'),local);
+  const host={postMessage:m=>sent.push(m.kicadReviewAsset)},scope={addEventListener:(_,f)=>listeners.add(f),removeEventListener:(_,f)=>listeners.delete(f)};
+  const allowed={abcdef123456:{kind:'svg'},abcdef123457:{kind:'json'}};
+  const first=local.ImageView.assetClient(host,allowed,scope);
+  const jobs=Array.from({length:8},()=>first.get('abcdef123456','svg'));
+  const rejections=jobs.map(p=>assert.rejects(p,/timeout; retry available/));
+  await assert.rejects(first.get('abcdef123456','svg'),/unavailable/);assert.equal(sent.length,8);
+  for(const [id,fn] of [...timers]){timers.delete(id);fn();}await Promise.all(rejections);
+  const pending=first.get('abcdef123457','json'),bad=assert.rejects(pending,/unavailable/);
+  for(const listener of listeners)listener({source:host,data:{kicadReviewAssetResult:{...sent.at(-1),text:'é'.repeat(2*1024*1024+1)}}});
+  await bad;assert.equal(timers.size,0);
+  const stale=first.get('abcdef123456','svg'),disposed=assert.rejects(stale,/disposed/),old=sent.at(-1);
+  first.dispose();await disposed;assert.equal(listeners.size,0);assert.equal(timers.size,0);
+  const next=local.ImageView.assetClient(host,allowed,scope),fresh=next.get('abcdef123456','svg');
+  let settled=false;fresh.then(()=>settled=true);
+  for(const listener of listeners)listener({source:host,data:{kicadReviewAssetResult:{...old,text:'stale'}}});
+  await Promise.resolve();assert.equal(settled,false);assert.notEqual(old.requestId,sent.at(-1).requestId);
+  for(const listener of listeners)listener({source:host,data:{kicadReviewAssetResult:{...sent.at(-1),text:'<svg/>'}}});
+  assert.equal(await fresh,'<svg/>');next.dispose();assert.equal(timers.size,0);
+});

@@ -443,7 +443,7 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
 # Only expected runtime type checks remain; reject stray typeof scaffolding.
-allowed_typeof = ("typeof value.text === 'string'", "typeof D.blobs?.[id] !== 'string'",
+allowed_typeof = ("typeof D.blobs?.[id] !== 'string'",
                   "typeof v === 'object'", "typeof v === 'string'",
                   "typeof v === 'number' && Number.isFinite(v)", "typeof v === 'number' ? finite(v)",
                   "typeof o.hidden === 'boolean'", "typeof m.truncated[k] === 'boolean'")

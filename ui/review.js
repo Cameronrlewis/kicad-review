@@ -275,60 +275,10 @@ const PX = 4;                       // CSS px per mm at z = PX
 const cache = {};
 // Asset failures may be shown as retryable; programming errors must still surface.
 class AssetUnavailableError extends Error {
-  constructor() { super('Asset unavailable. Try again.'); this.name = 'AssetUnavailableError'; }
+  constructor(message='Asset unavailable. Try again.') { super(message); this.name = 'AssetUnavailableError'; }
 }
-// The opaque hosted frame never fetches. Its parent owns authenticated delivery.
-function createAssetClient(data) {
-  const pending = new Map(), queue = [];
-  const nonce = crypto.randomUUID().replaceAll('-', '');
-  let serial = 0, active = 0;
-  const unavailable = () => new AssetUnavailableError();
-  const pump = () => {
-    while (active < 8 && queue.length) {
-      const job = queue.shift();
-      if (!pending.has(job.requestId)) continue;
-      job.sent = true; active++;
-      parent.postMessage({ kicadReviewAsset: { requestId: job.requestId, digest: job.digest, kind: job.kind } }, '*');
-    }
-  };
-  const finish = (job, text, error) => {
-    if (!pending.delete(job.requestId)) return;
-    clearTimeout(job.timer);
-    if (job.sent) active--;
-    if (error) job.reject(unavailable()); else job.resolve(text);
-    pump();
-  };
-  addEventListener('message', event => {
-    if (event.source !== parent) return;
-    const value = event.data?.kicadReviewAssetResult;
-    const job = value && pending.get(value.requestId);
-    if (!job || !job.sent || value.digest !== job.digest) return;
-    const limit = (job.kind === 'svg' ? 8 : 4) * 1024 * 1024;
-    const ok = !value.error && typeof value.text === 'string' && value.text.length <= limit
-      && new TextEncoder().encode(value.text).byteLength <= limit;
-    finish(job, value.text, !ok);
-  });
-  return {
-    request(digest) {
-      const kind = data.assetDescriptors?.[digest]?.kind;
-      if (parent === window || !/^[0-9a-f]{12}$/.test(digest) || !['svg', 'json'].includes(kind) || pending.size >= 128)
-        return Promise.reject(unavailable());
-      return new Promise((resolve, reject) => {
-        const requestId = `asset_${nonce}_${++serial}`, job = { requestId, digest, kind, resolve, reject, sent: false };
-        job.timer = setTimeout(() => finish(job, null, true), 15000);
-        pending.set(requestId, job); queue.push(job); pump();
-      });
-    },
-    dispose() {
-      // Empty the queue first: rejecting old jobs must not send more old-view work.
-      queue.length = 0;
-      const digests = [...pending.values()].map(job => job.digest);
-      for (const job of [...pending.values()]) finish(job, null, true);
-      return digests;
-    },
-  };
-}
-const assetClient = createAssetClient(D);
+// The opaque hosted frame never fetches. Its view-owned parent client is lazy.
+let imageAssetClient=null;
 addEventListener('pagehide', disposeAssets);
 // Cache promises so concurrent draws share one gzip stream or parent request.
 function svgText(id) {
@@ -473,8 +423,10 @@ function assetText(id) {
   if (!assetTextLoads.has(id)) {
     const load = async () => {
       if (typeof D.blobs?.[id] !== 'string') {
-        if (!D.assetDescriptors?.[id]) throw new AssetUnavailableError();
-        return assetClient.request(id);
+        if (!D.assets?.[id] || parent === window) throw new AssetUnavailableError();
+        imageAssetClient ||= ImageView.assetClient(parent,D.assets);
+        try { return await imageAssetClient.get(id,D.assets[id].kind); }
+        catch (error) { throw new AssetUnavailableError(error.message); }
       }
       // Only the untrusted base64/gzip decode boundary turns failures into asset errors.
       try {
@@ -495,7 +447,7 @@ function decodedAsset(id) {
     const decode = async () => {
       const text = await assetText(id);
       // Share the parsed JSON alone with mode consumers; corruption stays retryable.
-      return (D.assetDescriptors?.[id] || D.assets?.[id])?.kind === 'json'
+      return D.assets?.[id]?.kind === 'json'
         ? { json: parseAssetJSON(text) } : { text };
     };
     const promise = cache[id] = decode();
@@ -504,7 +456,8 @@ function decodedAsset(id) {
   return cache[id];
 }
 function disposeAssets() {
-  for (const id of assetClient.dispose()) {
+  imageAssetClient?.dispose(); imageAssetClient=null;
+  for (const id of assetTextLoads.keys()) {
     delete cache[id];
     // Rejecting transport is synchronous; do not let the next view reuse its old promise.
     assetTextLoads.delete(id);
@@ -512,6 +465,13 @@ function disposeAssets() {
 }
 function assetRetry(stage) {
   for (const message of stage.querySelectorAll('.image-error')) {
+    // Status and retry stay screen-sized, outside the zoomed drawing world.
+    const vp=message.closest('.vp');
+    if(vp) {
+      let notices=vp.querySelector(':scope > .image-errors');
+      if(!notices) {notices=document.createElement('div');notices.className='image-errors';vp.append(notices);}
+      notices.append(message);
+    }
     if (message.querySelector('button')) continue;
     const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Try again';
     retry.onclick = () => draw(); message.append(' ', retry);

@@ -284,6 +284,34 @@
       :{pos:[a.x,a.y],notes:['pin endpoint unavailable in this revision; retaining original point']};
   }
 
+  let assetClientSerial=0;
+  // One opaque-frame client per view; only its parent can complete declared requests.
+  function assetClient(host,allowed,scope=window) {
+    const pending=new Map(),prefix='asset-'+(++assetClientSerial)+'-';let serial=0,disposed=false;
+    const limit=kind=>kind==='svg'?8*1024*1024:4*1024*1024;
+    const receive=e=>{
+      const r=e.data?.kicadReviewAssetResult,p=pending.get(r?.requestId);
+      if(e.source!==host||!p||r.digest!==p.digest)return;
+      pending.delete(r.requestId);clearTimeout(p.timer);
+      if(r.error||typeof r.text!=='string'||new TextEncoder().encode(r.text).length>limit(p.kind))p.reject(Error('Asset unavailable'));
+      else p.resolve(r.text);
+    };
+    scope.addEventListener('message',receive);
+    return {
+      get(digest,kind){
+        if(disposed||pending.size>=8||!/^[0-9a-f]{12}$/.test(digest)||!['svg','json'].includes(kind)||allowed[digest]?.kind!==kind)return Promise.reject(Error('Asset unavailable'));
+        const requestId=prefix+(++serial);
+        return new Promise((resolve,reject)=>{
+          const timer=setTimeout(()=>{pending.delete(requestId);reject(Error('Asset timeout; retry available'));},15000);
+          pending.set(requestId,{digest,kind,resolve,reject,timer});
+          host.postMessage({kicadReviewAsset:{requestId,digest,kind}},'*');
+        });
+      },
+      dispose(){disposed=true;scope.removeEventListener('message',receive);
+        for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('Asset view disposed'));}pending.clear();}
+    };
+  }
+
   const live = new Set();
   async function mount(text, size, options) {
     const c=controller(text,options), dispose=c.dispose.bind(c);
@@ -291,7 +319,7 @@
     try {await c.setAppearance(new Map());return c;}
     catch(error){c.dispose();throw error;}
   }
-  globalThis.ImageView={snapshotScale,wheelFactor,gestureSession,vectorCrop,cropRegion,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
+  globalThis.ImageView={assetClient,snapshotScale,wheelFactor,gestureSession,vectorCrop,cropRegion,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
     disposeAll(){for(const c of [...live])c.dispose();},
     segmentDistance,polygonDistance,primitiveDistance,inspectHit,searchComponents,searchNets,pinPosition};
 })();

@@ -318,66 +318,46 @@ function reviewOverflow(items) {
   return `<details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${items}<button type="button" data-review-copy>Copy link</button><label>Go to<input data-review-goto aria-label="Go to saved review position" placeholder="Paste a review link"></label><input data-review-copyfield aria-label="Link to copy" readonly hidden></div></details>`;
 }
 // This parent owns the only network capability. The child supplies identities, not URLs.
-export function reportAssetBridge(iframe, base) {
-  const pending = new Map();
-  let generation = 0;
-  const unavailable = 'Asset unavailable. Try again.';
-  const reply = (value, ticket) => { if (ticket === generation) iframe.contentWindow?.postMessage({ kicadReviewAssetResult: value }, '*'); };
-  const dispose = () => {
-    generation++;
-    for (const entry of pending.values()) { clearTimeout(entry.timer); entry.controller.abort(); }
-    pending.clear();
-  };
-  addEventListener('pagehide', dispose);
-  addEventListener('message', async event => {
-    if (event.source !== iframe.contentWindow) return;
-    const value = event.data?.kicadReviewAsset;
-    if (!value || typeof value.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.requestId)) return;
-    const { requestId, digest, kind } = value, ticket = generation;
-    if (pending.has(requestId)) return; // Duplicate IDs cannot displace an in-flight request.
-    if (Object.keys(value).some(k => !['requestId', 'digest', 'kind'].includes(k))
-      || typeof digest !== 'string' || !/^[0-9a-f]{12}$/.test(digest)
-      || !['svg', 'json'].includes(kind) || pending.size >= 8) {
-      reply({ requestId, digest, error: unavailable }, ticket); return;
-    }
-    const controller = new AbortController(), entry = { controller, timer: null };
-    const finish = result => {
-      if (pending.get(requestId) !== entry) return;
-      clearTimeout(entry.timer); pending.delete(requestId);
-      reply({ requestId, digest, ...result }, ticket);
-    };
-    entry.timer = setTimeout(() => { controller.abort(); finish({ error: unavailable }); }, 15000);
-    pending.set(requestId, entry);
+export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
+  let declarations,disposed=false;const jobs=new Map();
+  const manifest=()=>declarations ||= fetcher(raw,{credentials:'include',cache:'no-cache',signal:AbortSignal.timeout(15000)}).then(async r=>{
+    if(!r.ok)throw Error('Asset unavailable');
+    const text=await r.text(),prefix='<script>window.REVIEW_DATA = ',start=text.indexOf(prefix);
+    if(start<0)throw Error('Asset unavailable');
+    const end=text.indexOf('<'+'/script>',start);
+    return JSON.parse(text.slice(start+prefix.length,end).trim().replace(/;$/,'')).assets||{};
+  }).catch(e=>{declarations=null;throw e;});
+  const receive=async e=>{
+    const a=e.data?.kicadReviewAsset;
+    if(disposed||e.source!==iframe.contentWindow||!a||typeof a.requestId!=='string'||!/^[\w-]{1,64}$/.test(a.requestId)
+      ||!/^[0-9a-f]{12}$/.test(a.digest)||!['svg','json'].includes(a.kind)||jobs.has(a.requestId))return;
+    const reply={requestId:a.requestId,digest:a.digest};
+    if(jobs.size>=8){iframe.contentWindow.postMessage({kicadReviewAssetResult:{...reply,error:'Busy; retry'}},'*');return;}
+    const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),15000);jobs.set(a.requestId,{abort,timer});
     try {
-      const result = await fetch(`${base}${digest}.${kind}`, { credentials: 'same-origin', redirect: 'error', signal: controller.signal });
-      // The authenticated route checks the stored declaration, repository access and
-      // expiry before issuing these headers. Never trust a declaration from the child.
-      const mime = kind === 'svg' ? 'image/svg+xml' : 'application/json';
-      if (!result.ok || !result.body || result.headers.get('Content-Type') !== mime
-        || result.headers.get('ETag') !== `"${digest}"`) throw new Error(unavailable);
-      const limit = (kind === 'svg' ? 8 : 4) * 1024 * 1024;
-      const reader = result.body.getReader(), decoder = new TextDecoder('utf-8', { fatal: true });
-      let size = 0, text = '';
-      try {
-        while (true) {
-          const { done, value: chunk } = await reader.read();
-          if (done) break;
-          size += chunk.byteLength;
-          if (size > limit) throw new Error(unavailable);
-          text += decoder.decode(chunk, { stream: true });
-        }
-        text += decoder.decode();
-      } catch (error) { await reader.cancel().catch(() => {}); throw error; }
-      finally { reader.releaseLock(); }
-      finish({ text });
-    } catch { controller.abort(); finish({ error: unavailable }); }
-  });
-  return { dispose };
+      const allowed=await manifest();
+      if(disposed||abort.signal.aborted||allowed[a.digest]?.kind!==a.kind)throw Error('Asset unavailable');
+      const response=await fetcher(raw.replace(/\/raw$/,'')+'/assets/'+a.digest+'.'+a.kind,
+        {credentials:'include',cache:'no-cache',signal:abort.signal});
+      if(!response.ok||!response.body)throw Error('Asset unavailable');
+      const reader=response.body.getReader(),parts=[];let size=0;
+      const max=(a.kind==='svg'?8:4)*1024*1024;
+      try {for(;;){const {value,done}=await reader.read();if(done)break;
+        size+=value.byteLength;if(size>max)throw Error('Asset too large');parts.push(value);}}
+      finally {await reader.cancel();reader.releaseLock();}
+      reply.text=await new Blob(parts).text();
+    } catch {reply.error='Asset unavailable; retry';}
+    finally {clearTimeout(timer);jobs.delete(a.requestId);}
+    if(!disposed)iframe.contentWindow.postMessage({kicadReviewAssetResult:reply},'*');
+  };
+  scope.addEventListener('message',receive);
+  return ()=>{disposed=true;scope.removeEventListener('message',receive);for(const job of jobs.values()){clearTimeout(job.timer);job.abort.abort();}jobs.clear();};
 }
 
 function reportFrameScript(raw) {
-  const bridge = raw.startsWith('/r/') ? `const assetBridge = (${reportAssetBridge.toString()})(iframe, ${JSON.stringify(raw.replace(/\/raw$/, '/assets/'))});` : 'const assetBridge = null;';
-  return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); ${bridge} const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; document.querySelector('[data-review-copy]').onclick = async () => { try { await navigator.clipboard.writeText(location.href); } catch { const input = document.querySelector('[data-review-copyfield]'); input.hidden = false; input.value = location.href; input.focus(); input.select(); } }; document.querySelector('[data-review-goto]').onchange = event => { const text = event.target.value; const i = text.indexOf('#'); if (i >= 0) location.hash = text.slice(i); event.target.value = ''; }; const load = (showLoading) => { assetBridge?.dispose(); if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); const syncTheme = () => { const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; iframe.contentWindow?.postMessage({ kicadReviewTheme: theme }, '*'); }; new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] }); iframe.addEventListener('load', () => { syncTheme(); fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) { loading.hidden = true; syncTheme(); } if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
+  const authenticated = /^\/r\/[^/]+\/[^/]+\/a\/\d{1,20}\/raw$/.test(raw);
+  const assetSetup = authenticated ? `const assetParentFactory=(${assetParent.toString()});let disposeAssets=null;` : 'let disposeAssets=null;';
+  return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; ${assetSetup} let reportedHash; let fallback; document.querySelector('[data-review-copy]').onclick = async () => { try { await navigator.clipboard.writeText(location.href); } catch { const input = document.querySelector('[data-review-copyfield]'); input.hidden = false; input.value = location.href; input.focus(); input.select(); } }; document.querySelector('[data-review-goto]').onchange = event => { const text = event.target.value; const i = text.indexOf('#'); if (i >= 0) location.hash = text.slice(i); event.target.value = ''; }; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } disposeAssets?.(); disposeAssets=null; ${authenticated ? `disposeAssets=assetParentFactory(iframe,raw);` : ''} iframe.src = raw + location.hash; }; addEventListener('pagehide',()=>{disposeAssets?.();disposeAssets=null;}); load(true); const syncTheme = () => { const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; iframe.contentWindow?.postMessage({ kicadReviewTheme: theme }, '*'); }; new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] }); iframe.addEventListener('load', () => { syncTheme(); fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) { loading.hidden = true; syncTheme(); } if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
 }
 
 export function sharedPage({ token, name }) {

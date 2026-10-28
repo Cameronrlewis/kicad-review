@@ -354,7 +354,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
-    return sessionResponse(await currentBody(await storedReport(artifact, active), { hosted: true }), {
+    return sessionResponse(await currentBody(await storedReport(artifact, active), { lazyAssets: true }), {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Security-Policy': reportCsp,

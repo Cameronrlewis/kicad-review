@@ -416,7 +416,8 @@ test('review page keeps its loading overlay until the framed report is ready and
   assert.match(page, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true/);
   assert.match(page, /setTimeout[\s\S]*20000/);
   assert.match(page, /pointer-events: none/);
-  assert.match(page, /const load = \(showLoading\) => \{ assetBridge\?\.dispose\(\); if \(showLoading\) \{ loading\.hidden = false; clearTimeout\(fallback\); \} iframe\.src = raw \+ location\.hash; \}; load\(true\);/);
+  assert.match(page, /assetParentFactory/);
+  assert.match(page, /disposeAssets\?\.\(\); disposeAssets=null; disposeAssets=assetParentFactory\(iframe,raw\); iframe\.src = raw \+ location\.hash;/);
   const hashchange = page.match(/addEventListener\('hashchange', \(\) => \{ if \(location\.hash !== reportedHash\) load\(false\); \}\);/);
   assert.ok(hashchange, 'hash changes forward without requesting the loading overlay');
   assert.doesNotMatch(hashchange[0], /loading\.hidden = false|clearTimeout/);
@@ -2081,7 +2082,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), 'fd193261863387167d11d69e7baadf796f937021e5c6683d331f9cf2c247d249');
+  assert.equal(createHash('sha256').update(current).digest('hex'), '94384b153514ac7c04bc0dafc1e9b16cd0ab90ad455438b3abc2c4bfc9eb17c4');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -3287,7 +3288,6 @@ test('data with replacement patterns is inserted literally', () => {
 
 // Task 9.1: authenticated image delivery and the opaque-frame bridge.
 import { assetFromReport, readStoredData, privateAsset } from './worker.js';
-import { reportAssetBridge } from './pages.js';
 import { gzipSync, gunzipSync } from 'node:zlib';
 const imageId = 'abcdef123456';
 const imageText = '<svg xmlns="http://www.w3.org/2000/svg"/>';
@@ -3309,10 +3309,10 @@ test('asset extraction only accepts declared digest and kind', () => {
 
 test('hosted asset descriptors strip only eligible blobs; offline and guest keep every blob', () => {
   const stored = storedImageReport();
-  const hosted = readStoredData(currentReport(stored, { hosted: true }));
+  const hosted = readStoredData(currentReport(stored, { lazyAssets: true }));
   assert.equal(hosted.blobs[imageId], undefined);
   assert.equal(hosted.blobs.deadbeef0000, 'kept-glb');
-  assert.deepEqual(hosted.assetDescriptors, { [imageId]: { kind: 'svg' } });
+  assert.deepEqual(hosted.assets, imageData().assets);
   assert.deepEqual(hosted.unknown, { keep: true });
   assert.deepEqual(readStoredData(currentReport(stored)), imageData());
   assert.equal(readStoredData(stored).blobs[imageId], imageData().blobs[imageId]);
@@ -3388,7 +3388,7 @@ test('hosted wrapper never downloads the envelope; raw and each asset read it on
     const options = { headers: { Cookie: `s=${sealed}` } };
     const page = await call('/r/Cameronrlewis/repo/a/42', options);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /reportAssetBridge/);
+    assert.match(await page.text(), /assetParentFactory/);
     assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42']);
     for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
       const result = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, options);
@@ -3400,17 +3400,12 @@ test('hosted wrapper never downloads the envelope; raw and each asset read it on
   } finally { restore(); }
 });
 
-test('asset bridge validates server-declared kind and digest before reading response bytes', async () => {
-  for (const headers of [
-    {}, { 'Content-Type': 'application/json', ETag: `"${imageId}"` },
-    { 'Content-Type': 'image/svg+xml' },
-    { 'Content-Type': 'image/svg+xml', ETag: '"deadbeef0000"' },
-  ]) {
+test('asset parent validates server-declared kind and digest before reading response bytes', async () => {
+  for (const manifest of [{}, {assets: {[imageId]: {kind: 'json'}}}, {assets: {deadbeef0000: {kind: 'svg'}}}]) {
     let reads = 0;
-    const h = assetBridgeHarness({ fetcher: async () => ({ ok: true, headers: new Headers(headers),
-      body: { getReader() { reads++; return new Response(imageText).body.getReader(); } } }) });
+    const h = assetBridgeHarness({ manifest, fetcher: async () => { reads++; return new Response(imageText); } });
     await h.message({ requestId: 'invalid', digest: imageId, kind: 'svg' });
-    assert.equal(reads, 0, 'unverified response bytes must not be decoded');
+    assert.equal(reads, 0, 'undeclared response bytes must not be requested');
     assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
     assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, undefined);
   }
@@ -3419,26 +3414,35 @@ test('asset bridge validates server-declared kind and digest before reading resp
 const assetHeaders = (digest = imageId, kind = 'svg') => ({
   'Content-Type': kind === 'svg' ? 'image/svg+xml' : 'application/json', ETag: `"${digest}"`,
 });
-function assetBridgeHarness({ fetcher = async () => new Response(imageText, { headers: assetHeaders() }) } = {}) {
+function assetBridgeHarness({ fetcher = async () => new Response(imageText, { headers: assetHeaders() }),
+  manifest = {assets: {[imageId]: {kind: 'svg'}, deadbeef1111: {kind: 'json'}}}, realManifest = false } = {}) {
   const listeners = {}, sent = [], calls = [], timers = new Map(); let timerId = 0;
-  const iframe = { contentWindow: { postMessage: message => sent.push(message) }, addEventListener: (n, f) => { listeners[`frame:${n}`] = f; } };
-  runInNewContext(`(${reportAssetBridge.toString()})(iframe, '/r/o/r/a/42/assets/')`, {
-    iframe,
-    addEventListener: (n, f) => { listeners[n] = f; }, AbortController, TextDecoder, Uint8Array,
+  const iframe = { contentWindow: { postMessage: message => sent.push(message) } };
+  const scope = {addEventListener: (n, f) => { listeners[n] = f; }, removeEventListener: n => { delete listeners[n]; }};
+  const stop = runInNewContext(`(${assetParent.toString()})(iframe, '/r/o/r/a/42/raw', scope, fetcher)`, {
+    iframe, scope, AbortController, AbortSignal, Blob,
     setTimeout: f => { timers.set(++timerId, f); return timerId; }, clearTimeout: id => timers.delete(id),
-    fetch: (url, options) => { calls.push([url, options]); return fetcher(url, options); },
+    fetcher: (url, options) => {
+      calls.push([url, options]);
+      return url.endsWith('/raw') && !realManifest
+        ? Promise.resolve(new Response('<script>window.REVIEW_DATA = '+JSON.stringify(manifest)+';</script>'))
+        : fetcher(url, options);
+    },
   });
-  return { sent, calls, timers, listeners, message: (value, source = iframe.contentWindow) => listeners.message({ source, data: { kicadReviewAsset: value } }) };
+  listeners.pagehide = stop;
+  return { sent, calls, timers, listeners, stop, message: (value, source = iframe.contentWindow) => listeners.message({ source, data: { kicadReviewAsset: value } }) };
 }
 const settleAsset = async () => { for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
-test('asset bridge rejects foreign windows, URL injection, forged IDs and unsupported kinds', async () => {
+test('asset bridge ignores foreign windows, forged IDs and unsupported kinds', async () => {
   const h = assetBridgeHarness(); const valid = { requestId: 'r1', digest: imageId, kind: 'svg' };
   h.message(valid, {});
-  for (const bad of [{ ...valid, url: 'https://attacker.example' }, { ...valid, requestId: {} }, { ...valid, requestId: 'x'.repeat(129) }, { ...valid, digest: '../../secret' }, { ...valid, kind: 'glb' }]) h.message(bad);
+  for (const bad of [{ ...valid, requestId: {} }, { ...valid, requestId: 'x'.repeat(129) }, { ...valid, digest: '../../secret' }, { ...valid, kind: 'glb' }]) h.message(bad);
   await settleAsset(); assert.equal(h.calls.length, 0);
-  h.message(valid); await settleAsset(); assert.equal(h.calls.length, 1);
-  assert.equal(h.calls[0][0], `/r/o/r/a/42/assets/${imageId}.svg`);
-  assert.equal(h.calls[0][1].credentials, 'same-origin');
+  h.message({...valid,url:'https://attacker.example'}); await settleAsset(); assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[0][0], '/r/o/r/a/42/raw');
+  assert.equal(h.calls[1][0], `/r/o/r/a/42/assets/${imageId}.svg`);
+  assert.equal(h.calls[1][1].credentials, 'include');
+  assert.equal(h.calls[1][1].cache, 'no-cache');
   assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, imageText);
 });
 test('asset bridge uses authenticated route declarations without trusting the child manifest', async () => {
@@ -3453,10 +3457,10 @@ test('asset bridge uses authenticated route declarations without trusting the ch
     assert.equal(url, 'https://signed.example/envelope'); downloads++;
     return new Response(storedImageReport(data));
   });
-  const h = assetBridgeHarness({ fetcher: async url => {
+  const h = assetBridgeHarness({ realManifest: true, fetcher: async url => {
     const result = await call(url.replace('/r/o/r/', '/r/Cameronrlewis/repo/'), { headers: { Cookie: `s=${sealed}` } });
     // Fetch decodes Content-Encoding in the browser; the Worker test Response does not.
-    return result.ok ? new Response(gunzipSync(await result.arrayBuffer()), { headers: result.headers }) : result;
+    return result.ok && !url.endsWith('/raw') ? new Response(gunzipSync(await result.arrayBuffer()), { headers: result.headers }) : result;
   } });
   const ask = (requestId, digest = imageId, kind = 'svg') => h.message({ requestId, digest, kind });
   try {
@@ -3467,21 +3471,23 @@ test('asset bridge uses authenticated route declarations without trusting the ch
       assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
       assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, undefined);
     }
-    assert.equal(downloads, 4, 'exactly one envelope read per declared or undeclared asset request');
+    assert.equal(downloads, 3, 'one allowlist envelope plus one envelope per declared asset');
     denied = true; await ask('revoked'); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
     denied = false; expired = true; await ask('expired'); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
-    assert.equal(downloads, 4, 'revocation and expiry reject before downloading');
+    assert.equal(downloads, 3, 'revocation and expiry revalidate every fetch before downloading');
   } finally { restore(); }
 });
 
 test('asset bridge bounds concurrency, times out, rejects oversized decoded SVG and JSON, permits retry', async () => {
-  const h = assetBridgeHarness({ fetcher: () => new Promise(() => {}) });
+  const h = assetBridgeHarness({ fetcher: (_, {signal}) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(Error('aborted')))) });
   for (let i = 0; i < 9; i++) h.message({ requestId: `r${i}`, digest: imageId, kind: 'svg' });
-  assert.equal(h.calls.length, 8); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+  await settleAsset();
+  assert.equal(h.calls.length, 9); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /Busy; retry/);
   for (const timer of [...h.timers.values()]) timer(); await settleAsset();
-  assert.equal(h.calls[0][1].signal.aborted, true);
+  assert.equal(h.calls[1][1].signal.aborted, true);
   assert.equal(h.sent.filter(x => x.kicadReviewAssetResult.error).length, 9);
-  h.message({ requestId: 'retry', digest: imageId, kind: 'svg' }); assert.equal(h.calls.length, 9);
+  h.message({ requestId: 'retry', digest: imageId, kind: 'svg' }); await settleAsset(); assert.equal(h.calls.length, 10);
+  h.stop();
   for (const [kind, digest, size] of [['svg', imageId, 8 * 1024 * 1024], ['json', 'deadbeef1111', 4 * 1024 * 1024]]) {
     const over = assetBridgeHarness({ fetcher: async () => new Response('x'.repeat(size + 1), { headers: assetHeaders(digest, kind) }) });
     over.message({ requestId: 'over', digest, kind }); await settleAsset();
@@ -3493,15 +3499,15 @@ test('asset bridge bounds concurrency, times out, rejects oversized decoded SVG 
 function assetClientHarness() {
   const listeners = {}, sent = [], timers = new Map(); let id = 0;
   const parent = { postMessage: value => sent.push(value) };
-  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const fn = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('\nconst assetClient ='));
-  const context = { parent, window: {}, crypto: globalThis.crypto, TextEncoder, Promise, Map,
-    addEventListener: (n, f) => { listeners[n] = f; },
+  const source = readFileSync(new URL('../ui/image-view.js', import.meta.url), 'utf8');
+  const context = { parent, console, TextEncoder,
+    addEventListener: (n, f) => { listeners[n] = f; }, removeEventListener: n => { delete listeners[n]; },
     setTimeout: f => { timers.set(++id, f); return id; }, clearTimeout: key => timers.delete(key) };
-  const client = runInNewContext(`${fn}; createAssetClient({assetDescriptors:{'${imageId}':{kind:'svg'}}})`, context);
-  return { client, sent, timers, result(value, from = parent) { listeners.message({ source: from, data: { kicadReviewAssetResult: value } }); } };
+  const client = runInNewContext(`${source}; ImageView.assetClient(parent,{'${imageId}':{kind:'svg'}},globalThis)`, context);
+  return { client: {request: id => client.get(id,'svg'), dispose: () => client.dispose()}, sent, timers, listeners,
+    result(value, from = parent) { listeners.message?.({ source: from, data: { kicadReviewAssetResult: value } }); } };
 }
-test('asset child accepts only parent results for pending digest, times out and retries after disposal', async () => {
+test('asset child accepts only parent results for pending digest, times out and retries in a new view', async () => {
   const h = assetClientHarness(); let complete = false;
   const p = h.client.request(imageId).then(x => { complete = true; return x; });
   const { requestId } = h.sent[0].kicadReviewAsset;
@@ -3510,13 +3516,14 @@ test('asset child accepts only parent results for pending digest, times out and 
   await settleAsset(); assert.equal(complete, false);
   h.result(valid); assert.equal(await p, imageText); assert.equal(h.timers.size, 0);
   const pending = Array.from({ length: 10 }, () => h.client.request(imageId));
-  const rejected = pending.map(p => assert.rejects(p, /unavailable/i));
+  const rejected = pending.map(p => assert.rejects(p, /unavailable|disposed/i));
   assert.equal(h.sent.length, 9, 'at most eight simultaneous parent requests');
-  assert.equal(h.client.dispose().length, 10); await Promise.all(rejected); assert.equal(h.timers.size, 0);
-  const retry = h.client.request(imageId), timeout = assert.rejects(retry, /unavailable/i);
-  for (const timer of [...h.timers.values()]) timer(); await timeout;
-  const last = h.client.request(imageId), message = h.sent.at(-1).kicadReviewAsset;
-  h.result({ requestId: message.requestId, digest: imageId, text: imageText }); assert.equal(await last, imageText);
+  h.client.dispose(); await Promise.all(rejected); assert.equal(h.timers.size, 0); assert.equal(h.listeners.message, undefined);
+  await assert.rejects(h.client.request(imageId), /unavailable/i);
+  const next = assetClientHarness(), retry = next.client.request(imageId), timeout = assert.rejects(retry, /timeout; retry available/i);
+  for (const timer of [...next.timers.values()]) timer(); await timeout;
+  const last = next.client.request(imageId), message = next.sent.at(-1).kicadReviewAsset;
+  next.result({ requestId: message.requestId, digest: imageId, text: imageText }); assert.equal(await last, imageText);
 });
 test('asset child rejects oversized and error replies without caching a false success', async () => {
   const h = assetClientHarness();
@@ -3558,9 +3565,9 @@ test('digest JSON uses gzip MIME and hosted raw takes declarations only from the
     assert.ok(!page.includes(`"${imageId}":{"kind":"json"}`), 'wrapper does not parse or embed the envelope allowlist');
     const raw = await (await call('/r/Cameronrlewis/repo/a/42/raw', options)).text();
     assert.equal(readStoredData(raw).blobs[imageId], undefined);
-    assert.equal(readStoredData(raw).assetDescriptors[imageId].kind, 'json');
+    assert.equal(readStoredData(raw).assets[imageId].kind, 'json');
     assert.match(reportCsp, /connect-src 'none'/); assert.doesNotMatch(page, /allow-same-origin/);
-    assert.doesNotMatch(sharedPage({ token: 'x', name: 'kicad-review.html' }), /reportAssetBridge/);
+    assert.doesNotMatch(sharedPage({ token: 'x', name: 'kicad-review.html' }), /assetParentFactory/);
   } finally { restore(); }
 });
 test('private gzip responses preserve encodeBody manual through the wrapper', async () => {
@@ -3615,8 +3622,8 @@ for (const failure of ['open', 'close']) test(`browser cache test releases its H
 test('parent asset disposal aborts old navigation without delivering its late result', async () => {
   let resolve;
   const h = assetBridgeHarness({ fetcher: () => new Promise(r => { resolve = r; }) });
-  h.message({ requestId: 'old', digest: imageId, kind: 'svg' });
-  h.listeners.pagehide(); assert.equal(h.calls[0][1].signal.aborted, true); assert.equal(h.timers.size, 0);
+  h.message({ requestId: 'old', digest: imageId, kind: 'svg' }); await settleAsset();
+  h.listeners.pagehide(); assert.equal(h.calls[1][1].signal.aborted, true); assert.equal(h.timers.size, 0);
   resolve(new Response(imageText, { headers: assetHeaders() })); await settleAsset(); assert.equal(h.sent.length, 0);
 });
 test('hosted stripping preserves GLB, Three bundle and unknown fields with script-safe JSON', () => {
@@ -3624,7 +3631,7 @@ test('hosted stripping preserves GLB, Three bundle and unknown fields with scrip
   data.unknown.text = '</script><script>alert(1)</script>';
   const bundle = '<script type="application/octet-stream" id="three-bundle">retained</script>';
   const stored = storedImageReport(data).replace(/<\/script><script>alert\(1\)<\/script>/, '\\u003c/script>\\u003cscript>alert(1)\\u003c/script>') + bundle;
-  const hosted = currentReport(stored, { hosted: true }), parsed = readStoredData(hosted);
+  const hosted = currentReport(stored, { lazyAssets: true }), parsed = readStoredData(hosted);
   assert.equal(parsed.blobs.deadbeef0000, 'kept-glb'); assert.deepEqual(parsed.board, data.board);
   assert.deepEqual(parsed.unknown, data.unknown); assert.ok(hosted.includes(bundle));
   assert.doesNotMatch(hosted, /<script>alert\(1\)<\/script>/);
@@ -3656,7 +3663,7 @@ test('raw and digest delivery follow signed blob redirects without forwarding Gi
     for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
       const r = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, { headers: { Cookie: `s=${sealed}` } });
       assert.equal(r.status, 200, suffix);
-      if (suffix === '/raw') assert.equal(readStoredData(await r.text()).assetDescriptors[imageId].kind, 'svg');
+      if (suffix === '/raw') assert.equal(readStoredData(await r.text()).assets[imageId].kind, 'svg');
       else assert.deepEqual(Buffer.from(await r.arrayBuffer()), gzipSync(imageText));
     }
     assert.deepEqual(redirects, ['follow', 'follow']);
@@ -3665,7 +3672,7 @@ test('raw and digest delivery follow signed blob redirects without forwarding Gi
 
 test('mode rendering handles only tagged asset failures and rethrows programming errors', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
   const body = source.slice(source.indexOf('  if (!view) stage.innerHTML'), source.indexOf('  assetRetry(stage);'));
   const exercise = error => {
     const stage = { messages: [], append(message) { this.messages.push(message); } };
@@ -3684,19 +3691,19 @@ test('mode rendering handles only tagged asset failures and rethrows programming
 
 test('JSON asset corruption is tagged at decode, evicted, shown unavailable and retryable', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
   const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
   const body = source.slice(source.indexOf('  if (!view) stage.innerHTML'), source.indexOf('  assetRetry(stage);'));
   for (const transport of ['embedded', 'hosted', 'legacy']) {
     const hosted = transport === 'hosted';
     let attempts = 0;
-    const D = hosted ? { assetDescriptors: { [imageId]: { kind: 'json' } } }
+    const D = hosted ? { assets: { [imageId]: { kind: 'json' } } }
       : { blobs: { [imageId]: gzipSync('{bad json').toString('base64') },
         ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
     const messages = [], cache = {};
     const context = { D, cache, atob, Uint8Array, Blob, Response, DecompressionStream, messages,
       repaired: gzipSync('{"version":1}').toString('base64'),
-      assetClient: { request: async () => ++attempts < 3 ? '{bad json' : '{"version":1}' },
+      imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => ++attempts < 3 ? '{bad json' : '{"version":1}' })},
       document: { createElement: () => ({ setAttribute() {} }) } };
     await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
       for(let i=0;i<2;i++) {
@@ -3717,18 +3724,18 @@ test('JSON asset corruption is tagged at decode, evicted, shown unavailable and 
 
 test('JSON assets share one parsed value with mode consumers and keep the text API', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
   const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
   const scene = source.slice(source.indexOf('const boardSceneCache ='), source.indexOf('const HIDE_LAYERS ='));
   for (const transport of ['embedded', 'hosted', 'legacy']) {
     const text = '{"version":1}', D = transport === 'hosted'
-      ? { assetDescriptors: { [imageId]: { kind: 'json' } } }
+      ? { assets: { [imageId]: { kind: 'json' } } }
       : { blobs: { [imageId]: gzipSync(text).toString('base64') },
         ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
     let parses = 0, requests = 0, validations = 0;
     const context = { D, cache: {}, atob, Uint8Array, Blob, Response, DecompressionStream,
       JSON: { parse: value => { parses++; return JSON.parse(value); } },
-      assetClient: { request: async () => { requests++; return text; } },
+      imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => { requests++; return text; } })},
       BoardGL: { validateScene: value => { validations++; assert.equal(value.version, 1); } } };
     await runInNewContext(`${errorClass}\n${decode}\n${scene}\n(async()=>{
       if(await svgText('${imageId}')!==${JSON.stringify(text)})throw Error('text API changed');
@@ -3743,18 +3750,18 @@ test('JSON assets share one parsed value with mode consumers and keep the text A
 
 test('JSON asset caches retain only the parsed value without losing exact text access', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
   const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
   for (const transport of ['embedded', 'hosted', 'legacy']) {
     for (const textFirst of [true, false]) {
       const text = ' { "version": 1, "items": [1, 2] }\n', cache = {};
-      const D = transport === 'hosted' ? { assetDescriptors: { [imageId]: { kind: 'json' } } }
+      const D = transport === 'hosted' ? { assets: { [imageId]: { kind: 'json' } } }
         : { blobs: { [imageId]: gzipSync(text).toString('base64') },
           ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
       let requests = 0, parses = 0;
       const context = { D, cache, atob, Uint8Array, Blob, Response, DecompressionStream,
         JSON: { parse: value => { parses++; return JSON.parse(value); } },
-        assetClient: { request: async () => { requests++; return text; } } };
+        imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => { requests++; return text; } })} };
       await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
         const jobs=${textFirst ? `[svgText('${imageId}'),jsonAsset('${imageId}')]` : `[jsonAsset('${imageId}'),svgText('${imageId}')]`};
         const values=await Promise.all(jobs), json=values[${textFirst ? 1 : 0}];
@@ -3774,8 +3781,8 @@ test('JSON asset caches retain only the parsed value without losing exact text a
   }
   // SVG text is still cached; the memory policy applies only to parsed JSON.
   let requests = 0;
-  const context = { D: { assetDescriptors: { [imageId]: { kind: 'svg' } } }, cache: {},
-    assetClient: { request: async () => { requests++; return imageText; } } };
+  const context = { D: { assets: { [imageId]: { kind: 'svg' } } }, cache: {},
+    imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => { requests++; return imageText; } })} };
   await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
     if(await svgText('${imageId}')!==${JSON.stringify(imageText)})throw Error('SVG changed');
     if(await svgText('${imageId}')!==${JSON.stringify(imageText)})throw Error('cached SVG changed');
@@ -3785,15 +3792,15 @@ test('JSON asset caches retain only the parsed value without losing exact text a
 
 test('asset text loads are discarded synchronously on view disposal', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
   const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
   const jobs = new Map();
   let requests = 0;
-  const context = { D: { assetDescriptors: { [imageId]: { kind: 'json' } } }, cache: {},
-    assetClient: {
-      request(id) { requests++; return new Promise((resolve, reject) => jobs.set(id, { resolve, reject })); },
+  const context = { D: { assets: { [imageId]: { kind: 'json' } } }, cache: {},
+    imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({
+      get(id) { requests++; return new Promise((resolve, reject) => jobs.set(id, { resolve, reject })); },
       dispose() { const ids = [...jobs.keys()]; for (const job of jobs.values()) job.reject(new Error('disposed')); jobs.clear(); return ids; },
-    }, repair() { jobs.get(imageId).resolve('{"version":1}'); jobs.delete(imageId); } };
+    })}, repair() { jobs.get(imageId).resolve('{"version":1}'); jobs.delete(imageId); } };
   await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
     const stale=svgText('${imageId}'), rejected=stale.catch(()=>null);
     disposeAssets();
@@ -3812,10 +3819,97 @@ test('asset text loads are discarded synchronously on view disposal', async () =
 
 test('asset decode failures are tagged and evicted so the next attempt can retry', async () => {
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
   const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
   for (const encoded of ['!bad base64', Buffer.from('not gzip').toString('base64')]) {
     const context = { D: { blobs: { [imageId]: encoded } }, cache: {}, atob, Uint8Array, Blob, Response, DecompressionStream };
     await runInNewContext(`${errorClass}\n${decode}\n(async()=>{for(let i=0;i<2;i++){try{await svgText('${imageId}');throw Error('unexpected success');}catch(error){if(!(error instanceof AssetUnavailableError))throw error;}if('${imageId}' in cache)throw Error('failed decode cached');}})()`, context);
   }
+});
+
+import {assetParent} from './pages.js';
+test('asset parent permits only source-window declared digests and generated URLs',async()=>{
+  let receive;const results=[],urls=[],child={postMessage:m=>results.push(m)};
+  const scope={addEventListener:(_,fn)=>receive=fn,removeEventListener(){}};
+  const raw='/r/o/r/a/42/raw',digest='abcdef123456';
+  const stop=assetParent({contentWindow:child},raw,scope,async url=>{
+    urls.push(url);
+    return url===raw?new Response('<script>window.REVIEW_DATA = '+JSON.stringify({assets:{[digest]:{kind:'svg'}}})+';</script>')
+      :new Response('<svg/>');
+  });
+  const data={kicadReviewAsset:{requestId:'asset-1',digest,kind:'svg',url:'https://attacker/'}};
+  await receive({source:{},data});assert.equal(urls.length,0);
+  await receive({source:child,data});assert.deepEqual(urls,[raw,'/r/o/r/a/42/assets/'+digest+'.svg']);
+  assert.equal(results[0].kicadReviewAssetResult.text,'<svg/>');
+  await receive({source:child,data:{kicadReviewAsset:{requestId:'asset-2',digest:'000000000000',kind:'svg'}}});
+  assert.equal(urls.length,2);assert.ok(results[1].kicadReviewAssetResult.error);stop();
+});
+
+test('asset parent wrapper factory survives HTML script parsing and never enters guest pages', () => {
+  const page = reviewPage({owner:'o',repo:'r',id:42,name:'kicad-review.html'});
+  const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+  for(const script of scripts) assert.doesNotThrow(() => new Function(script));
+  const bridge = scripts.find(script => script.includes('assetParentFactory'));
+  assert.ok(bridge?.includes("addEventListener('pagehide'"));
+  assert.match(bridge, /disposeAssets=assetParentFactory\(iframe,raw\)/);
+  assert.doesNotMatch(sharedPage({token:'t',name:'kicad-review.html'}), /assetParentFactory/);
+});
+
+test('asset parent aborts a stalled fetch at 15001 ms and replies unavailable', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let receive,signal;const results=[],child={postMessage:m=>results.push(m)};
+  const scope={addEventListener:(_,fn)=>receive=fn,removeEventListener(){}};
+  const raw='/r/o/r/a/42/raw';
+  const stop=assetParent({contentWindow:child},raw,scope,async (url,options)=>{
+    if(url===raw)return new Response('<script>window.REVIEW_DATA = '+JSON.stringify({assets:{[imageId]:{kind:'svg'}}})+';</script>');
+    signal=options.signal;
+    return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Error('aborted'))));
+  });
+  const job=receive({source:child,data:{kicadReviewAsset:{requestId:'timeout',digest:imageId,kind:'svg'}}});
+  await settleAsset();assert.equal(signal.aborted,false);
+  t.mock.timers.tick(15001);await job;
+  assert.equal(signal.aborted,true);
+  assert.match(results[0].kicadReviewAssetResult.error,/unavailable/i);
+  assert.equal(results[0].kicadReviewAssetResult.text,undefined);stop();
+});
+
+test('asset parent retries a failed allowlist load without trusting a child announcement',async()=>{
+  let manifests=0;
+  const h=assetBridgeHarness({realManifest:true,fetcher:async url=>{
+    if(url.endsWith('/raw'))return ++manifests===1 ? new Response('denied',{status:403})
+      :new Response(storedImageReport());
+    return new Response(imageText);
+  }});
+  const ask=requestId=>h.message({requestId,digest:imageId,kind:'svg',assets:{[imageId]:{kind:'svg'}}});
+  await ask('first');assert.match(h.sent[0].kicadReviewAssetResult.error,/unavailable/i);
+  await ask('retry');assert.equal(h.sent[1].kicadReviewAssetResult.text,imageText);
+  assert.equal(manifests,2);h.stop();
+});
+
+test('asset parent actual wrapper reload replaces transport while preserving readiness listeners',async()=>{
+  const page=reviewPage({owner:'o',repo:'r',id:42,name:'kicad-review.html'});
+  const script=[...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('assetParentFactory'))[1];
+  const listeners=new Map(),calls=[],sent=[],navigations=[],controls=new Map();
+  const iframe={contentWindow:{postMessage:value=>sent.push(value)},addEventListener(){},set src(value){navigations.push(value);}};
+  const loading={hidden:false},location={hash:'#v=board'};
+  const context={location,history:{replaceState(){}},AbortController,AbortSignal,Blob,setTimeout,clearTimeout,
+    document:{getElementById:id=>id==='review-report'?iframe:loading,documentElement:{dataset:{theme:'dark'}},
+      querySelector:selector=>{if(!controls.has(selector))controls.set(selector,{});return controls.get(selector);}},
+    MutationObserver:class{observe(){}},
+    addEventListener:(name,fn)=>{if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},
+    removeEventListener:(name,fn)=>listeners.get(name)?.delete(fn),
+    fetch:async url=>{calls.push(url);return new Response(url.endsWith('/raw')?storedImageReport():imageText);}};
+  context.window=context;
+  runInNewContext(script,context);
+  assert.deepEqual(navigations,['/r/o/r/a/42/raw#v=board']);
+  assert.equal(listeners.get('message').size,2);
+  const first=[...listeners.get('message')][0],ask={source:iframe.contentWindow,data:{kicadReviewAsset:{requestId:'one',digest:imageId,kind:'svg'}}};
+  await first(ask);assert.equal(sent.at(-1).kicadReviewAssetResult.text,imageText);
+  location.hash='#v=sheet:/left/';for(const fn of listeners.get('hashchange'))fn();
+  assert.equal(listeners.get('message').size,2);assert.equal(listeners.get('message').has(first),false);
+  assert.equal(navigations.at(-1),'/r/o/r/a/42/raw#v=sheet:/left/');
+  await first(ask);assert.equal(calls.length,2,'disposed callback cannot fetch');
+  const next=[...listeners.get('message')].at(-1);await next(ask);
+  assert.equal(calls.filter(url=>url.endsWith('/raw')).length,2,'new view has a fresh allowlist');
+  for(const fn of listeners.get('pagehide'))fn();assert.equal(listeners.get('message').size,1);
 });

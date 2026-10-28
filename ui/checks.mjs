@@ -5415,3 +5415,33 @@ CHECKS.push(['images inspection complete-screen','',`
   if(document.querySelectorAll('*').length>=2000)return 'proof DOM budget';
   return true;
 `]);
+
+CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
+  if(D.repo!=='fixture/images')return 'skip';
+  await applyState({...S,p:0,v:'sheet:/left/',m:'side'});
+  const layer=currentView().layers[0],theme=document.documentElement.dataset.theme==='dark'?'dark':'light';
+  const id=layer.svgThemes?.[theme]?.base||layer.svg.base,original=assetText;
+  const nativeTimeout=window.setTimeout,scope=new EventTarget(),host={postMessage(){}};
+  window.setTimeout=(fn,ms,...args)=>nativeTimeout(fn,ms===15000?0:ms,...args);
+  const client=ImageView.assetClient(host,{[id]:{kind:'svg'}},scope);
+  const fail=async key=>{
+    if(key!==id)return original(key);
+    try{return await client.get(id,'svg');}catch(error){throw new AssetUnavailableError(error.message);}
+  };
+  try {
+    delete cache[id];assetText=fail;await draw();
+    const stage=document.querySelector('#stage'),error=stage.querySelector('.image-error'),button=error?.querySelector('button');
+    if(!error?.textContent.includes('Asset timeout; retry available')||error.getAttribute('role')!=='status')return 'timeout status missing';
+    if(!button||button.textContent!=='Try again')return 'retry missing';
+    if(stage.querySelectorAll('img[data-image-artwork]').length!==1)return 'other revision was lost';
+    const box=button.getBoundingClientRect();
+    if(box.height<44||box.width<44||error.closest('.world'))return 'retry scales with drawing or misses touch target';
+    if(box.left<0||box.right>innerWidth||box.top<0||box.bottom>innerHeight)return 'retry outside screen';
+    assetText=original;button.click();
+    for(let i=0;i<200&&document.querySelector('#stage').dataset.imageReady!=='true';i++)await new Promise(r=>nativeTimeout(r,10));
+    if(document.querySelector('#stage .image-error')||document.querySelectorAll('#stage img[data-image-artwork]').length!==2)return 'retry failed';
+    // Leave the unavailable state on screen for the complete-screen evidence capture.
+    delete cache[id];assetText=fail;await draw();
+    return true;
+  } finally {assetText=original;window.setTimeout=nativeTimeout;client.dispose();}
+`]);
