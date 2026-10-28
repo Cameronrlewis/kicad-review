@@ -2079,6 +2079,9 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
 test('missing share secrets keep existing review HTML byte-identical and guest routes inactive', async () => {
   const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
   const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
+    // Deployment provenance is additive to the pinned pre-footer shell.
+    .replace('<meta name="deploy-sha" content="unknown">', '')
+    .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>', '')
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
@@ -3990,4 +3993,24 @@ test('multi-project lazy manifests and artwork use the production client and par
     assert.equal(calls.length,49,'one raw allowlist plus 48 declared assets');
     assert.equal(childListeners.size,0,'production disposeAssets removes the real client');
   } finally {context.imageAssetClient?.dispose();stop();for(const release of waiting.splice(0))release();}
+});
+
+test('deployment provenance reports the serving commit, never a fabricated fallback', async () => {
+  assert.ok(readFileSync('.github/workflows/site-deploy.yml', 'utf8').includes('npx --yes wrangler@4.148.0 deploy --var DEPLOY_SHA:${{ github.sha }}'));
+  assert.ok(readFileSync('site/README.md', 'utf8').includes('npx --yes wrangler@4.148.0 deploy --var DEPLOY_SHA:$(git rev-parse HEAD)'));
+  const restore = shareCreationFetch();
+  try {
+    const cookie = await signedIn();
+    for (const value of ['a'.repeat(40), 'b'.repeat(40), undefined, '', '<script>bad</script>']) {
+      const sha = /^[0-9a-f]{40}$/.test(value || '') ? value : 'unknown';
+      for (const path of ['/', '/missing', '/r/Cameronrlewis/repo/a/123']) {
+        const result = await worker.fetch(request(path, { headers: { Cookie: `s=${cookie}` } }), { ...env, DEPLOY_SHA: value });
+        assert.equal(result.headers.get('X-Deploy-Sha'), sha);
+        const html = await result.text();
+        assert.ok(html.includes(`<meta name="deploy-sha" content="${sha}">`));
+        assert.ok(html.includes(`<footer class="deployment" aria-label="Deployment">Deployed commit <code>${sha}</code></footer>`));
+        assert.equal((html.match(/class="deployment"/g) || []).length, 1);
+      }
+    }
+  } finally { restore(); }
 });

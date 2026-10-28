@@ -375,7 +375,7 @@ body.shot #toolbar { display:none; }
 .vp.sheet .marker.sel.added { border-style: solid; }
 .vp.sheet .marker.sel.removed { border-style: dashed; }
 .vp.sheet .marker.sel.modified { border-style: dotted; }
-.sch-mark-label { position: absolute; left: 0; top: 100%; white-space: nowrap;
+.vp.sheet .marker::before { content: attr(aria-label); position: absolute; left: 0; top: 100%; white-space: nowrap;
   font: 11px var(--font-mono); transform: scale(calc(1 / var(--k, 1))); transform-origin: 0 0;
   color: #0f0f0f; background: #f5f4ef; padding: 0 2px; }
 .vp.sheet .marker[data-mark-style="recolour"] { background: color-mix(in srgb, var(--sch-mark, #b3201f) 12%, transparent); }

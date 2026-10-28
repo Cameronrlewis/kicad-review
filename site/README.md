@@ -46,8 +46,10 @@ npx wrangler login
 npx wrangler secret put GITHUB_CLIENT_ID
 npx wrangler secret put GITHUB_CLIENT_SECRET
 npx wrangler secret put SESSION_KEY
-npx wrangler deploy
+npx --yes wrangler@4.148.0 deploy --var DEPLOY_SHA:$(git rev-parse HEAD)
 ```
+
+Run the deploy command from `site/` in the approved checkout. It records the full serving commit in the page footer, `<meta name="deploy-sha">`, and the `X-Deploy-Sha` response header. The deployment workflow passes `${{ github.sha }}` through the same `DEPLOY_SHA` variable. An unset or invalid variable displays `unknown`, never a guessed commit. Verify this value against the intended tools SHA before hosted checks; the report's base/head commits identify the design, not the deployed interface.
 
 Keep `keep_names = false` in `site/wrangler.toml`. The thread client (`threadsClient`) is shipped to the browser via `.toString()`; name-preserving build helpers would not exist there.
 

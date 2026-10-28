@@ -2,7 +2,7 @@ import { createShare, serveShare, revokeShares, shareEnabled } from './share.js'
 import { reportCsp, frameCsp } from './csp.js';
 import { currentBody, readStoredData } from './report-shell.js';
 export { readStoredData } from './report-shell.js';
-import { escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
+import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute } from './threads.js';
 import { issuesRoute } from './issues.js';
@@ -732,7 +732,7 @@ async function callback(request, env) {
   return redirect(nextPath(stateData.n), [await sessionCookie(value, env, secure), clear('st', secure)]);
 }
 
-export default {
+const routes = {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
@@ -823,5 +823,21 @@ export default {
     } catch {
       return errorPage(500, 'Internal server error', 'Try again later.');
     }
+  },
+};
+
+export default {
+  async fetch(request, env) {
+    const result = await routes.fetch(request, env);
+    const sha = typeof env.DEPLOY_SHA === 'string' && /^[0-9a-f]{40}$/.test(env.DEPLOY_SHA) ? env.DEPLOY_SHA : 'unknown';
+    const headers = new Headers(result.headers);
+    headers.set('X-Deploy-Sha', sha);
+    // Never buffer or modify sandboxed reports, assets, redirects or downloads.
+    const shell = headers.get('Content-Type')?.startsWith('text/html')
+      && !headers.get('Content-Security-Policy')?.includes('sandbox');
+    const body = shell ? deploymentPage(await result.text(), sha) : result.body;
+    if (shell) headers.delete('Content-Length');
+    return new Response(body, { status: result.status, statusText: result.statusText, headers,
+      ...(headers.has('Content-Encoding') ? { encodeBody: 'manual' } : {}) });
   },
 };

@@ -1665,8 +1665,7 @@ function afterDraw(view) {
         m.dataset.markStyle = Appearance.get().markStyle;
         const word = `${semantic?.word || r.action || "finding"} ${r.ref || r.kind || ""}`.trim();
         m.setAttribute("aria-label", word);
-        const label = document.createElement("span"); label.className = "sch-mark-label"; label.textContent = word;
-        m.append(label);
+        // The accessible name also supplies the visible label without a child per marker.
         const schMark = KrAppearance.resolve(Appearance.get()).marks.schematic[r.action];
         if (schMark) m.style.setProperty("--sch-mark", cssAppearance(schMark.color));
       }

@@ -44,7 +44,7 @@ export function historyPage({ user, owner, repo, pull, title, events, filter }) 
 export function frame({ title, user, crumbs = [], body, meta = '', navigation = true, reviewStatus = '' }) {
   const trail = crumbs.map((crumb, index) => `<span>${index < crumbs.length - 1 && crumb.href ? link(crumb.href, crumb.label) : e(crumb.label)}</span>`).join('');
   const account = `<details class="bench-menu account"><summary aria-label="User menu">${e(user || 'Viewer')} ▾</summary><div class="bench-popover"><span class="bench-label">Theme</span><div class="bench-themes">${['Dark', 'Light', 'System'].map(t => `<button type="button" data-theme-set="${t.toLowerCase()}" aria-pressed="false">${t}</button>`).join('')}</div>${user ? '<form method="post" action="/logout"><button>Sign out</button></form>' : '<span class="muted">Read-only viewer</span>'}</div></details>`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title>${meta}<script>${theme}</script><style>${tokens}\n${site}</style></head><body>${icons}<header class="top">${navigation ? '<a class="product" href="/">' : '<span class="product">'}<svg class="bench-mark" aria-hidden="true"><use href="#kr-mark"></use></svg>KiCad review${navigation ? '</a>' : '</span>'}${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}${reviewStatus ? `<span class="bench-state" role="status">${e(reviewStatus)}</span>` : ''}${account}</header>${body}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title><meta name="deploy-sha" content="unknown">${meta}<script>${theme}</script><style>${tokens}\n${site}</style></head><body>${icons}<header class="top">${navigation ? '<a class="product" href="/">' : '<span class="product">'}<svg class="bench-mark" aria-hidden="true"><use href="#kr-mark"></use></svg>KiCad review${navigation ? '</a>' : '</span>'}${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}${reviewStatus ? `<span class="bench-state" role="status">${e(reviewStatus)}</span>` : ''}${account}</header>${body}<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer></body></html>`;
 }
 
 export function signedOutPage({ sessionEnded = false } = {}) {
@@ -412,4 +412,11 @@ function shareControls(create, revoke) {
       catch (error) { status.textContent = error.message; }
     };
   })();</script>`;
+}
+
+// Only the trusted site shell carries these slots; stored report HTML is never stamped.
+export function deploymentPage(html, sha) {
+  return html.replace('<meta name="deploy-sha" content="unknown">', () => `<meta name="deploy-sha" content="${sha}">`)
+    .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>',
+      () => `<footer class="deployment" aria-label="Deployment">Deployed commit <code>${sha}</code></footer>`);
 }

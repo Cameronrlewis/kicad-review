@@ -809,6 +809,10 @@ export const CHECKS = [
       await applyState({...S,p,v:'sheet:'+sheet.path,m:'side',t:'changes',s:null});
       const total=document.querySelectorAll('*').length;count++;
       if(total>=2000)return 'DOM budget '+total+' project '+project.dir+' sheet '+sheet.path;
+      for(const mark of document.querySelectorAll('#stage .vp.sheet .marker')) {
+        if(mark.childElementCount)return 'redundant marker label nodes';
+        if(getComputedStyle(mark,'::before').content!==JSON.stringify(mark.getAttribute('aria-label')))return 'missing marker label';
+      }
       if(document.querySelector('#stage .layer svg'))return 'live artwork';
       if(document.querySelector('#stage').dataset.imageReady!=='true')return 'sheet not ready';
     }
@@ -4184,7 +4188,7 @@ return true;
       for(const [action,glyph,line] of [['added','+','solid'],['removed','−','dashed'],['modified','~','dotted']]) {
         const m=document.querySelector('#stage .marker.'+action), css=m&&getComputedStyle(m);
         if(!m||m.dataset.glyph!==glyph||!m.getAttribute('aria-label')?.includes(BoardMarks.styles[action].word)||m.dataset.dash!==BoardMarks.styles[action].dash||css.borderTopStyle!==line) return style+' '+action+' cues';
-        if(m.dataset.markStyle!==style||!m.querySelector('.sch-mark-label')?.textContent.includes(BoardMarks.styles[action].word)) return style+' '+action+' word/style';
+        if(m.dataset.markStyle!==style||getComputedStyle(m,'::before').content!==JSON.stringify(m.getAttribute('aria-label'))) return style+' '+action+' word/style';
         if(css.pointerEvents!=='none') return 'marker intercepts pins';
         if(style==='recolour'&&css.backgroundColor==='rgba(0, 0, 0, 0)'&&css.backgroundImage==='none') return action+' no tint';
       }
@@ -4245,7 +4249,8 @@ return true;
       if(!stack?.querySelector('img[data-image-artwork]')||getComputedStyle(stack).display==='none') return mode+' survivor';
       const semantic=BoardMarks.styles.removed;
       if(!mark||mark.dataset.glyph!==semantic.glyph||getComputedStyle(mark).borderTopStyle!==semantic.dash
-        ||!mark.querySelector('.sch-mark-label')?.textContent.includes(semantic.word)
+        ||!mark.getAttribute('aria-label')?.includes(semantic.word)
+        ||getComputedStyle(mark,'::before').content!==JSON.stringify(mark.getAttribute('aria-label'))
         ||mark.dataset.label!==semantic.glyph+' '+semantic.word
         ||getComputedStyle(mark,'::after').content!==JSON.stringify(mark.dataset.label)) return mode+' removed cues';
     }
@@ -4554,7 +4559,7 @@ return true;
             if(m.dataset.glyph!==semantic.glyph||m.dataset.dash!==semantic.dash
               ||m.dataset.label!==semantic.glyph+' '+semantic.word
               ||getComputedStyle(m,'::after').content!==JSON.stringify(m.dataset.label)) return mode+' action cues';
-            if(m.getAttribute('aria-label')!=='Modified R7'||m.querySelector('.sch-mark-label')?.textContent!=='Modified R7') return mode+' semantic word';
+            if(m.getAttribute('aria-label')!=='Modified R7'||getComputedStyle(m,'::before').content!==JSON.stringify('Modified R7')) return mode+' semantic word';
             const color=KrAppearance.resolve(Appearance.get()).marks.schematic.modified.color;
             const rgb=getComputedStyle(m).borderTopColor.match(/[0-9.]+/g).slice(0,3).map(Number);
             if(!rgb.every((v,i)=>Math.abs(v-color[i]*255)<1)) return mode+' live palette';

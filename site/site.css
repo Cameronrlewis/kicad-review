@@ -283,7 +283,7 @@ select { max-width: min(100%, 40ch); text-overflow: ellipsis; }
 .bench-popover li { padding:9px 8px; border:0; border-bottom:1px solid var(--line); background:none; overflow-wrap:anywhere; }
 .bench-popover li:last-child { border-bottom:0; }
 .bench-overflow > summary { font-weight:700; }
-.review-page { height:calc(100dvh - 36px); }
+.review-page { height:calc(100dvh - var(--toolbar-h) - 24px); }
 .readiness.bench-popover { order:initial; max-height:none; overflow:visible; }
 .readiness.bench-popover li { border:0; border-bottom:1px solid var(--line); background:none; }
 .readiness.bench-popover li:last-child { border-bottom:0; }
@@ -299,3 +299,5 @@ select { -webkit-appearance:none; appearance:none; height:var(--h-sm); padding:0
 input:hover, select:hover { border-color:var(--tx2); }
 input:focus-visible, select:focus-visible { border-color:var(--acc); outline:1px solid var(--acc); outline-offset:0; }
 .bench-search select { max-width:132px; font-size:var(--fs-sm); }
+
+.deployment { box-sizing: border-box; min-height: 24px; padding: 3px var(--space-4); color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
