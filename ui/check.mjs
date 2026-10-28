@@ -205,6 +205,37 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
       {cwd:repoRoot,input:raw,encoding:'utf8',maxBuffer:1<<26});
     await evaluate(`window.__sheetSimplification=${JSON.stringify({raw,simplified})}`);
   }
+if(name==='images active gesture pixels') {
+  const shot=async()=> (await send('Page.captureScreenshot',{format:'png'})).result.data;
+  for(const [mode,blend,wipe] of [['wipe',.5,0],['wipe',.5,.3],['wipe',.5,.7],['wipe',.5,1],['blend',0,.5],['blend',1,.5],['overlay',.5,.5],['semantic',.5,.5]]) {
+    const prepared=await evaluate(`(async()=>{const sheet=proj().sheets.find(s=>s.svg.base&&s.svg.head);
+      await applyState({...S,v:'sheet:'+sheet.path,m:${JSON.stringify(mode)},blend:${blend},wipe:${wipe}});
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return true;})()`);
+    if(prepared.exceptionDetails)throw Error('comparison fixture preparation failed');
+    const before=await shot();
+    await evaluate(`globalThis.__activeCaptures=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')]
+      .filter(i=>i.complete).map(i=>captureImageViewport(i.imageOwner,i.closest('.vp'),
+        {x:S.x,y:S.y,z:S.z,flip:flipOn()},[0,0,...currentView().size])).filter(Boolean)`);
+    const captured=await evaluate('__activeCaptures.length');
+    if(!captured.result?.value)throw Error('active gesture did not allocate snapshot');
+    const active=await shot();
+    await evaluate('__activeCaptures.forEach(c=>c.dispose());__activeCaptures=[]');
+    const settled=await shot();
+    const result=await evaluate(`(async()=>{
+      const read=async raw=>{const i=new Image();i.src='data:image/png;base64,'+raw;await i.decode();
+        const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {data:x.getImageData(0,0,c.width,c.height).data,w:c.width,h:c.height};};
+      const [a,b,c]=await Promise.all(${JSON.stringify([before,active,settled])}.map(read));
+      const r=document.querySelector('#stage .vp').getBoundingClientRect(), sx=a.w/innerWidth,sy=a.h/innerHeight;
+      let differing=0,samples=0;const colors=new Set();
+      for(let y=Math.ceil((r.top+20)*sy);y<(r.bottom-20)*sy;y+=3)for(let x=Math.ceil((r.left+20)*sx);x<(r.right-20)*sx;x+=3){
+        const k=(y*a.w+x)*4;colors.add(Array.from(a.data.slice(k,k+3)).join(','));samples++;
+        if([0,1,2].some(j=>Math.abs(a.data[k+j]-b.data[k+j])>12||Math.abs(a.data[k+j]-c.data[k+j])>12))differing++;
+      }
+      return {differing,samples,coverage:colors.size};})()`);
+    const v=result.result?.value;
+    if(!v||v.coverage<3||!v.samples||v.differing/v.samples>.01)throw Error('active comparison pixels '+mode+': '+JSON.stringify(v));
+  }
+}
   let r = await evaluate(`(async () => { ${expr} })()`);
   if (r.result?.value === true && name === "Themes reload seed" && persistCheck) {
     const expected = (await evaluate("JSON.stringify(appearanceStore().get())")).result.value;

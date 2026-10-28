@@ -707,6 +707,53 @@ const SCH_THEME_KEYS = {
 function schematicPaints(resolved) {
   return new Map(Object.entries(SCH_THEME_KEYS).map(([hex,key])=>['#'+hex,cssAppearance(resolved.colors[key])]));
 }
+function captureImageViewport(owner,vp,camera,pageMm) {
+  const w=vp.clientWidth,h=vp.clientHeight;
+  if(!w||!h||!Number.isFinite(camera.z)||camera.z<=0||!owner?.node?.complete||!owner.node.naturalWidth)return null;
+  const scale=ImageView.snapshotScale(w,h,devicePixelRatio||1);
+  const box=[camera.x-w/(2*camera.z),camera.y-h/(2*camera.z),w/camera.z,h/camera.z];
+  const canvas=document.createElement('canvas');canvas.className='gesture-snapshot';
+  canvas.width=Math.max(1,Math.floor(w*scale));canvas.height=Math.max(1,Math.floor(h*scale));
+  // Keep the snapshot IN the same .layer and revision .stack as its original.
+  // The world owns camera/flip; stack owns Wipe/Blend/Semantic/Overlay; layer owns opacity.
+  canvas.style.cssText=`position:absolute;left:${box[0]*PX}px;top:${box[1]*PX}px;width:${box[2]*PX}px;height:${box[3]*PX}px;pointer-events:none`;
+  const x=canvas.getContext('2d');if(!x)return null;
+  x.scale(canvas.width/box[2],canvas.height/box[3]);x.translate(-box[0],-box[1]);
+  try {x.drawImage(owner.node,...pageMm);} catch {return null;}
+  if(!owner.node.parentElement)return null;
+  owner.node.parentElement.append(canvas);owner.node.hidden=true;
+  if(owner.cropNode)owner.cropNode.hidden=true;
+  return {node:canvas,
+    move(){ /* The existing world transform moves this revision-local snapshot. */ },
+    dispose(){canvas.remove();if(owner.node)owner.node.hidden=!!owner.cropNode;
+      if(owner.cropNode)owner.cropNode.hidden=false;}
+  };
+}
+function configureImageGesture(owner,size) {
+  if(owner.gestureConfigured)return;
+  owner.gestureConfigured=true;owner.gestureFlip=flipOn();
+  const page=[0,0,...size];
+  owner.configureGesture({
+    capture:()=>{const vp=owner.node?.closest('.vp');
+      return vp?captureImageViewport(owner,vp,{x:S.x,y:S.y,z:S.z,flip:flipOn()},page):null;},
+    makeCrop:async region=>{
+      const crop=await owner.crop(region.source),node=crop.node;
+      node.dataset.cropView=S.v;
+      node.style.cssText=`position:absolute;left:${region.world[0]*PX}px;top:${region.world[1]*PX}px;width:${region.world[2]*PX}px;height:${region.world[3]*PX}px`;
+      const dispose=crop.dispose.bind(crop);
+      crop.dispose=()=>{if(owner.cropNode===node){owner.cropNode=null;if(owner.node)owner.node.hidden=false;}dispose();};
+      return crop;
+    },
+    restore:crop=>{
+      owner.cropNode=crop?.node||null;
+      if(crop&&owner.node?.parentElement)owner.node.parentElement.append(crop.node);
+      if(owner.node)owner.node.hidden=!!crop;
+    }
+  });
+}
+function imageOwners(stage=document.querySelector('#stage')) {
+  return [...stage.querySelectorAll('.stack')].flatMap(st=>(st.imageOwners||[]).map(c=>c.controller||c));
+}
 function releaseImageStage(stage) {
   for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) c.dispose();
 }
@@ -742,6 +789,8 @@ async function stack(side, view) {
         const dispose=adapter.dispose.bind(adapter);
         adapter.dispose=()=>{appearanceBoardImages.delete(adapter);dispose();};
         st.imageOwners.push(adapter); // Own even if initial appearance decoding fails.
+        const change=adapter.setAppearance.bind(adapter);
+        adapter.setAppearance=async look=>{const ok=await change(look);if(ok)configureImageGesture(adapter.controller,view.size);return ok;};
         await adapter.setAppearance(boardImageLook(Appearance.get(),adapter.layer));
         st.append(d);continue;
       }
@@ -749,7 +798,7 @@ async function stack(side, view) {
       st.imageOwners.push(c); // Own before appearance decode, which can reject.
       const change=c.setAppearance.bind(c);
       c.setAppearance=async paints=>{const ok=await change(paints);if(ok)c.node.imageOwner=c;return ok;};
-      c.node.imageOwner=c; c.sheet=view.kind==='sheet'; c.layer=canon(l.name); c.comparison=comparison;
+      c.node.imageOwner=c; configureImageGesture(c,view.size); c.sheet=view.kind==='sheet'; c.layer=canon(l.name); c.comparison=comparison;
       if (c.sheet&&!comparison) await c.setAppearance(schematicPaints(KrAppearance.resolve(Appearance.get())));
       d.append(c.node); st.append(d);
     } catch(error) {
@@ -994,6 +1043,10 @@ function apply() {
     w.style.transform = `translate(${width / 2 - f * S.x * S.z}px, ${height / 2 - S.y * S.z}px) scale(${f * k}, ${k})`;
     w.parentElement.classList.toggle("flip", f < 0);
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
+  }
+  for(const owner of imageOwners()) {
+    if(owner.gestureFlip!==flipOn()){owner.gestureFlip=flipOn();owner.invalidateGesture();}
+    owner.moveSnapshot();
   }
   onApply();
   if(currentView()?.kind==='sheet')for(const w of document.querySelectorAll('#stage .world'))mountImageMarks(w,currentView());

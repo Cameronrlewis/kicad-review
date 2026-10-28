@@ -44,6 +44,39 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ['images active gesture pixels','', 'return true;'],
+  ['images vector crop ownership','', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const sheet=proj().sheets.find(s=>s.path==='/left/');
+    await applyState({...S,v:'sheet:'+sheet.path,m:'wipe',wipe:.3});
+    const owner=imageOwners()[0],vp=owner.node.closest('.vp');
+    const region=ImageView.cropRegion([80,40,60,50],[0,0,...currentView().size],owner.viewBox);
+    owner.beginGesture();owner.endGesture(region);
+    await new Promise(r=>setTimeout(r,350));
+    if(!owner.cropNode?.complete||!owner.node.hidden||vp.querySelector('.gesture-snapshot'))return 'decoded crop did not replace snapshot';
+    const parsed=new DOMParser().parseFromString(await (await fetch(owner.cropNode.src)).text(),'image/svg+xml');
+    if(parsed.documentElement.getAttribute('viewBox')!==region.source.join(' '))return 'crop lost nonzero source origin';
+    if(owner.cropNode.parentElement!==owner.node.parentElement||!owner.cropNode.closest('.stack.base'))return 'crop escaped revision/layer clipping';
+    if(parseFloat(owner.cropNode.style.left)!==region.world[0]*PX)return 'crop lost world position';
+    owner.invalidateGesture();
+    if(owner.node.hidden||vp.querySelector('[data-crop-view]'))return 'crop invalidation left stale artwork';
+    const decode=HTMLImageElement.prototype.decode,create=URL.createObjectURL,revoke=URL.revokeObjectURL;
+    let release,started;const pending=new Promise(r=>started=r),urls=new Set();
+    try {
+      URL.createObjectURL=function(...args){const url=create.apply(this,args);urls.add(url);return url;};
+      URL.revokeObjectURL=function(url){urls.delete(url);return revoke.call(this,url);};
+      HTMLImageElement.prototype.decode=async function(){started();await new Promise(r=>release=r);return decode.call(this);};
+      owner.beginGesture();owner.endGesture(region);await pending;
+      // A new appearance invalidates the in-flight crop before its decode completes.
+      HTMLImageElement.prototype.decode=decode;
+      await owner.setAppearance(new Map());release();await new Promise(r=>setTimeout(r,30));
+      if(owner.cropNode||owner.node.hidden||vp.querySelector('.gesture-snapshot'))return 'late crop survived appearance';
+      await applyState({...S,v:'board'});
+      if(urls.size)return 'old image-owner URLs retained after navigation '+urls.size;
+      if(document.querySelector('[data-crop-view]')||document.querySelector('.gesture-snapshot'))return 'crop resurrected after navigation';
+    } finally {HTMLImageElement.prototype.decode=decode;URL.createObjectURL=create;URL.revokeObjectURL=revoke;}
+    return true;
+  `],
   ['images compare and four copper layers readiness navigation and failures', '', `
     if(D.repo!=='fixture/images')return 'skip';
     const oldCreate=BoardGL.create,oldDecode=HTMLImageElement.prototype.decode,state={...S},failed=boardView.failed;

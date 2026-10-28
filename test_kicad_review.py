@@ -4542,7 +4542,11 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
                         color = '#009600'  # real exports share inks; data-theme keeps blobs distinct
                         text = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 297 210" data-theme="{theme}">'
                                 f'<rect x="{x-1}" y="54" width="2" height="2" fill="none" stroke="{color}"/>'
-                                f'<path d="M{x-5} 55h2" stroke="{color}"/></svg>')
+                                f'<path d="M{x-5} 55h2" stroke="{color}"/>'
+                                # Broad revision ink on both Wipe sides, with a common stroke.
+                                f'<path d="M30 120H280 M{65 if side == "base" else 240} 80V180" '
+                                f'fill="none" stroke="{color}" stroke-width="8"/>'
+                                '<text x="150" y="130" font-size=".4" fill="#009600">R16 10k</text></svg>')
                         rel = f'{folder}/{page["stem"]}.svg'
                         write('.', {f'{out}/{side}/{rel}': text})
                         mapping[page['path']][theme] = rel

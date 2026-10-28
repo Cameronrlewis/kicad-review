@@ -8,22 +8,78 @@
     /((?:\b(?:fill|stroke)\s*=\s*["']|\b(?:fill|stroke)\s*:\s*))(#[0-9a-f]{6})(?=\s*(?:!important)?[;"'])/gi,
     (all,prefix,hex)=>prefix+(paints.get(hex.toLowerCase())||hex));
 
+  // The full-image owner outlives this session. Only transient artwork belongs here.
+  function gestureSession({capture,restore,makeCrop,setTimer=setTimeout,clearTimer=clearTimeout}) {
+    let ticket=0,disposed=false,timer=null,snapshot=null,crop=null;
+    const cancelTimer=()=>{if(timer!==null)clearTimer(timer);timer=null;};
+    const clear=()=>{snapshot?.dispose();snapshot=null;crop?.dispose();crop=null;};
+    return {
+      begin(){if(disposed)return;ticket++;cancelTimer();crop?.dispose();crop=null;
+        if(!snapshot)snapshot=capture();},
+      settle(box){if(disposed)return;cancelTimer();const generation=++ticket;
+        timer=setTimer(async()=>{
+          timer=null;let next=null;
+          try {if(box)next=await makeCrop(box);} catch { /* Keep the full image on crop failure. */ }
+          if(disposed||generation!==ticket){next?.dispose();return;}
+          crop?.dispose();crop=next;restore(crop);snapshot?.dispose();snapshot=null;
+        },150);},
+      move(){snapshot?.move?.();},
+      invalidate(){ticket++;cancelTimer();clear();if(!disposed)restore(null);},
+      dispose(){if(disposed)return;disposed=true;ticket++;cancelTimer();clear();}
+    };
+  }
+
+  function parseVector(source) {
+    const root=new DOMParser().parseFromString(source,'image/svg+xml').documentElement;
+    if(root.localName!=='svg'||root.querySelector('parsererror'))throw Error('invalid crop source');
+    return root;
+  }
+  function vectorCrop(source,box,options,parsed) {
+    const root=(parsed||parseVector(source)).cloneNode(true), [x,y,w,h]=box;
+    if(box.length!==4||![x,y,w,h].every(Number.isFinite)||w<=0||h<=0)throw Error('invalid crop box');
+    root.setAttribute('viewBox',box.join(' '));root.setAttribute('width',String(w));root.setAttribute('height',String(h));
+    return mount(new XMLSerializer().serializeToString(root),[w,h],options);
+  }
+  function cropRegion(box,page,viewBox) {
+    const world=[box[0]-box[2]*.1,box[1]-box[3]*.1,box[2]*1.2,box[3]*1.2];
+    return {world,source:[(world[0]-page[0])*viewBox[2]/page[2]+viewBox[0],
+      (world[1]-page[1])*viewBox[3]/page[3]+viewBox[1],
+      world[2]*viewBox[2]/page[2],world[3]*viewBox[3]/page[3]]};
+  }
+
   function controller(source, options, env={
     make:()=>document.createElement('img'),
     create:text=>URL.createObjectURL(new Blob([text],{type:'image/svg+xml'})),
     revoke:url=>URL.revokeObjectURL(url)
   }) {
-    let generation=0, disposed=false, node=null, appliedSource=null;
+    let generation=0, disposed=false, node=null, appliedSource=null, parsed=null, session=null;
     const owned=new Set(), release=(url,image)=>{
       if(image)image.removeAttribute?.('src');
       if(owned.delete(url))env.revoke(url);
     };
     let activeURL=null;
-    return {
+    const owner = {
       get node(){return node;}, get source(){return source;},
       get appliedSource(){return appliedSource;}, get generation(){return generation;},
+      configureGesture(options){session?.dispose();session=disposed?null:gestureSession(options);},
+      beginGesture(){session?.begin();},
+      endGesture(box){session?.settle(box);},
+      invalidateGesture(){session?.invalidate();},
+      moveSnapshot(){session?.move();},
+      crop(box){
+        if(disposed)throw Error('image owner disposed');
+        if(!appliedSource)throw Error('image not decoded');
+        parsed ||= parseVector(appliedSource);
+        return vectorCrop(appliedSource,box,options,parsed);
+      },
+      get viewBox(){
+        if(!appliedSource)return null;
+        parsed ||= parseVector(appliedSource);
+        return parsed.getAttribute('viewBox').trim().split(/[\s,]+/).map(Number);
+      },
       async setAppearance(paints) {
         if(disposed)return false;
+        session?.invalidate();
         const ticket=++generation, text=replacePaints(source,paints), url=env.create(text);
         owned.add(url);
         let next;
@@ -35,8 +91,9 @@
         }
         catch(error){release(url,next); if(disposed||ticket!==generation)return false; throw error;}
         if(disposed||ticket!==generation){release(url,next);return false;}
+        session?.invalidate(); // Also cancel gestures begun while this decode was pending.
         const previous=node, previousURL=activeURL;
-        node=next; activeURL=url; appliedSource=text;
+        node=next; node.imageOwner=owner; activeURL=url; appliedSource=text; parsed=null;
         if(previous?.isConnected)previous.replaceWith(next);
         else previous?.remove();
         if(previousURL)release(previousURL);
@@ -44,10 +101,11 @@
       },
       dispose(){
         if(disposed)return;
-        disposed=true; generation++; node?.remove(); node=null;
+        disposed=true; generation++; session?.dispose();session=null; parsed=null;node?.remove(); node=null;
         for(const url of [...owned])release(url);
       }
     };
+    return owner;
   }
 
   const rgbHex=rgb=>'#'+rgb.slice(0,3).map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
@@ -204,7 +262,7 @@
     try {await c.setAppearance(new Map());return c;}
     catch(error){c.dispose();throw error;}
   }
-  globalThis.ImageView={snapshotScale,wheelFactor,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
+  globalThis.ImageView={snapshotScale,wheelFactor,gestureSession,vectorCrop,cropRegion,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
     disposeAll(){for(const c of [...live])c.dispose();},
     segmentDistance,polygonDistance,primitiveDistance,inspectHit};
 })();

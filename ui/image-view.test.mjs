@@ -561,3 +561,47 @@ test('comparison board adapter keeps fixed source tint but applies wrapper alpha
   assert.equal(made[0],source);assert.equal(wrapper.style.opacity,'0.25');
   assert.equal(wrapper.hidden,false);assert.ok(wrapper.node);adapter.dispose();
 });
+
+
+test('navigation cancels settle and disposes a late crop',async()=>{
+  let timer, resolveCrop, removed=0, shown=0, clears=0;
+  const session=ctx.ImageView.gestureSession({
+    capture:()=>({dispose(){removed++;}}),restore:()=>shown++,
+    makeCrop:()=>new Promise(r=>resolveCrop=r),
+    setTimer:fn=>{timer=fn;return 1;},clearTimer:()=>clears++});
+  session.begin();session.settle([0,0,10,10]);
+  const pending=timer(); session.dispose();
+  resolveCrop({dispose(){removed++;}});await pending;
+  assert.equal(shown,0);assert.equal(removed,2);assert.equal(clears,0);
+});
+test('dispose clears a still-pending settle timer',()=>{
+  const cleared=[];let callback;
+  const session=ctx.ImageView.gestureSession({capture:()=>null,restore:()=>{},
+    makeCrop:async()=>{throw Error('must not crop');},
+    setTimer:fn=>{callback=fn;return 17;},clearTimer:id=>cleared.push(id)});
+  session.begin();session.settle([0,0,10,10]);session.dispose();
+  assert.deepEqual(cleared,[17]);assert.ok(callback);
+});
+test('failed crop restores once and releases the snapshot',async()=>{
+  let timer, removed=0;const shown=[];
+  const session=ctx.ImageView.gestureSession({capture:()=>({dispose(){removed++;}}),
+    restore:crop=>shown.push(crop),makeCrop:async()=>{throw Error('decode');},
+    setTimer:fn=>{timer=fn;return 0;},clearTimer:()=>{}});
+  session.begin();session.begin();session.settle([0,0,1,1]);await timer();
+  assert.deepEqual(shown,[null]);assert.equal(removed,1);session.dispose();
+});
+test('a new gesture rejects an older decoded crop and invalidation clears owners',async()=>{
+  let timer,resolveCrop,removed=0;const shown=[];
+  const session=ctx.ImageView.gestureSession({capture:()=>({dispose(){removed++;}}),
+    restore:crop=>shown.push(crop),makeCrop:()=>new Promise(r=>resolveCrop=r),
+    setTimer:fn=>{timer=fn;return 1;},clearTimer:()=>{}});
+  session.begin();session.settle([0,0,1,1]);const pending=timer();session.begin();
+  resolveCrop({dispose(){removed++;}});await pending;
+  assert.equal(shown.length,0);assert.equal(removed,1);
+  session.invalidate();assert.deepEqual(shown,[null]);assert.equal(removed,2);
+  session.dispose();session.invalidate();assert.equal(shown.length,1);
+});
+test('viewport crop mapping retains source and page origins with ten percent margin',()=>{
+  assert.deepEqual(Array.from(ctx.ImageView.cropRegion([15,25,20,10],[10,20,100,50],[7,9,1000,500]).world),[13,24,24,12]);
+  assert.deepEqual(Array.from(ctx.ImageView.cropRegion([15,25,20,10],[10,20,100,50],[7,9,1000,500]).source),[37,49,240,120]);
+});
