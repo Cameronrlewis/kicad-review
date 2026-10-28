@@ -799,7 +799,8 @@ async function draw() {
     else gate?.images([...target.querySelectorAll('img[data-image-artwork]')],mounts.expected,mounts.failed);
     target.setAttribute('aria-busy', 'false');
     statusText('.status-message', target.querySelector('.image-error')?.textContent ||
-      (target.dataset.boardReady === String(my) ? boardView.note || 'Ready' : 'Drawing unavailable'));
+      (target.dataset.boardReady === String(my) ? boardView.note || 'Ready' :
+        mounts.failed ? 'Drawing unavailable' : mounts.expected === 0 ? (view ? 'No visible board artwork' : 'This drawing is unavailable in both revisions.') : 'Drawing unavailable'));
   };
   $("#stage").setAttribute("aria-busy", "true");
   statusText('.status-message', 'Loading drawing…');
@@ -928,7 +929,7 @@ function trackAppearanceBoard(renderer, canvas, present = true) {
   const rawDraw = renderer.draw.bind(renderer);
   renderer.draw = options => {
     const ok = rawDraw(options);
-    if (!options?.mask && canvas.isConnected) activeBoardGate?.record(renderer, ok);
+    if (!options?.mask && canvas.hasAttribute('data-board-renderer') && canvas.isConnected) activeBoardGate?.record(renderer, ok);
     return ok;
   };
   appearanceBoards.add(renderer);
