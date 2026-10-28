@@ -3432,6 +3432,33 @@ test('BR02 broker reports network and body errors and allows retry',async()=>{
   }
 });
 
+test('BR02 broker caps duplicate waiters per asset',async()=>{
+  let listener,release,count=0;const replies=[];
+  const child={postMessage:m=>replies.push(m)};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    Map,Number,ArrayBuffer,Error,fetch:async()=>{count++;await gate;return {ok:true,arrayBuffer:async()=>new ArrayBuffer(4)}}});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'f'.repeat(64),kind:'board.glb'};
+  const requests=[];
+  for(let id=1;id<=17;id++)requests.push(listener({source:child,data:{...data,id}}));
+  assert.equal(replies.length,1);
+  assert.equal(replies[0].error,'Too many requests for this model. Retry.');
+  release();await Promise.all(requests);assert.equal(count,1);
+  assert.equal(replies.length,17);
+});
+
+test('BR02 broker distinguishes authorization denial from retryable unavailability',async()=>{
+  for(const status of [401,403]){
+    let listener;const replies=[];const child={postMessage:m=>replies.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      Map,Number,ArrayBuffer,Error,fetch:async()=>({ok:false,status})});
+    await listener({source:child,data:{kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:status,digest:'9'.repeat(64),kind:'board.glb'}});
+    assert.equal(replies[0].error,'Model access denied. Refresh the review link or sign in, then retry.');
+  }
+});
+
 test('BR02 broker rejects endpoints outside the authenticated model route',()=>{
   for(const endpoint of ['https://evil/model/','//evil/','/r/o/r/a/12/raw','/r/o/r/a/no/3d/','/s/token/3d/']){
     assert.throws(()=>runInNewContext(`(${threeClient.toString()})(${JSON.stringify({endpoint})})`,{Error}),/invalid model endpoint/);
