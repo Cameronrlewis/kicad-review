@@ -407,13 +407,16 @@ let boardDiff = null;
 const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
 const appearanceBoards = new Set(), appearanceSchematics = new Set(), appearanceBoardImages = new Set();
 const appearanceStore = () => Appearance;
+function boardImageLook(snapshot, name) {
+  return snapshot.layers?.[name] || {color:KicadColors.layers[name] || KicadColors.layers['Dwgs.User'],opacity:1,visible:true};
+}
 function applyAppearance(snapshot) {
   const stage = $("#stage"), ticket = (stage.appearanceGeneration || 0) + 1;
   stage.appearanceGeneration = ticket;
   const resolved = KrAppearance.resolve(snapshot);
   for (const board of appearanceBoards) board.setAppearance(glAppearance(resolved));
   const imageJobs = [];
-  for (const adapter of appearanceBoardImages) imageJobs.push(adapter.setAppearance(resolved.layers[adapter.layer]));
+  for (const adapter of appearanceBoardImages) imageJobs.push(adapter.setAppearance(boardImageLook(resolved,adapter.layer)));
   for (const c of appearanceSchematics) imageJobs.push(c.setAppearance(schematicPaints(resolved)));
   if (imageJobs.length) { stage.dataset.imageReady = "false"; stage.setAttribute("aria-busy", "true"); }
   for (const vp of document.querySelectorAll('#stage .vp.board')) vp.style.background = cssAppearance(resolved.boardBackground);
@@ -601,20 +604,20 @@ async function stack(side, view) {
   const theme=document.documentElement.dataset.theme==='light'?'light':'dark';
   for (const l of view.layers) {
     if (generation !== gen) break;
-    if (!l.svg?.[side]) continue;
+    if (!l.svg?.[side] || view.kind==='board' && boardImageLook(Appearance.get(),canon(l.name)).visible===false) continue;
     const d=document.createElement('div'); d.className='layer'; d.dataset.layer=l.name;
     try {
       const sourceTheme=l.svgThemes?.[theme]?.[side]?theme:'light';
       const t=await svgText(l.svgThemes?.[theme]?.[side] || l.svg[side]); if (!t) continue;
       if (view.kind==='lib') {d.innerHTML=t.slice(t.indexOf('<svg'));st.append(d);continue;}
       if(view.kind==='board') {
-        const originalRGB=l.sourceRGBThemes?.[sourceTheme]||KicadColors.layers[canon(l.name)].slice(0,3);
+        const originalRGB=l.sourceRGBThemes?.[sourceTheme]||boardImageLook({layers:{}},canon(l.name)).color.slice(0,3);
         const adapter=ImageView.boardLayer(t,originalRGB,d,{side,layer:l.name});
         adapter.layer=canon(l.name);
         const dispose=adapter.dispose.bind(adapter);
         adapter.dispose=()=>{appearanceBoardImages.delete(adapter);dispose();};
         st.imageOwners.push(adapter); // Own even if initial appearance decoding fails.
-        await adapter.setAppearance(Appearance.get().layers[adapter.layer]);
+        await adapter.setAppearance(boardImageLook(Appearance.get(),adapter.layer));
         st.append(d);continue;
       }
       const c=await ImageView.mount(t,view.size,{side,layer:l.name});
@@ -918,8 +921,8 @@ function updateStatus() {
   for (const [name,value] of Object.entries({x:p?.[0],y:p?.[1],dx,dy,dist:Math.hypot(dx,dy)})) statusText(`[data-coordinate=${name}]`,fmt(value));
   const coords = $("#statusbar .status-coordinates");
   coords?.classList.toggle("off-canvas",!current); coords?.toggleAttribute("data-sch-coordinates",sheet);
-  const rows = [...document.querySelectorAll("#panel .card[data-id]")], at = rows.findIndex(e => e.dataset.id === S.s);
-  statusText("[data-change]",`${at < 0 ? 0 : at+1}/${rows.length}`);
+  const ids = changeCardIds(), at = ids.indexOf(S.s);
+  statusText("[data-change]",`${at < 0 ? 0 : at+1}/${ids.length}`);
   statusText("[data-zoom]",placed() ? `${(S.z / PX * 100).toFixed(0)}%` : "off canvas");
   statusText("[data-units]",units);
   if ($("#status-units").value !== units) $("#status-units").value = units;
@@ -1247,7 +1250,7 @@ function pickAt(vp, e) {
     if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
   }
 }
-function markSelected() { S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
+function markSelected() { S.io = null; S.ig = null; revealChangeCard(); for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
@@ -1373,23 +1376,54 @@ function goToObject(i) {
 function bindInventory() {
   for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
 }
-function cardsHtml() {
+const CHANGE_PAGE_SIZE = 50, changePage = {key:'',index:0,ids:[]};
+function filteredChangeRows() {
   const f = S.filter, q = f.q.toLowerCase();
   let rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
     && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
   if (f.sort === "reference") rows.sort((a, b) => String(a.ref).localeCompare(String(b.ref), undefined, {numeric:true}));
   if (f.sort === "kind") rows.sort((a, b) => a.kind.localeCompare(b.kind));
   if (f.group) rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
+  return rows;
+}
+function changeCardIds() {
+  return rightTab==='changes' && !S.filter.all ? changePage.ids
+    : [...document.querySelectorAll('#panel .card[data-id]')].map(e=>e.dataset.id);
+}
+function cardsHtml() {
+  const f=S.filter, rows=filteredChangeRows(), key=JSON.stringify([S.p,f]);
+  changePage.ids=rows.map(r=>r.id);
+  if(changePage.key!==key){changePage.key=key;changePage.index=0;}
+  const pages=Math.max(1,Math.ceil(rows.length/CHANGE_PAGE_SIZE));
+  changePage.index=Math.max(0,Math.min(pages-1,changePage.index));
+  const start=changePage.index*CHANGE_PAGE_SIZE;
   let previous;
-  return (rows.slice(0, 1500).map(r => {
+  return (rows.slice(start,start+CHANGE_PAGE_SIZE).map(r => {
     const group = f.group ? r[f.group] : null;
     const heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
     previous = group;
     return heading + card(r);
   }).join("") || '<p class="muted">No changes match.</p>')
-    + (rows.length > 1500 ? `<p class="muted">showing 1500 of ${rows.length}; narrow the filter to see the rest</p>` : "");
+    + (pages>1 ? `<nav class="dock-list-tools" aria-label="Changes pages"><button type="button" data-change-page="previous" ${changePage.index===0?'disabled':''}>Previous</button><span role="status">${start+1}–${Math.min(start+CHANGE_PAGE_SIZE,rows.length)} of ${rows.length}</span><button type="button" data-change-page="next" ${changePage.index===pages-1?'disabled':''}>Next</button></nav>` : "");
 }
-function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
+function bindCards() {
+  for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id);
+  for (const b of document.querySelectorAll('#panel [data-change-page]')) b.onclick = () => {
+    const direction=b.dataset.changePage;
+    changePage.index+=direction==='next'?1:-1;
+    const cards=$('#panel .cards');cards.innerHTML=cardsHtml();bindCards();
+    const next=cards.querySelector(`[data-change-page="${direction}"]:not(:disabled)`) || cards.querySelector('[data-change-page]:not(:disabled)');
+    next?.focus();
+  };
+}
+function revealChangeCard() {
+  const cards=$('#panel .cards');
+  if(!cards || rightTab!=='changes' || S.filter.all || !S.s || cards.querySelector(`[data-id="${CSS.escape(S.s)}"]`))return;
+  const index=filteredChangeRows().findIndex(r=>r.id===S.s);
+  if(index<0)return;
+  changePage.index=Math.floor(index/CHANGE_PAGE_SIZE);
+  cards.innerHTML=cardsHtml();bindCards();
+}
 function waiverSnippet(v, check) {
   const today = new Date(), until = new Date(today.getTime() + 90 * 864e5).toISOString().slice(0, 10);
   const quote = x => '"' + String(x).replace(/["\\\u0000-\u001f\u007f]/g, c => c === '"' || c === "\\" ? "\\" + c : "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")) + '"';
@@ -1643,6 +1677,7 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel [data-lib-object]")) b.onclick = () => goToObject(+b.dataset.libObject);
   bindInventory();
   bindCards();
+  revealChangeCard();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
   for (const b of document.querySelectorAll("#panel [data-issue-for]")) b.onclick = () => {
     const v = allViolations().find(x => x.id === b.dataset.issueFor), a = v && findingAnchor(v);
@@ -1673,7 +1708,8 @@ function saveHash(immediate = false) {
   if (immediate) publish(); else hashTimer = setTimeout(publish, 200);
 }
 function stepIds() {
-  const sel = S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : S.t === "threads" ? "#panel .thread-card[data-thread]" : "#panel .card[data-id]";
+  if(S.t!=='checks' && S.t!=='threads')return changeCardIds();
+  const sel = S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : "#panel .thread-card[data-thread]";
   return [...document.querySelectorAll(sel)].map(e => e.dataset.id || e.dataset.thread);
 }
 function renderChangeCount() {
@@ -1689,7 +1725,7 @@ function step(dir) {
   if (!ids.length) return;
   const i = ids.indexOf(S.t === "threads" ? S.thread : S.s), next = ids[i < 0 ? (dir > 0 ? 0 : ids.length - 1) : (i + dir + ids.length) % ids.length];
   if (S.t === "threads") { openThread(next); document.querySelector(`#panel [data-thread="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }); return; }
-  goTo(next); document.querySelector(`#panel [data-id="${next}"]`)?.scrollIntoView({ block: "nearest" });
+  return goTo(next).then(() => document.querySelector(`#panel [data-id="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }));
 }
 // Hotkeys: KiCad common/tool/actions.cpp:717-767,809-815,1043-1057,1150-1155,1212-1218;
 // pcbnew/tools/pcb_actions.cpp:1869-1877,2125-2150,2160-2180. Browser Ctrl variants are explicit.

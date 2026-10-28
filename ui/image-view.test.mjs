@@ -304,18 +304,44 @@ test('layer adapter applies imported RGB to original, never to prior rewrite',as
   assert.equal(wrapper.style.opacity,'1'); a.dispose(); assert.equal(revoked.length,2);
 });
 
+test('layer hide between controller decode and adapter continuation never remounts stale artwork',async()=>{
+  const jobs=[],revoked=[],wrapper={style:{},replaceChildren(n){this.child=n;}};
+  const adapter=ctx.ImageView.boardLayer('<svg fill="#ff0000"/>',[255,0,0],wrapper,{side:'head',layer:'F.Cu'},{
+    create:()=> 'blob:race',revoke:u=>revoked.push(u),make:()=>({dataset:{},remove(){},decode:()=>new Promise(resolve=>jobs.push(resolve))})
+  });
+  const look={color:[18,52,86,1],opacity:1},change=adapter.controller.setAppearance.bind(adapter.controller);
+  adapter.controller.setAppearance=async paints=>{
+    const ok=await change(paints);
+    await adapter.setAppearance({...look,visible:false});
+    return ok;
+  };
+  const pending=adapter.setAppearance(look);jobs[0]();
+  assert.equal(await pending,false);
+  assert.equal(wrapper.child,undefined);assert.equal(adapter.controller.node,null);
+  assert.deepEqual(revoked,['blob:race']);adapter.dispose();
+});
+
 test('layer adapter keeps alpha and visibility on wrapper through delayed replacement and disposal',async()=>{
   const jobs=[],revoked=[],wrapper={style:{},hidden:false,replaceChildren(n){this.child=n;}};
   const adapter=ctx.ImageView.boardLayer('<svg fill="#F00" opacity=".4"/>',[255,0,0],wrapper,{side:'base',layer:'F.Cu'},{
     create:s=>s,revoke:u=>revoked.push(u),make:()=>({dataset:{},remove(){},decode:()=>new Promise(resolve=>jobs.push(resolve))})
   });
-  const first=adapter.setAppearance({color:[18,52,86,.5],opacity:.5,visible:false});
+  const hidden=adapter.setAppearance({color:[18,52,86,.5],opacity:.5,visible:false});
+  assert.equal(jobs.length,0,'hidden layer must not allocate or decode an image');
+  assert.equal(await hidden,true);
   assert.equal(wrapper.style.opacity,'0.25');assert.equal(wrapper.hidden,true);
+  const first=adapter.setAppearance({color:[18,52,86,.5],opacity:.5,visible:true});
+  assert.equal(await adapter.setAppearance({color:[18,52,86,.5],opacity:.5,visible:false}),true);
+  assert.equal(adapter.controller.node,null);
+  assert.equal(revoked.length,1,'hiding releases pending URL immediately');
   const second=adapter.setAppearance({color:[65,43,21,1],opacity:1,visible:true});
   jobs[1]();assert.equal(await second,true);const current=wrapper.child;
   jobs[0]();assert.equal(await first,false);assert.equal(wrapper.child,current);
   assert.equal(wrapper.hidden,false);assert.equal(wrapper.style.opacity,'1');
   assert.ok(adapter.controller.appliedSource.includes('opacity=".4"'));
+  assert.equal(await adapter.setAppearance({color:[1,2,3,1],opacity:1,visible:false}),true);
+  assert.equal(adapter.controller.node,null);assert.equal(wrapper.child,undefined);
   const third=adapter.setAppearance({color:[1,2,3,1],opacity:1});adapter.dispose();
   jobs[2]();assert.equal(await third,false);assert.equal(new Set(revoked).size,3);
+  assert.equal(await adapter.setAppearance({color:[1,2,3,1],opacity:1}),false);
 });

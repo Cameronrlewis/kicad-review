@@ -60,16 +60,23 @@
   function boardLayer(source,original,wrapper,options,env) {
     // Always substitute from the immutable selected export, not a prior rewrite.
     const normalized=layerPaints(source,original,original);
-    const c=controller(normalized,options,env);
-    return {controller:c,
+    let c=controller(normalized,options,env), hidden=false, disposed=false;
+    return {get controller(){return c;},
       async setAppearance(look){
+        if(disposed)return false;
         wrapper.style.opacity=String(look.color[3]*look.opacity);
         wrapper.hidden=look.visible===false;
-        const applied=await c.setAppearance(new Map([[rgbHex(original),rgbHex(look.color)]]));
-        if(applied&&!c.node.isConnected)wrapper.replaceChildren(c.node);
-        return applied;
+        if(wrapper.hidden){
+          hidden=true;c.dispose();wrapper.replaceChildren();return true;
+        }
+        if(hidden){c=controller(normalized,options,env);hidden=false;}
+        const current=c;
+        const applied=await current.setAppearance(new Map([[rgbHex(original),rgbHex(look.color)]]));
+        if(!applied||disposed||hidden||current!==c||!current.node)return false;
+        if(!current.node.isConnected)wrapper.replaceChildren(current.node);
+        return true;
       },
-      dispose(){c.dispose();}
+      dispose(){disposed=true;c.dispose();}
     };
   }
 

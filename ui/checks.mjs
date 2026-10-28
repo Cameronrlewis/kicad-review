@@ -44,6 +44,72 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["images every sheet whole-page DOM budget", "", `
+    Object.assign(S.filter,{added:true,removed:true,modified:true,kind:'',q:'',all:false,sort:'',group:''});
+    let count=0;
+    for(const [p,project] of D.projects.entries())for(const sheet of project.sheets) {
+      if(!sheet.svg?.base&&!sheet.svg?.head)continue;
+      await applyState({...S,p,v:'sheet:'+sheet.path,m:'side',t:'changes',s:null});
+      const total=document.querySelectorAll('*').length;count++;
+      if(total>=2000)return 'DOM budget '+total+' project '+project.dir+' sheet '+sheet.path;
+      if(document.querySelector('#stage .layer svg'))return 'live artwork';
+      if(document.querySelector('#stage').dataset.imageReady!=='true')return 'sheet not ready';
+    }
+    return count>0||'no sheets checked';
+  `],
+  ["images large Changes dock pages retain every row and selection", "", `
+    const p=D.projects.findIndex(p=>p.changes.length>100);
+    if(p<0)return true;
+    await applyState({...S,p,t:'changes',s:null});
+    Object.assign(S.filter,{added:true,removed:true,modified:true,kind:'',q:'',all:false,sort:'reference',group:'kind'});renderPanel();setDock('panel',true);
+    const seen=new Set();let pages=0;
+    for(;;) {
+      const cards=[...document.querySelectorAll('#panel .card[data-id]')];
+      if(cards.length>50)return 'unbounded Changes page '+cards.length;
+      for(const card of cards){if(seen.has(card.dataset.id))return 'duplicate page row';seen.add(card.dataset.id);}
+      const next=document.querySelector('[data-change-page="next"]');
+      if(!next)return 'missing Changes pagination';
+      if(next.disabled)break;
+      next.click();if(++pages>100)return 'pagination loop';
+    }
+    if(seen.size!==proj().changes.length)return 'lost changes '+seen.size+'/'+proj().changes.length;
+    const ordered=filteredChangeRows();await goTo(ordered[49].id);await step(1);
+    if(S.s!==ordered[50].id||!document.querySelector('#panel .card[data-id="'+CSS.escape(S.s)+'"][aria-selected="true"]'))return 'keyboard navigation did not cross page boundary';
+    if(document.querySelector('[data-change]').textContent!=='51/'+ordered.length)return 'status counter truncated';
+    const first=proj().changes.find(r=>!document.querySelector('#panel .card[data-id="'+CSS.escape(r.id)+'"]'));
+    if(!first)return 'fixture has no off-page change';
+    await goTo(first.id);
+    if(!document.querySelector('#panel .card[aria-selected="true"]')||!document.querySelector('#panel .card[data-id="'+CSS.escape(first.id)+'"]'))return 'off-page selection not revealed';
+    const search=document.querySelector('#panel .q');search.value=first.ref||first.kind;search.dispatchEvent(new Event('input'));
+    if(!document.querySelector('#panel .card[data-id="'+CSS.escape(first.id)+'"]'))return 'search lost matching row';
+    Object.assign(S.filter,{q:'',sort:'',group:''});renderPanel();
+    document.querySelector('[data-change-page]')?.scrollIntoView({block:'nearest'});return true;
+  `],
+  ["images fallback skips hidden layers and tolerates missing appearance", "", `
+    const layer=proj().board.layers.find(l=>l.svg?.head);
+    if(!layer)return 'fixture has no board artwork';
+    const name=canon(layer.name),snapshot=Appearance.get(),get=Appearance.get,resolve=KrAppearance.resolve;
+    const hidden=structuredClone(snapshot);hidden.layers[name]={...hidden.layers[name],visible:false};
+    const view={kind:'board',size:proj().board.size,layers:[layer]},stages=[];
+    try {
+      Appearance.get=()=>hidden;
+      const absent=await stack('head',view);stages.push(absent);
+      if(absent.imageOwners.length||absent.querySelector('img'))return 'hidden layer allocated artwork';
+      Appearance.get=()=>{const s=structuredClone(snapshot);delete s.layers[name];return s;};
+      const fallback=await stack('head',view);stages.push(fallback);
+      const adapter=fallback.imageOwners[0];
+      if(fallback.querySelector('.image-error')||!adapter?.controller.node?.naturalWidth)return 'missing appearance broke stack';
+      appearanceBoardImages.add(adapter);
+      KrAppearance.resolve=s=>{const r=resolve(s);delete r.layers[name];return r;};
+      await applyAppearance(snapshot);
+      if(!adapter.controller.node?.naturalWidth)return 'missing resolved appearance broke update';
+      return true;
+    } finally {
+      Appearance.get=get;KrAppearance.resolve=resolve;
+      for(const stage of stages)for(const owner of stage.imageOwners)owner.dispose();
+      await applyAppearance(snapshot);
+    }
+  `],
   ["images fallback appearance", "", `
 const oldCreate=BoardGL.create;
 BoardGL.create=()=>null;
@@ -88,7 +154,9 @@ return true;
       snapshot.layerOpacity['F.Cu']=.5;
       await applyAppearance(snapshot);
       const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
-      if(!fronts.length||!fronts.every(a=>a.controller.appliedSource.includes('#123456')&&Number(a.controller.node.parentElement.style.opacity)===.25))return 'fallback ignored supplied snapshot';
+      // Empty base-layer exports decode too, but contain no source paint to replace.
+      const painted=fronts.filter(a=>a.controller.source.toLowerCase().includes(ImageView.rgbHex(KicadColors.layers['F.Cu'])));
+      if(!painted.length||!painted.every(a=>a.controller.appliedSource.includes('#123456'))||!fronts.every(a=>a.controller.node.complete&&Number(a.controller.node.parentElement.style.opacity)===.25))return 'fallback ignored supplied snapshot';
       return JSON.stringify(Appearance.get())===saved||'appearance application mutated store';
     } finally {BoardGL.create=original;await applyAppearance(Appearance.get());}
   `],
@@ -104,7 +172,8 @@ return true;
       Appearance.import(JSON.stringify({meta:{version:5},board:{copper:{f:'rgb(65, 43, 21)'}}}));
       await applyAppearance(Appearance.get());
       const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
-      if(fronts.length!==2||!fronts.every(a=>a.controller.node.complete&&a.controller.appliedSource.includes('#412b15')))return 'legacy RGB import';
+      const painted=fronts.filter(a=>a.controller.source.toLowerCase().includes(ImageView.rgbHex(KicadColors.layers['F.Cu'])));
+      if(fronts.length!==2||!painted.length||!painted.every(a=>a.controller.appliedSource.includes('#412b15'))||!fronts.every(a=>a.controller.node.complete))return 'legacy RGB import';
       for(const a of appearanceBoardImages)if(!a.controller.node.complete||!a.controller.node.naturalWidth)return 'legacy decode';
       const old=[...appearanceBoardImages];
       await applyState({...S,v:'sheet:'+proj().sheets[0].path});
@@ -116,7 +185,8 @@ return true;
   `],
   ["images screen and legacy appearance", "", `
     // Use the first two-sided project when present. The legacy added-project's
-    // unfiltered Changes dock alone exceeds the artwork DOM budget.
+    // unfiltered Changes dock alone previously exceeded the artwork DOM budget.
+    // The every-sheet check also covers that large project with paginated Changes.
     const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg?.base&&s.svg?.head));
     const project=D.projects[p<0?S.p:p],sheet=project.sheets.find(s=>s.svg?.base||s.svg?.head);
     if(!sheet)return 'fixture has no sheet';
@@ -1180,11 +1250,27 @@ return true;
     d.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 1 }));
     d.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: r.left + r.width * 0.1 }));
     return Math.abs(S.wipe - 0.5) < 0.02 || S.wipe;`],
-  ["a capped change list says so", "p=1", `
-    const p = REVIEW_DATA.projects[1], keep = p.changes;
-    p.changes = Array.from({ length: 1600 }, (_, i) => ({ ...keep[0], id: "x" + i }));
-    renderPanel(); const t = document.querySelector("#panel .cards").textContent; p.changes = keep; renderPanel();
-    return t.includes("showing 1500 of 1600") || t.slice(-80);`],
+  ["Changes pagination retains all 1600 rows", "p=1", `
+    const p=proj(),keep=p.changes,filter={...S.filter},selection=S.s;
+    try {
+      p.changes=Array.from({length:1600},(_,i)=>({...keep[0],id:'x'+i}));
+      Object.assign(S.filter,{added:true,removed:true,modified:true,all:false,q:'',kind:'',sort:'',group:''});
+      S.s=null;renderPanel();setDock('panel',true);const seen=new Set();
+      if(stepIds().length!==1600)return 'keyboard navigation truncated '+stepIds().length;
+      for(let page=0;page<32;page++) {
+        const rows=[...document.querySelectorAll('#panel .card')];
+        if(rows.length!==50)return 'wrong page size '+rows.length;
+        for(const r of rows)seen.add(r.dataset.id);
+        const next=document.querySelector('[data-change-page="next"]');
+        if(!next||next.disabled!==(page===31))return 'wrong next page state';
+        if(!next.disabled){next.click();if(!document.activeElement?.matches('[data-change-page]:not(:disabled)'))return 'pagination lost focus';}
+      }
+      if(seen.size!==1600)return 'rows truncated '+seen.size;
+      S.s='x0';renderPanel();
+      if(!document.querySelector('.card[data-id="x0"][aria-selected="true"]'))return 'saved selection not revealed';
+      return document.querySelector('.cards [role="status"]').textContent==='1–50 of 1600'||'wrong page range';
+    } finally {p.changes=keep;S.filter=filter;S.s=selection;renderPanel();}
+  `],
   ["generated ids and enums are escaped in markup", "p=1", `
     const p = REVIEW_DATA.projects[1], r = p.changes[0], old = r.id; r.id = 'c"><b id=inj>';
     renderPanel(); const bad = !!document.querySelector("#inj"); r.id = old; renderPanel();
@@ -2960,10 +3046,10 @@ return true;
     if(t('dx')==='0.000') return 'pan dropped origin';
     S.v='sheet:/not-in-report'; await draw(); await raf();
     return t('x')==='off canvas' && t('dx')==='0.000' && !/NaN|Infinity/.test(document.querySelector('#statusbar').textContent);`],
-  ["status change counter matches visible change rows", "", `
+  ["status change counter includes off-page filtered change rows", "", `
     const row=proj().changes.find(r=>viewOf(r)&&currentView(viewOf(r))); if(!row) return 'skip';
     await goTo(row.id); await new Promise(r=>requestAnimationFrame(r));
-    const rows=[...document.querySelectorAll('#panel .card[data-id]')], i=rows.findIndex(e=>e.dataset.id===S.s);
+    const rows=filteredChangeRows(), i=rows.findIndex(r=>r.id===S.s);
     return document.querySelector('[data-change]').textContent===(i+1)+'/'+rows.length;`],
   ["shortcut sheet button and question mark open, Escape closes keeping selection and focus", "", `
     const before=S.s, opener=document.querySelector('#shortcuts-open'); opener.focus();
@@ -3294,7 +3380,7 @@ return true;
     && /^(\u2013|\\d+) \\/ \\d+$/.test(document.querySelector('#change-count').textContent)
     && !!document.querySelector('[data-mark-style]');`],
   ["chrome toolbar change counter follows step", "", `
-  const n = document.querySelectorAll('#panel .card[data-id]').length;
+  const n = filteredChangeRows().length;
   if (!n) return 'no cards';
   if (document.querySelector('#change-count').textContent.split(' / ')[1] !== String(n)) return 'total ' + document.querySelector('#change-count').textContent;
   document.querySelector('#change-nav [data-step="1"]').click();
