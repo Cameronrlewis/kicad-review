@@ -5,7 +5,7 @@ const D = window.REVIEW_DATA;
 document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
 const LIGHT_RIGS3D = ["bench", "lowsun", "photo"];
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, part3d: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
@@ -225,9 +225,9 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function openProject(i) { S.part3d = null; S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -266,7 +266,7 @@ function valid(st) {   // drop anything that does not exist in this report
 function applyState(st) {
   const v = valid(st);
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
-  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
+  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
                      revision: v.revision ?? "head", layout: v.layout ?? null, layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? null, camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
@@ -274,6 +274,7 @@ function applyState(st) {
   renderModes();
   renderNav();
   renderPanel();
+  renderInspector();
   renderZoombar();
   return draw().then(() => S.s && !hasPos && !v.v && goTo(S.s));
 }
@@ -585,6 +586,7 @@ async function draw() {
     return;
   }
   window.Review3D?.dispose();
+  if(S.part3d){S.part3d=null;renderInspector();}
   let scenes = null;
   const geo = S.v === "board" && view && proj().board.geometry;
   if (boardView.failed !== null && boardView.failed !== S.p) boardView.failed = boardView.note = null;
@@ -1137,8 +1139,10 @@ function pickAt(vp, e) {
     if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
   }
 }
-function markSelected() { S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
-if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled, lighting}) => { if (revision) S.revision = revision; if (assembled !== undefined) S.assembled3d = assembled; if (lighting) S.lighting3d = lighting; saveHash(); }; }
+function markSelected() { S.part3d = null; S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
+if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onPartPick = part => {
+  S.s = null; markSelected(); S.part3d = {...part,box:part.box.slice()}; renderInspector(); saveHash();
+}; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled, lighting}) => { if (revision) S.revision = revision; if (assembled !== undefined) S.assembled3d = assembled; if (lighting) S.lighting3d = lighting; saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
@@ -1533,7 +1537,16 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel [data-lib-object]")) b.onclick = () => goToObject(+b.dataset.libObject);
   bindInventory();
   bindCards();
-  for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => { const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if (row) window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" }); };
+  for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => {
+    const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if(!row)return;
+    const side=row.side==='both'?(S.revision||'head'):row.side;
+    const part=window.Review3D?.state?.parts[side]?.find(x=>x.ref===row.ref);
+    if(part) {
+      const change=p.changes.find(c=>c.kind==='footprint'&&(side==='base'?(c.uuid_before||c.uuid):c.uuid)===part.uuid);
+      if(change)window.Review3D.onPick(change.id);
+      else {window.Review3D.onPartPick({...part,side});window.Review3D.focusPart(part.ref,side);}
+    } else window.Review3D?.focus({ ...row, action: row.side === "base" ? "removed" : "added" });
+  };
   for (const b of document.querySelectorAll("#panel [data-issue-for]")) b.onclick = () => {
     const v = allViolations().find(x => x.id === b.dataset.issueFor), a = v && findingAnchor(v);
     if (ISSUES_ON && a && !issueForAnchor(a)) parent.postMessage({ kicadReviewIssueFor: { ...a, title: `${v.check}: ${v.description}`.slice(0, 200) } }, "*");
@@ -1851,7 +1864,7 @@ function inspectorProperties() {
 }
 function renderInspector() {
   const dock = $("#inspector"); if (!dock) return;
-  const data = inspectorProperties(), title = data?.selected.ref || data?.selected.type || data?.selected.kind || "";
+  const data = S.part3d ? null : inspectorProperties(), title = S.part3d?.ref || data?.selected.ref || data?.selected.type || data?.selected.kind || "";
   const flat = v => Array.isArray(v) && v.every(x => x == null || x !== Object(x));
   const value = v => v == null ? "—" : flat(v) ? v.join(", ") : v === Object(v) ? JSON.stringify(v) : String(v);
   // Arrays of plain values (Nets, layers) read as a list, not raw JSON.
@@ -1870,6 +1883,21 @@ function renderInspector() {
     groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label).replace(/\./g, ".<wbr>")}</dt><dd>${changed ? `<del>${html(data.base[key], a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${html(data.head[key], b)}</ins>` : html(data.head[key], b)}</dd>`);
   }
   dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
+  if(S.part3d) {
+    const p=S.part3d,body=$("#insp-body"),box=p.box.map(n=>round3(n*1000));
+    body.dataset.part3dInspector='';body.replaceChildren();
+    dock.querySelector('header strong').textContent=p.ref;
+    // Unchanged parts are identities, not fabricated changes. All index strings remain text.
+    for(const [title,rows] of [
+      ['Identity',[['Reference',p.ref],['UUID',p.uuid],['Revision',p.side],['Commit',D[p.side]],['3D model',p.hasModel?'Present':'Missing']]],
+      ['Placement · board mm',[['X bounds (mm)',`${box[0]} … ${box[3]}`],['Y bounds (mm)',`${box[2]} … ${box[5]}`],['Height bounds (mm)',`${box[1]} … ${box[4]}`]]]
+    ]) {
+      const section=document.createElement('section'),heading=document.createElement('h4'),list=document.createElement('dl');
+      section.className='insp-module';heading.textContent=title;
+      for(const [label,value] of rows){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=value??'Not in report';list.append(dt,dd);}
+      section.append(heading,list);body.append(section);
+    }
+  }
   $("#insp-toggle").onclick = () => { inspectorClosed = !inspectorClosed; inspectorLayout(); persistInspector(); renderInspector(); };
 }
 let inspectorHeight = 176, inspectorClosed = false;

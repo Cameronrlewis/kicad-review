@@ -44,6 +44,162 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+["BR02 processed unchanged focus and missing batch", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,p=st.parts.head.find(p=>p.ref==='R2');
+ if(!p?.hasModel)return 'missing unchanged R2 index';
+ if(st.roots[1].getObjectByName('R2'))return 'unchanged part was not merged';
+ Review3D.focusPart('R2','head',false);
+ if(!Review3D.state.selected.length)return 'unchanged focus has no outline';
+ for(const side of ['base','head']) {
+   const missing=st.parts[side].filter(p=>!p.hasModel),mesh=st.placeholderMeshBySide[side];
+   if(missing.length&&(!mesh?.isMesh||mesh.geometry.index.count!==missing.length*36))
+     return 'missing models not in one indexed box batch';
+ }
+ return true;
+`],
+["BR02 processed bare parts cannot be picked", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ Review3D.setAssembled(false);
+ Review3D.focusPart('R2','head',false);
+ if(Review3D.state.selected.length)return 'hidden body remains selectable';
+ Review3D.setAssembled(true);Review3D.focusPart('R2','head',false);
+ return Review3D.state.selected.length>0||'assembled focus failed';
+`],
+
+...[...['R2','J1','U3','U4'].flatMap(ref=>['base','head'].map(side=>[ref,side])),['R1','base'],['R12','head']].map(([ref,side])=>[
+ 'BR02 processed pointer '+side+' '+ref,'v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const side=${JSON.stringify(side)},ref=${JSON.stringify(ref)},st=Review3D.state;
+ Review3D.setRevision(side);
+ const v=st.views.find(v=>v.visible&&(!v.side||v.side===side));if(!v)return 'missing own viewport';
+ const p=st.parts[side].find(p=>p.ref===ref),{THREE:T}=THREE3D;
+ if(!p)return 'missing indexed target';
+ const point=p.bounds.getCenter(new T.Vector3());v.camera.updateMatrixWorld(true);point.project(v.camera);
+ const b=v.host.getBoundingClientRect(),xy={clientX:b.left+(point.x+1)*b.width/2,
+   clientY:b.top+(1-point.y)*b.height/2,bubbles:true,pointerId:1,pointerType:'mouse'};
+ if(Math.abs(point.x)>1||Math.abs(point.y)>1)return 'target outside viewport';
+ // ui/check.mjs named BR02 processed pointer preparation computes these projected host coordinates before this assertion body runs.
+ if(window.__br02PointerResult?.side!==side||window.__br02PointerResult?.ref!==ref)return 'CDP pointer input was not prepared';
+ const changed=proj().changes.find(c=>c.kind==='footprint'&&(c.uuid===p.uuid||c.uuid_before===p.uuid));
+ if(changed) {
+   if(S.s!==changed.id)return 'changed footprint bypassed change selection: '+JSON.stringify({expected:changed.id,selected:S.s,part:S.part3d?.uuid});
+   if(!Review3D.state.selected.some(x=>x.ref===ref&&x.side===side))return 'changed footprint did not select its revision-local outline';
+   if(S.part3d)return 'changed selection incorrectly entered part inspector';
+ } else {
+   if(S.part3d?.uuid!==p.uuid||S.part3d?.side!==side)return 'indexed pointer selected wrong UUID/revision';
+   const inspector=document.querySelector('[data-part3d-inspector]');
+   if(!inspector||![ref,p.uuid,side].every(x=>inspector.textContent.includes(x)))return 'inspector identity missing';
+ }
+ if(!v.host.querySelector('.tip3d')?.textContent.includes(ref))return 'indexed hover absent';
+ for(const hidden of [[p.side],['bodies']]) {
+   Review3D.setHidden(hidden);
+   if(v.host.querySelector('.tip3d'))return 'hidden body tooltip remains visible';
+   const mesh=st.placeholderMeshBySide[side];
+   if(mesh&&hidden[0]===p.side) {
+     const own=mesh.userData.placeholderSides.indexOf(p.side),other=1-own;
+     if(mesh.material[own].visible||!mesh.material[other].visible)return 'placeholder side visibility not independent';
+   }
+   Review3D.setAssembled(false);Review3D.setAssembled(true);
+   if(Review3D.state.selected.length)return 'assembly reset hidden selection';Review3D.setHidden([]);
+ }
+ Review3D.setAssembled(false);
+ if(Review3D.state.selected.length)return 'bare board retained outlines';
+ Review3D.setAssembled(true);return true;
+ `]),
+
+["BR02 processed overlapping box misses changed mesh", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,{THREE:T}=THREE3D,v=st.views.find(v=>v.visible&&(!v.side||v.side==='head'));
+ if(!v)return 'missing head viewport';
+ const root=st.roots[1],changed=st.parts.head.find(p=>p.ref==='R12'),unchanged=st.parts.head.find(p=>p.ref==='R2');
+ root.traverse(n=>{if(n.isMesh)n.visible=false});
+ const center=unchanged.bounds.getCenter(new T.Vector3());
+ v.controls.target.copy(center);v.camera.position.copy(center).add(new T.Vector3(0,.1,0));
+ v.camera.up.set(0,0,-1);v.camera.lookAt(center);v.camera.updateMatrixWorld(true);
+ changed.bounds=unchanged.bounds.clone().expandByScalar(.001);
+ // Triangle is inside the overlapping changed AABB but away from the centre ray.
+ const size=unchanged.bounds.getSize(new T.Vector3()),x=center.x+size.x*.4,z=center.z;
+ const g=new T.BufferGeometry().setAttribute('position',new T.Float32BufferAttribute([
+   x,center.y+.001,z,x+size.x*.05,center.y+.001,z,x,center.y+.001,z+size.z*.05],3));
+ const mesh=new T.Mesh(g,new T.MeshBasicMaterial({side:T.DoubleSide}));
+ mesh.userData={role:'body',side:changed.side,ref:'R12'};root.add(mesh);
+ // Named \`BR02 processed mesh miss\` branch in ui/check.mjs sends a real CDP mouse press/release here.
+ if(!window.__br02MeshMissInput)return 'CDP mesh-miss input was not prepared';
+ return S.part3d?.uuid===unchanged.uuid||'changed AABB stole mesh-miss ray';
+`],
+["BR02 processed moved renamed own pane outlines", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const c=proj().changes.find(c=>c.kind==='footprint'&&c.ref==='R12');if(!c)return 'renamed change absent';
+ Review3D.focus(c,false);const st=Review3D.state;
+ for(const side of st.visibleSides) {
+   const p=st.parts[side].find(p=>p.uuid===(side==='base'?(c.uuid_before||c.uuid):c.uuid));
+   const outlines=st.selected.filter(o=>o.userData.revision===side);
+   if(outlines.length!==1||outlines[0].userData.uuid!==p.uuid)return 'lost revision-local outline';
+   const b=new THREE3D.THREE.Box3().setFromObject(outlines[0]);
+   if(b.min.distanceTo(p.bounds.min)>1e-6||b.max.distanceTo(p.bounds.max)>1e-6)return 'outline uses other revision box';
+ }
+ return S.phone||st.selected.length===2||'changed focus cleared base outline';
+`],
+
+  ["BR02 processed missing list keeps revision identity", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    for(const side of ['base','head']) {
+      Review3D.setRevision(side);
+      document.querySelector('[data-no-model="U3"]').click();
+      const c=proj().changes.find(c=>c.ref==='U3');
+      if(S.s!==c.id||S.part3d)return 'changed missing part bypassed change selection';
+      const st=Review3D.state,p=st.parts[side].find(p=>p.ref==='U3');
+      if(!st.selected.some(o=>o.userData.uuid===p.uuid&&o.side===side))return 'changed missing list lost own revision';
+      document.querySelector('[data-no-model="U4"]').click();
+      if(S.s||S.part3d?.side!==side||S.part3d?.ref!=='U4')return 'unchanged missing list fabricated a change';
+    }
+    return true;
+  `],
+  ["BR02 processed rejected peer index retains own focus", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),expected=Review3D.state.parts.head.find(p=>p.ref==='R12').bounds.clone();
+    p.board.parts3d.head='br02-invalid-index';REVIEW_DATA.blobs['br02-invalid-index']='not base64!';
+    await Review3D.show(document.querySelector('#stage'),p,S);
+    const c=p.changes.find(c=>c.ref==='R12');Review3D.focus(c,false);
+    const st=Review3D.state;
+    if(!st.errorsBySide.head)return 'invalid index not diagnosed';
+    const own=st.selected.find(o=>o.side==='head');
+    if(!own&&st.visibleSides.includes('head'))return 'valid peer suppressed legacy own focus';
+    if(own) {
+      const box=new THREE3D.THREE.Box3().setFromObject(own);
+      if(box.min.distanceTo(expected.min)>1e-6||box.max.distanceTo(expected.max)>1e-6)return 'rejected index borrowed peer bounds';
+    }
+    return true;
+  `],
+  ["BR02 processed inspector identity is text and clears on navigation", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const part=Review3D.state.parts.head.find(p=>p.ref==='R2');
+    const ref='<img src=x onerror=alert(1)>';
+    Review3D.onPartPick({...part,ref,side:'head'});
+    const inspector=document.querySelector('[data-part3d-inspector]');
+    if(inspector.querySelector('img')||!inspector.textContent.includes(ref))return 'index text interpreted as markup';
+    if(!inspector.textContent.includes('X bounds (mm)')||!inspector.textContent.includes('14.2'))return 'world bounds not shown in board mm';
+    await goTo(proj().changes[0].id);
+    if(S.part3d||document.querySelector('[data-part3d-inspector]'))return 'changed selection retained part identity';
+    Review3D.onPartPick({...part,side:'head'});
+    await applyState({...S,s:proj().changes[0].id});
+    if(S.part3d||document.querySelector('[data-part3d-inspector]'))return '3D hash navigation retained stale part identity';
+    Review3D.onPartPick({...part,side:'head'});S.v='board';await draw();
+    return !S.part3d&&!document.querySelector('[data-part3d-inspector]')||'navigation retained stale 3D identity';
+  `],
+  ["BR02 processed inspector whole screen", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state,part=st.parts.head.find(p=>p.ref==='R2'),widthBefore=document.documentElement.scrollWidth;
+    Review3D.setRevision('head');Review3D.onPartPick({...part,side:'head'});Review3D.focusPart(part.ref,'head',false);
+    // The shared shell belongs to 05: record its existing overflow, reject any added by this inspector.
+    console.log('BOARD_PROOF part inspector '+JSON.stringify({width:innerWidth,before:widthBefore,after:document.documentElement.scrollWidth}));
+    if(document.documentElement.scrollWidth>widthBefore)return 'part inspector introduced horizontal overflow';
+    const inspector=document.querySelector('[data-part3d-inspector]'),r=inspector.getBoundingClientRect();
+    if(r.left<0||r.right>innerWidth||r.bottom>innerHeight||inspector.scrollWidth>inspector.clientWidth)return 'part inspector outside screen';
+    const toggle=document.querySelector('#insp-toggle');toggle.focus();
+    return document.activeElement===toggle&&inspector.textContent.includes(part.uuid)||'part identity or keyboard focus absent';
+  `],
   ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
     const id = '__sch6_palette_probe__';
     const source = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
@@ -4689,7 +4845,7 @@ CHECKS.push(
     document.querySelector('[data-3d-assembled]').click();
     if(st.selected.some(o=>o.visible))return 'selection outline remains in bare mode';
     Review3D.focus(change,false);
-    if(!st.selected.length||st.selected.some(o=>o.visible))return 'focus recreated visible bare outline';
+    if(st.selected.length)return 'focus recreated bare outline';
     if(st.assembled!==false||document.querySelector('[data-3d-assembled]').getAttribute('aria-pressed')!=='false')return 'toggle state';
     if(meshes('bodies').some(x=>x.object.visible))return 'bodies still visible when bare';
     if(!meshes('board').every(x=>x.object.visible))return 'board hidden when bare';
@@ -4698,7 +4854,7 @@ CHECKS.push(
     Review3D.setHidden(['silk']);
     if(meshes('bodies').some(x=>x.object.visible))return 'hidden groups re-showed bodies';
     Review3D.setAssembled(true);
-    return (st.selected.every(o=>o.visible)&&meshes('bodies').every(x=>x.object.visible)&&meshes('silk').every(x=>!x.object.visible))||'assemble did not restore';
+    return (st.selected.length===0&&meshes('bodies').every(x=>x.object.visible)&&meshes('silk').every(x=>!x.object.visible))||'assemble did not restore';
   `],
   ['BR02 processed 3D tools whole screen reachable', 'v=3d&m=side', `
     if(!proj().board.parts3d)return 'skip';

@@ -35,7 +35,9 @@ window.Review3D = (() => {
       else throw Error('3D part index unavailable');
       if (s.dead) return [];
       const {THREE:T} = THREE3D;
-      return ThreeParts.validate(JSON.parse(new TextDecoder().decode(bytes))).map(p => ({...p,
+      const rows = ThreeParts.validate(JSON.parse(new TextDecoder().decode(bytes)));
+      s.indexedSides.add(side);
+      return rows.map(p => ({...p,
         bounds:new T.Box3(new T.Vector3(...p.box.slice(0, 3)), new T.Vector3(...p.box.slice(3)))}));
     } catch (error) {
       if (!s.dead && s.state.errorsBySide[side] == null) {
@@ -237,6 +239,7 @@ window.Review3D = (() => {
     const s = active; if (!s || s.dead) return;
     s.assembled = s.state.assembled = !!value;
     document.querySelector("#zoombar [data-3d-assembled]")?.setAttribute("aria-pressed", String(s.assembled));
+    if (!s.assembled) { clearPartSelection(); clearPartTooltips(); }
     applyVisibility(); window.Review3D.onStateChange?.({assembled:s.assembled}); render();
   }
   function cameraBar() {
@@ -339,7 +342,7 @@ window.Review3D = (() => {
       const r = v.host.getBoundingClientRect(); v.visible = !v.failed && !v.host.hidden && r.width > 0 && r.height > 0;
       if (v.visible) { v.camera.aspect = r.width / r.height; v.camera.updateProjectionMatrix(); }
     }
-    render();
+    applyVisibility(); render();
   }
   function boxEdges(size) {
     const {THREE} = window.THREE3D, box = new THREE.BoxGeometry(size.x, size.y, size.z);
@@ -374,7 +377,7 @@ window.Review3D = (() => {
     return {original, materials:changed};
   }
   function recolour() { if(!active)return; const st=window.Review3D.state; st.highlights.forEach(h=>{const c=tint(h.action);h.materials.forEach((m,i)=>{if(m.color)m.color.copy(h.original[i].color).lerp(c,.7);if(m.emissive)m.emissive.copy(c);});});st.ghosts.forEach(g=>g.object.traverse(o=>{if(o.isMesh)materials(o).forEach(m=>m.color.copy(tint("removed")));}));active.selected.forEach(o=>o.material.color.set(css("--accent")));render(); }
-  function marker(v,node,change) { const { THREE }=window.THREE3D,b=new THREE.Box3().setFromObject(node),position=b.getCenter(new THREE.Vector3()),el=document.createElement("span");position.y=b.max.y+.004;el.className=`marker3d ${change.action}`;el.dataset.ref=change.ref;el.textContent=`${change.action === "added" ? "＋" : change.action === "removed" ? "−" : "≡"} ${change.ref||""}`;el.style.color=`var(--${change.action})`;v.host.appendChild(el);const m={position,el};(v.labels ||= []).push(m); return m; }
+  function marker(v,node,change,bounds) { const { THREE }=window.THREE3D,b=bounds||new THREE.Box3().setFromObject(node),position=b.getCenter(new THREE.Vector3()),el=document.createElement("span");position.y=b.max.y+.004;el.className=`marker3d ${change.action}`;el.dataset.ref=change.ref;el.textContent=`${change.action === "added" ? "＋" : change.action === "removed" ? "−" : "≡"} ${change.ref||""}`;el.style.color=`var(--${change.action})`;v.host.appendChild(el);const m={position,el};(v.labels ||= []).push(m); return m; }
   function view(host, roots, side = null) {
     const {THREE, OrbitControls} = window.THREE3D, s = active, scene = new THREE.Scene();
     scene.environment = environment(s, s.lighting); scene.add(...roots);
@@ -392,41 +395,228 @@ window.Review3D = (() => {
       s.syncing = false; render();
     });
     controls.addEventListener('end', () => window.Review3D.onCameraEnd?.());
-    host.addEventListener('pointerup', e => pick(v, e), {signal:s.abort.signal});
-    host.addEventListener('pointermove', e => { if (!e.buttons) hover(v, e); }, {signal:s.abort.signal});
+    installPartInput(v);
     s.views.push(v); s.state.cameras.push(camera); s.state.controls.push(controls); return v;
   }
-  function hit(v,e) { const {THREE}=window.THREE3D,r=v.host.getBoundingClientRect(),ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1),v.camera);const h=ray.intersectObjects(v.scene.children,true).find(x=>x.object.visible);let n=h?.object;while(n&&!n.userData.noModel&&!active.changes.some(c=>c.ref===n.name))n=n.parent;return n; }
-  function pick(v,e) { if(!active)return; const n=hit(v,e);if(!n)return;const c=active.changes.find(x=>x.ref===n.name);if(c)window.Review3D.onPick?.(c.id);else hover(v,e); }
-  function hover(v,e) { if(!active)return; const n=hit(v,e);if(n?.userData.noModel){const r=v.host.getBoundingClientRect();tooltip(v,`${n.name} · no 3D model`,e.clientX-r.left,e.clientY-r.top,1200);} }
+  function nearestPart(ray, parts, visible) {
+    const {THREE:T} = THREE3D; let best = null, distance = Infinity;
+    // ponytail: O(n) until a measured large-board picking bottleneck justifies a spatial index.
+    for (const p of parts) {
+      if (!visible(p)) continue;
+      const point = ray.intersectBox(p.bounds, new T.Vector3()); if (!point) continue;
+      const d = point.distanceToSquared(ray.origin); if (d < distance) { best = p; distance = d; }
+    }
+    return best;
+  }
+  function visibleNode(n) { for (; n; n = n.parent) if (!n.visible) return false; return true; }
+  function visiblePart(p) { return active.assembled !== false && !active.hiddenBodies && !active.hiddenGroups.has(p.side); }
+  function indexedHit(v, event) {
+    const {THREE:T} = THREE3D, b = v.host.getBoundingClientRect(), ray = new T.Raycaster();
+    ray.setFromCamera(new T.Vector2((event.clientX-b.left)/b.width*2-1, -(event.clientY-b.top)/b.height*2+1), v.camera);
+    return active.state.visibleSides.flatMap(side => {
+      if (v.side && v.side !== side || !active.indexedSides.has(side)) return [];
+      const root = sideRoot(active, side);
+      if (!root || root.parent !== v.scene || !visibleNode(root)) return [];
+      const parts = active.state.parts[side], changed = new Set(active.changes
+        .filter(c => side === 'base' ? c.action !== 'added' : c.action !== 'removed')
+        .map(c => ThreeParts.reference(c, side, parts)));
+      const p = nearestPart(ray.ray, parts.filter(p => !p.hasModel || !changed.has(p.ref)), visiblePart);
+      const point = p && ray.ray.intersectBox(p.bounds, new T.Vector3());
+      const candidates = p ? [{...p, revision:side, distance:point.distanceTo(ray.ray.origin), meshHit:false}] : [];
+      root.updateMatrixWorld(true); const meshes = [];
+      root.traverse(n => { if (n.isMesh && n.userData.role === 'body' && changed.has(n.userData.ref) && visibleNode(n)) meshes.push(n); });
+      for (const hit of ray.intersectObjects(meshes, false)) {
+        const part = parts.find(p => p.ref === hit.object.userData.ref);
+        if (part && visiblePart(part)) candidates.push({...part, revision:side, distance:hit.distance, meshHit:true});
+      }
+      return candidates;
+    }).sort((a,b) => a.distance-b.distance || Number(b.meshHit)-Number(a.meshHit))[0] || null;
+  }
+  // Old reports (and a revision with a rejected index) retain node-based input only on that revision.
+  function hit(v,e) {
+    const {THREE}=THREE3D, r=v.host.getBoundingClientRect(), ray=new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1),v.camera);
+    const roots=active.allowedSides.filter(side=>!active.indexedSides.has(side)&&(!v.side||v.side===side))
+      .map(side=>sideRoot(active,side)).filter(root=>root?.parent===v.scene);
+    const h=ray.intersectObjects(roots,true).find(x=>visibleNode(x.object));
+    let n=h?.object;while(n&&!n.userData.noModel&&!active.changes.some(c=>c.ref===n.name))n=n.parent;
+    return n;
+  }
+  function pick(v,e) {
+    if(!active)return;
+    const p=indexedHit(v,e);
+    if(p) {
+      const c=active.changes.find(c=>ThreeParts.reference(c,p.revision,active.state.parts[p.revision])===p.ref&&
+        (p.revision==='base'?c.action!=='added':c.action!=='removed'));
+      if(c)window.Review3D.onPick?.(c.id);
+      else { window.Review3D.onPartPick?.({uuid:p.uuid,ref:p.ref,side:p.revision,box:p.box,hasModel:p.hasModel}); focusPart(p.ref,p.revision,false); }
+      const b=v.host.getBoundingClientRect();
+      tooltip(v,p.ref+(p.hasModel?'':' · no 3D model'),e.clientX-b.left,e.clientY-b.top,1200);
+      return;
+    }
+    const n=hit(v,e);if(!n)return;const c=active.changes.find(x=>x.ref===n.name);
+    if(c)window.Review3D.onPick?.(c.id);else hover(v,e);
+  }
+  function hover(v,e) {
+    if(!active)return;
+    const p=indexedHit(v,e), n=p?null:hit(v,e), r=v.host.getBoundingClientRect();
+    if(p)tooltip(v,p.ref+(p.hasModel?'':' · no 3D model'),e.clientX-r.left,e.clientY-r.top,1200);
+    else if(n?.userData.noModel)tooltip(v,`${n.name} · no 3D model`,e.clientX-r.left,e.clientY-r.top,1200);
+    else v.host.querySelector('.tip3d')?.remove();
+  }
+  function installPartInput(v) {
+    const options={signal:active.abort.signal}; let down=null;
+    v.host.addEventListener('pointerdown',e=>{down=e.button===0?[e.clientX,e.clientY,e.pointerId]:null;},options);
+    v.host.addEventListener('pointercancel',()=>{down=null;},options);
+    v.host.addEventListener('pointerup',e=>{
+      const start=down;down=null;
+      if(!start||e.pointerId!==start[2]||Math.hypot(e.clientX-start[0],e.clientY-start[1])>4)return;
+      pick(v,e);
+    },options);
+    v.host.addEventListener('pointermove',e=>{if(!e.buttons)hover(v,e);},options);
+  }
+  function clearPartTooltips() { for(const v of active.views){clearTimeout(v.tip);v.host.querySelector('.tip3d')?.remove();} }
+  function clearPartSelection() {
+    active.selected.forEach(o=>{o.removeFromParent();o.traverse(free);});
+    active.selected=[];active.state.selected=active.selected;
+  }
+  function appendPartOutline(ref,side) {
+    const s=active,p=s.state.parts[side]?.find(p=>p.ref===ref);
+    if(!p||!visiblePart(p))return;
+    const {THREE:T}=THREE3D,b=p.bounds,c=b.getCenter(new T.Vector3());
+    for(const v of s.views.filter(v=>v.visible&&(!v.side||v.side===side))) {
+      const line=new T.LineSegments(boxEdges(b.getSize(new T.Vector3())),new T.LineBasicMaterial({color:css('--accent'),depthTest:false}));
+      line.position.copy(c);line.renderOrder=10;line.raycast=()=>{};
+      line.ref=ref;line.side=side;line.userData={uuid:p.uuid,revision:side};
+      v.scene.add(line);s.selected.push(line);
+    }
+    return b;
+  }
+  function focusPart(ref,side,moveCamera=true) {
+    if(!active)return;clearPartSelection();const b=appendPartOutline(ref,side);
+    if(b&&moveCamera){const {THREE:T}=THREE3D,c=b.getCenter(new T.Vector3());
+      active.views.forEach(v=>setCamera(v,c,b.getBoundingSphere(new T.Sphere()).radius,true));}
+    render();
+  }
+  function focusIndexedChange(change,moveCamera=true) {
+    clearPartSelection();const {THREE:T}=THREE3D,box=new T.Box3();
+    for(const side of active.state.visibleSides) {
+      if(side==='base'&&change.action==='added'||side==='head'&&change.action==='removed')continue;
+      const ref=ThreeParts.reference(change,side,active.state.parts[side]);
+      if(active.indexedSides.has(side)) {
+        const b=appendPartOutline(ref,side);if(b)box.union(b);
+      } else if(physicalVisible(ref,side)) {
+        const node=sideRoot(active,side)?.getObjectByName(ref);
+        for(const v of active.views.filter(v=>v.visible&&(!v.side||v.side===side)&&node?.parent)) {
+          const line=outline(v.scene,node,css('--accent'));line.ref=ref;line.side=side;
+          line.userData={revision:side,uuid:side==='base'?(change.uuid_before||change.uuid):change.uuid};active.selected.push(line);
+          box.union(new T.Box3().setFromObject(node));
+        }
+      }
+    }
+    if(moveCamera&&!box.isEmpty())active.views.forEach(v=>setCamera(v,box.getCenter(new T.Vector3()),box.getBoundingSphere(new T.Sphere()).radius,true));
+    render();
+  }
   function tooltip(v,text,x,y,ms){ let el=v.host.querySelector(".tip3d");if(!el){el=document.createElement("span");el.className="tip3d";v.host.appendChild(el);}el.textContent=text;el.style.left=`${x}px`;el.style.top=`${y}px`;clearTimeout(v.tip);if(ms)v.tip=setTimeout(()=>el.remove(),ms); }
-  function focus(change, moveCamera=true) { if(!active)return; const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);return own?[outline(v.scene,own,css("--accent"))]:[];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
+  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);return own?[outline(v.scene,own,css("--accent"))]:[];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
   function setBlend(value){if(!active?.blend)return;active.blend.value=value;active.blend.base.forEach(m=>{m.transparent=true;m.opacity=1-value;});active.blend.head.forEach(m=>{m.transparent=true;m.opacity=value;});window.Review3D.state.blend=value;render();}
   function toggleBlend(){setBlend(active.blend.value<.5?1:0);}
   // Bare board hides every component: bodies, no-model blocks, change markers and baseline ghosts. No second file.
+  function applyBodyVisibility() {
+    const s=active;
+    for(const root of s.roots)root?.traverse(n=>{
+      if(!n.isMesh||n.userData.role!=='body')return;
+      const assembled=s.assembled!==false&&!s.hiddenBodies;
+      if(n.userData.placeholderSides) {
+        n.material.forEach((m,i)=>{m.visible=assembled&&!s.hiddenGroups.has(n.userData.placeholderSides[i]);});
+        n.visible=n.material.some(m=>m.visible);
+      } else n.visible=assembled&&!s.hiddenGroups.has(n.userData.side);
+    });
+  }
+  function physicalVisible(ref,side) {
+    const s=active,p=s.state.parts[side]?.find(p=>p.ref===ref);
+    if(p)return visiblePart(p);
+    const node=sideRoot(s,side)?.getObjectByName(ref);
+    const own=s.groups.filter(({object})=>{for(let n=object;n;n=n.parent)if(n===node)return true;return false;});
+    return s.assembled&&!s.hiddenBodies&&!own.some(({groups})=>groups.some(g=>s.hiddenGroups.has(g)));
+  }
   function applyVisibility() {
     const s = active; if (!s) return;
     const off = new Set(s.hidden || []); if (!s.assembled) off.add('bodies');
     s.groups.forEach(({object, groups}) => { object.visible = !groups.some(g => off.has(g)); });
-    s.state.blocks.forEach(b => { b.object.visible = s.assembled; });
-    s.state.ghosts.forEach(g => { g.object.visible = s.assembled; });
+    applyBodyVisibility();
+    s.state.blocks.forEach(b => { b.object.visible = physicalVisible(b.ref,b.side); });
+    applyGhostAndMarkerVisibility();
     s.selected.forEach(o => { o.visible = s.assembled; });
-    for (const v of s.views) for (const m of v.labels || []) m.el.hidden = !s.assembled;
   }
-  function setHidden(hidden = []) { if (!active) return; active.hidden = hidden; applyVisibility(); render(); }
+  function applyGhostAndMarkerVisibility() {
+    const s=active;
+    for(const g of s.state.ghosts) {
+      const side=g.side||'base',view=s.views.find(v=>v.side===side)||s.views.find(v=>!v.side);
+      const shown=s.mode==='overlay'&&physicalVisible(g.ref,side)&&!!view?.visible;
+      if(shown&&g.object.parent!==view.scene)view.scene.add(g.object);
+      else if(!shown)g.object.removeFromParent();
+      g.object.visible=shown;g.object.traverse(n=>{if(n.isMesh)n.visible=shown;});
+    }
+    for(const h of s.state.highlights)if(h.marker)h.marker.el.hidden=!physicalVisible(h.ref,h.side)||!s.views.some(v=>v.visible&&(!v.side||v.side===h.side));
+  }
+  function setHidden(hidden = []) {
+    if (!active) return;
+    active.hidden = hidden;active.hiddenGroups=new Set(hidden);active.hiddenBodies=active.hiddenGroups.has('bodies');
+    if(hidden.some(g=>['bodies','top','bottom'].includes(g))){clearPartSelection();clearPartTooltips();}
+    applyVisibility(); render();
+  }
   function cameraState() { const v=active?.views[0]; return v ? [...v.camera.position.toArray(), ...v.controls.target.toArray()].map(n => Math.round(n * 10000) / 10) : null; }
   function setCameraState(c) { if (!active || !Array.isArray(c) || c.length !== 6) return; active.views.forEach(v => { v.camera.position.set(c[0]/1000,c[1]/1000,c[2]/1000); v.controls.target.set(c[3]/1000,c[4]/1000,c[5]/1000); v.controls.update(); }); render(); }
   // Layer pivots are arbitrary; every primitive of a component shares its world-box side.
-  function classify(root) { const { THREE } = window.THREE3D, [top,bottom]=boardY(active.roots), middle=(top+bottom)/2, sides=new Map(), side=o=>{if(!sides.has(o))sides.set(o,new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3()).y>=middle?"top":"bottom");return sides.get(o);}; root?.traverse(o => { if (!o.isMesh) return; const name = o.name || ""; let groups; if (/silkscreen/i.test(name)) groups = ["silk", side(o)]; else if (/soldermask/i.test(name)) groups = ["mask", side(o)]; else if (/PCB/i.test(name)) groups = ["board"]; else { let p=o; while(p && !/^[A-Z]+\d+$/.test(p.name)) p=p.parent; groups = p && active.refs.has(p.name) ? ["bodies", side(p)] : []; } if(groups.length) active.groups.push({object:o,groups}); }); }
+  function classify(root) { const { THREE } = window.THREE3D, [top,bottom]=boardY(active.roots), middle=(top+bottom)/2, sides=new Map(), side=o=>{if(!sides.has(o))sides.set(o,new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3()).y>=middle?"top":"bottom");return sides.get(o);}; root?.traverse(o => { if (!o.isMesh) return; const name = o.name || ""; let groups;
+    // GLTFLoader puts multi-primitive node extras on a Group. Inherit only on the logical clone's meshes.
+    if(!o.userData.role)for(let parent=o.parent;parent;parent=parent.parent)if(parent.userData.role) {
+      const {role,side,ref}=parent.userData;Object.assign(o.userData,{role,side,ref});break;
+    }
+    if(o.userData.role) {
+      const {role,side}=o.userData;
+      groups=role==='body'?['bodies',...(['top','bottom'].includes(side)?[side]:[])]:
+        role==='mask'||role==='silk'?[role,side]:['board'];
+      active.groups.push({object:o,groups});return;
+    } if (/silkscreen/i.test(name)) groups = ["silk", side(o)]; else if (/soldermask/i.test(name)) groups = ["mask", side(o)]; else if (/PCB/i.test(name)) groups = ["board"]; else { let p=o; while(p && !/^[A-Z]+\d+$/.test(p.name)) p=p.parent; groups = p && active.refs.has(p.name) ? ["bodies", side(p)] : []; } if(groups.length) active.groups.push({object:o,groups}); }); }
   // Board surfaces come from PCB/silkscreen/soldermask meshes, not the tallest component. ponytail: 90/270 swaps the AABB, other angles keep it as the footprint size.
   function boardY(roots) { const { THREE } = window.THREE3D; let top=-Infinity,bottom=Infinity; roots.forEach(r=>r?.traverse(o=>{ if(o.isMesh&&/PCB|silkscreen|soldermask/i.test(o.name)){ const b=new THREE.Box3().setFromObject(o); top=Math.max(top,b.max.y); bottom=Math.min(bottom,b.min.y); } })); return top>bottom ? [top,bottom] : [.0016,0]; }
   function addNoModelBlocks(roots, rows) { const { THREE } = window.THREE3D, [top,bottom]=boardY(roots), canvas=document.createElement("canvas"); canvas.width=canvas.height=32; const cx=canvas.getContext("2d"); cx.fillStyle="#b4b4b4";cx.fillRect(0,0,32,32);cx.strokeStyle="#5a5a5a";cx.lineWidth=5; for(let x=-32;x<64;x+=16){cx.beginPath();cx.moveTo(x,32);cx.lineTo(x+32,0);cx.stroke();} const texture=new THREE.CanvasTexture(canvas); texture.wrapS=texture.wrapT=THREE.RepeatWrapping; texture.repeat.set(3,3); texture.colorSpace=THREE.SRGBColorSpace; active.textures.add(texture); rows.forEach(row=>{if(!row.pos||!row.box)return; const rot=row.pos[2]||0, swap=Math.round(Math.abs(rot)/90)%2===1, w=(row.box[2]-row.box[0])/1000, d=(row.box[3]-row.box[1])/1000, width=Math.max(.001,swap?d:w), depth=Math.max(.001,swap?w:d), onBottom=(row.layer||"F.Cu").startsWith("B."), sides=row.side==="both"?[0,1]:[row.side==="base"?0:1]; sides.forEach(i=>{if(!roots[i])return;const g=new THREE.Group(), mesh=new THREE.Mesh(new THREE.BoxGeometry(width,.001,depth),new THREE.MeshStandardMaterial({map:texture,color:0xc0c0c0}));g.name=row.ref;g.userData.noModel=true;g.position.set(row.pos[0]/1000,onBottom?bottom-.0005:top+.0005,row.pos[1]/1000);g.rotation.y=rot*Math.PI/180;g.add(mesh);roots[i].add(g);(window.Review3D.state.blocks ||= []).push({ref:row.ref,object:g,side:i ? "head" : "base"});active.refs.add(row.ref);}); }); }
+
+  function placeholderBatch(parts) {
+    const {THREE:T}=THREE3D,missing=parts.filter(p=>!p.hasModel);if(!missing.length)return null;
+    const positions=[],normals=[],uvs=[],indices=[],groups=[];
+    for(const side of ['top','bottom']) {
+     const start=indices.length;
+     for(const p of missing.filter(p=>p.side===side)) {
+      const size=p.bounds.getSize(new T.Vector3()),center=p.bounds.getCenter(new T.Vector3());
+      const box=new T.BoxGeometry(size.x,size.y,size.z);box.translate(...center.toArray());
+      const offset=positions.length/3;
+      positions.push(...box.attributes.position.array);normals.push(...box.attributes.normal.array);
+      uvs.push(...box.attributes.uv.array);indices.push(...Array.from(box.index.array,i=>i+offset));box.dispose();
+     }
+     groups.push({start,count:indices.length-start});
+    }
+    const g=new T.BufferGeometry();g.setAttribute('position',new T.Float32BufferAttribute(positions,3));
+    g.setAttribute('normal',new T.Float32BufferAttribute(normals,3));
+    g.setAttribute('uv',new T.Float32BufferAttribute(uvs,2));g.setIndex(indices);
+    const tile=document.createElement('canvas');tile.width=tile.height=8;const c=tile.getContext('2d');
+    c.fillStyle='#888';c.fillRect(0,0,8,8);c.strokeStyle='#bbb';
+    c.beginPath();c.moveTo(0,8);c.lineTo(8,0);c.stroke();
+    const map=new T.CanvasTexture(tile);map.wrapS=map.wrapT=T.RepeatWrapping;
+    groups.forEach((group,i)=>g.addGroup(group.start,group.count,i));
+    const mesh=new T.Mesh(g,['top','bottom'].map(()=>new T.MeshBasicMaterial({map})));
+    mesh.userData={role:'body',placeholderSides:['top','bottom']};
+    mesh.name='parts:missing';mesh.raycast=()=>{};return mesh;
+  }
+
   async function show(stage, project, appState, {single = false} = {}) {
     dispose();
     const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m;
     const session = active = {
       views:[], roots:[], changes:project.changes.filter(c => c.kind === 'footprint'),
-      refs:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
+      refs:new Set(), indexedSides:new Set(), hiddenGroups:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
       revision:single ? 'head' : ['base', 'head'].includes(appState.revision) ? appState.revision : 'head',
       abort:new AbortController(), partWarn:new Set(), pending:new Map(), urls:new Set(), worker:null, nextId:0,
       assetId:0, assetNonce:crypto.randomUUID(), animationFrames:new Set(),
@@ -439,7 +629,7 @@ window.Review3D = (() => {
       roots:session.roots, views:session.views, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
       revision:session.revision, assembled:session.assembled, lighting:session.lighting, modelDigests:{},
       loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
-      resourceCounts:{workers:0, urls:0, pending:0}, parts:{base:[], head:[]}, selected:[],
+      placeholderMeshBySide:{base:null,head:null}, resourceCounts:{workers:0, urls:0, pending:0}, parts:{base:[], head:[]}, selected:[],
       changedParts:new Set(session.changes.map(c => c.uuid || c.ref)).size,
       renderers:[], cameras:[], controls:[], visibleSides:[], drawCallsByViewport:[], drawCount:0,
       nodes:[], highlights:[], ghosts:[], blocks:[], parseCount:0
@@ -531,7 +721,14 @@ window.Review3D = (() => {
     session.roots = state.roots = roots;
     const base = single ? null : roots[0], head = roots[sides.indexOf('head')], logicalRoots = [base, head];
     const box = new T.THREE.Box3(); roots.forEach(r => r && box.union(new T.THREE.Box3().setFromObject(r)));
-    addNoModelBlocks(logicalRoots, project.board.no_model || []);
+    addNoModelBlocks(logicalRoots.map((root,i)=>session.indexedSides.has(i?'head':'base')?null:root), project.board.no_model || []);
+    for(const side of sides)if(session.indexedSides.has(side)&&sideRoot(session,side)) {
+      const mesh=placeholderBatch(state.parts[side]);state.placeholderMeshBySide[side]=mesh;
+      if(mesh) {
+        sideRoot(session,side).add(mesh);session.geometries.add(mesh.geometry);
+        for(const m of mesh.material){session.materials.add(m);session.textures.add(m.map);}
+      }
+    }
     roots.forEach(r => r && box.union(new T.THREE.Box3().setFromObject(r)));
     if (box.isEmpty()) {
       for (const side of sides) if (model[side] && !state.errorsBySide[side]) failure(session, side, 'No renderable 3D geometry.');
@@ -541,8 +738,8 @@ window.Review3D = (() => {
     roots.forEach(r => r?.traverse(n => { if (n.name) { session.refs.add(n.name); state.nodes.push(n.name); } }));
     roots.forEach(classify); state.groups = session.groups;
     const highlight = (side, v) => session.changes.filter(c => side === 'head' ? c.action !== 'removed' : c.action !== 'added').forEach(c => {
-      const n = sideRoot(session, side)?.getObjectByName(c.ref);
-      if (n) { const h = cloneMaterials(n, c), m = marker(v, n, c); state.highlights.push({ref:c.ref, action:c.action, side, original:h.original, materials:h.materials, marker:m}); }
+      const ref=ThreeParts.reference(c,side,state.parts[side]),n = sideRoot(session, side)?.getObjectByName(ref),p=state.parts[side].find(p=>p.ref===ref);
+      if (n||p&&!p.hasModel) { const h = n?cloneMaterials(n, c):{original:[],materials:[]}, m = marker(v, n, {...c,ref},p?.bounds); state.highlights.push({ref, action:c.action, side, original:h.original, materials:h.materials, marker:m}); }
     });
     if (mode === 'side' || single) {
       for (const [i, side] of sides.entries()) {
@@ -562,8 +759,8 @@ window.Review3D = (() => {
         if (mode === 'overlay') {
           highlight(head ? 'head' : 'base', v);
           session.changes.filter(c => c.action === 'removed' || c.action === 'modified').forEach(c => {
-            const n = base?.getObjectByName(c.ref);
-            if (n) { const g = n.clone(true); cloneMaterials(g, null, false, 'ghost'); v.scene.add(g); state.ghosts.push({ref:c.ref, object:g, translation:n.getWorldPosition(new T.THREE.Vector3()).add(new T.THREE.Vector3(0, .01, 0)).toArray()}); }
+            const ref=ThreeParts.reference(c,'base',state.parts.base),n = base?.getObjectByName(ref);
+            if (n) { const g = n.clone(true); cloneMaterials(g, null, false, 'ghost'); v.scene.add(g); state.ghosts.push({ref, side:'base', object:g, translation:n.getWorldPosition(new T.THREE.Vector3()).add(new T.THREE.Vector3(0, .01, 0)).toArray()}); }
           });
         } else if (mode === 'blend') {
           const bm = cloneMaterials(base, null, false, 'blend:base').materials, hm = cloneMaterials(head, null, false, 'blend:head').materials;
@@ -589,5 +786,5 @@ window.Review3D = (() => {
   }
   // Node contracts consume the unchanged helper; the browser API stays private.
   if (typeof module === 'object' && module.exports) module.exports = {parseByDigest};
-  return {show,dispose,cameraBar,frame,focus,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
+  return {show,dispose,cameraBar,frame,focus,focusPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
 })();

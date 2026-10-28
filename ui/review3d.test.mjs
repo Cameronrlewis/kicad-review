@@ -66,9 +66,9 @@ function viewer() {
   }};
   // Expose closure state only inside this VM, never in the production API.
   const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8').replace('let active = null, bundle;', 'let active = null, bundle; window.setTestSession = s => active = s;');
-  runInNewContext(source, {window, document, DOMException});
+  runInNewContext(source, {window, document, DOMException, clearTimeout});
   const lighting = {rig:'bench', bearing:60, exposure:1.35}, previous = {};
-  const s = {lighting, state:{lighting, blocks:[], ghosts:[]}, renderer:{toneMappingExposure:1.35}, views:[{scene:{environment:previous}}], environments:new Map(), groups:[], selected:[{visible:true}], assembled:true, visible:false};
+  const s = {lighting, state:{lighting, blocks:[], ghosts:[], highlights:[]}, renderer:{toneMappingExposure:1.35}, views:[{scene:{environment:previous},host:{querySelector:()=>null}}], environments:new Map(), roots:[], groups:[], selected:[], hiddenGroups:new Set(), assembled:true, visible:false};
   window.setTestSession(s);
   const events = [];
   window.Review3D.onStateChange = e => events.push(e);
@@ -109,10 +109,19 @@ test('BR02 failed lighting is atomic, announced, and recovers without stale erro
   assert.equal(s.environments.size, 1);
 });
 
-test('BR02 bare board hides independent selection outlines and restores assembly', () => {
+test('BR02 bare board releases independent outlines without resurrecting hidden selection', () => {
   const {api, s} = viewer();
+  let detached = 0, geometries = 0, materials = 0;
+  s.selected.push({removeFromParent() { detached++; }, traverse(free) {
+    free({geometry:{dispose() { geometries++; }},material:{dispose() { materials++; }}});
+  }});
   api.setAssembled(false);
-  assert.equal(s.selected[0].visible, false);
+  assert.equal(s.selected.length, 0);
+  assert.equal(s.state.selected, s.selected);
+  assert.equal(detached, 1);
+  assert.equal(geometries, 1);
+  assert.equal(materials, 1);
   api.setAssembled(true);
-  assert.equal(s.selected[0].visible, true);
+  assert.equal(s.selected.length, 0);
+  assert.equal(s.assembled, true);
 });

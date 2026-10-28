@@ -159,6 +159,37 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
     await sleep(100);
     await evaluate(`window.__3dInputResult = ${JSON.stringify({ before: r.before })}; window.__3dInputResult.after = window.Review3D.state.cameras.map(c => c.position.toArray())`);
   }
+  if (name.startsWith("BR02 processed pointer ")) {
+    const [, side, ref] = name.match(/^BR02 processed pointer (base|head) (\w+)$/);
+    const prepared = await evaluate(`(()=>{
+      if(!proj().board.parts3d)return null;
+      Review3D.setRevision(${JSON.stringify(side)});
+      const st=Review3D.state,p=st.parts[${JSON.stringify(side)}].find(p=>p.ref===${JSON.stringify(ref)});
+      const v=st.views.find(v=>v.visible&&(!v.side||v.side===${JSON.stringify(side)}));
+      if(!v||!p)throw Error('missing indexed pointer target');
+      const point=p.bounds.getCenter(new THREE3D.THREE.Vector3());v.camera.updateMatrixWorld(true);point.project(v.camera);
+      const b=v.host.getBoundingClientRect();
+      if(Math.abs(point.x)>1||Math.abs(point.y)>1)throw Error('target outside viewport');
+      window.__br02PointerUp=new Promise(resolve=>v.host.addEventListener('pointerup',()=>resolve(true),{once:true}));
+      return {x:b.left+(point.x+1)*b.width/2,y:b.top+(1-point.y)*b.height/2};
+    })()`);
+    if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception?.description);
+    const q=prepared.result?.value;
+    if(q) {
+      for(const type of ['mouseMoved','mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent', {type,x:q.x,y:q.y,button:type==='mouseMoved'?'none':'left',buttons:type==='mousePressed'?1:0,clickCount:1});
+      await evaluate(`window.__br02PointerUp.then(()=>{window.__br02PointerResult=${JSON.stringify({side,ref})};return true})`);
+    }
+  }
+  // BR02 processed mesh miss: prepare the overlapping geometry before real host-centre input.
+  if (name === "BR02 processed overlapping box misses changed mesh") {
+    const prepared=await evaluate(`(async()=>{${expr}})()`);
+    if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception?.description);
+    const q=(await evaluate(`(()=>{if(!proj().board.parts3d)return null;const v=Review3D.state.views.find(v=>v.visible&&(!v.side||v.side==='head')),b=v.host.getBoundingClientRect();window.__br02PointerUp=new Promise(resolve=>v.host.addEventListener('pointerup',()=>resolve(true),{once:true}));return {x:b.left+b.width/2,y:b.top+b.height/2}})()`)).result?.value;
+    if(q) {
+      for(const type of ['mouseMoved','mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent',{type,x:q.x,y:q.y,button:type==='mouseMoved'?'none':'left',buttons:type==='mousePressed'?1:0,clickCount:1});
+      await evaluate(`window.__br02PointerUp.then(()=>{window.__br02MeshMissInput=true;window.__br02PointerResult={side:'head',ref:'R2'};return true})`);
+    }
+  }
   if (name === "3D canvas click via mouse input selects J2 row") {
     const q = (await evaluate(`(async()=>{ if(!REVIEW_DATA.projects[0].board.model3d) return null; while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50)); const {THREE}=window.THREE3D, st=window.Review3D.state; let n; st.roots[1].traverse(o=>{ if(!n&&o.name==="J2") n=o; }); const p=new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[1]), r=st.views.find(v=>v.side==='head').host.getBoundingClientRect(); return {x:r.left+(p.x*.5+.5)*r.width,y:r.top+(-p.y*.5+.5)*r.height}; })()`)).result.value;
     if (q) for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: q.x, y: q.y, button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
