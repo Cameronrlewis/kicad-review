@@ -389,11 +389,14 @@ export const CHECKS = [
      for(let i=0;i<200&&!release;i++)await new Promise(r=>setTimeout(r,10));
      if(!release)return 'injected parse was never reached';
      Review3D.dispose();Loader.prototype.parseAsync=parse;
-     await Review3D.show(stage,p,S);const current=Review3D.state, canvases=document.querySelectorAll('#stage canvas').length;
+     await Review3D.show(stage,p,S);const current=Review3D.state, canvases=[...stage.querySelectorAll('canvas')];
+     // Assert ownership, not a per-side renderer count: shared rendering uses the same contract.
+     const ownedCanvases=new Set(current.renderers.map(renderer=>renderer.domElement));
+     if(!current.firstFrame||!canvases.length||canvases.length!==ownedCanvases.size||canvases.some(canvas=>!ownedCanvases.has(canvas)))return 'new session canvas ownership mismatch';
      release();await old;
      if(Review3D.state!==current)return 'late parse replaced newer session';
-     // Task 6 will consolidate the current per-side renderers into one renderer.
-     if(canvases!==current.renderers.length||canvases!==2||document.querySelectorAll('#stage canvas').length!==canvases)return 'late parse resurrected canvas';
+     const settledCanvases=[...stage.querySelectorAll('canvas')];
+     if(settledCanvases.length!==canvases.length||settledCanvases.some((canvas,i)=>canvas!==canvases[i]))return 'late parse resurrected canvas';
      if(current.loading)return 'new session still loading';
      Review3D.dispose();
      return Object.values(current.resourceCounts).every(n=>n===0)||'late parse session leaked owned resources';
