@@ -389,7 +389,7 @@ export const CHECKS = [
      await Review3D.show(stage,p,S);const current=Review3D.state, canvases=document.querySelectorAll('#stage canvas').length;
      release();await old;
      if(Review3D.state!==current)return 'late parse replaced newer session';
-     if(document.querySelectorAll('#stage canvas').length!==canvases)return 'late parse resurrected canvas';
+     if(document.querySelectorAll('#stage canvas').length!==1)return 'late parse resurrected canvas';
      if(current.loading)return 'new session still loading';
      Review3D.dispose();
      return Object.values(current.resourceCounts).every(n=>n===0)||'late parse session leaked owned resources';
@@ -507,17 +507,15 @@ export const CHECKS = [
   ...['worker-start','context-loss'].map(fault=>[
     'BR02 processed fallback whole screen '+fault,'v=3d&m=side', `
     if(!proj().board.parts3d)return 'skip';
-    // The shared shell is owned by 05; assert this fallback adds no overflow.
-    // Log its inherited overflow explicitly, rather than claiming whole-shell sign-off.
-    const Worker=window.Worker,shellWidth=document.documentElement.scrollWidth;
+    // The shared shell is owned by 05; require the whole viewport to fit.
+    const Worker=window.Worker;
     try {
       if('${fault}'==='worker-start')window.Worker=class {constructor(){throw Error('3D worker unavailable. Retry.')}};
       await Review3D.show(document.querySelector('#stage'),proj(),S);
       if('${fault}'==='context-loss')document.querySelector('#stage canvas').dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
       const button=document.querySelector('[data-3d-retry]');button?.focus();
       const rect=button?.getBoundingClientRect();
-      console.log('BOARD_PROOF '+JSON.stringify({task:'BR02 fallback shell',fault:'${fault}',shellWidth,width:innerWidth,fallbackWidth:document.documentElement.scrollWidth}));
-      return document.documentElement.scrollWidth<=Math.max(innerWidth,shellWidth)&&rect&&rect.width>0&&rect.left>=0&&rect.right<=innerWidth&&rect.top>=0&&rect.bottom<=innerHeight&&document.activeElement===button&&!!document.querySelector('[role="alert"]')||JSON.stringify({scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,rect:rect?.toJSON(),focused:document.activeElement===button,alert:!!document.querySelector('[role="alert"]')});
+      return document.documentElement.scrollWidth<=innerWidth&&rect&&rect.width>0&&rect.left>=0&&rect.right<=innerWidth&&rect.top>=0&&rect.bottom<=innerHeight&&document.activeElement===button&&!!document.querySelector('[role="alert"]')||JSON.stringify({scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,rect:rect?.toJSON(),focused:document.activeElement===button,alert:!!document.querySelector('[role="alert"]')});
     } finally {window.Worker=Worker;}
   `]),
   ["3D bad model data settles and keeps the valid side", "v=3d", `

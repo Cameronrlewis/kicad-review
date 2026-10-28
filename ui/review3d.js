@@ -40,6 +40,7 @@ window.Review3D = (() => {
           for (const job of s.pending.values()) job.reject(Error('3D worker failed. Retry.'));
           s.pending.clear(); s.worker?.terminate(); s.worker = null;
           s.resourceCounts.pending = s.resourceCounts.workers = 0;
+          s.resourceCounts.urls = s.urls.size;
         };
         s.worker.addEventListener('error', failed);
         s.worker.addEventListener('messageerror', failed);
@@ -88,6 +89,11 @@ window.Review3D = (() => {
     [...s.roots, ...s.views.map(v => v.scene)].forEach(r => r?.traverse(free));
     s.state.disposed = true; s.state.loading = false;
     s.state.loadingBySide.base = s.state.loadingBySide.head = false;
+    s.roots.length = 0;
+    s.views.length = 0;
+    s.state.roots = [];
+    s.state.renderers = []; s.state.cameras = []; s.state.controls = [];
+    s.state.nodes = []; s.state.highlights = []; s.state.ghosts = []; s.state.blocks = [];
     active = null;
   }
   function failure(s, side, message) {
@@ -168,7 +174,7 @@ window.Review3D = (() => {
     };
     const state = window.Review3D.state = session.state = {
       roots:session.roots, disposed:false, firstFrame:false, loading:false,
-      loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{},
+      loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
       resourceCounts:{workers:0, urls:0, pending:0}, parts:{base:[], head:[]}, selected:[],
       changedParts:new Set(session.changes.map(c => c.uuid || c.ref)).size,
       renderers:[], cameras:[], visibleSides:[], drawCallsByViewport:[], drawCount:0,
@@ -192,7 +198,7 @@ window.Review3D = (() => {
         if (session.dead) return;
         state.posterBySide[side] = image;
         if (image) session.hostsBySide[side].prepend(image);
-      } catch (error) { if (!session.dead && error.name !== 'AbortError') state.errorsBySide[side] = 'Preview unavailable: ' + error.message; }
+      } catch (error) { if (!session.dead && error.name !== 'AbortError') state.posterErrorsBySide[side] = 'Preview unavailable: ' + error.message; }
     }));
     if (session.dead) return;
     let T;
