@@ -3585,7 +3585,8 @@ return true;
     S.threads=[{id:'sch6-pin',resolved:false,anchor,comments:[]}];
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; await draw();
-      const pin=document.querySelector('#stage .pin[data-thread="sch6-pin"]');
+      // Head points can also appear in Base, where moved geometry has different coordinates.
+      const pin=[...document.querySelectorAll('#stage .pin[data-thread="sch6-pin"]')].find(p=>p.closest('.vp').querySelector('.stack.head'));
       if(!pin||getComputedStyle(pin).pointerEvents==='none'||resolveAnchor(anchor).view!==v) return mode+' pin';
       const vp=pin.closest('.vp'), r=vp.getBoundingClientRect();
       const cx=r.left+r.width/2+(x-S.x)*S.z, cy=r.top+r.height/2+(y-S.y)*S.z;
