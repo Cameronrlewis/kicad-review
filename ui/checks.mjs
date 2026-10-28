@@ -363,6 +363,9 @@ export const CHECKS = [
  const fault=${JSON.stringify(fault)}, p=structuredClone(proj()), stage=document.querySelector('#stage');
  const NativeWorker=window.Worker, Loader=window.THREE3D.GLTFLoader;
  const parse=Loader.prototype.parseAsync;let release;
+ const createURL=URL.createObjectURL,revokeURL=URL.revokeObjectURL,liveURLs=new Set();
+ URL.createObjectURL=function(...args){const url=createURL.apply(this,args);liveURLs.add(url);return url;};
+ URL.revokeObjectURL=function(url){liveURLs.delete(url);return revokeURL.call(this,url);};
  try {
    if(fault==='worker-start')window.Worker=class {constructor(){throw Error('BR02 injected worker failure')}};
    if(fault==='worker-postMessage-throws')window.Worker=class {
@@ -389,7 +392,8 @@ export const CHECKS = [
      await Review3D.show(stage,p,S);const current=Review3D.state, canvases=document.querySelectorAll('#stage canvas').length;
      release();await old;
      if(Review3D.state!==current)return 'late parse replaced newer session';
-     if(document.querySelectorAll('#stage canvas').length!==1)return 'late parse resurrected canvas';
+     // Task 6 will consolidate the current per-side renderers into one renderer.
+     if(canvases!==current.renderers.length||canvases!==2||document.querySelectorAll('#stage canvas').length!==canvases)return 'late parse resurrected canvas';
      if(current.loading)return 'new session still loading';
      Review3D.dispose();
      return Object.values(current.resourceCounts).every(n=>n===0)||'late parse session leaked owned resources';
@@ -401,6 +405,8 @@ export const CHECKS = [
    }
    const st=Review3D.state;
    if(fault==='worker-postMessage-throws'&&st.resourceCounts.pending!==0)return 'postMessage leaked pending job';
+   if(['worker-start','worker-error','worker-messageerror'].includes(fault)&&
+      (st.resourceCounts.urls!==liveURLs.size||liveURLs.size!==2))return 'failed worker retained blob URL: '+JSON.stringify({counts:st.resourceCounts,live:liveURLs.size});
    if(st.loading)return 'failure left loading unsettled';
    if(!st.errorsBySide.head)return 'head error not recorded';
    if(fault!=='corrupt-model'&&st.firstFrame)return 'failure reported a genuine first frame';
@@ -421,8 +427,25 @@ export const CHECKS = [
  } finally {
    release?.();window.Worker=NativeWorker;Loader.prototype.parseAsync=parse;
    delete REVIEW_DATA.blobs['br02-corrupt'];
+   Review3D.dispose();URL.createObjectURL=createURL;URL.revokeObjectURL=revokeURL;
  }
  `]),
+  ["BR02 processed poster errors preserve model and explain missing fallback", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),stage=document.querySelector('#stage');
+    REVIEW_DATA.blobs['br02-bad-poster']='not base64!';
+    try {
+      p.board.poster3d.head='br02-bad-poster';
+      await Review3D.show(stage,p,S);
+      const st=Review3D.state;
+      if(!st.posterErrorsBySide.head||st.posterBySide.head||st.errorsBySide.head||!st.firstFrame||!st.roots[1])return 'poster failure killed usable model or lost diagnostic';
+      p.board.model3d.head='br02-bad-poster';
+      await Review3D.show(stage,p,S);
+      const current=Review3D.state,notice=[...stage.querySelectorAll('.error3d')].find(n=>n.textContent.includes(current.posterErrorsBySide.head));
+      if(!notice||!notice.querySelector('[data-3d-retry]')||!current.roots[0]||current.loading)return 'missing poster fallback not explained';
+      return true;
+    } finally { Review3D.dispose();delete REVIEW_DATA.blobs['br02-bad-poster']; }
+  `],
   ["BR02 processed loading aggregates outstanding sides", "v=3d&m=side", `
  if(!proj().board.parts3d)return 'skip';
  const Loader=THREE3D.GLTFLoader,original=Loader.prototype.parseAsync,releases=[];

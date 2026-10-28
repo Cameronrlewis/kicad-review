@@ -29,7 +29,14 @@ window.Review3D = (() => {
         const code = atob(document.querySelector('#three-decode-worker').textContent.trim());
         const url = URL.createObjectURL(new Blob([code], {type:'text/javascript'}));
         s.urls.add(url); s.resourceCounts.urls = s.urls.size;
-        s.worker = new Worker(url); s.resourceCounts.workers = 1;
+        let worker;
+        const releaseURL = () => {
+          if (s.urls.delete(url)) URL.revokeObjectURL(url);
+          s.resourceCounts.urls = s.urls.size;
+        };
+        try { worker = s.worker = new Worker(url); }
+        catch (error) { releaseURL(); throw error; }
+        s.resourceCounts.workers = 1;
         s.worker.onmessage = ({data}) => {
           const job = s.pending.get(data.id); if (!job) return;
           s.pending.delete(data.id); s.resourceCounts.pending = s.pending.size;
@@ -37,8 +44,10 @@ window.Review3D = (() => {
         };
         const failed = event => {
           event.preventDefault();
+          if (s.dead || s.worker !== worker) return;
           for (const job of s.pending.values()) job.reject(Error('3D worker failed. Retry.'));
-          s.pending.clear(); s.worker?.terminate(); s.worker = null;
+          s.pending.clear(); worker.terminate(); s.worker = null;
+          releaseURL();
           s.resourceCounts.pending = s.resourceCounts.workers = 0;
           s.resourceCounts.urls = s.urls.size;
         };
@@ -105,7 +114,7 @@ window.Review3D = (() => {
     let notice = host.querySelector('.error3d');
     if (!notice) { notice = document.createElement('div'); notice.className = 'empty error3d'; notice.setAttribute('role', 'alert'); host.appendChild(notice); }
     notice.replaceChildren();
-    const text = document.createElement('p'); text.textContent = '3D model could not be loaded. ' + message;
+    const text = document.createElement('p'); text.textContent = ['3D model could not be loaded.', message, s.state.posterErrorsBySide[side]].filter(Boolean).join(' ');
     const retry = document.createElement('button'); retry.dataset['3dRetry'] = ''; retry.textContent = 'Retry 3D';
     retry.onclick = () => { if (!s.dead) void show(s.stage, s.project, s.appState); };
     notice.append(text, retry);
