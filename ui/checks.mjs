@@ -463,10 +463,57 @@ export const CHECKS = [
       const st=Review3D.state;
       if(st.parts.head.length!==0)return 'corrupt index installed parts';
       if(st.firstFrame!==true)return 'corrupt optional index killed the model';
+      const head=st.roots[1],view=st.views.find(v=>v.side==='head');
+      let renderable=false;head?.traverse(n=>{if(n.isMesh&&n.visible&&n.geometry?.getAttribute('position')?.count)renderable=true;});
+      if(!head||!renderable||!view||!view.visible||view.failed||view.host.hidden||!view.scene.getObjectById(head.id)||!(view.calls>0))return 'corrupt index lost renderable Head view';
+      if(st.errorsBySide.base)return 'corrupt Head index warned for Base';
       if(!/Part inspection unavailable/.test(st.errorsBySide.head||''))return 'no side-specific warning';
       return true;
     } finally { Review3D.dispose();delete REVIEW_DATA.blobs['br02-corrupt']; }
   `],
+  ...['model-first','index-first'].map(order=>[
+    'BR02 processed model and index failure order '+order, 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const NativeWorker=window.Worker,stage=document.querySelector('#stage'),gates={};
+    const wait=async predicate=>{for(let i=0;i<300&&!predicate();i++)await new Promise(r=>setTimeout(r,10));if(!predicate())throw Error('failure gate timeout');};
+    let opening;
+    try {
+      window.Worker=class extends NativeWorker {
+        postMessage(data,...args) {
+          if(data.b64==='br02-model-failure'||data.b64==='br02-index-failure') {
+            gates[data.b64]=()=>this.onmessage({data:{id:data.id,error:data.b64}});return;
+          }
+          return super.postMessage(data,...args);
+        }
+      };
+      REVIEW_DATA.blobs['br02-model-failure']='br02-model-failure';
+      REVIEW_DATA.blobs['br02-index-failure']='br02-index-failure';
+      for(const mode of ['overlay','blend','semantic']) {
+        const p=structuredClone(proj());
+        p.board.model3d.head='br02-model-failure';p.board.parts3d.head='br02-index-failure';
+        delete gates['br02-model-failure'];delete gates['br02-index-failure'];
+        opening=Review3D.show(stage,p,{...S,m:mode,revision:'head'});
+        await wait(()=>gates['br02-model-failure']&&gates['br02-index-failure']);
+        const first='${order}'==='model-first'?'br02-model-failure':'br02-index-failure';
+        gates[first]();
+        await wait(()=>Review3D.state.errorsBySide.head);
+        if(first==='br02-index-failure'&&!/^Part inspection unavailable:/.test(Review3D.state.errorsBySide.head))return 'index did not fail first';
+        if(first==='br02-model-failure'&&Review3D.state.errorsBySide.head!=='br02-model-failure')return 'model did not fail first';
+        gates[first==='br02-model-failure'?'br02-index-failure':'br02-model-failure']();
+        await opening;opening=null;
+        const st=Review3D.state,poster=st.posterBySide.head,host=poster?.closest('.view3d'),notice=host?.querySelector('.error3d');
+        if(st.errorsBySide.head!=='br02-model-failure'||st.errorsBySide.base)return mode+': model diagnostic replaced or Base warned';
+        if(!st.roots[0]||st.roots[1]||!st.firstFrame||st.loading||st.parts.head.length)return mode+': valid Base or settled state lost';
+        if(!host||host.hidden||getComputedStyle(host).display==='none'||poster.hidden||!notice?.textContent.includes('br02-model-failure')||!notice.querySelector('[data-3d-retry]'))return mode+': failed Head fallback hidden';
+        Review3D.dispose();
+      }
+      return true;
+    } finally {
+      Object.values(gates).forEach(release=>release());if(opening)await opening;
+      Review3D.dispose();window.Worker=NativeWorker;
+      delete REVIEW_DATA.blobs['br02-model-failure'];delete REVIEW_DATA.blobs['br02-index-failure'];
+    }
+  `]),
   ["BR02 processed loading aggregates outstanding sides", "v=3d&m=side", `
  if(!proj().board.parts3d)return 'skip';
  const Loader=THREE3D.GLTFLoader,original=Loader.prototype.parseAsync,releases=[];

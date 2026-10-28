@@ -38,7 +38,10 @@ window.Review3D = (() => {
       return ThreeParts.validate(JSON.parse(new TextDecoder().decode(bytes))).map(p => ({...p,
         bounds:new T.Box3(new T.Vector3(...p.box.slice(0, 3)), new T.Vector3(...p.box.slice(3)))}));
     } catch (error) {
-      if (!s.dead) { s.state.errorsBySide[side] ??= 'Part inspection unavailable: ' + error.message; s.partWarn.add(side); }
+      if (!s.dead && s.state.errorsBySide[side] == null) {
+        s.state.errorsBySide[side] = 'Part inspection unavailable: ' + error.message;
+        s.partWarn.add(side);
+      }
       return [];
     }
   }
