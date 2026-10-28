@@ -4561,6 +4561,7 @@ CHECKS.push(
     st.ghosts.forEach(g=>g.object.traverse(n=>{if(n.isMesh)ghosts.push(...[n.material].flat());}));
     if(!ghosts.length)return 'fixture has no ghosts';
     const tint=new THREE3D.THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--removed').trim());
+    if(new Set(ghosts).size!==1)return 'ghosts do not share a single material';
     return ghosts.every(m=>m.isMeshBasicMaterial&&!m.map&&m.color.equals(tint)&&m.opacity===.45&&m.transparent&&!m.depthTest&&!source.has(m))||'ghost appearance changed or source mutated';
   `],
   ['BR02 processed default revision omitted from share hash', 'v=3d&m=side', `

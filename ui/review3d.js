@@ -335,13 +335,16 @@ window.Review3D = (() => {
     const s = active; let roles = s.comparisonMaterials.get(source);
     if (!roles) { roles = new Map(); s.comparisonMaterials.set(source, roles); }
     if (!roles.has(role)) {
-      // Ghosts keep the baseline flat tint, without source lighting or textures.
-      const n = role === 'ghost'
-        ? new window.THREE3D.THREE.MeshBasicMaterial({color:tint('removed'), transparent:true, opacity:.45, depthTest:false})
-        : source.clone();
-      if (role === 'fade') { n.transparent = true; n.opacity = .12; n.color?.set('#a8a8a8'); }
-      else if (change) { const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; } }
-      roles.set(role, n); s.materials.add(n);
+      // Ghosts keep the baseline flat tint, without source lighting or textures, shared across the session.
+      if (role === 'ghost') {
+        s.ghostMaterial ||= new window.THREE3D.THREE.MeshBasicMaterial({color:tint('removed'), transparent:true, opacity:.45, depthTest:false});
+        roles.set(role, s.ghostMaterial); s.materials.add(s.ghostMaterial);
+      } else {
+        const n = source.clone();
+        if (role === 'fade') { n.transparent = true; n.opacity = .12; n.color?.set('#a8a8a8'); }
+        else if (change) { const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; } }
+        roles.set(role, n); s.materials.add(n);
+      }
     }
     return roles.get(role);
   }
