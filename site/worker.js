@@ -273,27 +273,52 @@ async function storedReport(artifact, active) {
   return blob;
 }
 
-function assetError(active) {
-  return sessionResponse('Asset unavailable. Try again.', { status: 404,
-    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'private,no-store' } }, active);
+function assetError() {
+  return new Response('Asset unavailable. Try again.', { status: 404,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'private,no-store' } });
 }
 
-export function privateAsset(request, bytes, digest, kind, active) {
-  const headers = { 'Content-Type': kind === 'svg' ? 'image/svg+xml' : 'application/json',
-    'Content-Encoding': 'gzip', 'Cache-Control': 'private,no-cache', ETag: `"${digest}"`, Vary: 'Cookie' };
+// 01 owns private image and 3D transport: `load` runs access and artifact validation on
+// every call, before any ETag comparison, and returns bytes or a failure Response.
+export async function privateAsset(request, digest, kind, load) {
+  const result = await load();
+  if (result instanceof Response) {
+    if (result.status >= 300 && result.status < 400 || result.headers.get('Location'))
+      return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } });
+    const headers = new Headers(result.headers);
+    headers.set('Cache-Control', 'no-store');
+    return new Response(result.body, { status: result.status, headers });
+  }
+  const headers = { 'Content-Type': kind === 'svg' ? 'image/svg+xml' : kind === 'board.glb' ? 'model/gltf-binary' : 'application/json',
+    'Content-Encoding': 'gzip', 'Cache-Control': 'private,no-cache', ETag: `"${digest}"`, Vary: 'Cookie', 'X-Content-Type-Options': 'nosniff' };
   const matched = (request.headers.get('If-None-Match') || '').split(',').some(tag =>
     tag.trim().replace(/^W\//, '') === headers.ETag || tag.trim() === '*');
-  return sessionResponse(matched ? null : bytes, { status: matched ? 304 : 200, headers, encodeBody: 'manual' }, active);
+  return new Response(matched ? null : result, { status: matched ? 304 : 200, headers, encodeBody: 'manual' });
 }
 
-async function digestAsset(request, owner, repo, id, digest, kind, allowed) {
+// Stored metadata/expiry/name/zip/download sequence; returns the stored HTML or a failure Response.
+async function readArtifactHtml(owner, repo, id, active, repository) {
   try {
-    const artifact = await reportArtifact(owner, repo, id, allowed.s, allowed.repo);
-    if (!artifact || artifact.expired) return assetError(allowed.s);
+    const artifact = await reportArtifact(owner, repo, id, active, repository);
+    if (!artifact || artifact.expired) return assetError();
     // ponytail: read the existing HTML envelope per asset; add range/indexed companion delivery only if Worker CPU or GitHub download traces require it.
-    const bytes = assetFromReport(await (await storedReport(artifact, allowed.s)).text(), digest, kind);
-    return bytes ? privateAsset(request, bytes, digest, kind, allowed.s) : assetError(allowed.s);
-  } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(allowed.s); }
+    return await (await storedReport(artifact, active)).text();
+  } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(); }
+}
+
+async function digestAsset(request, env, owner, repo, id, digest, kind) {
+  let active;
+  const asset = await privateAsset(request, digest, kind, async () => {
+    const allowed = await access(request, env, owner, repo);
+    if (allowed instanceof Response) return allowed;
+    active = allowed.s;
+    const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
+    if (stored instanceof Response) return stored;
+    return assetFromReport(stored, digest, kind) || assetError();
+  });
+  return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
+    encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
 }
 
 async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false, repository = null) {
@@ -731,8 +756,7 @@ export default {
       const assetRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/assets\/([0-9a-f]{12})\.(svg|json)$/);
       if (request.method === 'GET' && assetRoute) {
         const [, owner, repo, id, digest, kind] = assetRoute;
-        const allowed = await access(request, env, owner, repo);
-        return allowed instanceof Response ? allowed : digestAsset(request, owner, repo, id, digest, kind, allowed);
+        return digestAsset(request, env, owner, repo, id, digest, kind);
       }
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {

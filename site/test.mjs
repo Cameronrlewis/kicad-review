@@ -3318,12 +3318,33 @@ test('hosted asset descriptors strip only eligible blobs; offline and guest keep
   assert.equal(readStoredData(stored).blobs[imageId], imageData().blobs[imageId]);
 });
 
+for (const [digest, kind, mime] of [
+  ['abcdef123456', 'svg', 'image/svg+xml'], ['abcdef123456', 'json', 'application/json'],
+  ['c'.repeat(64), 'board.glb', 'model/gltf-binary'], ['d'.repeat(64), 'board-parts.json', 'application/json'],
+]) test('conditional asset reuse authorizes before 200 or 304: ' + kind, async () => {
+  let allowed = true, calls = 0;
+  const load = async () => { calls++; return allowed ? new Uint8Array([1, 2, 3]) : new Response('absent', { status: 404, headers: { 'Cache-Control': 'no-store' } }); };
+  const path = kind === 'svg' || kind === 'json' ? 'assets/' + digest + '.' + kind : '3d/' + digest + '/' + kind;
+  const url = 'https://site/r/Cameronrlewis/repo/a/42/' + path;
+  const first = await privateAsset(new Request(url), digest, kind, load);
+  assert.equal(first.status, 200); assert.equal(first.headers.get('Cache-Control'), 'private,no-cache');
+  assert.equal(first.headers.get('ETag'), '"' + digest + '"');
+  assert.equal(first.headers.get('Vary'), 'Cookie'); assert.equal(first.headers.get('Content-Type'), mime);
+  const req = new Request(url, { headers: { 'If-None-Match': first.headers.get('ETag') } });
+  const reused = await privateAsset(req, digest, kind, load);
+  assert.equal(reused.status, 304); assert.equal(reused.headers.get('Cache-Control'), 'private,no-cache');
+  allowed = false;
+  const denied = await privateAsset(req, digest, kind, load);
+  assert.equal(denied.status, 404); assert.equal(calls, 3);
+  assert.equal(denied.headers.get('Cache-Control'), 'no-store');
+});
+
 test('digest assets revalidate permissions and expiry before 200 or 304 and never leak redirects', async () => {
-  const sealed = await signedIn(); let denied = false, expired = false, unknown = false;
+  const sealed = await signedIn(); let denied = false, expired = false, unknown = false, pullRevoked = false;
   const seen = [];
   const restore = mockFetch(async (url, options) => {
     seen.push(url);
-    if (url.endsWith('/repo')) return denied ? new Response('{}', { status: 404 }) : accessibleRepo();
+    if (url.endsWith('/repo')) return pullRevoked ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })) : denied ? new Response('{}', { status: 404 }) : accessibleRepo();
     if (url.endsWith('/artifacts/42')) return unknown ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({ name: 'kicad-review.html', expired, workflow_run: { repository_id: 5 } }));
     if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/image-envelope' } });
     assert.equal(url, 'https://signed.example/image-envelope');
@@ -3333,7 +3354,7 @@ test('digest assets revalidate permissions and expiry before 200 or 304 and neve
   const path = `/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`;
   const get = (etag = false) => call(path, { headers: { Cookie: `s=${sealed}`, ...(etag ? { 'If-None-Match': `"${imageId}"` } : {}) } });
   try {
-    let r = await call(path); assert.equal(r.status, 302); assert.match(r.headers.get('cache-control'), /no-store/); assert.equal(seen.length, 0);
+    let r = await call(path); assert.equal(r.status, 404); assert.equal(r.headers.get('Location'), null); assert.match(r.headers.get('cache-control'), /no-store/); assert.doesNotMatch(await r.text(), /<html|Sign in/i); assert.equal(seen.length, 0);
     r = await get(); assert.equal(r.status, 200);
     assert.equal(r.headers.get('Cache-Control'), 'private,no-cache'); assert.equal(r.headers.get('Vary'), 'Cookie');
     assert.equal(r.headers.get('ETag'), `"${imageId}"`); assert.equal(r.headers.get('Content-Encoding'), 'gzip');
@@ -3341,7 +3362,8 @@ test('digest assets revalidate permissions and expiry before 200 or 304 and neve
     assert.deepEqual(Buffer.from(await r.arrayBuffer()), gzipSync(imageText));
     r = await get(true); assert.equal(r.status, 304); assert.equal(await r.text(), '');
     denied = true; r = await get(true); assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
-    denied = false; expired = true; r = await get(true); assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
+    denied = false; pullRevoked = true; r = await get(true); assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
+    pullRevoked = false; expired = true; r = await get(true); assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
     expired = false; unknown = true; r = await get(true); assert.equal(r.status, 404);
     unknown = false;
     for (const tail of [`${imageId}.json`, 'deadbeef0000.svg', 'bad.svg']) {
@@ -3541,12 +3563,12 @@ test('digest JSON uses gzip MIME and hosted raw takes declarations only from the
     assert.doesNotMatch(sharedPage({ token: 'x', name: 'kicad-review.html' }), /reportAssetBridge/);
   } finally { restore(); }
 });
-test('private gzip responses preserve encodeBody manual and refreshed cookies through wrappers', () => {
+test('private gzip responses preserve encodeBody manual through the wrapper', async () => {
   const Original = globalThis.Response; let encoding;
   globalThis.Response = class extends Original { constructor(body, init) { super(body, init); encoding = init.encodeBody; } };
   try {
-    const r = privateAsset(request('/asset'), gzipSync(imageText), imageId, 'svg', { setCookie: 's=renewed' });
-    assert.equal(encoding, 'manual'); assert.equal(r.headers.get('set-cookie'), 's=renewed');
+    const r = await privateAsset(request('/asset'), imageId, 'svg', async () => gzipSync(imageText));
+    assert.equal(encoding, 'manual');
     assert.equal(r.headers.get('X-Content-Type-Options'), 'nosniff');
   } finally { globalThis.Response = Original; }
 });
