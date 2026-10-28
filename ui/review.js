@@ -1562,7 +1562,7 @@ let renderedImageResults=null;
 function renderImageResults() {
   const board=S.v==='board',source=imageSearchRows();
   const rows=board?ImageView.searchNets(source,imageSearchState.query):ImageView.searchComponents(source,imageSearchState.query);
-  $('#image-search-count').textContent=$('#image-query').disabled?'':board?rows.length+' net results':source.length+' components · '+rows.length+' results';
+  $('#image-search-count').textContent=$('#image-query').disabled?'':board?rows.length+' net '+(rows.length===1?'result':'results'):rows.length+' '+(rows.length===1?'component':'components')+' found';
   const host=$('#image-results');host.hidden=!imageSearchState.open||$('#image-query').disabled;
   if(host.hidden){host.replaceChildren();renderedImageResults=null;return;}
   const key=JSON.stringify([imageSearchState.context,imageSearchState.side,imageSearchState.query]);

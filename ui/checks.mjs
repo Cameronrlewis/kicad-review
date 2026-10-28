@@ -5306,13 +5306,16 @@ CHECKS.push(['images inspection complete-screen','',`
     const controls=[...document.querySelectorAll('#toolbar > .tb-grp')];
     if(controls.some(e=>e.getBoundingClientRect().bottom>box.top+1))return 'phone search did not wrap below toolbar controls';
   }
+  const reachableTabs=[];
   for(const tab of ['changes','checks','parts','threads']) {
     const button=document.querySelector('#panel [data-tab="'+tab+'"]');
     if(!button)return 'review tab missing '+tab;
     if(button.disabled) { if(!button.title)return 'review tab unavailable without explanation '+tab; continue; }
     button.click();
     if(document.querySelector('#panel [data-tab="'+tab+'"]')?.getAttribute('aria-selected')!=='true')return 'review tab unreachable '+tab;
+    reachableTabs.push(tab);
   }
+  if(!reachableTabs.includes('changes')||!reachableTabs.includes('checks'))return 'core review tabs not reachable';
   if(!document.querySelector('#inspector').textContent.includes('U2')||!document.querySelector('.image-selection'))return 'proof selection';
   if(document.querySelectorAll('*').length>=2000)return 'proof DOM budget';
   return true;
