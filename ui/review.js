@@ -1844,7 +1844,7 @@ function anchorAt(x, y, side, touch=false) {
     const pin=picked?.e.uuid===selection.uuid&&picked.e.unit===selection.unit&&picked.p.number===selection.pin
       &&Math.hypot(picked.p.x-selection.point[0],picked.p.y-selection.point[1])<=.002?picked.p:null;
     if(!pin)return {...a,target:"point",uuid:null,kind:null,ref:null,x:round3(x),y:round3(y)};
-    if(pin)return {...a,target:'object',uuid:selection.uuid,kind:'symbol',ref:selection.ref,
+    return {...a,target:'object',uuid:selection.uuid,kind:'symbol',ref:selection.ref,
       x:round3(pin.x),y:round3(pin.y)};
   }
   return hit ? { ...a, target: "object", uuid: hit.uuid, kind: hit.kind, ref: hit.ref, layer: hit.layer ?? null, x: round3(hit.pos[0]), y: round3(hit.pos[1]) }
@@ -1876,7 +1876,7 @@ function resolveAnchor(a) {
     if(pin){
       if(Math.hypot(pin.pos[0]-a.x,pin.pos[1]-a.y)>.01)notes.push(`moved since ${short(a.commit)}`);
       const basePin=ImageView.pinPosition(a,source,hotspotViews(P,'base'));
-      const hasBase=!!basePin&&!basePin.notes.length;
+      const hasBase=!!basePin&&!basePin.notes.some(note=>/unavailable|ambiguous/.test(note));
       return {view:'sheet:'+a.sheet,side:destination,pos:pin.pos,pos_before:hasBase?basePin.pos:undefined,
         added:!hasBase,notes:[...notes,...pin.notes]};}
     // No positive source-pin match: fall through to the unchanged ordinary object resolver.
