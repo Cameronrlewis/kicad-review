@@ -46,7 +46,18 @@ assert root[-1][0].get('href') == '#shape'
 expected = kr.comparison_svg(source, 'head', True)
 assert '<svg' in expected and 'xmlns="http://www.w3.org/2000/svg"' in expected
 assert kr.comparison_svg(source, 'head', True) == expected
-print('ok image comparison source matrix, retained definitions and deterministic namespace')
+# A layer can contain only a horizontal/vertical stroke: its artwork bbox has zero area.
+for path in ('M 10 60 H 250', 'M 100 -10 V 150'):
+    source = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="-20 -30 300 200"><path d="{path}" stroke="black" stroke-width="20" fill="none"/></svg>'
+    root = ET.fromstring(kr.comparison_svg(source, 'base'))
+    filt = root.find('.//{http://www.w3.org/2000/svg}filter')
+    assert filt.get('filterUnits') == 'userSpaceOnUse'
+    assert [float(filt.get(key)) for key in ('x', 'y', 'width', 'height')] == [-20, -30, 300, 200]
+source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text data-note="keep ns0:attribute">keep ns0:text</text></svg>'
+root = ET.fromstring(kr.comparison_svg(source, 'base'))
+label = root.find('.//{http://www.w3.org/2000/svg}text')
+assert label.text == 'keep ns0:text' and label.get('data-note') == 'keep ns0:attribute'
+print('ok image comparison source matrix, retained definitions, filter bounds and namespace content')
 
 four = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb')
 assert kr.board_layers(str(four)) == ['B.Cu', 'In2.Cu', 'In1.Cu', 'F.Cu']
@@ -4455,8 +4466,12 @@ def augment_front_svg(text, original):
     for attribute in list(root.attrib):
         if attribute == 'xmlns' or attribute.startswith('{http://www.w3.org/2000/xmlns/}'):
             del root.attrib[attribute]
+    ns = '{http://www.w3.org/2000/svg}'
+    for node in root.iter():
+        if isinstance(node.tag, str) and node.tag.startswith(ns):
+            node.tag = node.tag[len(ns):]
+    root.attrib = {'xmlns': ns[1:-1], **root.attrib}
     serialized = ET.tostring(root, encoding='unicode')
-    serialized = serialized.replace('xmlns:ns0="http://www.w3.org/2000/svg"', 'xmlns="http://www.w3.org/2000/svg"').replace('ns0:', '')
     return '\n'.join(line.rstrip() for line in serialized.split('\n'))
 
 
@@ -4464,7 +4479,10 @@ def augment_front_svg_regressions():
     result = augment_front_svg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>', [1, 2, 3])
     assert result.startswith('<svg xmlns='), result
     assert len(ET.fromstring(result)) == 3
-    print('ok standalone augmented SVG namespace')
+    source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text data-note="keep ns0:attribute">keep ns0:text</text></svg>'
+    label = ET.fromstring(augment_front_svg(source, [1, 2, 3])).find('{http://www.w3.org/2000/svg}text')
+    assert label.text == 'keep ns0:text' and label.get('data-note') == 'keep ns0:attribute'
+    print('ok standalone augmented SVG namespace and retained content')
 
 augment_front_svg_regressions()
 

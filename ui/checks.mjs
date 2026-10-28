@@ -106,6 +106,11 @@ export const CHECKS = [
         const img=document.querySelector('#stage .stack.'+side+' [data-layer="F_Cu"] img');
         const expected=side==='base'?[217,26,38,255]:[26,153,51,255];
         if(!close(pixel(img,60,100),expected)||pixel(img,399,199)[3]!==0)return 'board tint pixels '+side+' '+pixel(img,60,100);
+        // These producer layers contain only a horizontal stroke (zero-height bbox).
+        for(const name of ['In1_Cu','In2_Cu','B_Cu']) {
+          const line=document.querySelector('#stage .stack.'+side+' [data-layer="'+name+'"] img');
+          if(!close(pixel(line,10,4),expected))return 'producer collinear comparison clipped '+side+' '+name;
+        }
       }
       const composite=new OffscreenCanvas(400,200),ctx=composite.getContext('2d');
       for(const side of ['base','head']) {
@@ -124,6 +129,25 @@ export const CHECKS = [
     const sample=(image,x,y)=>{const c=new OffscreenCanvas(1188,840),ctx=c.getContext('2d');ctx.drawImage(image,0,0,1188,840);return [...ctx.getImageData(x,y,1,1).data];};
     const close=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=2);
     try {
+      // Legacy filters cover the viewBox, including zero-area artwork bboxes and wide strokes.
+      for(const viewBox of ['-20 -30 300 200','-20, -30, 300, 200','-20\\t-30\\n300 200']) {
+        for(const [path,points] of [['M10 60H250',[[100,90],[100,83]]],['M100 -10V150',[[120,80],[113,80]]]]) {
+          const source='<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" viewBox="'+viewBox+'"><path d="'+path+'" stroke="black" stroke-width="20" fill="none"/><text data-note="ns0:attribute">ns0:text</text></svg>';
+          for(const side of ['base','head']) {
+            const text=original(source,side,false),root=new DOMParser().parseFromString(text,'image/svg+xml'),filter=root.querySelector('filter');
+            if(filter.getAttribute('filterUnits')!=='userSpaceOnUse'||['x','y','width','height'].map(k=>+filter.getAttribute(k)).join()!=='-20,-30,300,200')return 'legacy comparison viewBox bounds '+viewBox;
+            if(root.querySelector('text').textContent!=='ns0:text'||root.querySelector('text').getAttribute('data-note')!=='ns0:attribute')return 'legacy comparison altered namespace-like content';
+            const url=URL.createObjectURL(new Blob([text],{type:'image/svg+xml'})),image=new Image();
+            try {
+              image.src=url;await image.decode();
+              const canvas=new OffscreenCanvas(300,200),ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);
+              const expected=side==='base'?[217,26,38,255]:[26,153,51,255];
+              for(const [x,y] of points)if(!close([...ctx.getImageData(x,y,1,1).data],expected))return 'collinear comparison stroke clipped '+side+' '+path;
+              if(ctx.getImageData(299,199,1,1).data[3]!==0)return 'comparison background not transparent';
+            } finally {URL.revokeObjectURL(url);}
+          }
+        }
+      }
       Appearance.patch({flip:false});
       await applyState({...S,p,v:'sheet:'+sheet.path,m:'overlay',x:105,y:55,z:15});
       const prepared={};
@@ -164,12 +188,27 @@ export const CHECKS = [
       }
       if(calls!==2)return 'legacy tint not memoized '+calls;
       // A foreign-side transparent target still routes the click to the visible revision.
-      await applyState({...S,m:'wipe'});S.wipe=1;apply();
-      const vp=document.querySelector('#stage .vp'),rect=vp.querySelector('.marks [data-side="head"]');
-      let routed=0;const oldPick=pickAt;pickAt=()=>{routed++;};
-      try {rect.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:vp.getBoundingClientRect().left+vp.clientWidth/2,clientY:vp.getBoundingClientRect().top+vp.clientHeight/2}));}
-      finally {pickAt=oldPick;}
-      return routed===1||'Wipe target swallowed click';
+      // Each target keeps its revision; visible targets use image picking, foreign-side
+      // targets use fallback picking, independent of the global board-flip preference.
+      await applyState({...S,m:'wipe'});
+      const oldPick=pickAt,oldImagePick=pickImageAt;let routed=[];
+      pickAt=()=>{routed.push('fallback');};pickImageAt=()=>{routed.push('image');};
+      try {
+        for(const flip of [false,true])for(const wipe of [0,1]) {
+          Appearance.patch({flip});S.wipe=wipe;apply();
+          const vp=document.querySelector('#stage .vp'),rects=[...vp.querySelectorAll('.marks rect')];
+          if(!rects.length||rects.some(r=>!['base','head'].includes(r.dataset.side)))return 'hotspot lost revision side';
+          for(const side of ['base','head']) {
+            const rect=rects.find(r=>r.dataset.side===side);
+            if(!rect)return 'missing hotspot revision '+side;
+            routed=[];const bounds=vp.getBoundingClientRect();
+            rect.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:bounds.left+bounds.width/2,clientY:bounds.top+bounds.height/2}));
+            const expected=side===(wipe===1?'base':'head')?'image':'fallback';
+            if(routed.join()!==expected)return 'Wipe target route '+side+' '+wipe+' '+flip+' '+routed;
+          }
+        }
+      } finally {pickAt=oldPick;pickImageAt=oldImagePick;}
+      return true;
     } finally {sheet.svgCompare=compare;ImageView.comparisonSource=original;Appearance.set(look);await applyState(state);}
   `],
   ['images comparison endpoints and missing sides', '', `

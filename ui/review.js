@@ -1295,10 +1295,10 @@ function mountImageMarks(world,view) {
   for(const {e,side} of survivors) {
     const r=document.createElementNS(ns,'rect'),[x,y,x1,y1]=e.bbox;
     for(const [key,value] of Object.entries({x,y,width:x1-x,height:y1-y}))r.setAttribute(key,value);
-    r.dataset.hotspot=e.uuid;r.dataset.side=e.side;
+    r.dataset.hotspot=e.uuid;r.dataset.side=side;
     r.addEventListener('click',event=>{
       event.stopPropagation();
-      if(imageSides(vp,toWorld(vp,event)).includes(e.side))pickImageAt(vp,event);
+      if(imageSides(vp,toWorld(vp,event)).includes(side))pickImageAt(vp,event);
       else pickAt(vp,event); // A target on the other Wipe side must not swallow the click.
     });
     marks.append(r);

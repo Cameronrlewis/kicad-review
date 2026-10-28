@@ -2870,8 +2870,12 @@ def comparison_svg(text, side, schematic=False):
     for attribute in list(root.attrib):
         if attribute == 'xmlns' or attribute.startswith('{http://www.w3.org/2000/xmlns/}'):
             del root.attrib[attribute]
-    serialized = ET.tostring(root, encoding='unicode')
-    return serialized.replace('xmlns:ns0="http://www.w3.org/2000/svg"', 'xmlns="http://www.w3.org/2000/svg"').replace('ns0:', '')
+    # Change SVG tag names only; namespace-like text and attribute values stay untouched.
+    for node in root.iter():
+        if isinstance(node.tag, str) and node.tag.startswith(ns):
+            node.tag = node.tag[len(ns):]
+    root.attrib = {'xmlns': ns[1:-1], **root.attrib}
+    return ET.tostring(root, encoding='unicode')
 
 
 def svg_viewbox(text):
