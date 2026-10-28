@@ -227,7 +227,7 @@ body.shot .report-head { display:none; }
 
 /* Stage 3 task 1: CAD dock shell. Header row, toolbar row, docks, status bar. */
 :root { --nav-w:220px; --panel-w:320px; }
-body { height:100dvh; overflow:hidden; grid-template-rows:auto var(--bar-h) minmax(0,1fr) var(--statusbar-h); }
+body { height:100dvh; overflow:hidden; grid-template-rows:auto minmax(var(--bar-h),auto) minmax(0,1fr) var(--statusbar-h); }
 #toolbar { position:relative; display:flex; align-items:center; gap:0; min-width:0; padding:0 8px; overflow-x:auto; background:var(--surface-2); border-bottom:1px solid var(--line); }
 #toolbar > *, #modes > *, #zoombar > * { flex-shrink:0; }
 #modes, #zoombar, #change-nav { display:flex; align-items:center; gap:4px; padding:0; border:0; background:transparent; }

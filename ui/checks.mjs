@@ -247,6 +247,8 @@ export const CHECKS = [
     if(innerWidth>700)return true;
     const inside=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight};
     if(document.documentElement.scrollWidth>innerWidth)return 'phone shell overflow';
+    const toolbar=document.querySelector('#toolbar');
+    if(toolbar.scrollHeight>toolbar.clientHeight)return 'phone wrapped toolbar controls clipped';
     const status=document.querySelector('#statusbar');
     if(status.scrollHeight>status.clientHeight)return 'phone status controls clipped';
     for(const menu of document.querySelectorAll('.report-chrome details')) {
@@ -798,6 +800,9 @@ export const CHECKS = [
     const hosts=document.querySelectorAll('#stage .view3d'),st=Review3D.state;
     if(st.loading||st.roots[1]||!st.roots[0]||!hosts[1].textContent.includes('Board not in this revision')||hosts[1].querySelector('img'))return 'absent revision borrowed model/poster';
     if(S.phone) {
+      // Plan Global Constraints / Dependencies on 05: Side keeps the requested revision,
+      // including its explicit empty state. The spec's Base/Head switch reaches Base;
+      // an absent Head must never silently draw Base or count it as Head's first frame.
       if(st.firstFrame||hosts[1].hidden||!hosts[0].hidden||st.visibleSides.join()!=='head')return 'absent requested Head drew the Base revision';
       Review3D.setRevision('base');
       if(hosts[0].hidden||!hosts[1].hidden||st.visibleSides.join()!=='base')return 'available Base could not be reached';
