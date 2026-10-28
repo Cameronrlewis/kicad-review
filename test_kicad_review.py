@@ -4462,8 +4462,20 @@ def test_br03_cmd_copper():
                         subprocess.CalledProcessError(2, ['python'], stderr='failed'),
                         OSError('missing interpreter'), subprocess.CompletedProcess([], 0, 'not json', '')]
             for outcome in outcomes:
-                with patch('kicad_review.subprocess.run', side_effect=[outcome, ok]) as run:
+                with patch('kicad_review.subprocess.run', side_effect=[outcome, ok]) as run, _contextlib.redirect_stderr(io.StringIO()) as stderr:
                     cmd_copper(None)
+                if outcome is ok:
+                    assert stderr.getvalue() == ''
+                else:
+                    assert 'p: copper unavailable:' in stderr.getvalue()
+                    if isinstance(outcome, subprocess.CalledProcessError):
+                        assert 'returned non-zero exit status 2' in stderr.getvalue()
+                    elif isinstance(outcome, OSError):
+                        assert 'missing interpreter' in stderr.getvalue()
+                    elif isinstance(outcome, subprocess.TimeoutExpired):
+                        assert 'timed out after 120 seconds' in stderr.getvalue()
+                    else:
+                        assert 'Expecting value' in stderr.getvalue()
                 assert run.call_count == 2, 'BR03 copper failure stopped subsequent project'
                 first, second = run.call_args_list
                 assert first.kwargs == {'capture_output': True, 'text': True, 'timeout': 120, 'check': True}
