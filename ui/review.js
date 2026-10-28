@@ -1444,6 +1444,7 @@ function chooseImage(record,side,kind,point,pin=null) {
   S.io=null;S.ig=null;
   const semantic=proj().changes.find(c=>c.uuid===(record.changeUuid||record.uuid)&&onView(c,S.v));
   S.s=semantic?.id||null;
+  syncSelectedChangeCard();
   if(record.net)selectImageNet(record.net);else restoreImageNet();
   renderInspector();drawImageSelection();updateStatus();saveHash();
 }
@@ -1554,12 +1555,17 @@ function closeImageResults(focus=false) {
   if(focus)$('#image-query').focus();
   imageSearchState.open=false;renderImageResults();
 }
+let renderedImageResults=null;
 function renderImageResults() {
   const host=$('#image-results');host.hidden=!imageSearchState.open||$('#image-query').disabled;
-  if(host.hidden){host.replaceChildren();return;}
+  if(host.hidden){host.replaceChildren();renderedImageResults=null;return;}
   const board=S.v==='board',rows=board?ImageView.searchNets(imageSearchRows(),imageSearchState.query):ImageView.searchComponents(imageSearchRows(),imageSearchState.query);
-  host.innerHTML=rows.length?'<ul>'+rows.map((r,i)=>'<li><button type="button" data-image-result="'+i+'">'+esc(board?r.name:r.ref+' · '+(r.value||'')+(r.unit?' · unit '+r.unit:''))+'</button></li>').join('')+'</ul>':
+  const html=rows.length?'<ul>'+rows.map((r,i)=>'<li><button type="button" data-image-result="'+i+'">'+esc(board?r.name:r.ref+' · '+(r.value||'')+(r.unit?' · unit '+r.unit:''))+'</button></li>').join('')+'</ul>':
     '<p>No matches. Try '+(board?'a net name or part of its name.':'a reference, value, footprint or field.')+'</p>';
+  const key=JSON.stringify([imageSearchState.context,imageSearchState.side,imageSearchState.query,html]);
+  // Retain focused buttons across appearance redraws and asynchronous image mounts.
+  if(renderedImageResults?.key===key&&rows.length===renderedImageResults.rows.length&&rows.every((r,i)=>r===renderedImageResults.rows[i]))return;
+  renderedImageResults={key,rows};host.innerHTML=html;
   for(const button of host.querySelectorAll('button')) {
     button.onclick=()=>{
       const row=rows[Number(button.dataset.imageResult)],side=imageSearchState.side;
@@ -1599,6 +1605,10 @@ $('#image-query').onkeydown=e=>{
 };
 $('#image-search-side').onchange=e=>{clearImageSelection();imageSearchState.note='';imageSearchState.side=e.target.value;imageSearchState.open=false;renderImageSearch();};
 $('#image-search-clear').onclick=()=>{clearImageSelection();S.s=null;imageSearchState.open=false;renderImageResults();saveHash();};
+// Safari does not focus pressed buttons. Keep the input focused until click selects a row.
+for(const type of ['pointerdown','mousedown'])$('#image-results').addEventListener(type,e=>{
+  if(e.button===0&&e.target.closest('button'))e.preventDefault();
+});
 $('#image-search').addEventListener('focusout',()=>queueMicrotask(()=>{if(!$('#image-search').contains(document.activeElement)){imageSearchState.open=false;renderImageResults();}}));
 document.addEventListener('pointerdown',e=>{if(!e.target.closest('#image-search')){imageSearchState.open=false;renderImageResults();}});
 
@@ -1745,7 +1755,15 @@ function pickAt(vp, e) {
     if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
   }
 }
-function markSelected() { clearImageSelection(); S.io = null; S.ig = null; revealChangeCard(); for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
+function syncSelectedChangeCard() {
+  revealChangeCard();
+  for(const e of document.querySelectorAll('#panel [data-id]')) {
+    const selected=e.dataset.id===S.s;
+    e.setAttribute('aria-selected',selected);
+    if(selected)e.scrollIntoView({block:'nearest'});
+  }
+}
+function markSelected() { clearImageSelection(); S.io = null; S.ig = null; syncSelectedChangeCard(); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {

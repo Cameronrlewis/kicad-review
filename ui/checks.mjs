@@ -177,6 +177,66 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
 `];
 
 export const CHECKS = [
+  ['images search pointer activation without button focus','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const input=document.querySelector('#image-query');
+    for(const pointerType of ['mouse','touch','mousedown']) {
+      input.focus();input.value='U2';input.dispatchEvent(new Event('input'));
+      const button=document.querySelector('#image-results button');
+      const down=pointerType==='mousedown'?new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}):
+        new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,pointerType});
+      button.dispatchEvent(down);
+      // Safari leaves buttons unfocused: an uncancelled press blurs to body before click.
+      if(!down.defaultPrevented){input.blur();input.dispatchEvent(new FocusEvent('focusout',{bubbles:true,relatedTarget:null}));}
+      await new Promise(resolve=>setTimeout(resolve,0));
+      button.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0,pointerType}));
+      if(!button.isConnected)return pointerType+' result removed before click';
+      button.click();
+      if(S.imageSelection?.ref!=='U2'||!document.querySelector('#image-results').hidden)return pointerType+' selection failed';
+    }
+    input.focus();document.querySelector('#stage .vp').focus();
+    input.dispatchEvent(new FocusEvent('focusout',{bubbles:true,relatedTarget:document.querySelector('#stage .vp')}));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    if(!document.querySelector('#image-results').hidden)return 'keyboard departure kept results open';
+    return true;
+  `],
+  ['images search redraw preserves keyboard focus','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const input=document.querySelector('#image-query');
+    input.focus();input.value='U2';input.dispatchEvent(new Event('input'));
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+    const button=document.activeElement;
+    renderImageSearch();await Promise.resolve();
+    if(document.activeElement!==button||!button.isConnected)return 'unchanged search dropped keyboard focus';
+    await draw();await Promise.resolve();
+    if(document.activeElement!==button||document.querySelector('#image-results').hidden)return 'draw dropped keyboard focus';
+    button.click();
+    if(S.imageSelection?.ref!=='U2')return 'retained result activation failed';
+    return true;
+  `],
+  ['images numeric pick synchronizes change card','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    rightTab='changes';renderPanel();
+    const record=sheetImageElements('head')[0],change=proj().changes.find(c=>onView(c,S.v));
+    if(!record||!change)return 'fixture change missing';
+    const original=record.changeUuid;
+    record.changeUuid=change.uuid;
+    let scrolled=false;
+    const scroll=Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView=function(...args){if(this.dataset.id===change.id)scrolled=true;return scroll.apply(this,args);};
+    try {
+      S.s=null;markSelected();
+      chooseImage(record,'head','symbol',[(record.bbox[0]+record.bbox[2])/2,(record.bbox[1]+record.bbox[3])/2]);
+      if(!S.imageSelection||S.s!==change.id)return 'numeric semantic selection missing';
+      const card=[...document.querySelectorAll('#panel [data-id]')].find(e=>e.dataset.id===change.id);
+      if(card?.getAttribute('aria-selected')!=='true')return 'matching change card not highlighted';
+      if(!scrolled)return 'matching change card not scrolled into view';
+    } finally {record.changeUuid=original;Element.prototype.scrollIntoView=scroll;}
+    return true;
+  `],
   ['images bounded search and board facts','',`
     if(D.repo!=='fixture/images')return 'skip';
     await applyState({...S,v:'sheet:/right/',m:'side'});
