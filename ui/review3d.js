@@ -21,6 +21,8 @@ window.Review3D = (() => {
     for (const url of s.urls) URL.revokeObjectURL(url);
     s.urls.clear(); clearTimeout(s.idleTimer); cancelAnimationFrame(s.raf); s.raf = 0;
     s.policy?.dispose();
+    for (const remove of s.motionPreferences || []) remove();
+    s.motionPreferences?.clear?.();
     document.removeEventListener('visibilitychange', s.visibility);
     s.animationFrames.clear();
     s.pixelSample?.reject(new DOMException('Viewer closed', 'AbortError')); s.pixelSample = null;
@@ -331,10 +333,14 @@ window.Review3D = (() => {
         }
       } finally { session.inTick = false; }
       if (dirty || moving) { dirty = false; drawFrame(); }
-      if (moving || session.animationFrames.size) {
+      if (moving) {
         clearTimeout(session.idleTimer);
         if (lastTick !== null) policy.rotating(time - lastTick);
         lastTick = time; render();
+      } else if (session.animationFrames.size) {
+        lastTick = null; policy.idle(); clearTimeout(session.idleTimer);
+        session.idleTimer = setTimeout(() => { if (!session.dead) policy.poll(); }, 2000);
+        render();
       } else {
         lastTick = null; policy.idle(); clearTimeout(session.idleTimer);
         session.idleTimer = setTimeout(() => { if (!session.dead) policy.poll(); }, 2000);
@@ -455,7 +461,11 @@ window.Review3D = (() => {
     const camera = new THREE.PerspectiveCamera(35, 1, .01, 1000), controls = new OrbitControls(camera, host);
     const v = {host, canvas:s.canvas, renderer:s.renderer, camera, scene, controls, side, visible:true,
       sides:side ? [side] : s.allowedSides.filter(side => roots.includes(sideRoot(s, side)))};
-    controls.enableDamping = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+    controls.enableDamping = !reducedMotion.matches;
+    const motionPreference = () => { controls.enableDamping = !reducedMotion.matches; render(); };
+    reducedMotion.addEventListener?.('change', motionPreference);
+    (s.motionPreferences ||= []).push(() => reducedMotion.removeEventListener?.('change', motionPreference));
     controls.addEventListener('change', () => {
       if (s.dead || s.syncing) return; s.syncing = true;
       for (const other of s.views) if (other !== v) {

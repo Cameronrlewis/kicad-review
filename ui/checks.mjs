@@ -5153,18 +5153,18 @@ CHECKS.push(
  try {
    const event=(type,x)=>h.dispatchEvent(new PointerEvent(type,{pointerId:1,pointerType:'mouse',button:0,buttons:type==='pointerup'?0:1,clientX:x,clientY:b.top+b.height/2,bubbles:true}));
    event('pointerdown',b.left+b.width/2);event('pointermove',b.left+b.width/2+40);event('pointerup',b.left+b.width/2+40);
- } finally {h.setPointerCapture=capture;h.releasePointerCapture=release;}
- const released=v.camera.position.clone();
- if(start.distanceTo(released)<1e-7)return 'rotation did not move camera';
- await new Promise(r=>setTimeout(r,150));
- if(v.controls.enableDamping&&released.distanceTo(v.camera.position)<1e-7)return 'damping did not move camera after release';
- for(let i=0;i<100&&s.raf;i++)await new Promise(r=>setTimeout(r,100));
- const count=s.state.drawCount;
- await new Promise(r=>setTimeout(r,250));
- if(count!==s.state.drawCount||s.raf)return 'damping never settled '+JSON.stringify({count,draws:s.state.drawCount,raf:s.raf,camera:v.camera.position.toArray(),delta:v.controls._sphericalDelta});
- const before=s.state.drawCount;const pixels=await Review3D.sampleFrame();
- if(s.state.drawCount<=before||!pixels.opaquePixels)return 'pixel sample did not draw a fresh frame';
- v.controls.dampingFactor=damping;return true;
+   const released=v.camera.position.clone();
+   if(start.distanceTo(released)<1e-7)return 'rotation did not move camera';
+   await new Promise(r=>setTimeout(r,150));
+   if(v.controls.enableDamping&&released.distanceTo(v.camera.position)<1e-7)return 'damping did not move camera after release';
+   for(let i=0;i<100&&s.raf;i++)await new Promise(r=>setTimeout(r,100));
+   const count=s.state.drawCount;
+   await new Promise(r=>setTimeout(r,250));
+   if(count!==s.state.drawCount||s.raf)return 'damping never settled '+JSON.stringify({count,draws:s.state.drawCount,raf:s.raf,camera:v.camera.position.toArray(),delta:v.controls._sphericalDelta});
+   const before=s.state.drawCount;const pixels=await Review3D.sampleFrame();
+   if(s.state.drawCount<=before||!pixels.opaquePixels)return 'pixel sample did not draw a fresh frame';
+   return true;
+ } finally {v.controls.dampingFactor=damping;h.setPointerCapture=capture;h.releasePointerCapture=release;}
  `]
 );
 
