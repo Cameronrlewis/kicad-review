@@ -410,9 +410,10 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
 # Only expected runtime type checks remain; reject stray typeof scaffolding.
-allowed_typeof = ("typeof value.text === 'string'", "typeof D.blobs?.[id] !== 'string'", "typeof text !== 'string'")
+allowed_typeof = ("typeof value.text === 'string'", "typeof D.blobs?.[id] !== 'string'")
 scaffolding_js = js
 for guard in allowed_typeof:
+    assert js.count(guard) == 1, f"allowlisted guard must occur exactly once: {guard}"
     scaffolding_js = scaffolding_js.replace(guard, "")
 assert "typeof " not in scaffolding_js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
