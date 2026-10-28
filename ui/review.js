@@ -59,7 +59,9 @@ addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
   const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
   const [x, y] = p?.point || toWorld(vp, e);
-  const anchor = boardDiff ? (hit ? geometryAnchor(hit) : p?.side && pointAnchor(x,y,p.side)) : anchorAt(x, y, sideOf(vp));
+  const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp))
+    : boardDiff ? (hit ? geometryAnchor(hit) : p?.side && pointAnchor(x,y,p.side))
+    : anchorAt(x,y,sideOf(vp));
   if (anchor && anchor.file) parent.postMessage({ kicadReviewPin: anchor }, "*");
 }
 const shownThreads = () => (S.threads || []).filter(t => (S.threadFilter.status === "all" || (S.threadFilter.status === "resolved") === t.resolved)
@@ -1818,6 +1820,10 @@ function geometryAnchor({object,side,point}) {
   return {...pointAnchor(p[0],p[1],side),target:'object',uuid:inventory?.uuid || object.uuid,
     kind:inventory?.kind || object.kind,ref:inventory?.ref || object.ref || null,layer:inventory?.layer || object.layer || object.layers?.[0] || null};
 }
+function hotspotViews(P,side) {
+  const ids=new Set(P.sheets.map(s=>s.hotspots?.[side]).filter(Boolean));
+  return [...ids].flatMap(id=>decodedSheetHotspots.get(id)?.views||[]);
+}
 function anchorAt(x, y, side) {
   const P = proj();
   if (!S.v || S.v === "3d") return null;
@@ -1828,6 +1834,15 @@ function anchorAt(x, y, side) {
   const hit = hitTest(objs, x, y, null, "head");
   const a = { v: 1, project: P.dir, file, sheet: S.v === "board" ? null : S.v.slice(6), layer: null,
               side, commit: side === "base" ? D.base : D.head, severity: "comment" };
+  const selection=S.imageSelection;
+  if(selection?.kind==='pin'&&selection.side===side&&selection.sheet===S.v.slice(6)) {
+    if(Math.hypot(x-selection.point[0],y-selection.point[1])>.002)return {...a,target:"point",uuid:null,kind:null,ref:null,x:round3(x),y:round3(y)};
+    const pin=hotspotViews(P,side).find(v=>v.sheet===selection.sheet)?.elements
+      .find(e=>e.uuid===selection.uuid&&e.unit===selection.unit)?.pins
+      .find(p=>p.number===selection.pin&&Math.hypot(p.x-selection.point[0],p.y-selection.point[1])<=.002);
+    if(pin)return {...a,target:'object',uuid:selection.uuid,kind:'symbol',ref:selection.ref,
+      x:round3(pin.x),y:round3(pin.y)};
+  }
   return hit ? { ...a, target: "object", uuid: hit.uuid, kind: hit.kind, ref: hit.ref, layer: hit.layer ?? null, x: round3(hit.pos[0]), y: round3(hit.pos[1]) }
              : { ...a, target: "point", uuid: null, kind: null, ref: null, x: round3(x), y: round3(y) };
 }
@@ -1848,6 +1863,18 @@ function resolveAnchor(a) {
     const position=o=>{const b=BoardDiff.objectBounds(o); return o.anchor || (b && [(b[0]+b[2])/2,(b[1]+b[3])/2]);};
     if (head && position(head)) return {view:'board',side:'head',pos:position(head),pos_before:base && position(base),added:!base,notes};
     if (base && position(base)) return {view:'board',side:'base',pos:position(base),notes:[...notes,`${a.ref || 'object'} was removed in this change`]};
+  }
+  if(a.target==='object'&&a.kind==='symbol'&&a.sheet!=null) {
+    const sourceSide=a.commit===D.base?'base':a.commit===D.head?'head':null;
+    const source=sourceSide?hotspotViews(P,sourceSide):[];
+    const destination=hotspotViews(P,'head').some(v=>v.sheet===a.sheet&&v.elements.some(e=>e.uuid===a.uuid))?'head':'base';
+    const pin=ImageView.pinPosition(a,source,hotspotViews(P,destination));
+    if(pin){
+      if(Math.hypot(pin.pos[0]-a.x,pin.pos[1]-a.y)>.01)notes.push(`moved since ${short(a.commit)}`);
+      const basePin=ImageView.pinPosition(a,source,hotspotViews(P,'base'));
+      return {view:'sheet:'+a.sheet,side:destination,pos:pin.pos,pos_before:basePin?.pos,notes:[...notes,...pin.notes]};}
+    // No positive source-pin match: fall through to the unchanged ordinary object resolver.
+    // v1 has no pin discriminator; absence of source geometry is not evidence of a pin.
   }
   const objs = P.objects || [];
   const sameSheet = o => (o.sheet ?? null) === (a.sheet ?? null);

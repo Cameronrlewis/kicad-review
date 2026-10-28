@@ -270,6 +270,20 @@
     };
   }
 
+  function pinPosition(a,sourceViews,targetViews) {
+    if(a.kind!=='symbol'||a.sheet==null)return null;
+    const source=(sourceViews.find(v=>v.sheet===a.sheet)?.elements||[]).filter(e=>e.uuid===a.uuid);
+    const candidates=source.flatMap(e=>e.pins.filter(p=>Math.hypot(p.x-a.x,p.y-a.y)<=.002).map(p=>({e,p})));
+    if(candidates.length>1)return {pos:[a.x,a.y],notes:['ambiguous pin endpoint; retaining original point']};
+    if(!candidates.length)return null;
+    const {e,p}=candidates[0];
+    const next=(targetViews.find(v=>v.sheet===a.sheet)?.elements||[])
+      .filter(t=>t.uuid===a.uuid&&t.unit===e.unit)
+      .flatMap(t=>t.pins.filter(q=>q.number===p.number&&q.name===p.name));
+    return next.length===1?{pos:[next[0].x,next[0].y],notes:[]}
+      :{pos:[a.x,a.y],notes:['pin endpoint unavailable in this revision; retaining original point']};
+  }
+
   const live = new Set();
   async function mount(text, size, options) {
     const c=controller(text,options), dispose=c.dispose.bind(c);
@@ -279,5 +293,5 @@
   }
   globalThis.ImageView={snapshotScale,wheelFactor,gestureSession,vectorCrop,cropRegion,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
     disposeAll(){for(const c of [...live])c.dispose();},
-    segmentDistance,polygonDistance,primitiveDistance,inspectHit,searchComponents,searchNets};
+    segmentDistance,polygonDistance,primitiveDistance,inspectHit,searchComponents,searchNets,pinPosition};
 })();

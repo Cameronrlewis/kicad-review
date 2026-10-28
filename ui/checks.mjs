@@ -299,9 +299,59 @@ export const CHECKS = [
     search.value='absent-reference';search.dispatchEvent(new Event('input',{bubbles:true}));
     if(document.querySelectorAll('#image-search-results button').length)return 'stale empty results';
     const count=document.querySelector('#image-search-count');
-    if(count?.getAttribute('aria-live')!=='polite'||!count.textContent.includes('0 results'))return 'live empty result count';
+    if(count?.getAttribute('aria-live')!=='polite'||!count.textContent.includes('0 components found'))return 'live empty result count';
     search.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
     if(search.value||S.imageSelection||document.activeElement!==search)return 'Escape did not reset search selection';
+    {
+      const P=proj(), oldObjects=P.objects, oldMaps=P.sheets.map(s=>s.hotspots);
+      try {
+        P.sheets.forEach(s=>delete s.hotspots);
+        P.objects=[{kind:'symbol',uuid:'legacy-moved',ref:'U99',sheet:'/right/',
+          side:'head',pos:[110,65,0],pos_before:[100,55,0]}];
+        const a={target:'object',kind:'symbol',uuid:'legacy-moved',ref:'U99',project:P.dir,
+          sheet:'/right/',side:'base',commit:D.base,x:100,y:55};
+        const r=resolveAnchor(a);
+        if(r.side!=='head'||r.pos[0]!==110||r.pos[1]!==65)return 'legacy moved symbol frozen';
+        if(ImageView.pinPosition(a,[],[])!==null)return 'missing source misclassified as pin';
+      } finally {P.objects=oldObjects;P.sheets.forEach((s,i)=>{if(oldMaps[i])s.hotspots=oldMaps[i];});}
+    }
+    {
+      await applyState({...S,v:'sheet:/right/',m:'side'});
+      // Keep synthetic MouseEvent integer-pixel rounding within the .002 mm endpoint tolerance.
+      setT({x:100,y:55,z:1000});
+      S.imageSelection={kind:'pin',side:'base',sheet:'/right/',uuid:'placed',ref:'U2',unit:'2',pin:'3',point:[100,55]};
+      const vp=document.querySelector('#stage .stack.base')?.closest('.vp');
+      if(!vp)return 'base schematic viewport missing';
+      const r=vp.getBoundingClientRect(), posted=[], oldPost=parent.postMessage;
+      const world=vp.querySelector('.world'), wr=world.getBoundingClientRect();
+      const point=new DOMPoint(100*PX,55*PX).matrixTransform(new DOMMatrix(getComputedStyle(world).transform));
+      const origin=world.parentElement.getBoundingClientRect();
+      try {
+        parent.postMessage=(message)=>posted.push(message);
+        proposePin(vp,new MouseEvent('click',{clientX:origin.left+point.x,clientY:origin.top+point.y}));
+      } finally {parent.postMessage=oldPost;}
+      const anchor=posted.find(m=>m.kicadReviewPin)?.kicadReviewPin;
+      if(!anchor||anchor.uuid!=='placed'||anchor.sheet!=='/right/'||anchor.x!==100||anchor.y!==55)return 'posted pin moved to symbol origin';
+      acceptThreads([{id:'image-pin-reopen',anchor,resolved:false,comments:[]}]);
+      await openThread('image-pin-reopen');drawPins();
+      const resolved=resolveAnchor(anchor);
+      if(!resolved.notes.some(n=>n.startsWith('moved since')))return 'moved pin note missing';
+      const background=anchorAt(99,49,'base');
+      if(background.target!=='point'||background.uuid!==null)return 'stale selected pin captured background placement';
+      if(resolved.pos[0]!==102.54||resolved.pos[1]!==55||resolved.view!=='sheet:/right/')return 'reopened pin misplaced';
+      // Existing drawPins uses millimetres through PX on .pin buttons; compare the bottom-center tip screen position
+      // to the reopened resolver position via its world transform, not to symbol placement.
+      const headViewport=document.querySelector('#stage .stack.head')?.closest('.vp');
+      const button=headViewport?.querySelector('.world .pin[data-thread="image-pin-reopen"]');
+      if(!button)return 'reopened pin not drawn';
+      const b=button.getBoundingClientRect(), pinWorld=button.closest('.world');
+      const expected=new DOMPoint(resolved.pos[0]*PX,resolved.pos[1]*PX).matrixTransform(new DOMMatrix(getComputedStyle(pinWorld).transform));
+      const pinRect=pinWorld.parentElement.getBoundingClientRect();
+      if(Math.hypot((b.left+b.right)/2-pinRect.left-expected.x,b.bottom-pinRect.top-expected.y)>2)return 'rendered thread pin not at endpoint';
+      const selected=hotspotViews(proj(),'head').find(v=>v.sheet==='/right/').elements.find(e=>e.uuid==='placed');
+      chooseImage(selected,'head','pin',resolved.pos,selected.pins.find(p=>p.number==='3'));
+      if(!document.querySelector('#inspector').textContent.includes('U2'))return 'reopened pin inspector missing';
+    }
     return true;
   `],
   gestureLifecycleCheck,

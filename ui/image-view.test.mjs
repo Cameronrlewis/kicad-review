@@ -644,3 +644,31 @@ test('search bounds results and ranks reference prefixes before field matches', 
   assert.equal(ctx.ImageView.searchNets(nets,'unconnected-')[0].name,'unconnected-U1-Pad2');
   assert.equal(ctx.ImageView.searchNets(Array.from({length:40},(_,i)=>({name:'N'+i})), '').length,20);
 });
+
+test('owning symbol plus point retains and moves the selected pin endpoint',()=>{
+  const views=(offset)=>['/left/','/right/'].map(sheet=>({sheet,elements:[{
+    uuid:'placed',ref:sheet==='/left/'?'U1':'U2',unit:'2',pins:[{number:'3',name:'B',x:100+offset,y:55}]}]}));
+  const a={uuid:'placed',kind:'symbol',sheet:'/right/',x:100,y:55};
+  assert.deepEqual(Array.from(ctx.ImageView.pinPosition(a,views(0),views(0)).pos),[100,55]);
+  assert.deepEqual(Array.from(ctx.ImageView.pinPosition(a,views(0),views(2.54)).pos),[102.54,55]);
+  assert.equal(ctx.ImageView.pinPosition({...a,x:99,y:49},views(0),views(2.54)),null);
+  const missing=ctx.ImageView.pinPosition(a,views(0),[]);
+  assert.deepEqual(Array.from(missing.pos),[100,55]);assert.match(missing.notes[0],/unavailable/);
+});
+
+test('pin endpoint matching isolates sheets and units and rejects changed or ambiguous pins',()=>{
+  const a={uuid:'placed',kind:'symbol',sheet:'/right/',x:100,y:55};
+  const element={uuid:'placed',unit:'2',pins:[{number:'3',name:'B',x:100,y:55}]};
+  const source=[{sheet:'/right/',elements:[element]}];
+  const target=[{sheet:'/left/',elements:[element]},{sheet:'/right/',elements:[
+    {...element,unit:'1'}, {...element,pins:[{number:'3',name:'B',x:55,y:102.54}]}]}];
+  assert.deepEqual(Array.from(ctx.ImageView.pinPosition(a,source,target).pos),[55,102.54]);
+  for(const pins of [[{number:'4',name:'B',x:9,y:9}],[{number:'3',name:'C',x:9,y:9}],[],[...element.pins,...element.pins]]) {
+    const result=ctx.ImageView.pinPosition(a,source,[{sheet:'/right/',elements:[{...element,pins}]}]);
+    assert.deepEqual(Array.from(result.pos),[100,55]);assert.match(result.notes[0],/unavailable/);
+  }
+  assert.match(ctx.ImageView.pinPosition(a,[{sheet:'/right/',elements:[element,element]}],target).notes[0],/ambiguous/);
+  assert.equal(ctx.ImageView.pinPosition(a,[],[]),null);
+  assert.equal(ctx.ImageView.pinPosition({...a,kind:'footprint'},source,target),null);
+  assert.equal(ctx.ImageView.pinPosition(a,[{sheet:'/left/',elements:[element]}],target),null);
+});
