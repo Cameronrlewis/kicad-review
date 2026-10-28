@@ -180,7 +180,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
   return frame({ title: 'Compare commits', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Compare commits' }], body: `<main class="page bench-opening"><div class="page-head"><div><h1>Compare commits</h1><p class="lead">Pick the earlier revision as Base and the later one as Head. The review shows what changed from Base to Head.</p></div></div>${alert}${swapForm}<form method="post" action="${path}/compare" class="compare-form"><div class="source-picker"><label>Branch <select name="branch" form="source-picker">${branchOptions}</select></label><span class="muted">or a tag</span><label class="sr-only" for="tag">Tag</label><select id="tag" name="tag" form="source-picker"><option value="">Select a tag</option>${tagOptions}</select><button class="btn" form="source-picker">Show</button></div><div class="table-scroll"><table class="table" aria-label="Commit revisions"><thead><tr><th>Base <span class="compare-letter" aria-hidden="true">A</span></th><th>Head <span class="compare-letter" aria-hidden="true">B</span></th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th><th></th></tr></thead><tbody>${rows}</tbody></table></div><div class="compare-bar">${selection('Base', baseCommit)}<span class="compare-arrow" aria-hidden="true">→</span>${selection('Head', headCommit)}<div class="compare-action"><button class="btn btn-primary" type="submit">Start review</button><div class="muted" role="status"></div></div></div></form><form id="source-picker" method="get"></form>${script}</main>` });
 }
 
-export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false }) {
+export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false, assets = {} }) {
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
@@ -190,7 +190,7 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = f
   const raw = `${path}/a/${encodeURIComponent(id)}/raw`;
   const run = /^\d+$/.test(String(workflowRunId)) ? `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(workflowRunId)}` : '';
   const runLink = run ? link(run, 'Open run ↗') : '';
-  const script = reportFrameScript(raw);
+  const script = reportFrameScript(raw, assets);
   const sharing = share ? shareControls(`${path}/a/${encodeURIComponent(id)}/share`, `${path}/share/revoke`) : '';
   const readiness = mergeBadge(Number.isInteger(pull) ? 'Checking…' : 'Not a PR', Number.isInteger(pull) ? 'Checking merge readiness…' : 'Merge readiness requires a pull request.');
   const readinessScript = Number.isInteger(pull) ? `<script>(${readinessClient.toString()})(${JSON.stringify({ readiness: `${path}/pull/${pull}/readiness`, reviewHead: match ? match[2] : null }).replace(/</g, '\\u003c')});</script>` : '';
@@ -317,8 +317,63 @@ function mergeBadge(state, text) {
 function reviewOverflow(items) {
   return `<details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${items}<button type="button" data-review-copy>Copy link</button><label>Go to<input data-review-goto aria-label="Go to saved review position" placeholder="Paste a review link"></label><input data-review-copyfield aria-label="Link to copy" readonly hidden></div></details>`;
 }
-function reportFrameScript(raw) {
-  return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; document.querySelector('[data-review-copy]').onclick = async () => { try { await navigator.clipboard.writeText(location.href); } catch { const input = document.querySelector('[data-review-copyfield]'); input.hidden = false; input.value = location.href; input.focus(); input.select(); } }; document.querySelector('[data-review-goto]').onchange = event => { const text = event.target.value; const i = text.indexOf('#'); if (i >= 0) location.hash = text.slice(i); event.target.value = ''; }; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); const syncTheme = () => { const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; iframe.contentWindow?.postMessage({ kicadReviewTheme: theme }, '*'); }; new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] }); iframe.addEventListener('load', () => { syncTheme(); fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) { loading.hidden = true; syncTheme(); } if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
+// This parent owns the only network capability. The child supplies identities, not URLs.
+export function reportAssetBridge(iframe, base, assets) {
+  const pending = new Map();
+  let generation = 0;
+  const unavailable = 'Asset unavailable. Try again.';
+  const reply = (value, ticket) => { if (ticket === generation) iframe.contentWindow?.postMessage({ kicadReviewAssetResult: value }, '*'); };
+  const dispose = () => {
+    generation++;
+    for (const entry of pending.values()) { clearTimeout(entry.timer); entry.controller.abort(); }
+    pending.clear();
+  };
+  addEventListener('pagehide', dispose);
+  addEventListener('message', async event => {
+    if (event.source !== iframe.contentWindow) return;
+    const value = event.data?.kicadReviewAsset;
+    if (!value || typeof value.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.requestId)) return;
+    const { requestId, digest, kind } = value, ticket = generation;
+    if (pending.has(requestId)) return; // Duplicate IDs cannot displace an in-flight request.
+    if (Object.keys(value).some(k => !['requestId', 'digest', 'kind'].includes(k))
+      || typeof digest !== 'string' || !/^[0-9a-f]{12}$/.test(digest)
+      || !['svg', 'json'].includes(kind) || assets[digest]?.kind !== kind || pending.size >= 8) {
+      reply({ requestId, digest, error: unavailable }, ticket); return;
+    }
+    const controller = new AbortController(), entry = { controller, timer: null };
+    const finish = result => {
+      if (pending.get(requestId) !== entry) return;
+      clearTimeout(entry.timer); pending.delete(requestId);
+      reply({ requestId, digest, ...result }, ticket);
+    };
+    entry.timer = setTimeout(() => { controller.abort(); finish({ error: unavailable }); }, 15000);
+    pending.set(requestId, entry);
+    try {
+      const result = await fetch(`${base}${digest}.${kind}`, { credentials: 'same-origin', redirect: 'error', signal: controller.signal });
+      if (!result.ok || !result.body) throw new Error(unavailable);
+      const limit = (kind === 'svg' ? 8 : 4) * 1024 * 1024;
+      const reader = result.body.getReader(), decoder = new TextDecoder('utf-8', { fatal: true });
+      let size = 0, text = '';
+      try {
+        while (true) {
+          const { done, value: chunk } = await reader.read();
+          if (done) break;
+          size += chunk.byteLength;
+          if (size > limit) throw new Error(unavailable);
+          text += decoder.decode(chunk, { stream: true });
+        }
+        text += decoder.decode();
+      } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+      finally { reader.releaseLock(); }
+      finish({ text });
+    } catch { controller.abort(); finish({ error: unavailable }); }
+  });
+  return { dispose };
+}
+
+function reportFrameScript(raw, assets = {}) {
+  const bridge = raw.startsWith('/r/') ? `const assetBridge = (${reportAssetBridge.toString()})(iframe, ${JSON.stringify(raw.replace(/\/raw$/, '/assets/'))}, ${JSON.stringify(assets).replace(/</g, '\\u003c')});` : 'const assetBridge = null;';
+  return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); ${bridge} const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; document.querySelector('[data-review-copy]').onclick = async () => { try { await navigator.clipboard.writeText(location.href); } catch { const input = document.querySelector('[data-review-copyfield]'); input.hidden = false; input.value = location.href; input.focus(); input.select(); } }; document.querySelector('[data-review-goto]').onchange = event => { const text = event.target.value; const i = text.indexOf('#'); if (i >= 0) location.hash = text.slice(i); event.target.value = ''; }; const load = (showLoading) => { assetBridge?.dispose(); if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); const syncTheme = () => { const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; iframe.contentWindow?.postMessage({ kicadReviewTheme: theme }, '*'); }; new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] }); iframe.addEventListener('load', () => { syncTheme(); fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) { loading.hidden = true; syncTheme(); } if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
 }
 
 export function sharedPage({ token, name }) {

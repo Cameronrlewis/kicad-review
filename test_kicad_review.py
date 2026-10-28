@@ -408,7 +408,8 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
                    capture_output=True, text=True)
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
-assert "typeof " not in js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
+# Runtime type checks now validate messages from the hosted asset bridge.
+assert "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")
@@ -1207,6 +1208,14 @@ print("ok")
 wf = open(".github/workflows/review.yml", encoding="utf-8").read()
 readme = open("README.md", encoding="utf-8").read()
 assert "retention-days: 90" in wf, "workflow retention"
+image_upload = wf.split("      - name: Upload image assets\n", 1)[1].split("      - name:", 1)[0]
+assert "name: kicad-review-image-assets-${{ github.run_id }}-${{ github.run_attempt }}" in image_upload
+assert "archive: true" in image_upload and "path: review/assets/" in image_upload
+assert "retention-days: 90" in image_upload
+assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in image_upload
+html_upload = wf.split("      - name: Upload report\n", 1)[1].split("      - name:", 1)[0]
+assert "archive: false" in html_upload and "path: review/${{ steps.report.outputs.name }}" in html_upload
+
 assert "reports are kept 90 days" in readme, "README retention"
 print("ok")
 

@@ -270,15 +270,82 @@ function applyState(st) {
 
 const PX = 4;                       // CSS px per mm at z = PX
 const cache = {};
-// Cache the decode promise so concurrent draws of the same blob share one gzip stream.
+// The opaque hosted frame never fetches. Its parent owns authenticated delivery.
+function createAssetClient(data) {
+  const pending = new Map(), queue = [];
+  const nonce = crypto.randomUUID().replaceAll('-', '');
+  let serial = 0, active = 0;
+  const unavailable = () => new Error('Asset unavailable. Try again.');
+  const pump = () => {
+    while (active < 8 && queue.length) {
+      const job = queue.shift();
+      if (!pending.has(job.requestId)) continue;
+      job.sent = true; active++;
+      parent.postMessage({ kicadReviewAsset: { requestId: job.requestId, digest: job.digest, kind: job.kind } }, '*');
+    }
+  };
+  const finish = (job, text, error) => {
+    if (!pending.delete(job.requestId)) return;
+    clearTimeout(job.timer);
+    if (job.sent) active--;
+    if (error) job.reject(unavailable()); else job.resolve(text);
+    pump();
+  };
+  addEventListener('message', event => {
+    if (event.source !== parent) return;
+    const value = event.data?.kicadReviewAssetResult;
+    const job = value && pending.get(value.requestId);
+    if (!job || !job.sent || value.digest !== job.digest) return;
+    const limit = (job.kind === 'svg' ? 8 : 4) * 1024 * 1024;
+    const ok = !value.error && typeof value.text === 'string' && value.text.length <= limit
+      && new TextEncoder().encode(value.text).byteLength <= limit;
+    finish(job, value.text, !ok);
+  });
+  return {
+    request(digest) {
+      const kind = data.assetDescriptors?.[digest]?.kind;
+      if (parent === window || !/^[0-9a-f]{12}$/.test(digest) || !['svg', 'json'].includes(kind) || pending.size >= 128)
+        return Promise.reject(unavailable());
+      return new Promise((resolve, reject) => {
+        const requestId = `asset_${nonce}_${++serial}`, job = { requestId, digest, kind, resolve, reject, sent: false };
+        job.timer = setTimeout(() => finish(job, null, true), 15000);
+        pending.set(requestId, job); queue.push(job); pump();
+      });
+    },
+    dispose() {
+      // Empty the queue first: rejecting old jobs must not send more old-view work.
+      queue.length = 0;
+      const digests = [...pending.values()].map(job => job.digest);
+      for (const job of [...pending.values()]) finish(job, null, true);
+      return digests;
+    },
+  };
+}
+const assetClient = createAssetClient(D);
+addEventListener('pagehide', () => assetClient.dispose());
+// Cache promises so concurrent draws share one gzip stream or parent request.
 function svgText(id) {
   if (!id) return Promise.resolve(null);
   if (!(id in cache)) {
-    const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
-    cache[id] = new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
-    cache[id].catch(() => delete cache[id]);
+    const decode = async () => {
+      if (typeof D.blobs?.[id] !== 'string') {
+        if (D.assetDescriptors?.[id]) return assetClient.request(id);
+        throw new Error('Asset unavailable. Try again.');
+      }
+      const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
+      return new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    };
+    const promise = cache[id] = decode();
+    promise.catch(() => { if (cache[id] === promise) delete cache[id]; });
   }
   return cache[id];
+}
+function assetRetry(stage) {
+  for (const message of stage.querySelectorAll('.image-error')) {
+    if (message.querySelector('button')) continue;
+    const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Try again';
+    retry.onclick = () => draw(); message.append(' ', retry);
+  }
 }
 let boardDiff = null;
 const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
@@ -522,11 +589,13 @@ function recolorLayer(div, look, original) {
   if (a * look.opacity !== 1) div.style.opacity = a * look.opacity;
 }
 async function stack(side, view) {
+  const generation = gen;
   const st = document.createElement("div");
   st.className = `stack ${side}`;
   st.style.width = `${view.size[0] * PX}px`; st.style.height = `${view.size[1] * PX}px`;
   const look = view.kind === "board" ? Appearance.get().layers : {};
   for (const l of view.layers) {
+    if (generation !== gen) break;
     const t = await svgText(l.svg[side]);
     if (!t || look[canon(l.name)]?.visible === false) continue;
     const d = document.createElement("div");
@@ -557,6 +626,7 @@ function viewport(stage, label, kind) {
 }
 let gen = 0;
 async function draw() {
+  for (const id of assetClient.dispose()) delete cache[id];
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
   Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
   schematicResize.disconnect();
@@ -613,7 +683,12 @@ async function draw() {
   }
   if (!boardView.useGL) disposeBoardRenderers();
   if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable in both revisions.</p>`;
-  else await MODES[S.m](stage, view);
+  else try { await MODES[S.m](stage, view); }
+  catch (error) {
+    const message = document.createElement('p'); message.className = 'image-error'; message.setAttribute('role', 'status');
+    message.textContent = `Image unavailable: ${error.message}`; stage.append(message);
+  }
+  assetRetry(stage);
   if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
   noChangeNotice(stage);
   if (my !== gen) return;

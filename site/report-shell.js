@@ -25,13 +25,42 @@ const assets = {
 // String.replace with a function: `$` sequences in the inserted code stay literal.
 const put = (html, tag, text) => html.replace(tag, () => text);
 
+// Parse only the producer's JSON envelope, never execute stored report code.
+export function readStoredData(html) {
+  const start = html.indexOf(DATA), end = start < 0 ? -1 : html.indexOf('</script>', start);
+  if (end < 0) return null;
+  try {
+    const value = JSON.parse(html.slice(start + DATA.length, end).trim().replace(/;$/, ''));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch { return null; }
+}
+
+export function declaredAssets(data) {
+  const result = Object.create(null);
+  for (const [id, meta] of Object.entries(data?.assets || {})) {
+    if (/^[0-9a-f]{12}$/.test(id) && ['svg', 'json'].includes(meta?.kind)
+      && typeof data?.blobs?.[id] === 'string') result[id] = { kind: meta.kind };
+  }
+  return result;
+}
+
 // Returns the stored report rebuilt with the current interface, or null to serve it unchanged
 // (no recognisable data script: a foreign or hand-edited file).
-export function currentReport(stored) {
+export function currentReport(stored, { hosted = false } = {}) {
   const start = stored.indexOf(DATA);
   const end = start < 0 ? -1 : stored.indexOf('</script>', start);
   if (end < 0) return null;
-  const data = stored.slice(start + '<script>'.length, end);   // payload escapes every "<", so no early </script>
+  let data = stored.slice(start + '<script>'.length, end);   // payload escapes every "<", so no early </script>
+  if (hosted) {
+    const payload = readStoredData(stored);
+    if (!payload) return null;
+    const descriptors = declaredAssets(payload);
+    if (Object.keys(descriptors).length) {
+      payload.assetDescriptors = descriptors;
+      for (const id of Object.keys(descriptors)) delete payload.blobs[id];
+      data = `window.REVIEW_DATA = ${JSON.stringify(payload).replace(/</g, '\\u003c')};`;
+    }
+  }
   // 3D: reuse the stored three.js bundle (vendored library, same for every report).
   const bundle = data.includes('"model3d"') ? stored.match(BUNDLE)?.[0] : null;
   let html = put(page, '<link rel="stylesheet" href="tokens.css">\n<link rel="stylesheet" href="review.css">', `<style>\n${tokens}</style>\n<style>\n${review}</style>`);
@@ -44,7 +73,7 @@ export function currentReport(stored) {
 }
 
 // Body for a fetched stored report: the current interface when the data is recognisable, else the file as stored.
-export async function currentBody(response) {
+export async function currentBody(response, options) {
   const stored = await response.text();
-  return currentReport(stored) ?? stored;
+  return currentReport(stored, options) ?? stored;
 }
