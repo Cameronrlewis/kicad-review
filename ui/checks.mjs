@@ -318,7 +318,7 @@ export const CHECKS = [
     };
     try {
       const cancelled = Review3D.show(stage, p, {...S, s:null});
-      while (parsed < Object.values(p.board.model3d).filter(Boolean).length) await new Promise(r => setTimeout(r, 20));
+      while (parsed < new Set(['base','head'].filter(side=>p.board.model3d[side]).map(side=>p.board.assets3d?.[side]?.model?.digest||p.board.model3d[side])).size) await new Promise(r => setTimeout(r, 20));
       await Review3D.show(stage, {...p, board:{...p.board, model3d:{}, no_model:[]}}, {...S, m:"overlay", s:null});
       release(); await cancelled;
       return resources.size > 0 && disposed.size === resources.size || JSON.stringify({parsed, resources:resources.size, disposed:disposed.size});
@@ -568,16 +568,16 @@ export const CHECKS = [
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
     await new Promise(r => setTimeout(r, 800));
-    const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:st.renderers[0].getClearColor(new THREE.Color()).getHexString()}, dark = KRTheme.get() === "light";
+    const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:getComputedStyle(document.querySelector('#stage')).backgroundColor}, dark = KRTheme.get() === "light";
     await new Promise(r => { window.__themeFlipped = r; window.__flipTheme(dark ? "dark" : "light"); });
     const until = performance.now() + 3000;
-    while (st.renderers[0].getClearColor(new THREE.Color()).getHexString() === before.clear && performance.now() < until) await new Promise(r => setTimeout(r, 25));
+    while (getComputedStyle(document.querySelector('#stage')).backgroundColor === before.clear && performance.now() < until) await new Promise(r => setTimeout(r, 25));
     const css = getComputedStyle(document.documentElement), token = n => new THREE.Color(css.getPropertyValue(n).trim()), facts = {
-      clear:st.renderers.every(r => r.getClearColor(new THREE.Color()).equals(token(dark ? "--bg" : "--paper"))),
+      clear:st.renderers.every(r => r.getClearAlpha() === 0) && new THREE.Color(getComputedStyle(document.querySelector("#stage")).backgroundColor).equals(token(dark ? "--bg" : "--paper")),
       highlight:h.materials.every((m,i) => m.color.equals(h.original[i].color.clone().lerp(token("--modified"), .7)) && (!m.emissive || m.emissive.equals(token("--modified")))),
       outline:st.selected.every(o => o.material.color.equals(token("--accent"))),
-      changed:before.highlight !== h.materials[0].color.getHexString() && before.outline !== st.selected[0].material.color.getHexString() && before.clear !== st.renderers[0].getClearColor(new THREE.Color()).getHexString(),
-      camera:JSON.stringify(before.camera) === JSON.stringify(st.cameras.map(c => c.position.toArray())), parses:before.parses === st.parseCount && st.parseCount === 2, selection:S.s === "c2", same:st === Review3D.state,
+      changed:before.highlight !== h.materials[0].color.getHexString() && before.outline !== st.selected[0].material.color.getHexString() && before.clear !== getComputedStyle(document.querySelector("#stage")).backgroundColor,
+      camera:JSON.stringify(before.camera) === JSON.stringify(st.cameras.map(c => c.position.toArray())), parses:before.parses === st.parseCount && st.parseCount === new Set(Object.values(st.modelDigests)).size, selection:S.s === "c2", same:st === Review3D.state,
       marker:getComputedStyle(h.marker.el).color === (() => { const e=document.createElement("span");e.style.color="var(--modified)";document.body.append(e);const c=getComputedStyle(e).color;e.remove();return c; })(),
       ghosts:true
     };
@@ -590,7 +590,7 @@ export const CHECKS = [
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const n = window.Review3D.state.nodes || [];
-    return document.querySelectorAll('#stage canvas').length >= 2 && n.includes("J2") && n.includes("C20");`],
+    return document.querySelectorAll('#stage canvas').length === 1 && window.Review3D.state.roots.filter(Boolean).length === 2 && n.includes("J2") && n.includes("C20");`],
   ["3D camera buttons change the camera", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
@@ -617,7 +617,7 @@ export const CHECKS = [
   ["3D glyph marker labels are visible over their canvas", "v=3d&m=side", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
-    const l = document.querySelector('.marker3d[data-ref="J2"]'), c = l?.parentElement.querySelector("canvas"), a = l?.getBoundingClientRect(), b = c?.getBoundingClientRect();
+    const l = document.querySelector('.marker3d[data-ref="J2"]'), c = l?.closest(".view3d"), a = l?.getBoundingClientRect(), b = c?.getBoundingClientRect();
     return !!l && l.textContent.includes("≡ J2") && a.left >= b.left && a.right <= b.right && a.top >= b.top && a.bottom <= b.bottom;`],
   ["3D Overlay shows old-position ghosts", "v=3d&m=overlay", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
@@ -4179,7 +4179,7 @@ CHECKS.push(['vf-avail unchanged 3D both revisions', 'v=3d&m=side', `
   const model=proj().board.model3d;
   if(!model.base||!model.head)throw Error('missing model revision');
   if(!document.querySelector('[data-view="3d"]'))throw Error('3D navigator unavailable');
-  if(!window.Review3D.state.firstFrame||window.Review3D.state.roots.filter(Boolean).length!==2||document.querySelectorAll('#stage canvas').length!==2)throw Error('both revisions must draw');
+  if(!window.Review3D.state.firstFrame||window.Review3D.state.roots.filter(Boolean).length!==2||document.querySelectorAll('#stage canvas').length!==1||window.Review3D.state.renderers.length!==1)throw Error('both revisions must draw');
   if(model.base===model.head&&!document.querySelector('#stage').textContent.includes('No 3D changes'))throw Error('missing 3D no-change notice');
   console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',view:'3d',sameBlob:model.base===model.head,roots:window.Review3D.state.roots.length,theme:KRTheme.get()}));return true;
 `]);
@@ -4346,4 +4346,144 @@ CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=she
     if (out[name].mean > meanMax || out[name].moved > moveMax) return JSON.stringify(out);
   }
   return true;
+`]);
+
+CHECKS.push(
+  ['BR02 processed single renderer scissored sides', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state;
+    if(!st?.firstFrame)return '3D fixture has no first frame';
+    if(document.querySelectorAll('#stage canvas').length!==1)return 'expected one shared canvas';
+    if(st.renderers.length!==1||st.cameras.length!==2)return 'renderer/camera ownership';
+    const narrow=Boolean(S.phone);
+    if(narrow?st.visibleSides.length!==1:st.visibleSides.join(',')!=='base,head')return 'revision viewport routing';
+    if(st.views!==Review3D.session().views||st.views.some(v=>!v.host||!v.camera||!v.scene))return 'view diagnostics';
+    return st.drawCallsByViewport.length===(narrow?1:2)||'missing viewport counters';
+  `],
+  ['BR02 single renderer head only', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state;
+    if(REVIEW_DATA.mode!=='single')return 'fixture is not single mode';
+    if(proj().board.model3d?.base||proj().board.poster3d?.base)return 'base blob present in fixture';
+    if(!st?.firstFrame)return 'head model has no first frame';
+    if(st.renderers.length!==1||st.roots.length!==1)return 'single renderer or single root';
+    if(st.visibleSides.join(',')!=='head')return 'single mode must draw head only';
+    if(st.views.length!==1||st.views[0].side!=='head')return 'single mode view list';
+    if(!document.querySelector('#stage .vp.view3d.one'))return 'missing single viewport class';
+    if(document.querySelector('#stage .tag')?.textContent!=='Design')return 'single label';
+    if(window.__baseBlobReads?.length)return 'base blob decoded in single mode';
+    return (Review3D.session()?.revision==='head'&&typeof Review3D.poster3d==='function')||'session accessor or poster3d export';
+  `],
+  ['BR02 processed digest parses and shared resources dispose once', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const stage=document.querySelector('#stage'), p=structuredClone(proj());
+    for(const equal of [true,false]) {
+      if(equal){p.board.model3d.head=p.board.model3d.base;p.board.assets3d.head=p.board.assets3d.base;}
+      else {p.board.model3d=proj().board.model3d;p.board.assets3d=proj().board.assets3d;}
+      const reopening=Review3D.show(stage,p,S), st=Review3D.state, parses=st.parseCount;
+      await reopening;
+      const [base,head]=st.roots, bg=base.getObjectByProperty('isMesh',true)?.geometry,hg=head.getObjectByProperty('isMesh',true)?.geometry;
+      const same=st.modelDigests.base===st.modelDigests.head;
+      if(same!==equal)return 'fixture must exercise both equal and distinct digests';
+      if(st.parseCount-parses!==(same?1:2))return 'digest parse count';
+      if(!bg||!hg||(bg===hg)!==same)return 'digest geometry sharing';
+      if(base===head)return 'logical roots not cloned';
+      const counts=new Map(), originals=new Map();
+      const watch=o=>{if(!o?.dispose||originals.has(o))return;const fn=o.dispose;originals.set(o,fn);o.dispose=function(){counts.set(o,(counts.get(o)||0)+1);return fn.call(this);};};
+      for(const root of [...st.roots,...st.decodedScenes])root?.traverse(n=>{
+        watch(n.geometry);for(const m of [n.material].flat().filter(Boolean)){watch(m);for(const t of Object.values(m))if(t?.isTexture)watch(t);}
+      });
+      watch(st.renderers[0]);
+      try{Review3D.dispose();if([...originals.keys()].some(o=>counts.get(o)!==1))return 'shared GPU resource disposed zero or multiple times';}
+      finally{for(const [o,fn]of originals)o.dispose=fn;}
+      if(Review3D.session()!==null)return 'disposed session still published';
+    }
+    return true;
+  `],
+  ['BR02 processed shared resources dispose once', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const counts=new Map(),originals=new Map();
+    const watch=o=>{if(!o?.dispose||originals.has(o))return;const original=o.dispose;originals.set(o,original);o.dispose=function(){counts.set(o,(counts.get(o)||0)+1);return original.call(this);};};
+    for(const root of Review3D.state.roots)root?.traverse(n=>{watch(n.geometry);for(const m of [n.material].flat().filter(Boolean)){watch(m);for(const value of Object.values(m))if(value?.isTexture)watch(value);}});
+    try{Review3D.dispose();return [...originals.keys()].every(o=>counts.get(o)===1)||'shared GPU resource disposed zero or multiple times';}
+    finally{for(const [o,fn]of originals)o.dispose=fn;}
+  `],
+  ['BR02 processed no WebGL retains poster and retries', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const original=HTMLCanvasElement.prototype.getContext,stage=document.querySelector('#stage');
+    try{
+      HTMLCanvasElement.prototype.getContext=function(type,...args){return /^webgl/.test(type)?null:original.call(this,type,...args);};
+      await Review3D.show(stage,proj(),S);
+      if(Review3D.state.firstFrame||Review3D.state.loading)return 'failed renderer claims ready';
+      if(!stage.querySelector('[data-poster]:not([hidden])'))return 'WebGL failure lost poster';
+      if(!stage.querySelector('[data-3d-retry]'))return 'WebGL failure has no retry';
+    }finally{HTMLCanvasElement.prototype.getContext=original;}
+    await Review3D.show(stage,proj(),S);return Review3D.state.firstFrame||'retry failed to render';
+  `],
+  ['BR02 processed visible model is not covered', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state,host=[...document.querySelectorAll('#stage .view3d')].find(e=>e.getBoundingClientRect().width>0);
+    if(!st.firstFrame||!host)return 'no visible model frame';
+    if(!document.querySelector('#stage > canvas'))return 'shared canvas missing';
+    if(getComputedStyle(document.querySelector('#stage')).backgroundColor==='rgba(0, 0, 0, 0)')return 'stage has no theme background';
+    for(const e of document.querySelectorAll('#stage .view3d'))if(getComputedStyle(e).backgroundColor!=='rgba(0, 0, 0, 0)')return 'opaque input host covers model';
+    if([...document.querySelectorAll('#stage [data-poster]')].some(e=>!e.hidden&&e.closest('.view3d')===host))return 'poster still covers loaded model';
+    if((await Review3D.sampleFrame()).opaquePixels<100)return 'actual model pixels absent';
+    const b=host.getBoundingClientRect();if(!document.elementsFromPoint(b.x+b.width/2,b.y+b.height/2).includes(host))return 'viewport occluded';
+    return st.drawCallsByViewport.every(n=>n>0)||'real model submitted no primitives';
+  `]
+);
+
+CHECKS.push(
+ ['BR02 processed canonical revision and empty phone side', 'v=3d&m=side', `
+   if(!proj().board.parts3d)return 'skip';
+   const stage=document.querySelector('#stage'), p=structuredClone(proj()), app={...S,phone:true,revision:'head',m:'side',s:null};
+   for(const key of ['model3d','parts3d','assets3d','poster3d','coverage3dBySide'])delete p.board[key].head;
+   await Review3D.show(stage,p,app);
+   if(Review3D.state.revision!=='head'||Review3D.state.visibleSides.join(',')!=='head')return 'requested absent Head changed revision';
+   const host=stage.querySelector('.view3d:not([hidden])');
+   if(!host?.textContent.includes('Board not in this revision')||host.querySelector('[data-poster]'))return 'empty Head borrowed Base content';
+   Review3D.setRevision('base');
+   if(Review3D.state.visibleSides.join(',')!=='base'||!Review3D.state.firstFrame)return 'Base revision inaccessible';
+   if(S.revision!=='base')return 'app state not synchronized';
+   Review3D.setRevision('head');
+   if(Review3D.state.visibleSides.join(',')!=='head'||!host.querySelector('[data-revision-empty]'))return 'Head round trip failed';
+   app.phone=false;Review3D.resize();
+   return Review3D.state.views.every(v=>v.visible)||'resize did not consume canonical phone state';
+ `],
+ ['BR02 processed equal digest materials stay immutable across roles', 'v=3d&m=side', `
+   if(!proj().board.parts3d)return 'skip';
+   const p=structuredClone(proj()), stage=document.querySelector('#stage');
+   p.board.model3d.head=p.board.model3d.base;p.board.assets3d.head=p.board.assets3d.base;
+   await Review3D.show(stage,p,{...S,m:'blend',s:null});
+   const st=Review3D.state, source=st.decodedScenes[0], original=new Map();
+   source.traverse(n=>{for(const m of [n.material].flat().filter(Boolean))original.set(m,{opacity:m.opacity,transparent:m.transparent});});
+   const [base,head]=st.roots, bm=base.getObjectByProperty('isMesh',true).material,hm=head.getObjectByProperty('isMesh',true).material;
+   if(bm===hm||original.has(bm)||original.has(hm))return 'blend mutates shared source or shares roles';
+   Review3D.setBlend(.2);
+   if(bm.opacity!==.8||hm.opacity!==.2)return 'blend roles not independent';
+   if([...original].some(([m,v])=>m.opacity!==v.opacity||m.transparent!==v.transparent))return 'source material mutated';
+   const sourceMeshes=[],cloneMeshes=[];
+   source.traverse(n=>{if(n.isMesh)sourceMeshes.push(n);});base.traverse(n=>{if(n.isMesh)cloneMeshes.push(n);});
+   const roleMaterials=new Map();let mismatch=false;
+   sourceMeshes.forEach((n,i)=>[n.material].flat().forEach((sourceMaterial,j)=>{
+     const m=[cloneMeshes[i].material].flat()[j], prior=roleMaterials.get(sourceMaterial);
+     if(prior&&prior!==m)mismatch=true;roleMaterials.set(sourceMaterial,m);
+   }));
+   return !mismatch||'material cloned per mesh instead of distinct source and role';
+ `]
+);
+
+CHECKS.push(['BR02 processed compatibility phone predicate fractional widths', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const frame=document.createElement('iframe');frame.style.cssText='position:absolute;left:-2000px;height:40px;border:0';document.body.appendChild(frame);
+ try {
+   const run=frame.contentWindow.Function('S','('+sync3DPhone.toString()+')();return S.phone;');
+   for(const [width,expected]of [[699.5,true],[700,true],[700.5,false],[701,false]]){
+     frame.style.width=width+'px';frame.getBoundingClientRect();
+     if(run({})!==expected)return 'wrong responsive boundary at '+width;
+   }
+   frame.style.width='1200px';frame.getBoundingClientRect();
+   return run({layout:'phone'})||'forced phone layout ignored';
+ }finally{frame.remove();}
 `]);

@@ -723,3 +723,11 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 #nav .tree .name { flex:1 1 150px; overflow-wrap:break-word; word-break:normal; }
 .insp-module dl { grid-template-columns:minmax(64px,.9fr) minmax(0,1.1fr); }
 .insp-module dt { overflow-wrap:break-word; }
+
+/* One transparent WebGL canvas; viewport hosts own input, labels and posters. */
+#stage.mode-3d { position:relative; isolation:isolate; background:var(--paper); }
+html[data-theme="dark"] #stage.mode-3d { background:var(--bg); }
+#stage.mode-3d > canvas { position:absolute; inset:0; z-index:0; pointer-events:none; }
+#stage.mode-3d > .view3d { position:relative; z-index:1; background:transparent; }
+#stage.mode-3d .view3d [data-poster] { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; z-index:2; }
+#stage.mode-3d .view3d .tag { position:absolute; z-index:3; }

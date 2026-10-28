@@ -2,7 +2,7 @@
 /* Lazy 3D board viewer. The three.js bundle remains inert until this view opens. */
 window.Review3D = (() => {
   const style = document.createElement("style");
-  style.textContent = `.mode-3d [data-poster]{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.mode-3d [hidden]{display:none!important}.mode-3d .error3d{position:absolute;bottom:16px;left:16px;right:16px;z-index:3;padding:12px;background:var(--surface);color:var(--text);border:1px solid var(--line)}.mode-3d .error3d{overflow-wrap:anywhere;max-height:calc(100% - 32px);overflow:auto;box-sizing:border-box}.mode-3d .error3d button{min-height:32px;cursor:pointer;color:var(--text);background:var(--surface);border:1px solid var(--line);padding:4px 12px}@media(max-width:700px){.mode-3d .error3d button{min-height:44px}}.mode-3d .error3d p{margin:0 0 8px}.mode-3d button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.mode-3d{background:var(--line)}.mode-3d .view3d{background:var(--paper);min-width:0;position:relative}.mode-3d .view3d.one{grid-column:1/-1}.mode-3d canvas{display:block;width:100%;height:100%}.mode-3d .marker3d,.tip3d{position:absolute;z-index:2;pointer-events:none;transform:translate(-50%,-100%);font:700 13px system-ui,sans-serif;line-height:1;white-space:nowrap;color:var(--text);text-shadow:0 1px 2px var(--paper),1px 0 2px var(--paper),-1px 0 2px var(--paper),0 -1px 2px var(--paper)}.tip3d{text-shadow:none;padding:3px 5px;background:var(--surface);border:1px solid var(--line);border-radius:3px}.loading,.empty3d{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);margin:0}#modes button[aria-disabled=true]{cursor:not-allowed;opacity:.55}`;
+  style.textContent = `.mode-3d [data-poster]{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.mode-3d [hidden]{display:none!important}.mode-3d .error3d{position:absolute;bottom:16px;left:16px;right:16px;z-index:3;padding:12px;background:var(--surface);color:var(--text);border:1px solid var(--line)}.mode-3d .error3d{overflow-wrap:anywhere;max-height:calc(100% - 32px);overflow:auto;box-sizing:border-box}.mode-3d .error3d button{min-height:32px;cursor:pointer;color:var(--text);background:var(--surface);border:1px solid var(--line);padding:4px 12px}@media(max-width:700px){.mode-3d .error3d button{min-height:44px}}.mode-3d .error3d p{margin:0 0 8px}.mode-3d button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.mode-3d .view3d{min-width:0;position:relative}.mode-3d .view3d.one{grid-column:1/-1}.mode-3d canvas{display:block;width:100%;height:100%}.mode-3d .marker3d,.tip3d{position:absolute;z-index:2;pointer-events:none;transform:translate(-50%,-100%);font:700 13px system-ui,sans-serif;line-height:1;white-space:nowrap;color:var(--text);text-shadow:0 1px 2px var(--paper),1px 0 2px var(--paper),-1px 0 2px var(--paper),0 -1px 2px var(--paper)}.tip3d{text-shadow:none;padding:3px 5px;background:var(--surface);border:1px solid var(--line);border-radius:3px}.loading,.empty3d{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);margin:0}#modes button[aria-disabled=true]{cursor:not-allowed;opacity:.55}`;
   document.head.appendChild(style);
   let active = null, bundle;
   const gunzip = b64 => new Response(new Blob([Uint8Array.from(atob(b64), c => c.charCodeAt(0))]).stream().pipeThrough(new DecompressionStream("gzip")));
@@ -19,6 +19,9 @@ window.Review3D = (() => {
     s.pending.clear(); s.worker?.terminate(); s.worker = null;
     for (const url of s.urls) URL.revokeObjectURL(url);
     s.urls.clear(); clearTimeout(s.idleTimer); cancelAnimationFrame(s.raf);
+    for (const id of s.animationFrames) cancelAnimationFrame(id);
+    s.animationFrames.clear();
+    s.pixelSample?.reject(new DOMException('Viewer closed', 'AbortError')); s.pixelSample = null;
     s.resizeObserver?.disconnect(); s.intersectionObserver?.disconnect();
     s.resourceCounts.workers = s.resourceCounts.urls = s.resourceCounts.pending = 0;
   }
@@ -91,11 +94,43 @@ window.Review3D = (() => {
   const tint = action => new window.THREE3D.THREE.Color(css(`--${action}`));
   const materials = o => Array.isArray(o.material) ? o.material : [o.material];
   const free = o => { o.geometry?.dispose(); materials(o).filter(Boolean).forEach(m => { m.map?.dispose(); m.dispose(); }); };
+  // One owner for source resources, logical clones, and comparison-only materials.
+  function releaseGpu(s) {
+    const geometries = s.geometries || new Set(), materials = s.materials || new Set(), textures = s.textures || new Set();
+    const environmentTextures = new Set([...s.environments.values()].map(t => t.texture));
+    for (const root of [...s.roots, ...s.views.map(v => v.scene), ...(s.decodedScenes || [])]) root?.traverse(n => {
+      if (n.geometry) geometries.add(n.geometry);
+      for (const m of (Array.isArray(n.material) ? n.material : [n.material]).filter(Boolean)) {
+        materials.add(m);
+        for (const value of Object.values(m)) if (value?.isTexture && !environmentTextures.has(value)) textures.add(value);
+      }
+    });
+    for (const g of geometries) g.dispose();
+    for (const m of materials) m.dispose();
+    for (const t of textures) t.dispose();
+    for (const target of new Set(s.environments.values())) target.dispose();
+    geometries.clear(); materials.clear(); textures.clear(); s.environments.clear();
+    s.renderer?.dispose(); s.canvas?.remove();
+  }
+  function parseByDigest(s, digest, bytes, parser) {
+    const existing = s.parses.get(digest);
+    if (existing) { existing.refs++; return existing.promise; }
+    const entry = {promise:null, scene:null, refs:1};
+    entry.promise = Promise.resolve().then(() => { s.state.parseCount++; return parser(bytes); }).then(g => {
+      if (s.dead) {
+        releaseGpu({roots:[g.scene], views:[], environments:new Map()});
+        throw new DOMException('Viewer closed', 'AbortError');
+      }
+      entry.scene = g.scene; s.decodedScenes.push(g.scene); return g;
+    }).catch(error => { if (s.parses.get(digest) === entry) s.parses.delete(digest); throw error; });
+    s.parses.set(digest, entry); return entry.promise;
+  }
+  const sideRoot = (s, side) => s.roots[s.allowedSides.indexOf(side)];
   function dispose() {
     if (!active) return;
     const s = active; closeSession(s); clearInterval(s.themeTimer);
-    s.views.forEach(v => { v.controls.dispose(); v.renderer.dispose(); v.canvas.remove(); });
-    [...s.roots, ...s.views.map(v => v.scene)].forEach(r => r?.traverse(free));
+    s.views.forEach(v => { clearTimeout(v.tip); v.controls.dispose(); });
+    releaseGpu(s); s.parses.clear(); s.decodedModels.clear(); s.comparisonMaterials.clear(); s.decodedScenes.length = 0;
     s.state.disposed = true; s.state.loading = false;
     s.state.loadingBySide.base = s.state.loadingBySide.head = false;
     s.roots.length = 0;
@@ -108,7 +143,7 @@ window.Review3D = (() => {
   function failure(s, side, message) {
     if (s.dead) return;
     s.state.errorsBySide[side] = message;
-    const host = s.hostsBySide[side]; host.hidden = false;
+    const host = s.hostsBySide[side];
     host.querySelector('.loading')?.remove();
     if (s.state.posterBySide[side]) s.state.posterBySide[side].hidden = false;
     let notice = host.querySelector('.error3d');
@@ -116,7 +151,7 @@ window.Review3D = (() => {
     notice.replaceChildren();
     const text = document.createElement('p'); text.textContent = ['3D model could not be loaded.', message, s.state.posterErrorsBySide[side]].filter(Boolean).join(' ');
     const retry = document.createElement('button'); retry.dataset['3dRetry'] = ''; retry.textContent = 'Retry 3D';
-    retry.onclick = () => { if (!s.dead) void show(s.stage, s.project, s.appState); };
+    retry.onclick = () => { if (!s.dead) void show(s.stage, s.project, s.appState, {single:s.single}); };
     notice.append(text, retry);
   }
   function cameraBar() {
@@ -127,38 +162,149 @@ window.Review3D = (() => {
     menu.onkeydown = e => { if (e.key === "Escape") { menu.open = false; menu.querySelector("summary").focus(); e.stopPropagation(); } };
     bar.querySelectorAll("[data-3d-camera]").forEach(b => b.onclick = () => { frame(b.dataset["3dCamera"]); window.Review3D.onCameraEnd?.(); menu.open = false; menu.querySelector("summary").focus(); });
   }
-  function render() { if (!active || active.dead || active.contextLost) return; active.views.forEach(v => { v.renderer.render(v.scene, v.camera);
-    if (v.scene.children.some(root => active.roots.includes(root))) {
-      active.state.firstFrame = true;
-      for (const side of v.sides) if (active.state.posterBySide[side]) active.state.posterBySide[side].hidden = true;
-    } (v.labels || []).forEach(m => { const p = m.position.clone().project(v.camera), w = v.canvas.clientWidth, h = v.canvas.clientHeight; m.el.style.display = p.z > 1 ? "none" : "block"; m.el.style.left = `${(p.x * .5 + .5) * w}px`; m.el.style.top = `${(-p.y * .5 + .5) * h}px`; }); }); }
+  function render() {
+    const s = active; if (!s || s.dead || s.contextLost || !s.visible || !s.renderer) return;
+    const r = s.renderer, outer = s.canvas.getBoundingClientRect();
+    r.setScissorTest(false); r.clear(); r.setScissorTest(true);
+    const visible = s.views.filter(v => v.visible);
+    for (const v of visible) {
+      const b = v.host.getBoundingClientRect(); if (!b.width || !b.height) continue;
+      const x = b.left - outer.left, y = outer.bottom - b.bottom;
+      v.rect = {x, y, width:b.width, height:b.height};
+      r.setViewport(x, y, b.width, b.height); r.setScissor(x, y, b.width, b.height);
+      r.clear(true, true, true); r.info.reset(); r.render(v.scene, v.camera); v.calls = r.info.render.calls;
+      if (v.sides.some(side => sideRoot(s, side)?.parent === v.scene) && v.calls > 0) {
+        s.state.firstFrame = true;
+        for (const side of v.sides) if (s.state.posterBySide[side]) s.state.posterBySide[side].hidden = true;
+      }
+      for (const m of v.labels || []) {
+        const p = m.position.clone().project(v.camera), w = v.host.clientWidth, h = v.host.clientHeight;
+        m.el.style.display = m.el.hidden || p.z > 1 ? 'none' : 'block';
+        m.el.style.left = `${(p.x * .5 + .5) * w}px`; m.el.style.top = `${(-p.y * .5 + .5) * h}px`;
+      }
+    }
+    r.setScissorTest(false);
+    s.state.drawCallsByViewport = visible.map(v => v.calls || 0);
+    s.state.drawCalls = s.state.drawCallsByViewport.reduce((a, b) => a + b, 0); s.state.drawCount++;
+    if (s.pixelSample) {
+      const job = s.pixelSample; s.pixelSample = null;
+      try {
+        const gl = r.getContext(), w = gl.drawingBufferWidth, h = gl.drawingBufferHeight, bytes = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+        let opaquePixels = 0; for (let i = 3; i < bytes.length; i += 4) if (bytes[i] > 32) opaquePixels++;
+        job.resolve({opaquePixels});
+      } catch (error) { job.reject(error); }
+    }
+  }
+  function sampleFrame() {
+    if (!active || active.dead || !active.renderer || active.contextLost) return Promise.reject(Error('No active 3D renderer'));
+    return new Promise((resolve, reject) => {
+      if (active.pixelSample) return reject(Error('Pixel sample already pending'));
+      active.pixelSample = {resolve, reject}; render();
+    });
+  }
+  function animateFrame(s, tick) {
+    const id = requestAnimationFrame(now => { s.animationFrames.delete(id); tick(now); });
+    s.animationFrames.add(id);
+  }
   function setCamera(v, centre, radius, animate) { const { THREE } = window.THREE3D, dir = v.camera.position.clone().sub(v.controls.target).normalize(), vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect), distance = Math.max(radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.25, .02), target = centre.clone(), position = centre.clone().addScaledVector(dir, distance);
-    const owner=active, startP=v.camera.position.clone(), startT=v.controls.target.clone(), start=performance.now(), length=animate&&!matchMedia("(prefers-reduced-motion: reduce)").matches?400:0; const tick=now=>{ if(owner.dead)return; const t=length?Math.min(1,(now-start)/length):1, e=1-(1-t)*(1-t); v.camera.position.lerpVectors(startP,position,e); v.controls.target.lerpVectors(startT,target,e); if(!length){v.camera.near=distance/100;v.camera.far=distance*100;} v.camera.updateProjectionMatrix(); v.controls.update(); if(length)render(); if(t<1) requestAnimationFrame(tick); }; if(length)requestAnimationFrame(tick);else tick(start);
+    const owner=active, startP=v.camera.position.clone(), startT=v.controls.target.clone(), start=performance.now(), length=animate&&!matchMedia("(prefers-reduced-motion: reduce)").matches?400:0; const tick=now=>{ if(owner.dead)return; const t=length?Math.min(1,(now-start)/length):1, e=1-(1-t)*(1-t); v.camera.position.lerpVectors(startP,position,e); v.controls.target.lerpVectors(startT,target,e); if(!length){v.camera.near=distance/100;v.camera.far=distance*100;} v.camera.updateProjectionMatrix(); v.controls.update(); if(length)render(); if(t<1) animateFrame(owner,tick); }; if(length)animateFrame(owner,tick);else tick(start);
   }
   function frame(direction = "3d") { if (!active?.box) return; const { THREE } = window.THREE3D, b = active.box, c = b.getCenter(new THREE.Vector3()), dirs = { top:[0,1,0], bottom:[0,-1,0], front:[0,0,-1], back:[0,0,1], left:[-1,0,0], right:[1,0,0], "3d":[1,.99,-1], reset:[1,.99,-1] }, d = new THREE.Vector3(...dirs[direction]).normalize(), radius = b.getBoundingSphere(new THREE.Sphere()).radius;
     active.views.forEach(v => { const vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect), distance = radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.08; v.camera.up.set(...((direction === "top" || direction === "bottom") ? [0,0,-1] : [0,1,0])); v.controls._quat.setFromUnitVectors(v.camera.up, new THREE.Vector3(0,1,0)); v.controls._quatInverse.copy(v.controls._quat).invert(); v.camera.position.copy(c).addScaledVector(d, distance); v.controls.target.copy(c); v.camera.near = distance / 100; v.camera.far = distance * 100; v.camera.updateProjectionMatrix(); v.controls.update(); }); render(); }
-  function resize() { active?.views.forEach(v => { const r=v.host.getBoundingClientRect(); v.renderer.setSize(r.width,r.height,false); v.camera.aspect=r.width/Math.max(r.height,1); v.camera.updateProjectionMatrix(); }); render(); }
-  // Selection outline: the part's bounding box in --accent, drawn over everything. ponytail: box, not silhouette; per-mesh edges were an unreadable tangle.
-  function outline(scene, node, colour) { const { THREE }=window.THREE3D, b=new THREE.Box3().setFromObject(node), size=b.getSize(new THREE.Vector3()), e=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x,size.y,size.z)),new THREE.LineBasicMaterial({color:colour,depthTest:false})); e.position.copy(b.getCenter(new THREE.Vector3())); e.renderOrder=10;e.raycast=()=>{}; scene.add(e); return e; }
-  function cloneMaterials(root, change, fade=false) { const original=[], changed=[]; root?.traverse(o=>{ if(!o.isMesh)return; const before=materials(o); const after=before.map(m=>{const n=m.clone(); if(fade){n.transparent=true;n.opacity=.12;n.color?.set("#a8a8a8");}else{const c=tint(change.action);n.color?.lerp(c,.7);if(n.emissive){n.emissive.copy(c);n.emissiveIntensity=.7;}}return n;});original.push(...before);changed.push(...after);o.material=Array.isArray(o.material)?after:after[0];}); return {original,materials:changed}; }
-  function recolour() { if(!active)return; const st=window.Review3D.state; active.views.forEach(v=>v.renderer.setClearColor(bg()));st.highlights.forEach(h=>{const c=tint(h.action);h.materials.forEach((m,i)=>{if(m.color)m.color.copy(h.original[i].color).lerp(c,.7);if(m.emissive)m.emissive.copy(c);});});st.ghosts.forEach(g=>g.object.traverse(o=>{if(o.isMesh)materials(o).forEach(m=>m.color.copy(tint("removed")));}));active.selected.forEach(o=>o.material.color.set(css("--accent")));render(); }
-  function marker(v,node,change) { const { THREE }=window.THREE3D,b=new THREE.Box3().setFromObject(node),position=b.getCenter(new THREE.Vector3()),el=document.createElement("span");position.y=b.max.y+.004;el.className=`marker3d ${change.action}`;el.dataset.ref=change.ref;el.textContent=`${change.action === "added" ? "＋" : change.action === "removed" ? "−" : "≡"} ${change.ref||""}`;el.style.color=`var(--${change.action})`;v.host.appendChild(el);const m={position,el};(v.labels ||= []).push(m); return m; }
-  function view(host, roots) { const { THREE,OrbitControls }=window.THREE3D,renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setClearColor(bg());const camera=new THREE.PerspectiveCamera(35,1,.01,1000),scene=new THREE.Scene();scene.add(new THREE.HemisphereLight(0xffffff,0x334455,2));const light=new THREE.DirectionalLight(0xffffff,3);light.position.set(1,-1,2);scene.add(light,...roots);host.appendChild(renderer.domElement);const controls=new OrbitControls(camera,renderer.domElement),v={host,canvas:renderer.domElement,renderer,camera,scene,controls};controls.enableDamping=true;controls.addEventListener("change",()=>{if(active.syncing)return;active.syncing=true;active.views.forEach(q=>{if(q!==v){q.camera.position.copy(camera.position);q.controls.target.copy(controls.target);q.controls.update();}});active.syncing=false;render();});controls.addEventListener("end",()=>window.Review3D.onCameraEnd?.()); renderer.domElement.addEventListener("pointerup",e=>pick(v,e));renderer.domElement.addEventListener("pointermove",e=>{if(!e.buttons)hover(v,e);});v.sides = roots.map(r => active.roots.indexOf(r) === 0 ? 'base' : 'head');
-    const owner = active;
-    renderer.domElement.addEventListener('webglcontextlost', event => {
-      event.preventDefault(); if (owner.dead) return;
-      owner.contextLost = true; owner.state.firstFrame = false; owner.state.loading = false;
-      for (const side of ['base', 'head']) {
-        owner.state.loadingBySide[side] = false;
-        if (owner.available[side]) failure(owner, side, 'WebGL context lost. Retry.');
+  function routeRevisionViews() {
+    const s = active; if (!s) return;
+    const singleSide = s.single || (Boolean(s.appState.phone) && s.mode === 'side');
+    if (s.mode === 'side' || s.single) {
+      for (const [side, host] of Object.entries(s.hostsBySide)) {
+        host.hidden = singleSide && side !== s.revision; host.classList.toggle('one', singleSide);
+        let empty = host.querySelector('[data-revision-empty]');
+        if (!s.available[side] && !empty) {
+          empty = host.querySelector('.empty3d') || document.createElement('p'); empty.className = 'empty3d';
+          empty.dataset.revisionEmpty = ''; empty.textContent = 'Board not in this revision'; host.appendChild(empty);
+        }
+        if (empty) empty.hidden = !!s.available[side];
       }
-    }, {signal:owner.abort.signal});
-    active.views.push(v);return v; }
-  function hit(v,e) { const {THREE}=window.THREE3D,r=v.canvas.getBoundingClientRect(),ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1),v.camera);const h=ray.intersectObjects(v.scene.children,true).find(x=>x.object.visible);let n=h?.object;while(n&&!n.userData.noModel&&!active.changes.some(c=>c.ref===n.name))n=n.parent;return n; }
+      for (const v of s.views) v.visible = !singleSide || v.side === s.revision;
+      s.state.visibleSides = singleSide ? [s.revision] : s.allowedSides.filter(side => s.available[side]);
+    } else {
+      s.state.visibleSides = s.allowedSides.filter(side => s.available[side]);
+    }
+    s.state.phone = Boolean(s.appState.phone);
+  }
+  function setRevision(side) {
+    const s = active; if (!s || !s.allowedSides.includes(side)) return;
+    const changed = s.revision !== side; s.revision = side; s.state.revision = side;
+    if (changed) window.Review3D.onStateChange?.({revision:side});
+    routeRevisionViews(); resize();
+  }
+  function resize() {
+    const s = active; if (!s || s.dead) return;
+    routeRevisionViews(); if (!s.renderer) return;
+    const b = s.stage.getBoundingClientRect(); if (!b.width || !b.height) return;
+    s.renderer.setSize(b.width, b.height, false);
+    for (const v of s.views) {
+      const r = v.host.getBoundingClientRect(); v.visible = !v.host.hidden && r.width > 0 && r.height > 0;
+      if (v.visible) { v.camera.aspect = r.width / r.height; v.camera.updateProjectionMatrix(); }
+    }
+    render();
+  }
+  function boxEdges(size) {
+    const {THREE} = window.THREE3D, box = new THREE.BoxGeometry(size.x, size.y, size.z);
+    try { return new THREE.EdgesGeometry(box); } finally { box.dispose(); }
+  }
+  // Selection outline: the part's bounding box in --accent, drawn over everything. ponytail: box, not silhouette; per-mesh edges were an unreadable tangle.
+  function outline(scene, node, colour) { const { THREE }=window.THREE3D, b=new THREE.Box3().setFromObject(node), size=b.getSize(new THREE.Vector3()), e=new THREE.LineSegments(boxEdges(size),new THREE.LineBasicMaterial({color:colour,depthTest:false})); e.position.copy(b.getCenter(new THREE.Vector3())); e.renderOrder=10;e.raycast=()=>{}; scene.add(e); return e; }
+  function comparisonMaterial(source, role, change) {
+    const s = active; let roles = s.comparisonMaterials.get(source);
+    if (!roles) { roles = new Map(); s.comparisonMaterials.set(source, roles); }
+    if (!roles.has(role)) {
+      const n = source.clone();
+      if (role === 'fade') { n.transparent = true; n.opacity = .12; n.color?.set('#a8a8a8'); }
+      else if (role === 'ghost') { n.color?.copy(tint('removed')); n.transparent = true; n.opacity = .45; n.depthTest = false; }
+      else if (change) { const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; } }
+      roles.set(role, n); s.materials.add(n);
+    }
+    return roles.get(role);
+  }
+  function cloneMaterials(root, change, fade = false, role = null) {
+    const original = [], changed = [];
+    root?.traverse(o => {
+      if (!o.isMesh) return;
+      const before = materials(o), after = before.map(m => comparisonMaterial(m, role || (fade ? 'fade' : 'highlight:' + change.action), change));
+      original.push(...before); changed.push(...after); o.material = Array.isArray(o.material) ? after : after[0];
+    });
+    return {original, materials:changed};
+  }
+  function recolour() { if(!active)return; const st=window.Review3D.state; st.highlights.forEach(h=>{const c=tint(h.action);h.materials.forEach((m,i)=>{if(m.color)m.color.copy(h.original[i].color).lerp(c,.7);if(m.emissive)m.emissive.copy(c);});});st.ghosts.forEach(g=>g.object.traverse(o=>{if(o.isMesh)materials(o).forEach(m=>m.color.copy(tint("removed")));}));active.selected.forEach(o=>o.material.color.set(css("--accent")));render(); }
+  function marker(v,node,change) { const { THREE }=window.THREE3D,b=new THREE.Box3().setFromObject(node),position=b.getCenter(new THREE.Vector3()),el=document.createElement("span");position.y=b.max.y+.004;el.className=`marker3d ${change.action}`;el.dataset.ref=change.ref;el.textContent=`${change.action === "added" ? "＋" : change.action === "removed" ? "−" : "≡"} ${change.ref||""}`;el.style.color=`var(--${change.action})`;v.host.appendChild(el);const m={position,el};(v.labels ||= []).push(m); return m; }
+  function view(host, roots, side = null) {
+    const {THREE, OrbitControls} = window.THREE3D, s = active, scene = new THREE.Scene();
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 2));
+    const light = new THREE.DirectionalLight(0xffffff, 3); light.position.set(1, -1, 2); scene.add(light, ...roots);
+    const camera = new THREE.PerspectiveCamera(35, 1, .01, 1000), controls = new OrbitControls(camera, host);
+    const v = {host, canvas:s.canvas, renderer:s.renderer, camera, scene, controls, side, visible:true,
+      sides:side ? [side] : s.allowedSides.filter(side => roots.includes(sideRoot(s, side)))};
+    controls.enableDamping = true;
+    controls.addEventListener('change', () => {
+      if (s.dead || s.syncing) return; s.syncing = true;
+      for (const other of s.views) if (other !== v) {
+        other.camera.position.copy(camera.position); other.camera.quaternion.copy(camera.quaternion);
+        other.controls.target.copy(controls.target); other.camera.near = camera.near; other.camera.far = camera.far;
+        other.camera.updateProjectionMatrix(); other.controls.update();
+      }
+      s.syncing = false; render();
+    });
+    controls.addEventListener('end', () => window.Review3D.onCameraEnd?.());
+    host.addEventListener('pointerup', e => pick(v, e), {signal:s.abort.signal});
+    host.addEventListener('pointermove', e => { if (!e.buttons) hover(v, e); }, {signal:s.abort.signal});
+    s.views.push(v); s.state.cameras.push(camera); s.state.controls.push(controls); return v;
+  }
+  function hit(v,e) { const {THREE}=window.THREE3D,r=v.host.getBoundingClientRect(),ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1),v.camera);const h=ray.intersectObjects(v.scene.children,true).find(x=>x.object.visible);let n=h?.object;while(n&&!n.userData.noModel&&!active.changes.some(c=>c.ref===n.name))n=n.parent;return n; }
   function pick(v,e) { if(!active)return; const n=hit(v,e);if(!n)return;const c=active.changes.find(x=>x.ref===n.name);if(c)window.Review3D.onPick?.(c.id);else hover(v,e); }
   function hover(v,e) { if(!active)return; const n=hit(v,e);if(n?.userData.noModel){const r=v.host.getBoundingClientRect();tooltip(v,`${n.name} · no 3D model`,e.clientX-r.left,e.clientY-r.top,1200);} }
   function tooltip(v,text,x,y,ms){ let el=v.host.querySelector(".tip3d");if(!el){el=document.createElement("span");el.className="tip3d";v.host.appendChild(el);}el.textContent=text;el.style.left=`${x}px`;el.style.top=`${y}px`;clearTimeout(v.tip);if(ms)v.tip=setTimeout(()=>el.remove(),ms); }
-  function focus(change, moveCamera=true) { if(!active)return; const side=change.action === "removed" ? "base" : "head", root=active.roots[side === "head" ? 1 : 0], n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,active.roots[side === "head" ? 0 : 1]].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);return own?[outline(v.scene,own,css("--accent"))]:[];}); window.Review3D.state.selected=active.selected; render(); }
+  function focus(change, moveCamera=true) { if(!active)return; const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);return own?[outline(v.scene,own,css("--accent"))]:[];}); window.Review3D.state.selected=active.selected; render(); }
   function setBlend(value){if(!active?.blend)return;active.blend.value=value;active.blend.base.forEach(m=>{m.transparent=true;m.opacity=1-value;});active.blend.head.forEach(m=>{m.transparent=true;m.opacity=value;});window.Review3D.state.blend=value;render();}
   function toggleBlend(){setBlend(active.blend.value<.5?1:0);}
   function setHidden(hidden = []) { if (!active) return; const off = new Set(hidden); active.groups.forEach(({object, groups}) => { object.visible = !groups.some(g => off.has(g)); }); render(); }
@@ -168,25 +314,28 @@ window.Review3D = (() => {
   function classify(root) { const { THREE } = window.THREE3D, [top,bottom]=boardY(active.roots), middle=(top+bottom)/2, sides=new Map(), side=o=>{if(!sides.has(o))sides.set(o,new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3()).y>=middle?"top":"bottom");return sides.get(o);}; root?.traverse(o => { if (!o.isMesh) return; const name = o.name || ""; let groups; if (/silkscreen/i.test(name)) groups = ["silk", side(o)]; else if (/soldermask/i.test(name)) groups = ["mask", side(o)]; else if (/PCB/i.test(name)) groups = ["board"]; else { let p=o; while(p && !/^[A-Z]+\d+$/.test(p.name)) p=p.parent; groups = p && active.refs.has(p.name) ? ["bodies", side(p)] : []; } if(groups.length) active.groups.push({object:o,groups}); }); }
   // Board surfaces come from PCB/silkscreen/soldermask meshes, not the tallest component. ponytail: 90/270 swaps the AABB, other angles keep it as the footprint size.
   function boardY(roots) { const { THREE } = window.THREE3D; let top=-Infinity,bottom=Infinity; roots.forEach(r=>r?.traverse(o=>{ if(o.isMesh&&/PCB|silkscreen|soldermask/i.test(o.name)){ const b=new THREE.Box3().setFromObject(o); top=Math.max(top,b.max.y); bottom=Math.min(bottom,b.min.y); } })); return top>bottom ? [top,bottom] : [.0016,0]; }
-  function addNoModelBlocks(roots, rows) { const { THREE } = window.THREE3D, [top,bottom]=boardY(roots), canvas=document.createElement("canvas"); canvas.width=canvas.height=32; const cx=canvas.getContext("2d"); cx.fillStyle="#b4b4b4";cx.fillRect(0,0,32,32);cx.strokeStyle="#5a5a5a";cx.lineWidth=5; for(let x=-32;x<64;x+=16){cx.beginPath();cx.moveTo(x,32);cx.lineTo(x+32,0);cx.stroke();} const texture=new THREE.CanvasTexture(canvas); texture.wrapS=texture.wrapT=THREE.RepeatWrapping; texture.repeat.set(3,3); texture.colorSpace=THREE.SRGBColorSpace; rows.forEach(row=>{if(!row.pos||!row.box)return; const rot=row.pos[2]||0, swap=Math.round(Math.abs(rot)/90)%2===1, w=(row.box[2]-row.box[0])/1000, d=(row.box[3]-row.box[1])/1000, width=Math.max(.001,swap?d:w), depth=Math.max(.001,swap?w:d), onBottom=(row.layer||"F.Cu").startsWith("B."), sides=row.side==="both"?[0,1]:[row.side==="base"?0:1]; sides.forEach(i=>{if(!roots[i])return;const g=new THREE.Group(), mesh=new THREE.Mesh(new THREE.BoxGeometry(width,.001,depth),new THREE.MeshStandardMaterial({map:texture,color:0xc0c0c0}));g.name=row.ref;g.userData.noModel=true;g.position.set(row.pos[0]/1000,onBottom?bottom-.0005:top+.0005,row.pos[1]/1000);g.rotation.y=rot*Math.PI/180;g.add(mesh);roots[i].add(g);(window.Review3D.state.blocks ||= []).push({ref:row.ref,object:g,side:i ? "head" : "base"});active.refs.add(row.ref);}); }); }
-  async function show(stage, project, appState) {
+  function addNoModelBlocks(roots, rows) { const { THREE } = window.THREE3D, [top,bottom]=boardY(roots), canvas=document.createElement("canvas"); canvas.width=canvas.height=32; const cx=canvas.getContext("2d"); cx.fillStyle="#b4b4b4";cx.fillRect(0,0,32,32);cx.strokeStyle="#5a5a5a";cx.lineWidth=5; for(let x=-32;x<64;x+=16){cx.beginPath();cx.moveTo(x,32);cx.lineTo(x+32,0);cx.stroke();} const texture=new THREE.CanvasTexture(canvas); texture.wrapS=texture.wrapT=THREE.RepeatWrapping; texture.repeat.set(3,3); texture.colorSpace=THREE.SRGBColorSpace; active.textures.add(texture); rows.forEach(row=>{if(!row.pos||!row.box)return; const rot=row.pos[2]||0, swap=Math.round(Math.abs(rot)/90)%2===1, w=(row.box[2]-row.box[0])/1000, d=(row.box[3]-row.box[1])/1000, width=Math.max(.001,swap?d:w), depth=Math.max(.001,swap?w:d), onBottom=(row.layer||"F.Cu").startsWith("B."), sides=row.side==="both"?[0,1]:[row.side==="base"?0:1]; sides.forEach(i=>{if(!roots[i])return;const g=new THREE.Group(), mesh=new THREE.Mesh(new THREE.BoxGeometry(width,.001,depth),new THREE.MeshStandardMaterial({map:texture,color:0xc0c0c0}));g.name=row.ref;g.userData.noModel=true;g.position.set(row.pos[0]/1000,onBottom?bottom-.0005:top+.0005,row.pos[1]/1000);g.rotation.y=rot*Math.PI/180;g.add(mesh);roots[i].add(g);(window.Review3D.state.blocks ||= []).push({ref:row.ref,object:g,side:i ? "head" : "base"});active.refs.add(row.ref);}); }); }
+  async function show(stage, project, appState, {single = false} = {}) {
     dispose();
-    const model = project.board.model3d || {}, sides = ['base', 'head'], mode = appState.m;
+    const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m;
     const session = active = {
       views:[], roots:[], changes:project.changes.filter(c => c.kind === 'footprint'),
-      refs:new Set(), groups:[], selected:[], dead:false, mode,
+      refs:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
+      revision:single ? 'head' : ['base', 'head'].includes(appState.revision) ? appState.revision : 'head',
       abort:new AbortController(), pending:new Map(), urls:new Set(), worker:null, nextId:0,
-      assetId:0, assetNonce:crypto.randomUUID(),
+      assetId:0, assetNonce:crypto.randomUUID(), animationFrames:new Set(),
       available:Object.fromEntries(sides.map(side => [side, !!(model[side] || project.board.poster3d?.[side] || project.board.assets3d?.[side]?.model || model.errors?.[side])])),
-      geometries:new Set(), materials:new Set(), textures:new Set(), environments:new Map(),
+      geometries:new Set(), materials:new Set(), textures:new Set(), environments:new Map(), comparisonMaterials:new Map(),
+      parses:new Map(), decodedModels:new Map(), decodedScenes:[],
       assembled:true, hiddenBodies:false, visible:true, hostsBySide:{}, stage, project, appState
     };
     const state = window.Review3D.state = session.state = {
-      roots:session.roots, disposed:false, firstFrame:false, loading:false,
+      roots:session.roots, views:session.views, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
+      revision:session.revision, modelDigests:{},
       loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
       resourceCounts:{workers:0, urls:0, pending:0}, parts:{base:[], head:[]}, selected:[],
       changedParts:new Set(session.changes.map(c => c.uuid || c.ref)).size,
-      renderers:[], cameras:[], visibleSides:[], drawCallsByViewport:[], drawCount:0,
+      renderers:[], cameras:[], controls:[], visibleSides:[], drawCallsByViewport:[], drawCount:0,
       nodes:[], highlights:[], ghosts:[], blocks:[], parseCount:0
     };
     session.resourceCounts = state.resourceCounts;
@@ -194,13 +343,14 @@ window.Review3D = (() => {
     state.loading = Object.values(state.loadingBySide).some(Boolean);
     stage.className = 'mode-3d'; stage.replaceChildren(); cameraBar();
     for (const side of sides) {
-      const host = document.createElement('section'); host.className = 'vp view3d';
-      host.innerHTML = `<span class="tag">${side === 'head' ? 'Head' : 'Base'}</span>`;
+      const host = document.createElement('section'); host.className = 'vp view3d' + (single ? ' one' : '');
+      host.innerHTML = `<span class="tag">${single ? 'Design' : side === 'head' ? 'Head' : 'Base'}</span>`;
       const status = document.createElement('p'); status.className = model[side] ? 'loading' : 'empty3d';
       status.setAttribute('role', 'status');
       status.textContent = model[side] ? 'Loading 3D board…' : model.errors?.[side] || (session.available[side] ? '3D model unavailable' : 'Board not in this revision');
       host.appendChild(status); stage.appendChild(host); session.hostsBySide[side] = host;
     }
+    routeRevisionViews();
     await Promise.all(sides.map(async side => {
       try {
         const image = await poster3d(side, project.board.poster3d?.[side], session);
@@ -220,18 +370,47 @@ window.Review3D = (() => {
       return;
     }
     if (session.dead) return;
+    try {
+      const renderer = new T.THREE.WebGLRenderer({antialias:true, alpha:true});
+      renderer.setClearColor(0, 0); renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.autoClear = false; renderer.info.autoReset = false;
+      session.renderer = renderer; session.canvas = renderer.domElement; stage.prepend(session.canvas); state.renderers = [renderer];
+      session.canvas.addEventListener('webglcontextlost', event => {
+        event.preventDefault(); if (session.dead) return;
+        session.contextLost = true; state.firstFrame = false; state.loading = false;
+        session.pixelSample?.reject(Error('WebGL context lost')); session.pixelSample = null;
+        for (const side of sides) { state.loadingBySide[side] = false; if (session.available[side]) failure(session, side, 'WebGL context lost. Retry.'); }
+      }, {signal:session.abort.signal});
+      session.resizeObserver = new ResizeObserver(resize); session.resizeObserver.observe(stage);
+    } catch (error) {
+      state.loading = false; state.firstFrame = false;
+      for (const side of sides) { state.loadingBySide[side] = false; if (session.available[side]) failure(session, side, 'WebGL unavailable: ' + error.message); }
+      return;
+    }
     const loadSide = async side => {
-      state.loadingBySide[side] = !!model[side];
-      state.loading = Object.values(state.loadingBySide).some(Boolean);
       try {
         if (!model[side]) return null;
-        const bytes = await guardSession(session, decode3d({b64:window.REVIEW_DATA.blobs[model[side]]}, session));
-        state.parseCount++;
-        const gltf = await guardSession(session, new T.GLTFLoader().setMeshoptDecoder(T.MeshoptDecoder).parseAsync(bytes, ''), g => g.scene.traverse(free));
+        const digest = state.modelDigests[side] = project.board.assets3d?.[side]?.model?.digest || model[side];
+        if (!session.decodedModels.has(digest)) {
+          const pending = guardSession(session, decode3d({b64:window.REVIEW_DATA.blobs[model[side]]}, session));
+          session.decodedModels.set(digest, pending);
+          pending.catch(() => { if (session.decodedModels.get(digest) === pending) session.decodedModels.delete(digest); });
+        }
+        const bytes = await session.decodedModels.get(digest);
+        const gltf = await parseByDigest(session, digest, bytes, async bytes => {
+          const g = await new T.GLTFLoader().setMeshoptDecoder(T.MeshoptDecoder).parseAsync(bytes, '');
+          // Rename the immutable source nodes before logical cloning.
+          g.scene.traverse(o => {
+            const name = g.parser.json.meshes?.[g.parser.associations.get(o)?.meshes]?.name;
+            if (o.isMesh && /PCB|silkscreen|soldermask/i.test(name || '')) o.name = name;
+          });
+          return g;
+        });
+        if (session.dead) return null;
         let hasGeometry = false;
-        gltf.scene.traverse(node => { if (node.isMesh && node.geometry?.getAttribute('position')?.count) hasGeometry = true; });
-        if (!hasGeometry) { gltf.scene.traverse(free); throw Error('No renderable 3D geometry.'); }
-        return gltf;
+        gltf.scene.traverse(n => { if (n.isMesh && n.geometry?.getAttribute('position')?.count) hasGeometry = true; });
+        if (!hasGeometry) throw Error('No renderable 3D geometry.');
+        return gltf.scene.clone(true);
       } catch (error) {
         if (!session.dead) failure(session, side, String(error.message || error));
         return null;
@@ -239,37 +418,62 @@ window.Review3D = (() => {
         state.loadingBySide[side] = false; state.loading = Object.values(state.loadingBySide).some(Boolean);
       }
     };
-    const models = await Promise.all(sides.map(loadSide));
-    if (session.dead) { models.forEach(g => g?.scene.traverse(free)); return; }
-    models.forEach(g=>g?.scene.traverse(o=>{const name=g.parser.json.meshes?.[g.parser.associations.get(o)?.meshes]?.name;if(o.isMesh&&/PCB|silkscreen|soldermask/i.test(name||""))o.name=name;}));const roots=models.map(g=>g?.scene||null);session.roots=roots;window.Review3D.state.roots=roots;const box=new T.THREE.Box3();roots.forEach(r=>r&&box.union(new T.THREE.Box3().setFromObject(r)));addNoModelBlocks(roots,project.board.no_model || []); roots.forEach(r=>r&&box.union(new T.THREE.Box3().setFromObject(r)));if(box.isEmpty()){
-      sides.forEach(side => { if (model[side] && !state.errorsBySide[side]) failure(session, side, 'No renderable 3D geometry.'); });
+    const roots = await Promise.all(sides.map(loadSide));
+    if (session.dead) return;
+    session.roots = state.roots = roots;
+    const base = single ? null : roots[0], head = roots[sides.indexOf('head')], logicalRoots = [base, head];
+    const box = new T.THREE.Box3(); roots.forEach(r => r && box.union(new T.THREE.Box3().setFromObject(r)));
+    addNoModelBlocks(logicalRoots, project.board.no_model || []);
+    roots.forEach(r => r && box.union(new T.THREE.Box3().setFromObject(r)));
+    if (box.isEmpty()) {
+      for (const side of sides) if (model[side] && !state.errorsBySide[side]) failure(session, side, 'No renderable 3D geometry.');
       return;
-    }session.box=box;window.Review3D.state.box=box;roots.forEach(r=>r?.traverse(n=>{if(n.name){session.refs.add(n.name);window.Review3D.state.nodes.push(n.name);}})); roots.forEach(classify); window.Review3D.state.groups=session.groups; const highlight=(side,v)=>session.changes.filter(c=>side==="head"?c.action!=="removed":c.action!=="added").forEach(c=>{const n=roots[side==="head"?1:0]?.getObjectByName(c.ref);if(n){const h=cloneMaterials(n,c), m=marker(v,n,c);window.Review3D.state.highlights.push({ref:c.ref,action:c.action,side,original:h.original,materials:h.materials,marker:m});}});if(mode === 'side') {
-      roots.forEach((r, i) => {
-        const side = sides[i], host = session.hostsBySide[side];
-        host.querySelector('.loading')?.remove();
-        if (r) {
-          try { const v = view(host, [r]); highlight(side, v); }
-          catch (error) { failure(session, side, error.message); }
-        }
-      });
+    }
+    session.box = state.box = box;
+    roots.forEach(r => r?.traverse(n => { if (n.name) { session.refs.add(n.name); state.nodes.push(n.name); } }));
+    roots.forEach(classify); state.groups = session.groups;
+    const highlight = (side, v) => session.changes.filter(c => side === 'head' ? c.action !== 'removed' : c.action !== 'added').forEach(c => {
+      const n = sideRoot(session, side)?.getObjectByName(c.ref);
+      if (n) { const h = cloneMaterials(n, c), m = marker(v, n, c); state.highlights.push({ref:c.ref, action:c.action, side, original:h.original, materials:h.materials, marker:m}); }
+    });
+    if (mode === 'side' || single) {
+      for (const [i, side] of sides.entries()) {
+        const host = session.hostsBySide[side]; host.querySelector('.loading')?.remove();
+        // Empty revisions still own a camera and input host, never a peer model/poster.
+        const v = view(host, roots[i] ? [roots[i]] : [], side); if (roots[i]) highlight(side, v);
+      }
     } else {
-      try {
-      const side = roots[1] ? 'head' : 'base', host = session.hostsBySide[side];
-      const otherSide = side === 'head' ? 'base' : 'head';
+      const side = head ? 'head' : 'base', host = session.hostsBySide[side], otherSide = side === 'head' ? 'base' : 'head';
       session.hostsBySide[otherSide].hidden = !state.errorsBySide[otherSide];
       host.classList.toggle('one', session.hostsBySide[otherSide].hidden);
       host.querySelector('.tag').textContent = mode === 'overlay' ? 'Base position (red ghost) · Changed now (amber)' : mode === 'semantic' ? 'Changes only' : 'Base ↔ Head';
-      host.querySelector('.loading')?.remove();
-      const head=roots[1],base=roots[0],v=view(host,mode==="blend"?roots.filter(Boolean):head?[head]:base?[base]:[]);if(mode==="overlay"){highlight(head?"head":"base",v);session.changes.filter(c=>c.action==="removed"||c.action==="modified").forEach(c=>{const n=base?.getObjectByName(c.ref);if(n){const g=n.clone(true);g.traverse(o=>{if(o.isMesh)o.material=new T.THREE.MeshBasicMaterial({color:tint("removed"),transparent:true,opacity:.45,depthTest:false});});v.scene.add(g);window.Review3D.state.ghosts.push({ref:c.ref,object:g,translation:n.getWorldPosition(new T.THREE.Vector3()).add(new T.THREE.Vector3(0,.01,0)).toArray()});}});}else if(mode==="blend"){const bm=[],hm=[];base?.traverse(o=>o.isMesh&&bm.push(...materials(o)));head?.traverse(o=>o.isMesh&&hm.push(...materials(o)));session.blend={base:bm,head:hm,value:appState.blend??.5};setBlend(session.blend.value);}else if(mode==="semantic"){const refs=new Set(session.changes.filter(c=>c.action!=="removed").map(c=>c.ref));window.Review3D.state.faded=[];head?.traverse(n=>{if(n.name&&!refs.has(n.name)&&/^[A-Z]+\d+/.test(n.name)){const f=cloneMaterials(n,null,true);window.Review3D.state.faded.push({ref:n.name,materials:f.materials});}});highlight(head?"head":"base",v);}
-      } catch (error) { sides.forEach(side => { session.hostsBySide[side].hidden = false; if(session.available[side]) failure(session, side, error.message); }); }
+      const v = view(host, mode === 'blend' ? roots.filter(Boolean) : head ? [head] : base ? [base] : []);
+      if (mode === 'overlay') {
+        highlight(head ? 'head' : 'base', v);
+        session.changes.filter(c => c.action === 'removed' || c.action === 'modified').forEach(c => {
+          const n = base?.getObjectByName(c.ref);
+          if (n) { const g = n.clone(true); cloneMaterials(g, null, false, 'ghost'); v.scene.add(g); state.ghosts.push({ref:c.ref, object:g, translation:n.getWorldPosition(new T.THREE.Vector3()).add(new T.THREE.Vector3(0, .01, 0)).toArray()}); }
+        });
+      } else if (mode === 'blend') {
+        const bm = cloneMaterials(base, null, false, 'blend:base').materials, hm = cloneMaterials(head, null, false, 'blend:head').materials;
+        session.blend = {base:[...new Set(bm)], head:[...new Set(hm)], value:appState.blend ?? .5}; setBlend(session.blend.value);
+      } else if (mode === 'semantic') {
+        const refs = new Set(session.changes.filter(c => c.action !== 'removed').map(c => c.ref)); state.faded = [];
+        head?.traverse(n => { if (n.name && !refs.has(n.name) && /^[A-Z]+\d+/.test(n.name)) { const f = cloneMaterials(n, null, true); state.faded.push({ref:n.name, materials:f.materials}); } });
+        highlight(head ? 'head' : 'base', v);
+      }
     }
-    if (model.base && model.head && (model.changed === false || model.base === model.head)) {
-      const notice=document.createElement("p");notice.className="no-change-notice";notice.textContent="No 3D changes";
-      notice.style.cssText="position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:5;background:var(--surface);color:var(--text);padding:6px 12px;border:1px solid var(--line);pointer-events:none";stage.appendChild(notice);
+    if (!single && model.base && model.head && (model.changed === false || model.base === model.head)) {
+      const notice = document.createElement('p'); notice.className = 'no-change-notice'; notice.textContent = 'No 3D changes';
+      notice.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:5;background:var(--surface);color:var(--text);padding:6px 12px;border:1px solid var(--line);pointer-events:none'; stage.appendChild(notice);
     }
     for (const side of sides) session.hostsBySide[side].querySelector('.loading')?.remove();
-    state.visibleSides = session.views.flatMap(v => v.sides);
-    setHidden(appState.hidden3d); resize();frame("3d"); if (appState.camera3d) setCameraState(appState.camera3d); window.Review3D.state.cameras=session.views.map(v=>v.camera);window.Review3D.state.renderers=session.views.map(v=>v.renderer);window.Review3D.state.controls=session.views.map(v=>v.controls);const signal=session.abort.signal;window.addEventListener("resize",resize,{signal});const media=matchMedia('(prefers-color-scheme: dark)');let signature=[bg(),css('--added'),css('--removed'),css('--modified'),css('--accent')].join('|');const theme=()=>{const next=[bg(),css('--added'),css('--removed'),css('--modified'),css('--accent')].join('|');if(signature!==next){signature=next;recolour();}};document.addEventListener('kr-theme-change',theme,{signal});media.addEventListener('change',theme,{signal});session.themeTimer=setInterval(theme,250); if(appState.s){const c=session.changes.find(c=>c.id===appState.s);if(c)focus(c,!appState.camera3d);}}
-  return {show,dispose,cameraBar,frame,focus,setHidden,cameraState,setCameraState,setBlend,toggleBlend,state:undefined};
+    setHidden(appState.hidden3d); resize(); frame('3d'); if (appState.camera3d) setCameraState(appState.camera3d);
+    const signal = session.abort.signal; window.addEventListener('resize', resize, {signal});
+    const media = matchMedia('(prefers-color-scheme: dark)'); let signature = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|');
+    const theme = () => { const next = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|'); if (signature !== next) { signature = next; recolour(); } };
+    document.addEventListener('kr-theme-change', theme, {signal}); media.addEventListener('change', theme, {signal}); session.themeTimer = setInterval(theme, 250);
+    if (appState.s) { const c = session.changes.find(c => c.id === appState.s); if (c) focus(c, !appState.camera3d); }
+  }
+  return {show,dispose,cameraBar,frame,focus,setHidden,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
 })();
