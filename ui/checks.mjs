@@ -177,6 +177,48 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
 `];
 
 export const CHECKS = [
+  ['images bounded search and board facts','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const input=document.querySelector('#image-query');
+    if(!input)return 'component search missing';
+    if(!document.querySelector('#image-search-label').textContent.includes('1 component'))return 'sheet count missing';
+    input.focus();input.value='U2';input.dispatchEvent(new Event('input',{bubbles:true}));
+    if(document.querySelectorAll('#image-results button').length!==1)return 'search result';
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+    if(document.activeElement!==document.querySelector('#image-results button'))return 'keyboard search focus';
+    document.activeElement.click();
+    if(S.imageSelection?.ref!=='U2'||S.imageSelection.sheet!=='/right/')return 'search identity';
+    if(!document.querySelector('#image-results').hidden)return 'result disclosure stayed open';
+    const elements=sheetImageElements('head'),originalElements=elements.slice();
+    try {
+      for(let i=0;i<45;i++)elements.push({...elements[0],ref:'R'+(45-i),uuid:'search-stress-'+i});
+      input.value='R';input.dispatchEvent(new Event('input'));
+      const results=[...document.querySelectorAll('#image-results button')];
+      if(results.length!==20||!results[0].textContent.startsWith('R1 ·'))return 'unbounded or unnaturally ordered result DOM';
+    } finally {elements.splice(0,elements.length,...originalElements);}
+    input.focus();input.value='not-present';input.dispatchEvent(new Event('input'));
+    if(!document.querySelector('#image-results').textContent.includes('Try'))return 'empty search guidance';
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    await applyState({...S,v:'board',m:'side'});
+    if(!document.querySelector('#board-facts').textContent.includes('4 copper layers'))return 'Board facts missing';
+    if(!document.querySelector('#board-facts').textContent.includes('Size unavailable'))return 'null outline fabricated';
+    const graph=currentImageGraph('head'),originalNets=graph.nets,track=graph.tracks[0],originalNet=track.net;
+    try {
+      graph.nets=[{name:'AGND'},{name:'GND2'},{name:'GND'},{name:'12'},{name:'unconnected-U1-Pad2'}];
+      track.net='12';
+      input.value='gnd';input.dispatchEvent(new Event('input'));
+      if([...document.querySelectorAll('#image-results button')].map(b=>b.textContent).join(',')!=='GND,GND2,AGND')return 'net UI ranking';
+      input.value='';input.dispatchEvent(new Event('input'));
+      if(document.querySelector('#image-results').textContent.includes('unconnected-'))return 'unconnected net exposed';
+      input.value='12';input.dispatchEvent(new Event('input'));document.querySelector('#image-results button').click();
+      await draw();
+      if(S.imageSelection?.net!=='12'||!document.querySelector('#inspector').textContent.includes('12'))return 'numeric net search inspector';
+      document.querySelector('#image-search-clear').click();await draw();
+      if(S.imageSelection||document.querySelector('.image-selection'))return 'clear selection action';
+    } finally {clearImageSelection();graph.nets=originalNets;track.net=originalNet;}
+    return true;
+  `],
   ['images inspect search and anchors','',`
     await applyState({...S,v:'sheet:/right/',m:'side'});
     const vp=document.querySelector('#stage .stack.head').closest('.vp');
@@ -221,16 +263,24 @@ export const CHECKS = [
         const graph=structuredClone(decodedBoardInspect.get(original[side]));
         graph.tracks.forEach(t=>{t.net='12';t.uuid=side+'-'+t.uuid;});
         graph.nets=[{name:'12',netClass:null}];
+        graph.pads=[{uuid:'pad-'+side,ref:'U7',pin:'2',net:'12',layers:['In1.Cu'],hidden:false,x:5,y:8,width:1,height:1,
+          geometry:{primitive:{shape:'rect',size:[1000,1000],center:[5000,8000],angle:0}}}];
         inspect[side]='numeric-'+side;decodedBoardInspect.set(inspect[side],graph);
       }
       for(const flip of [false,true]) {
         Appearance.patch({flip,layers:Object.fromEntries(['F.Cu','In1.Cu','In2.Cu','B.Cu'].map(l=>[l,{visible:l==='In1.Cu',opacity:1}]))});
         await applyState({...S,v:'board',m:'side',layers:null,x:10,y:5,z:15});
         const vp=[...document.querySelectorAll('#stage .vp')].at(-1);
-        if(!click(vp,[10,5])||S.imageSelection.kind!=='track'||S.imageSelection.net!=='12'||imageRecord(S.imageSelection).layer!=='In1.Cu')return 'copper numeric/hidden/flip '+flip;
+        if(!click(vp,[10,5])||S.imageSelection.kind!=='track'||S.imageSelection.net!=='12'||imageRecord(S.imageSelection).layer!=='In1.Cu')return 'copper numeric/hidden/flip '+JSON.stringify({flip,selection:S.imageSelection,layer:imageRecord(S.imageSelection)?.layer});
         if(Appearance.get().netColors['12']?.[0]!==1)return 'net highlight missing';
         clearImageSelection();await draw();
         if(JSON.stringify(Appearance.get().netColors)!==JSON.stringify(look.netColors))return 'net colour not restored';
+        if(!click([...document.querySelectorAll('#stage .vp')].at(-1),[5,8])||S.imageSelection.kind!=='pad'||S.imageSelection.pin!=='2'||inspectorProperties().head.pin!=='2')return 'pad number missing from inspection';
+        await draw();
+        if(!boardDiff&&!document.querySelector('#stage .image-selection g rect'))return 'exact fallback pad geometry overlay missing';
+        Appearance.patch({netColors:{GND:[0,.2,.3,1]}});clearImageSelection();await draw();
+        if(Appearance.get().netColors.GND?.[1]!==.2)return 'selection restore overwrote intervening net edit';
+        Appearance.set({...Appearance.get(),netColors:look.netColors});await draw();
         Appearance.patch({layers:{'In1.Cu':{opacity:0}}});await draw();
         if(click([...document.querySelectorAll('#stage .vp')].at(-1),[10,5]))return 'zero opacity layer picked';
       }
@@ -528,23 +578,21 @@ export const CHECKS = [
       // Each target keeps its revision; visible targets use image picking, foreign-side
       // targets use fallback picking, independent of the global board-flip preference.
       await applyState({...S,m:'wipe'});
-      const oldPick=pickAt,oldImagePick=pickImageAt;let routed=[];
-      pickAt=()=>{routed.push('fallback');};pickImageAt=()=>{routed.push('image');};
-      try {
-        for(const flip of [false,true])for(const wipe of [0,1]) {
-          Appearance.patch({flip});S.wipe=wipe;apply();
-          const vp=document.querySelector('#stage .vp'),rects=[...vp.querySelectorAll('.marks rect')];
-          if(!rects.length||rects.some(r=>!['base','head'].includes(r.dataset.side)))return 'hotspot lost revision side';
-          for(const side of ['base','head']) {
-            const rect=rects.find(r=>r.dataset.side===side);
-            if(!rect)return 'missing hotspot revision '+side;
-            routed=[];const bounds=vp.getBoundingClientRect();
-            rect.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:bounds.left+bounds.width/2,clientY:bounds.top+bounds.height/2}));
-            const expected=side===(wipe===1?'base':'head')?'image':'fallback';
-            if(routed.join()!==expected)return 'Wipe target route '+side+' '+wipe+' '+flip+' '+routed;
-          }
+      // Numeric integration routes both paths through retained pickAt first.
+      // Assert the selected revision, not the removed temporary wrapper's call shape.
+      for(const flip of [false,true])for(const wipe of [0,1]) {
+        Appearance.patch({flip});S.wipe=wipe;apply();
+        const vp=document.querySelector('#stage .vp'),rects=[...vp.querySelectorAll('.marks:not(.image-selection) rect')];
+        if(!rects.length||rects.some(r=>!['base','head'].includes(r.dataset.side)))return 'hotspot lost revision side';
+        const expected=wipe===1?'base':'head',pin=views[expected==='base'?0:1].elements[0].pins[0];
+        const bounds=vp.getBoundingClientRect(),point=BoardGL.worldToScreen([pin.x,pin.y],{x:S.x,y:S.y,z:S.z,width:bounds.width,height:bounds.height,flip:false});
+        for(const side of ['base','head']) {
+          const rect=rects.find(r=>r.dataset.side===side);
+          if(!rect)return 'missing hotspot revision '+side;
+          rect.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:bounds.left+point[0],clientY:bounds.top+point[1]}));
+          if(S.imageSelection?.side!==expected||S.imageSelection.kind!=='pin')return 'Wipe numeric target route '+side+' '+wipe+' '+flip;
         }
-      } finally {pickAt=oldPick;pickImageAt=oldImagePick;}
+      }
       return true;
     } finally {sheet.svgCompare=compare;ImageView.comparisonSource=original;Appearance.set(look);await applyState(state);}
   `],
@@ -5168,3 +5216,18 @@ for(const [kind,mode,flip] of [['sheet','overlay',false],['board','side',false],
     } finally {BoardGL.create=original;}
   `]);
 }
+
+CHECKS.push(['images inspection complete-screen','',`
+  if(D.repo!=='fixture/images')return 'skip';
+  await applyState({...S,v:'sheet:/right/',m:'side',x:105,y:55,z:15});
+  const record=sheetImageElements('head')[0],pin=record.pins[0];
+  chooseImage(record,'head','pin',[pin.x,pin.y],pin);
+  const input=document.querySelector('#image-query');input.focus();input.value='U2';input.dispatchEvent(new Event('input'));
+  const host=document.querySelector('#image-search'),box=host.getBoundingClientRect(),stage=document.querySelector('#stage').getBoundingClientRect();
+  if(box.left<0||box.right>innerWidth+1||stage.height<=0||host.scrollWidth>host.clientWidth+1)return 'search screen overflow';
+  const result=document.querySelector('#image-results button');
+  if(result.getBoundingClientRect().height<44)return 'search touch target';
+  if(!document.querySelector('#inspector').textContent.includes('U2')||!document.querySelector('.image-selection'))return 'proof selection';
+  if(document.querySelectorAll('*').length>=2000)return 'proof DOM budget';
+  return true;
+`]);

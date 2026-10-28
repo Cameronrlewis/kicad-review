@@ -839,6 +839,7 @@ async function draw() {
   schematicResize.disconnect();
   resetCoordinates();
   const my = ++gen, view = currentView(), P = proj(), stage = document.createElement("main");
+  if(imageSearchState.context!==S.p+":"+S.v)$("#image-search").hidden=true;
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   stage.dataset.view = S.v; stage.dataset.imageReady = "false"; stage.dataset.generation = String(my);
   $("#stage").dataset.generation = String(my);
@@ -861,6 +862,7 @@ async function draw() {
   $("#stage").setAttribute("aria-busy", "true");
   statusText('.status-message', 'Loading drawing…');
   if (S.v === '3d') {
+    renderImageSearch();
     disposeBoardRenderers();
     appearanceSchematics.clear();
     releaseImageStage($("#stage"));
@@ -880,6 +882,8 @@ async function draw() {
   if (my !== gen) return;   // a newer draw owns the stage
   await manifestsReady;
   if (my !== gen) return;
+  // Search changes the viewport height; settle it before the compositor camera.
+  renderImageSearch();
   boardView.scenes = scenes; boardView.generation = my;
   if (boardView.project !== S.p) {
     boardView.project = S.p;
@@ -1436,7 +1440,7 @@ function selectImageNet(name) {
 }
 function chooseImage(record,side,kind,point,pin=null) {
   S.imageSelection={side,kind,uuid:record.uuid,ref:record.ref||'',sheet:S.v.startsWith('sheet:')?S.v.slice(6):null,
-    unit:record.unit,pin:pin?.number,net:record.net,point};
+    unit:record.unit,pin:pin?.number??record.pin,net:record.net,point};
   S.io=null;S.ig=null;
   const semantic=proj().changes.find(c=>c.uuid===(record.changeUuid||record.uuid)&&onView(c,S.v));
   S.s=semantic?.id||null;
@@ -1511,6 +1515,93 @@ function drawImageSelection() {
     world.append(svg);
   }
 }
+const imageSearchState={context:null,side:'head',query:'',open:false,note:''};
+function imageSearchRows() {
+  const side=imageSearchState.side;
+  return S.v==='board'?currentImageGraph(side)?.nets||[]:sheetImageElements(side);
+}
+function renderImageSearch() {
+  const host=$('#image-search');if(!host)return;
+  const board=S.v==='board',sheet=S.v?.startsWith('sheet:');
+  host.hidden=!board&&!sheet;if(host.hidden)return;
+  const context=S.p+':'+S.v,pg=sheet?proj().sheets.find(s=>'sheet:'+s.path===S.v):null;
+  const available=side=>board?!!currentImageGraph(side):decodedSheetHotspots.get(pg?.hotspots?.[side])?.views.some(v=>v.sheet===pg.path);
+  if(imageSearchState.context!==context)Object.assign(imageSearchState,{context,side:available('head')?'head':'base',query:'',open:false,note:''});
+  const sideSelect=$('#image-search-side');
+  for(const option of sideSelect.options)option.disabled=!available(option.value);
+  if(!available(imageSearchState.side)&&available(imageSearchState.side==='head'?'base':'head'))imageSearchState.side=imageSearchState.side==='head'?'base':'head';
+  sideSelect.value=imageSearchState.side;
+  const ok=available(imageSearchState.side),rows=imageSearchRows(),input=$('#image-query');
+  input.disabled=!ok;sideSelect.disabled=!available('head')&&!available('base');
+  input.placeholder=board?'Search nets…':'Reference, value, footprint or field…';
+  input.setAttribute('aria-label',board?'Search nets':'Search components');
+  if(input.value!==imageSearchState.query)input.value=imageSearchState.query;
+  $('#image-search-label').textContent=board?'Net search':ok?rows.length+' component'+(rows.length===1?'':'s'):'Components';
+  const graph=board?currentImageGraph(imageSearchState.side):null;
+  const partial=graph&&(Object.values(graph.truncated).some(Boolean)||Object.values(graph.unsupported||{}).some(n=>n>0));
+  const missing=['base','head'].some(side=>sideSelect.options[side==='base'?0:1].disabled);
+  $('#image-search-note').textContent=!ok?'Inspection unavailable for this report. Artwork and review lists remain available.':
+    imageSearchState.note|| (partial?'Partial inspection: some geometry is unavailable.':missing?'Inspection available for '+imageSearchState.side+' only.':'');
+  const facts=$('#board-facts');facts.hidden=!graph;
+  if(graph) {
+    const stats=graph.stats,size=stats.boardSizeMm;
+    facts.textContent='Board facts · '+imageSearchState.side+' · '+(size?size.join(' × ')+' mm':'Size unavailable')+
+      ' · '+stats.copperLayers+' copper layers · '+stats.netCount+' nets · '+stats.padCount+' pads · '+stats.viaCount+' vias · '+stats.routedLengthMm+' mm routed';
+  }
+  renderImageResults();
+}
+function closeImageResults(focus=false) {
+  if(focus)$('#image-query').focus();
+  imageSearchState.open=false;renderImageResults();
+}
+function renderImageResults() {
+  const host=$('#image-results');host.hidden=!imageSearchState.open||$('#image-query').disabled;
+  if(host.hidden){host.replaceChildren();return;}
+  const board=S.v==='board',rows=board?ImageView.searchNets(imageSearchRows(),imageSearchState.query):ImageView.searchComponents(imageSearchRows(),imageSearchState.query);
+  host.innerHTML=rows.length?'<ul>'+rows.map((r,i)=>'<li><button type="button" data-image-result="'+i+'">'+esc(board?r.name:r.ref+' · '+(r.value||'')+(r.unit?' · unit '+r.unit:''))+'</button></li>').join('')+'</ul>':
+    '<p>No matches. Try '+(board?'a net name or part of its name.':'a reference, value, footprint or field.')+'</p>';
+  for(const button of host.querySelectorAll('button')) {
+    button.onclick=()=>{
+      const row=rows[Number(button.dataset.imageResult)],side=imageSearchState.side;
+      closeImageResults(true);imageSearchState.note='';
+      if(!board) {
+        const box=row.bbox,point=[(box[0]+box[2])/2,(box[1]+box[3])/2];
+        zoomTo(box);chooseImage(row,side,'symbol',point);
+      } else {
+        const graph=currentImageGraph(side),visible=visibleImageLayers(graph);
+        const candidates=['pads','vias','tracks'].flatMap(k=>graph[k].map(r=>({record:r,kind:k==='pads'?'pad':k==='vias'?'via':'track'})))
+          .filter(({record:r})=>r.net===row.name&&!r.hidden&&r.layers.some(l=>visible.has(l)));
+        const selected=candidates[0];
+        if(selected) {
+          const r=selected.record,p=r.geometry.primitive?.center?.map(n=>n/1000)||[(r.x1+r.x2)/2,(r.y1+r.y2)/2];
+          setT({x:p[0],y:p[1]});chooseImage(r,side,selected.kind,p);
+        } else {
+          clearImageSelection();selectImageNet(row.name);
+          imageSearchState.note='Net '+row.name+': no visible retained copper geometry. Check layer visibility or select another net.';
+          $('#image-search-note').textContent=imageSearchState.note;
+        }
+      }
+    };
+    button.onkeydown=e=>{
+      const buttons=[...host.querySelectorAll('button')],i=buttons.indexOf(button);
+      if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();buttons[(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}
+      if(e.key==='Home'||e.key==='End'){e.preventDefault();buttons[e.key==='Home'?0:buttons.length-1]?.focus();}
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeImageResults(true);}
+    };
+  }
+}
+$('#image-query').oninput=e=>{imageSearchState.note='';imageSearchState.query=e.target.value;imageSearchState.open=true;renderImageResults();};
+$('#image-query').onfocus=()=>{imageSearchState.open=true;renderImageResults();};
+$('#image-query').onkeydown=e=>{
+  if(e.key==='ArrowDown'){e.preventDefault();imageSearchState.open=true;renderImageResults();$('#image-results button')?.focus();}
+  if(e.key==='Escape'){e.preventDefault();e.stopPropagation();imageSearchState.open=false;renderImageResults();}
+  if(e.key==='Enter'&&imageSearchState.open){e.preventDefault();$('#image-results button')?.click();}
+};
+$('#image-search-side').onchange=e=>{clearImageSelection();imageSearchState.note='';imageSearchState.side=e.target.value;imageSearchState.open=false;renderImageSearch();};
+$('#image-search-clear').onclick=()=>{clearImageSelection();S.s=null;imageSearchState.open=false;renderImageResults();saveHash();};
+$('#image-search').addEventListener('focusout',()=>queueMicrotask(()=>{if(!$('#image-search').contains(document.activeElement)){imageSearchState.open=false;renderImageResults();}}));
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('#image-search')){imageSearchState.open=false;renderImageResults();}});
+
 function mountImageMarks(world,view) {
   world.querySelector('.marks')?.remove();if(view.kind!=='sheet')return;
   const ns='http:'+'//www.w3.org/2000/svg',marks=document.createElementNS(ns,'svg');
@@ -1535,13 +1626,15 @@ function mountImageMarks(world,view) {
     r.dataset.hotspot=e.uuid;r.dataset.side=side;
     r.addEventListener('click',event=>{
       event.stopPropagation();
-      pickAt(vp,event); // Route placement and Wipe through the same revision-aware picker.
+      // A target on the other Wipe side must not swallow the click.
+      pickAt(vp,event);
     });
     marks.append(r);
   }
   world.append(marks);
 }
 function afterDraw(view) {
+  renderImageSearch();
   renderInspector();
   syncMarkStyles();
   if (!view) return;
