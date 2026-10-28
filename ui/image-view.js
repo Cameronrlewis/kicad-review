@@ -1,5 +1,9 @@
 // Decoded SVG artwork ownership. Camera updates never rewrite the source.
 (() => {
+  const snapshotScale = (w,h,dpr) => Math.min(dpr,Math.sqrt(6e6/Math.max(1,w*h)));
+  const wheelFactor = (delta,mode,sensitivity=1) =>
+    Math.exp(-.0015*Math.max(-400,Math.min(400,delta*(mode===1?16:mode===2?200:1)*sensitivity)));
+
   const replacePaints=(text,paints)=>text.replace(
     /((?:\b(?:fill|stroke)\s*=\s*["']|\b(?:fill|stroke)\s*:\s*))(#[0-9a-f]{6})(?=\s*(?:!important)?[;"'])/gi,
     (all,prefix,hex)=>prefix+(paints.get(hex.toLowerCase())||hex));
@@ -200,7 +204,7 @@
     try {await c.setAppearance(new Map());return c;}
     catch(error){c.dispose();throw error;}
   }
-  globalThis.ImageView={replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
+  globalThis.ImageView={snapshotScale,wheelFactor,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
     disposeAll(){for(const c of [...live])c.dispose();},
     segmentDistance,polygonDistance,primitiveDistance,inspectHit};
 })();

@@ -5,6 +5,33 @@ import vm from 'node:vm';
 import {gunzipSync} from 'node:zlib';
 const ctx = {console,setTimeout,clearTimeout,TextEncoder}; vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(new URL('./image-view.js', import.meta.url), 'utf8'), ctx);
+test('snapshot and wheel work are bounded', () => {
+  assert.equal(ctx.ImageView.snapshotScale(2000,3000,3), 1);
+  assert.ok(Math.abs(ctx.ImageView.wheelFactor(1,1)-Math.exp(-.024)) < 1e-12);
+  assert.ok(Math.abs(ctx.ImageView.wheelFactor(100000,0)-Math.exp(-.6)) < 1e-12);
+  assert.ok(Math.abs(ctx.ImageView.wheelFactor(1,2)-Math.exp(-.3)) < 1e-12);
+});
+
+test('snapshot respects DPR and the six-megapixel allocation cap', () => {
+  assert.equal(ctx.ImageView.snapshotScale(100,100,2.625), 2.625);
+  assert.equal(ctx.ImageView.snapshotScale(0,0,2), 2);
+  for (const [w,h,dpr] of [[1440,900,2],[412,915,2.625],[4000,3000,3]]) {
+    const scale=ctx.ImageView.snapshotScale(w,h,dpr);
+    assert.ok(scale<=dpr);
+    assert.ok(w*h*scale*scale<=6e6+1e-8);
+  }
+});
+
+test('wheel normalization preserves direction, sensitivity and symmetric limits', () => {
+  assert.equal(ctx.ImageView.wheelFactor(0,0), 1);
+  assert.equal(ctx.ImageView.wheelFactor(12,0,0), 1);
+  assert.ok(Math.abs(ctx.ImageView.wheelFactor(-100000,0)-Math.exp(.6)) < 1e-12);
+  assert.ok(Math.abs(ctx.ImageView.wheelFactor(10,0,2)-Math.exp(-.03)) < 1e-12);
+  assert.equal(ctx.ImageView.wheelFactor(25,1),ctx.ImageView.wheelFactor(2,2));
+  assert.equal(ctx.ImageView.wheelFactor(100000,2,2),ctx.ImageView.wheelFactor(400,0));
+  assert.ok(Math.abs(ctx.ImageView.wheelFactor(10,0)*ctx.ImageView.wheelFactor(-10,0)-1) < 1e-12);
+});
+
 test('board readiness is generation-specific and needs a successful draw',()=>{
   const stage={dataset:{view:'board',generation:'7'},isConnected:true};
   const gate=ctx.ImageView.boardDrawGate(stage,7), renderer={stats:{draws:0}};
