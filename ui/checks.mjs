@@ -44,6 +44,71 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ['images compare and four copper layers readiness navigation and failures', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const oldCreate=BoardGL.create,oldDecode=HTMLImageElement.prototype.decode,state={...S},failed=boardView.failed;
+    let release;
+    const ready=()=>{const s=document.querySelector('#stage');return s.dataset.view==='board'&&s.dataset.boardReady===s.dataset.generation;};
+    const waitFor=async test=>{for(let i=0;i<200;i++){if(test())return;await new Promise(r=>setTimeout(r,10));}throw Error('navigation readiness timeout');};
+    try {
+      boardView.failed=null;
+      await applyState({...S,p:0,v:'board',m:'side'});
+      if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='gl')return 'initial GL readiness';
+      const renderers=boardView.renderers.map(renderer=>({renderer,draw:renderer.draw}));
+      try {
+        for(const {renderer} of renderers)renderer.draw=()=>false;
+        await draw();
+        if(document.querySelector('#stage').dataset.boardReady!==undefined)return 'old cumulative GL draws reported ready after failed draw';
+      } finally {for(const {renderer,draw} of renderers)renderer.draw=draw;await draw();}
+      for(const mode of ['overlay','wipe','blend','semantic','side']) {
+        await applyState({...S,m:mode});
+        if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='gl')return 'GL composition not ready '+mode;
+      }
+      const geometry=proj().board.geometry;
+      try {
+        for(const absent of ['base','head']) {
+          proj().board.geometry={...geometry,[absent]:null};await draw();
+          if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='gl')return 'present GL side not ready with absent '+absent;
+        }
+      } finally {proj().board.geometry=geometry;await draw();}
+      const staleGate=activeBoardGate,staleRenderer=boardView.renderers[0];
+      document.querySelector('#nav [data-view="sheet:/left/"]').click();
+      if(document.querySelector('#stage').dataset.boardReady!==undefined)return 'old board ready during click navigation';
+      await waitFor(()=>document.querySelector('#stage').dataset.view==='sheet:/left/'&&document.querySelector('#stage').dataset.imageReady==='true');
+      staleGate.record(staleRenderer,true);staleGate.finish(1);
+      if(document.querySelector('#stage').dataset.boardReady!==undefined)return 'delayed old draw published readiness';
+      document.querySelector('#nav [data-view="board"]').click();
+      await waitFor(ready);
+      if(document.querySelector('#stage').dataset.boardBackend!=='gl')return 'click back did not draw GL';
+      BoardGL.create=()=>null;boardView.failed=0;
+      let calls=0,decoded=0;
+      HTMLImageElement.prototype.decode=async function(){
+        if(++calls===2)throw Error('intentional board layer decode failure');
+        await oldDecode.call(this);decoded++;
+      };
+      await draw();
+      const broken=document.querySelector('#stage');
+      if(!decoded||!broken.querySelector('.image-error')||broken.dataset.boardReady!==undefined)return 'partial layer failure reported ready';
+      HTMLImageElement.prototype.decode=oldDecode;
+      await draw();
+      if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='images')return 'fallback decode recovery';
+      let entered;
+      const waiting=new Promise(r=>{entered=r;}),blocked=new Promise(r=>{release=r;});
+      let delayed=false;
+      HTMLImageElement.prototype.decode=async function(){
+        await oldDecode.call(this);
+        if(!delayed){delayed=true;entered();await blocked;}
+      };
+      const pending=draw();await waiting;
+      await applyState({...S,v:'sheet:/left/'});
+      release();await pending;
+      const sheet=document.querySelector('#stage');
+      return sheet.dataset.view==='sheet:/left/'&&sheet.dataset.boardReady===undefined&&sheet.dataset.boardBackend===undefined||'delayed fallback mounted after navigation';
+    } finally {
+      release?.();HTMLImageElement.prototype.decode=oldDecode;BoardGL.create=oldCreate;
+      boardView.failed=failed;await applyState(state);
+    }
+  `],
   ['images compare and four copper layers', '', `
     if(D.repo!=='fixture/images')return 'skip';
     const p=D.projects.findIndex(p=>p.board.layers.filter(l=>/^(F|In1|In2|B)[_.]Cu$/.test(l.name)).length===4);
@@ -51,14 +116,24 @@ export const CHECKS = [
     const old=BoardGL.create,look=Appearance.get(),state={...S},failed=boardView.failed;
     const close=(a,b,t=2)=>a.every((v,i)=>Math.abs(v-b[i])<=t);
     const pixel=(image,x,y,alpha=1)=>{const c=new OffscreenCanvas(400,200),ctx=c.getContext('2d');ctx.globalAlpha=alpha;ctx.drawImage(image,0,0,400,200);return [...ctx.getImageData(x,y,1,1).data];};
-    BoardGL.create=()=>null;
     try {
+      boardView.failed=null;
+      await applyState({...S,p,v:'board',m:'side'});
+      let stage=document.querySelector('#stage');
+      if(stage.dataset.view!=='board'||stage.dataset.boardReady!==stage.dataset.generation||stage.dataset.boardBackend!=='gl')return 'GL generation not ready';
+      const prior=stage,priorGeneration=stage.dataset.generation;
+      await draw();stage=document.querySelector('#stage');
+      if(stage!==prior||stage.dataset.generation===priorGeneration||stage.dataset.boardReady!==stage.dataset.generation||stage.dataset.boardBackend!=='gl')return 'reused connected GL generation not ready';
+      BoardGL.create=()=>null;
       boardView.failed=p;
       const orders=[];
       for(const flip of [false,true])for(const mode of ['side','overlay','blend','wipe','semantic']) {
         Appearance.patch({flip});
         await applyState({...S,p,v:'board',m:mode,layers:D.projects[p].board.layers.map(l=>l.name),x:10,y:5,z:20});
+        const stage=document.querySelector('#stage');
+        if(stage.dataset.view!=='board'||stage.dataset.boardReady!==stage.dataset.generation||stage.dataset.boardBackend!=='images')return 'fallback generation not ready '+mode;
         const stacks=[...document.querySelectorAll('#stage .stack')],names=stacks[0];
+        if(mode==='side'&&stacks.some(st=>st.querySelectorAll('.layer[data-layer$="_Cu"] img').length!==4))return 'four decoded copper images per side required';
         const copper=[...names.querySelectorAll('.layer')].map(e=>canon(e.dataset.layer)).filter(n=>n.endsWith('.Cu'));
         if(new Set(copper).size!==4)return 'missing physical copper '+copper;
         const order=KicadColors.boardPriority(boardView.scenes?.find(Boolean)||{layers:copper.map(name=>({name}))},flipOn()).filter(n=>copper.includes(n)).reverse();

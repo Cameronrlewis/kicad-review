@@ -5,6 +5,39 @@ import vm from 'node:vm';
 import {gunzipSync} from 'node:zlib';
 const ctx = {console,setTimeout,clearTimeout,TextEncoder}; vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(new URL('./image-view.js', import.meta.url), 'utf8'), ctx);
+test('board readiness is generation-specific and needs a successful draw',()=>{
+  const stage={dataset:{view:'board',generation:'7'},isConnected:true};
+  const gate=ctx.ImageView.boardDrawGate(stage,7), renderer={stats:{draws:0}};
+  gate.record(renderer,false);gate.finish(1);assert.equal(stage.dataset.boardReady,undefined);
+  renderer.stats.draws=1;gate.record(renderer,true);gate.finish(1);
+  assert.equal(stage.dataset.boardReady,'7');assert.equal(stage.dataset.boardBackend,'gl');
+  stage.dataset.generation='8';gate.cancel();gate.finish(1);
+  assert.notEqual(stage.dataset.boardReady,'8');
+});
+test('board readiness requires every present decoded image and no failed layers',()=>{
+  const stage={dataset:{view:'board',generation:'9'},isConnected:true};
+  const gate=ctx.ImageView.boardDrawGate(stage,9), decoded={complete:true,naturalWidth:100};
+  gate.images([decoded],2,1);assert.equal(stage.dataset.boardReady,undefined);
+  gate.images([decoded],2,0);assert.equal(stage.dataset.boardReady,undefined);
+  gate.images([decoded,{complete:true,naturalWidth:0}],2,0);assert.equal(stage.dataset.boardReady,undefined);
+  gate.images([],0,0);assert.equal(stage.dataset.boardReady,undefined);
+  gate.images([decoded,decoded],2,0);assert.equal(stage.dataset.boardReady,'9');
+  assert.equal(stage.dataset.boardBackend,'images');
+});
+test('old, detached, non-board and cancelled draw gates cannot publish readiness',()=>{
+  for(const state of ['old','detached','sheet','cancelled']) {
+    const stage={dataset:{view:'board',generation:'10'},isConnected:true};
+    const gate=ctx.ImageView.boardDrawGate(stage,10),renderer={stats:{draws:5}};
+    gate.record(renderer,false);gate.finish(1);assert.equal(stage.dataset.boardReady,undefined);
+    gate.record(renderer,true);gate.finish(2);assert.equal(stage.dataset.boardReady,undefined);
+    if(state==='old')stage.dataset.generation='11';
+    if(state==='detached')stage.isConnected=false;
+    if(state==='sheet')stage.dataset.view='sheet:/';
+    if(state==='cancelled')gate.cancel();
+    gate.finish(1);gate.images([{complete:true,naturalWidth:1}],1,0);
+    assert.equal(stage.dataset.boardReady,undefined,state);
+  }
+});
 test('only final appearance survives navigation; all URLs released', async () => {
   const jobs=[], revoked=[], made=[], nodes=[];
   const env={create:text=>{made.push(text);return 'blob:'+made.length;}, revoke:u=>revoked.push(u),

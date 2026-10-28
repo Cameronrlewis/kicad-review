@@ -515,6 +515,7 @@ function assetRetry(stage) {
   }
 }
 let boardDiff = null;
+let activeBoardGate = null, boardMountState = null;
 const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
 const appearanceBoards = new Set(), appearanceSchematics = new Set(), appearanceBoardImages = new Set();
 const appearanceStore = () => Appearance;
@@ -573,6 +574,7 @@ function boardCamera(vp) {
   return {x: S.x, y: S.y, z: S.z, width: vp.clientWidth, height: vp.clientHeight, dpr: devicePixelRatio || 1, flip: flipOn()};
 }
 function disposeBoardRenderers() {
+  activeBoardGate?.cancel(); activeBoardGate = null;
   boardDiff?.dispose(); boardDiff = null;
   for (const r of new Set([...boardView.renderers, ...boardView.panes.filter(Boolean).map(p => p.renderer)])) r.dispose();
   boardView.renderers = []; boardView.panes = [];
@@ -711,7 +713,7 @@ function releaseImageStage(stage) {
 const comparisonSources = new Map();
 async function stack(side, view) {
   const st=document.createElement('div'); st.className=`stack ${side}`; st.imageOwners=[];
-  const generation = gen;
+  const generation = gen, mounts = view.kind === "board" && boardMountState?.generation === gen ? boardMountState : null;
   st.style.width=`${view.size[0]*PX}px`; st.style.height=`${view.size[1]*PX}px`;
   const theme=document.documentElement.dataset.theme==='light'?'light':'dark';
   const scene=boardView.scenes?.[side==='base'?0:1]||{layers:view.layers.map(l=>({name:canon(l.name)}))};
@@ -721,11 +723,12 @@ async function stack(side, view) {
   for (const l of layers) {
     if (generation !== gen) break;
     if (!l.svg?.[side] || view.kind==='board' && boardImageLook(Appearance.get(),canon(l.name)).visible===false) continue;
+    if (mounts) mounts.expected++;
     const d=document.createElement('div'); d.className='layer'; d.dataset.layer=l.name;
     try {
       const sourceTheme=l.svgThemes?.[theme]?.[side]?theme:'light';
       const sourceID=comparison&&l.svgCompare?.[side]||l.svgThemes?.[theme]?.[side]||l.svg[side];
-      let t=await svgText(sourceID); if (!t) continue;
+      let t=await svgText(sourceID); if (!t) { if (mounts) mounts.failed++; continue; }
       if(comparison&&!l.svgCompare?.[side]) {
         const key=JSON.stringify([sourceID,side,view.kind==='sheet']);
         if(!comparisonSources.has(key))comparisonSources.set(key,ImageView.comparisonSource(t,side,view.kind==='sheet'));
@@ -750,6 +753,7 @@ async function stack(side, view) {
       if (c.sheet&&!comparison) await c.setAppearance(schematicPaints(KrAppearance.resolve(Appearance.get())));
       d.append(c.node); st.append(d);
     } catch(error) {
+      if (mounts) mounts.failed++;
       const message=document.createElement('p'); message.className='image-error'; message.setAttribute('role','status');
       message.textContent=`${side} image unavailable: ${error.message}`; st.append(message);
     }
@@ -772,6 +776,8 @@ function viewport(stage, label, kind) {
 }
 let gen = 0;
 async function draw() {
+  activeBoardGate?.cancel(); activeBoardGate = null;
+  delete $("#stage").dataset.boardReady; delete $("#stage").dataset.boardBackend;
   disposeAssets();
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
   Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
@@ -780,7 +786,21 @@ async function draw() {
   const my = ++gen, view = currentView(), P = proj(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   stage.dataset.view = S.v; stage.dataset.imageReady = "false"; stage.dataset.generation = String(my);
+  $("#stage").dataset.generation = String(my);
   $("#stage").dataset.imageReady = "false";
+  const mounts = boardMountState = {generation:my,expected:0,failed:0};
+  let gate = null;
+  const boardGate = target => { gate = activeBoardGate = ImageView.boardDrawGate(target,my); };
+  // All board paths finalize only after manifests and the final connected composition.
+  const finishBoard = target => {
+    if (my !== gen || !target.isConnected || S.v !== 'board') return;
+    saveHash(true);
+    if (boardView.useGL) gate?.finish(target.querySelectorAll('canvas[data-board-renderer]').length);
+    else gate?.images([...target.querySelectorAll('img[data-image-artwork]')],mounts.expected,mounts.failed);
+    target.setAttribute('aria-busy', 'false');
+    statusText('.status-message', target.querySelector('.image-error')?.textContent ||
+      (target.dataset.boardReady === String(my) ? boardView.note || 'Ready' : 'Drawing unavailable'));
+  };
   $("#stage").setAttribute("aria-busy", "true");
   statusText('.status-message', 'Loading drawing…');
   if (S.v === '3d') {
@@ -812,10 +832,16 @@ async function draw() {
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
   if (boardView.useGL) {
     appearanceSchematics.clear();
-    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { $("#stage").setAttribute("aria-busy", "false"); noChangeNotice($("#stage")); if (!placed()) fit(); else apply(); afterDraw(view); return; }
+    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) {
+      const connected = $("#stage");
+      boardGate(connected); noChangeNotice(connected);
+      if (!placed()) fit(); else apply();
+      afterDraw(view); finishBoard(connected); return;
+    }
     disposeBoardRenderers();
     releaseImageStage($("#stage"));
     $("#stage").replaceWith(stage);
+    boardGate(stage);
     try {
       const project = S.p;
       let mounted;
@@ -825,13 +851,15 @@ async function draw() {
       boardDiff = mounted;
       boardDiff.project = project; boardDiff.mode = S.m; boardDiff.scenes = {base:scenes[0],head:scenes[1]};
       boardView.panes = boardDiff.panes; boardView.renderers = boardDiff.panes.map(p=>p.renderer);
-      for (const {renderer, canvas} of boardDiff.panes) trackAppearanceBoard(renderer, canvas);
+      for (const {renderer, canvas, scenes:present} of boardDiff.panes)
+        trackAppearanceBoard(renderer, canvas, Object.values(present).some(Boolean));
       if (S.m === "wipe") addDivider(stage.querySelector(".vp"));
       boardDiagnostics(stage);
       inspectionNotice(stage, view, P);
       noChangeNotice(stage);
       if (!placed()) fit(); else apply();
       afterDraw(view);
+      finishBoard(stage);
       return;
     } catch (error) {
       disposeBoardRenderers(); boardView.failed = S.p; boardView.useGL = false;
@@ -839,10 +867,12 @@ async function draw() {
     }
   }
   if (!boardView.useGL) disposeBoardRenderers();
+  if (S.v === 'board') boardGate(stage);
   if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable in both revisions.</p>`;
   else try { await MODES[S.m](stage, view); }
   catch (error) {
     if (!(error instanceof AssetUnavailableError)) throw error;
+    if (S.v === "board") mounts.failed++;
     const message = document.createElement('p'); message.className = 'image-error'; message.setAttribute('role', 'status');
     message.textContent = `Image unavailable: ${error.message}`; stage.append(message);
   }
@@ -861,6 +891,7 @@ async function draw() {
   try { await applyAppearance(Appearance.get()); }
   catch (error) {
     if (my !== gen) { releaseImageStage(stage); return; }
+    if (S.v === "board") mounts.failed++;
     const message = document.createElement("p"); message.className = "image-error";
     message.setAttribute("role", "status"); message.textContent = `Image appearance unavailable: ${error.message}`;
     stage.append(message);
@@ -874,6 +905,7 @@ async function draw() {
   saveHash(true); // Navigation must be reflected in the address before readiness.
   stage.imageMounted = true; stage.setAttribute("aria-busy", "false");
   if (view && view.kind !== "lib" && !stage.querySelector(".image-error")) stage.dataset.imageReady = "true";
+  finishBoard(stage);
 }
 function noChangeNotice(stage) {
   const text = S.v === "board" ? (!proj().board.changed && "No layout changes") :
@@ -890,7 +922,15 @@ function boardDiagnostics(stage) {   // text only: warning objects are never par
   d.className = "board-diag"; sum.textContent = `Geometry warnings (${warnings.length})`; pre.textContent = warnings.join("\n");
   d.append(sum, pre); stage.appendChild(d);
 }
-function trackAppearanceBoard(renderer, canvas) {
+function trackAppearanceBoard(renderer, canvas, present = true) {
+  // An absent revision has a blank comparison canvas, not board artwork to await.
+  if (present) canvas.dataset.boardRenderer = '';
+  const rawDraw = renderer.draw.bind(renderer);
+  renderer.draw = options => {
+    const ok = rawDraw(options);
+    if (!options?.mask && canvas.isConnected) activeBoardGate?.record(renderer, ok);
+    return ok;
+  };
   appearanceBoards.add(renderer);
   const project = S.p;
   // Stage 4 disposes a lost renderer and shows SVG. Restore by mounting fresh

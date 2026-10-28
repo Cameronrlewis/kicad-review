@@ -181,6 +181,18 @@
     return elements.filter(e=>intersects(e.bbox)).sort((a,b)=>area(a)-area(b)).slice(0,limit).reverse();
   }
 
+  function boardDrawGate(stage,generation) {
+    const seen=new Set();let cancelled=false;
+    const active=()=>!cancelled&&stage.isConnected&&stage.dataset.view==='board'&&stage.dataset.generation===String(generation);
+    const ready=backend=>{if(active()){stage.dataset.boardBackend=backend;stage.dataset.boardReady=String(generation);}};
+    return {
+      record(renderer,ok){if(ok&&renderer.stats.draws>0)seen.add(renderer);},
+      finish(expected){if(expected>0&&seen.size===expected)ready('gl');},
+      images(nodes,expected,failed){if(expected>0&&!failed&&nodes.length===expected&&nodes.every(n=>n.complete&&n.naturalWidth>0))ready('images');},
+      cancel(){cancelled=true;}
+    };
+  }
+
   const live = new Set();
   async function mount(text, size, options) {
     const c=controller(text,options), dispose=c.dispose.bind(c);
@@ -188,7 +200,7 @@
     try {await c.setAppearance(new Map());return c;}
     catch(error){c.dispose();throw error;}
   }
-  globalThis.ImageView={replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,
+  globalThis.ImageView={replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
     disposeAll(){for(const c of [...live])c.dispose();},
     segmentDistance,polygonDistance,primitiveDistance,inspectHit};
 })();
