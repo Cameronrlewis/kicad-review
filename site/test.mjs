@@ -623,7 +623,6 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
       'https://api.github.com/repos/Cameronrlewis/repo',
       'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/44',
       'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/123',
-      'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/44/zip',
     ]);
   } finally { restore(); }
 });
@@ -1582,7 +1581,7 @@ test('review page avoids PDF discovery calls and uses listing hint when present'
       const response = await call(`/r/Cameronrlewis/repo/a/123${suffix}`, { headers: { Cookie: `s=${sealed}` } });
       assert.equal(response.status, 200);
       assert.equal((await response.text()).includes('Download PDF'), Boolean(suffix));
-      assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123', 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123/zip']);
+      assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123', 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9']);
     } finally { restore(); }
   }
 });
@@ -2082,7 +2081,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '78cd6c4f68d99846d215353077f7235a4ea498c5034d2c98dfb89943d8c05853');
+  assert.equal(createHash('sha256').update(current).digest('hex'), 'fd193261863387167d11d69e7baadf796f937021e5c6683d331f9cf2c247d249');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -3289,7 +3288,7 @@ test('data with replacement patterns is inserted literally', () => {
 // Task 9.1: authenticated image delivery and the opaque-frame bridge.
 import { assetFromReport, readStoredData, privateAsset } from './worker.js';
 import { reportAssetBridge } from './pages.js';
-import { gzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync } from 'node:zlib';
 const imageId = 'abcdef123456';
 const imageText = '<svg xmlns="http://www.w3.org/2000/svg"/>';
 const imageData = () => ({ version: 1, assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
@@ -3353,11 +3352,56 @@ test('digest assets revalidate permissions and expiry before 200 or 304 and neve
   } finally { restore(); }
 });
 
-function assetBridgeHarness({ fetcher = async () => new Response(imageText) } = {}) {
+test('hosted wrapper never downloads the envelope; raw and each asset read it once', async () => {
+  const sealed = await signedIn(), seen = [];
+  const restore = mockFetch(async url => {
+    seen.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired: false });
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
+    assert.equal(url, 'https://signed.example/envelope');
+    return new Response(storedImageReport());
+  });
+  try {
+    const options = { headers: { Cookie: `s=${sealed}` } };
+    const page = await call('/r/Cameronrlewis/repo/a/42', options);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /reportAssetBridge/);
+    assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42']);
+    for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
+      const result = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, options);
+      assert.equal(result.status, 200);
+      await result.arrayBuffer();
+    }
+    assert.equal(seen.filter(url => url.endsWith('/zip')).length, 2);
+    assert.equal(seen.filter(url => url === 'https://signed.example/envelope').length, 2);
+  } finally { restore(); }
+});
+
+test('asset bridge validates server-declared kind and digest before reading response bytes', async () => {
+  for (const headers of [
+    {}, { 'Content-Type': 'application/json', ETag: `"${imageId}"` },
+    { 'Content-Type': 'image/svg+xml' },
+    { 'Content-Type': 'image/svg+xml', ETag: '"deadbeef0000"' },
+  ]) {
+    let reads = 0;
+    const h = assetBridgeHarness({ fetcher: async () => ({ ok: true, headers: new Headers(headers),
+      body: { getReader() { reads++; return new Response(imageText).body.getReader(); } } }) });
+    await h.message({ requestId: 'invalid', digest: imageId, kind: 'svg' });
+    assert.equal(reads, 0, 'unverified response bytes must not be decoded');
+    assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+    assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, undefined);
+  }
+});
+
+const assetHeaders = (digest = imageId, kind = 'svg') => ({
+  'Content-Type': kind === 'svg' ? 'image/svg+xml' : 'application/json', ETag: `"${digest}"`,
+});
+function assetBridgeHarness({ fetcher = async () => new Response(imageText, { headers: assetHeaders() }) } = {}) {
   const listeners = {}, sent = [], calls = [], timers = new Map(); let timerId = 0;
   const iframe = { contentWindow: { postMessage: message => sent.push(message) }, addEventListener: (n, f) => { listeners[`frame:${n}`] = f; } };
-  runInNewContext(`(${reportAssetBridge.toString()})(iframe, '/r/o/r/a/42/assets/', assets)`, {
-    iframe, assets: { [imageId]: { kind: 'svg' }, deadbeef1111: { kind: 'json' } },
+  runInNewContext(`(${reportAssetBridge.toString()})(iframe, '/r/o/r/a/42/assets/')`, {
+    iframe,
     addEventListener: (n, f) => { listeners[n] = f; }, AbortController, TextDecoder, Uint8Array,
     setTimeout: f => { timers.set(++timerId, f); return timerId; }, clearTimeout: id => timers.delete(id),
     fetch: (url, options) => { calls.push([url, options]); return fetcher(url, options); },
@@ -3365,16 +3409,49 @@ function assetBridgeHarness({ fetcher = async () => new Response(imageText) } = 
   return { sent, calls, timers, listeners, message: (value, source = iframe.contentWindow) => listeners.message({ source, data: { kicadReviewAsset: value } }) };
 }
 const settleAsset = async () => { for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
-test('asset bridge rejects foreign windows, URL injection, forged IDs and undeclared kinds', async () => {
+test('asset bridge rejects foreign windows, URL injection, forged IDs and unsupported kinds', async () => {
   const h = assetBridgeHarness(); const valid = { requestId: 'r1', digest: imageId, kind: 'svg' };
   h.message(valid, {});
-  for (const bad of [{ ...valid, url: 'https://attacker.example' }, { ...valid, requestId: {} }, { ...valid, requestId: 'x'.repeat(129) }, { ...valid, digest: '../../secret' }, { ...valid, kind: 'json' }]) h.message(bad);
+  for (const bad of [{ ...valid, url: 'https://attacker.example' }, { ...valid, requestId: {} }, { ...valid, requestId: 'x'.repeat(129) }, { ...valid, digest: '../../secret' }, { ...valid, kind: 'glb' }]) h.message(bad);
   await settleAsset(); assert.equal(h.calls.length, 0);
   h.message(valid); await settleAsset(); assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0][0], `/r/o/r/a/42/assets/${imageId}.svg`);
   assert.equal(h.calls[0][1].credentials, 'same-origin');
   assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, imageText);
 });
+test('asset bridge uses authenticated route declarations without trusting the child manifest', async () => {
+  const sealed = await signedIn(); let denied = false, expired = false, downloads = 0;
+  const data = imageData();
+  data.assets.deadbeef1111 = { kind: 'json', name: 'hotspots.json' };
+  data.blobs.deadbeef1111 = gzipSync('{"version":1}').toString('base64');
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return denied ? new Response('{}', { status: 404 }) : accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired });
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
+    assert.equal(url, 'https://signed.example/envelope'); downloads++;
+    return new Response(storedImageReport(data));
+  });
+  const h = assetBridgeHarness({ fetcher: async url => {
+    const result = await call(url.replace('/r/o/r/', '/r/Cameronrlewis/repo/'), { headers: { Cookie: `s=${sealed}` } });
+    // Fetch decodes Content-Encoding in the browser; the Worker test Response does not.
+    return result.ok ? new Response(gunzipSync(await result.arrayBuffer()), { headers: result.headers }) : result;
+  } });
+  const ask = (requestId, digest = imageId, kind = 'svg') => h.message({ requestId, digest, kind });
+  try {
+    await ask('svg'); assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, imageText);
+    await ask('json', 'deadbeef1111', 'json'); assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, '{"version":1}');
+    for (const [digest, kind] of [[imageId, 'json'], ['deadbeef0000', 'svg']]) {
+      await ask(`invalid_${kind}`, digest, kind);
+      assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+      assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, undefined);
+    }
+    assert.equal(downloads, 4, 'exactly one envelope read per declared or undeclared asset request');
+    denied = true; await ask('revoked'); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+    denied = false; expired = true; await ask('expired'); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+    assert.equal(downloads, 4, 'revocation and expiry reject before downloading');
+  } finally { restore(); }
+});
+
 test('asset bridge bounds concurrency, times out, rejects oversized decoded SVG and JSON, permits retry', async () => {
   const h = assetBridgeHarness({ fetcher: () => new Promise(() => {}) });
   for (let i = 0; i < 9; i++) h.message({ requestId: `r${i}`, digest: imageId, kind: 'svg' });
@@ -3384,7 +3461,7 @@ test('asset bridge bounds concurrency, times out, rejects oversized decoded SVG 
   assert.equal(h.sent.filter(x => x.kicadReviewAssetResult.error).length, 9);
   h.message({ requestId: 'retry', digest: imageId, kind: 'svg' }); assert.equal(h.calls.length, 9);
   for (const [kind, digest, size] of [['svg', imageId, 8 * 1024 * 1024], ['json', 'deadbeef1111', 4 * 1024 * 1024]]) {
-    const over = assetBridgeHarness({ fetcher: async () => new Response('x'.repeat(size + 1)) });
+    const over = assetBridgeHarness({ fetcher: async () => new Response('x'.repeat(size + 1), { headers: assetHeaders(digest, kind) }) });
     over.message({ requestId: 'over', digest, kind }); await settleAsset();
     assert.match(over.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
     assert.equal(over.sent.at(-1).kicadReviewAssetResult.text, undefined);
@@ -3443,7 +3520,7 @@ test('digest asset denies foreign repository IDs, expired timestamps and unknown
     assert.equal(downloads, 0);
   } finally { restore(); }
 });
-test('digest JSON uses gzip MIME and hosted wrapper takes declarations only from the stored envelope', async () => {
+test('digest JSON uses gzip MIME and hosted raw takes declarations only from the stored envelope', async () => {
   const sealed = await signedIn(), data = imageData(); data.assets[imageId].kind = 'json';
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
@@ -3456,7 +3533,7 @@ test('digest JSON uses gzip MIME and hosted wrapper takes declarations only from
     const r = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.json`, options);
     assert.equal(r.headers.get('Content-Type'), 'application/json'); assert.equal(r.headers.get('Content-Encoding'), 'gzip');
     const page = await (await call('/r/Cameronrlewis/repo/a/42', options)).text();
-    assert.ok(page.includes(`"${imageId}":{"kind":"json"}`));
+    assert.ok(!page.includes(`"${imageId}":{"kind":"json"}`), 'wrapper does not parse or embed the envelope allowlist');
     const raw = await (await call('/r/Cameronrlewis/repo/a/42/raw', options)).text();
     assert.equal(readStoredData(raw).blobs[imageId], undefined);
     assert.equal(readStoredData(raw).assetDescriptors[imageId].kind, 'json');
@@ -3478,7 +3555,7 @@ test('parent asset disposal aborts old navigation without delivering its late re
   const h = assetBridgeHarness({ fetcher: () => new Promise(r => { resolve = r; }) });
   h.message({ requestId: 'old', digest: imageId, kind: 'svg' });
   h.listeners.pagehide(); assert.equal(h.calls[0][1].signal.aborted, true); assert.equal(h.timers.size, 0);
-  resolve(new Response(imageText)); await settleAsset(); assert.equal(h.sent.length, 0);
+  resolve(new Response(imageText, { headers: assetHeaders() })); await settleAsset(); assert.equal(h.sent.length, 0);
 });
 test('hosted stripping preserves GLB, Three bundle and unknown fields with script-safe JSON', () => {
   const data = imageData(); data.board = { model3d: { enabled: true, head: 'deadbeef0000' } };

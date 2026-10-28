@@ -1,6 +1,6 @@
 import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { currentBody, readStoredData, declaredAssets } from './report-shell.js';
+import { currentBody, readStoredData } from './report-shell.js';
 export { readStoredData } from './report-shell.js';
 import { escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
@@ -293,7 +293,7 @@ async function digestAsset(request, owner, repo, id, digest, kind, allowed) {
     // ponytail: read the existing HTML envelope per asset; add range/indexed companion delivery only if Worker CPU or GitHub download traces require it.
     const bytes = assetFromReport(await (await storedReport(artifact, allowed.s)).text(), digest, kind);
     return bytes ? privateAsset(request, bytes, digest, kind, allowed.s) : assetError(allowed.s);
-  } catch { return assetError(allowed.s); }
+  } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(allowed.s); }
 }
 
 async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false, repository = null) {
@@ -320,13 +320,12 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
           if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
         }
       } catch { /* PR discovery must not prevent opening the report. */ }
-      // The parent gets its allowlist from the authenticated envelope, never the child.
-      let assets = {};
-      try { assets = declaredAssets(readStoredData(await (await storedReport(artifact, active)).text())); }
-      catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ }
+      // The parent gets its allowlist validation from the authenticated envelope, never the child.
+      // Validate each declaration in digestAsset instead of downloading that envelope
+      // again for the wrapper; the parent checks the returned MIME type and digest.
       const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, assets, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
