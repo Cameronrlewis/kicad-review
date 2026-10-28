@@ -4605,3 +4605,11 @@ def br02_processed_sample_contract():
 
 
 br02_processed_sample_contract()
+
+# BR02: workers are inert, byte-identical offline assets, not external scripts.
+worker = base64.b64encode(pathlib.Path('ui/three-decode.js').read_bytes()).decode()
+worker_tag = '<script type="application/octet-stream" id="three-decode-worker">' + worker + '</script>'
+assert '</script>' not in worker
+html = kicad_review.inline_page(pathlib.Path('ui/sample/review-data-3d.js').read_text())
+assert worker_tag in html, 'BR02 inline decode worker source'
+print('ok BR02 inline decode worker source')

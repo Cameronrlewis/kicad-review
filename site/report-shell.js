@@ -15,6 +15,10 @@ import boardMarks from '../ui/board-marks.js';
 import boardDiff from '../ui/board-diff.js';
 import reviewJs from '../ui/review.js';
 import review3d from '../ui/review3d.js';
+import workerSource from '../ui/three-decode.js';
+
+const workerTag = '<script type="application/octet-stream" id="three-decode-worker">'
+  + btoa(String.fromCharCode(...new TextEncoder().encode(workerSource))) + '</script>';
 
 const DATA = '<script>window.REVIEW_DATA = ';
 const BUNDLE = /<script type="application\/octet-stream" id="three-bundle">[^<]*<\/script>/;
@@ -38,7 +42,7 @@ export function currentReport(stored) {
   html = put(html, '<script src="sample/review-data.js"></script>', `<script>${data}</script>`);
   html = put(html, '<!-- KR_ICONS -->', sprite);
   html = put(html, '<script src="theme.js"></script>', `<script>\n${theme}</script>`);
-  html = put(html, '<script src="review.js"></script>', `${bundle ? `${bundle}<script>\n${review3d}</script>` : ''}<script>\n${reviewJs}</script>`);
+  html = put(html, '<script src="review.js"></script>', `${bundle ? `${bundle}${workerTag}<script>\n${review3d}</script>` : ''}<script>\n${reviewJs}</script>`);
   for (const [name, text] of Object.entries(assets)) html = put(html, `<script src="${name}"></script>`, `<script>\n${text}</script>`);
   return html;
 }

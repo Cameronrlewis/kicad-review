@@ -357,6 +357,169 @@ export const CHECKS = [
       facts.push(ticks.length > 0 && !error && updates === 0 && JSON.stringify(camera) === JSON.stringify(Review3D.cameraState()));
     }
     return facts.every(Boolean) || JSON.stringify(facts);`],
+  ...["worker-start","worker-postMessage-throws","worker-messageerror","worker-error","corrupt-model","context-loss","late-parse"].map(fault=>[
+ "BR02 processed session fault "+fault,"v=3d&m=side",`
+ if(!proj().board.parts3d)return 'skip';
+ const fault=${JSON.stringify(fault)}, p=structuredClone(proj()), stage=document.querySelector('#stage');
+ const NativeWorker=window.Worker, Loader=window.THREE3D.GLTFLoader;
+ const parse=Loader.prototype.parseAsync;let release;
+ try {
+   if(fault==='worker-start')window.Worker=class {constructor(){throw Error('BR02 injected worker failure')}};
+   if(fault==='worker-postMessage-throws')window.Worker=class {
+     constructor(...args){const worker=new NativeWorker(...args);worker.postMessage=()=>{throw Error('BR02 injected postMessage failure')};return worker;}
+   };
+   if(fault==='worker-error'||fault==='worker-messageerror')window.Worker=class {
+     constructor(...args){const worker=new NativeWorker(...args);
+       queueMicrotask(()=>worker.dispatchEvent(new Event(fault==='worker-error'?'error':'messageerror')));
+       return worker;}
+   };
+   if(fault==='corrupt-model') {
+     p.board.model3d.head='br02-corrupt';REVIEW_DATA.blobs['br02-corrupt']='not base64!';
+   }
+   if(fault==='late-parse') {
+     let first=true;
+     Loader.prototype.parseAsync=async function(...args) {
+       const model=await parse.apply(this,args);
+       if(first){first=false;await new Promise(r=>release=r)}return model;
+     };
+     const old=Review3D.show(stage,p,S);
+     for(let i=0;i<200&&!release;i++)await new Promise(r=>setTimeout(r,10));
+     if(!release)return 'injected parse was never reached';
+     Review3D.dispose();Loader.prototype.parseAsync=parse;
+     await Review3D.show(stage,p,S);const current=Review3D.state, canvases=document.querySelectorAll('#stage canvas').length;
+     release();await old;
+     if(Review3D.state!==current)return 'late parse replaced newer session';
+     if(document.querySelectorAll('#stage canvas').length!==canvases)return 'late parse resurrected canvas';
+     if(current.loading)return 'new session still loading';
+     Review3D.dispose();
+     return Object.values(current.resourceCounts).every(n=>n===0)||'late parse session leaked owned resources';
+   }
+   await Review3D.show(stage,p,S);
+   if(fault==='context-loss') {
+     const canvas=document.querySelector('#stage canvas');if(!canvas)return 'no model canvas';
+     canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+   }
+   const st=Review3D.state;
+   if(fault==='worker-postMessage-throws'&&st.resourceCounts.pending!==0)return 'postMessage leaked pending job';
+   if(st.loading)return 'failure left loading unsettled';
+   if(!st.errorsBySide.head)return 'head error not recorded';
+   if(fault!=='corrupt-model'&&st.firstFrame)return 'failure reported a genuine first frame';
+   if(!document.querySelector('#stage [data-poster="head"]:not([hidden])'))return 'head poster lost';
+   if(fault==='corrupt-model'&&!st.roots[0])return 'valid base lost';
+   if(!document.querySelector('#stage [data-3d-retry]'))return 'no accessible retry';
+   if(fault==='worker-start'||fault==='context-loss') {
+     window.Worker=NativeWorker;
+     const oldCanvas=stage.querySelector('canvas');
+     stage.querySelector('[data-3d-retry]').click();
+     for(let i=0;i<300&&!Review3D.state.firstFrame;i++)await new Promise(r=>setTimeout(r,10));
+     if(!Review3D.state.firstFrame)return 'retry did not restore model';
+     if(fault==='context-loss'&&stage.querySelector('canvas')===oldCanvas)return 'retry kept lost context';
+   }
+   Review3D.dispose();
+   const counts=Review3D.state.resourceCounts;
+   return counts.workers===0&&counts.urls===0&&counts.pending===0||'session leaked owned resources';
+ } finally {
+   release?.();window.Worker=NativeWorker;Loader.prototype.parseAsync=parse;
+   delete REVIEW_DATA.blobs['br02-corrupt'];
+ }
+ `]),
+  ["BR02 processed loading aggregates outstanding sides", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const Loader=THREE3D.GLTFLoader,original=Loader.prototype.parseAsync,releases=[];
+ let opening;
+ try {
+   Loader.prototype.parseAsync=async function(...args){await new Promise(r=>releases.push(r));return original.apply(this,args);};
+   opening=Review3D.show(document.querySelector('#stage'),proj(),S);
+   for(let i=0;i<300&&releases.length<2;i++)await new Promise(r=>setTimeout(r,10));
+   const st=Review3D.state;
+   if(releases.length!==2)return 'both revision parse gates not reached';
+   if(st.firstFrame||!['base','head'].every(side=>st.posterBySide[side]&&!st.posterBySide[side].hidden))return 'poster missing before a real model frame';
+   if(st.changedParts!==new Set(proj().changes.filter(c=>c.kind==='footprint').map(c=>c.uuid||c.ref)).size)return 'changed footprint identity count incorrect';
+   if(!st.loadingBySide.base||!st.loadingBySide.head||!st.loading)return 'aggregate loading false while requests outstanding';
+   releases.shift()();
+   for(let i=0;i<300&&st.loadingBySide.base&&st.loadingBySide.head;i++)await new Promise(r=>setTimeout(r,10));
+   if(!st.loading||!Object.values(st.loadingBySide).some(Boolean)||Object.values(st.loadingBySide).every(Boolean))return 'aggregate did not retain the outstanding side';
+   releases.shift()();await opening;
+   return !st.loading&&!st.loadingBySide.base&&!st.loadingBySide.head||'aggregate failed to settle';
+ } finally {
+   Loader.prototype.parseAsync=original;releases.forEach(r=>r());if(opening)await opening;
+ }
+`],
+  ["BR02 processed empty model cannot fake a first frame", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj());
+    const data=JSON.stringify({asset:{version:'2.0'},scenes:[{nodes:[]}],scene:0,nodes:[]});
+    const bytes=new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    REVIEW_DATA.blobs['br02-empty']=btoa(String.fromCharCode(...bytes));
+    try {
+      p.board.model3d.base=p.board.model3d.head='br02-empty';
+      await Review3D.show(document.querySelector('#stage'),p,S);
+      const st=Review3D.state;
+      return !st.firstFrame&&!st.loading&&['base','head'].every(side=>st.posterBySide[side]&&!st.posterBySide[side].hidden&&st.errorsBySide[side])||'empty model/placeholder reported first frame';
+    } finally {delete REVIEW_DATA.blobs['br02-empty'];Review3D.dispose();}
+  `],
+  ["BR02 processed WebGL unavailable retains posters", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const proto=HTMLCanvasElement.prototype, get=proto.getContext;
+    try {
+      proto.getContext=function(type,...args){return /webgl/.test(type)?null:get.call(this,type,...args)};
+      await Review3D.show(document.querySelector('#stage'),proj(),S);
+      const st=Review3D.state;
+      return !st.loading&&!st.firstFrame&&['base','head'].every(side=>st.posterBySide[side]&&!st.posterBySide[side].hidden&&st.errorsBySide[side])&&!!document.querySelector('[data-3d-retry]')||'WebGL fallback lost poster/state';
+    } finally {proto.getContext=get;Review3D.dispose();}
+  `],
+  ["BR02 processed absent revision never borrows poster", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj());delete p.board.model3d.head;delete p.board.poster3d.head;
+    delete p.board.parts3d.head;delete p.board.assets3d;
+    await Review3D.show(document.querySelector('#stage'),p,S);
+    const hosts=document.querySelectorAll('#stage .view3d'),st=Review3D.state;
+    return !st.loading&&!st.roots[1]&&st.roots[0]&&st.firstFrame&&hosts[1].textContent.includes('Board not in this revision')&&!hosts[1].querySelector('img')||'absent revision borrowed model/poster';
+  `],
+  ["BR02 processed cancelled vendor decode cannot revive session", "", `
+    if(!proj().board.parts3d)return 'skip';
+    const NativeWorker=window.Worker;let blocked=false,opening;
+    try {
+      window.Worker=class {constructor(...args){const worker=new NativeWorker(...args);worker.postMessage=()=>{blocked=true};return worker;}};
+      opening=Review3D.show(document.querySelector('#stage'),proj(),{...S,m:'side'});
+      for(let i=0;i<300&&!blocked;i++)await new Promise(r=>setTimeout(r,10));
+      const old=Review3D.state;
+      if(!blocked||old.resourceCounts.pending!==1)return 'vendor decode was not gated';
+      Review3D.dispose();window.Worker=NativeWorker;
+      await Review3D.show(document.querySelector('#stage'),proj(),{...S,m:'side'});
+      const current=Review3D.state;await opening;
+      return Review3D.state===current&&current.firstFrame&&!current.loading&&Object.values(old.resourceCounts).every(n=>n===0)||'cancelled vendor decode revived/leaked session';
+    } finally {window.Worker=NativeWorker;Review3D.dispose();if(opening)await opening;}
+  `],
+  ["BR02 processed bundle failure retries without cached rejection", "", `
+    if(!proj().board.parts3d)return 'skip';
+    const tag=document.querySelector('#three-bundle'),source=tag.textContent;
+    try {
+      tag.textContent=btoa('not gzip');
+      await Review3D.show(document.querySelector('#stage'),proj(),{...S,m:'side'});
+      const st=Review3D.state;
+      if(st.loading||st.firstFrame||!st.posterBySide.head||st.posterBySide.head.hidden)return 'bundle failure lost fallback';
+      tag.textContent=source;document.querySelector('[data-3d-retry]').click();
+      for(let i=0;i<300&&!Review3D.state.firstFrame;i++)await new Promise(r=>setTimeout(r,10));
+      return Review3D.state.firstFrame&&!Review3D.state.loading||'bundle rejection was cached';
+    } finally {tag.textContent=source;Review3D.dispose();}
+  `],
+  ...['worker-start','context-loss'].map(fault=>[
+    'BR02 processed fallback whole screen '+fault,'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    // The shared shell is owned by 05; assert this fallback adds no overflow.
+    // Log its inherited overflow explicitly, rather than claiming whole-shell sign-off.
+    const Worker=window.Worker,shellWidth=document.documentElement.scrollWidth;
+    try {
+      if('${fault}'==='worker-start')window.Worker=class {constructor(){throw Error('3D worker unavailable. Retry.')}};
+      await Review3D.show(document.querySelector('#stage'),proj(),S);
+      if('${fault}'==='context-loss')document.querySelector('#stage canvas').dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+      const button=document.querySelector('[data-3d-retry]');button?.focus();
+      const rect=button?.getBoundingClientRect();
+      console.log('BOARD_PROOF '+JSON.stringify({task:'BR02 fallback shell',fault:'${fault}',shellWidth,width:innerWidth,fallbackWidth:document.documentElement.scrollWidth}));
+      return document.documentElement.scrollWidth<=Math.max(innerWidth,shellWidth)&&rect&&rect.width>0&&rect.left>=0&&rect.right<=innerWidth&&rect.top>=0&&rect.bottom<=innerHeight&&document.activeElement===button&&!!document.querySelector('[role="alert"]')||JSON.stringify({scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,rect:rect?.toJSON(),focused:document.activeElement===button,alert:!!document.querySelector('[role="alert"]')});
+    } finally {window.Worker=Worker;}
+  `]),
   ["3D bad model data settles and keeps the valid side", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), good = p.board.model3d.head;

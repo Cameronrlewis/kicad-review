@@ -530,7 +530,7 @@ test('review route shows the repository after a pull-access check and refreshes 
 });
 
 test('shared CSP module preserves the original report sandbox and wrapper policies', () => {
-  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'");
+  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; worker-src blob:; connect-src 'none'; frame-ancestors 'self'");
   assert.equal(frameCsp, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
 });
 
@@ -3280,4 +3280,15 @@ test('reports without a recognisable data script are served unchanged', () => {
 test('data with replacement patterns is inserted literally', () => {
   const html = currentReport('<script>window.REVIEW_DATA = {"v":"$& $1 $$"};</script>');
   assert.match(html, /window\.REVIEW_DATA = \{"v":"\$& \$1 \$\$"\};/);
+});
+
+test('BR02 report embeds the decode worker and permits only blob workers', () => {
+  const html = inlinePage(readFileSync(new URL('../ui/sample/review-data-3d.js', import.meta.url), 'utf8'));
+  const dressed = currentReport(html);
+  const tag = dressed.match(/<script type="application\/octet-stream" id="three-decode-worker">([^<]*)<\/script>/);
+  assert.ok(tag);
+  assert.equal(Buffer.from(tag[1], 'base64').toString('utf8'), readFileSync(new URL('../ui/three-decode.js', import.meta.url), 'utf8'));
+  assert.match(reportCsp, /(?:^|; )worker-src blob:(?:;|$)/);
+  assert.match(reportCsp, /connect-src 'none'/);
+  assert.doesNotMatch(reportCsp, /allow-same-origin|unsafe-eval|https?:|connect-src (?!'none')/);
 });
