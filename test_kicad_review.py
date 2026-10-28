@@ -408,8 +408,9 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
                    capture_output=True, text=True)
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
-# Runtime type checks now validate messages from the hosted asset bridge.
-assert "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
+# Only the two asset-bridge type guards are runtime checks, not old scaffolding.
+scaffolding_js = js.replace("typeof value.text === 'string'", "").replace("typeof D.blobs?.[id] !== 'string'", "")
+assert "typeof " not in scaffolding_js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")

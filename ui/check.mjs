@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname, basename, extname } from "node:path";
 import { createServer } from "node:http";
 import { CHECKS } from "./checks.mjs";
+import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
 const opt = k => { const i = args.indexOf(k); if (i < 0) return null; if (!args[i + 1] || args[i + 1].startsWith('--')) throw Error('Missing value for ' + k); return args.splice(i, 2)[1]; };
@@ -45,7 +46,7 @@ const root = dirname(page), server = createServer((req, res) => {
   catch { res.writeHead(404).end(); }
 });
 await new Promise(r => server.listen(0, "127.0.0.1", r)); server.unref();
-const origin = `http://127.0.0.1:${server.address().port}`, pageUrl = `${origin}/${encodeURIComponent(basename(page))}`;
+const origin = `http://127.0.0.1:${server.address().port}`, pageUrl = offline ? pathToFileURL(page).href : `${origin}/${encodeURIComponent(basename(page))}`;
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const proc = spawn(chrome, ["--headless=new", "--no-sandbox", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
   ...(gpu ? ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"] : ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]), `--window-size=${width},1080`, "about:blank"], { stdio: "ignore" });
@@ -70,7 +71,7 @@ const onMessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) {
     const text = m.params.args.map(a => a.value ?? "").join(" ");
     if (/^BOARD_(FPS|PROOF) /.test(text)) console.log(text);
   }
-  if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url) && !m.params.request.url.startsWith(origin + "/")) errors.push("external request: " + m.params.request.url);
+  if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url) && (offline || !m.params.request.url.startsWith(origin + "/"))) errors.push("external request: " + m.params.request.url);
   if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text); };
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
@@ -135,7 +136,8 @@ await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.
 const iconSprite = readFileSync(new URL("./icons/sprite.svg", import.meta.url), "utf8");
 let failed = 0;
 const readyTimeout = Math.max(1000, Number(process.env.CHECK_TIMEOUT || 15000) - 1000);
-for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].includes(filter))) {
+const selectedChecks = CHECKS.filter(c => c[0].includes(filter));
+for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.entries()) {
   console.log(`RUN ${name}`);
   let timer, body, startupScript, initialAppearance;
   try {
@@ -241,7 +243,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   finally {
     clearTimeout(timer);
     if (initialAppearance !== undefined) await evaluate(`localStorage.${initialAppearance === null ? "removeItem('kr.appearance.v1')" : `setItem('kr.appearance.v1',${JSON.stringify(initialAppearance)})`}`);
-    if (startupScript) { await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); await freshTab(); }
+    if (startupScript) { await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); if (checkIndex + 1 < selectedChecks.length) await freshTab(); }
   }
 }
 if (shot && !failed) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }

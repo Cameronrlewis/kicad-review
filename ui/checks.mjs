@@ -4180,3 +4180,27 @@ CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=she
   }
   return true;
 `]);
+
+CHECKS.push(['digest assets offline embedded closure', '', `
+  const entries=Object.entries(D.assets||{});
+  if(!entries.length)return 'skip';
+  if(Object.keys(D.assetDescriptors||{}).length)return 'offline report has hosted descriptors';
+  for(const [id,meta] of entries) {
+    if(!['svg','json'].includes(meta.kind)||typeof D.blobs?.[id]!=='string')return 'missing embedded asset '+id;
+    if(!await svgText(id))return 'empty embedded asset '+id;
+  }
+  const sheets=proj().sheets.filter(sheet=>sheet.svg&&(sheet.svg.base||sheet.svg.head));
+  if(!sheets.length)return 'fixture needs a schematic';
+  for(const sheet of sheets)for(const mode of ['side','overlay','wipe','blend','semantic']) {
+    await applyState({...S,v:'sheet:'+sheet.path,m:mode});
+    if(document.querySelector('#stage .image-error'))return 'unavailable sheet '+sheet.path+' '+mode;
+  }
+  await applyState({...S,v:'sheet:'+sheets[0].path,m:'side'});
+  if(window.__offlineAssetFetches.length)return 'offline fetch: '+window.__offlineAssetFetches.join(', ');
+  console.log('BOARD_PROOF '+JSON.stringify({task:'digest assets offline embedded closure',assets:entries.length,sheets:sheets.length,modes:5,fetches:0,protocol:location.protocol}));
+  return true;
+`, {beforeStartup:`
+  window.__offlineAssetFetches=[];
+  const originalFetch=window.fetch;
+  window.fetch=function(...args){window.__offlineAssetFetches.push(String(args[0]));return originalFetch.apply(this,args);};
+`}]);

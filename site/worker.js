@@ -267,7 +267,8 @@ async function storedReport(artifact, active) {
   if (download.status !== 302) throw new Error('Report unavailable');
   const location = new URL(download.headers.get('Location'));
   if (location.protocol !== 'https:' || location.username || location.password) throw new Error('Report unavailable');
-  const blob = await fetch(location.href, { redirect: 'manual' });
+  // Signed storage URLs may redirect; never forward the GitHub authorization header.
+  const blob = await fetch(location.href);
   if (!blob.ok || !blob.body) throw new Error('Report unavailable');
   return blob;
 }

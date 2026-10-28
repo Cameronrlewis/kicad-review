@@ -3392,7 +3392,7 @@ function assetClientHarness() {
   const listeners = {}, sent = [], timers = new Map(); let id = 0;
   const parent = { postMessage: value => sent.push(value) };
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
-  const fn = source.slice(source.indexOf('function createAssetClient('), source.indexOf('\nconst assetClient ='));
+  const fn = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('\nconst assetClient ='));
   const context = { parent, window: {}, crypto: globalThis.crypto, TextEncoder, Promise, Map,
     addEventListener: (n, f) => { listeners[n] = f; },
     setTimeout: f => { timers.set(++id, f); return id; }, clearTimeout: key => timers.delete(key) };
@@ -3496,4 +3496,56 @@ test('guest raw delivery retains image blobs and never installs hosted asset des
     const data = readStoredData(await raw.text());
     assert.equal(data.blobs[imageId], imageData().blobs[imageId]); assert.equal(data.assetDescriptors, undefined);
   } finally { restore(); }
+});
+
+test('raw and digest delivery follow signed blob redirects without forwarding GitHub credentials', async () => {
+  const sealed = await signedIn(), redirects = [];
+  const restore = mockFetch(async (url, options) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/redirecting-blob' } });
+    assert.equal(url, 'https://signed.example/redirecting-blob');
+    redirects.push(options?.redirect ?? 'follow');
+    assert.equal(options?.headers?.Authorization, undefined);
+    // Simulate the Fetch redirect policy: only follow returns the final blob.
+    return options?.redirect === 'manual' ? new Response(null, { status: 302, headers: { Location: 'https://storage.example/final' } }) : new Response(storedImageReport());
+  });
+  try {
+    for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
+      const r = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(r.status, 200, suffix);
+      if (suffix === '/raw') assert.equal(readStoredData(await r.text()).assetDescriptors[imageId].kind, 'svg');
+      else assert.deepEqual(Buffer.from(await r.arrayBuffer()), gzipSync(imageText));
+    }
+    assert.deepEqual(redirects, ['follow', 'follow']);
+  } finally { restore(); }
+});
+
+test('mode rendering handles only tagged asset failures and rethrows programming errors', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const body = source.slice(source.indexOf('  if (!view) stage.innerHTML'), source.indexOf('  assetRetry(stage);'));
+  const exercise = error => {
+    const stage = { messages: [], append(message) { this.messages.push(message); } };
+    const context = { stage, view: {}, S: { m: 'side' }, MODES: { side: async () => { throw error; } },
+      document: { createElement: () => ({ setAttribute() {} }) } };
+    return { stage, result: runInNewContext(`${errorClass}\n(async()=>{${body}})()`, context) };
+  };
+  const bug = new TypeError('render bug'), generic = exercise(bug);
+  await assert.rejects(generic.result, error => error === bug);
+  assert.equal(generic.stage.messages.length, 0);
+  // Construct the error and execute draw's catch in the same realm as its class.
+  const context = { messages: [], document: { createElement: () => ({ setAttribute() {} }) } };
+  await runInNewContext(`${errorClass}\n(async()=>{const view={}, S={m:'side'}, stage={append:m=>messages.push(m)}, MODES={side:async()=>{throw new AssetUnavailableError();}};${body}})()`, context);
+  assert.match(context.messages[0].textContent, /Image unavailable: Asset unavailable/);
+});
+
+test('asset decode failures are tagged and evicted so the next attempt can retry', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('function createAssetClient('));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  for (const encoded of ['!bad base64', Buffer.from('not gzip').toString('base64')]) {
+    const context = { D: { blobs: { [imageId]: encoded } }, cache: {}, atob, Uint8Array, Blob, Response, DecompressionStream };
+    await runInNewContext(`${errorClass}\n${decode}\n(async()=>{for(let i=0;i<2;i++){try{await svgText('${imageId}');throw Error('unexpected success');}catch(error){if(!(error instanceof AssetUnavailableError))throw error;}if('${imageId}' in cache)throw Error('failed decode cached');}})()`, context);
+  }
 });

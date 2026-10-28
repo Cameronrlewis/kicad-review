@@ -270,12 +270,16 @@ function applyState(st) {
 
 const PX = 4;                       // CSS px per mm at z = PX
 const cache = {};
+// Asset failures may be shown as retryable; programming errors must still surface.
+class AssetUnavailableError extends Error {
+  constructor() { super('Asset unavailable. Try again.'); this.name = 'AssetUnavailableError'; }
+}
 // The opaque hosted frame never fetches. Its parent owns authenticated delivery.
 function createAssetClient(data) {
   const pending = new Map(), queue = [];
   const nonce = crypto.randomUUID().replaceAll('-', '');
   let serial = 0, active = 0;
-  const unavailable = () => new Error('Asset unavailable. Try again.');
+  const unavailable = () => new AssetUnavailableError();
   const pump = () => {
     while (active < 8 && queue.length) {
       const job = queue.shift();
@@ -330,10 +334,13 @@ function svgText(id) {
     const decode = async () => {
       if (typeof D.blobs?.[id] !== 'string') {
         if (D.assetDescriptors?.[id]) return assetClient.request(id);
-        throw new Error('Asset unavailable. Try again.');
+        throw new AssetUnavailableError();
       }
-      const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
-      return new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      // Only the untrusted base64/gzip decode boundary turns failures into asset errors.
+      try {
+        const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
+        return await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      } catch { throw new AssetUnavailableError(); }
     };
     const promise = cache[id] = decode();
     promise.catch(() => { if (cache[id] === promise) delete cache[id]; });
@@ -685,6 +692,7 @@ async function draw() {
   if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable in both revisions.</p>`;
   else try { await MODES[S.m](stage, view); }
   catch (error) {
+    if (!(error instanceof AssetUnavailableError)) throw error;
     const message = document.createElement('p'); message.className = 'image-error'; message.setAttribute('role', 'status');
     message.textContent = `Image unavailable: ${error.message}`; stage.append(message);
   }
