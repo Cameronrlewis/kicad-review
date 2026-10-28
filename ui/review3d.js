@@ -25,6 +25,23 @@ window.Review3D = (() => {
     s.resizeObserver?.disconnect(); s.intersectionObserver?.disconnect();
     s.resourceCounts.workers = s.resourceCounts.urls = s.resourceCounts.pending = 0;
   }
+  async function loadPartIndex(board, side, s) {
+    const id = board.parts3d?.[side]; if (!id) return [];
+    try {
+      let bytes;
+      if (window.REVIEW_DATA.blobs[id]) bytes = await guardSession(s, decode3d({b64:window.REVIEW_DATA.blobs[id]}, s));
+      else if (board.assets3d?.[side]?.parts && typeof requestAsset3d === 'function')
+        bytes = await requestAsset3d(board.assets3d[side].parts, 'board-parts.json', s);
+      else throw Error('3D part index unavailable');
+      if (s.dead) return [];
+      const {THREE:T} = THREE3D;
+      return ThreeParts.validate(JSON.parse(new TextDecoder().decode(bytes))).map(p => ({...p,
+        bounds:new T.Box3(new T.Vector3(...p.box.slice(0, 3)), new T.Vector3(...p.box.slice(3)))}));
+    } catch (error) {
+      if (!s.dead) { s.state.errorsBySide[side] ??= 'Part inspection unavailable: ' + error.message; s.partWarn.add(side); }
+      return [];
+    }
+  }
   function decode3d(source, s) {
     if (s.dead) return Promise.reject(new DOMException('Viewer closed', 'AbortError'));
     try {
@@ -142,7 +159,7 @@ window.Review3D = (() => {
   }
   function failure(s, side, message) {
     if (s.dead) return;
-    s.state.errorsBySide[side] = message;
+    s.state.errorsBySide[side] = message; s.partWarn.delete(side);
     const host = s.hostsBySide[side];
     // A partially built view must not hide its fallback on the next frame.
     for (const v of s.views) if (v.host === host) { v.failed = true; v.visible = false; }
@@ -326,7 +343,7 @@ window.Review3D = (() => {
       views:[], roots:[], changes:project.changes.filter(c => c.kind === 'footprint'),
       refs:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
       revision:single ? 'head' : ['base', 'head'].includes(appState.revision) ? appState.revision : 'head',
-      abort:new AbortController(), pending:new Map(), urls:new Set(), worker:null, nextId:0,
+      abort:new AbortController(), partWarn:new Set(), pending:new Map(), urls:new Set(), worker:null, nextId:0,
       assetId:0, assetNonce:crypto.randomUUID(), animationFrames:new Set(),
       available:Object.fromEntries(sides.map(side => [side, !!(model[side] || project.board.poster3d?.[side] || project.board.assets3d?.[side]?.model || model.errors?.[side])])),
       geometries:new Set(), materials:new Set(), textures:new Set(), environments:new Map(), comparisonMaterials:new Map(),
@@ -422,8 +439,9 @@ window.Review3D = (() => {
         state.loadingBySide[side] = false; state.loading = Object.values(state.loadingBySide).some(Boolean);
       }
     };
-    const roots = await Promise.all(sides.map(loadSide));
+    const [roots, ...parts] = await Promise.all([Promise.all(sides.map(loadSide)), ...sides.map(side => loadPartIndex(project.board, side, session))]);
     if (session.dead) return;
+    sides.forEach((side, i) => { state.parts[side] = parts[i]; });
     session.roots = state.roots = roots;
     const base = single ? null : roots[0], head = roots[sides.indexOf('head')], logicalRoots = [base, head];
     const box = new T.THREE.Box3(); roots.forEach(r => r && box.union(new T.THREE.Box3().setFromObject(r)));
@@ -451,7 +469,7 @@ window.Review3D = (() => {
     } else {
       const side = head ? 'head' : 'base', host = session.hostsBySide[side], otherSide = side === 'head' ? 'base' : 'head';
       try {
-        session.hostsBySide[otherSide].hidden = !state.errorsBySide[otherSide];
+        session.hostsBySide[otherSide].hidden = !state.errorsBySide[otherSide] || session.partWarn.has(otherSide);
         host.classList.toggle('one', session.hostsBySide[otherSide].hidden);
         host.querySelector('.tag').textContent = mode === 'overlay' ? 'Base position (red ghost) · Changed now (amber)' : mode === 'semantic' ? 'Changes only' : 'Base ↔ Head';
         const v = view(host, mode === 'blend' ? roots.filter(Boolean) : head ? [head] : base ? [base] : []);

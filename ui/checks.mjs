@@ -449,6 +449,24 @@ export const CHECKS = [
       return true;
     } finally { Review3D.dispose();delete REVIEW_DATA.blobs['br02-bad-poster']; }
   `],
+  ["BR02 processed corrupt part index keeps the model and warns for its side", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),stage=document.querySelector('#stage');
+    try {
+      await Review3D.show(stage,p,S);
+      const ok=Review3D.state.parts;
+      if(!ok.base.length||!ok.head.length||!ok.head.every(x=>x.bounds?.isBox3&&!x.bounds.isEmpty()))return 'valid indexes not installed with bounds';
+      if(Object.keys(Review3D.state.errorsBySide).length)return 'valid indexes warned';
+      Review3D.dispose();
+      p.board.parts3d={...p.board.parts3d,head:'br02-corrupt'};REVIEW_DATA.blobs['br02-corrupt']='not base64!';
+      await Review3D.show(stage,p,S);
+      const st=Review3D.state;
+      if(st.parts.head.length!==0)return 'corrupt index installed parts';
+      if(st.firstFrame!==true)return 'corrupt optional index killed the model';
+      if(!/Part inspection unavailable/.test(st.errorsBySide.head||''))return 'no side-specific warning';
+      return true;
+    } finally { Review3D.dispose();delete REVIEW_DATA.blobs['br02-corrupt']; }
+  `],
   ["BR02 processed loading aggregates outstanding sides", "v=3d&m=side", `
  if(!proj().board.parts3d)return 'skip';
  const Loader=THREE3D.GLTFLoader,original=Loader.prototype.parseAsync,releases=[];
