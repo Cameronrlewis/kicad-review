@@ -203,7 +203,7 @@ return true;
     const sheetSource=await jsonAsset(oldSheet.head),boardSource=await jsonAsset(oldInspect.head);
     const fixtures=[
       ['sheet',m=>{m.views[0].viewBox=[0,0,null,1];}],
-      ['sheet',m=>{m.views[1].elements[0].pins[0].x=null;}],
+      ['sheet',m=>{const view=m.views.find(v=>v.elements?.length);if(!view)throw Error('fixture lacks hotspot elements');view.elements[0].pins[0].x=null;}],
       ['sheet',m=>{m.views[0].labels=[{uuid:'bad',text:'X',kind:'label',x:null,y:0}];}],
       ['board',m=>{m.pads=[{uuid:'bad',ref:'U1',net:'',layers:['F.Cu'],hidden:false}];}],
       ['board',m=>{m.tracks[0].x1=null;}],

@@ -432,16 +432,18 @@ async function loadImageManifests(P) {
 }
 function inspectionNotice(stage, view, P) {
   if (!view || !['sheet', 'board'].includes(view.kind)) return;
-  const sheet = view.kind === 'sheet' && P.sheets.find(s => 'sheet:' + s.path === stage.dataset.view);
-  const ids = sheet ? sheet.hotspots : P.board?.inspect;
+  const sheet = view.kind === 'sheet' ? P.sheets.find(s => 'sheet:' + s.path === stage.dataset.view) : null;
+  if (view.kind === 'sheet' && !sheet) return;
+  const ids = view.kind === 'sheet' ? sheet.hotspots : P.board?.inspect;
   const layers = view.kind === 'board' ? P.board.layers : view.layers;
   const sides = ['base', 'head'].filter(side => layers.some(l => l.svg?.[side]) || view.kind === 'board' && P.board.geometry?.[side]);
-  const available = sides.length && sides.every(side => view.kind === 'board' ? decodedBoardInspect.has(ids?.[side]) :
-    decodedSheetHotspots.get(ids?.[side])?.views.some(v => v.sheet === sheet.path));
+  const declared = sides.some(side => !!ids?.[side]);
+  if (!declared) return;
+  const available = sides.length && sides.every(side => view.kind === 'board' ? !ids?.[side] || decodedBoardInspect.has(ids[side]) :
+    !ids?.[side] || decodedSheetHotspots.get(ids[side])?.views.some(v => v.sheet === sheet.path));
   if (available) return;
   const notice = document.createElement('p'); notice.className = 'inspection-unavailable'; notice.setAttribute('role', 'status');
   notice.textContent = 'Inspection unavailable for this report. Artwork remains available.';
-  notice.style.cssText = 'position:absolute;top:28px;left:8px;right:8px;z-index:5;margin:0;padding:6px 12px;background:var(--surface);color:var(--text);border:1px solid var(--line);pointer-events:none';
   stage.append(notice);
 }
 async function jsonAsset(id) {
@@ -780,8 +782,7 @@ async function draw() {
     return;
   }
   window.Review3D?.dispose();
-  await loadImageManifests(P);
-  if (my !== gen) return;
+  const manifestsReady = loadImageManifests(P);
   let scenes = null;
   const geo = S.v === "board" && view && proj().board.geometry;
   if (boardView.failed !== null && boardView.failed !== S.p) boardView.failed = boardView.note = null;
@@ -789,6 +790,8 @@ async function draw() {
   if (geo) try { scenes = [await loadBoardScene(geo.base), await loadBoardScene(geo.head)]; }
     catch (error) { if (my === gen) { console.warn("Board scene unavailable; showing SVG:", error); boardView.note = "Geometry unsupported — showing SVG"; } }
   if (my !== gen) return;   // a newer draw owns the stage
+  await manifestsReady;
+  if (my !== gen) return;
   boardView.scenes = scenes; boardView.generation = my;
   if (boardView.project !== S.p) {
     boardView.project = S.p;
