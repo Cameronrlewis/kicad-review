@@ -21,8 +21,9 @@ for(const [digest,kind,path] of [
     res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));
   });
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
-  const browser=await FrameCDP.open();
+  let browser;
   try {
+    browser=await FrameCDP.open();
     const base='http://127.0.0.1:'+server.address().port;
     await browser.root('Network.setCacheDisabled',{cacheDisabled:false});
     await browser.root('Page.navigate',{url:base});
@@ -34,5 +35,8 @@ for(const [digest,kind,path] of [
     allowed=false;
     const third=await get();assert.equal(third.status,404);assert.doesNotMatch(third.text,/private-ink/);
     assert.equal(checks,3,'a fresh browser cache hit bypassed authorization');
-  } finally {await browser.close();await new Promise(r=>server.close(r));}
+  } finally {
+    try {await browser?.close();}
+    finally {await new Promise(r=>server.close(r));}
+  }
 });

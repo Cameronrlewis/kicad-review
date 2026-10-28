@@ -3564,13 +3564,53 @@ test('digest JSON uses gzip MIME and hosted raw takes declarations only from the
   } finally { restore(); }
 });
 test('private gzip responses preserve encodeBody manual through the wrapper', async () => {
-  const Original = globalThis.Response; let encoding;
-  globalThis.Response = class extends Original { constructor(body, init) { super(body, init); encoding = init.encodeBody; } };
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  const Original = globalThis.Response, encodings = new WeakMap(); let refreshes = 0;
+  globalThis.Response = class extends Original {
+    constructor(body, init) { super(body, init); encodings.set(this, init?.encodeBody); }
+  };
+  const restore = mockFetch(async url => {
+    if (url === 'https://github.com/login/oauth/access_token') { refreshes++; return tokenResponse(); }
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
+    assert.equal(url, 'https://signed.example/envelope');
+    return new Response(storedImageReport());
+  });
   try {
-    const r = await privateAsset(request('/asset'), imageId, 'svg', async () => gzipSync(imageText));
-    assert.equal(encoding, 'manual');
-    assert.equal(r.headers.get('X-Content-Type-Options'), 'nosniff');
-  } finally { globalThis.Response = Original; }
+    for (const status of [200, 304]) {
+      const headers = { Cookie: `s=${sealed}` };
+      if (status === 304) headers['If-None-Match'] = `"${imageId}"`;
+      const r = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, { headers });
+      assert.equal(r.status, status);
+      assert.equal(encodings.get(r), 'manual', 'final session-wrapped response must preserve manual gzip encoding');
+      assert.equal(r.headers.get('Content-Encoding'), 'gzip');
+      assert.equal(r.headers.get('Content-Type'), 'image/svg+xml');
+      assert.equal(r.headers.get('Cache-Control'), 'private,no-cache');
+      assert.equal(r.headers.get('ETag'), `"${imageId}"`);
+      assert.equal(r.headers.get('Vary'), 'Cookie');
+      assert.equal(r.headers.get('X-Content-Type-Options'), 'nosniff');
+      const refreshed = cookieValue(r, 's');
+      assert.ok(refreshed); assert.notEqual(refreshed, sealed);
+      assert.equal((await open(refreshed, env)).t, 'access-secret');
+      assert.deepEqual(Buffer.from(await r.arrayBuffer()), status === 200 ? gzipSync(imageText) : Buffer.alloc(0));
+    }
+    assert.equal(refreshes, 2);
+  } finally { restore(); globalThis.Response = Original; }
+});
+for (const failure of ['open', 'close']) test(`browser cache test releases its HTTP listener when browser ${failure} fails`, () => {
+  const probe = failure === 'open'
+    ? 'export const FrameCDP={async open(){throw new Error("browser open probe failed");}};'
+    : 'export const FrameCDP={async open(){return {async root(){throw new Error("browser setup probe failed");},async close(){throw new Error("browser close probe failed");}};}};';
+  const result = spawnSync(process.execPath, ['--import', new URL('./css-loader.mjs', import.meta.url).pathname,
+    '--test', new URL('./asset-cache.test.mjs', import.meta.url).pathname], {
+    encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, FRAME_CDP: 'data:text/javascript,' + encodeURIComponent(probe) },
+  });
+  assert.equal(result.error, undefined, `cache test must exit without hanging: ${result.error}`);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'browser failure must still fail the cache test');
+  assert.match(result.stdout + result.stderr, new RegExp(`browser ${failure} probe failed`));
 });
 test('parent asset disposal aborts old navigation without delivering its late result', async () => {
   let resolve;
