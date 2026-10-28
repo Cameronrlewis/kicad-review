@@ -152,7 +152,7 @@ window.Review3D = (() => {
     if (!active) return;
     const s = active; closeSession(s); clearInterval(s.themeTimer);
     s.views.forEach(v => { clearTimeout(v.tip); v.controls.dispose(); });
-    releaseGpu(s); s.parses.clear(); s.decodedModels.clear(); s.comparisonMaterials.clear(); s.decodedScenes.length = 0;
+    releaseGpu(s); s.parses.clear(); s.decodedModels.clear(); s.decodedScenes.length = 0;
     s.state.disposed = true; s.state.loading = false;
     s.state.loadingBySide.base = s.state.loadingBySide.head = false;
     s.roots.length = 0;
@@ -350,21 +350,20 @@ window.Review3D = (() => {
   }
   // Selection outline: the part's bounding box in --accent, drawn over everything. ponytail: box, not silhouette; per-mesh edges were an unreadable tangle.
   function outline(scene, node, colour) { const { THREE }=window.THREE3D, b=new THREE.Box3().setFromObject(node), size=b.getSize(new THREE.Vector3()), e=new THREE.LineSegments(boxEdges(size),new THREE.LineBasicMaterial({color:colour,depthTest:false})); e.position.copy(b.getCenter(new THREE.Vector3())); e.renderOrder=10;e.raycast=()=>{}; scene.add(e); return e; }
-  function comparisonMaterial(source, role, change) {
-    const s = active; let roles = s.comparisonMaterials.get(source);
-    if (!roles) { roles = new Map(); s.comparisonMaterials.set(source, roles); }
-    if (!roles.has(role)) {
-      const n = source.clone();
-      if (change) { const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; } }
-      roles.set(role, n); s.materials.add(n);
+  function comparisonMaterial(source, change) {
+    const s = active; let n = s.comparisonMaterials.get(source);
+    if (!n) {
+      n = source.clone();
+      const c = tint(change.action); n.color?.lerp(c, .7); if (n.emissive) { n.emissive.copy(c); n.emissiveIntensity = .7; }
+      s.comparisonMaterials.set(source, n); s.materials.add(n);
     }
-    return roles.get(role);
+    return n;
   }
   function cloneMaterials(root, change) {
     const original = [], changed = [];
     root?.traverse(o => {
       if (!o.isMesh) return;
-      const before = materials(o), after = before.map(m => comparisonMaterial(m, 'highlight:' + change.action, change));
+      const before = materials(o), after = before.map(m => comparisonMaterial(m, change));
       original.push(...before); changed.push(...after); o.material = Array.isArray(o.material) ? after : after[0];
     });
     return {original, materials:changed};

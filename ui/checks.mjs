@@ -5086,6 +5086,16 @@ CHECKS.push(["BR02 processed overlay bare board hides ghosts and markers", "v=3d
  if(!proj().board.parts3d)return 'skip';
  const st=Review3D.state,g=st.ghosts[0],h=st.highlights.find(h=>h.marker&&!h.marker.el.hidden);
  if(!g?.object.parent||!h)return 'initial ghost or marker absent';
+ let ghostMeshes=[];g.object.traverse(n=>{if(n.isMesh)ghostMeshes.push(n);});
+ if(!ghostMeshes.length||ghostMeshes.some(n=>!n.visible))return 'initial ghost meshes hidden';
+ const visibleRoutes=[];
+ for(const phone of [false,true]) {
+   Object.assign(S,{phone,m:'overlay'});Review3D.resize();
+   const routedGhost=st.ghosts.find(x=>x.ref==='R1');
+   const routedMarker=st.highlights.find(x=>x.marker&&x.side==='head');
+   if(!routedGhost?.object.parent||!routedMarker||routedMarker.marker.el.hidden)return phone?'narrow overlay representation hidden':'wide overlay representation hidden';
+   visibleRoutes.push({routedGhost,routedMarker});
+ }
  Review3D.setAssembled(false);
  if(st.ghosts.some(g=>g.object.parent&&(()=>{let visible=false;g.object.traverse(n=>{if(n.isMesh&&n.visible)visible=true;});return visible;})()))return 'bare ghost visible';
  if(st.highlights.some(h=>h.marker&&!h.marker.el.hidden))return 'bare marker visible';
