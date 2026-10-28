@@ -4736,9 +4736,10 @@ CHECKS.push(
     const geometry=new T.BoxGeometry(2,.05,2);scene.add(new T.Mesh(geometry,material));
     const camera=new T.OrthographicCamera(-1.1,1.1,1.1,-1.1,.1,10), target=new T.WebGLRenderTarget(64,64);
     const previous=r.getRenderTarget(), viewport=r.getViewport(new T.Vector4()), scissor=r.getScissor(new T.Vector4()), scissorTest=r.getScissorTest();
+    const clearColor=r.getClearColor(new T.Color()), clearAlpha=r.getClearAlpha(), autoClear=r.autoClear;
     const sample=side=>{
       camera.position.set(0,side*3,0);camera.up.set(0,0,-side);camera.lookAt(0,0,0);camera.updateMatrixWorld();
-      r.setRenderTarget(target);r.setViewport(0,0,64,64);r.setScissorTest(false);r.clear();r.render(scene,camera);
+      r.setRenderTarget(target);r.setViewport(0,0,64,64);r.setScissorTest(false);r.autoClear=true;r.setClearColor(0x000000,0);r.clear();r.render(scene,camera);
       const pixels=new Uint8Array(64*64*4);r.readRenderTargetPixels(target,0,0,64,64,pixels);
       let sum=0;for(let y=16;y<48;y++)for(let x=16;x<48;x++){const i=(y*64+x)*4;sum+=.2126*pixels[i]+.7152*pixels[i+1]+.0722*pixels[i+2];}
       return sum/1024;
@@ -4746,6 +4747,7 @@ CHECKS.push(
     let top,bottom;
     try{top=sample(1);bottom=sample(-1);}finally{
       r.setRenderTarget(previous);r.setViewport(viewport);r.setScissor(scissor);r.setScissorTest(scissorTest);
+      r.setClearColor(clearColor,clearAlpha);r.autoClear=autoClear;
       target.dispose();material.dispose();geometry.dispose();
     }
     console.log('BOARD_PROOF rendered studio top='+top.toFixed(2)+' bottom='+bottom.toFixed(2));
