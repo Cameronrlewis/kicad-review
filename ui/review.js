@@ -528,7 +528,7 @@ function applyAppearance(snapshot) {
   for (const board of appearanceBoards) board.setAppearance(glAppearance(resolved));
   const imageJobs = [];
   for (const adapter of appearanceBoardImages) imageJobs.push(adapter.setAppearance(boardImageLook(resolved,adapter.layer)));
-  for (const c of appearanceSchematics) imageJobs.push(c.setAppearance(schematicPaints(resolved)));
+  for (const c of appearanceSchematics) imageJobs.push(c.setAppearance(c.comparison?new Map():schematicPaints(resolved)));
   if (imageJobs.length) { stage.dataset.imageReady = "false"; stage.setAttribute("aria-busy", "true"); }
   for (const vp of document.querySelectorAll('#stage .vp.board')) vp.style.background = cssAppearance(resolved.boardBackground);
   for (const vp of document.querySelectorAll('#stage .vp.sheet')) vp.style.background = cssAppearance(resolved.schematicBackground);
@@ -708,22 +708,33 @@ function schematicPaints(resolved) {
 function releaseImageStage(stage) {
   for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) c.dispose();
 }
+const comparisonSources = new Map();
 async function stack(side, view) {
   const st=document.createElement('div'); st.className=`stack ${side}`; st.imageOwners=[];
   const generation = gen;
   st.style.width=`${view.size[0]*PX}px`; st.style.height=`${view.size[1]*PX}px`;
   const theme=document.documentElement.dataset.theme==='light'?'light':'dark';
-  for (const l of view.layers) {
+  const scene=boardView.scenes?.[side==='base'?0:1]||{layers:view.layers.map(l=>({name:canon(l.name)}))};
+  const order=KicadColors.boardPriority(scene,flipOn());
+  const layers=view.kind==='board'?[...view.layers].sort((a,b)=>order.indexOf(canon(b.name))-order.indexOf(canon(a.name))):view.layers;
+  const comparison=S.m==='overlay'&&view.kind!=='lib';
+  for (const l of layers) {
     if (generation !== gen) break;
     if (!l.svg?.[side] || view.kind==='board' && boardImageLook(Appearance.get(),canon(l.name)).visible===false) continue;
     const d=document.createElement('div'); d.className='layer'; d.dataset.layer=l.name;
     try {
       const sourceTheme=l.svgThemes?.[theme]?.[side]?theme:'light';
-      const t=await svgText(l.svgThemes?.[theme]?.[side] || l.svg[side]); if (!t) continue;
+      const sourceID=comparison&&l.svgCompare?.[side]||l.svgThemes?.[theme]?.[side]||l.svg[side];
+      let t=await svgText(sourceID); if (!t) continue;
+      if(comparison&&!l.svgCompare?.[side]) {
+        const key=JSON.stringify([sourceID,side,view.kind==='sheet']);
+        if(!comparisonSources.has(key))comparisonSources.set(key,ImageView.comparisonSource(t,side,view.kind==='sheet'));
+        t=comparisonSources.get(key);
+      }
       if (view.kind==='lib') {d.innerHTML=t.slice(t.indexOf('<svg'));st.append(d);continue;}
       if(view.kind==='board') {
         const originalRGB=l.sourceRGBThemes?.[sourceTheme]||boardImageLook({layers:{}},canon(l.name)).color.slice(0,3);
-        const adapter=ImageView.boardLayer(t,originalRGB,d,{side,layer:l.name});
+        const adapter=ImageView.boardLayer(t,originalRGB,d,{side,layer:l.name,comparison});
         adapter.layer=canon(l.name);
         const dispose=adapter.dispose.bind(adapter);
         adapter.dispose=()=>{appearanceBoardImages.delete(adapter);dispose();};
@@ -735,8 +746,8 @@ async function stack(side, view) {
       st.imageOwners.push(c); // Own before appearance decode, which can reject.
       const change=c.setAppearance.bind(c);
       c.setAppearance=async paints=>{const ok=await change(paints);if(ok)c.node.imageOwner=c;return ok;};
-      c.node.imageOwner=c; c.sheet=view.kind==='sheet'; c.layer=canon(l.name);
-      if (c.sheet) await c.setAppearance(schematicPaints(KrAppearance.resolve(Appearance.get())));
+      c.node.imageOwner=c; c.sheet=view.kind==='sheet'; c.layer=canon(l.name); c.comparison=comparison;
+      if (c.sheet&&!comparison) await c.setAppearance(schematicPaints(KrAppearance.resolve(Appearance.get())));
       d.append(c.node); st.append(d);
     } catch(error) {
       const message=document.createElement('p'); message.className='image-error'; message.setAttribute('role','status');
@@ -943,6 +954,7 @@ function apply() {
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
   onApply();
+  if(currentView()?.kind==='sheet')for(const w of document.querySelectorAll('#stage .world'))mountImageMarks(w,currentView());
   if (boardDiff) { boardDiff.render(); drawPins(); }
   else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   setText($("#zoombar .pct"), Math.round(S.z / PX * 100) + "%");
@@ -1249,6 +1261,42 @@ function markersFor(view) {
   if (view.kind === "sheet") return proj().changes.filter(r => onView(r, S.v));
   return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" || r.action === "modified" && MARKED.has(r.kind)));
 }
+function imageSides(vp,point) {
+  const stacks=[...vp.querySelectorAll('.stack')];
+  const available=['base','head'].filter(side=>stacks.some(st=>st.classList.contains(side)&&st.querySelector('[data-image-artwork]')));
+  if(S.m==='side')return available;
+  if(S.m==='blend')return available.filter(side=>S.blend===0?side==='base':S.blend===1?side==='head':true).reverse();
+  if(S.m==='semantic')return [available.includes('head')?'head':'base'].filter(s=>available.includes(s));
+  if(S.m==='wipe') {
+    const r=vp.getBoundingClientRect(),screenX=r.width/2+(flipOn()?-1:1)*(point[0]-S.x)*S.z;
+    return available.filter(side=>side===(screenX<r.width*S.wipe?'base':'head'));
+  }
+  return available.reverse();
+}
+function pickImageAt(vp,event) {pickAt(vp,event);}
+function mountImageMarks(world,view) {
+  world.querySelector('.marks')?.remove();if(view.kind!=='sheet')return;
+  const ns='http:'+'//www.w3.org/2000/svg',marks=document.createElementNS(ns,'svg');
+  marks.classList.add('marks');marks.setAttribute('viewBox','0 0 '+view.size.join(' '));
+  marks.style.width=view.size[0]*PX+'px';marks.style.height=view.size[1]*PX+'px';
+  const sheet=proj().sheets.find(s=>'sheet:'+s.path===S.v),vp=world.parentElement;
+  const box=[S.x-vp.clientWidth/(2*S.z),S.y-vp.clientHeight/(2*S.z),S.x+vp.clientWidth/(2*S.z),S.y+vp.clientHeight/(2*S.z)];
+  const elements=['base','head'].filter(side=>world.querySelector('.stack.'+side+' [data-image-artwork]')).flatMap(side=>
+    (decodedSheetHotspots.get(sheet?.hotspots?.[side])?.views.find(v=>v.sheet===sheet.path)?.elements||[]).map(e=>({...e,side})));
+  // Bound the combined pane, not each revision separately; smaller targets draw last.
+  for(const e of ImageView.visibleHotspots(elements,box)) {
+    const r=document.createElementNS(ns,'rect'),[x,y,x1,y1]=e.bbox;
+    for(const [key,value] of Object.entries({x,y,width:x1-x,height:y1-y}))r.setAttribute(key,value);
+    r.dataset.hotspot=e.uuid;r.dataset.side=e.side;
+    r.addEventListener('click',event=>{
+      event.stopPropagation();
+      if(imageSides(vp,toWorld(vp,event)).includes(e.side))pickImageAt(vp,event);
+      else pickAt(vp,event); // A target on the other Wipe side must not swallow the click.
+    });
+    marks.append(r);
+  }
+  world.append(marks);
+}
 function afterDraw(view) {
   renderInspector();
   syncMarkStyles();
@@ -1256,6 +1304,7 @@ function afterDraw(view) {
   refreshAppearance();
   const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
   for (const w of document.querySelectorAll("#stage .world")) {
+    mountImageMarks(w,view);
     const side = sideOf(w);
     const marked = [...markersFor(view)];
     const rows = view.kind === "sheet"
@@ -1348,12 +1397,12 @@ function pickAt(vp, e) {
   }
   const [x, y] = toWorld(vp, e);
   const rows = proj().changes.filter(c => onView(c, S.v));
-  const side = sideOf(vp);
-  const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
+  const sides=vp.querySelector('[data-image-artwork]')?imageSides(vp,[x,y]):[sideOf(vp)];
+  const hit=sides.map(side=>hitTest(rows.filter(r=>side==='base'?r.action!=='added':r.action!=='removed'),x,y,rows.find(c=>c.id===S.s)||null,side)).find(Boolean);
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
   else {
-    const o = (proj().objects || []).find(o => objView(o) === S.v && (o.side || "head") === side &&
-      (o.box ? x >= o.box[0] && y >= o.box[1] && x <= o.box[2] && y <= o.box[3] : o.pos && Math.hypot(x-o.pos[0], y-o.pos[1]) < 2));
+    const o = sides.map(side=>(proj().objects || []).find(o => objView(o) === S.v && (o.side || "head") === side &&
+      (o.box ? x >= o.box[0] && y >= o.box[1] && x <= o.box[2] && y <= o.box[3] : o.pos && Math.hypot(x-o.pos[0], y-o.pos[1]) < 2))).find(Boolean);
     if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
   }
 }

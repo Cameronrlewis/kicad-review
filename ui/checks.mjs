@@ -44,6 +44,168 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ['images compare and four copper layers', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const p=D.projects.findIndex(p=>p.board.layers.filter(l=>/^(F|In1|In2|B)[_.]Cu$/.test(l.name)).length===4);
+    if(p<0)return 'skip';
+    const old=BoardGL.create,look=Appearance.get(),state={...S},failed=boardView.failed;
+    const close=(a,b,t=2)=>a.every((v,i)=>Math.abs(v-b[i])<=t);
+    const pixel=(image,x,y,alpha=1)=>{const c=new OffscreenCanvas(400,200),ctx=c.getContext('2d');ctx.globalAlpha=alpha;ctx.drawImage(image,0,0,400,200);return [...ctx.getImageData(x,y,1,1).data];};
+    BoardGL.create=()=>null;
+    try {
+      boardView.failed=p;
+      const orders=[];
+      for(const flip of [false,true])for(const mode of ['side','overlay','blend','wipe','semantic']) {
+        Appearance.patch({flip});
+        await applyState({...S,p,v:'board',m:mode,layers:D.projects[p].board.layers.map(l=>l.name),x:10,y:5,z:20});
+        const stacks=[...document.querySelectorAll('#stage .stack')],names=stacks[0];
+        const copper=[...names.querySelectorAll('.layer')].map(e=>canon(e.dataset.layer)).filter(n=>n.endsWith('.Cu'));
+        if(new Set(copper).size!==4)return 'missing physical copper '+copper;
+        const order=KicadColors.boardPriority(boardView.scenes?.find(Boolean)||{layers:copper.map(name=>({name}))},flipOn()).filter(n=>copper.includes(n)).reverse();
+        if(copper.join()!==order.join())return 'wrong physical order '+copper;
+        if(mode==='side')orders.push(copper);
+        if(![...document.querySelectorAll('#stage img[data-image-artwork]')].every(i=>i.complete&&i.naturalWidth))return 'undecoded comparison';
+        if(document.querySelector('#stage .layer svg')||document.querySelector('#stage .layer[style*=filter]'))return 'live artwork/filter';
+        for(const st of stacks)for(const layer of st.querySelectorAll('.layer')) {
+          const side=st.classList.contains('base')?'base':'head',name=canon(layer.dataset.layer),adapter=st.imageOwners.find(a=>a.layer===name);
+          if(mode==='overlay') {
+            if(adapter.controller.source!==await svgText(D.projects[p].board.layers.find(l=>l.name===layer.dataset.layer).svgCompare[side]))return 'wrong comparison source';
+          } else if(name.endsWith('.Cu')&&!adapter.controller.appliedSource.includes(ImageView.rgbHex(KicadColors.layers[name])))return 'KiCad swatch '+name;
+        }
+        if(D.repo==='fixture/images') {
+          const blank=names.querySelector('[data-layer="Dwgs_User"] img');
+          if(!blank||pixel(blank,60,100)[3]!==0)return 'blank layer unavailable '+mode;
+          if(!document.querySelector('.no-change-notice'))return 'unchanged board unavailable';
+        }
+        if(document.querySelectorAll('#modes [data-mode]').length!==5||!document.querySelector('.diff-mark-legend'))return 'comparison controls/legend';
+      }
+      if(orders[0].join()!==[...orders[1]].reverse().join())return 'flip did not reverse copper';
+      // A two-layer Base must not impose its stack on a four-layer Head.
+      const scenes=boardView.scenes;
+      try {
+        boardView.scenes=[{...scenes[0],copperStack:['F.Cu','B.Cu']},scenes[1]];
+        const st=await stack('head',currentView());
+        try {
+          const copper=[...st.querySelectorAll('.layer')].map(l=>canon(l.dataset.layer)).filter(n=>n.endsWith('.Cu'));
+          if(copper.join()!=='F.Cu,In1.Cu,In2.Cu,B.Cu')return 'revision-specific physical order '+copper;
+        } finally {for(const owner of st.imageOwners)owner.dispose();}
+      } finally {boardView.scenes=scenes;}
+      // Same-layer overlap gets alpha once, not once per source path.
+      Appearance.patch({flip:false});
+      await applyState({...S,p,v:'board',m:'side'});
+      const front=[...appearanceBoardImages].find(a=>a.layer==='F.Cu');
+      const color=KicadColors.layers['F.Cu'];
+      await front.setAppearance({color,opacity:.5,visible:true});
+      const image=front.controller.node,alpha=+image.parentElement.style.opacity;
+      if(alpha!==.5*color[3])return 'layer wrapper alpha';
+      const single=pixel(image,60,100,alpha),overlap=pixel(image,120,100,alpha);
+      if(!close(single,overlap)||!close(single,[...color.slice(0,3),128]))return 'per-path opacity '+single+' / '+overlap;
+      // Producer resources: opaque board tint and untouched transparent background.
+      await applyState({...S,p,v:'board',m:'overlay'});
+      for(const side of ['base','head']) {
+        const img=document.querySelector('#stage .stack.'+side+' [data-layer="F_Cu"] img');
+        const expected=side==='base'?[217,26,38,255]:[26,153,51,255];
+        if(!close(pixel(img,60,100),expected)||pixel(img,399,199)[3]!==0)return 'board tint pixels '+side+' '+pixel(img,60,100);
+      }
+      const composite=new OffscreenCanvas(400,200),ctx=composite.getContext('2d');
+      for(const side of ['base','head']) {
+        ctx.globalCompositeOperation=side==='base'?'source-over':'multiply';
+        ctx.drawImage(document.querySelector('#stage .stack.'+side+' [data-layer="F_Cu"] img'),0,0,400,200);
+      }
+      if(!close([...ctx.getImageData(60,100,1,1).data],[22,16,8,255]))return 'unchanged multiply pixel';
+      if(getComputedStyle(document.querySelector('#stage .stack.head')).mixBlendMode!=='multiply'||getComputedStyle(document.querySelector('#stage .world')).isolation!=='isolate')return 'missing multiply isolation';
+      return true;
+    } finally {BoardGL.create=old;Appearance.set(look);boardView.failed=failed;await applyState(state);}
+  `],
+  ['images comparison pixels legacy and bounded marks', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const state={...S},look=Appearance.get(),p=0,sheet=D.projects[p].sheets.find(s=>s.path==='/left/');
+    const compare=sheet.svgCompare,original=ImageView.comparisonSource;
+    const sample=(image,x,y)=>{const c=new OffscreenCanvas(1188,840),ctx=c.getContext('2d');ctx.drawImage(image,0,0,1188,840);return [...ctx.getImageData(x,y,1,1).data];};
+    const close=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=2);
+    try {
+      Appearance.patch({flip:false});
+      await applyState({...S,p,v:'sheet:'+sheet.path,m:'overlay',x:105,y:55,z:15});
+      const prepared={};
+      for(const side of ['base','head']) {
+        const image=document.querySelector('#stage .stack.'+side+' img'),x=side==='base'?362:372;
+        const color=side==='base'?[217,26,38]:[26,153,51],alpha=Math.round(255-.59*150);
+        prepared[side]=sample(image,x,140);
+        if(!close(prepared[side],[...color,alpha])||sample(image,1180,830)[3]!==0)return 'schematic darkness alpha '+side+' '+prepared[side];
+      }
+      const controllers=[...appearanceSchematics];
+      Appearance.import(JSON.stringify({meta:{version:5},schematic:{wire:'#135724'}}));await applyAppearance(Appearance.get());
+      if(!controllers.every(c=>c.appliedSource===c.source))return 'appearance retinted Overlay';
+      if([...document.querySelectorAll('#stage .layer')].some(l=>getComputedStyle(l).filter!=='none'))return 'live comparison filter';
+      if(![...document.querySelectorAll('#stage .marker,.pin')].every(n=>!n.closest('.stack')))return 'marks inherit artwork opacity';
+      const marks=document.querySelector('#stage .marks'),rects=[...marks.children];
+      if(!rects.length||rects.length>400)return 'missing or unbounded hotspot targets';
+      const areas=rects.map(r=>+r.getAttribute('width')*+r.getAttribute('height'));
+      if(areas.some((a,i)=>i&&a>areas[i-1]))return 'targets not smallest frontmost';
+      const before=rects.length;S.x=10000;apply();
+      if(document.querySelector('#stage .marks').children.length)return 'offscreen targets retained';
+      S.x=105;apply();if(document.querySelector('#stage .marks').children.length!==before)return 'camera did not refresh targets';
+      const views=['base','head'].map(side=>decodedSheetHotspots.get(sheet.hotspots[side]).views.find(v=>v.sheet===sheet.path));
+      const originals=views.map(v=>v.elements);
+      try {
+        for(const v of views)v.elements=Array.from({length:600},(_,i)=>({uuid:'dense-'+i,bbox:[100,54,101+i/1000,55]}));
+        apply();
+        if(document.querySelector('#stage .marks').children.length!==400||document.querySelectorAll('*').length>=2000)return 'combined pane hotspot DOM budget';
+      } finally {views.forEach((v,i)=>v.elements=originals[i]);apply();}
+      // Legacy data has no pre-tinted resources. Rewrite detached source once per source/side.
+      sheet.svgCompare=undefined;comparisonSources.clear();let calls=0;
+      ImageView.comparisonSource=(...args)=>{calls++;return original(...args);};
+      for(let n=0;n<2;n++) {
+        await draw();
+        for(const side of ['base','head']) {
+          const image=document.querySelector('#stage .stack.'+side+' img'),x=side==='base'?362:372;
+          if(!close(sample(image,x,140),prepared[side]))return 'legacy/prepared pixels differ '+side;
+        }
+      }
+      if(calls!==2)return 'legacy tint not memoized '+calls;
+      // A foreign-side transparent target still routes the click to the visible revision.
+      await applyState({...S,m:'wipe'});S.wipe=1;apply();
+      const vp=document.querySelector('#stage .vp'),rect=vp.querySelector('.marks [data-side="head"]');
+      let routed=0;const oldPick=pickAt;pickAt=()=>{routed++;};
+      try {rect.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:vp.getBoundingClientRect().left+vp.clientWidth/2,clientY:vp.getBoundingClientRect().top+vp.clientHeight/2}));}
+      finally {pickAt=oldPick;}
+      return routed===1||'Wipe target swallowed click';
+    } finally {sheet.svgCompare=compare;ImageView.comparisonSource=original;Appearance.set(look);await applyState(state);}
+  `],
+  ['images comparison endpoints and missing sides', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const state={...S},look=Appearance.get();
+    try {
+      for(let p=0;p<D.projects.length;p++)for(const sheet of D.projects[p].sheets) {
+        await applyState({...S,p,v:'sheet:'+sheet.path,m:'semantic',x:105,y:55,z:5});
+        const vp=document.querySelector('#stage .vp'),expected=sheet.svg.head?'head':'base';
+        const visible=[...vp.querySelectorAll('.stack')].filter(st=>getComputedStyle(st).display!=='none'&&st.querySelector('[data-image-artwork]'));
+        if(visible.length!==1||!visible[0].classList.contains(expected)||getComputedStyle(visible[0]).opacity!=='0.8')return 'missing-side Semantic '+p;
+        if(!visible[0].querySelector('img').naturalWidth)return 'Semantic decode';
+      }
+      const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg.base&&s.svg.head));
+      if(p<0)return 'fixture needs two revisions';
+      const sheet=D.projects[p].sheets.find(s=>s.svg.base&&s.svg.head);
+      for(const flip of [false,true])for(const mode of ['wipe','blend']) {
+        Appearance.patch({flip});
+        await applyState({...S,p,v:'sheet:'+sheet.path,m:mode,x:105,y:55,z:5});
+        const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect(),point=[S.x,S.y];
+        for(const endpoint of [0,1]) {
+          if(mode==='wipe'){S.wipe=endpoint;apply();}
+          else {S.blend=endpoint;renderModes();const input=document.querySelector('#modes input');input.value=endpoint*100;input.dispatchEvent(new Event('input'));}
+          const expected=endpoint===0?(mode==='wipe'?'head':'base'):(mode==='wipe'?'base':'head');
+          if(imageSides(vp,point).join()!==expected)return mode+' endpoint routing '+flip+' '+endpoint;
+          if(mode==='blend'&&+vp.querySelector('.head').style.opacity!==endpoint)return 'Blend opacity';
+          if(mode==='wipe') {
+            const d=vp.querySelector('.divider');
+            if(+d.getAttribute('aria-valuenow')!==endpoint*100||Math.abs(parseFloat(d.style.left)-r.width*endpoint)>1)return 'Wipe divider';
+            if(!vp.querySelector('.base').style.clipPath||!vp.querySelector('.head').style.clipPath)return 'Wipe clipping';
+          }
+        }
+      }
+      return true;
+    } finally {Appearance.set(look);await applyState(state);}
+  `],
   ["images every sheet whole-page DOM budget", "", `
     Object.assign(S.filter,{added:true,removed:true,modified:true,kind:'',q:'',all:false,sort:'',group:''});
     let count=0;
@@ -4610,3 +4772,22 @@ CHECKS.push(['digest assets offline embedded closure', '', `
   const originalFetch=window.fetch;
   window.fetch=function(...args){window.__offlineAssetFetches.push(String(args[0]));return originalFetch.apply(this,args);};
 `}]);
+
+// Disposable proof pages deliberately retain the selected view for --shot.
+for(const [kind,mode,flip] of [['sheet','overlay',false],['board','side',false],['board','side',true]]) {
+  CHECKS.push(['images complete-screen '+kind+(kind==='board'?(flip?' flipped':' normal'):''),'',`
+    if(D.repo!=='fixture/images')return 'skip';
+    const original=BoardGL.create;
+    try {
+      if(${JSON.stringify(kind)}==='board'){BoardGL.create=()=>null;boardView.failed=0;}
+      Appearance.patch({flip:${flip}});
+      await applyState({...S,p:0,v:${JSON.stringify(kind==='sheet'?'sheet:/left/':'board')},m:${JSON.stringify(mode)},t:${JSON.stringify(kind==='sheet'?'changes':'appearance')},x:${kind==='sheet'?105:10},y:${kind==='sheet'?55:5},z:${kind==='sheet'?15:20}});
+      const stage=document.querySelector('#stage'),pane=stage.querySelector('.vp'),box=pane.getBoundingClientRect();
+      if(stage.dataset.imageReady!=='true'||stage.querySelector('.image-error'))return 'proof image unavailable';
+      if(![...stage.querySelectorAll('img')].every(i=>i.complete&&i.naturalWidth))return 'proof decode';
+      if(box.width<=0||box.height<=0||box.left<0||box.right>innerWidth+1)return 'proof outside screen';
+      if(!stage.querySelector('.diff-mark-legend')||document.querySelectorAll('*').length>=2000)return 'proof legend/DOM budget';
+      return true;
+    } finally {BoardGL.create=original;}
+  `]);
+}

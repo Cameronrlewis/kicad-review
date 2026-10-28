@@ -71,7 +71,7 @@
         }
         if(hidden){c=controller(normalized,options,env);hidden=false;}
         const current=c;
-        const applied=await current.setAppearance(new Map([[rgbHex(original),rgbHex(look.color)]]));
+        const applied=await current.setAppearance(options.comparison?new Map():new Map([[rgbHex(original),rgbHex(look.color)]]));
         if(!applied||disposed||hidden||current!==c||!current.node)return false;
         if(!current.node.isConnected)wrapper.replaceChildren(current.node);
         return true;
@@ -161,6 +161,24 @@
       smallest(vias.filter(v=>v.d<=reach))||nearest(tracks.filter(v=>v.d<=reach))||null;
   }
 
+  function comparisonSource(text,side,schematic) {
+    const root=new DOMParser().parseFromString(text,'image/svg+xml').documentElement;
+    const ns='http:'+'//www.w3.org/2000/svg',uid='kr-image-'+side;
+    const element=(name,attrs={})=>{const e=document.createElementNS(ns,name);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);return e;};
+    const defs=element('defs'),f=element('filter',{id:uid,'color-interpolation-filters':'sRGB'});
+    const rgb=side==='base'?[.85,.1,.15]:[.1,.6,.2];
+    f.append(element('feColorMatrix',{type:'matrix',values:rgb.map(v=>'0 0 0 0 '+v).join(' ')+' '+(schematic?'-.3 -.59 -.11 1 0':'0 0 0 1 0')}));defs.append(f);
+    const group=element('g',{filter:`url(#${uid})`});
+    for(const child of [...root.children])if(!['defs','title','desc'].includes(child.localName))group.append(child);
+    root.append(defs,group);return new XMLSerializer().serializeToString(root);
+  }
+  function visibleHotspots(elements,box,limit=400) {
+    const intersects=b=>b[2]>=box[0]&&b[0]<=box[2]&&b[3]>=box[1]&&b[1]<=box[3];
+    const area=e=>(e.bbox[2]-e.bbox[0])*(e.bbox[3]-e.bbox[1]);
+    // ponytail: 400 DOM targets per pane; point scan keeps omitted targets pickable.
+    return elements.filter(e=>intersects(e.bbox)).sort((a,b)=>area(a)-area(b)).slice(0,limit).reverse();
+  }
+
   const live = new Set();
   async function mount(text, size, options) {
     const c=controller(text,options), dispose=c.dispose.bind(c);
@@ -168,7 +186,7 @@
     try {await c.setAppearance(new Map());return c;}
     catch(error){c.dispose();throw error;}
   }
-  globalThis.ImageView={replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,
+  globalThis.ImageView={replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,
     disposeAll(){for(const c of [...live])c.dispose();},
     segmentDistance,polygonDistance,primitiveDistance,inspectHit};
 })();

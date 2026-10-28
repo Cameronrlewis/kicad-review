@@ -26,6 +26,30 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import kicad_review as kr
 
+# Comparison resources preserve source paint and transparency; filtering happens inside the image.
+s = '<svg xmlns="http://www.w3.org/2000/svg"><path stroke="#009600" fill="none" d="M 1 1 L 2 2"/></svg>'
+t = kr.comparison_svg(s, 'base', schematic=True)
+assert '0 0 0 0 0.85' in t and 'fill="none"' in t
+assert '-.3 -.59 -.11 1 0' in t and '<script' not in t
+for side, first in (('base', '0.85'), ('head', '0.1')):
+    for schematic in (False, True):
+        text = kr.comparison_svg(s, side, schematic)
+        assert '0 0 0 0 ' + first in text
+        assert ('-.3 -.59 -.11 1 0' if schematic else '0 0 0 1 0') in text
+# Definitions and metadata stay outside the single filtered artwork group.
+import xml.etree.ElementTree as ET
+source = '<svg xmlns="http://www.w3.org/2000/svg"><defs><path id="shape" d="M0 0h1"/></defs><title>Artwork</title><use href="#shape"/></svg>'
+root = ET.fromstring(kr.comparison_svg(source, 'base'))
+assert [c.tag.rsplit('}', 1)[-1] for c in root] == ['defs', 'title', 'defs', 'g']
+assert root[-1][0].get('href') == '#shape'
+with patch.dict(ET._namespace_map):
+    expected = kr.comparison_svg(source, 'head', True)
+    ET.register_namespace('unrelated', 'http://www.w3.org/2000/svg')
+    before = ET._namespace_map.copy()
+    assert kr.comparison_svg(source, 'head', True) == expected
+    assert ET._namespace_map == before
+print('ok image comparison source matrix, retained definitions and deterministic namespace')
+
 four = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb')
 assert kr.board_layers(str(four)) == ['B.Cu', 'In2.Cu', 'In1.Cu', 'F.Cu']
 with TemporaryDirectory() as d:
@@ -755,7 +779,8 @@ with TemporaryDirectory() as t:
         artwork = {key for pair in pg['svgThemes'].values() for key in pair.values()}
         assert artwork == {pg['svg']['head']}, 'unchanged artwork deduplicates independently of manifests'
         assert pg['hotspots']['base'] == pg['hotspots']['head']
-        assert len(blobs) == 2, 'one drawing and one revision manifest'
+        assert pg['svgCompare']['base'] != pg['svgCompare']['head'], 'tinted bytes never define identity'
+        assert len(blobs) == 4, 'one drawing, one revision manifest and two comparison resources'
         # Missing root identity is a legacy compatibility case, not a fabricated anchor.
         pathlib.Path('head/H/H.kicad_sch').write_text('(kicad_sch (paper A4))')
         legacy = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS)
@@ -4522,6 +4547,10 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
                         ink = '#%02x%02x%02x' % tuple(kr.IMAGE_PALETTES[theme]['sourceRGB'][canonical])
                         themed = text.replace(colors[0], ink)
                         write('.', {f'{out}/{side}/{folder}/Images-{layer}.svg': themed})
+                # An exported, empty technical layer remains a real selectable image.
+                for folder in ('pcb', 'pcb-dark'):
+                    write('.', {f'{out}/{side}/{folder}/Images-Dwgs_User.svg':
+                                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297.0022 210.0072"><g/></svg>'})
             with patch.object(kr, 'sheet_pages', wraps=kr.sheet_pages) as parsed_pages:
                 image_project = build_augmented_image_project(desc, image_blobs, settings, committed_svg)
             # Per revision: producer page cache, hotspot parser, and object parser.
@@ -4551,11 +4580,21 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
                 assert covering[-1].get('fill') == ('#abcdef' if fx == .75 else '#%02x%02x%02x' % tuple(kr.IMAGE_PALETTES['light']['sourceRGB']['F.Cu']))
     finally:
         os.chdir(old)
-    copper = {r['name'].replace('_', '.'): r for r in image_project['board']['layers']}
+    copper = {r['name'].replace('_', '.'): r for r in image_project['board']['layers'] if r['name'].endswith('_Cu')}
     assert set(copper) == {'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'}
     for layer in copper.values():
         for side in ('base', 'head'):
             assert '<svg' in gzip.decompress(base64.b64decode(image_blobs[layer['svg'][side]])).decode()
+    for project in [image_project, *missing_projects]:
+        for rows, schematic in ((project['sheets'], True), (project['board']['layers'], False)):
+            for row in rows:
+                for side in ('base', 'head'):
+                    key = row['svgCompare'][side]
+                    assert bool(key) == bool(row['svg'][side])
+                    if key:
+                        text = gzip.decompress(base64.b64decode(image_blobs[key])).decode()
+                        assert text == kr.comparison_svg(gzip.decompress(base64.b64decode(image_blobs[row['svg'][side]])).decode(), side, schematic)
+                        assert '0 0 0 0 ' + ('0.85' if side == 'base' else '0.1') in text
     data = {'version': 1, 'repo': 'fixture/images', 'base': 'a'*40, 'head': 'b'*40,
             'links': {}, 'run_url': '', 'reason': 'synthetic image regression', 'settings': settings,
             'projects': [image_project, *missing_projects], 'blobs': image_blobs}
@@ -4563,6 +4602,11 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
     with TemporaryDirectory() as directory:
         html = kr.finalize_report(data, directory)
         assert not re.search(r'<(?:script[^>]+src|link[^>]+href)=', html)
+        for project in data['projects']:
+            for row in project['sheets'] + project['board']['layers']:
+                for key in filter(None, row['svgCompare'].values()):
+                    assert data['assets'][key] == {'kind': 'svg', 'name': 'comparison.svg'}
+                    assert pathlib.Path(directory, key + '.svg.gz').read_bytes() == base64.b64decode(image_blobs[key])
     destination.write_text('window.REVIEW_DATA = ' + json.dumps(data, separators=(',', ':')).replace('<', '\\u003c') + ';\n')
     return image_project, image_blobs
 

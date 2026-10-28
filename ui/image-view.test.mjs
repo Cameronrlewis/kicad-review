@@ -479,3 +479,25 @@ test('inspection notice distinguishes missing revisions and absent sheet paths w
   api.decodedBoardInspect.set('base',boardManifest);api.decodedBoardInspect.set('head',boardManifest);
   context.inspectionNotice(stage,{kind:'board',layers:[]},project);assert.equal(notices.length,0);
 });
+
+test('visible hotspots cull viewport, cap 400, draw smallest last without mutating data', () => {
+  const elements=Array.from({length:600},(_,i)=>({uuid:String(i),bbox:[0,0,i+1,i+1]}));
+  elements.push({uuid:'outside',bbox:[1000,1000,1001,1001]});
+  const selected=ctx.ImageView.visibleHotspots(elements,[0,0,10,10]);
+  assert.equal(selected.length,400);
+  assert.equal(selected[0].uuid,'399');assert.equal(selected.at(-1).uuid,'0');
+  assert.equal(elements[0].uuid,'0');assert.equal(elements.at(-1).uuid,'outside');
+  assert.deepEqual(Array.from(ctx.ImageView.visibleHotspots(elements,[1000,1000,1000,1000],1),e=>e.uuid),['outside']);
+  assert.equal(ctx.ImageView.visibleHotspots(elements,[0,0,10,10],0).length,0);
+});
+
+test('comparison board adapter keeps fixed source tint but applies wrapper alpha and opacity', async () => {
+  const made=[],env={create:text=>{made.push(text);return 'blob:'+made.length;},revoke(){},
+    make:()=>({dataset:{},decode:async()=>{},remove(){},removeAttribute(){}})};
+  const wrapper={style:{},replaceChildren(n){this.node=n;}};
+  const source='<svg fill="#c83434"><filter><feColorMatrix values="0 0 0 0 0.85"/></filter></svg>';
+  const adapter=ctx.ImageView.boardLayer(source,[200,52,52],wrapper,{side:'base',layer:'F.Cu',comparison:true},env);
+  await adapter.setAppearance({color:[1,2,3,.5],opacity:.5,visible:true});
+  assert.equal(made[0],source);assert.equal(wrapper.style.opacity,'0.25');
+  assert.equal(wrapper.hidden,false);assert.ok(wrapper.node);adapter.dispose();
+});

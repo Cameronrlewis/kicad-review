@@ -2843,6 +2843,35 @@ def svg_body(path):
         return re.sub(r"<title>.*?</title>", "", fh.read(), count=1, flags=re.S)
 
 
+def comparison_svg(text, side, schematic=False):
+    """Tint inside the decoded image, preserving custom source paints and alpha."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(text)
+    ns = '{http://www.w3.org/2000/svg}'
+    uid = 'kr-image-' + side
+    rgb = (.85, .1, .15) if side == 'base' else (.1, .6, .2)
+    alpha = '-.3 -.59 -.11 1 0' if schematic else '0 0 0 1 0'
+    defs = ET.SubElement(root, ns + 'defs')
+    filt = ET.SubElement(defs, ns + 'filter', {'id': uid, 'color-interpolation-filters': 'sRGB'})
+    matrix = ' '.join(f'0 0 0 0 {v}' for v in rgb) + ' ' + alpha
+    ET.SubElement(filt, ns + 'feColorMatrix', {'type': 'matrix', 'values': matrix})
+    group = ET.Element(ns + 'g', {'filter': f'url(#{uid})'})
+    for child in list(root):
+        if child is defs or child.tag.rsplit('}', 1)[-1] in ('defs', 'title', 'desc'):
+            continue
+        root.remove(child)
+        group.append(child)
+    root.append(group)
+    # Stable digest bytes must not depend on another exporter registering a prefix.
+    namespace_map = ET._namespace_map.copy()
+    try:
+        ET.register_namespace('', 'http://www.w3.org/2000/svg')
+        return ET.tostring(root, encoding='unicode')
+    finally:
+        ET._namespace_map.clear()
+        ET._namespace_map.update(namespace_map)
+
+
 def svg_viewbox(text):
     match = re.search(r"viewBox\s*=\s*[\"']([^\"']+)[\"']", text)
     values = [float(v) for v in re.split(r"[\s,]+", match[1].strip())] if match else []
@@ -2993,6 +3022,14 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
             row['svgThemes'][theme] = pair
         canonical = row['name'].replace('_', '.')
         row['sourceRGBThemes'] = {t: IMAGE_PALETTES[t]['sourceRGB'].get(canonical, [255, 255, 255]) for t in ('light', 'dark')}
+    for rows, schematic in ((sheets, True), (board['layers'], False)):
+        for row in rows:
+            pair = {}
+            for side in ('base', 'head'):
+                key = row['svg'][side]
+                text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
+                pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
+            row['svgCompare'] = pair
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     changes = diff_objects(objs["base"], objs["head"])
     for n, change in enumerate(changes, change_offset + 1):
@@ -3112,7 +3149,7 @@ def image_asset_declarations(projects):
     # Shared content has one descriptor. Prefer board roles explicitly, not by
     # traversal order, preserving the established layer/inspection filenames.
     priority = {'sheet.svg': 0, 'layer.svg': 1,
-                'sheet-hotspots.json': 0, 'board-inspect.json': 1}
+                'sheet-hotspots.json': 0, 'board-inspect.json': 1, 'comparison.svg': 2}
 
     def declare(pair, kind, name):
         for key in (pair or {}).values():
@@ -3126,10 +3163,12 @@ def image_asset_declarations(projects):
     for project in projects:
         for sheet in project.get('sheets', []):
             declare(sheet.get('hotspots'), 'json', 'sheet-hotspots.json')
+            declare(sheet.get('svgCompare'), 'svg', 'comparison.svg')
             for pair in sheet.get('svgThemes', {}).values():
                 declare(pair, 'svg', 'sheet.svg')
         declare(project.get('board', {}).get('inspect'), 'json', 'board-inspect.json')
         for layer in project.get('board', {}).get('layers', []):
+            declare(layer.get('svgCompare'), 'svg', 'comparison.svg')
             for pair in layer.get('svgThemes', {}).values():
                 declare(pair, 'svg', 'layer.svg')
     return assets
