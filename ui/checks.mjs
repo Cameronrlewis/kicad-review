@@ -5416,6 +5416,9 @@ CHECKS.push(['images inspection complete-screen','',`
   return true;
 `]);
 
+// Presentation and trusted-pointer regression, not hosted transport acceptance.
+// site/test.mjs exercises production lazy consumers/client/parent together; Task 11.1
+// must cover the real sandbox frame, wrapper and authenticated raw delivery in Chrome.
 CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
   if(D.repo!=='fixture/images')return 'skip';
   await applyState({...S,p:0,v:'sheet:/left/',m:'side'});
@@ -5437,7 +5440,18 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     const box=button.getBoundingClientRect();
     if(box.height<44||box.width<44||error.closest('.world'))return 'retry scales with drawing or misses touch target';
     if(box.left<0||box.right>innerWidth||box.top<0||box.bottom>innerHeight)return 'retry outside screen';
-    assetText=original;button.click();
+    if(typeof window.__checkMouseClick!=='function')return 'trusted retry input unavailable';
+    const vp=button.closest('.vp'),camera=[S.x,S.y,S.z];let trusted=false,captured=false;
+    button.addEventListener('click',e=>{trusted=e.isTrusted;},{once:true});
+    vp.addEventListener('gotpointercapture',()=>{captured=true;},{once:true});
+    assetText=original;
+    await new Promise(resolve=>{
+      window.__checkMouseDone=resolve;
+      window.__checkMouseClick(JSON.stringify({x:box.left+box.width/2,y:box.top+box.height/2}));
+    });
+    delete window.__checkMouseDone;
+    if(!trusted||captured)return 'trusted retry click captured by drawing viewport';
+    if(camera.some((value,i)=>value!==[S.x,S.y,S.z][i]))return 'retry changed drawing camera';
     for(let i=0;i<200&&document.querySelector('#stage').dataset.imageReady!=='true';i++)await new Promise(r=>nativeTimeout(r,10));
     if(document.querySelector('#stage .image-error')||document.querySelectorAll('#stage img[data-image-artwork]').length!==2)return 'retry failed';
     // Leave the unavailable state on screen for the complete-screen evidence capture.

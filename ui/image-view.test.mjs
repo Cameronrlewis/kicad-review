@@ -696,8 +696,11 @@ test('asset client bounds jobs and bytes, times out, and isolates replacement vi
   const first=local.ImageView.assetClient(host,allowed,scope);
   const jobs=Array.from({length:8},()=>first.get('abcdef123456','svg'));
   const rejections=jobs.map(p=>assert.rejects(p,/timeout; retry available/));
-  await assert.rejects(first.get('abcdef123456','svg'),/unavailable/);assert.equal(sent.length,8);
-  for(const [id,fn] of [...timers]){timers.delete(id);fn();}await Promise.all(rejections);
+  const queued=first.get('abcdef123456','svg'),queueRejection=assert.rejects(queued,/timeout; retry available/);
+  assert.equal(sent.length,8);assert.equal(timers.size,8);
+  for(const [id,fn] of [...timers]){timers.delete(id);fn();}
+  assert.equal(sent.length,9);assert.equal(timers.size,1);
+  for(const [id,fn] of [...timers]){timers.delete(id);fn();}await Promise.all([...rejections,queueRejection]);
   const pending=first.get('abcdef123457','json'),bad=assert.rejects(pending,/unavailable/);
   for(const listener of listeners)listener({source:host,data:{kicadReviewAssetResult:{...sent.at(-1),text:'é'.repeat(2*1024*1024+1)}}});
   await bad;assert.equal(timers.size,0);
@@ -709,4 +712,31 @@ test('asset client bounds jobs and bytes, times out, and isolates replacement vi
   await Promise.resolve();assert.equal(settled,false);assert.notEqual(old.requestId,sent.at(-1).requestId);
   for(const listener of listeners)listener({source:host,data:{kicadReviewAssetResult:{...sent.at(-1),text:'<svg/>'}}});
   assert.equal(await fresh,'<svg/>');next.dispose();assert.equal(timers.size,0);
+});
+
+
+test('asset client drains a bounded FIFO without rejecting multi-project bursts',async()=>{
+  const listeners=new Set(),sent=[],host={postMessage:m=>sent.push(m.kicadReviewAsset)};
+  const scope={addEventListener:(_,f)=>listeners.add(f),removeEventListener:(_,f)=>listeners.delete(f)};
+  const allowed=Object.fromEntries(Array.from({length:32},(_,i)=>[i.toString(16).padStart(12,'0'),{kind:'json'}]));
+  const c=ctx.ImageView.assetClient(host,allowed,scope);
+  try {
+    const jobs=Object.keys(allowed).map(id=>c.get(id,'json'));
+    // Attach handlers immediately so the RED implementation does not leak unhandled rejections.
+    const result=Promise.allSettled(jobs);
+    assert.equal(sent.length,8);
+    for(let i=0;i<32;i++){
+      assert.equal(sent[i]?.digest,Object.keys(allowed)[i],'FIFO order');
+      assert.equal(sent.length-i,Math.min(8,32-i),'eight in flight, remainder queued');
+      for(const f of listeners)f({source:host,data:{kicadReviewAssetResult:{...sent[i],text:'{"version":1}'}}});
+    }
+    assert.ok((await result).every(r=>r.status==='fulfilled'));
+    const burst=Array.from({length:137},()=>c.get(Object.keys(allowed)[0],'json'));
+    const end=Promise.allSettled(burst);assert.equal(sent.length,40);
+    c.dispose();
+    const values=await end;
+    assert.equal(values.filter(r=>/disposed/.test(r.reason?.message)).length,136,'8 pending plus 128 waiting disposed');
+    assert.equal(values.filter(r=>/unavailable/i.test(r.reason?.message)).length,1,'bounded queue rejects overflow only');
+    assert.equal(listeners.size,0);
+  } finally {c.dispose();}
 });

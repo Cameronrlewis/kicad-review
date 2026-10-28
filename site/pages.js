@@ -320,8 +320,8 @@ function reviewOverflow(items) {
 // This parent owns the only network capability. The child supplies identities, not URLs.
 export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
   let declarations,disposed=false;const jobs=new Map();
-  const manifest=()=>declarations ||= fetcher(raw,{credentials:'include',cache:'no-cache',signal:AbortSignal.timeout(15000)}).then(async r=>{
-    if(!r.ok)throw Error('Asset unavailable');
+  const manifest=()=>declarations ||= fetcher(raw,{credentials:'include',cache:'no-cache',redirect:'error',signal:AbortSignal.timeout(15000)}).then(async r=>{
+    if(!r.ok||r.redirected)throw Error('Asset unavailable');
     const text=await r.text(),prefix='<script>window.REVIEW_DATA = ',start=text.indexOf(prefix);
     if(start<0)throw Error('Asset unavailable');
     const end=text.indexOf('<'+'/script>',start);
@@ -338,14 +338,16 @@ export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
       const allowed=await manifest();
       if(disposed||abort.signal.aborted||allowed[a.digest]?.kind!==a.kind)throw Error('Asset unavailable');
       const response=await fetcher(raw.replace(/\/raw$/,'')+'/assets/'+a.digest+'.'+a.kind,
-        {credentials:'include',cache:'no-cache',signal:abort.signal});
-      if(!response.ok||!response.body)throw Error('Asset unavailable');
+        {credentials:'include',cache:'no-cache',redirect:'error',signal:abort.signal});
+      const mime=a.kind==='svg'?'image/svg+xml':'application/json';
+      if(!response.ok||response.redirected||!response.body||response.headers.get('ETag')!==`"${a.digest}"`
+        ||response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase()!==mime)throw Error('Asset unavailable');
       const reader=response.body.getReader(),parts=[];let size=0;
       const max=(a.kind==='svg'?8:4)*1024*1024;
       try {for(;;){const {value,done}=await reader.read();if(done)break;
         size+=value.byteLength;if(size>max)throw Error('Asset too large');parts.push(value);}}
       finally {await reader.cancel();reader.releaseLock();}
-      reply.text=await new Blob(parts).text();
+      reply.text=new TextDecoder('utf-8',{fatal:true}).decode(await new Blob(parts).arrayBuffer());
     } catch {reply.error='Asset unavailable; retry';}
     finally {clearTimeout(timer);jobs.delete(a.requestId);}
     if(!disposed)iframe.contentWindow.postMessage({kicadReviewAssetResult:reply},'*');

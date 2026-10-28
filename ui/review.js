@@ -1186,6 +1186,7 @@ function attachPanZoom(vp) {
     return a&&b?{x:(a.lx+b.lx)/2,y:(a.ly+b.ly)/2,d:Math.hypot(a.lx-b.lx,a.ly-b.ly)}:null;
   };
   vp.addEventListener("pointerdown", e => {
+    if (e.target.closest('.image-errors')) return;
     if (![0,1,2].includes(e.button) || !placed() || pointers.has(e.pointerId)) return;
     if(!pointers.size){everPinched=false;suppressContext=false;pendingContext=null;}
     pointers.set(e.pointerId,{id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0});

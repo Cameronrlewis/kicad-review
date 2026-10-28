@@ -345,9 +345,9 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
           if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
         }
       } catch { /* PR discovery must not prevent opening the report. */ }
-      // The parent gets its allowlist validation from the authenticated envelope, never the child.
-      // Validate each declaration in digestAsset instead of downloading that envelope
-      // again for the wrapper; the parent checks the returned MIME type and digest.
+      // The browser parent downloads the authenticated raw envelope for its allowlist,
+      // never trusting child declarations. digestAsset revalidates authorization and
+      // declarations per request; the parent checks the returned MIME type and digest.
       const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
         user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,

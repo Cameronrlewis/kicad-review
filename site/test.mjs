@@ -2082,7 +2082,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '94384b153514ac7c04bc0dafc1e9b16cd0ab90ad455438b3abc2c4bfc9eb17c4');
+  assert.equal(createHash('sha256').update(current).digest('hex'), '83197040294991b195713326271e80b6c06b9c40fee9e1dd2fd69a3006b7c9b8');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -3374,7 +3374,7 @@ test('digest assets revalidate permissions and expiry before 200 or 304 and neve
   } finally { restore(); }
 });
 
-test('hosted wrapper never downloads the envelope; raw and each asset read it once', async () => {
+test('worker wrapper response defers the allowlist envelope fetch to the browser; raw and each asset read it once', async () => {
   const sealed = await signedIn(), seen = [];
   const restore = mockFetch(async url => {
     seen.push(url);
@@ -3420,7 +3420,7 @@ function assetBridgeHarness({ fetcher = async () => new Response(imageText, { he
   const iframe = { contentWindow: { postMessage: message => sent.push(message) } };
   const scope = {addEventListener: (n, f) => { listeners[n] = f; }, removeEventListener: n => { delete listeners[n]; }};
   const stop = runInNewContext(`(${assetParent.toString()})(iframe, '/r/o/r/a/42/raw', scope, fetcher)`, {
-    iframe, scope, AbortController, AbortSignal, Blob,
+    iframe, scope, AbortController, AbortSignal, Blob, TextDecoder,
     setTimeout: f => { timers.set(++timerId, f); return timerId; }, clearTimeout: id => timers.delete(id),
     fetcher: (url, options) => {
       calls.push([url, options]);
@@ -3433,7 +3433,7 @@ function assetBridgeHarness({ fetcher = async () => new Response(imageText, { he
   return { sent, calls, timers, listeners, stop, message: (value, source = iframe.contentWindow) => listeners.message({ source, data: { kicadReviewAsset: value } }) };
 }
 const settleAsset = async () => { for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
-test('asset bridge ignores foreign windows, forged IDs and unsupported kinds', async () => {
+test('asset parent ignores foreign windows, forged IDs and unsupported kinds', async () => {
   const h = assetBridgeHarness(); const valid = { requestId: 'r1', digest: imageId, kind: 'svg' };
   h.message(valid, {});
   for (const bad of [{ ...valid, requestId: {} }, { ...valid, requestId: 'x'.repeat(129) }, { ...valid, digest: '../../secret' }, { ...valid, kind: 'glb' }]) h.message(bad);
@@ -3445,7 +3445,7 @@ test('asset bridge ignores foreign windows, forged IDs and unsupported kinds', a
   assert.equal(h.calls[1][1].cache, 'no-cache');
   assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, imageText);
 });
-test('asset bridge uses authenticated route declarations without trusting the child manifest', async () => {
+test('asset parent uses authenticated route declarations without trusting the child manifest', async () => {
   const sealed = await signedIn(); let denied = false, expired = false, downloads = 0;
   const data = imageData();
   data.assets.deadbeef1111 = { kind: 'json', name: 'hotspots.json' };
@@ -3478,7 +3478,7 @@ test('asset bridge uses authenticated route declarations without trusting the ch
   } finally { restore(); }
 });
 
-test('asset bridge bounds concurrency, times out, rejects oversized decoded SVG and JSON, permits retry', async () => {
+test('asset parent bounds concurrency, times out, rejects oversized decoded SVG and JSON, permits retry', async () => {
   const h = assetBridgeHarness({ fetcher: (_, {signal}) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(Error('aborted')))) });
   for (let i = 0; i < 9; i++) h.message({ requestId: `r${i}`, digest: imageId, kind: 'svg' });
   await settleAsset();
@@ -3835,7 +3835,7 @@ test('asset parent permits only source-window declared digests and generated URL
   const stop=assetParent({contentWindow:child},raw,scope,async url=>{
     urls.push(url);
     return url===raw?new Response('<script>window.REVIEW_DATA = '+JSON.stringify({assets:{[digest]:{kind:'svg'}}})+';</script>')
-      :new Response('<svg/>');
+      :new Response('<svg/>',{headers:assetHeaders(digest)});
   });
   const data={kicadReviewAsset:{requestId:'asset-1',digest,kind:'svg',url:'https://attacker/'}};
   await receive({source:{},data});assert.equal(urls.length,0);
@@ -3878,7 +3878,7 @@ test('asset parent retries a failed allowlist load without trusting a child anno
   const h=assetBridgeHarness({realManifest:true,fetcher:async url=>{
     if(url.endsWith('/raw'))return ++manifests===1 ? new Response('denied',{status:403})
       :new Response(storedImageReport());
-    return new Response(imageText);
+    return new Response(imageText,{headers:assetHeaders()});
   }});
   const ask=requestId=>h.message({requestId,digest:imageId,kind:'svg',assets:{[imageId]:{kind:'svg'}}});
   await ask('first');assert.match(h.sent[0].kicadReviewAssetResult.error,/unavailable/i);
@@ -3892,13 +3892,13 @@ test('asset parent actual wrapper reload replaces transport while preserving rea
   const listeners=new Map(),calls=[],sent=[],navigations=[],controls=new Map();
   const iframe={contentWindow:{postMessage:value=>sent.push(value)},addEventListener(){},set src(value){navigations.push(value);}};
   const loading={hidden:false},location={hash:'#v=board'};
-  const context={location,history:{replaceState(){}},AbortController,AbortSignal,Blob,setTimeout,clearTimeout,
+  const context={location,history:{replaceState(){}},AbortController,AbortSignal,Blob,TextDecoder,setTimeout,clearTimeout,
     document:{getElementById:id=>id==='review-report'?iframe:loading,documentElement:{dataset:{theme:'dark'}},
       querySelector:selector=>{if(!controls.has(selector))controls.set(selector,{});return controls.get(selector);}},
     MutationObserver:class{observe(){}},
     addEventListener:(name,fn)=>{if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},
     removeEventListener:(name,fn)=>listeners.get(name)?.delete(fn),
-    fetch:async url=>{calls.push(url);return new Response(url.endsWith('/raw')?storedImageReport():imageText);}};
+    fetch:async url=>{calls.push(url);return new Response(url.endsWith('/raw')?storedImageReport():imageText,{headers:assetHeaders()});}};
   context.window=context;
   runInNewContext(script,context);
   assert.deepEqual(navigations,['/r/o/r/a/42/raw#v=board']);
@@ -3912,4 +3912,82 @@ test('asset parent actual wrapper reload replaces transport while preserving rea
   const next=[...listeners.get('message')].at(-1);await next(ask);
   assert.equal(calls.filter(url=>url.endsWith('/raw')).length,2,'new view has a fresh allowlist');
   for(const fn of listeners.get('pagehide'))fn();assert.equal(listeners.get('message').size,1);
+});
+
+
+test('asset parent rejects redirects, MIME or digest mismatches and invalid UTF-8',async()=>{
+  const failures=[
+    ['missing headers',()=>new Response(imageText)],
+    ['HTML login',()=>new Response('<html>login</html>',{headers:{...assetHeaders(),'Content-Type':'text/html'}})],
+    ['wrong digest',()=>new Response(imageText,{headers:assetHeaders('000000000000')})],
+    ['unquoted digest',()=>new Response(imageText,{headers:{...assetHeaders(),ETag:imageId}})],
+    ['wrong kind',()=>new Response(imageText,{headers:assetHeaders(imageId,'json')})],
+    ['bad UTF-8',()=>new Response(new Uint8Array([0xc3,0x28]),{headers:assetHeaders()})],
+    ['redirect response',()=>new Response(null,{status:302,headers:{Location:'/login'}})],
+    ['followed redirect',()=>{const r=new Response(imageText,{headers:assetHeaders()});Object.defineProperty(r,'redirected',{value:true});return r;}],
+  ];
+  for(const [name,response] of failures){
+    const h=assetBridgeHarness({fetcher:async()=>response()});
+    try {
+      await h.message({requestId:'bad',digest:imageId,kind:'svg'});
+      assert.match(h.sent[0].kicadReviewAssetResult.error,/unavailable/i,name);
+      assert.equal(h.sent[0].kicadReviewAssetResult.text,undefined,name);
+      assert.ok(h.calls.every(([,options])=>options.redirect==='error'),'raw and asset redirects forbidden');
+    } finally {h.stop();}
+  }
+  const bytes=new TextEncoder().encode('<svg>é</svg>');
+  const h=assetBridgeHarness({fetcher:async()=>new Response(new ReadableStream({start(c){for(const byte of bytes)c.enqueue(new Uint8Array([byte]));c.close();}}),{headers:assetHeaders()})});
+  try {
+    await h.message({requestId:'unicode',digest:imageId,kind:'svg'});
+    assert.equal(h.sent[0].kicadReviewAssetResult.text,'<svg>é</svg>','split multibyte UTF-8 remains valid');
+  } finally {h.stop();}
+});
+
+test('multi-project lazy manifests and artwork use the production client and parent with eight in flight',async()=>{
+  const assets={},texts={},projects=[],warnings=[],calls=[],waiting=[];
+  let serial=0,active=0,peak=0,receive;
+  const add=(kind,text)=>{const id=(++serial).toString(16).padStart(12,'0');assets[id]={kind};texts[id]=text;return id;};
+  for(let p=0;p<6;p++)projects.push({dir:'project-'+p,sheets:['/left/','/right/'].map(path=>({path,
+    hotspots:Object.fromEntries(['base','head'].map(side=>[side,add('json',JSON.stringify({version:1,units:'mm',warnings:[],
+      views:[{sheet:path,file:'fixture.kicad_sch',viewBox:[0,0,100,100],elements:[],labels:[],noConnects:[],wires:[]}]}))])),
+    svg:Object.fromEntries(['base','head'].map(side=>[side,add('svg',imageText)])),
+  }))});
+  const childListeners=new Set();
+  const host={postMessage:data=>queueMicrotask(()=>receive({source:child,data}))};
+  const child={postMessage:data=>queueMicrotask(()=>{for(const fn of childListeners)fn({source:host,data});})};
+  const scope={addEventListener:(_,fn)=>receive=fn,removeEventListener(){}};
+  const stop=assetParent({contentWindow:child},'/r/o/r/a/42/raw',scope,async(url,options)=>{
+    calls.push([url,options]);
+    if(url.endsWith('/raw'))return new Response('<script>window.REVIEW_DATA = '+JSON.stringify({assets})+';</script>');
+    const id=url.match(/\/assets\/([0-9a-f]{12})\./)[1];
+    active++;peak=Math.max(peak,active);
+    return new Promise(resolve=>waiting.push(()=>{active--;resolve(new Response(texts[id],{headers:assetHeaders(id,assets[id].kind)}));}));
+  });
+  const source=readFileSync(new URL('../ui/review.js',import.meta.url),'utf8');
+  const errorClass=source.slice(source.indexOf('class AssetUnavailableError'),source.indexOf('// The opaque hosted frame'));
+  const decode=source.slice(source.indexOf('function svgText('),source.indexOf('function assetRetry('));
+  const context={D:{assets,projects},cache:{},imageAssetClient:null,parent:host,TextEncoder,setTimeout,clearTimeout,
+    console:{warn:(...args)=>warnings.push(args)},
+    addEventListener:(_,fn)=>childListeners.add(fn),removeEventListener:(_,fn)=>childListeners.delete(fn)};
+  context.window=context;
+  const result=runInNewContext(readFileSync(new URL('../ui/image-view.js',import.meta.url),'utf8')+'\n'+errorClass+'\n'+decode+`\n(async()=>{
+    try {
+      const artwork=D.projects.flatMap(P=>P.sheets.flatMap(s=>Object.values(s.svg)));
+      await Promise.all([...D.projects.map(P=>loadImageManifests(P)),...artwork.map(id=>svgText(id))]);
+      return {manifests:decodedSheetHotspots.size,artwork:artwork.length};
+    } finally {disposeAssets();}
+  })()`,context);
+  try {
+    await settleAsset();assert.equal(active,8,'first eight requests run, forty wait');
+    for(let batch=0;batch<6;batch++){
+      assert.equal(waiting.length,8,'next FIFO batch fills all eight slots');
+      for(const release of waiting.splice(0))release();
+      await settleAsset();
+    }
+    const counts=await result;
+    assert.equal(counts.manifests,24);assert.equal(counts.artwork,24);
+    assert.equal(peak,8);assert.equal(active,0);assert.equal(warnings.length,0);
+    assert.equal(calls.length,49,'one raw allowlist plus 48 declared assets');
+    assert.equal(childListeners.size,0,'production disposeAssets removes the real client');
+  } finally {context.imageAssetClient?.dispose();stop();for(const release of waiting.splice(0))release();}
 });
