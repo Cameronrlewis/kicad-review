@@ -205,27 +205,36 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
       {cwd:repoRoot,input:raw,encoding:'utf8',maxBuffer:1<<26});
     await evaluate(`window.__sheetSimplification=${JSON.stringify({raw,simplified})}`);
   }
+if(['images active gesture pixels','images deep vector crop pixels'].includes(name) &&
+    (await evaluate("D.repo==='fixture/images'")).result?.value!==true)return ['SKIP '+name,noSkip];
 if(name==='images active gesture pixels') {
-  const shot=async()=> (await send('Page.captureScreenshot',{format:'png'})).result.data;
+  const screenshotPath=shot;
+  const capture=async()=> (await send('Page.captureScreenshot',{format:'png'})).result.data;
   for(const [mode,blend,wipe] of [['wipe',.5,0],['wipe',.5,.3],['wipe',.5,.7],['wipe',.5,1],['blend',0,.5],['blend',1,.5],['overlay',.5,.5],['semantic',.5,.5]]) {
     const prepared=await evaluate(`(async()=>{const sheet=proj().sheets.find(s=>s.svg.base&&s.svg.head);
-      await applyState({...S,v:'sheet:'+sheet.path,m:${JSON.stringify(mode)},blend:${blend},wipe:${wipe}});
-      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return true;})()`);
+      S.blend=${blend};S.wipe=${wipe};
+      await applyState({...S,v:'sheet:'+sheet.path,m:${JSON.stringify(mode)}});
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      if(S.m==='wipe'&&+document.querySelector('#stage .divider').getAttribute('aria-valuenow')!==Math.round(${wipe}*100))throw Error('Wipe boundary not applied');
+      if(S.m==='blend'&&+document.querySelector('#stage .stack.head').style.opacity!==${blend})throw Error('Blend endpoint not applied');
+      return true;})()`);
     if(prepared.exceptionDetails)throw Error('comparison fixture preparation failed');
-    const before=await shot();
+    const before=await capture();
     await evaluate(`globalThis.__activeCaptures=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')]
       .filter(i=>i.complete).map(i=>captureImageViewport(i.imageOwner,i.closest('.vp'),
         {x:S.x,y:S.y,z:S.z,flip:flipOn()},[0,0,...currentView().size])).filter(Boolean)`);
     const captured=await evaluate('__activeCaptures.length');
     if(!captured.result?.value)throw Error('active gesture did not allocate snapshot');
-    const active=await shot();
+    const active=await capture();
     await evaluate('__activeCaptures.forEach(c=>c.dispose());__activeCaptures=[]');
-    const settled=await shot();
+    const settled=await capture();
+    if(screenshotPath)for(const [phase,raw] of [['before',before],['active',active],['settled',settled]])
+      writeFileSync(screenshotPath.replace(/\.png$/,'')+'-gesture-'+mode+'-'+(mode==='wipe'?wipe:blend)+'-'+phase+'.png',Buffer.from(raw,'base64'));
     const result=await evaluate(`(async()=>{
       const read=async raw=>{const i=new Image();i.src='data:image/png;base64,'+raw;await i.decode();
         const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {data:x.getImageData(0,0,c.width,c.height).data,w:c.width,h:c.height};};
       const [a,b,c]=await Promise.all(${JSON.stringify([before,active,settled])}.map(read));
-      const r=document.querySelector('#stage .vp').getBoundingClientRect(), sx=a.w/innerWidth,sy=a.h/innerHeight;
+      const r=document.querySelector('#stage .vp').getBoundingClientRect(), sx=a.w/(visualViewport?.width||innerWidth),sy=a.h/(visualViewport?.height||innerHeight);
       let differing=0,samples=0;const colors=new Set();
       for(let y=Math.ceil((r.top+20)*sy);y<(r.bottom-20)*sy;y+=3)for(let x=Math.ceil((r.left+20)*sx);x<(r.right-20)*sx;x+=3){
         const k=(y*a.w+x)*4;colors.add(Array.from(a.data.slice(k,k+3)).join(','));samples++;
@@ -236,6 +245,31 @@ if(name==='images active gesture pixels') {
     if(!v||v.coverage<3||!v.samples||v.differing/v.samples>.01)throw Error('active comparison pixels '+mode+': '+JSON.stringify(v));
   }
 }
+  if(name==='images deep vector crop pixels') {
+    const prepared=await evaluate(`(async()=>{
+      if(D.repo!=='fixture/images')throw Error('image fixture required');
+      await applyState({...S,v:'sheet:/left/',m:'side'});fit();
+      setT({x:140,y:109.8,z:S.z*64});await new Promise(r=>setTimeout(r,50));return true;})()`);
+    if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception.description);
+    const before=(await send('Page.captureScreenshot',{format:'png'})).result.data;
+    const cropped=await evaluate(`(async()=>{
+      const c=imageOwners()[0],vp=c.node.closest('.vp'),w=vp.clientWidth,h=vp.clientHeight;
+      c.endGesture(ImageView.cropRegion([S.x-w/(2*S.z),S.y-h/(2*S.z),w/S.z,h/S.z],[0,0,...currentView().size],c.viewBox));
+      for(let i=0;i<200&&!c.cropNode;i++)await new Promise(r=>setTimeout(r,10));
+      if(!c.cropNode?.complete)throw Error('extreme crop not decoded');
+      const r=vp.getBoundingClientRect();return {left:r.left+w/2+(138.5-S.x)*S.z,top:r.top+h/2+(109.35-S.y)*S.z,width:3*S.z,height:.85*S.z};})()`);
+    if(cropped.exceptionDetails)throw Error(cropped.exceptionDetails.exception.description);
+    const after=(await send('Page.captureScreenshot',{format:'png'})).result.data;
+    const result=await evaluate(`(async()=>{
+      const read=async raw=>{const i=new Image();i.src='data:image/png;base64,'+raw;await i.decode();const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {data:x.getImageData(0,0,c.width,c.height).data,w:c.width,h:c.height};};
+      const images=await Promise.all(${JSON.stringify([before,after])}.map(read)),r=${JSON.stringify(cropped.result.value)};
+      return images.map(a=>{const d=a.w/(visualViewport?.width||innerWidth);let n=0,x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+        for(let y=Math.max(0,Math.floor(r.top*d)-2);y<Math.min(a.h,Math.ceil((r.top+r.height)*d)+2);y++)for(let x=Math.max(0,Math.floor(r.left*d)-2);x<Math.min(a.w,Math.ceil((r.left+r.width)*d)+2);x++){
+          const k=(y*a.w+x)*4;if(a.data[k+1]>a.data[k]+30&&a.data[k+1]>a.data[k+2]+30){n++;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
+        }return {n,box:[x0,y0,x1,y1]};});})()`);
+    const [a,b]=result.result?.value||[];
+    if(!a?.n||!b?.n||Math.abs(a.n-b.n)/a.n>.05||a.box.some((v,i)=>Math.abs(v-b.box[i])>2))throw Error('extreme vector crop pixels: '+JSON.stringify([a,b]));
+  }
   let r = await evaluate(`(async () => { ${expr} })()`);
   if (r.result?.value === true && name === "Themes reload seed" && persistCheck) {
     const expected = (await evaluate("JSON.stringify(appearanceStore().get())")).result.value;

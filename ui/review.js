@@ -716,7 +716,8 @@ function captureImageViewport(owner,vp,camera,pageMm) {
   canvas.width=Math.max(1,Math.floor(w*scale));canvas.height=Math.max(1,Math.floor(h*scale));
   // Keep the snapshot IN the same .layer and revision .stack as its original.
   // The world owns camera/flip; stack owns Wipe/Blend/Semantic/Overlay; layer owns opacity.
-  canvas.style.cssText=`position:absolute;left:${box[0]*PX}px;top:${box[1]*PX}px;width:${box[2]*PX}px;height:${box[3]*PX}px;pointer-events:none`;
+  // Fractional layout offsets snap before a large world scale; transforms do not.
+  canvas.style.cssText=`position:absolute;left:0;top:0;width:${w}px;height:${h}px;transform-origin:0 0;transform:translate(${box[0]*PX}px,${box[1]*PX}px) scale(${PX/camera.z});pointer-events:none`;
   const x=canvas.getContext('2d');if(!x)return null;
   x.scale(canvas.width/box[2],canvas.height/box[3]);x.translate(-box[0],-box[1]);
   try {x.drawImage(owner.node,...pageMm);} catch {return null;}
@@ -737,15 +738,16 @@ function configureImageGesture(owner,size) {
     capture:()=>{const vp=owner.node?.closest('.vp');
       return vp?captureImageViewport(owner,vp,{x:S.x,y:S.y,z:S.z,flip:flipOn()},page):null;},
     makeCrop:async region=>{
-      const crop=await owner.crop(region.source),node=crop.node;
-      node.dataset.cropView=S.v;
-      node.style.cssText=`position:absolute;left:${region.world[0]*PX}px;top:${region.world[1]*PX}px;width:${region.world[2]*PX}px;height:${region.world[3]*PX}px`;
+      const zoom=S.z,view=S.v,crop=await owner.crop(region.source),node=crop.node;
+      crop.region=region;node.dataset.cropView=view;
+      // Size at the capture zoom and translate in the compositor to avoid paint snapping.
+      node.style.cssText=`position:absolute;left:0;top:0;width:${region.world[2]*zoom}px;height:${region.world[3]*zoom}px;transform-origin:0 0;transform:translate(${region.world[0]*PX}px,${region.world[1]*PX}px) scale(${PX/zoom})`;
       const dispose=crop.dispose.bind(crop);
       crop.dispose=()=>{if(owner.cropNode===node){owner.cropNode=null;if(owner.node)owner.node.hidden=false;}dispose();};
       return crop;
     },
     restore:crop=>{
-      owner.cropNode=crop?.node||null;
+      owner.cropNode=crop?.node||null;owner.cropRegion=crop?.region||null;
       if(crop&&owner.node?.parentElement)owner.node.parentElement.append(crop.node);
       if(owner.node)owner.node.hidden=!!crop;
     }
@@ -755,6 +757,7 @@ function imageOwners(stage=document.querySelector('#stage')) {
   return [...stage.querySelectorAll('.stack')].flatMap(st=>(st.imageOwners||[]).map(c=>c.controller||c));
 }
 function releaseImageStage(stage) {
+  if(stage.isConnected){clearTimeout(settle);gesturing=false;}
   for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) c.dispose();
 }
 const comparisonSources = new Map();
@@ -1106,6 +1109,16 @@ document.addEventListener("kr-theme-change", () => {
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
+  for(const owner of imageOwners()){
+    owner.beginGesture();owner.endGesture(()=>{
+      // No automatic threshold without an observed softness crossover. A manually
+      // requested crop remains reusable until the camera leaves its ten-percent margin.
+      const region=owner.cropRegion,vp=owner.node?.closest('.vp');if(!region||!vp)return null;
+      const box=[S.x-vp.clientWidth/(2*S.z),S.y-vp.clientHeight/(2*S.z),vp.clientWidth/S.z,vp.clientHeight/S.z],r=region.world;
+      return box[0]>=r[0]&&box[1]>=r[1]&&box[0]+box[2]<=r[0]+r[2]&&box[1]+box[3]<=r[1]+r[3]?region:
+        ImageView.cropRegion(box,[0,0,...currentView().size],owner.viewBox);
+    });
+  }
   gesturing = true; clearTimeout(settle);
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
@@ -1193,46 +1206,66 @@ function attachPanZoom(vp) {
     e.preventDefault(); gesture();
     const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? r.height : 1);
     const rate = window.KRBoardWheelProfile === "mac-rotation" ? BOARD_WHEEL_MAC_ROTATION_RATE/100 : BOARD_WHEEL_PIXEL_RATE;
-    zoomBoardAt(vp,e.clientX,e.clientY,Math.exp(Math.max(-20,Math.min(20,-pixels*rate))),{frame:true});
+    const factor=currentView()?.kind==='sheet'?ImageView.wheelFactor(e.deltaY,e.deltaMode):Math.exp(Math.max(-20,Math.min(20,-pixels*rate)));
+    zoomBoardAt(vp,e.clientX,e.clientY,factor,{frame:true});
   }, { passive:false });
-  let active = null, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
+  const pointers=new Map();
+  let everPinched=false, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
+  const pinch=()=>{
+    const [a,b]=[...pointers.values()];
+    return a&&b?{x:(a.lx+b.lx)/2,y:(a.ly+b.ly)/2,d:Math.hypot(a.lx-b.lx,a.ly-b.ly)}:null;
+  };
   vp.addEventListener("pointerdown", e => {
-    if (![0,1,2].includes(e.button) || !placed() || active) return;
-    suppressContext = false; pendingContext = null;
-    active = {id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0};
+    if (![0,1,2].includes(e.button) || !placed() || pointers.has(e.pointerId)) return;
+    if(!pointers.size){everPinched=false;suppressContext=false;pendingContext=null;}
+    pointers.set(e.pointerId,{id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0});
+    if(pointers.size>1){everPinched=true;pendingContext=null;}
+    gesture();
     // Synthetic browser checks have no active native pointer; real input gets capture.
     try { vp.setPointerCapture(e.pointerId); } catch {}
     if (e.button === 1) e.preventDefault();
   });
   vp.addEventListener("pointermove", e => {
-    if (active && active.id === e.pointerId) {
-      const a = active; a.moved = Math.max(a.moved, Math.hypot(e.clientX-a.x,e.clientY-a.y));
-      if (a.moved >= 4) { gesture(); setT({x:S.x-(flipOn()?-1:1)*(e.clientX-a.lx)/S.z,y:S.y-(e.clientY-a.ly)/S.z},{frame:true}); }
-      a.lx=e.clientX; a.ly=e.clientY;
+    const a=pointers.get(e.pointerId);
+    if(a) {
+      const before=pinch(),dx=e.clientX-a.lx,dy=e.clientY-a.ly;
+      a.moved=Math.max(a.moved,Math.hypot(e.clientX-a.x,e.clientY-a.y));
+      a.lx=e.clientX;a.ly=e.clientY;
+      const after=pinch();
+      if(before&&after&&before.d>0&&after.d>0){
+        gesture();zoomBoardAt(vp,before.x,before.y,after.d/before.d,{frame:true});
+        setT({x:S.x-(flipOn()?-1:1)*(after.x-before.x)/S.z,y:S.y-(after.y-before.y)/S.z},{frame:true});
+      } else if(a.moved>=4){gesture();setT({x:S.x-(flipOn()?-1:1)*dx/S.z,y:S.y-dy/S.z},{frame:true});}
     }
     cursorEvent=e;
     if (!cursorFrame) cursorFrame=requestAnimationFrame(() => { cursorFrame=0; updateCoordinates(vp,cursorEvent); });
   });
   const end = e => {
-    if (!active || active.id !== e.pointerId) return;
-    const a=active; active=null; suppressContext = a.moved >= 4;
+    const a=pointers.get(e.pointerId);if(!a)return;
+    const canceled=e.type!=="pointerup",click=!canceled&&!everPinched&&a.moved<4;
+    pointers.delete(e.pointerId);suppressContext=everPinched||a.moved>=4;
+    if(canceled){
+      for(const id of pointers.keys())if(vp.hasPointerCapture(id))vp.releasePointerCapture(id);
+      pointers.clear();
+    }
     if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId);
-    if (e.type === "pointerup" && a.moved < 4 && [0,2].includes(a.button)) {   // a click, not a pan, sets the measurement origin
+    if (click && [0,2].includes(a.button)) {   // a click, not a pan, sets the measurement origin
       anchorKey = JSON.stringify([S.p,S.v]);
       deltaAnchor = String(S.v).startsWith("sheet:") ? (p => [p.x,p.y])(schematicPoint(vp,e)) : toWorld(vp,e); updateStatus();
     }
-    if (e.type === "pointerup" && a.moved < 4 && a.button === 0) pickAt(vp,e);
-    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext) canvasMenu(vp,pendingContext);
+    if (click && a.button === 0) pickAt(vp,e);
+    if (click && a.button === 2 && pendingContext) canvasMenu(vp,pendingContext);
     pendingContext = null;
-    if (e.type !== "pointerup") { suppressContext=false; if(cursorFrame) cancelAnimationFrame(cursorFrame); cursorFrame=0; resetCoordinates(); }
+    if(canceled){suppressContext=false;if(cursorFrame)cancelAnimationFrame(cursorFrame);cursorFrame=0;resetCoordinates();}
+    if(!pointers.size)everPinched=false;
   };
   for (const type of ["pointerup","pointercancel","lostpointercapture"]) vp.addEventListener(type,end);
   vp.addEventListener("pointerleave", () => { resetCoordinates(); for(const pane of document.querySelectorAll("#stage .vp")) pane.classList.remove("board-cursor"); });
   vp.addEventListener("auxclick", e => { if (suppressContext || e.button===1) e.preventDefault(); });
   vp.addEventListener("contextmenu", e => {
-    if (suppressContext || active?.moved >= 4) { e.preventDefault(); return; }
+    if (suppressContext || everPinched || [...pointers.values()].some(a=>a.moved>=4)) { e.preventDefault(); return; }
     if (!placed()) return; e.preventDefault();
-    if (active) pendingContext=e; else canvasMenu(vp,e);
+    if (pointers.size) pendingContext=e; else canvasMenu(vp,e);
   });
 }
 function contentBox() {

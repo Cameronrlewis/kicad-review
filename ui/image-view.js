@@ -10,18 +10,19 @@
 
   // The full-image owner outlives this session. Only transient artwork belongs here.
   function gestureSession({capture,restore,makeCrop,setTimer=setTimeout,clearTimer=clearTimeout}) {
-    let ticket=0,disposed=false,timer=null,snapshot=null,crop=null;
+    let ticket=0,disposed=false,timer=null,snapshot=null,crop=null,cropBox=null;
     const cancelTimer=()=>{if(timer!==null)clearTimer(timer);timer=null;};
     const clear=()=>{snapshot?.dispose();snapshot=null;crop?.dispose();crop=null;};
     return {
-      begin(){if(disposed)return;ticket++;cancelTimer();crop?.dispose();crop=null;
+      begin(){if(disposed)return;ticket++;cancelTimer();
         if(!snapshot)snapshot=capture();},
       settle(box){if(disposed)return;cancelTimer();const generation=++ticket;
         timer=setTimer(async()=>{
-          timer=null;let next=null;
-          try {if(box)next=await makeCrop(box);} catch { /* Keep the full image on crop failure. */ }
-          if(disposed||generation!==ticket){next?.dispose();return;}
-          crop?.dispose();crop=next;restore(crop);snapshot?.dispose();snapshot=null;
+          timer=null;let next=null,region=null;
+          try {region=typeof box==='function'?box():box;if(region)next=region===cropBox&&crop?crop:await makeCrop(region);}
+          catch { /* Keep the full image on crop failure. */ }
+          if(disposed||generation!==ticket){if(next!==crop)next?.dispose();return;}
+          if(crop!==next)crop?.dispose();crop=next;cropBox=region;restore(crop);snapshot?.dispose();snapshot=null;
         },150);},
       move(){snapshot?.move?.();},
       invalidate(){ticket++;cancelTimer();clear();if(!disposed)restore(null);},

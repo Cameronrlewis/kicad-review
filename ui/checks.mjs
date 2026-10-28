@@ -43,23 +43,105 @@ const MARK_STYLE_FIXTURE = `
     syncMarkStyles();
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
+const gestureLifecycleCheck=['images gesture lifecycle','',`
+  if(D.repo!=='fixture/images')return 'skip';
+  const sheet=proj().sheets.find(s=>s.path==='/left/');
+  await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
+  const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+  const event=(type,id,dx=0,dy=0)=>vp.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:'touch',pointerId:id,button:0,clientX:x+dx,clientY:y+dy}));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const z=S.z;
+  vp.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-1,deltaMode:2,clientX:x,clientY:y}));
+  const snapshots=[...document.querySelectorAll('.gesture-snapshot')];
+  if(!snapshots.length)return 'active gesture did not allocate snapshot';
+  if(snapshots.some(c=>c.width*c.height>6000000))return 'snapshot exceeds 6 MP';
+  if(Math.abs(S.z/z-ImageView.wheelFactor(-1,2))>1e-8)return 'sheet wheel did not normalize page mode';
+  if(snapshots.some(c=>!c.closest('.layer')||!c.closest('.stack')))return 'snapshot outside revision/layer';
+  await wait(250);
+  if(document.querySelector('.gesture-snapshot')||imageOwners().some(o=>o.node.hidden))return 'gesture did not restore source artwork';
+  let picks=0;const pick=pickAt;pickAt=()=>picks++;
+  try {
+    const before=S.z;
+    event('pointerdown',101,-30);event('pointerdown',102,30);event('pointermove',102,90,10);
+    if(S.z<=before||!document.querySelector('.gesture-snapshot'))return 'two-pointer pinch did not zoom with snapshot '+JSON.stringify({before,z:S.z,snapshots:document.querySelectorAll('.gesture-snapshot').length,connected:vp.isConnected});
+    event('pointerup',101,-30);event('pointerup',102,90,10);
+    if(picks)return 'pinch synthesized click';
+    event('pointerdown',201);event('pointerdown',202,40);event('pointercancel',201);event('pointerup',202,40);
+    event('pointerup',201);
+    if(picks)return 'pointercancel synthesized click';
+    await wait(250);
+    if(document.querySelector('.gesture-snapshot'))return 'cancel left snapshot';
+    // A fresh one-finger click still works after the canceled pointer map is cleared.
+    event('pointerdown',301);event('pointerup',301);
+    if(picks!==1)return 'pointercancel did not clear pointer map';
+  } finally {pickAt=pick;}
+  const create=URL.createObjectURL,revoke=URL.revokeObjectURL,urls=new Set();
+  try {
+    URL.createObjectURL=function(...args){const url=create.apply(this,args);urls.add(url);return url;};
+    URL.revokeObjectURL=function(url){urls.delete(url);return revoke.call(this,url);};
+    await draw();
+    const current=document.querySelector('#stage .vp'),rect=current.getBoundingClientRect();
+    current.dispatchEvent(new WheelEvent('wheel',{deltaY:-10,cancelable:true,clientX:rect.left+20,clientY:rect.top+20}));
+    const beforeView=S.v,oldURLs=[...urls];
+    await applyState({...S,v:'board'});await wait(200);
+    if(document.querySelector('.gesture-snapshot')||document.querySelector('[data-crop-view="'+beforeView+'"]'))return 'old gesture resurrected';
+    if(oldURLs.some(url=>urls.has(url)))return 'navigation retained image-owner URL';
+  } finally {URL.createObjectURL=create;URL.revokeObjectURL=revoke;}
+  return true;
+`];
+
 export const CHECKS = [
+  gestureLifecycleCheck,
   ['images active gesture pixels','', 'return true;'],
+  ['images deep vector crop pixels','', 'return true;'],
   ['images vector crop ownership','', `
     if(D.repo!=='fixture/images')return 'skip';
     const sheet=proj().sheets.find(s=>s.path==='/left/');
-    await applyState({...S,v:'sheet:'+sheet.path,m:'wipe',wipe:.3});
+    S.wipe=.3;await applyState({...S,v:'sheet:'+sheet.path,m:'wipe'});
+    const text=await svgText(sheet.svg.base),probe=await ImageView.mount(text,sheet.size,{side:'base',layer:'cache probe'});
+    const Parser=DOMParser;let parses=0;
+    try {
+      globalThis.DOMParser=class extends Parser {parseFromString(...args){parses++;return super.parseFromString(...args);}};
+      const first=await probe.crop([10,20,40,30]),second=await probe.crop([20,30,40,30]);
+      first.dispose();second.dispose();
+      if(parses!==1||probe.viewBox.join()!=='10,20,297,210')return 'vector source was reparsed or mutated';
+      await probe.setAppearance(new Map([['#009600','#135724']]));
+      const colored=await probe.crop([10,20,40,30]);
+      try {if(parses!==2||!colored.source.includes('#135724'))return 'crop reused stale appearance parse';}
+      finally {colored.dispose();}
+      for(const box of [[0,0,0,1],[0,0,1,-1],[0,0,NaN,1]]){
+        let failed=false;try{ImageView.vectorCrop(text,box,{});}catch{failed=true;}
+        if(!failed)return 'invalid vector crop accepted';
+      }
+    } finally {globalThis.DOMParser=Parser;probe.dispose();}
     const owner=imageOwners()[0],vp=owner.node.closest('.vp');
+    const drawImage=CanvasRenderingContext2D.prototype.drawImage;
+    try {
+      CanvasRenderingContext2D.prototype.drawImage=()=>{throw Error('intentional snapshot failure');};
+      if(captureImageViewport(owner,vp,{x:S.x,y:S.y,z:S.z},[0,0,...currentView().size])!==null||owner.node.hidden)return 'failed snapshot hid source artwork';
+    } finally {CanvasRenderingContext2D.prototype.drawImage=drawImage;}
     const region=ImageView.cropRegion([80,40,60,50],[0,0,...currentView().size],owner.viewBox);
     owner.beginGesture();owner.endGesture(region);
-    await new Promise(r=>setTimeout(r,350));
+    for(let i=0;i<200&&!owner.cropNode;i++)await new Promise(r=>setTimeout(r,10));
     if(!owner.cropNode?.complete||!owner.node.hidden||vp.querySelector('.gesture-snapshot'))return 'decoded crop did not replace snapshot';
     const parsed=new DOMParser().parseFromString(await (await fetch(owner.cropNode.src)).text(),'image/svg+xml');
     if(parsed.documentElement.getAttribute('viewBox')!==region.source.join(' '))return 'crop lost nonzero source origin';
     if(owner.cropNode.parentElement!==owner.node.parentElement||!owner.cropNode.closest('.stack.base'))return 'crop escaped revision/layer clipping';
-    if(parseFloat(owner.cropNode.style.left)!==region.world[0]*PX)return 'crop lost world position';
+    if(!owner.cropNode.style.transform.startsWith('translate('+region.world[0]*PX+'px'))return 'crop lost world position';
     owner.invalidateGesture();
     if(owner.node.hidden||vp.querySelector('[data-crop-view]'))return 'crop invalidation left stale artwork';
+    setT({x:100,y:55,z:15});
+    const visible=[S.x-vp.clientWidth/(2*S.z),S.y-vp.clientHeight/(2*S.z),vp.clientWidth/S.z,vp.clientHeight/S.z];
+    owner.endGesture(ImageView.cropRegion(visible,[0,0,...currentView().size],owner.viewBox));
+    for(let i=0;i<200&&!owner.cropNode;i++)await new Promise(r=>setTimeout(r,10));
+    const retained=owner.cropNode?.src;if(!retained)return 'manual crop not decoded '+JSON.stringify({connected:owner.node?.isConnected,view:S.v});
+    gesture();setT({x:S.x+visible[2]*.01});await new Promise(r=>setTimeout(r,250));
+    if(owner.cropNode?.src!==retained)return 'pan within margin recreated vector crop';
+    gesture();setT({x:S.x+visible[2]*.3});
+    for(let i=0;i<200&&(!owner.cropNode||owner.cropNode.src===retained);i++)await new Promise(r=>setTimeout(r,10));
+    if(!owner.cropNode?.complete||owner.cropNode.src===retained)return 'pan outside margin did not replace crop';
+    owner.invalidateGesture();
+
     const decode=HTMLImageElement.prototype.decode,create=URL.createObjectURL,revoke=URL.revokeObjectURL;
     let release,started;const pending=new Promise(r=>started=r),urls=new Set();
     try {

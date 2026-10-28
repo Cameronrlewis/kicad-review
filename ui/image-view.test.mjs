@@ -605,3 +605,21 @@ test('viewport crop mapping retains source and page origins with ten percent mar
   assert.deepEqual(Array.from(ctx.ImageView.cropRegion([15,25,20,10],[10,20,100,50],[7,9,1000,500]).world),[13,24,24,12]);
   assert.deepEqual(Array.from(ctx.ImageView.cropRegion([15,25,20,10],[10,20,100,50],[7,9,1000,500]).source),[37,49,240,120]);
 });
+
+test('settling inside a retained vector margin reuses the decoded crop',async()=>{
+  let timer,made=0,removed=0;const shown=[],box={world:[0,0,10,10]};
+  const crop={dispose(){removed++;}};
+  const session=ctx.ImageView.gestureSession({capture:()=>null,restore:c=>shown.push(c),
+    makeCrop:async()=>{made++;return crop;},setTimer:fn=>{timer=fn;return 1;},clearTimer:()=>{}});
+  session.begin();session.settle(box);await timer();
+  session.begin();session.settle(()=>box);await timer();
+  assert.equal(made,1);assert.equal(removed,0);assert.deepEqual(shown,[crop,crop]);
+  session.invalidate();assert.equal(removed,1);assert.equal(shown.at(-1),null);session.dispose();
+});
+test('settle reads the final coalesced camera region, not the first event',async()=>{
+  let timer,box=[0,0,10,10],seen;
+  const session=ctx.ImageView.gestureSession({capture:()=>null,restore:()=>{},
+    makeCrop:async b=>{seen=b;return {dispose(){}};},setTimer:fn=>{timer=fn;return 1;},clearTimer:()=>{}});
+  session.begin();session.settle(()=>box);box=[20,30,10,10];await timer();
+  assert.equal(seen,box);session.dispose();
+});
