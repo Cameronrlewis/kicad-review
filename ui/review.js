@@ -9,7 +9,7 @@ S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing =
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
 S.issues = null;
-S.units = "mm"; S.grid = true;
+S.units = "mm"; S.grid = true; S.imageSelection = null;
 const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
@@ -69,7 +69,7 @@ function openThread(id) {
   const r = resolveAnchor(t.anchor), drawable = !r.detached && currentView(r.view);
   S.thread = id;
   const show = () => { if (drawable) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
-  if (drawable && r.view !== S.v) { stopPlacing(); const tabs = tabsChange(r.view); S.v = r.view; S.x = S.y = S.z = null; renderNav(); if (tabs) renderPanel(); return draw().then(() => { show(); saveHash(); }); }
+  if (drawable && r.view !== S.v) { clearImageSelection(); stopPlacing(); const tabs = tabsChange(r.view); S.v = r.view; S.x = S.y = S.z = null; renderNav(); if (tabs) renderPanel(); return draw().then(() => { show(); saveHash(); }); }
   show();
 }
 const proj = () => D.projects[S.p];
@@ -224,9 +224,9 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function openProject(i) { clearImageSelection(); S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { clearImageSelection(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -255,6 +255,7 @@ function valid(st) {   // drop anything that does not exist in this report
 }
 function applyState(st) {
   const v = valid(st);
+  if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
@@ -1059,6 +1060,7 @@ function apply() {
   else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   setText($("#zoombar .pct"), Math.round(S.z / PX * 100) + "%");
   if (!gesturing) drawSchematicGrids();
+  drawImageSelection();
   updateSchematicStatus();
 }
 // KiCad 10: eeschema/eeschema_settings.cpp:705-706 defaults to 50 mil (index 1);
@@ -1171,7 +1173,7 @@ function updateStatus() {
   const color = a.layers[a.activeLayer]?.color;
   const swatch = $("[data-layer-swatch]"), swatchColor = S.v === "board" && color ? `rgb(${color.slice(0,3).join(",")})` : "transparent";
   if (swatch.dataset.color !== swatchColor) { swatch.style.background = swatchColor; swatch.dataset.color = swatchColor; }
-  const selected = proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
+  const selected = S.imageSelection || proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
   statusText("[data-selection]",selected ? selected.ref || selected.reference || selected.kind || selected.id : "Nothing selected");
   statusText("[data-view-mode]",({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
 
@@ -1403,7 +1405,112 @@ function imageSides(vp,point) {
   }
   return available.reverse();
 }
-function pickImageAt(vp,event) {pickAt(vp,event);}
+function currentImageGraph(side) {return decodedBoardInspect.get(proj().board?.inspect?.[side])||null;}
+function sheetImageElements(side) {
+  const pg=proj().sheets.find(s=>'sheet:'+s.path===S.v);
+  return decodedSheetHotspots.get(pg?.hotspots?.[side])?.views.find(v=>v.sheet===pg.path)?.elements||[];
+}
+function imageRecord(selection) {
+  if(!selection)return null;
+  return selection.sheet!=null?sheetImageElements(selection.side).find(e=>e.uuid===selection.uuid&&e.unit===selection.unit)
+    :['pads','vias','tracks'].flatMap(k=>currentImageGraph(selection.side)?.[k]||[]).find(e=>e.uuid===selection.uuid);
+}
+let savedImageNets=null;
+function restoreImageNet() {
+  if(!savedImageNets)return;
+  const {name,previous}=savedImageNets,look=Appearance.get(),netColors={...look.netColors};
+  // Restore only our temporary colour; preserve intervening Appearance edits.
+  if(JSON.stringify(netColors[name])===JSON.stringify([1,.8,0,1])) {
+    if(previous===undefined)delete netColors[name];else netColors[name]=previous;
+    Appearance.set({...look,netColors});
+  }
+  savedImageNets=null;
+}
+function clearImageSelection() {
+  S.imageSelection=null;restoreImageNet();renderInspector();
+  document.querySelectorAll('#stage .image-selection').forEach(n=>n.remove());
+}
+function selectImageNet(name) {
+  restoreImageNet();savedImageNets={name,previous:Appearance.get().netColors[name]};
+  Appearance.patch({netColors:{[name]:[1,.8,0,1]}});
+}
+function chooseImage(record,side,kind,point,pin=null) {
+  S.imageSelection={side,kind,uuid:record.uuid,ref:record.ref||'',sheet:S.v.startsWith('sheet:')?S.v.slice(6):null,
+    unit:record.unit,pin:pin?.number,net:record.net,point};
+  S.io=null;S.ig=null;
+  const semantic=proj().changes.find(c=>c.uuid===(record.changeUuid||record.uuid)&&onView(c,S.v));
+  S.s=semantic?.id||null;
+  if(record.net)selectImageNet(record.net);else restoreImageNet();
+  renderInspector();drawImageSelection();updateStatus();saveHash();
+}
+function visibleImageLayers(graph) {
+  const layers=glAppearance().layers;
+  return new Set(graph.layers.filter(l=>{const a=layers[canon(l)];return a&&a.visible!==false&&a.color[3]*a.opacity>0;}));
+}
+function pickImageAt(vp,event) {
+  const point=boardDiff?.point(vp,event)?.point||toWorld(vp,event);
+  const sides=boardDiff?boardDiff.sidesAt(vp,point):imageSides(vp,point);
+  const reach=Math.max(.15,(event.pointerType==='touch'?12:6)/S.z);
+  for(const side of sides) {
+    if(S.v==='board') {
+      const g=currentImageGraph(side);if(!g)continue;
+      const record=ImageView.inspectHit(g,point,visibleImageLayers(g),S.z,event.pointerType==='touch');
+      if(record){chooseImage(record,side,g.pads.includes(record)?'pad':g.vias.includes(record)?'via':'track',point);return true;}
+    } else if(S.v.startsWith('sheet:')) {
+      const elements=sheetImageElements(side);
+      const pin=elements.flatMap(e=>(e.pins||[]).map(p=>({e,p,d:Math.hypot(p.x-point[0],p.y-point[1])})))
+        .filter(p=>p.d<=reach).sort((a,b)=>a.d-b.d)[0];
+      if(pin){chooseImage(pin.e,side,'pin',[pin.p.x,pin.p.y],pin.p);return true;}
+      const e=elements.filter(e=>point[0]>=e.bbox[0]&&point[0]<=e.bbox[2]&&point[1]>=e.bbox[1]&&point[1]<=e.bbox[3])
+        .sort((a,b)=>(a.bbox[2]-a.bbox[0])*(a.bbox[3]-a.bbox[1])-(b.bbox[2]-b.bbox[0])*(b.bbox[3]-b.bbox[1]))[0];
+      if(e){chooseImage(e,side,'symbol',point);return true;}
+    }
+  }
+  clearImageSelection();return false;
+}
+function drawImageSelection() {
+  document.querySelectorAll('#stage .image-selection').forEach(e=>e.remove());
+  const s=S.imageSelection,r=imageRecord(s);if(!r)return;
+  // ponytail: geometry overlay avoids SVG-to-object binding; exact KiCad text highlighting is outside this inspection feature.
+  for(const world of document.querySelectorAll('#stage .world')) {
+    const vp=world.parentElement,sides=boardDiff?boardDiff.sidesAt(vp,s.point):imageSides(vp,s.point);
+    if(!sides.includes(s.side))continue;
+    const ns='http:'+'//www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
+    svg.classList.add('marks','image-selection');svg.setAttribute('viewBox','0 0 '+currentView().size.join(' '));
+    svg.style.width=currentView().size[0]*PX+'px';svg.style.height=currentView().size[1]*PX+'px';
+    const add=(tag,attrs,parent=svg)=>{const e=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);parent.append(e);return e;};
+    if(r.bbox)add('rect',{x:r.bbox[0],y:r.bbox[1],width:r.bbox[2]-r.bbox[0],height:r.bbox[3]-r.bbox[1],fill:'none',stroke:'var(--accent)','stroke-width':.3});
+    const visible=r.geometry?visibleImageLayers(currentImageGraph(s.side)):null;
+    if(r.geometry&&!r.layers.some(l=>visible.has(l)))continue;
+    const group=add('g',{fill:'var(--accent)','fill-opacity':.35});
+    // Geometry uses micrometres and KiCad counter-clockwise angles, unlike SVG.
+    const primitive=(p,parent,fill)=>{
+      if(!p)return;
+      const [w,h]=p.size.map(n=>n/1000),[x,y]=p.center.map(n=>n/1000);
+      const g=add('g',{transform:`translate(${x} ${y}) rotate(${-(p.angle||0)/1000})`,fill},parent);
+      if(p.shape==='circle')add('circle',{r:w/2},g);
+      else if(p.shape==='trapezoid') {
+        const [tx,ty]=(p.delta||[0,0]).map(n=>n/1000);
+        add('polygon',{points:[[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx,sy])=>[sx*w/2-sx*sy*ty/2,sy*h/2+sx*sy*tx/2].join(',')).join(' ')},g);
+      } else if(['rect','oval','roundrect'].includes(p.shape))add('rect',{x:-w/2,y:-h/2,width:w,height:h,rx:p.shape==='oval'?Math.min(w,h)/2:p.shape==='roundrect'?Math.min((p.radius||0)/1000,w/2,h/2):0},g);
+    };
+    const geometry=r.geometry;
+    if(geometry) {
+      for(const layer of r.layers.filter(l=>visible.has(l)))primitive(geometry.layerPrimitives?.[layer]||geometry.primitive,group,'var(--accent)');
+      for(const seg of geometry.segments||[])add('line',{x1:seg[0]/1000,y1:seg[1]/1000,x2:seg[2]/1000,y2:seg[3]/1000,stroke:'var(--accent)','stroke-width':seg[4]/1000},group);
+      for(const ring of geometry.rings||[])add('polygon',{points:ring.map(p=>p.map(n=>n/1000).join(',')).join(' ')},group);
+      if(geometry.drill) {
+        const id='image-hole-'+s.side+'-'+[...document.querySelectorAll('#stage .image-selection')].length;
+        const mask=add('mask',{id,maskUnits:'userSpaceOnUse'},add('defs',{}));
+        add('rect',{x:0,y:0,width:currentView().size[0],height:currentView().size[1],fill:'white'},mask);
+        primitive({...geometry.drill,shape:geometry.drill.size[0]===geometry.drill.size[1]?'circle':'oval'},mask,'black');
+        group.setAttribute('mask','url(#'+id+')');
+      }
+    }
+    add('circle',{cx:s.point[0],cy:s.point[1],r:Math.max(.3,6/S.z),fill:'none',stroke:'var(--accent)','stroke-width':.3});
+    world.append(svg);
+  }
+}
 function mountImageMarks(world,view) {
   world.querySelector('.marks')?.remove();if(view.kind!=='sheet')return;
   const ns='http:'+'//www.w3.org/2000/svg',marks=document.createElementNS(ns,'svg');
@@ -1428,8 +1535,7 @@ function mountImageMarks(world,view) {
     r.dataset.hotspot=e.uuid;r.dataset.side=side;
     r.addEventListener('click',event=>{
       event.stopPropagation();
-      if(imageSides(vp,toWorld(vp,event)).includes(side))pickImageAt(vp,event);
-      else pickAt(vp,event); // A target on the other Wipe side must not swallow the click.
+      pickAt(vp,event); // Route placement and Wipe through the same revision-aware picker.
     });
     marks.append(r);
   }
@@ -1488,6 +1594,7 @@ function afterDraw(view) {
     vp.append(legend);
   }
   refreshAppearance();
+  drawImageSelection();
   drawPins();
 }
 function drawPins() {
@@ -1524,6 +1631,7 @@ function drawPins() {
 }
 function pickAt(vp, e) {
   if (S.placing) { stopPlacing(); proposePin(vp, e); return; }
+  if (pickImageAt(vp,e))return;
   if (boardDiff) {
     const hit=boardDiff.pick(vp,e,S.s);
     if (hit) { S.s=hit.id; markSelected(); saveHash(); boardDiff.render(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({block:"nearest"}); }
@@ -1544,7 +1652,7 @@ function pickAt(vp, e) {
     if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
   }
 }
-function markSelected() { S.io = null; S.ig = null; revealChangeCard(); for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
+function markSelected() { clearImageSelection(); S.io = null; S.ig = null; revealChangeCard(); for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
@@ -1655,6 +1763,7 @@ function inventoryHtml() {
   }).join("") || '<p class="muted">No parts match.</p>') + (objs.length > 1500 ? `<p class="muted">showing 1500 of ${objs.length}; narrow the search to see the rest</p>` : "");
 }
 function goToObject(i) {
+  clearImageSelection();
   const o = proj().objects?.[i]; if (!o) return Promise.resolve();
   S.s = null; S.ig = null; S.io = i; renderInspector();
   const view = objView(o); if (!currentView(view)) return Promise.resolve();
@@ -2242,6 +2351,20 @@ async function computeRegions(view) {
 
 // bench-t6: one readout for change rows, inventory, geometry and check findings.
 function inspectorProperties() {
+  if(S.imageSelection) {
+    const selected=imageRecord(S.imageSelection);
+    if(selected) {
+      const values={...selected,kind:S.imageSelection.kind,
+        'X (mm)':S.imageSelection.point[0],'Y (mm)':S.imageSelection.point[1],pin:S.imageSelection.pin};
+      delete values.geometry;delete values.pins;
+      if(S.imageSelection.kind==='pin') {
+        const pin=selected.pins?.find(p=>p.number===S.imageSelection.pin);
+        values['Pin name']=pin?.name;
+      }
+      return {selected:{...selected,kind:S.imageSelection.kind},
+        base:S.imageSelection.side==='base'?values:{},head:S.imageSelection.side==='head'?values:{}};
+    }
+  }
   const p = proj(), row = p.changes.find(r => r.id === S.s) || allViolations().find(r => r.id === S.s);
   const selected = S.ig?.object || (S.io != null ? p.objects?.[S.io] : row);
   if (!selected) return null;

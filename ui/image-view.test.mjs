@@ -623,3 +623,24 @@ test('settle reads the final coalesced camera region, not the first event',async
   session.begin();session.settle(()=>box);box=[20,30,10,10];await timer();
   assert.equal(seen,box);session.dispose();
 });
+
+
+test('component and net ranking preserve natural identity', () => {
+  const rows = ['R10','R2','U1'].map(ref=>({ref,value:'R2 match',fields:{},footprint:''}));
+  assert.equal(ctx.ImageView.searchComponents(rows,'R')[0].ref,'R2');
+  assert.equal(ctx.ImageView.searchComponents(rows,'R')[1].ref,'R10');
+  assert.equal(ctx.ImageView.searchNets([{name:'unconnected-U1-Pad2'},{name:'12'},{name:'GND'}],'12')[0].name,'12');
+  assert.equal(ctx.ImageView.searchNets([{name:'unconnected-U1-Pad2'}],'').length,0);
+});
+test('search bounds results and ranks reference prefixes before field matches', () => {
+  const rows=Array.from({length:40},(_,i)=>({ref:'R'+(40-i),fields:{supplier:'needle'},footprint:'Package'}));
+  rows.push({ref:'U1',value:'R match'},{ref:'C1',footprint:'needle'});
+  assert.equal(ctx.ImageView.searchComponents(rows,' r ')[0].ref,'R1');
+  assert.equal(ctx.ImageView.searchComponents(rows,'needle').length,20);
+  assert.equal(ctx.ImageView.searchComponents(rows,'package')[0].ref,'R1');
+  assert.equal(ctx.ImageView.searchComponents(rows,'missing').length,0);
+  const nets=['AGND','GND10','GND2','GND','unconnected-U1-Pad2'].map(name=>({name}));
+  assert.equal(ctx.ImageView.searchNets(nets,'gnd').map(n=>n.name).join(','),'GND,GND2,GND10,AGND');
+  assert.equal(ctx.ImageView.searchNets(nets,'unconnected-')[0].name,'unconnected-U1-Pad2');
+  assert.equal(ctx.ImageView.searchNets(Array.from({length:40},(_,i)=>({name:'N'+i})), '').length,20);
+});

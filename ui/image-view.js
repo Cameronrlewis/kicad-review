@@ -224,6 +224,20 @@
       smallest(vias.filter(v=>v.d<=reach))||nearest(tracks.filter(v=>v.d<=reach))||null;
   }
 
+  const natural = new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
+  function searchComponents(elements,query) {
+    const q=query.trim().toLowerCase();
+    return elements.filter(e=>[e.ref,e.value,e.footprint,...Object.values(e.fields||{})]
+      .some(v=>String(v||'').toLowerCase().includes(q)))
+      .sort((a,b)=>Number(!String(a.ref||'').toLowerCase().startsWith(q))-Number(!String(b.ref||'').toLowerCase().startsWith(q)) || natural.compare(a.ref,b.ref))
+      .slice(0,20);
+  }
+  function searchNets(nets,query) {
+    const q=query.trim().toLowerCase(),rank=n=>n===q?0:n.startsWith(q)?1:2;
+    return nets.filter(n=>(!n.name.toLowerCase().startsWith('unconnected-')||q.startsWith('unconnected-'))&&n.name.toLowerCase().includes(q))
+      .sort((a,b)=>rank(a.name.toLowerCase())-rank(b.name.toLowerCase())||natural.compare(a.name,b.name)).slice(0,20);
+  }
+
   function comparisonSource(text,side,schematic) {
     const root=new DOMParser().parseFromString(text,'image/svg+xml').documentElement;
     const ns='http:'+'//www.w3.org/2000/svg',uid='kr-image-'+side;
@@ -265,5 +279,5 @@
   }
   globalThis.ImageView={snapshotScale,wheelFactor,gestureSession,vectorCrop,cropRegion,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
     disposeAll(){for(const c of [...live])c.dispose();},
-    segmentDistance,polygonDistance,primitiveDistance,inspectHit};
+    segmentDistance,polygonDistance,primitiveDistance,inspectHit,searchComponents,searchNets};
 })();

@@ -177,7 +177,66 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
 `];
 
 export const CHECKS = [
+  ['images inspect search and anchors','',`
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const vp=document.querySelector('#stage .stack.head').closest('.vp');
+    const world=vp.querySelector('.world'),origin=world.parentElement.getBoundingClientRect();
+    const p=new DOMPoint(102.54*PX,55*PX).matrixTransform(new DOMMatrix(getComputedStyle(world).transform));
+    pickImageAt(vp,new MouseEvent('click',{clientX:origin.left+p.x,clientY:origin.top+p.y}));
+    if(S.imageSelection?.kind!=='pin'||S.imageSelection.ref!=='U2'||S.imageSelection.sheet!=='/right/')return 'numeric pin selection missing';
+    if(!document.querySelector('#inspector').textContent.includes('U2'))return 'image inspector missing';
+    return true;
+  `],
   gestureLifecycleCheck,
+  ['images numeric revision routing and selection lifecycle','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    const click=(vp,point,touch=false)=>{
+      const r=vp.getBoundingClientRect();
+      const screen=BoardGL.worldToScreen(point,{x:S.x,y:S.y,z:S.z,width:r.width,height:r.height,flip:flipOn()});
+      return pickImageAt(vp,{clientX:r.left+screen[0],clientY:r.top+screen[1],pointerType:touch?'touch':'mouse'});
+    };
+    for(const mode of ['side','wipe','blend','overlay','semantic']) {
+      S.wipe=.5;S.blend=1;
+      await applyState({...S,v:'sheet:/right/',m:mode,x:105,y:55,z:15});
+      const vp=[...document.querySelectorAll('#stage .vp')].at(-1);
+      if(!click(vp,[mode==='wipe'?100:102.54,55])||S.imageSelection.ref!=='U2'||S.imageSelection.pin!=='3')return 'right instance '+mode;
+      if(S.imageSelection.side!==(mode==='wipe'?'base':'head'))return 'wrong revision '+mode;
+      if(!document.querySelector('#stage .image-selection'))return 'selection overlay '+mode;
+      if(mode==='blend') {
+        S.blend=0;await draw();click(document.querySelector('#stage .vp'),[100,55]);
+        if(S.imageSelection.side!=='base')return 'blend base endpoint';
+      }
+    }
+    await applyState({...S,v:'sheet:/left/',m:'side'});
+    if(S.imageSelection)return 'navigation retained selection';
+    click([...document.querySelectorAll('#stage .vp')].at(-1),[102.54,55]);
+    if(S.imageSelection.ref!=='U1'||S.imageSelection.sheet!=='/left/')return 'left instance identity';
+    const selection=JSON.stringify(S.imageSelection);await draw();
+    if(JSON.stringify(S.imageSelection)!==selection||!document.querySelector('.image-selection'))return 'redraw lost selection';
+    markSelected();if(S.imageSelection||document.querySelector('.image-selection'))return 'ordinary selection did not clear';
+    const inspect=proj().board.inspect,look=Appearance.get();
+    const original={...inspect};
+    try {
+      for(const side of ['base','head']) {
+        const graph=structuredClone(decodedBoardInspect.get(original[side]));
+        graph.tracks.forEach(t=>{t.net='12';t.uuid=side+'-'+t.uuid;});
+        graph.nets=[{name:'12',netClass:null}];
+        inspect[side]='numeric-'+side;decodedBoardInspect.set(inspect[side],graph);
+      }
+      for(const flip of [false,true]) {
+        Appearance.patch({flip,layers:Object.fromEntries(['F.Cu','In1.Cu','In2.Cu','B.Cu'].map(l=>[l,{visible:l==='In1.Cu',opacity:1}]))});
+        await applyState({...S,v:'board',m:'side',layers:null,x:10,y:5,z:15});
+        const vp=[...document.querySelectorAll('#stage .vp')].at(-1);
+        if(!click(vp,[10,5])||S.imageSelection.kind!=='track'||S.imageSelection.net!=='12'||imageRecord(S.imageSelection).layer!=='In1.Cu')return 'copper numeric/hidden/flip '+flip;
+        if(Appearance.get().netColors['12']?.[0]!==1)return 'net highlight missing';
+        clearImageSelection();await draw();
+        if(JSON.stringify(Appearance.get().netColors)!==JSON.stringify(look.netColors))return 'net colour not restored';
+        Appearance.patch({layers:{'In1.Cu':{opacity:0}}});await draw();
+        if(click([...document.querySelectorAll('#stage .vp')].at(-1),[10,5]))return 'zero opacity layer picked';
+      }
+    } finally {clearImageSelection();Object.assign(inspect,original);Appearance.set(look);}
+    return true;
+  `],
   ['images active gesture pixels','', 'return true;'],
   ['images deep vector crop pixels','', 'return true;'],
   ['images vector crop ownership','', `
