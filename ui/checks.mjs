@@ -4586,3 +4586,85 @@ CHECKS.push(['BR02 processed compatibility phone predicate fractional widths', '
    return run({layout:'phone'})||'forced phone layout ignored';
  }finally{frame.remove();}
 `]);
+
+CHECKS.push(
+  ['BR02 processed studio environment, tone mapping and no direct lights', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, s=Review3D.session(), T=THREE3D.THREE, r=st.renderers[0];
+    if(!st.firstFrame)return 'no first frame';
+    if(r.toneMapping!==T.NeutralToneMapping||r.outputColorSpace!==T.SRGBColorSpace||r.toneMappingExposure!==1.35)return 'renderer tone mapping or exposure';
+    if(JSON.stringify(st.lighting)!=='{"rig":"bench","bearing":60,"exposure":1.35}')return 'default lighting '+JSON.stringify(st.lighting);
+    const lights=[];
+    for(const v of st.views){ if(!v.scene.environment)return 'view without environment'; v.scene.traverse(o=>{if(o.isLight)lights.push(o.type);}); }
+    if(lights.length)return 'direct lights '+lights;
+    if(s.environments.size!==1)return 'environment cache size '+s.environments.size;
+    const first=st.views[0].scene.environment;
+    Review3D.setLighting({rig:'photo',bearing:100,exposure:9});
+    if(JSON.stringify(st.lighting)!=='{"rig":"photo","bearing":90,"exposure":3}')return 'clamp/snap '+JSON.stringify(st.lighting);
+    if(r.toneMappingExposure!==3||st.views.some(v=>v.scene.environment===first)||s.environments.size!==2)return 'rig change did not swap environment';
+    Review3D.setLighting({rig:'photo',bearing:90,exposure:.1});
+    if(r.toneMappingExposure!==.4||s.environments.size!==2)return 'exposure rebuilt the environment';
+    Review3D.setLighting({rig:'photo',bearing:90,exposure:1});
+    if(s.environments.size!==2)return 'revisiting a rig/bearing rebuilt its environment';
+    Review3D.setLighting({rig:'bench',bearing:70,exposure:1});
+    if(s.environments.size!==2||st.lighting.bearing!==60)return 'bearing not snapped to the 30 degree grid: '+s.environments.size;
+    Review3D.setLighting({rig:'nope',bearing:'x',exposure:NaN});
+    if(JSON.stringify(st.lighting)!=='{"rig":"bench","bearing":60,"exposure":1.35}')return 'invalid lighting not defaulted';
+    const px=await Review3D.sampleFrame();
+    return px.opaquePixels>0||'lit board draws nothing';
+  `],
+  ['BR02 processed lighting and assembled state survive the share hash', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    if(/(^|&)(lt|asm)=/.test(encodeState({...S})))return 'defaults persisted';
+    const hash=encodeState({...S,assembled3d:false,lighting3d:{rig:'lowsun',bearing:120,exposure:1.6},hidden3d:['silk'],camera3d:[1,2,3,4,5,6]});
+    const d=valid(decodeState(hash));
+    if(d.assembled3d!==false||d.lighting3d.rig!=='lowsun'||d.lighting3d.bearing!==120||d.lighting3d.exposure!==1.6)return 'round trip '+hash;
+    if(d.hidden3d.join()!=='silk'||d.camera3d.join()!=='1,2,3,4,5,6')return 'old camera/hidden hash lost';
+    const bad=valid(decodeState('p=0&lt=laser,x,y&asm=1'));
+    if(bad.lighting3d||bad.assembled3d!==undefined)return 'invalid lighting accepted';
+    const old=valid(decodeState('p=0&v=3d&m=side&c=1,2,3,4,5,6&h=silk'));
+    return (old.camera3d&&old.hidden3d.join()==='silk'&&!old.lighting3d)||'old hash broke';
+  `],
+  ['BR02 processed bare board hides components and restores them', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, s=Review3D.session(), seen=[];
+    const meshes=g=>s.groups.filter(x=>x.groups.includes(g));
+    if(!meshes('bodies').length)return 'fixture has no component bodies';
+    document.addEventListener('x',()=>{}); Review3D.onStateChange=e=>seen.push(e);
+    document.querySelector('[data-3d-assembled]').click();
+    if(st.assembled!==false||document.querySelector('[data-3d-assembled]').getAttribute('aria-pressed')!=='false')return 'toggle state';
+    if(meshes('bodies').some(x=>x.object.visible))return 'bodies still visible when bare';
+    if(!meshes('board').every(x=>x.object.visible))return 'board hidden when bare';
+    if(st.blocks.some(b=>b.object.visible)||st.views.some(v=>(v.labels||[]).some(m=>!m.el.hidden)))return 'blocks or markers still visible';
+    if(seen[0]?.assembled!==false)return 'no state event';
+    Review3D.setHidden(['silk']);
+    if(meshes('bodies').some(x=>x.object.visible))return 'hidden groups re-showed bodies';
+    Review3D.setAssembled(true);
+    return (meshes('bodies').every(x=>x.object.visible)&&meshes('silk').every(x=>!x.object.visible))||'assemble did not restore';
+  `],
+  ['BR02 processed 3D tools whole screen reachable', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const tools=document.querySelector('#zoombar .tools3d');
+    if(!tools)return 'missing .tools3d';
+    // Page-level overflow at 412 px belongs to 05's shell (bench-menu popover); the 3D tools must be reachable by scrolling the toolbar.
+    tools.scrollIntoView({inline:'center',block:'nearest'});
+    { const r=tools.getBoundingClientRect(); if(r.left<0||r.right>innerWidth)return 'tools unreachable '+JSON.stringify(r); }
+    const b=tools.querySelector('[data-3d-assembled]');
+    for(const el of tools.querySelectorAll('button,summary,select,input')){
+      const name=el.getAttribute('aria-label')||el.title||el.closest('label')?.textContent||el.textContent;
+      if(!name.trim())return 'unnamed control '+el.outerHTML.slice(0,60);
+    }
+    const light=tools.querySelector('.light3d'); light.open=true; await new Promise(r=>setTimeout(r,50));
+    tools.scrollIntoView({inline:'center',block:'nearest'});const m=light.querySelector('.light-menu').getBoundingClientRect(), tb=document.querySelector('#toolbar').getBoundingClientRect();
+    if(m.left<0||m.right>innerWidth||m.top<tb.bottom||m.bottom>innerHeight)return 'light menu clipped '+JSON.stringify(m);
+    for(const el of light.querySelectorAll('select,input')){const r=el.getBoundingClientRect(); if(innerWidth<=700&&r.height<43)return 'phone target too small '+r.height;}
+    const ex=light.querySelector('[data-3d-exposure]'); ex.value='2'; ex.dispatchEvent(new Event('input',{bubbles:true}));
+    if(Review3D.state.lighting.exposure!==2)return 'exposure slider not wired';
+    light.querySelector('[data-3d-rig]').value='photo'; light.querySelector('[data-3d-rig]').dispatchEvent(new Event('change',{bubbles:true}));
+    if(Review3D.state.lighting.rig!=='photo'||Review3D.state.lighting.exposure!==1.2)return 'preset did not apply its exposure';
+    light.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    if(light.open||document.activeElement!==light.querySelector('summary'))return 'Escape did not close and refocus';
+    const r=b.getBoundingClientRect(); if(innerWidth<=700&&r.height<43)return 'phone Assembled target too small';
+    return true;
+  `]
+);

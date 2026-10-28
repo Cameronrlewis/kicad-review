@@ -16,6 +16,7 @@ import boardDiff from '../ui/board-diff.js';
 import reviewJs from '../ui/review.js';
 import review3d from '../ui/review3d.js';
 import threeParts from '../ui/three-parts.js';
+import threeStudio from '../ui/three-studio.js';
 import workerSource from '../ui/three-decode.js';
 
 const workerTag = '<script type="application/octet-stream" id="three-decode-worker">'
@@ -43,7 +44,7 @@ export function currentReport(stored) {
   html = put(html, '<script src="sample/review-data.js"></script>', `<script>${data}</script>`);
   html = put(html, '<!-- KR_ICONS -->', sprite);
   html = put(html, '<script src="theme.js"></script>', `<script>\n${theme}</script>`);
-  html = put(html, '<script src="review.js"></script>', `${bundle ? `${bundle}${workerTag}<script>\n${threeParts}</script><script>\n${review3d}</script>` : ''}<script>\n${reviewJs}</script>`);
+  html = put(html, '<script src="review.js"></script>', `${bundle ? `${bundle}${workerTag}<script>\n${threeParts}</script><script>\n${threeStudio}</script><script>\n${review3d}</script>` : ''}<script>\n${reviewJs}</script>`);
   for (const [name, text] of Object.entries(assets)) html = put(html, `<script src="${name}"></script>`, `<script>\n${text}</script>`);
   return html;
 }

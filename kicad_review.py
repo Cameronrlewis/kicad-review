@@ -2961,7 +2961,7 @@ def inline_page(data_js):
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
         worker = base64.b64encode(open(posixpath.join(UI_DIR, "three-decode.js"), "rb").read()).decode()
         worker_tag = f'<script type="application/octet-stream" id="three-decode-worker">{worker}</script>'
-        prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script>{worker_tag}<script>\n{read("three-parts.js")}</script><script>\n{read("review3d.js")}</script>'
+        prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script>{worker_tag}<script>\n{read("three-parts.js")}</script><script>\n{read("three-studio.js")}</script><script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
     for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js"):
         page = page.replace(f'<script src="{asset}"></script>', f'<script>\n{read(asset)}</script>')

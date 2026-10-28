@@ -3288,6 +3288,8 @@ test('BR02 report embeds the decode worker and permits only blob workers', () =>
   const tag = dressed.match(/<script type="application\/octet-stream" id="three-decode-worker">([^<]*)<\/script>/);
   assert.ok(tag);
   assert.equal(Buffer.from(tag[1], 'base64').toString('utf8'), readFileSync(new URL('../ui/three-decode.js', import.meta.url), 'utf8'));
+  const studio = readFileSync(new URL('../ui/three-studio.js', import.meta.url), 'utf8');
+  assert.ok(dressed.includes(studio) && dressed.indexOf(studio) < dressed.indexOf('window.Review3D'), 'BR02 dressed report carries the studio script before the viewer');
   assert.match(reportCsp, /(?:^|; )worker-src blob:(?:;|$)/);
   assert.match(reportCsp, /connect-src 'none'/);
   assert.doesNotMatch(reportCsp, /allow-same-origin|unsafe-eval|https?:|connect-src (?!'none')/);

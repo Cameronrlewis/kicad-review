@@ -4,6 +4,7 @@ const D = window.REVIEW_DATA;
 // bench-t2: never repeat the site frame inside its sandboxed report.
 document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
+const LIGHT_RIGS3D = ["bench", "lowsun", "photo"];
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
@@ -236,6 +237,8 @@ function decodeState(hash) {
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
   if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
   if (q.has("h")) out.hidden3d = q.get("h").split(",").filter(Boolean);
+  if (q.get("asm") === "0") out.assembled3d = false;
+  if (q.has("lt")) { const [rig, bearing, exposure] = q.get("lt").split(","); out.lighting3d = { rig, bearing: +bearing, exposure: +exposure }; }
   return out;
 }
 function valid(st) {   // drop anything that does not exist in this report
@@ -253,13 +256,18 @@ function valid(st) {   // drop anything that does not exist in this report
   }
   if (Array.isArray(st.camera3d) && st.camera3d.length === 6 && st.camera3d.every(Number.isFinite)) out.camera3d = st.camera3d;
   if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
+  if (st.assembled3d === false) out.assembled3d = false;
+  if (st.lighting3d && LIGHT_RIGS3D.includes(st.lighting3d.rig)) {   // unknown rig = default light; numbers are clamped by the viewer
+    const { rig, bearing, exposure } = st.lighting3d;
+    out.lighting3d = { rig, bearing: Number.isFinite(bearing) ? bearing : null, exposure: Number.isFinite(exposure) ? exposure : null };
+  }
   return out;
 }
 function applyState(st) {
   const v = valid(st);
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
-                     revision: v.revision ?? "head", layout: v.layout ?? null, layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     revision: v.revision ?? "head", layout: v.layout ?? null, layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? null, camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
@@ -1130,7 +1138,7 @@ function pickAt(vp, e) {
   }
 }
 function markSelected() { S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
-if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision}) => { S.revision = revision; saveHash(); }; }
+if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled, lighting}) => { if (revision) S.revision = revision; if (assembled !== undefined) S.assembled3d = assembled; if (lighting) S.lighting3d = lighting; saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
@@ -1548,6 +1556,8 @@ function encodeState(s = S) {
   if (s.layers) q.set("l", s.layers.join(","));
   if (Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
   if (s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
+  if (s.assembled3d === false) q.set("asm", "0");
+  if (s.lighting3d) { const l = window.Review3D?.normalizeLighting(s.lighting3d) ?? s.lighting3d; if (l.rig !== "bench" || l.bearing !== 60 || l.exposure !== 1.35) q.set("lt", [l.rig, l.bearing, l.exposure].join(",")); }
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;

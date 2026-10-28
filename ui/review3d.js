@@ -173,12 +173,69 @@ window.Review3D = (() => {
     retry.onclick = () => { if (!s.dead) void show(s.stage, s.project, s.appState, {single:s.single}); };
     notice.append(text, retry);
   }
+  const RIGS = [["bench", "Bench"], ["lowsun", "Low sun"], ["photo", "Photo"]];
+  // Defaults and clamping for the light tool; app state and the hash are untrusted.
+  function normalizeLighting(v) {
+    const S = window.ThreeStudio, rig = S.LIGHT_RIGS[v?.rig] ? v.rig : S.PRESETS.bench.rig, preset = S.PRESETS[rig];
+    const bearing = Number.isFinite(v?.bearing) ? S.snapBearing(v.bearing) : preset.bearing;
+    const exposure = Number.isFinite(v?.exposure) ? Math.round(Math.min(3, Math.max(.4, v.exposure)) * 20) / 20 : preset.exposure;
+    return {rig, bearing, exposure};
+  }
+  function toolsHtml() {
+    const l = active?.lighting || normalizeLighting(), on = active ? active.assembled : true;
+    return `<span class="tools3d" role="group" aria-label="3D tools"><button type="button" data-3d-assembled aria-pressed="${on}" title="Show or hide the components">Assembled</button>`
+      + `<details class="light3d"><summary title="Studio lighting"><svg class="i" aria-hidden="true"><use href="#kr-i-cube"></use></svg>Light</summary><div class="light-menu">`
+      + `<label>Preset<select data-3d-rig>${RIGS.map(([id, n]) => `<option value="${id}"${id === l.rig ? " selected" : ""}>${n}</option>`).join("")}</select></label>`
+      + `<label>Light from<select data-3d-bearing>${Array.from({length:12}, (_, i) => i * 30).map(b => `<option value="${b}"${b === l.bearing ? " selected" : ""}>${b}°</option>`).join("")}</select></label>`
+      + `<label>Exposure <output data-3d-exposure-out>${l.exposure.toFixed(2)}</output><input type="range" data-3d-exposure aria-label="Exposure" min="0.4" max="3" step="0.05" value="${l.exposure}"></label>`
+      + `</div></details></span>`;
+  }
+  function environment(s, {rig, bearing}) {
+    const key = `${rig}:${bearing}`;
+    let target = s.environments.get(key);
+    if (!target) {
+      const {THREE} = window.THREE3D, texture = new THREE.DataTexture(window.ThreeStudio.pixels(rig, bearing), 256, 128, THREE.RGBAFormat, THREE.FloatType);
+      texture.mapping = THREE.EquirectangularReflectionMapping; texture.colorSpace = THREE.LinearSRGBColorSpace; texture.needsUpdate = true;
+      const pmrem = new THREE.PMREMGenerator(s.renderer);
+      try { target = pmrem.fromEquirectangular(texture); } finally { texture.dispose(); pmrem.dispose(); }
+      s.environments.set(key, target);
+    }
+    return target.texture;
+  }
+  function setLighting(value) {
+    const s = active; if (!s || s.dead) return;
+    const l = s.lighting = s.state.lighting = normalizeLighting(value);
+    if (s.renderer) {
+      s.renderer.toneMappingExposure = l.exposure;
+      try { const env = environment(s, l); for (const v of s.views) v.scene.environment = env; }
+      catch (error) { s.state.lightingError = String(error.message || error); }
+    }
+    const bar = document.querySelector("#zoombar");   // keep the tools in step with the state
+    if (bar?.querySelector("[data-3d-rig]")) {
+      bar.querySelector("[data-3d-rig]").value = l.rig; bar.querySelector("[data-3d-bearing]").value = String(l.bearing);
+      bar.querySelector("[data-3d-exposure]").value = String(l.exposure); bar.querySelector("[data-3d-exposure-out]").textContent = l.exposure.toFixed(2);
+    }
+    window.Review3D.onStateChange?.({lighting:l}); render();
+  }
+  function setAssembled(value) {
+    const s = active; if (!s || s.dead) return;
+    s.assembled = s.state.assembled = !!value;
+    document.querySelector("#zoombar [data-3d-assembled]")?.setAttribute("aria-pressed", String(s.assembled));
+    applyVisibility(); window.Review3D.onStateChange?.({assembled:s.assembled}); render();
+  }
   function cameraBar() {
     const bar = document.querySelector("#zoombar"); if (!bar) return;
-    bar.innerHTML = `<details class="camera-presets"><summary title="3D camera orientations"><svg class="i" aria-hidden="true"><use href="#kr-i-cube"></use></svg>Camera</summary><div class="camera-menu">${["Top","Bottom","Front","Back","Left","Right","3D","Reset"].map(n => `<button data-3d-camera="${n.toLowerCase()}" title="${n} camera view">${n}</button>`).join("")}</div></details>`;
-    const menu = bar.querySelector("details"), popup = bar.querySelector(".camera-menu");
-    menu.ontoggle = () => { const r = bar.getBoundingClientRect(); popup.style.top = document.querySelector("#toolbar").getBoundingClientRect().bottom + 4 + "px"; popup.style.left = Math.min(r.left, innerWidth - 180) + "px"; };
-    menu.onkeydown = e => { if (e.key === "Escape") { menu.open = false; menu.querySelector("summary").focus(); e.stopPropagation(); } };
+    bar.innerHTML = `<details class="camera-presets"><summary title="3D camera orientations"><svg class="i" aria-hidden="true"><use href="#kr-i-cube"></use></svg>Camera</summary><div class="camera-menu">${["Top","Bottom","Front","Back","Left","Right","3D","Reset"].map(n => `<button data-3d-camera="${n.toLowerCase()}" title="${n} camera view">${n}</button>`).join("")}</div></details>${toolsHtml()}`;
+    const menu = bar.querySelector(".camera-presets"), popup = bar.querySelector(".camera-menu");
+    for (const [d, p, w] of [[menu, popup, 180], [bar.querySelector(".light3d"), bar.querySelector(".light-menu"), 240]]) {
+      d.ontoggle = () => { const r = d.getBoundingClientRect(); p.style.top = document.querySelector("#toolbar").getBoundingClientRect().bottom + 4 + "px"; p.style.left = Math.max(0, Math.min(r.left, innerWidth - w)) + "px"; };
+      d.onkeydown = e => { if (e.key === "Escape") { d.open = false; d.querySelector("summary").focus(); e.stopPropagation(); } };
+    }
+    bar.querySelector("[data-3d-assembled]").onclick = () => setAssembled(!active?.assembled);
+    const light = () => ({rig:bar.querySelector("[data-3d-rig]").value, bearing:+bar.querySelector("[data-3d-bearing]").value, exposure:+bar.querySelector("[data-3d-exposure]").value});
+    bar.querySelector("[data-3d-rig]").onchange = e => setLighting({...light(), exposure:window.ThreeStudio.PRESETS[e.target.value].exposure});
+    bar.querySelector("[data-3d-bearing]").onchange = () => setLighting(light());
+    bar.querySelector("[data-3d-exposure]").oninput = () => setLighting(light());
     bar.querySelectorAll("[data-3d-camera]").forEach(b => b.onclick = () => { frame(b.dataset["3dCamera"]); window.Review3D.onCameraEnd?.(); menu.open = false; menu.querySelector("summary").focus(); });
   }
   function render() {
@@ -301,8 +358,7 @@ window.Review3D = (() => {
   function marker(v,node,change) { const { THREE }=window.THREE3D,b=new THREE.Box3().setFromObject(node),position=b.getCenter(new THREE.Vector3()),el=document.createElement("span");position.y=b.max.y+.004;el.className=`marker3d ${change.action}`;el.dataset.ref=change.ref;el.textContent=`${change.action === "added" ? "＋" : change.action === "removed" ? "−" : "≡"} ${change.ref||""}`;el.style.color=`var(--${change.action})`;v.host.appendChild(el);const m={position,el};(v.labels ||= []).push(m); return m; }
   function view(host, roots, side = null) {
     const {THREE, OrbitControls} = window.THREE3D, s = active, scene = new THREE.Scene();
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 2));
-    const light = new THREE.DirectionalLight(0xffffff, 3); light.position.set(1, -1, 2); scene.add(light, ...roots);
+    scene.environment = environment(s, s.lighting); scene.add(...roots);
     const camera = new THREE.PerspectiveCamera(35, 1, .01, 1000), controls = new OrbitControls(camera, host);
     const v = {host, canvas:s.canvas, renderer:s.renderer, camera, scene, controls, side, visible:true,
       sides:side ? [side] : s.allowedSides.filter(side => roots.includes(sideRoot(s, side)))};
@@ -328,7 +384,16 @@ window.Review3D = (() => {
   function focus(change, moveCamera=true) { if(!active)return; const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);return own?[outline(v.scene,own,css("--accent"))]:[];}); window.Review3D.state.selected=active.selected; render(); }
   function setBlend(value){if(!active?.blend)return;active.blend.value=value;active.blend.base.forEach(m=>{m.transparent=true;m.opacity=1-value;});active.blend.head.forEach(m=>{m.transparent=true;m.opacity=value;});window.Review3D.state.blend=value;render();}
   function toggleBlend(){setBlend(active.blend.value<.5?1:0);}
-  function setHidden(hidden = []) { if (!active) return; const off = new Set(hidden); active.groups.forEach(({object, groups}) => { object.visible = !groups.some(g => off.has(g)); }); render(); }
+  // Bare board hides every component: bodies, no-model blocks, change markers and baseline ghosts. No second file.
+  function applyVisibility() {
+    const s = active; if (!s) return;
+    const off = new Set(s.hidden || []); if (!s.assembled) off.add('bodies');
+    s.groups.forEach(({object, groups}) => { object.visible = !groups.some(g => off.has(g)); });
+    s.state.blocks.forEach(b => { b.object.visible = s.assembled; });
+    s.state.ghosts.forEach(g => { g.object.visible = s.assembled; });
+    for (const v of s.views) for (const m of v.labels || []) m.el.hidden = !s.assembled;
+  }
+  function setHidden(hidden = []) { if (!active) return; active.hidden = hidden; applyVisibility(); render(); }
   function cameraState() { const v=active?.views[0]; return v ? [...v.camera.position.toArray(), ...v.controls.target.toArray()].map(n => Math.round(n * 10000) / 10) : null; }
   function setCameraState(c) { if (!active || !Array.isArray(c) || c.length !== 6) return; active.views.forEach(v => { v.camera.position.set(c[0]/1000,c[1]/1000,c[2]/1000); v.controls.target.set(c[3]/1000,c[4]/1000,c[5]/1000); v.controls.update(); }); render(); }
   // Layer pivots are arbitrary; every primitive of a component shares its world-box side.
@@ -348,11 +413,11 @@ window.Review3D = (() => {
       available:Object.fromEntries(sides.map(side => [side, !!(model[side] || project.board.poster3d?.[side] || project.board.assets3d?.[side]?.model || model.errors?.[side])])),
       geometries:new Set(), materials:new Set(), textures:new Set(), environments:new Map(), comparisonMaterials:new Map(),
       parses:new Map(), decodedModels:new Map(), decodedScenes:[],
-      assembled:true, hiddenBodies:false, visible:true, hostsBySide:{}, stage, project, appState
+      assembled:appState.assembled3d !== false, hidden:[], lighting:normalizeLighting(appState.lighting3d), hiddenBodies:false, visible:true, hostsBySide:{}, stage, project, appState
     };
     const state = window.Review3D.state = session.state = {
       roots:session.roots, views:session.views, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
-      revision:session.revision, modelDigests:{},
+      revision:session.revision, assembled:session.assembled, lighting:session.lighting, modelDigests:{},
       loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
       resourceCounts:{workers:0, urls:0, pending:0}, parts:{base:[], head:[]}, selected:[],
       changedParts:new Set(session.changes.map(c => c.uuid || c.ref)).size,
@@ -394,6 +459,7 @@ window.Review3D = (() => {
     try {
       const renderer = new T.THREE.WebGLRenderer({antialias:true, alpha:true});
       renderer.setClearColor(0, 0); renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.toneMapping = T.THREE.NeutralToneMapping; renderer.outputColorSpace = T.THREE.SRGBColorSpace; renderer.toneMappingExposure = session.lighting.exposure;
       renderer.autoClear = false; renderer.info.autoReset = false;
       session.renderer = renderer; session.canvas = renderer.domElement; stage.prepend(session.canvas); state.renderers = [renderer];
       session.canvas.addEventListener('webglcontextlost', event => {
@@ -503,5 +569,5 @@ window.Review3D = (() => {
   }
   // Node contracts consume the unchanged helper; the browser API stays private.
   if (typeof module === 'object' && module.exports) module.exports = {parseByDigest};
-  return {show,dispose,cameraBar,frame,focus,setHidden,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
+  return {show,dispose,cameraBar,frame,focus,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
 })();

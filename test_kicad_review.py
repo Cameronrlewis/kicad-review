@@ -4612,4 +4612,5 @@ worker_tag = '<script type="application/octet-stream" id="three-decode-worker">'
 assert '</script>' not in worker
 html = kicad_review.inline_page(pathlib.Path('ui/sample/review-data-3d.js').read_text())
 assert worker_tag in html, 'BR02 inline decode worker source'
+assert pathlib.Path('ui/three-studio.js').read_text() in html and html.index('window.ThreeStudio') < html.index('window.Review3D'), 'BR02 studio script precedes the viewer'
 print('ok BR02 inline decode worker source')
