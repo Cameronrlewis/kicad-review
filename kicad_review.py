@@ -2852,7 +2852,11 @@ def comparison_svg(text, side, schematic=False):
     rgb = (.85, .1, .15) if side == 'base' else (.1, .6, .2)
     alpha = '-.3 -.59 -.11 1 0' if schematic else '0 0 0 1 0'
     defs = ET.SubElement(root, ns + 'defs')
-    filt = ET.SubElement(defs, ns + 'filter', {'id': uid, 'color-interpolation-filters': 'sRGB'})
+    box = svg_viewbox(text)
+    filt = ET.SubElement(defs, ns + 'filter', {
+        'id': uid, 'color-interpolation-filters': 'sRGB', 'filterUnits': 'userSpaceOnUse',
+        'x': str(box[0]), 'y': str(box[1]), 'width': str(box[2]), 'height': str(box[3]),
+    })
     matrix = ' '.join(f'0 0 0 0 {v}' for v in rgb) + ' ' + alpha
     ET.SubElement(filt, ns + 'feColorMatrix', {'type': 'matrix', 'values': matrix})
     group = ET.Element(ns + 'g', {'filter': f'url(#{uid})'})
@@ -2862,14 +2866,12 @@ def comparison_svg(text, side, schematic=False):
         root.remove(child)
         group.append(child)
     root.append(group)
-    # Stable digest bytes must not depend on another exporter registering a prefix.
-    namespace_map = ET._namespace_map.copy()
-    try:
-        ET.register_namespace('', 'http://www.w3.org/2000/svg')
-        return ET.tostring(root, encoding='unicode')
-    finally:
-        ET._namespace_map.clear()
-        ET._namespace_map.update(namespace_map)
+    # Keep SVG namespace explicit without mutating ElementTree's global registry.
+    for attribute in list(root.attrib):
+        if attribute == 'xmlns' or attribute.startswith('{http://www.w3.org/2000/xmlns/}'):
+            del root.attrib[attribute]
+    serialized = ET.tostring(root, encoding='unicode')
+    return serialized.replace('xmlns:ns0="http://www.w3.org/2000/svg"', 'xmlns="http://www.w3.org/2000/svg"').replace('ns0:', '')
 
 
 def svg_viewbox(text):

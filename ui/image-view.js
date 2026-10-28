@@ -165,7 +165,9 @@
     const root=new DOMParser().parseFromString(text,'image/svg+xml').documentElement;
     const ns='http:'+'//www.w3.org/2000/svg',uid='kr-image-'+side;
     const element=(name,attrs={})=>{const e=document.createElementNS(ns,name);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);return e;};
-    const defs=element('defs'),f=element('filter',{id:uid,'color-interpolation-filters':'sRGB'});
+    const box=(root.getAttribute('viewBox')||'0 0 100 100').trim().split(/[\\s,]+/).map(Number);
+    const [x,y,width,height]=box.length===4&&box.every(Number.isFinite)?box:[0,0,100,100];
+    const defs=element('defs'),f=element('filter',{id:uid,'color-interpolation-filters':'sRGB',filterUnits:'userSpaceOnUse',x,y,width,height});
     const rgb=side==='base'?[.85,.1,.15]:[.1,.6,.2];
     f.append(element('feColorMatrix',{type:'matrix',values:rgb.map(v=>'0 0 0 0 '+v).join(' ')+' '+(schematic?'-.3 -.59 -.11 1 0':'0 0 0 1 0')}));defs.append(f);
     const group=element('g',{filter:`url(#${uid})`});

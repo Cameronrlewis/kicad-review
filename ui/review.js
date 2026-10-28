@@ -1281,10 +1281,18 @@ function mountImageMarks(world,view) {
   marks.style.width=view.size[0]*PX+'px';marks.style.height=view.size[1]*PX+'px';
   const sheet=proj().sheets.find(s=>'sheet:'+s.path===S.v),vp=world.parentElement;
   const box=[S.x-vp.clientWidth/(2*S.z),S.y-vp.clientHeight/(2*S.z),S.x+vp.clientWidth/(2*S.z),S.y+vp.clientHeight/(2*S.z)];
-  const elements=['base','head'].filter(side=>world.querySelector('.stack.'+side+' [data-image-artwork]')).flatMap(side=>
-    (decodedSheetHotspots.get(sheet?.hotspots?.[side])?.views.find(v=>v.sheet===sheet.path)?.elements||[]).map(e=>({...e,side})));
-  // Bound the combined pane, not each revision separately; smaller targets draw last.
-  for(const e of ImageView.visibleHotspots(elements,box)) {
+  const elements=[];
+  for(const side of ['base','head']) {
+    if(!world.querySelector('.stack.'+side+' [data-image-artwork]'))continue;
+    const rows=decodedSheetHotspots.get(sheet?.hotspots?.[side])?.views.find(v=>v.sheet===sheet.path)?.elements||[];
+    for(const e of ImageView.visibleHotspots(rows,box))elements.push({e,side});
+  }
+  // Cull each revision before attaching its side, then bound the combined pane.
+  const survivors=elements.sort((a,b)=>{
+    const area=({bbox})=>(bbox[2]-bbox[0])*(bbox[3]-bbox[1]);
+    return area(b.e)-area(a.e);
+  }).slice(-400).reverse();
+  for(const {e,side} of survivors) {
     const r=document.createElementNS(ns,'rect'),[x,y,x1,y1]=e.bbox;
     for(const [key,value] of Object.entries({x,y,width:x1-x,height:y1-y}))r.setAttribute(key,value);
     r.dataset.hotspot=e.uuid;r.dataset.side=e.side;
