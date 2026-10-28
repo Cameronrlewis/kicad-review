@@ -37,6 +37,6 @@ for(const [digest,kind,path] of [
     assert.equal(checks,3,'a fresh browser cache hit bypassed authorization');
   } finally {
     try {await browser?.close();}
-    finally {await new Promise(r=>server.close(r));}
+    finally {server.closeAllConnections();await new Promise(r=>server.close(r));} // Chrome keeps loopback keep-alive sockets open
   }
 });
