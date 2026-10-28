@@ -335,6 +335,115 @@ function svgText(id) {
   // Share the in-flight text with validation, without retaining it in a JSON cache record.
   return Promise.all([assetText(id), decodedAsset(id)]).then(([text]) => text);
 }
+// Optional inspection data is validated independently of artwork and inventory.
+const decodedSheetHotspots = new Map(), decodedBoardInspect = new Map();
+const imageManifestLoads = new Map();
+function validateImageManifest(m, kind) {
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const text = v => typeof v === 'string';
+  const finite = v => typeof v === 'number' && Number.isFinite(v);
+  const vector = (v, n) => Array.isArray(v) && v.length === n && v.every(finite);
+  const box = v => vector(v, 4) && v[2] >= v[0] && v[3] >= v[1];
+  const nonnegative = v => finite(v) && v >= 0;
+  const list = (v, test) => Array.isArray(v) && v.every(test);
+  const require = ok => { if (!ok) throw Error('Invalid ' + kind + ' inspection manifest'); };
+  const warnings = v => list(v, w => object(w) && text(w.reason));
+  require(object(m) && m.version === 1 && m.units === 'mm' && warnings(m.warnings));
+  if (kind === 'sheet') {
+    const paths = new Set();
+    require(list(m.views, v => {
+      if (!object(v) || !text(v.sheet) || !v.sheet.startsWith('/') || paths.has(v.sheet) ||
+          !text(v.file) || !v.file || !vector(v.viewBox, 4) || v.viewBox[2] <= 0 || v.viewBox[3] <= 0) return false;
+      paths.add(v.sheet);
+      return list(v.elements, e => object(e) && text(e.uuid) && !!e.uuid && text(e.ref) &&
+        text(e.unit) && /^[1-9]\d*$/.test(e.unit) && box(e.bbox) &&
+        list(e.pins, p => object(p) && text(p.number) && text(p.name) && finite(p.x) && finite(p.y))) &&
+        list(v.labels, l => object(l) && text(l.uuid) && text(l.text) &&
+          ['label', 'global_label', 'hierarchical_label'].includes(l.kind) && finite(l.x) && finite(l.y)) &&
+        list(v.noConnects, n => object(n) && text(n.uuid) && finite(n.x) && finite(n.y)) &&
+        list(v.wires, w => object(w) && text(w.uuid) && box(w.bbox) &&
+          list(w.points, p => vector(p, 2)) && w.points.length >= 2);
+    }));
+    return m;
+  }
+  const copper = KicadColors.appearanceOrder.filter(l => l.endsWith('.Cu'));
+  require(list(m.layers, l => copper.includes(l)) && m.layers.length > 0 &&
+    m.layers.every((l, i) => !i || copper.indexOf(l) > copper.indexOf(m.layers[i - 1])));
+  // The copper stack defines physical spans; pads/graphics also carry technical layers.
+  const knownLayer = l => text(l) && (m.layers.includes(l) || !l.endsWith('.Cu') && Object.hasOwn(KicadColors.layers, l));
+  const span = ls => list(ls, knownLayer) && ls.length > 0 && new Set(ls).size === ls.length;
+  const primitive = (p, drill = false) => object(p) && vector(p.center, 2) &&
+    vector(p.size, 2) && p.size.every(nonnegative) && finite(p.angle) &&
+    (drill || (['circle', 'rect', 'oval', 'roundrect', 'trapezoid', 'custom'].includes(p.shape) &&
+      nonnegative(p.radius) && vector(p.delta, 2)));
+  const geometry = g => {
+    if (!object(g)) return false;
+    // Reject nonfinite numbers anywhere, including optional per-layer overrides.
+    const numbers = v => typeof v === 'number' ? finite(v) : Array.isArray(v) ? v.every(numbers) :
+      object(v) ? Object.values(v).every(numbers) : true;
+    if (!numbers(g)) return false;
+    if (g.primitive !== undefined && !primitive(g.primitive)) return false;
+    if (g.drill != null && !primitive(g.drill, true)) return false;
+    if (g.segments !== undefined && !list(g.segments, s => vector(s, 5) && nonnegative(s[4]))) return false;
+    if (g.rings !== undefined && !list(g.rings, r => list(r, p => vector(p, 2)) && r.length >= 3)) return false;
+    if (g.layerPrimitives !== undefined && (!object(g.layerPrimitives) ||
+      !Object.entries(g.layerPrimitives).every(([l, p]) => knownLayer(l) && primitive(p)))) return false;
+    if (g.text !== undefined && (!object(g.text) || !text(g.text.value) || !vector(g.text.at, 2) ||
+      !vector(g.text.size, 2) || !g.text.size.every(nonnegative) || !finite(g.text.angle) || !nonnegative(g.text.thickness))) return false;
+    return !!g.primitive || !!g.segments?.length || !!g.rings?.length || !!g.text;
+  };
+  const record = o => object(o) && text(o.uuid) && !!o.uuid && text(o.net) && span(o.layers) &&
+    typeof o.hidden === 'boolean' && geometry(o.geometry);
+  require(list(m.pads, o => record(o) && text(o.ref) && text(o.pin) &&
+    [o.x, o.y, o.angle].every(finite) && [o.width, o.height, o.radiusRatio].every(nonnegative) &&
+    text(o.shape) && !!o.geometry.primitive));
+  require(list(m.tracks, o => record(o) && ['track', 'arc'].includes(o.kind) &&
+    [o.x1, o.y1, o.x2, o.y2].every(finite) && nonnegative(o.width) &&
+    o.layers.includes(o.layer) && o.layers.every(l => m.layers.includes(l)) && !!o.geometry.segments?.length));
+  require(list(m.vias, o => record(o) && [o.x, o.y].every(finite) && nonnegative(o.diameter) &&
+    (o.drill === null || nonnegative(o.drill)) && !!o.geometry.primitive &&
+    o.fromLayer === o.layers[0] && o.toLayer === o.layers.at(-1) && o.layers.every(l => m.layers.includes(l)) &&
+    o.layers.every((l, i) => !i || m.layers.indexOf(l) === m.layers.indexOf(o.layers[i - 1]) + 1)));
+  require(list(m.nets, n => object(n) && text(n.name) && (n.netClass === null || text(n.netClass))));
+  require(object(m.stats) && ['copperLayers', 'routedLengthMm', 'padCount', 'viaCount', 'netCount'].every(k => nonnegative(m.stats[k])) &&
+    (m.stats.boardSizeMm === null || vector(m.stats.boardSizeMm, 2) && m.stats.boardSizeMm.every(nonnegative)));
+  require(object(m.truncated) && ['nets', 'pads', 'tracks', 'vias', 'footprintGraphics'].every(k => typeof m.truncated[k] === 'boolean'));
+  require(list(m.footprintGraphics, o => object(o) && text(o.uuid) && text(o.ref) && span(o.layers) && geometry(o.geometry)));
+  return m;
+}
+async function loadImageManifests(P) {
+  const groups = [
+    ['sheet', decodedSheetHotspots, (P.sheets || []).flatMap(s => Object.values(s.hotspots || {}))],
+    ['board', decodedBoardInspect, Object.values(P.board?.inspect || {})],
+  ];
+  await Promise.all(groups.flatMap(([kind, decoded, ids]) => [...new Set(ids.filter(Boolean))].map(async id => {
+    if (decoded.has(id)) return;
+    const key = kind + ':' + id;
+    if (!imageManifestLoads.has(key)) {
+      const load = (async () => {
+        try { decoded.set(id, validateImageManifest(await jsonAsset(id), kind)); }
+        catch (error) { console.warn('Inspection unavailable for this report', error); }
+      })();
+      imageManifestLoads.set(key, load);
+      load.finally(() => { if (imageManifestLoads.get(key) === load) imageManifestLoads.delete(key); });
+    }
+    await imageManifestLoads.get(key);
+  })));
+}
+function inspectionNotice(stage, view, P) {
+  if (!view || !['sheet', 'board'].includes(view.kind)) return;
+  const sheet = view.kind === 'sheet' && P.sheets.find(s => 'sheet:' + s.path === stage.dataset.view);
+  const ids = sheet ? sheet.hotspots : P.board?.inspect;
+  const layers = view.kind === 'board' ? P.board.layers : view.layers;
+  const sides = ['base', 'head'].filter(side => layers.some(l => l.svg?.[side]) || view.kind === 'board' && P.board.geometry?.[side]);
+  const available = sides.length && sides.every(side => view.kind === 'board' ? decodedBoardInspect.has(ids?.[side]) :
+    decodedSheetHotspots.get(ids?.[side])?.views.some(v => v.sheet === sheet.path));
+  if (available) return;
+  const notice = document.createElement('p'); notice.className = 'inspection-unavailable'; notice.setAttribute('role', 'status');
+  notice.textContent = 'Inspection unavailable for this report. Artwork remains available.';
+  notice.style.cssText = 'position:absolute;top:28px;left:8px;right:8px;z-index:5;margin:0;padding:6px 12px;background:var(--surface);color:var(--text);border:1px solid var(--line);pointer-events:none';
+  stage.append(notice);
+}
 async function jsonAsset(id) {
   const pending = decodedAsset(id), asset = await pending;
   if (!asset) return null;
@@ -433,7 +542,7 @@ function applyAppearance(snapshot) {
   stage.appearancePending = Promise.all(imageJobs).then(result => {
     // A draw waiting on a superseded decode must wait for the latest palette too.
     if (ticket !== stage.appearanceGeneration) return stage.appearancePending;
-    if (stage.isConnected && stage.imageMounted && stage.dataset.view === S.v && !stage.querySelector('.image-error')) {
+    if (stage.isConnected && stage.imageMounted && +stage.dataset.generation === gen && stage.dataset.view === S.v && !stage.querySelector('.image-error')) {
       stage.dataset.imageReady = "true"; stage.setAttribute("aria-busy", "false");
     }
     return result;
@@ -655,9 +764,10 @@ async function draw() {
   Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
   schematicResize.disconnect();
   resetCoordinates();
-  const my = ++gen, view = currentView(), stage = document.createElement("main");
+  const my = ++gen, view = currentView(), P = proj(), stage = document.createElement("main");
   stage.id = "stage"; stage.className = `mode-${S.m}`;
-  stage.dataset.view = S.v; stage.dataset.imageReady = "false";
+  stage.dataset.view = S.v; stage.dataset.imageReady = "false"; stage.dataset.generation = String(my);
+  $("#stage").dataset.imageReady = "false";
   $("#stage").setAttribute("aria-busy", "true");
   statusText('.status-message', 'Loading drawing…');
   if (S.v === '3d') {
@@ -670,6 +780,8 @@ async function draw() {
     return;
   }
   window.Review3D?.dispose();
+  await loadImageManifests(P);
+  if (my !== gen) return;
   let scenes = null;
   const geo = S.v === "board" && view && proj().board.geometry;
   if (boardView.failed !== null && boardView.failed !== S.p) boardView.failed = boardView.note = null;
@@ -702,6 +814,7 @@ async function draw() {
       for (const {renderer, canvas} of boardDiff.panes) trackAppearanceBoard(renderer, canvas);
       if (S.m === "wipe") addDivider(stage.querySelector(".vp"));
       boardDiagnostics(stage);
+      inspectionNotice(stage, view, P);
       noChangeNotice(stage);
       if (!placed()) fit(); else apply();
       afterDraw(view);
@@ -720,6 +833,7 @@ async function draw() {
     message.textContent = `Image unavailable: ${error.message}`; stage.append(message);
   }
   assetRetry(stage);
+  inspectionNotice(stage, view, P);
   if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
   noChangeNotice(stage);
   if (my !== gen) { releaseImageStage(stage); return; }
@@ -1011,21 +1125,11 @@ function attachPanZoom(vp) {
     if (active) pendingContext=e; else canvasMenu(vp,e);
   });
 }
-function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
-  const v = currentView();
-  let b = null;
-  for (const svg of document.querySelectorAll("#stage svg")) {
-    const R = svg.getBoundingClientRect();
-    if (!v || !R.width) continue;
-    const kx = v.size[0] / R.width, ky = v.size[1] / R.height;
-    for (const g of svg.querySelectorAll(":scope > g")) {
-      const r = g.getBoundingClientRect();
-      if (!r.width && !r.height) continue;
-      const q = [(r.left - R.left) * kx, (r.top - R.top) * ky, (r.right - R.left) * kx, (r.bottom - R.top) * ky];
-      b = b ? [Math.min(b[0], q[0]), Math.min(b[1], q[1]), Math.max(b[2], q[2]), Math.max(b[3], q[3])] : q;
-    }
-  }
-  return b;
+function contentBox() {
+  const v = currentView(); if (!v) return null;
+  if (v.kind === 'board' && sceneBox()) return sceneBox();
+  // Full page, not symbol extents, is authoritative for worksheet and legacy SVG Home fit.
+  return [0, 0, ...v.size];
 }
 function zoomTo(box, pad = 8) {
   const vp = document.querySelector("#stage .vp");

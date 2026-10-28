@@ -183,6 +183,77 @@ return true;
       return true;
     } finally {BoardGL.create=original;}
   `],
+  ['images manifests and home','',`
+    const sheet=proj().sheets.find(s=>s.hotspots?.head);if(!sheet)return 'fixture lacks manifest';
+    await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
+    if(!decodedSheetHotspots.has(sheet.hotspots.head))return 'manifest not decoded before readiness';
+    const b=contentBox();if(!b||b.some(n=>!Number.isFinite(n)))return 'image bounds unavailable';
+    fit();if(S.x!==currentView().size[0]/2||S.y!==currentView().size[1]/2)return 'Home lost worksheet';
+    await new Promise(requestAnimationFrame);
+    for(const image of document.querySelectorAll('#stage img[data-image-artwork]')) {
+      const r=image.getBoundingClientRect(),pane=image.closest('.vp').getBoundingClientRect();
+      if(r.left<pane.left-1||r.right>pane.right+1||r.top<pane.top-1||r.bottom>pane.bottom+1)return 'Home clipped page/title block';
+    }
+    return document.querySelector('#stage').dataset.imageReady==='true'||'manifest readiness missing';
+  `],
+  ['images malformed manifests preserve artwork','',`
+    const P=proj(),sheet=P.sheets.find(s=>s.hotspots?.head&&s.svg?.base&&s.svg?.head);
+    if(!sheet||!P.board.inspect?.head)return 'fixture lacks manifests';
+    const oldSheet=sheet.hotspots,oldInspect=P.board.inspect,oldGeometry=P.board.geometry;
+    const sheetSource=await jsonAsset(oldSheet.head),boardSource=await jsonAsset(oldInspect.head);
+    const fixtures=[
+      ['sheet',m=>{m.views[0].viewBox=[0,0,null,1];}],
+      ['sheet',m=>{m.views[1].elements[0].pins[0].x=null;}],
+      ['sheet',m=>{m.views[0].labels=[{uuid:'bad',text:'X',kind:'label',x:null,y:0}];}],
+      ['board',m=>{m.pads=[{uuid:'bad',ref:'U1',net:'',layers:['F.Cu'],hidden:false}];}],
+      ['board',m=>{m.tracks[0].x1=null;}],
+      ['board',m=>{m.tracks[0].geometry.segments[0][0]=null;}],
+      ['board',m=>{m.tracks[0].layers=['not-a-layer'];}],
+      ['board',m=>{delete m.stats;}],
+    ];
+    const ids=[];
+    try {
+      P.board.geometry=null; // Exercise image fallback independently of WebGL availability.
+      for(const [i,[kind,mutate]] of fixtures.entries()) {
+        const id='malformed_manifest_'+i,source=structuredClone(kind==='sheet'?sheetSource:boardSource);mutate(source);ids.push(id);
+        const bytes=new Uint8Array(await new Response(new Blob([JSON.stringify(source)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+        D.blobs[id]=btoa(String.fromCharCode(...bytes));
+        sheet.hotspots=kind==='sheet'?{...oldSheet,head:id}:oldSheet;
+        P.board.inspect=kind==='board'?{...oldInspect,head:id}:oldInspect;
+        await applyState({...S,v:kind==='sheet'?'sheet:'+sheet.path:'board',m:'side'});
+        const stage=document.querySelector('#stage'),images=[...stage.querySelectorAll('img[data-image-artwork]')];
+        if(stage.dataset.imageReady!=='true')return 'malformed '+i+' blocked readiness';
+        if(!stage.querySelector('.inspection-unavailable[role="status"]'))return 'malformed '+i+' lacks unavailable notice';
+        if((kind==='sheet'?decodedSheetHotspots:decodedBoardInspect).has(id))return 'malformed '+i+' cached';
+        if(!['base','head'].every(side=>images.some(img=>img.dataset.side===side&&img.complete&&img.naturalWidth>0)))return 'malformed '+i+' lost revision artwork';
+        if(stage.querySelector('.image-error'))return 'manifest failure became image failure';
+      }
+      return true;
+    } finally {
+      sheet.hotspots=oldSheet;P.board.inspect=oldInspect;P.board.geometry=oldGeometry;
+      for(const id of ids){delete D.blobs[id];delete cache[id];}
+      await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
+    }
+  `],
+  ['images manifest decode navigation generation','',`
+    const P=proj(),sheet=P.sheets.find(s=>s.hotspots?.head),other=P.sheets.find(s=>s!==sheet&&s.svg?.head);
+    if(!sheet||!other)return 'fixture lacks sheets';
+    const original=jsonAsset,old=sheet.hotspots,id='delayed_manifest';
+    let release,started;const gate=new Promise(r=>release=r),entered=new Promise(r=>started=r);
+    jsonAsset=async key=>{if(key===id){started();await gate;return original(old.head);}return original(key);};
+    let pending;
+    try {
+      sheet.hotspots={...old,head:id};
+      pending=applyState({...S,v:'sheet:'+sheet.path,m:'side'});await entered;
+      if(document.querySelector('#stage').dataset.imageReady!=='false')return 'ready before manifest decode';
+      sheet.hotspots=old;
+      await applyState({...S,v:'sheet:'+other.path,m:'side'});
+      const stage=document.querySelector('#stage');
+      release();await pending;
+      if(document.querySelector('#stage')!==stage||stage.dataset.view!=='sheet:'+other.path||stage.dataset.imageReady!=='true')return 'stale manifest draw mounted';
+      return true;
+    } finally {sheet.hotspots=old;release();if(pending)await pending;jsonAsset=original;decodedSheetHotspots.delete(id);}
+  `],
   ["images screen and legacy appearance", "", `
     // Use the first two-sided project when present. The legacy added-project's
     // unfiltered Changes dock alone previously exceeded the artwork DOM budget.

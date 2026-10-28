@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {gunzipSync} from 'node:zlib';
 const ctx = {console,setTimeout,clearTimeout,TextEncoder}; vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(new URL('./image-view.js', import.meta.url), 'utf8'), ctx);
 test('only final appearance survives navigation; all URLs released', async () => {
@@ -344,4 +345,119 @@ test('layer adapter keeps alpha and visibility on wrapper through delayed replac
   const third=adapter.setAppearance({color:[1,2,3,1],opacity:1});adapter.dispose();
   jobs[2]();assert.equal(await third,false);assert.equal(new Set(revoked).size,3);
   assert.equal(await adapter.setAppearance({color:[1,2,3,1],opacity:1}),false);
+});
+
+// Exercise the actual review.js boundary without booting the report UI.
+const reviewSource = fs.readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+const manifestSource = reviewSource.slice(reviewSource.indexOf('const decodedSheetHotspots ='), reviewSource.indexOf('function inspectionNotice('));
+function manifestHarness(jsonAsset = async () => null) {
+  const context = vm.createContext({console:{warn(){}}, jsonAsset});
+  vm.runInContext(fs.readFileSync(new URL('./kicad-colors.js', import.meta.url), 'utf8'), context);
+  vm.runInContext(manifestSource + '\nglobalThis.api={validateImageManifest,loadImageManifests,decodedSheetHotspots,decodedBoardInspect};', context);
+  return context.api;
+}
+const fixtureContext = vm.createContext({window:{}});
+vm.runInContext(fs.readFileSync(new URL('./sample/review-data-images.js', import.meta.url), 'utf8'), fixtureContext);
+const imageData = fixtureContext.window.REVIEW_DATA;
+const imageProject = imageData.projects[0];
+const fixtureManifest = id => JSON.parse(gunzipSync(Buffer.from(imageData.blobs[id], 'base64')));
+const sheetManifest = fixtureManifest(imageProject.sheets[0].hotspots.head);
+const boardManifest = fixtureManifest(imageProject.board.inspect.head);
+const pickManifest = JSON.parse(fs.readFileSync(new URL('./fixtures/image-pick-records.json', import.meta.url), 'utf8'));
+
+test('manifest validation accepts real producers, repeated sheets, technical pad layers and numeric net names', () => {
+  const api = manifestHarness();
+  assert.equal(api.validateImageManifest(sheetManifest, 'sheet'), sheetManifest);
+  assert.equal(api.validateImageManifest(boardManifest, 'board'), boardManifest);
+  assert.equal(api.validateImageManifest(pickManifest, 'board'), pickManifest);
+  const numeric = structuredClone(boardManifest); numeric.nets.push({name:'12',netClass:null});
+  numeric.tracks[0].net = '12';
+  assert.equal(api.validateImageManifest(numeric, 'board').tracks[0].net, '12');
+});
+
+test('manifest validation rejects every consumed malformed sheet field', () => {
+  const api = manifestHarness();
+  for (const mutate of [
+    m=>{m.units='um';}, m=>{m.views.push(m.views[0]);},
+    m=>{delete m.views[1].sheet;}, m=>{m.views[1].file=12;}, m=>{m.views[1].viewBox[0]=Infinity;},
+    m=>{m.views[1].viewBox[2]=-1;}, m=>{m.views[1].elements[0].uuid=1;},
+    m=>{m.views[1].elements[0].ref=null;}, m=>{m.views[1].elements[0].unit=2;},
+    m=>{m.views[1].elements[0].bbox=[2,2,1,1];}, m=>{m.views[1].elements[0].pins[0].x=NaN;},
+    m=>{m.views[1].elements[0].pins[0].number=3;}, m=>{m.views[1].elements[0].pins[0].name=null;},
+    m=>{m.views[0].labels=[{uuid:'l',text:'GND',kind:'label',x:0,y:Infinity}];},
+    m=>{m.views[0].noConnects=[{uuid:'n',x:'0',y:0}];},
+    m=>{m.views[0].wires=[{uuid:'w',points:[[0,0],[1,Infinity]],bbox:[0,0,1,1]}];},
+    m=>{delete m.views[0].wires;}, m=>{m.warnings=[{}];},
+  ]) {
+    const m=structuredClone(sheetManifest);mutate(m);
+    assert.throws(()=>api.validateImageManifest(m,'sheet'), /Invalid sheet inspection manifest/, mutate.toString());
+  }
+});
+
+test('manifest validation rejects missing pad geometry, nonfinite tracks, invalid spans, stats and flags', () => {
+  const api = manifestHarness();
+  for (const mutate of [
+    m=>{delete m.pads[0].geometry;}, m=>{m.pads[0].geometry={};},
+    m=>{m.pads[0].geometry.primitive.center[0]='bad';}, m=>{m.pads[0].ref=null;},
+    m=>{m.pads[0].width=Infinity;}, m=>{m.tracks=structuredClone(boardManifest.tracks);m.tracks[0].x1=Infinity;},
+    m=>{m.tracks=structuredClone(boardManifest.tracks);m.tracks[0].geometry.segments[0][2]=NaN;},
+    m=>{m.pads[0].layers=['unknown'];}, m=>{m.vias[0].toLayer='unknown';},
+    m=>{m.vias[0].layers=['F.Cu','B.Cu'];},
+    m=>{m.vias[0].layers=['F.Mask'];m.vias[0].fromLayer=m.vias[0].toLayer='F.Mask';},
+    m=>{m.nets=[{name:12,netClass:null}];},
+    m=>{delete m.stats;}, m=>{m.stats={};}, m=>{m.stats.boardSizeMm=[1,Infinity];},
+    m=>{m.stats.padCount=-1;}, m=>{m.truncated=true;}, m=>{m.truncated.pads='false';},
+    m=>{m.warnings=[{}];}, m=>{m.layers=['not-copper'];}, m=>{m.layers.reverse();},
+  ]) {
+    const m=structuredClone(pickManifest);
+    m.vias=[{uuid:'blind-via',net:'12',hidden:false,layers:['F.Cu','In1.Cu'],
+      x:1,y:1,diameter:1,drill:.4,fromLayer:'F.Cu',toLayer:'In1.Cu',
+      geometry:{primitive:{shape:'circle',center:[1000,1000],size:[1000,1000],angle:0,radius:500,delta:[0,0]}}}];
+    api.validateImageManifest(m,'board');mutate(m);
+    assert.throws(()=>api.validateImageManifest(m,'board'), /Invalid board inspection manifest/, mutate.toString());
+  }
+});
+
+test('optional manifest loads deduplicate, cache only validated data, retry failures and need no inventory', async () => {
+  let calls=0, good=false;
+  const api=manifestHarness(async id=>{calls++;return id==='sheet'?sheetManifest:good?boardManifest:{version:1};});
+  const p={sheets:[{hotspots:{base:'sheet',head:'sheet'}}],board:{inspect:{base:'board',head:'board'}}};
+  await Promise.all([api.loadImageManifests(p),api.loadImageManifests(p)]);
+  assert.equal(calls,2);assert.equal(api.decodedSheetHotspots.get('sheet'),sheetManifest);
+  assert.equal(api.decodedBoardInspect.size,0);
+  good=true;await api.loadImageManifests(p);
+  assert.equal(calls,3);assert.equal(api.decodedBoardInspect.get('board'),boardManifest);
+  await api.loadImageManifests({sheets:[],board:{}});assert.equal(calls,3);
+});
+
+test('content bounds use whole worksheet/legacy page or retained board scene, never overlay DOM', () => {
+  let view={kind:'sheet',size:[297,210]}, scene=[1,2,10,20];
+  const context=vm.createContext({currentView:()=>view,sceneBox:()=>scene});
+  vm.runInContext(reviewSource.slice(reviewSource.indexOf('function contentBox()'),reviewSource.indexOf('function zoomTo(')),context);
+  assert.deepEqual(Array.from(context.contentBox()),[0,0,297,210]);
+  view={kind:'board',size:[100,80]};assert.deepEqual(Array.from(context.contentBox()),scene);
+  scene=null;assert.deepEqual(Array.from(context.contentBox()),[0,0,100,80]);
+  view=null;assert.equal(context.contentBox(),null);
+});
+
+test('inspection notice distinguishes missing revisions and absent sheet paths without depending on layer visibility', () => {
+  const api=manifestHarness();
+  const notices=[];
+  const context=vm.createContext({decodedSheetHotspots:api.decodedSheetHotspots,decodedBoardInspect:api.decodedBoardInspect,
+    document:{createElement:()=>({setAttribute(){},style:{}})}});
+  vm.runInContext(reviewSource.slice(reviewSource.indexOf('function inspectionNotice('),reviewSource.indexOf('async function jsonAsset(')),context);
+  const stage={dataset:{view:'sheet:/'},append:n=>notices.push(n)};
+  const sheet={path:'/',hotspots:{base:'base',head:'head'}};
+  const project={sheets:[sheet],board:{layers:[{svg:{base:'b',head:'h'}}],inspect:{base:'base',head:'head'}}};
+  const view={kind:'sheet',layers:[{svg:{base:'b',head:'h'}}]};
+  api.decodedSheetHotspots.set('base',sheetManifest);
+  context.inspectionNotice(stage,view,project);assert.equal(notices.length,1);
+  api.decodedSheetHotspots.set('head',sheetManifest);notices.length=0;
+  context.inspectionNotice(stage,view,project);assert.equal(notices.length,0);
+  stage.dataset.view='sheet:/missing/';sheet.path='/missing/';
+  context.inspectionNotice(stage,view,project);assert.equal(notices.length,1);
+  assert.match(notices[0].textContent,/Artwork remains available/);
+  notices.length=0;stage.dataset.view='board';
+  api.decodedBoardInspect.set('base',boardManifest);api.decodedBoardInspect.set('head',boardManifest);
+  context.inspectionNotice(stage,{kind:'board',layers:[]},project);assert.equal(notices.length,0);
 });
