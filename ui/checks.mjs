@@ -129,16 +129,22 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
   const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
   const event=(type,id,dx=0,dy=0)=>vp.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:'touch',pointerId:id,button:0,clientX:x+dx,clientY:y+dy}));
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
-  const z=S.z;
-  vp.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-1,deltaMode:2,clientX:x,clientY:y}));
-  const snapshots=[...document.querySelectorAll('.gesture-snapshot')];
-  if(!snapshots.length)return 'active gesture did not allocate snapshot';
-  if(snapshots.some(c=>c.width*c.height>6000000))return 'snapshot exceeds 6 MP';
-  if(Math.abs(S.z/z-ImageView.wheelFactor(-1,2))>1e-8)return 'sheet wheel did not normalize page mode';
-  if(snapshots.some(c=>!c.closest('.layer')||!c.closest('.stack')))return 'snapshot outside revision/layer';
-  await wait(250);
-  if(document.querySelector('.gesture-snapshot')||imageOwners().some(o=>o.node.hidden))return 'gesture did not restore source artwork';
-  if(imageOwners().some(o=>o.cropNode))return 'uncalibrated environment enabled automatic cropping';
+  const z=S.z,owners=imageOwners(),cropMethods=owners.map(o=>o.crop);
+  let cropAttempts=0;
+  try {
+    owners.forEach(o=>{const crop=o.crop;o.crop=function(...args){cropAttempts++;return crop.apply(this,args);};});
+    vp.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-1,deltaMode:2,clientX:x,clientY:y}));
+    const snapshots=[...document.querySelectorAll('.gesture-snapshot')];
+    if(!snapshots.length)return 'active gesture did not allocate snapshot';
+    if(snapshots.some(c=>c.width*c.height>6000000))return 'snapshot exceeds 6 MP';
+    if(Math.abs(S.z/z-ImageView.wheelFactor(-1,2))>1e-8)return 'sheet wheel did not normalize page mode';
+    if(snapshots.some(c=>!c.closest('.layer')||!c.closest('.stack')))return 'snapshot outside revision/layer';
+    // Observe crop requests before decode, and wait for actual settlement rather than a fixed delay.
+    const deadline=performance.now()+2000;
+    while(!cropAttempts&&snapshots.some(c=>c.isConnected)&&performance.now()<deadline)await wait(10);
+    if(cropAttempts||owners.some(o=>o.cropNode))return 'uncalibrated environment enabled automatic cropping';
+    if(snapshots.some(c=>c.isConnected)||owners.some(o=>o.node.hidden))return 'gesture did not restore source artwork';
+  } finally {owners.forEach((o,i)=>{o.crop=cropMethods[i];});}
   let picks=0;const pick=pickAt;pickAt=()=>picks++;
   try {
     const before=S.z;
