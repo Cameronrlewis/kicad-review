@@ -3551,6 +3551,21 @@ test('asset child retries Busy replies after backoff and resolves the text', asy
   assert.equal(await queued, 'queued'); assert.equal(h.timers.size, 0);
   h.client.dispose();
 });
+for (const order of [[0, 1], [1, 0]]) test(`asset child preserves FIFO when Busy replies arrive in order ${order}`, async () => {
+  const h = assetClientHarness(), requests = [h.client.request(imageId), h.client.request(imageId)];
+  const initial = h.sent.map(message => message.kicadReviewAsset);
+  h.result({ ...initial[order[0]], error: 'Busy; retry' });
+  requests.push(h.client.request(imageId));
+  h.result({ ...initial[order[1]], error: 'Busy; retry' });
+  assert.equal(h.sent.length, 2, 'later work waits for backoff');
+  assert.equal(h.timers.size, 1);
+  for (const timer of [...h.timers.values()]) timer();
+  assert.equal(h.sent.length, 5);
+  const texts = ['A', 'B', 'later'];
+  h.sent.slice(2).forEach((message, i) => h.result({ ...message.kicadReviewAsset, text: texts[i] }));
+  assert.deepEqual(await Promise.all(requests), texts, 'retries retain get() order ahead of later work');
+  assert.equal(h.timers.size, 0); h.client.dispose();
+});
 test('asset child disposal during Busy backoff rejects without posting again', async () => {
   const h = assetClientHarness(), p = h.client.request(imageId);
   const rejected = assert.rejects(p, /disposed/i);
