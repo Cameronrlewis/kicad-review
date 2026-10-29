@@ -59,7 +59,7 @@ addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
   const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
   const [x, y] = p?.point || toWorld(vp, e);
-  const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp),e.pointerType==='touch')
+  const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp))
     : boardDiff ? (hit ? geometryAnchor(hit) : p?.side && pointAnchor(x,y,p.side))
     : anchorAt(x,y,sideOf(vp));
   if (anchor && anchor.file) parent.postMessage({ kicadReviewPin: anchor }, "*");
@@ -162,7 +162,7 @@ function syncLeftDock() {
   document.documentElement.style.setProperty("--nav-w", leftCollapsed ? "0px" : `${leftWidth}px`);
   $("#nav").classList.toggle("left-collapsed", leftCollapsed);
   const toggle = $('[data-dock="nav"]');
-  toggle?.setAttribute("aria-expanded", String(!leftCollapsed && (!matchMedia("(max-width:899px)").matches || $("#nav").classList.contains("dock-open"))));
+  toggle?.setAttribute("aria-expanded", String(!leftCollapsed));
 }
 function projectChips(c) {
   return `<span class="counts">${["added", "removed", "modified"].map((a, i) => `<span class="chip ${a}" title="${c[a]} ${a}" aria-label="${c[a]} ${a}">${["+", "−", "~"][i]} ${c[a]}</span>`).join("")}</span>`;
@@ -258,7 +258,7 @@ function valid(st) {   // drop anything that does not exist in this report
 function applyState(st) {
   const v = valid(st);
   if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
-  if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
+  if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
                      layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
@@ -1193,17 +1193,12 @@ function attachPanZoom(vp) {
     zoomBoardAt(vp,e.clientX,e.clientY,factor,{frame:true});
   }, { passive:false });
   const pointers=new Map();
-  let everPinched=false, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
-  const pinch=()=>{
-    const [a,b]=[...pointers.values()];
-    return a&&b?{x:(a.lx+b.lx)/2,y:(a.ly+b.ly)/2,d:Math.hypot(a.lx-b.lx,a.ly-b.ly)}:null;
-  };
+  let suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
   vp.addEventListener("pointerdown", e => {
-    if (e.target.closest('.image-errors')) return;
-    if (![0,1,2].includes(e.button) || !placed() || pointers.has(e.pointerId)) return;
-    if(!pointers.size){everPinched=false;suppressContext=false;pendingContext=null;}
+    if (e.pointerType==='touch' || e.target.closest('.image-errors')) return;
+    if (![0,1,2].includes(e.button) || !placed() || pointers.size) return;
+    suppressContext=false;pendingContext=null;
     pointers.set(e.pointerId,{id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0});
-    if(pointers.size>1){everPinched=true;pendingContext=null;}
     gesture();
     // Synthetic browser checks have no active native pointer; real input gets capture.
     try { vp.setPointerCapture(e.pointerId); } catch {}
@@ -1212,22 +1207,18 @@ function attachPanZoom(vp) {
   vp.addEventListener("pointermove", e => {
     const a=pointers.get(e.pointerId);
     if(a) {
-      const before=pinch(),dx=e.clientX-a.lx,dy=e.clientY-a.ly;
+      const dx=e.clientX-a.lx,dy=e.clientY-a.ly;
       a.moved=Math.max(a.moved,Math.hypot(e.clientX-a.x,e.clientY-a.y));
       a.lx=e.clientX;a.ly=e.clientY;
-      const after=pinch();
-      if(before&&after&&before.d>0&&after.d>0){
-        gesture();zoomBoardAt(vp,before.x,before.y,after.d/before.d,{frame:true});
-        setT({x:S.x-(flipOn()?-1:1)*(after.x-before.x)/S.z,y:S.y-(after.y-before.y)/S.z},{frame:true});
-      } else if(a.moved>=4){gesture();setT({x:S.x-(flipOn()?-1:1)*dx/S.z,y:S.y-dy/S.z},{frame:true});}
+      if(a.moved>=4){gesture();setT({x:S.x-(flipOn()?-1:1)*dx/S.z,y:S.y-dy/S.z},{frame:true});}
     }
     cursorEvent=e;
     if (!cursorFrame) cursorFrame=requestAnimationFrame(() => { cursorFrame=0; updateCoordinates(vp,cursorEvent); });
   });
   const end = e => {
     const a=pointers.get(e.pointerId);if(!a)return;
-    const canceled=e.type!=="pointerup",click=!canceled&&!everPinched&&a.moved<4;
-    pointers.delete(e.pointerId);suppressContext=everPinched||a.moved>=4;
+    const canceled=e.type!=="pointerup",click=!canceled&&a.moved<4;
+    pointers.delete(e.pointerId);suppressContext=a.moved>=4;
     if(canceled){
       for(const id of pointers.keys())if(vp.hasPointerCapture(id))vp.releasePointerCapture(id);
       pointers.clear();
@@ -1241,13 +1232,13 @@ function attachPanZoom(vp) {
     if (click && a.button === 2 && pendingContext) canvasMenu(vp,pendingContext);
     pendingContext = null;
     if(canceled){suppressContext=false;if(cursorFrame)cancelAnimationFrame(cursorFrame);cursorFrame=0;resetCoordinates();}
-    if(!pointers.size)everPinched=false;
   };
   for (const type of ["pointerup","pointercancel","lostpointercapture"]) vp.addEventListener(type,end);
   vp.addEventListener("pointerleave", () => { resetCoordinates(); for(const pane of document.querySelectorAll("#stage .vp")) pane.classList.remove("board-cursor"); });
   vp.addEventListener("auxclick", e => { if (suppressContext || e.button===1) e.preventDefault(); });
   vp.addEventListener("contextmenu", e => {
-    if (suppressContext || everPinched || [...pointers.values()].some(a=>a.moved>=4)) { e.preventDefault(); return; }
+    if(e.pointerType==='touch')return;
+    if (suppressContext || [...pointers.values()].some(a=>a.moved>=4)) { e.preventDefault(); return; }
     if (!placed()) return; e.preventDefault();
     if (pointers.size) pendingContext=e; else canvasMenu(vp,e);
   });
@@ -1428,8 +1419,8 @@ function visibleImageLayers(graph) {
   const layers=glAppearance().layers;
   return new Set(graph.layers.filter(l=>{const a=layers[canon(l)];return a&&a.visible!==false&&a.color[3]*a.opacity>0;}));
 }
-function sheetPinAt(side,point,touch=false) {
-  const reach=Math.max(.15,(touch?12:6)/S.z);
+function sheetPinAt(side,point) {
+  const reach=Math.max(.15,6/S.z);
   return sheetImageElements(side).flatMap(e=>(e.pins||[]).map(p=>({e,p,d:Math.hypot(p.x-point[0],p.y-point[1])})))
     .filter(p=>p.d<=reach).sort((a,b)=>a.d-b.d)[0];
 }
@@ -1439,11 +1430,11 @@ function pickImageAt(vp,event) {
   for(const side of sides) {
     if(S.v==='board') {
       const g=currentImageGraph(side);if(!g)continue;
-      const record=ImageView.inspectHit(g,point,visibleImageLayers(g),S.z,event.pointerType==='touch');
+      const record=ImageView.inspectHit(g,point,visibleImageLayers(g),S.z);
       if(record){chooseImage(record,side,g.pads.includes(record)?'pad':g.vias.includes(record)?'via':'track',point);return true;}
     } else if(S.v.startsWith('sheet:')) {
       const elements=sheetImageElements(side);
-      const pin=sheetPinAt(side,point,event.pointerType==='touch');
+      const pin=sheetPinAt(side,point);
       if(pin){chooseImage(pin.e,side,'pin',[pin.p.x,pin.p.y],pin.p);return true;}
       const e=elements.filter(e=>point[0]>=e.bbox[0]&&point[0]<=e.bbox[2]&&point[1]>=e.bbox[1]&&point[1]<=e.bbox[3])
         .sort((a,b)=>(a.bbox[2]-a.bbox[0])*(a.bbox[3]-a.bbox[1])-(b.bbox[2]-b.bbox[0])*(b.bbox[3]-b.bbox[1]))[0];
@@ -1800,7 +1791,7 @@ function hotspotViews(P,side) {
   const ids=new Set(P.sheets.map(s=>s.hotspots?.[side]).filter(Boolean));
   return [...ids].flatMap(id=>decodedSheetHotspots.get(id)?.views||[]);
 }
-function anchorAt(x, y, side, touch=false) {
+function anchorAt(x, y, side) {
   const P = proj();
   if (!S.v || S.v === "3d") return null;
   const file = viewFile(P, S.v);
@@ -1813,7 +1804,7 @@ function anchorAt(x, y, side, touch=false) {
   const selection=S.imageSelection;
   if(selection?.kind==='pin'&&selection.side===side&&selection.sheet===S.v.slice(6)) {
     // Use inspection's pointer reach; .002 mm only validates the stored endpoint geometry.
-    const picked=sheetPinAt(side,[x,y],touch);
+    const picked=sheetPinAt(side,[x,y]);
     const pin=picked?.e.uuid===selection.uuid&&picked.e.unit===selection.unit&&picked.p.number===selection.pin
       &&Math.hypot(picked.p.x-selection.point[0],picked.p.y-selection.point[1])<=.002?picked.p:null;
     if(!pin)return {...a,target:"point",uuid:null,kind:null,ref:null,x:round3(x),y:round3(y)};
@@ -2426,21 +2417,17 @@ function setDock(name, open) {
     if (!open) { S.panelTable = false; document.getElementById("app").classList.remove("right-table"); }
   }
   if (name === "nav") { leftCollapsed = !open; syncLeftDock(); persistLeftDock(); }
-  document.getElementById(name).classList.toggle("dock-open", open);
   document.querySelector(`[data-dock="${name}"]`).setAttribute("aria-expanded", String(open));
 }
-const wide = matchMedia("(min-width:900px)");
-function syncDockButtons() {   // wide: toggles collapse a docked column; narrow: toggles the overlay
-  for (const b of document.querySelectorAll("[data-dock]")) b.setAttribute("aria-expanded", String(wide.matches ? !(b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed) : $("#" + b.dataset.dock).classList.contains("dock-open")));
+function syncDockButtons() {
+  for (const b of document.querySelectorAll("[data-dock]")) b.setAttribute("aria-expanded", String(!(b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed)));
 }
 for (const b of document.querySelectorAll("[data-dock]")) b.onclick = () => {
   // Each dock owns its collapse state (splitter, persisted width).
-  if (wide.matches) { setDock(b.dataset.dock, b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed); syncDockButtons(); return; }
-  const open = b.getAttribute("aria-expanded") !== "true";
-  if (matchMedia("(max-width:899px)").matches) setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
-  setDock(b.dataset.dock, open);
+  setDock(b.dataset.dock, b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed);
+  syncDockButtons();
 };
-wide.addEventListener("change", syncDockButtons); syncDockButtons();
+syncDockButtons();
 for (const b of document.querySelectorAll("#change-nav [data-step]")) b.onclick = () => step(+b.dataset.step);
 
 // Changed regions: rasterise both sides, compare pixels on a grid, merge touching cells into boxes.
@@ -2673,7 +2660,7 @@ document.addEventListener("keydown", event => {
     document.querySelector("[data-panel-table]")?.focus();
   }
 }, true);
-if (!matchMedia("(max-width:899px)").matches) document.querySelector('[data-dock="panel"]').setAttribute("aria-expanded", "true");
+document.querySelector('[data-dock="panel"]').setAttribute("aria-expanded", "true");
 
 renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");

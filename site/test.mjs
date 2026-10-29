@@ -4218,3 +4218,44 @@ test('optional cache checks skip when debug port serves something other than Chr
   assert.match(result.stdout, /# skipped 3/);
   assert.match(result.stdout, /No dedicated Chrome debug port reachable/);
 });
+
+test('desktop camera keeps wheel zoom and mouse pan with one active pointer', () => {
+  const source=readFileSync(new URL('../ui/review.js',import.meta.url),'utf8');
+  const handlers=new Map(),S={x:0,y:0,z:1},zooms=[];
+  const vp={setAttribute(){},addEventListener:(name,fn)=>handlers.set(name,fn),
+    getBoundingClientRect:()=>({width:100,height:100}),setPointerCapture(){},hasPointerCapture:()=>false};
+  const context={S,window:{},BOARD_WHEEL_PIXEL_RATE:.001,BOARD_WHEEL_MAC_ROTATION_RATE:1,
+    placed:()=>true,currentView:()=>({kind:'board'}),gesture(){},flipOn:()=>false,
+    setT:value=>Object.assign(S,value),zoomBoardAt:(_vp,_x,_y,factor)=>zooms.push(factor),
+    requestAnimationFrame:()=>1,cancelAnimationFrame(){},updateCoordinates(){},updateStatus(){},vp};
+  runInNewContext(source.slice(source.indexOf('function attachPanZoom('),source.indexOf('function contentBox('))+';attachPanZoom(vp);',context);
+  const pointer=(type,id,pointerType,x=0,y=0)=>handlers.get(type)({type,pointerId:id,pointerType,button:0,clientX:x,clientY:y,target:{closest:()=>null}});
+  pointer('pointerdown',10,'touch');pointer('pointermove',10,'touch',20,10);
+  assert.deepEqual(S,{x:0,y:0,z:1},'direct touch does not control desktop camera');
+  pointer('pointerdown',1,'mouse');pointer('pointerdown',2,'pen',20,0);pointer('pointermove',2,'pen',40,10);
+  assert.deepEqual(S,{x:0,y:0,z:1},'additional pointer does not pinch');
+  pointer('pointermove',1,'mouse',10,5);pointer('pointerup',1,'mouse',10,5);
+  assert.deepEqual(S,{x:-10,y:-5,z:1});
+  let prevented=false;
+  handlers.get('wheel')({deltaY:-10,deltaMode:0,ctrlKey:true,clientX:50,clientY:50,preventDefault(){prevented=true;}});
+  assert.equal(prevented,true);assert.equal(zooms.length,1);assert.ok(zooms[0]>1);
+});
+
+test('desktop dock toggles remain independent without viewport queries', () => {
+  const source=readFileSync(new URL('../ui/review.js',import.meta.url),'utf8');
+  const classList=()=>{const values=new Set();return {contains:v=>values.has(v),toggle(v,on){if(on)values.add(v);else values.delete(v);},remove:v=>values.delete(v)};};
+  const app={classList:classList()},nav={classList:classList()},panel={classList:classList()},buttons=['nav','panel'].map(name=>({dataset:{dock:name},setAttribute(){}}));
+  const document={getElementById:id=>({app,nav,panel}[id]),querySelector:selector=>buttons.find(b=>selector.includes('"'+b.dataset.dock+'"')),querySelectorAll:()=>buttons};
+  const context={document,S:{},leftCollapsed:false,$:selector=>selector==='#app'?app:nav,
+    syncLeftDock(){},persistLeftDock(){}};
+  runInNewContext(source.slice(source.indexOf('function setDock('),source.indexOf('for (const b of document.querySelectorAll("#change-nav',source.indexOf('function setDock('))),context);
+  buttons[0].onclick();assert.equal(context.leftCollapsed,true);
+  buttons[1].onclick();assert.equal(app.classList.contains('right-collapsed'),true);
+  buttons[0].onclick();assert.equal(context.leftCollapsed,false);
+  assert.equal(app.classList.contains('right-collapsed'),true);
+});
+
+test('3D camera retains desktop OrbitControls with direct-touch mappings disabled', () => {
+  const source=readFileSync(new URL('../ui/review3d.js',import.meta.url),'utf8');
+  assert.match(source,/controls\.touches\s*=\s*\{ONE:null,TWO:null\}/);
+});

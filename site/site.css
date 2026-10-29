@@ -61,8 +61,6 @@ dialog h2 { margin: 0 0 var(--sp-3); }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(1turn); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
-@media (pointer: coarse) { :root { --h-sm: 32px; --row-h: 32px; } }
-@media (max-width: 700px) { .account > span { max-width: 12ch; overflow: hidden; text-overflow: ellipsis; } .crumbs { flex: 1; } .page-actions { margin-left: 0; } }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: var(--space-3); }
 a.card { text-decoration: none; }
 a.card:hover { border-color: var(--accent); }
@@ -243,7 +241,6 @@ select { max-width: min(100%, 40ch); text-overflow: ellipsis; }
 .signed-out-page{max-width:1000px;padding-top:10vh}.signed-out-card{padding:0;border-radius:3px;max-width:660px;margin:auto}.signed-out-card>h1,.signed-out-card>.signed-out-intro,.signed-out-card>p,.signed-out-card>.signed-out-permissions,.signed-out-card>.notice{margin:20px}.signed-out-card>h1{font-size:22px}.signed-out-card>.signed-out-permissions{border-top:1px solid var(--line);padding-top:12px}.signed-out-card .bench-module-head{margin:0}
 @media(min-width:1700px){.bench-start{grid-template-columns:318px minmax(0,1fr) 352px}.bench-start .table{font-size:12px}.bench-start .table th{font-size:10.5px}}
 @media(max-width:1100px){.bench-start{grid-template-columns:245px minmax(0,1fr)}.bench-start>aside:last-child{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr}}
-@media(max-width:720px){.bench-start{grid-template-columns:minmax(0,1fr)}.bench-start>aside:last-child{display:flex;grid-column:auto}.bench-start .table{min-width:580px}.bench-start .table-scroll{overflow:auto}.bench-opening{padding:8px}.signed-out-page{padding-top:24px}}
 /* bench-t8: reference-width rails and local recent-review controls. */
 @media(min-width:1101px){.bench-start{grid-template-columns:318px minmax(0,1fr) 352px}}
 .bench-search{display:flex;gap:6px;padding:6px;border-bottom:1px solid var(--line)}.bench-search input{flex:1;min-width:0}.bench-search select{max-width:120px;font-size:11px}.bench-start [hidden]{display:none!important}.bench-start #bench-search-state:empty{display:none}

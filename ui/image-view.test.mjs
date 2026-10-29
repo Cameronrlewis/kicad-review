@@ -173,10 +173,10 @@ test('stale and disposed decode failures return false and never release URLs twi
 const primitive=(shape,size,angle=0)=>({shape,size,angle,center:[0,0]});
 const graph=(pads=[],vias=[],tracks=[])=>({pads,vias,tracks});
 const copper=(uuid,geometry,layers=['In1.Cu'])=>({uuid,layers,geometry});
-const hit=(g,p,l=['In1.Cu'],touch=false,scale=10)=>
-  ctx.ImageView.inspectHit(g,p,new Set(l),scale,touch);
+const hit=(g,p,l=['In1.Cu'],scale=10)=>
+  ctx.ImageView.inspectHit(g,p,new Set(l),scale);
 
-test('exact rotated/custom pads, blind via and touch reach',()=>{
+test('exact rotated/custom pads, blind via and mouse reach',()=>{
   const small={uuid:'small',layers:['In1.Cu'],net:'12',width:1,height:2,
     geometry:{primitive:primitive('rect',[1000,2000],90000)}};
   const large={...small,uuid:'large',width:4,height:4,
@@ -190,14 +190,14 @@ test('exact rotated/custom pads, blind via and touch reach',()=>{
   assert.equal(hit(g,[.8,0]).uuid,'small');assert.equal(hit(g,[.8,0]).net,'12');
   assert.equal(hit(graph([custom]),[0,0]),null);
   assert.equal(hit(graph([],[via]),[0,0],['In2.Cu']),null);
-  assert.equal(hit(graph([],[],[track]),[4.5,1.3],['In1.Cu'],true).uuid,'arc-piece');
-  assert.equal(hit(graph([],[],[track]),[4.5,1.301],['In1.Cu'],true),null);
+  assert.equal(hit(graph([],[],[track]),[4.5,.7],['In1.Cu']).uuid,'arc-piece');
+  assert.equal(hit(graph([],[],[track]),[4.5,.701],['In1.Cu']),null);
   assert.equal(hit(g,[0,0],[]),null);
 });
 
 const producer=JSON.parse(fs.readFileSync(new URL('./fixtures/image-pick-records.json',import.meta.url),'utf8'));
 const byPin=Object.fromEntries(producer.pads.map(p=>[p.pin,p]));
-const hitPad=(pad,p)=>hit(graph([pad]),p,['F.Cu'],false,100);
+const hitPad=(pad,p)=>hit(graph([pad]),p,['F.Cu'],100);
 test('producer copper override must not replace copper',()=>{
   assert.equal(hitPad(byPin['1'],[10,10])?.pin,'1');
   assert.equal(hitPad(byPin['1'],[11.36,10]),null,'mask margin is not copper');
@@ -303,9 +303,9 @@ test('reach uses CSS pixels with a 0.15 mm floor, and rejects invalid camera inp
   const g=graph([],[],[track]);
   assert.equal(hit(g,[.5,.7]),track);
   assert.equal(hit(g,[.5,.701]),null);
-  assert.equal(hit(g,[.5,.25],['In1.Cu'],false,1000),track);
-  assert.equal(hit(g,[.5,.251],['In1.Cu'],true,1000),null);
-  for(const scale of [0,-1,NaN,Infinity])assert.equal(hit(g,[0,0],['In1.Cu'],false,scale),null);
+  assert.equal(hit(g,[.5,.25],['In1.Cu'],1000),track);
+  assert.equal(hit(g,[.5,.251],['In1.Cu'],1000),null);
+  for(const scale of [0,-1,NaN,Infinity])assert.equal(hit(g,[0,0],['In1.Cu'],scale),null);
   for(const point of [[NaN,0],[0,Infinity],[],[0]])assert.equal(hit(g,point),null);
   assert.equal(hit(graph(),[0,0]),null);
 });

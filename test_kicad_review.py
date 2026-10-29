@@ -1621,8 +1621,6 @@ for command in (
     'node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"',
     'node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
     'node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
-    'node ui/check.mjs --no-skip "images screen and legacy appearance" --phone --page "$PAGES/images.html"',
-    'node ui/check.mjs --no-skip "images screen and legacy appearance" --phone --dark --page "$PAGES/images.html"',
 ):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"

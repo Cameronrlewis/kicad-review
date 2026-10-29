@@ -57,5 +57,3 @@ jobs:
       - run: node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
-      - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --phone --page "$PAGES/images.html"
-      - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --phone --dark --page "$PAGES/images.html"

@@ -127,7 +127,7 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
   const sheet=proj().sheets.find(s=>s.path==='/left/');
   await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
   const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
-  const event=(type,id,dx=0,dy=0)=>vp.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:'touch',pointerId:id,button:0,clientX:x+dx,clientY:y+dy}));
+  const event=(type,id,dx=0,dy=0)=>vp.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:'mouse',pointerId:id,button:0,clientX:x+dx,clientY:y+dy}));
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
   const z=S.z,owners=imageOwners(),cropMethods=owners.map(o=>o.crop);
   let cropAttempts=0;
@@ -148,16 +148,15 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
   let picks=0;const pick=pickAt;pickAt=()=>picks++;
   try {
     const before=S.z;
-    event('pointerdown',101,-30);event('pointerdown',102,30);event('pointermove',102,90,10);
-    if(S.z<=before||!document.querySelector('.gesture-snapshot'))return 'two-pointer pinch did not zoom with snapshot '+JSON.stringify({before,z:S.z,snapshots:document.querySelectorAll('.gesture-snapshot').length,connected:vp.isConnected});
-    event('pointerup',101,-30);event('pointerup',102,90,10);
-    if(picks)return 'pinch synthesized click';
-    event('pointerdown',201);event('pointerdown',202,40);event('pointercancel',201);event('pointerup',202,40);
-    event('pointerup',201);
+    event('pointerdown',101);event('pointermove',101,90,10);
+    if(S.z!==before||!document.querySelector('.gesture-snapshot'))return 'mouse pan changed zoom or missed snapshot';
+    event('pointerup',101,90,10);
+    if(picks)return 'pan synthesized click';
+    event('pointerdown',201);event('pointercancel',201);event('pointerup',201);
     if(picks)return 'pointercancel synthesized click';
     await wait(250);
     if(document.querySelector('.gesture-snapshot'))return 'cancel left snapshot';
-    // A fresh one-finger click still works after the canceled pointer map is cleared.
+    // A fresh mouse click still works after the canceled pointer map is cleared.
     event('pointerdown',301);event('pointerup',301);
     if(picks!==1)return 'pointercancel did not clear pointer map';
   } finally {pickAt=pick;}
@@ -181,7 +180,7 @@ export const CHECKS = [
     if(D.repo!=='fixture/images')return 'skip';
     await applyState({...S,v:'sheet:/right/',m:'side'});
     const input=document.querySelector('#image-query');
-    for(const pointerType of ['mouse','touch','mousedown']) {
+    for(const pointerType of ['mouse','mousedown']) {
       input.focus();input.value='U2';input.dispatchEvent(new Event('input'));
       const button=document.querySelector('#image-results button');
       const down=pointerType==='mousedown'?new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}):
@@ -351,8 +350,6 @@ export const CHECKS = [
           if(posted.filter(m=>m.kicadReviewPin).some(m=>m.kicadReviewPin.x!==100||m.kicadReviewPin.y!==55||m.kicadReviewPin.uuid!=='placed'))return 'context pin endpoint misplaced';
         } finally {parent.postMessage=oldPost;}
         if(anchorAt(100+9/S.z,55,'base').target!=='point')return 'mouse reach exceeded';
-        if(anchorAt(100+9/S.z,55,'base',true).uuid!=='placed')return 'touch pin reach missing';
-        if(anchorAt(100+13/S.z,55,'base',true).target!=='point')return 'touch reach exceeded';
         const element=sheetImageElements('base').find(e=>e.uuid==='placed'), oldPins=element.pins;
         try {
           element.pins=[...oldPins,{number:'other',name:'other',x:100.5,y:55}];
@@ -403,10 +400,10 @@ export const CHECKS = [
   gestureLifecycleCheck,
   ['images numeric revision routing and selection lifecycle','',`
     if(D.repo!=='fixture/images')return 'skip';
-    const click=(vp,point,touch=false)=>{
+    const click=(vp,point)=>{
       const r=vp.getBoundingClientRect();
       const screen=BoardGL.worldToScreen(point,{x:S.x,y:S.y,z:S.z,width:r.width,height:r.height,flip:flipOn()});
-      return pickImageAt(vp,{clientX:r.left+screen[0],clientY:r.top+screen[1],pointerType:touch?'touch':'mouse'});
+      return pickImageAt(vp,{clientX:r.left+screen[0],clientY:r.top+screen[1],pointerType:'mouse'});
     };
     for(const mode of ['side','wipe','blend','overlay','semantic']) {
       S.wipe=.5;S.blend=1;
@@ -1074,12 +1071,9 @@ return true;
   ["images screen and legacy appearance", "", `
     const profile=window.__checkDeviceProfile;
     if(!profile)return 'screen check missing runner device profile';
-    // Mobile layout overflow can enlarge innerWidth; CDP screen metrics remain
-    // the emulated device size. Phone chrome clipping belongs to the layout spec.
-    const width=profile.mobile?screen.width:innerWidth,height=profile.mobile?screen.height:innerHeight;
+    const width=innerWidth,height=innerHeight;
     if(width!==profile.width||height!==profile.height||devicePixelRatio!==profile.dpr)
       return 'screen metrics mismatch '+JSON.stringify({width,height,dpr:devicePixelRatio,expected:profile});
-    if(navigator.maxTouchPoints!==(profile.mobile?5:0))return 'screen touch profile '+navigator.maxTouchPoints;
     // Use the first two-sided project when present. The legacy added-project's
     // unfiltered Changes dock alone previously exceeded the artwork DOM budget.
     // The every-sheet check also covers that large project with paginated Changes.
@@ -5427,11 +5421,7 @@ CHECKS.push(['images inspection complete-screen','',`
   const host=document.querySelector('#image-search'),box=host.getBoundingClientRect(),stage=document.querySelector('#stage').getBoundingClientRect();
   if(box.left<0||box.right>innerWidth+1||stage.height<=0||host.scrollWidth>host.clientWidth+1)return 'search screen overflow';
   const result=document.querySelector('#image-results button');
-  if(result.getBoundingClientRect().height<44)return 'search touch target';
-  if(innerWidth<900) {
-    const controls=[...document.querySelectorAll('#toolbar > .tb-grp')];
-    if(controls.some(e=>e.getBoundingClientRect().bottom>box.top+1))return 'phone search did not wrap below toolbar controls';
-  }
+  if(result.getBoundingClientRect().height<44)return 'search target size';
   const reachableTabs=[];
   for(const tab of ['changes','checks','parts','threads']) {
     const button=document.querySelector('#panel [data-tab="'+tab+'"]');
@@ -5469,7 +5459,7 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     if(!button||button.textContent!=='Try again')return 'retry missing';
     if(stage.querySelectorAll('img[data-image-artwork]').length!==1)return 'other revision was lost';
     const box=button.getBoundingClientRect();
-    if(box.height<44||box.width<44||error.closest('.world'))return 'retry scales with drawing or misses touch target';
+    if(box.height<44||box.width<44||error.closest('.world'))return 'retry scales with drawing or misses target size';
     if(box.left<0||box.right>innerWidth||box.top<0||box.bottom>innerHeight)return 'retry outside screen';
     if(typeof window.__checkMouseClick!=='function')return 'trusted retry input unavailable';
     const vp=button.closest('.vp'),camera=[S.x,S.y,S.z];let trusted=false,captured=false;

@@ -377,18 +377,15 @@ CI generates `images.html` from `ui/sample/review-data-images.js` through
 `inline_page`, alongside the legacy, 3D, Parts and unchanged-project fixtures.
 Run `node ui/check.mjs --no-skip "images screen and legacy appearance" --page
 /path/to/images.html --width 1440 --height 900 --dpr 2` for the desktop profile;
-repeat with `--dark`. Use `--phone` (412×915, DPR 2.625, mobile/touch, CPU slowdown
-4×), with and without `--dark`, for Pixel 7 emulation. This does not throttle or
-spoof GPU performance and is not real-device sign-off. Checks run sequentially.
+repeat with `--dark`. Checks run sequentially.
 Use `--offline` against the inline page to block and detect external requests.
 
 The mandatory image matrix also covers comparisons, four copper layers, gesture
 pixels/lifecycle, fallback appearance, manifests/Home, added/removed revisions,
 inspection/search/anchors, and persisted themes in GL and fallback modes.
-Keep complete-screen captures for comparisons and inspection in both themes and
-profiles. Review navigation, toolbar, stage, inspector, status, keyboard focus and
+Keep complete-screen captures for comparisons and inspection in both desktop themes. Review navigation, toolbar, stage, inspector, status, keyboard focus and
 search wrapping together; compare the whole four-layer board with KiCad 10, not
-just colour swatches. Phone chrome layout is tracked separately from artwork.
+just colour swatches.
 
 ### Data format
 

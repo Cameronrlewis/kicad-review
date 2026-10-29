@@ -210,9 +210,9 @@
     const segmentArea=(g.segments||[]).reduce((n,s)=>n+(Math.hypot(s[2]-s[0],s[3]-s[1])+s[4])*s[4],0);
     return ringArea+segmentArea+(Number.isFinite(primitiveArea)?primitiveArea:0);
   }
-  function inspectHit(graph,pointMm,visibleLayers,pxPerMm,touch) {
+  function inspectHit(graph,pointMm,visibleLayers,pxPerMm) {
     if(pointMm.length!==2||!pointMm.every(Number.isFinite)||!Number.isFinite(pxPerMm)||pxPerMm<=0)return null;
-    const p=pointMm.map(v=>v*1000),reach=Math.max(.15,(touch?12:6)/pxPerMm)*1000;
+    const p=pointMm.map(v=>v*1000),reach=Math.max(.15,6/pxPerMm)*1000;
     // Caller supplies eye-enabled, nonzero-effective-opacity layers for this revision.
     // toWorld already handles flip; never transform this graph a second time.
     const visible=o=>!o.hidden&&o.layers.some(l=>visibleLayers.has(l));
