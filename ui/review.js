@@ -755,6 +755,8 @@ async function stack(side, view) {
         const key=JSON.stringify([sourceID,side,view.kind==='sheet']);
         if(!comparisonSources.has(key))comparisonSources.set(key,ImageView.comparisonSource(t,side,view.kind==='sheet'));
         t=comparisonSources.get(key);
+        comparisonSources.delete(key);comparisonSources.set(key,t);
+        if(comparisonSources.size>8)comparisonSources.delete(comparisonSources.keys().next().value);
       }
       if (view.kind==='lib') {d.innerHTML=t.slice(t.indexOf('<svg'));st.append(d);continue;}
       if(view.kind==='board') {

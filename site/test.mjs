@@ -4180,3 +4180,18 @@ test('asset parent cancellation validates source and ID, frees slots and never r
     h.stop(); await Promise.all(jobs);
   } finally { h.stop(); }
 });
+
+test('fallback comparison source cache retains at most eight recently used SVGs', () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const block = source.slice(source.indexOf('      if(comparison&&!l.svgCompare?.[side]) {'), source.indexOf("      if (view.kind==='lib')"));
+  const comparisonSources = new Map(); let builds = 0;
+  const context = {comparisonSources,comparison:true,l:{},side:'head',view:{kind:'sheet'},
+    ImageView:{comparisonSource:text=>{builds++;return 'comparison:'+text;}}};
+  const render = id => {context.sourceID=id;context.t=id;runInNewContext(block,context);return context.t;};
+  for(let i=0;i<8;i++)assert.equal(render('svg'+i),'comparison:svg'+i);
+  render('svg0'); render('svg8');
+  assert.equal(comparisonSources.size,8);
+  assert.equal(comparisonSources.has('["svg0","head",true]'),true,'cache hit refreshes age');
+  assert.equal(comparisonSources.has('["svg1","head",true]'),false,'least recent source evicted');
+  render('svg1');assert.equal(builds,10,'evicted SVG rebuilt from immutable source');
+});
