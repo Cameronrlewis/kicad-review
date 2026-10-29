@@ -1284,7 +1284,7 @@ export const CHECKS = [
     line.category = undefined; renderPanel();
     return [...document.querySelectorAll('.bom-cat')].map(r => r.textContent.trim()).includes('Other 1') || 'a line without a category belongs to Other';
   } finally {
-    parts.summary = originalSummary; parts.exports = originalExports; line.category = originalCategory; renderPanel();
+    parts.summary = originalSummary; parts.exports = originalExports; line.category = originalCategory; S.partsView = 'problems'; renderPanel();
   }
 `],
   ["Parts fixture BOM empty state and prototype-named categories", "", `
