@@ -258,12 +258,8 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
   if (st.assembled3d === false) out.assembled3d = false;
   if (st.lighting3d && LIGHT_RIGS3D.includes(st.lighting3d.rig)) {   // unknown rig = default light; numbers are clamped by the viewer
-    const { rig, bearing, exposure } = st.lighting3d;
     // The raw development template can omit the optional 3D scripts.
-    const b = Number.isFinite(bearing) ? bearing : 60;
-    const e = Number.isFinite(exposure) ? exposure : {bench:1.35,lowsun:1.6,photo:1.2}[rig];
-    out.lighting3d = {rig, bearing:(30 * Math.round(b / 30) % 360 + 360) % 360,
-      exposure:Math.round(Math.max(.4, Math.min(3, e)) * 20) / 20};
+    out.lighting3d = window.ThreeStudio.normalizeLighting(st.lighting3d);
   }
   return out;
 }

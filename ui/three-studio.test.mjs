@@ -42,3 +42,17 @@ test('BR02 frame policy resets idle on movement, restores once, and respects low
     for(let i=0;i<20;i++)low.rotating(34);low.idle();now+=2000;low.poll();low.dispose();
   }
 });
+
+test('BR02 shared lighting normalization follows preset defaults and clamps steps',()=>{
+  const S=window.ThreeStudio, plain=v=>JSON.parse(JSON.stringify(v));
+  assert.deepEqual(plain(S.normalizeLighting()),{rig:'bench',bearing:60,exposure:1.35});
+  assert.deepEqual(plain(S.normalizeLighting({rig:'invalid',bearing:-30,exposure:99})),{rig:'bench',bearing:330,exposure:3});
+  assert.deepEqual(plain(S.normalizeLighting({rig:'photo',bearing:44,exposure:.426})),{rig:'photo',bearing:30,exposure:.45});
+  assert.equal(S.normalizeLighting({rig:'lowsun',exposure:-2}).exposure,.4);
+  assert.equal(S.normalizeLighting({exposure:.475}).exposure,.5);
+  const old=S.PRESETS.photo;
+  try {
+    S.PRESETS.photo={...old,bearing:120,exposure:1.75};
+    assert.deepEqual(plain(S.normalizeLighting({rig:'photo',bearing:NaN,exposure:Infinity})),{rig:'photo',bearing:120,exposure:1.75});
+  } finally {S.PRESETS.photo=old;}
+});

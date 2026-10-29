@@ -3272,6 +3272,9 @@ test('stored reports are re-dressed exactly as kicad_review.py builds the curren
     // An old report: same data, an outdated interface around it.
     const old = current.replace(/<style>[\s\S]*?<\/style>/, '<style>old</style>').replace('KiCad review', 'Old review');
     assert.equal(currentReport(old), current);
+    assert.equal(current.split('window.ThreeStudio=').length - 1, 1);
+    assert.ok(current.indexOf('window.ThreeStudio=') < current.indexOf('const D = window.REVIEW_DATA'));
+    assert.doesNotMatch(current, /<script[^>]+src=/);
   }
 });
 test('reports without a recognisable data script are served unchanged', () => {

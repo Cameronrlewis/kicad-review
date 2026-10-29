@@ -28,6 +28,16 @@ const PRESETS = {
 const EXPOSURE_RANGE = { min: .4, max: 3, step: .05 };
 const snapBearing = b => (30 * Math.round(b / 30) % 360 + 360) % 360;   // "Light from" dial, 30° steps
 
+// Defaults and clamping shared by the light tool and persisted app state.
+function normalizeLighting(value) {
+  const rig = Object.hasOwn(LIGHT_RIGS, value?.rig) ? value.rig : PRESETS.bench.rig;
+  const preset = PRESETS[rig], {min, max, step} = EXPOSURE_RANGE, steps = 1 / step;
+  const bearing = Number.isFinite(value?.bearing) ? snapBearing(value.bearing) : preset.bearing;
+  const exposure = Number.isFinite(value?.exposure)
+    ? Math.round(Math.min(max, Math.max(min, value.exposure)) * steps) / steps : preset.exposure;
+  return {rig, bearing, exposure: Number(exposure.toFixed(2))};
+}
+
 // Returns linear RGB for one direction (azimuth az, elevation el, degrees).
 function radiance(rig, bearing, az, el) {
   const amb = rig.ambient.floor + (rig.ambient.ceiling - rig.ambient.floor) * smoothstep(.3, 1, (el + 90) / 180);
@@ -59,5 +69,5 @@ function framePolicy(cap,now,onDpr) {
     dispose(){dead=true;}
   };
 }
-return {LIGHT_RIGS,PRESETS,radiance,snapBearing,pixels,framePolicy};
+return {LIGHT_RIGS,PRESETS,normalizeLighting,radiance,snapBearing,pixels,framePolicy};
 })();

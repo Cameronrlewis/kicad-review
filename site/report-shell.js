@@ -26,7 +26,7 @@ const DATA = '<script>window.REVIEW_DATA = ';
 const BUNDLE = /<script type="application\/octet-stream" id="three-bundle">[^<]*<\/script>/;
 const assets = {
   'kicad-colors.js': kicadColors, 'appearance-state.js': appearanceState, 'board-gl.js': boardGl,
-  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff,
+  'appearance.js': appearance, 'board-marks.js': boardMarks, 'board-diff.js': boardDiff, 'three-studio.js': threeStudio,
 };
 // String.replace with a function: `$` sequences in the inserted code stay literal.
 const put = (html, tag, text) => html.replace(tag, () => text);
@@ -44,7 +44,7 @@ export function currentReport(stored) {
   html = put(html, '<script src="sample/review-data.js"></script>', `<script>${data}</script>`);
   html = put(html, '<!-- KR_ICONS -->', sprite);
   html = put(html, '<script src="theme.js"></script>', `<script>\n${theme}</script>`);
-  html = put(html, '<script src="review.js"></script>', `${bundle ? `${bundle}${workerTag}<script>\n${threeParts}</script><script>\n${threeStudio}</script><script>\n${review3d}</script>` : ''}<script>\n${reviewJs}</script>`);
+  html = put(html, '<script src="review.js"></script>', `${bundle ? `${bundle}${workerTag}<script>\n${threeParts}</script><script>\n${review3d}</script>` : ''}<script>\n${reviewJs}</script>`);
   for (const [name, text] of Object.entries(assets)) html = put(html, `<script src="${name}"></script>`, `<script>\n${text}</script>`);
   return html;
 }

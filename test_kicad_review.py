@@ -121,6 +121,8 @@ for asset in ('board-gl.js', 'appearance-state.js', 'appearance.js', 'board-mark
 assert 'window.BoardMarks' in html and 'window.BoardDiff' in html
 assert html.index('window.BoardMarks') < html.index('window.BoardDiff') < html.index('const D = window.REVIEW_DATA')
 assert not re.search(r'<script[^>]+src=', html)
+assert html.count('window.ThreeStudio=') == 1 and 'function normalizeLighting(value)' in html
+assert html.index('window.ThreeStudio=') < html.index('const D = window.REVIEW_DATA')
 assert 'src="appearance-state.js"' not in html
 assert 'function createStore(' in html
 assert html.index('function createStore(') < html.index('const D = window.REVIEW_DATA')
@@ -446,7 +448,7 @@ print("ok RC-S3 directory line breaks")
 r = subprocess.run([sys.executable, "-O", "-c", 'import io, kicad_review as k; from unittest.mock import patch\nwith patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(\'<script data-check src="review.js"></script>\' if path.endswith("review.html") else ""), create=True):\n k.inline_page("")'], capture_output=True, text=True)
 assert r.returncode != 0 and "RuntimeError: external report assets remain" in r.stderr, "RC-S4: optimized Python silently leaves external assets"
 template = open("ui/review.html", encoding="utf-8").read()
-for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
+for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"', 'src="three-studio.js"'):
     changed = template.replace(marker, "data-check " + marker)
     single_quoted = "<" + ("script " if marker.startswith("src") else "link ") + marker.replace('"', "'") + ("></script>" if marker.startswith("src") else ">")
     with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(single_quoted if path.endswith("review.html") else ""), create=True):

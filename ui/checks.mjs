@@ -4879,7 +4879,7 @@ CHECKS.push(
     Review3D.focus(change,false);
     if(!st.selected.length||st.selected.some(o=>!o.visible))return 'selection outline missing before bare';
     Review3D.onStateChange=e=>seen.push(e);
-    document.querySelector('[data-3d-assembled]').click();
+    document.querySelector('[data-3d-bare]').click();
     if(st.selected.some(o=>o.visible))return 'selection outline remains in bare mode';
     Review3D.focus(change,false);
     if(st.selected.length)return 'focus recreated bare outline';
@@ -5309,11 +5309,41 @@ CHECKS.push(['BR02 processed desktop Blend requires each source draw','v=3d&m=bl
 `]);
 
 CHECKS.push(['BR02 optional viewer state validation','v=board',`
- const viewer=window.Review3D;
+ const viewer=window.Review3D,preset=ThreeStudio.PRESETS.photo;
  try {
    window.Review3D=undefined;
    const light=valid(decodeState('#lt=photo,-30,99')).lighting3d;
    if(light.rig!=='photo'||light.bearing!==330||light.exposure!==3)return 'lighting validation requires optional viewer';
+   ThreeStudio.PRESETS.photo={...preset,bearing:120,exposure:1.75};
+   const defaults=valid({lighting3d:{rig:'photo'}}).lighting3d;
+   if(defaults.bearing!==120||defaults.exposure!==1.75)return 'hash defaults drifted from studio presets';
    return S.lighting3d?.rig==='bench'&&S.assembled3d===true||'default state requires optional viewer';
- } finally {window.Review3D=viewer;}
+ } finally {window.Review3D=viewer;ThreeStudio.PRESETS.photo=preset;}
+`]);
+
+CHECKS.push(['BR02 processed assembly buttons are idempotent','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const assembled=document.querySelector('[data-3d-assembled]'),bare=document.querySelector('[data-3d-bare]');
+ for(const [button,value] of [[assembled,true],[assembled,true],[bare,false],[bare,false],[assembled,true]]) {
+   button.click();
+   if(Review3D.state.assembled!==value||S.assembled3d!==value)return 'assembly button toggled instead of selecting '+value;
+   if(assembled.getAttribute('aria-pressed')!==String(value)||bare.getAttribute('aria-pressed')!==String(!value))return 'assembly pressed state';
+ }
+ return true;
+`]);
+CHECKS.push(['BR02 processed menus restore focus on every close','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ for(const selector of ['.tools3d','.camera-presets']) {
+   const menu=document.querySelector(selector),summary=menu.querySelector('summary');
+   for(const close of ['summary','programmatic','Escape']) {
+     menu.open=true;await new Promise(r=>setTimeout(r,30));
+     menu.querySelector('button').focus();
+     if(close==='summary')summary.click();
+     else if(close==='Escape')menu.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+     else menu.open=false;
+     await new Promise(r=>setTimeout(r,30));
+     if(menu.open||document.activeElement!==summary)return selector+' close focus '+close;
+   }
+ }
+ return true;
 `]);

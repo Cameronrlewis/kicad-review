@@ -188,15 +188,12 @@ window.Review3D = (() => {
   const RIGS = [["bench", "Bench"], ["lowsun", "Low sun"], ["photo", "Photo"]];
   // Defaults and clamping for the light tool; app state and the hash are untrusted.
   function normalizeLighting(v) {
-    const S = window.ThreeStudio, rig = Object.hasOwn(S.LIGHT_RIGS, v?.rig) ? v.rig : S.PRESETS.bench.rig, preset = S.PRESETS[rig];
-    const bearing = Number.isFinite(v?.bearing) ? S.snapBearing(v.bearing) : preset.bearing;
-    const exposure = Number.isFinite(v?.exposure) ? Math.round(Math.min(3, Math.max(.4, v.exposure)) * 20) / 20 : preset.exposure;
-    return {rig, bearing, exposure};
+    return window.ThreeStudio.normalizeLighting(v);
   }
   function toolsHtml() {
     const l = active?.lighting || normalizeLighting(), on = active ? active.assembled : true;
     return `<details class="tools3d light3d"><summary>3D tools</summary><div class="tools3d-panel light-menu">`
-      + `<button type="button" data-3d-assembled aria-pressed="${on}" title="Show or hide the components">Assembled</button><button type="button" data-3d-bare aria-pressed="${!on}">Bare board</button>`
+      + `<button type="button" data-3d-assembled aria-pressed="${on}" title="Show the components">Assembled</button><button type="button" data-3d-bare aria-pressed="${!on}">Bare board</button>`
       + `<label>Light<select data-3d-rig aria-label="Light preset">${RIGS.map(([id, n]) => `<option value="${id}"${id === l.rig ? " selected" : ""}>${n}</option>`).join("")}</select></label>`
       + `<label>Bearing<input type="range" data-3d-bearing aria-label="Light bearing" min="0" max="330" step="30" value="${l.bearing}"></label>`
       + `<label>Exposure <output data-3d-exposure-out>${l.exposure.toFixed(2)}</output><input type="range" data-3d-exposure aria-label="Light exposure" min="0.4" max="3" step="0.05" value="${l.exposure}"></label>`
@@ -265,10 +262,10 @@ window.Review3D = (() => {
     bar.innerHTML = `<details class="camera-presets"><summary title="3D camera orientations"><svg class="i" aria-hidden="true"><use href="#kr-i-cube"></use></svg>Camera</summary><div class="camera-menu">${["Top","Bottom","Front","Back","Left","Right","3D","Reset"].map(n => `<button data-3d-camera="${n.toLowerCase()}" title="${n} camera view">${n}</button>`).join("")}</div></details>${toolsHtml()}`;
     const menu = bar.querySelector(".camera-presets"), popup = bar.querySelector(".camera-menu");
     for (const [d, p, w] of [[menu, popup, 180], [bar.querySelector(".light3d"), bar.querySelector(".light-menu"), 240]]) {
-      d.ontoggle = () => { const r = d.getBoundingClientRect(); p.style.top = document.querySelector("#toolbar").getBoundingClientRect().bottom + 4 + "px"; p.style.left = Math.max(0, Math.min(r.left, innerWidth - w)) + "px"; };
+      d.ontoggle = () => { if (!d.open) { d.querySelector("summary").focus(); return; } const r = d.getBoundingClientRect(); p.style.top = document.querySelector("#toolbar").getBoundingClientRect().bottom + 4 + "px"; p.style.left = Math.max(0, Math.min(r.left, innerWidth - w)) + "px"; };
       d.onkeydown = e => { if (e.key === "Escape") { d.open = false; d.querySelector("summary").focus(); e.stopPropagation(); } };
     }
-    bar.querySelector("[data-3d-assembled]").onclick = () => setAssembled(!active?.assembled);
+    bar.querySelector("[data-3d-assembled]").onclick = () => setAssembled(true);
     bar.querySelector("[data-3d-bare]").onclick = () => setAssembled(false);
     const light = () => ({rig:bar.querySelector("[data-3d-rig]").value, bearing:+bar.querySelector("[data-3d-bearing]").value, exposure:+bar.querySelector("[data-3d-exposure]").value});
     bar.querySelector("[data-3d-rig]").onchange = e => setLighting(window.ThreeStudio.PRESETS[e.target.value]);
@@ -774,7 +771,7 @@ window.Review3D = (() => {
     const state = window.Review3D.state = session.state = {
       roots:session.roots, views:session.views, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
       revision:session.revision, assembled:session.assembled, lighting:session.lighting, modelDigests:{},
-      readyBySide:{base:{frame:false,context:0},head:{frame:false,context:0}},
+      readyBySide:{base:{frame:false},head:{frame:false}},
       loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
       placeholderMeshBySide:{base:null,head:null}, resourceCounts:{workers:0, urls:0, pending:0}, parts:{base:[], head:[]}, selected:[],
       changedParts:new Set(session.changes.map(c => c.uuid || c.ref)).size,
@@ -823,7 +820,7 @@ window.Review3D = (() => {
       session.canvas.addEventListener('webglcontextlost', event => {
         event.preventDefault(); if (session.dead) return;
         session.contextLost = true; state.firstFrame = false; state.loading = false;
-        for (const side of sides) { session.readyBySide[side].frame = false; session.readyBySide[side].context++; }
+        for (const side of sides) { session.readyBySide[side].frame = false; }
         syncTools();
         session.pixelSample?.reject(Error('WebGL context lost')); session.pixelSample = null;
         for (const side of sides) { state.loadingBySide[side] = false; if (session.available[side]) failure(session, side, 'WebGL context lost. Retry.'); }
