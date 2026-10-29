@@ -1370,14 +1370,15 @@ function bomRows(parts) {
 }
 function bomRow(l, cs) {
   const sheet = /^https?:\/\//i.test(l.datasheet || "") ? `<a href="${esc(l.datasheet)}" rel="noopener noreferrer" target="_blank">datasheet</a>` : "—";
-  const mark = cs.map(r => ({ added: "+", swapped: "~", value: "~", footprint: "~", mpn: "~" })[r.action] || "").join("");
-  return `<tr class="bom-row${cs.length ? " changed" : ""}"><td class="bom-delta" title="${esc(cs.map(r => r.action).join(", "))}">${mark}</td><td class="bom-qty">${l.refs.length}</td><td class="bom-part"><b>${esc(l.value || "—")}</b><small>${esc(l.footprint)}</small>${l.mpn ? `<small class="bom-mpn-inline">${esc(l.mpn)}</small>` : ""}</td><td class="bom-refs" title="${esc(l.refs.join(", "))}">${esc(l.refsCompressed ?? l.refs.join(", "))}</td><td>${esc(l.mpn || "—")}</td><td>${esc(l.lcsc || "—")}</td><td>${sheet}</td></tr>`;
+  const marks = cs.map(r => ({ added: ["+", "added"], swapped: ["~", "changed"], value: ["~", "changed"], footprint: ["~", "changed"], mpn: ["~", "changed"] })[r.action]).filter(Boolean);
+  const mark = marks.map(([glyph]) => glyph).join(""), label = [...new Set(marks.map(([, text]) => text))].join(", ");
+  return `<tr class="bom-row${cs.length ? " changed" : ""}"><td class="bom-delta" title="${esc(cs.map(r => r.action).join(", "))}">${mark}${label ? `<span class="sr-only">${esc(label)}</span>` : ""}</td><td class="bom-qty">${l.refs.length}</td><td class="bom-part"><b>${esc(l.value || "—")}</b><small>${esc(l.footprint)}</small>${l.mpn ? `<small class="bom-mpn-inline">${esc(l.mpn)}</small>` : ""}</td><td class="bom-refs" title="${esc(l.refs.join(", "))}">${esc(l.refsCompressed ?? l.refs.join(", "))}</td><td>${esc(l.mpn || "—")}</td><td>${esc(l.lcsc || "—")}</td><td>${sheet}</td></tr>`;
 }
 function renderBom(parts) {
-  const s = parts.summary, f = S.bomFilter, n = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const s = parts.summary, byCategory = s.byCategory || {}, f = S.bomFilter, n = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
   const counts = Object.create(null);   // from the lines, so a category the summary does not know still gets a chip and a group
   for (const l of parts.lines) counts[bomCategory(l)] = (counts[bomCategory(l)] || 0) + l.refs.length;
-  const cats = [...Object.keys(s.byCategory).filter(c => counts[c]), ...Object.keys(counts).filter(c => !Object.hasOwn(s.byCategory, c))];
+  const cats = [...Object.keys(byCategory).filter(c => counts[c]), ...Object.keys(counts).filter(c => !Object.hasOwn(byCategory, c))];
   if (f.category && !counts[f.category]) f.category = "";
   const rows = bomRows(parts), changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
   const th = (k, label) => `<th scope="col" aria-sort="${f.sort === k ? (f.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-bom-sort="${k}">${label}</button></th>`;

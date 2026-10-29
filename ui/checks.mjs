@@ -1272,15 +1272,20 @@ export const CHECKS = [
 `],
   ["Parts fixture BOM view old report and unknown category", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
-  const parts = REVIEW_DATA.projects[0].parts;
-  delete parts.summary; delete parts.exports; S.t = 'parts'; S.partsView = 'bom'; renderPanel();
-  if (document.querySelector('[data-parts-view]') || document.querySelector('.bom-table') || document.querySelectorAll('.parts-row').length !== 5) return 'a report from before the BOM view must show only the Problems view';
-  parts.summary = {components: 6, unique: 5, withMpn: 4, byCategory: {Resistors: 3, Connectors: 1, 'ICs & Modules': 2}};
-  parts.lines[3].category = 'Antennas & RF'; renderPanel();
-  const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
-  if (!chips.endsWith('Antennas & RF 1') || !document.querySelector('.bom-table').textContent.includes('Antennas & RF')) return 'unknown category ' + chips;
-  parts.lines[3].category = undefined; renderPanel();
-  return [...document.querySelectorAll('.bom-cat')].map(r => r.textContent.trim()).includes('Other 1') || 'a line without a category belongs to Other';
+  const parts = REVIEW_DATA.projects[0].parts, originalSummary = parts.summary, originalExports = parts.exports;
+  const line = parts.lines[3], originalCategory = line.category;
+  try {
+    delete parts.summary; delete parts.exports; S.t = 'parts'; S.partsView = 'bom'; renderPanel();
+    if (document.querySelector('[data-parts-view]') || document.querySelector('.bom-table') || document.querySelectorAll('.parts-row').length !== 5) return 'a report from before the BOM view must show only the Problems view';
+    parts.summary = {components: 6, unique: 5, withMpn: 4, byCategory: {Resistors: 3, Connectors: 1, 'ICs & Modules': 2}};
+    line.category = 'Antennas & RF'; renderPanel();
+    const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
+    if (!chips.endsWith('Antennas & RF 1') || !document.querySelector('.bom-table').textContent.includes('Antennas & RF')) return 'unknown category ' + chips;
+    line.category = undefined; renderPanel();
+    return [...document.querySelectorAll('.bom-cat')].map(r => r.textContent.trim()).includes('Other 1') || 'a line without a category belongs to Other';
+  } finally {
+    parts.summary = originalSummary; parts.exports = originalExports; line.category = originalCategory; renderPanel();
+  }
 `],
   ["Parts fixture BOM empty state and prototype-named categories", "", `
     if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
