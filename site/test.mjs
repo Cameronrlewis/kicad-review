@@ -3685,7 +3685,7 @@ test('private gzip responses preserve encodeBody manual through the wrapper', as
 });
 for (const failure of ['open', 'close']) test(`browser cache test releases its HTTP listener when browser ${failure} fails`, () => {
   const probe = failure === 'open'
-    ? 'export const FrameCDP={async open(){throw new Error("browser open probe failed");}};'
+    ? 'export const FrameCDP={async open(port){if(port!==9223)throw new Error("unexpected browser port");throw new Error("browser open probe failed");}};'
     : 'export const FrameCDP={async open(){return {async root(){throw new Error("browser setup probe failed");},async close(){throw new Error("browser close probe failed");}};}};';
   const result = spawnSync(process.execPath, ['--import', new URL('./css-loader.mjs', import.meta.url).pathname,
     '--test', new URL('./asset-cache.test.mjs', import.meta.url).pathname], {
@@ -3696,6 +3696,7 @@ for (const failure of ['open', 'close']) test(`browser cache test releases its H
   assert.equal(result.signal, null);
   assert.equal(result.status, 1, 'browser failure must still fail the cache test');
   assert.match(result.stdout + result.stderr, new RegExp(`browser ${failure} probe failed`));
+  assert.doesNotMatch(result.stdout + result.stderr, /unexpected browser port/);
 });
 test('parent asset disposal aborts old navigation without delivering its late result', async () => {
   let resolve;

@@ -31,7 +31,7 @@ test('report CSP allows WebAssembly compilation but blocks JavaScript eval in th
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   let browser;
   try {
-    browser=await FrameCDP.open();
+    browser=await FrameCDP.open(port);
     await browser.root('Page.navigate',{url:'http://127.0.0.1:'+server.address().port});
     await browser.waitRoot('!!window.cspResult');
     assert.deepEqual(await browser.evalRoot('window.cspResult'),{valid:true,compiled:true,evalBlocked:true});
@@ -59,7 +59,7 @@ for(const [digest,kind,path] of [
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   let browser;
   try {
-    browser=await FrameCDP.open();
+    browser=await FrameCDP.open(port);
     const base='http://127.0.0.1:'+server.address().port;
     await browser.root('Network.setCacheDisabled',{cacheDisabled:false});
     await browser.root('Page.navigate',{url:base});
