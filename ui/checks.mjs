@@ -49,8 +49,8 @@ export const CHECKS = [
     const original=previous.flatMap(c=>c.violations).find(v=>v.where?.board && v.pos);
     if(!original) return 'vendor isolation requires a located board violation';
     try {
-      S.checks={...old,check:'fab_limits',scope:'all',error:true,warning:true,q:''};
-      p.checks=['jlcpcb','pcbway'].map((vendor,i)=>({name:'fab_limits',title:'Fab limits ('+vendor+')',
+      S.checks={...old,check:'',scope:'all',error:true,warning:true,q:'',group:'check'};
+      p.checks=['jlcpcb','pcbway'].map((vendor,i)=>({name:'fab_limits',title:'Fab limits',
         vendor,profile:i?'pcbway-std':'jlcpcb-2l',level:'required',status:'fail',
         errors:1,warnings:0,new_errors:1,new_warnings:0,fixed:0,baselineAvailable:true,
         checked:['trackWidthOuterMm'],unchecked:['holeToHoleMixedMm'],
@@ -61,6 +61,22 @@ export const CHECKS = [
       for(const c of p.checks) {
         if(panel.querySelectorAll('.viol[data-id="'+c.violations[0].id+'"]').length!==1)
           return 'vendor finding duplicated or lost: '+c.vendor;
+      }
+      for(const c of p.checks) {
+        const label='Fab limits · '+({jlcpcb:'JLCPCB',pcbway:'PCBWay'}[c.vendor]);
+        const key=encodeURIComponent(c.name+'\u0000'+c.vendor);
+        let button=panel.querySelector('[data-check-summary="'+key+'"]');
+        if(!button?.textContent.includes(label)) return 'vendor summary label missing: '+c.vendor;
+        button.click();
+        button=panel.querySelector('[data-check-summary="'+key+'"]');
+        const findings=[...panel.querySelectorAll('.viol')];
+        if(button.getAttribute('aria-pressed')!=='true' || findings.length!==1 ||
+            findings[0].dataset.id!==c.violations[0].id) return 'vendor summary mixes findings: '+c.vendor;
+        if(panel.querySelector('.check-group .rule')?.textContent!==label) return 'vendor group label missing';
+        if(valid(decodeState('#'+encodeState())).t!=='checks') return 'vendor filter broke URL tab state';
+        button.click();
+        if(panel.querySelector('[data-check-summary="'+key+'"]').getAttribute('aria-pressed')!=='false' ||
+            panel.querySelectorAll('.viol').length!==2) return 'vendor summary toggle did not reset';
       }
       const ledgers=[...panel.querySelectorAll('[aria-label="Fabrication limit coverage"]')];
       if(ledgers.length!==2 || !ledgers[0].textContent.includes('JLCPCB 2-layer') ||

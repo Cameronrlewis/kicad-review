@@ -1287,12 +1287,19 @@ function fabLedger(c) {
       : `<p>Compared with base: ${esc(c.new_errors ?? 0)} new, ${esc(c.fixed ?? 0)} fixed.</p>`}
   </section>`;
 }
+function checkKey(check) {
+  return check.vendor ? `${check.name}\u0000${check.vendor}` : check.name;
+}
+function checkTitle(check) {
+  const vendor = { jlcpcb: "JLCPCB", pcbway: "PCBWay" }[check.vendor] || check.vendor;
+  return vendor ? `${check.title} · ${vendor}` : check.title;
+}
 function renderChecks() {
   const p = proj(), state = S.checks;
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
   const order = ["erc", "drc", "parity", "bom"];  // release is listed only when it ran: older reports never had it
   const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields", interfaces: "Interfaces", release: "Release package", fab_limits: "Fab limits" };
-  const byName = new Map(p.checks.map(c => [c.name, c]));
+  const byKey = new Map(p.checks.map(c => [checkKey(c), c]));
   const names = [...new Set([...order, ...p.checks.map(c => c.name)])];
   // Both fab vendors share one check name; retain each section instead of Map's last value.
   const configured = names.flatMap(name => {
@@ -1303,25 +1310,26 @@ function renderChecks() {
   const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
   const totalNew = all.filter(v => v.new && !v.waived).length;
   const scope = state.scope ?? (totalNew ? "new" : "all");
-  const checked = state.check && byName.has(state.check) ? state.check : "";
+  const checked = state.check && byKey.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
-    if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
-      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span></span>
+    const key = check ? checkKey(check) : name;
+    if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="false">
+      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(check ? checkTitle(check) : titles[name] || name)}</span></span>
       <span class="check-reason">${esc(check?.reason || "turned off in kicad-review.toml")}</span></button>`;
     const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
     const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
     const newer = check.new_errors + check.new_warnings;
-    return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
-      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
+    return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="${checked === key}">
+      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(checkTitle(check))} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
       <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
-  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
+  let shown = all.filter(v => (!checked || checkKey(v.check) === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
   const totalShown = shown.length;
   const groups = new Map();
   for (const v of shown) {
-    const checkKey = `${v.check.name}\u0000${v.check.vendor || ""}`;
-    const key = state.group === "severity" ? v.severity : state.group === "check" ? checkKey : `${checkKey}\u0000${v.type}`;
-    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? v.check.title : v.type, violations: [] });
+    const identity = checkKey(v.check);
+    const key = state.group === "severity" ? v.severity : state.group === "check" ? identity : `${identity}\u0000${v.type}`;
+    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? checkTitle(v.check) : v.type, violations: [] });
     groups.get(key).violations.push(v);
   }
   const groupHtml = [...groups.values()].sort((a, b) => {
@@ -1521,7 +1529,7 @@ function renderPanel() {
   }
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
-  for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = decodeURIComponent(b.dataset.checkSummary); if (!proj().checks.some(c => checkKey(c) === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-severity]")) b.onclick = () => { S.checks[b.dataset.checkSeverity] = !S.checks[b.dataset.checkSeverity]; renderPanel(); };
   $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true, waived: true }); renderPanel(); });
