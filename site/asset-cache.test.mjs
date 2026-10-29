@@ -10,7 +10,7 @@ let skip;
 try {
   if(!Number.isInteger(port)||port<1||port>65535||port===9222)throw Error('Use a dedicated port other than 9222');
   const response=await fetch(`http://127.0.0.1:${port}/json/version`,{signal:AbortSignal.timeout(1000)});
-  if(!response.ok)throw Error('Chrome debug endpoint unavailable');
+  if(!response.ok||typeof (await response.json()).webSocketDebuggerUrl!=='string')throw Error('Chrome debug endpoint unavailable');
 } catch {skip=`No dedicated Chrome debug port reachable at ${port}; run headless Chrome and set CDP_PORT (never 9222).`;}
 test('report CSP allows WebAssembly compilation but blocks JavaScript eval in the browser',{skip},async()=>{
   const server=createServer((req,res)=>{

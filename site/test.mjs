@@ -3690,7 +3690,7 @@ for (const failure of ['open', 'close']) test(`browser cache test releases its H
   const result = spawnSync(process.execPath, ['--import', new URL('./css-loader.mjs', import.meta.url).pathname,
     '--test', new URL('./asset-cache.test.mjs', import.meta.url).pathname], {
     encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, NODE_TEST_CONTEXT: undefined, CDP_PORT: '9223', FRAME_CDP: 'data:text/javascript,' + encodeURIComponent("globalThis.fetch=async()=>new Response('{}');"+probe) },
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, CDP_PORT: '9223', FRAME_CDP: 'data:text/javascript,' + encodeURIComponent("globalThis.fetch=async()=>new Response('{\"webSocketDebuggerUrl\":\"ws://test\"}');"+probe) },
   });
   assert.equal(result.error, undefined, `cache test must exit without hanging: ${result.error}`);
   assert.equal(result.signal, null);
@@ -4202,4 +4202,18 @@ test('fallback comparison source cache retains at most eight recently used SVGs'
   assert.equal(comparisonSources.has('["svg0","head",true]'),true,'cache hit refreshes age');
   assert.equal(comparisonSources.has('["svg1","head",true]'),false,'least recent source evicted');
   render('svg1');assert.equal(builds,10,'evicted SVG rebuilt from immutable source');
+});
+
+test('optional cache checks skip when debug port serves something other than Chrome', () => {
+  const probe = `globalThis.fetch=async()=>new Response('<html>not Chrome</html>');
+    export const FrameCDP={async open(){throw Error('must not connect without Chrome');}};`;
+  const result = spawnSync(process.execPath, ['--import', new URL('./css-loader.mjs', import.meta.url).pathname,
+    '--test', new URL('./asset-cache.test.mjs', import.meta.url).pathname], {
+    encoding:'utf8', timeout:5000,
+    env:{...process.env,NODE_TEST_CONTEXT:undefined,CDP_PORT:'9223',FRAME_CDP:'data:text/javascript,'+encodeURIComponent(probe)},
+  });
+  assert.equal(result.error,undefined);
+  assert.equal(result.status,0);
+  assert.match(result.stdout, /# skipped 3/);
+  assert.match(result.stdout, /No dedicated Chrome debug port reachable/);
 });
