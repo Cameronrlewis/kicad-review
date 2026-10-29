@@ -154,6 +154,8 @@ window.Review3D = (() => {
   function dispose() {
     if (!active) return;
     const s = active; closeSession(s); clearInterval(s.themeTimer);
+    for (const [node, afterRender] of s.renderHooks) node.onAfterRender = afterRender;
+    s.renderHooks.length = 0;
     s.views.forEach(v => { clearTimeout(v.tip); v.controls.dispose(); });
     releaseGpu(s); s.parses.clear(); s.decodedModels.clear(); s.decodedScenes.length = 0;
     s.state.disposed = true; s.state.loading = false;
@@ -167,6 +169,7 @@ window.Review3D = (() => {
   }
   function failure(s, side, message) {
     if (s.dead) return;
+    s.readyBySide[side].frame = false;
     s.state.errorsBySide[side] = message; s.partWarn.delete(side);
     const host = s.hostsBySide[side];
     // A partially built view must not hide its fallback on the next frame.
@@ -180,6 +183,7 @@ window.Review3D = (() => {
     const retry = document.createElement('button'); retry.dataset['3dRetry'] = ''; retry.textContent = 'Retry 3D';
     retry.onclick = () => { if (!s.dead) void show(s.stage, s.project, s.appState, {single:s.single}); };
     notice.append(text, retry);
+    routeRevisionViews();
   }
   const RIGS = [["bench", "Bench"], ["lowsun", "Low sun"], ["photo", "Photo"]];
   // Defaults and clamping for the light tool; app state and the hash are untrusted.
@@ -191,13 +195,24 @@ window.Review3D = (() => {
   }
   function toolsHtml() {
     const l = active?.lighting || normalizeLighting(), on = active ? active.assembled : true;
-    return `<span class="tools3d" role="group" aria-label="3D tools"><button type="button" data-3d-assembled aria-pressed="${on}" title="Show or hide the components">Assembled</button>`
-      + `<details class="light3d"><summary title="Studio lighting"><svg class="i" aria-hidden="true"><use href="#kr-i-cube"></use></svg>Light</summary><div class="light-menu">`
-      + `<label>Preset<select data-3d-rig>${RIGS.map(([id, n]) => `<option value="${id}"${id === l.rig ? " selected" : ""}>${n}</option>`).join("")}</select></label>`
-      + `<label>Light from<select data-3d-bearing>${Array.from({length:12}, (_, i) => i * 30).map(b => `<option value="${b}"${b === l.bearing ? " selected" : ""}>${b}°</option>`).join("")}</select></label>`
-      + `<label>Exposure <output data-3d-exposure-out>${l.exposure.toFixed(2)}</output><input type="range" data-3d-exposure aria-label="Exposure" min="0.4" max="3" step="0.05" value="${l.exposure}"></label>`
-      + `<span data-3d-light-error role="alert" hidden></span></div></details></span>`;
+    return `<details class="tools3d light3d"><summary>3D tools</summary><div class="tools3d-panel light-menu">`
+      + `<button type="button" data-3d-assembled aria-pressed="${on}" title="Show or hide the components">Assembled</button><button type="button" data-3d-bare aria-pressed="${!on}">Bare board</button>`
+      + `<label>Light<select data-3d-rig aria-label="Light preset">${RIGS.map(([id, n]) => `<option value="${id}"${id === l.rig ? " selected" : ""}>${n}</option>`).join("")}</select></label>`
+      + `<label>Bearing<input type="range" data-3d-bearing aria-label="Light bearing" min="0" max="330" step="30" value="${l.bearing}"></label>`
+      + `<label>Exposure <output data-3d-exposure-out>${l.exposure.toFixed(2)}</output><input type="range" data-3d-exposure aria-label="Light exposure" min="0.4" max="3" step="0.05" value="${l.exposure}"></label>`
+      + `<output role="status" class="coverage3d"></output><span data-3d-light-error role="alert" hidden></span></div></details>`;
   }
+  function syncTools() {
+    const s = active, menu = document.querySelector('.tools3d'); if (!s || !menu) return;
+    menu.querySelector('[data-3d-assembled]').setAttribute('aria-pressed', String(s.assembled));
+    menu.querySelector('[data-3d-bare]').setAttribute('aria-pressed', String(!s.assembled));
+    for (const control of menu.querySelectorAll('select,input')) control.disabled = !s.renderer || !!s.contextLost;
+    const stats = s.project.board.coverage3dBySide?.[s.revision];
+    menu.querySelector('.coverage3d').textContent = stats
+      ? '3D coverage: ' + stats.withModel + ' of ' + stats.footprints + ' parts have models'
+      : '3D coverage unavailable';
+  }
+
   function environment(s, {rig, bearing}) {
     const key = `${rig}:${bearing}`;
     let target = s.environments.get(key);
@@ -235,7 +250,7 @@ window.Review3D = (() => {
       notice.textContent = failed ? `Lighting could not be applied: ${s.state.lightingError}` : ""; notice.hidden = !failed;
     }
     if (failed) return false;
-    window.Review3D.onStateChange?.({lighting:l}); render();
+    window.Review3D.onStateChange?.({lighting3d:l}); render();
     return true;
   }
   function setAssembled(value) {
@@ -243,7 +258,7 @@ window.Review3D = (() => {
     s.assembled = s.state.assembled = !!value;
     document.querySelector("#zoombar [data-3d-assembled]")?.setAttribute("aria-pressed", String(s.assembled));
     if (!s.assembled) { clearPartSelection(); clearPartTooltips(); }
-    applyVisibility(); window.Review3D.onStateChange?.({assembled:s.assembled}); render();
+    applyVisibility(); syncTools(); window.Review3D.onStateChange?.({assembled3d:s.assembled}); render();
   }
   function cameraBar() {
     const bar = document.querySelector("#zoombar"); if (!bar) return;
@@ -254,10 +269,12 @@ window.Review3D = (() => {
       d.onkeydown = e => { if (e.key === "Escape") { d.open = false; d.querySelector("summary").focus(); e.stopPropagation(); } };
     }
     bar.querySelector("[data-3d-assembled]").onclick = () => setAssembled(!active?.assembled);
+    bar.querySelector("[data-3d-bare]").onclick = () => setAssembled(false);
     const light = () => ({rig:bar.querySelector("[data-3d-rig]").value, bearing:+bar.querySelector("[data-3d-bearing]").value, exposure:+bar.querySelector("[data-3d-exposure]").value});
-    bar.querySelector("[data-3d-rig]").onchange = e => setLighting({...light(), exposure:window.ThreeStudio.PRESETS[e.target.value].exposure});
-    bar.querySelector("[data-3d-bearing]").onchange = () => setLighting(light());
+    bar.querySelector("[data-3d-rig]").onchange = e => setLighting(window.ThreeStudio.PRESETS[e.target.value]);
+    bar.querySelector("[data-3d-bearing]").oninput = () => setLighting(light());
     bar.querySelector("[data-3d-exposure]").oninput = () => setLighting(light());
+    syncTools();
     bar.querySelectorAll("[data-3d-camera]").forEach(b => b.onclick = () => { frame(b.dataset["3dCamera"]); window.Review3D.onCameraEnd?.(); menu.open = false; menu.querySelector("summary").focus(); });
   }
   function render() { active?.invalidate?.(); }
@@ -271,10 +288,18 @@ window.Review3D = (() => {
       const x = b.left - outer.left, y = outer.bottom - b.bottom;
       v.rect = {x, y, width:b.width, height:b.height};
       r.setViewport(x, y, b.width, b.height); r.setScissor(x, y, b.width, b.height);
-      r.clear(true, true, true); r.info.reset(); r.render(v.scene, v.camera); v.calls = r.info.render.calls;
-      if (v.sides.some(side => sideRoot(s, side)?.parent === v.scene) && v.calls > 0) {
+      try { r.clear(true, true, true); r.info.reset(); s.drawnSides.clear(); r.render(v.scene, v.camera); v.calls = r.info.render.calls; }
+      catch (error) {
+        for (const side of v.sides) failure(s, side, String(error.message || error));
+        s.state.firstFrame = Object.values(s.readyBySide).some(ready => ready.frame);
+        s.pixelSample?.reject(error); s.pixelSample = null; continue;
+      }
+      if (s.drawnSides.size && v.calls > 0) {
         s.state.firstFrame = true;
-        for (const side of v.sides) if (s.state.posterBySide[side]) s.state.posterBySide[side].hidden = true;
+        for (const side of v.sides) if (s.drawnSides.has(side)) {
+          s.readyBySide[side].frame = true;
+          if (s.state.posterBySide[side]) s.state.posterBySide[side].hidden = true;
+        }
       }
       for (const m of v.labels || []) {
         const p = m.position.clone().project(v.camera), w = v.host.clientWidth, h = v.host.clientHeight;
@@ -374,12 +399,32 @@ window.Review3D = (() => {
       s.state.visibleSides = singleSide ? [s.revision] : s.allowedSides.filter(side => s.available[side]);
     } else {
       s.state.visibleSides = s.allowedSides.filter(side => s.available[side]);
+      routeCompositeViews(s);
+    }
+    syncTools();
+  }
+  function routeCompositeViews(s) {
+    const wanted = s.mode === 'blend' ? ['base', 'head'] : [sideRoot(s, 'head') ? 'head' : 'base'];
+    const failed = side => !!s.state.errorsBySide[side] && !s.partWarn.has(side);
+    for (const v of s.views.filter(v => !v.side)) {
+      for (const [side, host] of Object.entries(s.hostsBySide)) {
+        host.hidden = host !== v.host && !failed(side);
+        if (host === v.host) host.classList.toggle('one', !Object.entries(s.hostsBySide).some(([peer, h]) => h !== host && failed(peer)));
+      }
+      for (const side of s.allowedSides) {
+        const poster = s.state.posterBySide[side]; if (!poster) continue;
+        // Failed revisions keep their own labelled fallback host. Side posters never move.
+        const host = wanted.includes(side) && !failed(side) ? v.host : s.hostsBySide[side];
+        if (poster.parentElement !== host) host.prepend(poster);
+        poster.hidden = !failed(side) && (!wanted.includes(side) || s.readyBySide[side].frame);
+      }
     }
   }
+
   function setRevision(side) {
     const s = active; if (!s || !s.allowedSides.includes(side)) return;
     const changed = s.revision !== side; s.revision = side; s.state.revision = side;
-    if (changed) window.Review3D.onStateChange?.({revision:side});
+    if (changed) { clearPartSelection(); window.Review3D.onStateChange?.({revision:side}); }
     routeRevisionViews(); resize();
   }
   function resize() {
@@ -664,7 +709,7 @@ window.Review3D = (() => {
       });
       active.state.selected=active.selected;clearPartTooltips();
     }
-    applyVisibility();window.Review3D.onStateChange?.({hiddenGroups:hidden});render();
+    applyVisibility();if(!active.applyingState)window.Review3D.onStateChange?.({hiddenGroups:hidden});render();
   }
   function cameraState() { const v=active?.views[0]; return v ? [...v.camera.position.toArray(), ...v.controls.target.toArray()].map(n => Math.round(n * 10000) / 10) : null; }
   function setCameraState(c) { if (!active || !Array.isArray(c) || c.length !== 6) return; active.views.forEach(v => { v.camera.position.set(c[0]/1000,c[1]/1000,c[2]/1000); v.controls.target.set(c[3]/1000,c[4]/1000,c[5]/1000); v.controls.update(); }); render(); }
@@ -723,18 +768,20 @@ window.Review3D = (() => {
       assetId:0, assetNonce:crypto.randomUUID(), animationFrames:new Set(),
       available:Object.fromEntries(sides.map(side => [side, !!(model[side] || project.board.poster3d?.[side] || project.board.assets3d?.[side]?.model || model.errors?.[side])])),
       geometries:new Set(), materials:new Set(), textures:new Set(), environments:new Map(), comparisonMaterials:new Map(),
-      parses:new Map(), decodedModels:new Map(), decodedScenes:[],
+      parses:new Map(), decodedModels:new Map(), decodedScenes:[], drawnSides:new Set(), renderHooks:[],
       assembled:appState.assembled3d !== false, hidden:[], lighting:normalizeLighting(appState.lighting3d), hiddenBodies:false, visible:true, hostsBySide:{}, stage, project, appState
     };
     const state = window.Review3D.state = session.state = {
       roots:session.roots, views:session.views, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
       revision:session.revision, assembled:session.assembled, lighting:session.lighting, modelDigests:{},
+      readyBySide:{base:{frame:false,context:0},head:{frame:false,context:0}},
       loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
       placeholderMeshBySide:{base:null,head:null}, resourceCounts:{workers:0, urls:0, pending:0}, parts:{base:[], head:[]}, selected:[],
       changedParts:new Set(session.changes.map(c => c.uuid || c.ref)).size,
       renderers:[], cameras:[], controls:[], visibleSides:[], drawCallsByViewport:[], drawCount:0,
       nodes:[], highlights:[], ghosts:[], blocks:[], parseCount:0
     };
+    session.readyBySide = state.readyBySide;
     session.resourceCounts = state.resourceCounts;
     for (const side of sides) state.loadingBySide[side] = !!model[side];
     state.loading = Object.values(state.loadingBySide).some(Boolean);
@@ -772,17 +819,19 @@ window.Review3D = (() => {
       renderer.setClearColor(0, 0); renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       renderer.toneMapping = T.THREE.NeutralToneMapping; renderer.outputColorSpace = T.THREE.SRGBColorSpace; renderer.toneMappingExposure = session.lighting.exposure;
       renderer.autoClear = false; renderer.info.autoReset = false;
-      session.renderer = renderer; session.canvas = renderer.domElement; stage.prepend(session.canvas); state.renderers = [renderer];
+      session.renderer = renderer; session.canvas = renderer.domElement; stage.prepend(session.canvas); state.renderers = [renderer]; syncTools();
       session.canvas.addEventListener('webglcontextlost', event => {
         event.preventDefault(); if (session.dead) return;
         session.contextLost = true; state.firstFrame = false; state.loading = false;
+        for (const side of sides) { session.readyBySide[side].frame = false; session.readyBySide[side].context++; }
+        syncTools();
         session.pixelSample?.reject(Error('WebGL context lost')); session.pixelSample = null;
         for (const side of sides) { state.loadingBySide[side] = false; if (session.available[side]) failure(session, side, 'WebGL context lost. Retry.'); }
       }, {signal:session.abort.signal});
       installScheduler(session);
       session.resizeObserver = new ResizeObserver(resize); session.resizeObserver.observe(stage);
     } catch (error) {
-      state.loading = false; state.firstFrame = false;
+      state.loading = false; state.firstFrame = false; syncTools();
       for (const side of sides) { state.loadingBySide[side] = false; if (session.available[side]) failure(session, side, 'WebGL unavailable: ' + error.message); }
       return;
     }
@@ -809,7 +858,19 @@ window.Review3D = (() => {
         let hasGeometry = false;
         gltf.scene.traverse(n => { if (n.isMesh && n.geometry?.getAttribute('position')?.count) hasGeometry = true; });
         if (!hasGeometry) throw Error('No renderable 3D geometry.');
-        return gltf.scene.clone(true);
+        const root = gltf.scene.clone(true);
+        // Only a genuine mesh draw can retire this revision's poster. Composite
+        // view draw-call totals alone cannot prove that both roots contributed.
+        root.traverse(node => {
+          if (!node.isMesh) return;
+          const afterRender = node.onAfterRender;
+          session.renderHooks.push([node, afterRender]);
+          node.onAfterRender = function(...args) {
+            afterRender.apply(this, args);
+            if (sideRoot(session, side)?.parent === args[1]) session.drawnSides.add(side);
+          };
+        });
+        return root;
       } catch (error) {
         if (!session.dead) failure(session, side, String(error.message || error));
         return null;
@@ -897,7 +958,9 @@ window.Review3D = (() => {
       notice.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:5;background:var(--surface);color:var(--text);padding:6px 12px;border:1px solid var(--line);pointer-events:none'; stage.appendChild(notice);
     }
     for (const side of sides) session.hostsBySide[side].querySelector('.loading')?.remove();
-    setHidden(appState.hidden3d); resize(); frame('3d'); if (appState.camera3d) setCameraState(appState.camera3d);
+    session.applyingState = true;
+    try { setHidden(appState.hidden3d); } finally { session.applyingState = false; }
+    resize(); frame('3d'); if (appState.camera3d) setCameraState(appState.camera3d);
     const signal = session.abort.signal;
     const media = matchMedia('(prefers-color-scheme: dark)'); let signature = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|');
     const theme = () => { const next = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|'); if (signature !== next) { signature = next; recolour(); } };

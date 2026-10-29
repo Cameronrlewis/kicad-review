@@ -4887,7 +4887,7 @@ CHECKS.push(
     if(meshes('bodies').some(x=>x.object.visible))return 'bodies still visible when bare';
     if(!meshes('board').every(x=>x.object.visible))return 'board hidden when bare';
     if(st.blocks.some(b=>b.object.visible)||st.views.some(v=>(v.labels||[]).some(m=>!m.el.hidden)))return 'blocks or markers still visible';
-    if(seen[0]?.assembled!==false)return 'no state event';
+    if(seen[0]?.assembled3d!==false)return 'no state event';
     Review3D.setHidden(['silk']);
     if(meshes('bodies').some(x=>x.object.visible))return 'hidden groups re-showed bodies';
     Review3D.setAssembled(true);
@@ -4904,7 +4904,7 @@ CHECKS.push(
       const name=el.getAttribute('aria-label')||el.title||el.closest('label')?.textContent||el.textContent;
       if(!name.trim())return 'unnamed control '+el.outerHTML.slice(0,60);
     }
-    const light=tools.querySelector('.light3d'); light.open=true; await new Promise(r=>setTimeout(r,50));
+    const light=tools; light.open=true; await new Promise(r=>setTimeout(r,50));
     tools.scrollIntoView({inline:'center',block:'nearest'});const m=light.querySelector('.light-menu').getBoundingClientRect(), tb=document.querySelector('#toolbar').getBoundingClientRect();
     if(m.left<0||m.right>innerWidth||m.top<tb.bottom||m.bottom>innerHeight)return 'light menu clipped '+JSON.stringify(m);
     const ex=light.querySelector('[data-3d-exposure]'); ex.value='2'; ex.dispatchEvent(new Event('input',{bubbles:true}));
@@ -5138,3 +5138,182 @@ CHECKS.push(
  } finally {window.matchMedia=original;}
  `]
 );
+
+CHECKS.push(
+ ['BR02 processed whole screen tools and revisions','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const tools=document.querySelector('details.tools3d');if(!tools)return '3D tools missing';
+ tools.open=true;await new Promise(r=>setTimeout(r,50));
+ if(document.documentElement.scrollWidth>innerWidth)return 'horizontal overflow';
+ if(!document.querySelector('[data-3d-camera="reset"]'))return 'Camera reset lost';
+ for(const e of tools.querySelectorAll('button,select,input')) {
+   const r=e.getBoundingClientRect();
+   if(!r.width||!r.height||r.left<0||r.right>innerWidth||r.bottom>innerHeight)return 'unreachable 3D tool';
+   if(!(e.getAttribute('aria-label')||e.closest('label')?.textContent||e.textContent.trim()))return 'unnamed 3D tool';
+   if(!e.disabled){e.focus();if(document.activeElement!==e)return 'tool cannot receive focus';}
+ }
+ for(const side of ['base','head']) {
+   Review3D.setRevision(side);
+   const stats=proj().board.coverage3dBySide?.[side];
+   const expected=stats?'3D coverage: '+stats.withModel+' of '+stats.footprints+' parts have models':'3D coverage unavailable';
+   if(tools.querySelector('.coverage3d')?.textContent!==expected)return 'coverage not synchronized';
+ }
+ if(tools.querySelector('[data-revision]'))return 'duplicate revision control';
+ Review3D.setLighting({rig:'invalid',bearing:-30,exposure:99});
+ const light=Review3D.state.lighting;
+ if(light.rig!=='bench'||light.bearing!==330||light.exposure!==3)return 'lighting validation';
+ Review3D.setLighting(ThreeStudio.PRESETS.bench);
+ tools.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+ if(tools.open||document.activeElement!==tools.querySelector('summary'))return 'Escape focus';
+ tools.open=true;
+ return Review3D.state.visibleSides.join(',')==='base,head'||'desktop lost a revision';
+ `],
+ ['BR02 processed desktop canonical state round trip','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const saved={...S},stage=document.querySelector('#stage'),p=proj();
+ try {
+   if(valid(decodeState('#revision3d=base')).revision!=='base')return 'legacy alias not migrated';
+   if(valid(decodeState('#revision=head&revision3d=base')).revision!=='head')return 'alias overrode canonical';
+   if(valid(decodeState('#revision=invalid&revision3d=base')).revision!=='head')return 'invalid canonical not normalized';
+   const part=Review3D.state.parts.head.find(p=>p.hasModel);
+   if(!part)return 'fixture lacks selectable model';
+   S.part3d={...part,box:part.box.slice()};Review3D.focusPart(part.ref,'head',false);
+   Review3D.setRevision('head');
+   if(!S.part3d)return 'same revision cleared selection';
+   Review3D.setRevision('base');
+   if(S.part3d||Review3D.state.selected.length)return 'revision change retained stale selection';
+   Review3D.setAssembled(false);
+   Review3D.setLighting({rig:'photo',bearing:90,exposure:1.5});
+   Review3D.setHidden(['silk']);S.hidden3d=['silk'];
+   const camera=Review3D.cameraState();S.camera3d=camera;
+   await new Promise(r=>setTimeout(r,250));
+   const decoded=valid(decodeState(location.hash));
+   if(decoded.revision!=='base'||decoded.assembled3d!==false||decoded.lighting3d.rig!=='photo')return 'callback hash lost state';
+   if(location.hash.includes('revision3d'))return 'alias serialized';
+   select('board');select('3d');await draw();
+   if(S.revision!=='base'||S.assembled3d!==false||Review3D.state.lighting.rig!=='photo')return 'navigation lost state';
+   if(S.hidden3d.join()!=='silk'||JSON.stringify(Review3D.cameraState())!==JSON.stringify(camera))return 'navigation lost camera/hidden';
+   const absent=structuredClone(p);
+   for(const key of ['model3d','poster3d','parts3d','coverage3dBySide','assets3d'])if(absent.board[key])absent.board[key].head=null;
+   S.revision='head';await Review3D.show(stage,absent,S);
+   if(Review3D.state.revision!=='head')return 'absent head silently replaced';
+   const host=Review3D.session().hostsBySide.head;
+   if(!host.textContent.includes('Board not in this revision')||host.querySelector('[data-poster]:not([hidden])'))return 'absent Head fallback';
+   return true;
+ } finally {Object.assign(S,saved);await Review3D.show(stage,p,S);}
+ `],
+ ...['overlay','semantic','blend'].map(mode=>[
+ 'BR02 processed desktop composite revision semantics '+mode,'v=3d&m='+mode,`
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,parses=st.parseCount;
+ for(const side of ['base','head','base','head']) {
+   Review3D.setRevision(side);const v=st.views.find(v=>v.visible);
+   if(st.roots[1].parent!==v.scene)return 'composite lost head';
+   if((st.roots[0].parent===v.scene)!==(S.m==='blend'))return 'composite base membership changed';
+   if(S.m==='overlay'&&st.ghosts.some(g=>g.object.parent!==v.scene))return 'overlay lost ghosts';
+   if(S.m==='blend')for(const [revision,weight] of [['base',1-st.blend],['head',st.blend]]) {
+     const root=st.roots[revision==='head'?1:0],materials=[];
+     root.traverse(n=>{if(n.isMesh)materials.push(...(Array.isArray(n.material)?n.material:[n.material]))});
+     if(materials.some(m=>m.userData.alpha3d!=null&&Math.abs(m.opacity-m.userData.alpha3d*weight)>1e-6))return 'blend weights changed';
+   }
+   if((await Review3D.sampleFrame()).opaquePixels<100)return 'composite not drawn';
+ }
+ return st.parseCount===parses||'revision switch decoded again';
+ `])
+);
+
+CHECKS.push(
+ ...['overlay','semantic','blend'].map(mode=>[
+ 'BR02 processed desktop composite context posters '+mode,'v=3d&m='+mode,`
+ if(!proj().board.parts3d)return 'skip';
+ const stage=document.querySelector('#stage'),st=Review3D.state,s=Review3D.session();
+ s.canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+ Review3D.resize();Review3D.setRevision('base');
+ for(const side of ['base','head']) {
+   const poster=st.posterBySide[side],host=poster?.closest('.view3d');
+   if(st.readyBySide[side].frame||!poster||poster.hidden||host.hidden)return 'context loss hid '+side+' poster';
+ }
+ const prototype=THREE3D.GLTFLoader.prototype,native=prototype.parseAsync,releases=[],frames=[];
+ let opening;
+ try {
+   prototype.parseAsync=async function(...args){await new Promise(r=>releases.push(r));return native.apply(this,args)};
+   opening=Review3D.show(stage,proj(),S);
+   for(let i=0;i<300&&releases.length<2;i++)await new Promise(r=>setTimeout(r,10));
+   if(releases.length!==2)return 'parse gates not reached';
+   const next=Review3D.state,renderer=next.renderers[0],draw=renderer.render;
+   renderer.render=function(scene,...args) {
+     if(next.views.some(v=>v.scene===scene)) {
+       for(const side of ['base','head'])if(!next.readyBySide[side].frame&&next.posterBySide[side]?.hidden&&scene.children.includes(next.roots[side==='head'?1:0]))throw Error('poster hidden before '+side+' draw');
+       frames.push(scene);
+     }
+     return draw.call(this,scene,...args);
+   };
+   releases.forEach(r=>r());await opening;opening=null;
+   if(!frames.length||!next.firstFrame)return 'retry did not draw';
+   for(const side of S.m==='blend'?['base','head']:['head'])if(!next.readyBySide[side].frame||!next.posterBySide[side].hidden)return 'retry not ready '+side;
+   return true;
+ } finally {prototype.parseAsync=native;releases.forEach(r=>r());if(opening)await opening;}
+
+ `]),
+ ['BR02 processed desktop fallback tools remain accessible','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const original=HTMLCanvasElement.prototype.getContext;
+ try {
+   HTMLCanvasElement.prototype.getContext=function(type,...args){return /webgl/.test(type)?null:original.call(this,type,...args)};
+   await Review3D.show(document.querySelector('#stage'),proj(),S);
+   const tools=document.querySelector('.tools3d');tools.open=true;
+   if([...tools.querySelectorAll('select,input')].some(e=>!e.disabled))return 'renderer-dependent light control enabled';
+   if(tools.querySelector('[data-3d-assembled]').disabled)return 'assembly disabled with renderer';
+   Review3D.setRevision('base');
+   return !!tools.querySelector('.coverage3d').textContent&&!!document.querySelector('[data-3d-retry]')||'fallback tools lost';
+ } finally {HTMLCanvasElement.prototype.getContext=original;}
+ `]
+);
+
+CHECKS.push(['BR02 processed desktop render failure retains only failed poster','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,s=Review3D.session(),renderer=s.renderer,native=renderer.render;
+ const base=st.views.find(v=>v.side==='base');
+ try {
+   renderer.render=function(scene,...args){if(scene===base.scene)throw Error('Synthetic revision draw failure');return native.call(this,scene,...args)};
+   try {await Review3D.sampleFrame();return 'render error not surfaced';}catch(error){if(!error.message.includes('Synthetic revision draw failure'))throw error;}
+   Review3D.resize();Review3D.setRevision('head');
+   const poster=st.posterBySide.base;
+   if(st.readyBySide.base.frame||!poster||poster.hidden||poster.parentElement!==s.hostsBySide.base)return 'failed Side poster moved or hidden';
+   if(!st.readyBySide.head.frame||!st.posterBySide.head.hidden)return 'valid peer readiness lost';
+   return (await Review3D.sampleFrame()).opaquePixels>100||'valid peer not drawn';
+ } finally {renderer.render=native;}
+`]);
+
+CHECKS.push(['BR02 processed desktop Blend requires each source draw','v=3d&m=blend',`
+ if(!proj().board.parts3d)return 'skip';
+ const prototype=THREE3D.GLTFLoader.prototype,native=prototype.parseAsync,releases=[];
+ let opening,renderer,draw;
+ try {
+   prototype.parseAsync=async function(...args){await new Promise(r=>releases.push(r));return native.apply(this,args)};
+   opening=Review3D.show(document.querySelector('#stage'),proj(),S);
+   for(let i=0;i<300&&releases.length<2;i++)await new Promise(r=>setTimeout(r,10));
+   if(releases.length!==2)return 'parse gates not reached';
+   const st=Review3D.state;renderer=st.renderers[0];draw=renderer.render;
+   renderer.render=function(scene,...args){if(st.roots[0])st.roots[0].visible=false;return draw.call(this,scene,...args)};
+   releases.forEach(r=>r());await opening;opening=null;
+   if(st.readyBySide.base.frame||st.posterBySide.base.hidden)return 'Head draw retired undrawn Base poster';
+   if(!st.readyBySide.head.frame||!st.posterBySide.head.hidden)return 'Head draw not ready';
+   Review3D.resize();Review3D.setRevision('base');
+   if(st.posterBySide.base.hidden)return 'routing retired undrawn Base poster';
+   renderer.render=draw;st.roots[0].visible=true;await Review3D.sampleFrame();
+   if(!st.readyBySide.base.frame||!st.posterBySide.base.hidden)return 'Base draw did not retire its own poster';
+   const owner=Review3D.session();Review3D.dispose();
+   return owner.renderHooks.length===0||'mesh readiness hooks retained after disposal';
+ } finally {prototype.parseAsync=native;if(renderer&&draw)renderer.render=draw;releases.forEach(r=>r());if(opening)await opening;}
+`]);
+
+CHECKS.push(['BR02 optional viewer state validation','v=board',`
+ const viewer=window.Review3D;
+ try {
+   window.Review3D=undefined;
+   const light=valid(decodeState('#lt=photo,-30,99')).lighting3d;
+   if(light.rig!=='photo'||light.bearing!==330||light.exposure!==3)return 'lighting validation requires optional viewer';
+   return S.lighting3d?.rig==='bench'&&S.assembled3d===true||'default state requires optional viewer';
+ } finally {window.Review3D=viewer;}
+`]);

@@ -233,6 +233,7 @@ function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
   if (q.has("p")) out.p = +q.get("p");
   for (const k of ["v", "m", "s", "t", "revision"]) if (q.has(k)) out[k] = q.get(k);
+  if (!q.has("revision") && q.has("revision3d")) out.revision = q.get("revision3d");
   for (const k of ["x", "y", "z"]) if (q.has(k)) out[k] = +q.get(k);
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
   if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
@@ -245,7 +246,7 @@ function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
-  if (["base", "head"].includes(st.revision)) out.revision = st.revision;
+  out.revision = ["base", "head"].includes(st.revision) ? st.revision : "head";
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
   if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
@@ -258,7 +259,11 @@ function valid(st) {   // drop anything that does not exist in this report
   if (st.assembled3d === false) out.assembled3d = false;
   if (st.lighting3d && LIGHT_RIGS3D.includes(st.lighting3d.rig)) {   // unknown rig = default light; numbers are clamped by the viewer
     const { rig, bearing, exposure } = st.lighting3d;
-    out.lighting3d = { rig, bearing: Number.isFinite(bearing) ? bearing : null, exposure: Number.isFinite(exposure) ? exposure : null };
+    // The raw development template can omit the optional 3D scripts.
+    const b = Number.isFinite(bearing) ? bearing : 60;
+    const e = Number.isFinite(exposure) ? exposure : {bench:1.35,lowsun:1.6,photo:1.2}[rig];
+    out.lighting3d = {rig, bearing:(30 * Math.round(b / 30) % 360 + 360) % 360,
+      exposure:Math.round(Math.max(.4, Math.min(3, e)) * 20) / 20};
   }
   return out;
 }
@@ -266,7 +271,7 @@ function applyState(st) {
   const v = valid(st);
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
-                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? null, camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? {rig:"bench",bearing:60,exposure:1.35}, camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
@@ -1138,12 +1143,14 @@ function pickAt(vp, e) {
 function markSelected() { S.part3d = null; S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onPartPick = part => {
   S.s = null; markSelected(); S.part3d = {...part,box:part.box.slice()}; renderInspector(); saveHash();
-}; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled, lighting, hiddenGroups, partSelection}) => {
-  if (revision) S.revision = revision;
-  if (assembled !== undefined) S.assembled3d = assembled;
-  if (lighting) S.lighting3d = lighting;
+}; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled3d, lighting3d, hiddenGroups, partSelection}) => {
+  const patch = {};
+  if (revision !== undefined) patch.revision = valid({...S, revision}).revision;
+  if (assembled3d !== undefined) patch.assembled3d = assembled3d !== false;
+  if (lighting3d) patch.lighting3d = window.Review3D.normalizeLighting(lighting3d);
+  Object.assign(S, patch);
   const part=S.part3d&&window.Review3D.state?.parts[S.part3d.side]?.find(p=>p.uuid===S.part3d.uuid);
-  if(S.part3d&&(partSelection===null||assembled===false||hiddenGroups?.some(g=>g==='bodies'||g===part?.side))) {
+  if(S.part3d&&(partSelection===null||revision!==undefined||assembled3d===false||hiddenGroups?.some(g=>g==='bodies'||g===part?.side))) {
     S.part3d=null;renderInspector();
   }
   saveHash();

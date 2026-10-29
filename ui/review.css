@@ -742,3 +742,10 @@ html[data-theme="dark"] #stage.mode-3d { background:var(--bg); }
 .light-menu label output { grid-column:2; grid-row:1; justify-self:end; font:600 11.5px var(--font-mono); color:var(--tx); }
 .light-menu label:has(input[type=range]) { grid-template-columns:5.5em 1fr; } .light-menu input[type=range] { grid-column:1/-1; width:100%; }
 .light-menu select { font:inherit; color:var(--tx); background:var(--module); border:1px solid var(--hair); border-radius:3px; padding:2px 6px; min-height:24px; }
+
+/* Native desktop 3D tools share the viewer's existing tokens and focus styling. */
+#toolbar .tools3d { display:block; position:relative; }
+#toolbar .tools3d-panel { max-height:70vh; overflow:auto; gap:var(--space-2); padding:var(--space-3); }
+.tools3d:not([open]) .tools3d-panel { display:none !important; }
+#toolbar .tools3d-panel button, #toolbar .tools3d-panel select, #toolbar .tools3d-panel input { min-height:44px; }
+.tools3d-panel .coverage3d { font-size:12px; color:var(--tx2); overflow-wrap:anywhere; }
