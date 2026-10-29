@@ -1287,6 +1287,37 @@ export const CHECKS = [
     parts.summary = originalSummary; parts.exports = originalExports; line.category = originalCategory; S.partsView = 'problems'; renderPanel();
   }
 `],
+  ["Multi-board BOM: All boards view combines boards with qualified references", "", `
+  if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  document.querySelector('[data-parts-view=bom]').click();
+  const chips = [...document.querySelectorAll('[data-bom-board]')].map(b => b.textContent.trim()).join('|');
+  if (chips !== 'All boards|Alpha|Beta') return 'board chips ' + chips;
+  const summary = document.querySelector('.bom-summary')?.textContent.trim();
+  if (summary !== '7 components · 5 unique parts · 5 with MPN') return 'combined summary ' + summary;
+  const refs = [...document.querySelectorAll('.bom-row .bom-refs')].map(c => c.textContent).join('|');
+  if (refs !== 'Alpha:R1-R2; Beta:R1|Beta:R2|Alpha:C1|Beta:C1|Alpha:U1') return 'combined refs ' + refs;
+  const qty = [...document.querySelectorAll('.bom-row .bom-qty')].map(c => c.textContent).join('|');
+  return qty === '3|1|1|1|1' || 'combined quantities ' + qty;
+`],
+  ["Multi-board BOM: a board chip shows that project; All boards saves the combined files", "", `
+  if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  document.querySelector('[data-parts-view=bom]').click();
+  const names = [], saved = [], clickAnchor = HTMLAnchorElement.prototype.click, createUrl = URL.createObjectURL;
+  HTMLAnchorElement.prototype.click = function () { names.push(this.download); };
+  URL.createObjectURL = blob => { saved.push(blob); return 'blob:fixture/' + saved.length; };
+  try {
+    document.querySelector('[data-bom-board="1"]').click();
+    if (!document.querySelector('.bom-summary')?.textContent.startsWith('3 components')) return 'Beta summary ' + document.querySelector('.bom-summary')?.textContent;
+    document.querySelector('[data-bom-download=csv]').click();
+    document.querySelector('[data-bom-board="all"]').click();
+    if (!document.querySelector('.bom-summary')?.textContent.startsWith('7 components')) return 'All boards summary';
+    document.querySelector('[data-bom-download=csv]').click();
+    if (names[0] !== 'Beta-bom.csv' || names[1] !== 'all-boards-bom.csv') return 'download names ' + names;
+    return await saved[1].text() === REVIEW_DATA.bom.exports.csv || 'combined CSV bytes differ from the embedded export';
+  } finally { HTMLAnchorElement.prototype.click = clickAnchor; URL.createObjectURL = createUrl; }
+`],
   ["Parts fixture BOM empty state and prototype-named categories", "", `
     if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
     const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalSummary = parts.summary;

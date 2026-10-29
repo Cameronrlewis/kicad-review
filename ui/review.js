@@ -1361,6 +1361,7 @@ function fieldChangesHtml(parts) {
 }
 S.partsView = "problems";   // ponytail: not in the link hash; add a key when deep links to the BOM view are needed
 S.bomFilter = { category: "", sort: "refs", dir: 1 };
+S.bomBoard = "all";   // "all": the repository BOM (REVIEW_DATA.bom) when present; "project": the project at S.p
 const BOM_SORTS = { qty: l => l.refs.length, part: l => l.value, refs: l => l.refs[0], mpn: l => l.mpn || "", lcsc: l => l.lcsc || "", datasheet: l => l.datasheet || "" };
 const bomCategory = l => l.category || "Other";
 const BOM_FAB_LABEL = { jlcpcb: "JLCPCB", pcbway: "PCBWay" };
@@ -1369,10 +1370,10 @@ function bomDownloadsHtml(parts) {
   return `<span class="bom-downloads">${typeof x.fab === "string" ? `<button type="button" data-bom-download="fab">${esc(BOM_FAB_LABEL[x.preset] || x.preset)} ↓</button>` : ""}<button type="button" data-bom-download="csv">CSV ↓</button></span>${x.fabError ? `<p class="bom-export-error" role="status">${esc(x.fabError)}</p>` : ""}`;
 }
 function downloadBom(kind) {
-  const x = proj().parts.exports; if (!x || typeof x[kind] !== "string") return;
+  const src = bomSource(), x = src.exports; if (!x || typeof x[kind] !== "string") return;
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([kind === "csv" ? x.csv : x.fab], { type: "text/csv;charset=utf-8" }));
-  const name = proj().name.replace(/[^\w.-]+/g, "_");
+  const name = src.name.replace(/[^\w.-]+/g, "_");
   const stem = /[a-z0-9]/i.test(name) ? name : "bom";
   a.download = `${stem}-${kind === "csv" ? "bom.csv" : `bom-${x.preset}.csv`}`;
   document.body.append(a); a.click(); a.remove();
@@ -1403,9 +1404,26 @@ function renderBom(parts) {
     <div class="dock-list-tools"><input type="search" data-list-search="parts" aria-label="Search parts" placeholder="Search parts…" value="${esc(S.partsFilter.q || "")}"></div>
     <div class="parts-scroll"><table class="bom-table"><thead><tr><th scope="col"><span class="sr-only">Change</span></th>${th("qty", "QTY")}${th("part", "PART")}${th("refs", "REFS")}${th("mpn", "MPN")}${th("lcsc", "LCSC")}${th("datasheet", "DATASHEET")}</tr></thead>${groups.map(({ c, rs }) => `<tbody><tr class="bom-cat"><th scope="rowgroup" colspan="7">${esc(c)} <span class="muted">${rs.reduce((total, l) => total + l.refs.length, 0)}</span></th></tr>${rs.map(l => bomRow(l, changes(l))).join("")}</tbody>`).join("")}</table>${groups.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
 }
+function bomSource() {
+  const repo = D.bom;
+  if (repo && !repo.error && S.bomBoard === "all") {   // changes carry board-qualified refs, so badges match combined lines
+    const changes = D.projects.flatMap(p => (p.parts?.changes || []).map(c => ({ ...c, refs: c.refs.map(r => `${p.name}:${r}`) })));
+    return { name: "all-boards", summary: repo.summary, lines: repo.lines, exports: repo.exports, changes };
+  }
+  const project = proj(), parts = project.parts;
+  return { name: project.name, summary: parts.summary, lines: parts.lines, exports: parts.exports, changes: parts.changes };
+}
+function renderBomWithBoards() {
+  const repo = D.bom;
+  const chips = repo ? [["all", repo.error ? "All boards (unavailable)" : "All boards"], ...D.projects.map((p, i) => [String(i), p.name])] : [];
+  const pressed = k => k === "all" ? S.bomBoard === "all" : S.bomBoard !== "all" && k === String(S.p);
+  const picker = repo ? `<div class="filters bom-boards" role="group" aria-label="Board">${chips.map(([k, label]) => `<button type="button" class="check-chip" data-bom-board="${esc(k)}" aria-pressed="${pressed(k)}">${esc(label)}</button>`).join("")}</div>` : "";
+  const note = repo && repo.error && S.bomBoard === "all" ? `<p class="bom-export-error">${esc(repo.error)}</p>` : "";
+  return picker + note + renderBom(bomSource());
+}
 function renderParts() {
   const parts = proj().parts, bom = parts.summary && S.partsView === "bom";   // reports from before the BOM view have no summary
-  return (parts.summary ? `<div class="filters parts-view" role="group" aria-label="Parts view">${[["problems", "Problems"], ["bom", "BOM"]].map(([k, label]) => `<button type="button" class="check-chip" data-parts-view="${k}" aria-pressed="${(k === "bom") === !!bom}">${label}</button>`).join("")}</div>` : "") + (bom ? renderBom(parts) : renderPartsProblems(parts));
+  return (parts.summary ? `<div class="filters parts-view" role="group" aria-label="Parts view">${[["problems", "Problems"], ["bom", "BOM"]].map(([k, label]) => `<button type="button" class="check-chip" data-parts-view="${k}" aria-pressed="${(k === "bom") === !!bom}">${label}</button>`).join("")}</div>` : "") + (bom ? renderBomWithBoards() : renderPartsProblems(parts));
 }
 function renderPartsProblems(parts) {
   const age = partsAge(parts.supplier), f = S.partsFilter;
@@ -1498,7 +1516,7 @@ function dockListTools(name, state) {
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
-  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-parts-view", "data-bom-cat", "data-bom-sort", "data-bom-download", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-parts-view", "data-bom-cat", "data-bom-sort", "data-bom-board", "data-bom-download", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
@@ -1550,6 +1568,10 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel [data-parts-view]")) b.onclick = () => { S.partsView = b.dataset.partsView; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-bom-cat]")) b.onclick = () => { S.bomFilter.category = b.dataset.bomCat; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-bom-sort]")) b.onclick = () => { const f = S.bomFilter, k = b.dataset.bomSort; f.dir = f.sort === k ? -f.dir : 1; f.sort = k; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-board]")) b.onclick = () => {
+    if (b.dataset.bomBoard === "all") { S.bomBoard = "all"; renderPanel(); }
+    else { S.bomBoard = "project"; openProject(Number(b.dataset.bomBoard)); }
+  };
   for (const b of document.querySelectorAll("#panel [data-bom-download]")) b.onclick = () => downloadBom(b.dataset.bomDownload);
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
