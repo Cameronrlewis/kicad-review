@@ -25,10 +25,15 @@ function base64url(bytes) {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
+function unbase64(value) {
+  const binary = atob(value), bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 function unbase64url(value) {
   const base64 = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return unbase64(base64);
 }
 
 async function key(env) {
@@ -244,7 +249,7 @@ export function assetFromReport(html, id, kind) {
   if (!/^[0-9a-f]{12}$/.test(id) || !['svg', 'json'].includes(kind)) return null;
   const data = readStoredData(html), meta = data?.assets?.[id], encoded = data?.blobs?.[id];
   if (meta?.kind !== kind || typeof encoded !== 'string') return null;
-  try { return Uint8Array.from(atob(encoded), c => c.charCodeAt(0)); } catch { return null; }
+  try { return unbase64(encoded); } catch { return null; }
 }
 
 // Shared raw-report/asset validation. The repository-scoped GitHub endpoint rejects

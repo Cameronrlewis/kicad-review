@@ -3310,6 +3310,14 @@ test('asset extraction only accepts declared digest and kind', () => {
   assert.equal(assetFromReport(storedImageReport(data), imageId, 'svg'), null);
 });
 
+test('asset extraction preserves every byte of blobs larger than 256 KB', () => {
+  const bytes = Buffer.alloc(300 * 1024 + 1);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = i % 256;
+  const base64 = bytes.toString('base64'), data = imageData();
+  data.blobs[imageId] = base64;
+  assert.deepEqual(Buffer.from(assetFromReport(storedImageReport(data), imageId, 'svg')), Buffer.from(base64, 'base64'));
+});
+
 test('hosted asset descriptors strip only eligible blobs; offline and guest keep every blob', () => {
   const stored = storedImageReport();
   const hosted = readStoredData(currentReport(stored, { lazyAssets: true }));
