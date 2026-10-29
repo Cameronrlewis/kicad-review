@@ -139,7 +139,6 @@ test('timed-out runner body settles before the next check starts', async () => {
   const log = line => { if (line === 'RUN second' && !settled) overlap = true; };
   await runInNewContext(`(async()=>{${loop}})()`, {
     CHECKS: [['first', '', 'first()'], ['second', '', 'second()']], filter:'', dark:false, page:'', pageUrl:'http://127.0.0.1:1/page.html', noSkip:false, errors:[],
-    width:1920, height:1080, dpr:1,
     setTimeout, clearTimeout, process:{env:{CHECK_WALL_TIMEOUT:'1'}}, console:{log},
     send:async () => ({}), sleep:() => new Promise(r => setTimeout(r, 10)),
     evaluate:async expr => { if (expr.includes('first()')) settled = true; return {result:{value:true}}; },

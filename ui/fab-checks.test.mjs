@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { CHECKS } from './checks.mjs';
 
 const source = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
 const start = source.indexOf('function renderChecks()');
@@ -44,4 +45,11 @@ test('fab summary keys isolate vendors and preserve pressed state without raw HT
     assert.ok(!html.includes(`data-id="${other}"`));
     assert.ok(!html.includes('\u0000'));
   }
+});
+
+test('fab vendor coverage check describes desktop scope without phone-only setup', () => {
+  const check = CHECKS.find(([name]) => name === 'Fab limits vendor isolation and desktop coverage');
+  assert.ok(check, 'desktop coverage check missing');
+  assert.equal(check[3]?.viewport, undefined);
+  assert.doesNotMatch(check[2], /phone|innerWidth!==412|innerHeight!==915/);
 });
