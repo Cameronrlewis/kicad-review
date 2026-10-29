@@ -1363,6 +1363,19 @@ S.partsView = "problems";   // ponytail: not in the link hash; add a key when de
 S.bomFilter = { category: "", sort: "refs", dir: 1 };
 const BOM_SORTS = { qty: l => l.refs.length, part: l => l.value, refs: l => l.refs[0], mpn: l => l.mpn || "", lcsc: l => l.lcsc || "", datasheet: l => l.datasheet || "" };
 const bomCategory = l => l.category || "Other";
+const BOM_FAB_LABEL = { jlcpcb: "JLCPCB", pcbway: "PCBWay" };
+function bomDownloadsHtml(parts) {
+  const x = parts.exports; if (!x) return "";
+  return `<span class="bom-downloads">${typeof x.fab === "string" ? `<button type="button" data-bom-download="fab">${esc(BOM_FAB_LABEL[x.preset] || x.preset)} ↓</button>` : ""}<button type="button" data-bom-download="csv">CSV ↓</button></span>${x.fabError ? `<p class="bom-export-error" role="status">${esc(x.fabError)}</p>` : ""}`;
+}
+function downloadBom(kind) {
+  const x = proj().parts.exports; if (!x || typeof x[kind] !== "string") return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([kind === "csv" ? x.csv : x.fab], { type: "text/csv;charset=utf-8" }));
+  a.download = `${proj().name.replace(/[^\w.-]+/g, "_")}-${kind === "csv" ? "bom.csv" : `bom-${x.preset}.csv`}`;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
 function bomRows(parts) {
   const f = S.bomFilter, q = (S.partsFilter.q || "").toLowerCase(), key = BOM_SORTS[f.sort] || BOM_SORTS.refs;
   return parts.lines.filter(l => (!f.category || bomCategory(l) === f.category) && (!q || JSON.stringify(l).toLowerCase().includes(q)))
@@ -1383,7 +1396,7 @@ function renderBom(parts) {
   const rows = bomRows(parts), changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
   const th = (k, label) => `<th scope="col" aria-sort="${f.sort === k ? (f.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-bom-sort="${k}">${label}</button></th>`;
   const groups = cats.map(c => ({ c, rs: rows.filter(l => bomCategory(l) === c) })).filter(g => g.rs.length);
-  return `<div class="bom-head"><p class="bom-summary">${n(s.components, "component")} · ${n(s.unique, "unique part")} · ${s.withMpn} with MPN</p></div>
+  return `<div class="bom-head"><p class="bom-summary">${n(s.components, "component")} · ${n(s.unique, "unique part")} · ${s.withMpn} with MPN</p>${bomDownloadsHtml(parts)}</div>
     <div class="filters bom-chips" role="group" aria-label="Category">${[["", "All", s.components], ...cats.map(c => [c, c, counts[c]])].map(([c, label, count]) => `<button type="button" class="check-chip" data-bom-cat="${esc(c)}" aria-pressed="${f.category === c}">${esc(label)} ${count}</button>`).join("")}</div>
     <div class="dock-list-tools"><input type="search" data-list-search="parts" aria-label="Search parts" placeholder="Search parts…" value="${esc(S.partsFilter.q || "")}"></div>
     <div class="parts-scroll"><table class="bom-table"><thead><tr><th scope="col"><span class="sr-only">Change</span></th>${th("qty", "QTY")}${th("part", "PART")}${th("refs", "REFS")}${th("mpn", "MPN")}${th("lcsc", "LCSC")}${th("datasheet", "DATASHEET")}</tr></thead>${groups.map(({ c, rs }) => `<tbody><tr class="bom-cat"><th scope="rowgroup" colspan="7">${esc(c)} <span class="muted">${rs.reduce((total, l) => total + l.refs.length, 0)}</span></th></tr>${rs.map(l => bomRow(l, changes(l))).join("")}</tbody>`).join("")}</table>${groups.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
@@ -1483,7 +1496,7 @@ function dockListTools(name, state) {
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
-  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-parts-view", "data-bom-cat", "data-bom-sort", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-parts-view", "data-bom-cat", "data-bom-sort", "data-bom-download", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
@@ -1535,6 +1548,7 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel [data-parts-view]")) b.onclick = () => { S.partsView = b.dataset.partsView; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-bom-cat]")) b.onclick = () => { S.bomFilter.category = b.dataset.bomCat; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-bom-sort]")) b.onclick = () => { const f = S.bomFilter, k = b.dataset.bomSort; f.dir = f.sort === k ? -f.dir : 1; f.sort = k; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-download]")) b.onclick = () => downloadBom(b.dataset.bomDownload);
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };

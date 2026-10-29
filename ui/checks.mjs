@@ -1220,7 +1220,7 @@ export const CHECKS = [
       || document.querySelector('.bom-table a[href^=javascript]') || !document.querySelector('.bom-table').textContent.includes('<img src=x onerror=alert(1)>')) return 'escaping';
   const mpnRow = [...document.querySelectorAll('.bom-row')].find(r => r.querySelector('.bom-refs')?.textContent === 'R1');
   if (!mpnRow?.querySelector('.bom-delta')?.textContent.includes('~') || !mpnRow.textContent.includes('RC0603')) return 'BOM MPN-only change';
-  const marks = [...document.querySelectorAll('.bom-row.changed .bom-delta')].map(c => c.textContent).sort().join('');
+  const marks = [...document.querySelectorAll('.bom-row.changed .bom-delta')].map(c => c.firstChild.textContent).sort().join('');
   if (marks !== '+~~') return 'change marks ' + marks;
   document.querySelector('[data-parts-view=problems]').click();
   const row = [...document.querySelectorAll('.parts-row')].find(r => r.querySelector('.parts-refs')?.textContent === 'R1');
@@ -1307,6 +1307,32 @@ export const CHECKS = [
       if (document.activeElement?.dataset.bomSort !== 'qty' || document.activeElement.closest('th').getAttribute('aria-sort') !== 'ascending') return 'sort focus';
       return true;
     } finally { parts.lines = originalLines; parts.summary = originalSummary; S.partsView = 'problems'; S.bomFilter = {category:'',sort:'refs',dir:1}; renderPanel(); }
+  `],
+  ["Parts fixture BOM downloads save the exact export text", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    const parts = REVIEW_DATA.projects[0].parts, saved = [], originalExports = {...parts.exports};
+    const create = URL.createObjectURL; URL.createObjectURL = blob => { saved.push({blob}); return 'blob:fixture/' + saved.length; };
+    const click = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { saved[saved.length - 1].name = this.download; saved[saved.length - 1].href = this.href; };
+    try {
+      document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+      const label = [...document.querySelectorAll('[data-bom-download]')].map(b => b.textContent.trim()).join('|');
+      if (label !== 'JLCPCB ↓|CSV ↓') return 'buttons ' + label;
+      document.querySelector('[data-bom-download=fab]').click();
+      document.querySelector('[data-bom-download=csv]').click();
+      if (saved.length !== 2 || saved[0].name !== 'Parts-bom-jlcpcb.csv' || saved[1].name !== 'Parts-bom.csv') return 'names ' + JSON.stringify(saved.map(s => s.name));
+      if (await saved[0].blob.text() !== parts.exports.fab || await saved[1].blob.text() !== parts.exports.csv) return 'bytes differ from the embedded export';
+      if (!saved.every(s => s.blob.type.startsWith('text/csv') && s.href.startsWith('blob:fixture/'))) return 'CSV blob type or URL';
+      const csv = document.querySelector('[data-bom-download=csv]'); csv.focus(); renderPanel();
+      if (document.activeElement?.dataset.bomDownload !== 'csv') return 'download focus';
+      parts.exports.preset = 'pcbway'; renderPanel();
+      if (document.querySelector('[data-bom-download=fab]').textContent.trim() !== 'PCBWay ↓') return 'pcbway label';
+      document.querySelector('[data-bom-download=fab]').click();
+      if (saved[2].name !== 'Parts-bom-pcbway.csv' || await saved[2].blob.text() !== parts.exports.fab) return 'pcbway download';
+      parts.exports.fab = null; parts.exports.fabError = 'JLCPCB export unavailable: X1 alone exceeds 2048 UTF-8 bytes'; renderPanel();
+      if (document.querySelector('[data-bom-download=fab]') || !document.querySelector('[data-bom-download=csv]') || !document.querySelector('.bom-export-error')?.textContent.includes('X1') || !document.querySelector('.bom-row')) return 'fabrication failure must retain report, CSV and diagnostic';
+      delete parts.exports; renderPanel();
+      return !document.querySelector('[data-bom-download]') || 'no exports, no buttons';
+    } finally { URL.createObjectURL = create; HTMLAnchorElement.prototype.click = click; parts.exports = originalExports; S.partsView = 'problems'; renderPanel(); }
   `],
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;
