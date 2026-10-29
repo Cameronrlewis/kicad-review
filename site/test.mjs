@@ -4021,7 +4021,7 @@ test('asset parent retries a failed allowlist load without trusting a child anno
   assert.equal(manifests,2);h.stop();
 });
 
-test('asset parent actual wrapper reload replaces transport while preserving readiness listeners',async()=>{
+test('asset parent actual wrapper hash navigation preserves transport and manifest',async()=>{
   const page=reviewPage({owner:'o',repo:'r',id:42,name:'kicad-review.html'});
   const script=[...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('assetParentFactory'))[1];
   const listeners=new Map(),calls=[],sent=[],navigations=[],controls=new Map();
@@ -4041,11 +4041,10 @@ test('asset parent actual wrapper reload replaces transport while preserving rea
   const first=[...listeners.get('message')][0],ask={source:iframe.contentWindow,data:{kicadReviewAsset:{requestId:'one',digest:imageId,kind:'svg'}}};
   await first(ask);assert.equal(sent.at(-1).kicadReviewAssetResult.text,imageText);
   location.hash='#v=sheet:/left/';for(const fn of listeners.get('hashchange'))fn();
-  assert.equal(listeners.get('message').size,2);assert.equal(listeners.get('message').has(first),false);
+  assert.equal(listeners.get('message').size,2);assert.equal(listeners.get('message').has(first),true);
   assert.equal(navigations.at(-1),'/r/o/r/a/42/raw#v=sheet:/left/');
-  await first(ask);assert.equal(calls.length,2,'disposed callback cannot fetch');
-  const next=[...listeners.get('message')].at(-1);await next(ask);
-  assert.equal(calls.filter(url=>url.endsWith('/raw')).length,2,'new view has a fresh allowlist');
+  await first(ask);assert.equal(calls.length,3,'hash navigation reuses transport');
+  assert.equal(calls.filter(url=>url.endsWith('/raw')).length,1,'hash navigation reuses allowlist');
   for(const fn of listeners.get('pagehide'))fn();assert.equal(listeners.get('message').size,1);
 });
 
