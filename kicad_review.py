@@ -362,8 +362,11 @@ def render_fab(p, side, out, settings):
                                           rules_bytes, (vendor_rules, covered))
                 s["violations"] = [v for v in fab_subtract(vendor_rows, board_rows) if v["type"] in covered]
                 if any(v["type"] == "invalid_outline" for v in vendor_rows):
-                    s["unchecked"].append("edgeClearanceMm")
-                    s["coverageWarnings"].append("Edge clearance not checked: no valid closed board outline")
+                    if "edgeClearanceMm" not in s["unchecked"]:
+                        s["unchecked"].append("edgeClearanceMm")
+                    warning = "Edge clearance not checked: no valid closed board outline"
+                    if warning not in s["coverageWarnings"]:
+                        s["coverageWarnings"].append(warning)
                 s["checked"] = [k for k in s["values"] if k not in s["unchecked"]
                                 and not (s["layers"] <= 2 and "Inner" in k)]
     pathlib.Path(out, "fab-limits.json").write_text(json.dumps({"sections": sections}, sort_keys=True), encoding="utf-8")

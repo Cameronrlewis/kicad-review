@@ -4385,6 +4385,20 @@ with tempfile.TemporaryDirectory() as td:
     for severity in ('error','warning','ignore'):
         case = root / severity; case.mkdir()
         fab_test_render(case,severity,missing_outline=True)
+    duplicate = root / 'duplicate-outline'; duplicate.mkdir()
+    original_context = kr.fab_context
+    warning = 'Edge clearance not checked: no valid closed board outline'
+    def preunchecked_context(pcb):
+        sections = original_context(pcb)
+        for section in sections:
+            section['values'].pop('edgeClearanceMm', None)
+            section['coverageWarnings'].append(warning)
+        return sections
+    with patch.object(kr, 'fab_context', side_effect=preunchecked_context):
+        _, _, _, _, sections = fab_test_render(duplicate, missing_outline=True)
+    for section in sections.values():
+        assert section['unchecked'].count('edgeClearanceMm') == 1, 'FAB-03 duplicate unchecked edge clearance'
+        assert section['coverageWarnings'].count(warning) == 1, 'FAB-03 duplicate outline coverage warning'
     complete = root / 'complete'; complete.mkdir()
     _, _, _, settings, _ = fab_test_render(complete)
     for suffix, dangling in ((s,d) for s in ('.kicad_pcb','.kicad_pro','.kicad_dru') for d in (False,True)):
