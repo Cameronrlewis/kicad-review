@@ -291,6 +291,7 @@ function svgText(id) {
 // Optional inspection data is validated independently of artwork and inventory.
 const decodedSheetHotspots = new Map(), decodedBoardInspect = new Map();
 const imageManifestLoads = new Map();
+const boardSceneCache = new Map(), decodedBoardScenes = new Map();
 function validateImageManifest(m, kind) {
   const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
   const text = v => typeof v === 'string';
@@ -457,6 +458,10 @@ function decodedAsset(id) {
 }
 function disposeAssets() {
   imageAssetClient?.dispose(); imageAssetClient=null;
+  imageManifestLoads.clear();
+  for (const key of boardSceneCache.keys()) {
+    if (!decodedBoardScenes.has(key)) boardSceneCache.delete(key);
+  }
   for (const id of assetTextLoads.keys()) {
     delete cache[id];
     // Rejecting transport is synchronous; do not let the next view reuse its old promise.
@@ -623,16 +628,18 @@ Appearance.subscribe(snapshot => {
     }
   }
 });
-const boardSceneCache = new Map(), decodedBoardScenes = new Map();
 // Scene blobs share the validated JSON value, never given to the SVG loader.
 async function loadBoardScene(key) {
   if (!key) return null;
-  if (!boardSceneCache.has(key)) boardSceneCache.set(key, (async () => {
-    const scene = await jsonAsset(key);
-    BoardGL.validateScene(scene);
-    decodedBoardScenes.set(key,scene);
-    return scene;
-  })().catch(error => { boardSceneCache.delete(key); throw error; }));
+  if (!boardSceneCache.has(key)) {
+    const load = (async () => {
+      const scene = await jsonAsset(key);
+      BoardGL.validateScene(scene);
+      decodedBoardScenes.set(key,scene);
+      return scene;
+    })().catch(error => { if (boardSceneCache.get(key) === load) boardSceneCache.delete(key); throw error; });
+    boardSceneCache.set(key, load);
+  }
   return boardSceneCache.get(key);
 }
 const HIDE_LAYERS = /Fab|Courtyard|CrtYd|Paste|Adhes|Mask|Margin|User|Drawings|Dwgs|Comments|Cmts|Eco/i;

@@ -3801,7 +3801,7 @@ test('JSON assets share one parsed value with mode consumers and keep the text A
   const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
   const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
   const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
-  const scene = source.slice(source.indexOf('const boardSceneCache ='), source.indexOf('const HIDE_LAYERS ='));
+  const scene = source.slice(source.indexOf('async function loadBoardScene('), source.indexOf('const HIDE_LAYERS ='));
   for (const transport of ['embedded', 'hosted', 'legacy']) {
     const text = '{"version":1}', D = transport === 'hosted'
       ? { assets: { [imageId]: { kind: 'json' } } }
@@ -3890,6 +3890,64 @@ test('asset text loads are discarded synchronously on view disposal', async () =
   assert.equal(requests, 2, 'new view starts fresh transport before old rejection settles');
   assert.match(source, /addEventListener\('pagehide', disposeAssets\)/);
   assert.match(source.slice(source.indexOf('async function draw(')), /\n  disposeAssets\(\);/);
+});
+
+test('new views reload pending inspection and scenes through the bridge after disposal', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const scenes = source.slice(source.indexOf('async function loadBoardScene('), source.indexOf('const HIDE_LAYERS ='));
+  const client = readFileSync(new URL('../ui/image-view.js', import.meta.url), 'utf8');
+  for (const kind of ['board', 'sheet', 'scene']) {
+    const listeners = new Set(), sent = [], warnings = [];
+    const parent = {postMessage: value => { if (value.kicadReviewAsset) sent.push(value.kicadReviewAsset); }};
+    const manifest = kind === 'board' ? {version:1, units:'mm', warnings:[], layers:['F.Cu'],
+      pads:[], tracks:[], vias:[], nets:[], footprintGraphics:[],
+      stats:{copperLayers:1,routedLengthMm:0,padCount:0,viaCount:0,netCount:0,boardSizeMm:null},
+      truncated:{nets:false,pads:false,tracks:false,vias:false,footprintGraphics:false}}
+      : {version:1,units:'mm',warnings:[],views:[{sheet:'/',file:'test.kicad_sch',viewBox:[0,0,10,10],
+        elements:[],labels:[],noConnects:[],wires:[]}]};
+    const context = {D:{assets:{[imageId]:{kind:'json'}}}, cache:{}, imageAssetClient:null,
+      parent, TextEncoder, setTimeout, clearTimeout, kind, assert,
+      console:{warn:(...args)=>warnings.push(args)},
+      KicadColors:{appearanceOrder:['F.Cu'],layers:{}}, BoardGL:{validateScene(){}},
+      addEventListener:(_,fn)=>listeners.add(fn), removeEventListener:(_,fn)=>listeners.delete(fn),
+      document:{createElement:()=>({setAttribute(){}})},
+      reply() { for (const fn of listeners) fn({source:parent,data:{kicadReviewAssetResult:{
+        ...sent.at(-1),text:JSON.stringify(manifest)}}}); },
+    };
+    context.window = context;
+    try {
+      await runInNewContext(`${client}\n${errorClass}\n${decode}\n${scenes}\n(async()=>{
+        const P={sheets:[{path:'/',hotspots:{base:'${imageId}',head:'${imageId}'}}],
+          board:{inspect:{base:'${imageId}',head:'${imageId}'},layers:[{svg:{base:'art',head:'art'}}]}};
+        if(kind!=='sheet')P.sheets=[];
+        if(kind!=='board')delete P.board.inspect;
+        const load=()=>kind==='scene'?loadBoardScene('${imageId}'):loadImageManifests(P);
+        const stale=load().catch(()=>null);
+        disposeAssets();
+        const fresh=load();
+        await stale;
+        if(kind==='scene')assert.ok(boardSceneCache.has('${imageId}'),'stale rejection must not delete replacement scene');
+        else assert.ok(imageManifestLoads.has(kind+':${imageId}'),'stale finally must not delete replacement manifest');
+        reply();
+        await fresh;
+        if(kind==='scene')assert.ok(decodedBoardScenes.has('${imageId}'));
+        else {
+          assert.ok((kind==='board'?decodedBoardInspect:decodedSheetHotspots).has('${imageId}'));
+          const notices=[],stage={dataset:{view:kind==='board'?'board':'sheet:/'},append:n=>notices.push(n)};
+          inspectionNotice(stage,{kind,layers:P.board.layers},P);
+          assert.equal(notices.length,0,'new view has inspection, no unavailable notice');
+        }
+        const before=cache['${imageId}'];
+        disposeAssets();
+        await load();
+        assert.equal(cache['${imageId}'],before,'completed decoded assets survive disposal');
+      })()`,context);
+      assert.equal(sent.length,2,kind+': fresh view requests the same digest before old reply');
+      assert.equal(warnings.length,kind==='scene'?0:1,'only cancelled inspection warns');
+    } finally {context.imageAssetClient?.dispose();}
+  }
 });
 
 test('asset decode failures are tagged and evicted so the next attempt can retry', async () => {
