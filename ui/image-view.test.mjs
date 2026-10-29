@@ -325,7 +325,7 @@ function mountHarness() {
     decode:()=>new Promise((resolve,reject)=>jobs.push({resolve,reject}))};}};
   return {jobs,made,revoked};
 }
-test('mount decodes before returning and disposeAll releases successful and pending mounts', async()=>{
+test('mount decodes before returning and callers dispose each owner', async()=>{
   const {jobs,made,revoked}=mountHarness();
   let returned=false;
   const first=ctx.ImageView.mount('<svg/>',[10,10],{side:'head',layer:'sheet'}).then(c=>{returned=true;return c;});
@@ -333,16 +333,16 @@ test('mount decodes before returning and disposeAll releases successful and pend
   jobs[0].resolve();const c=await first;
   assert.equal(c.source,'<svg/>');assert.equal(c.node.dataset.imageArtwork,'');
   const pending=ctx.ImageView.mount('<svg/>',[10,10],{side:'base',layer:'sheet'});
-  ctx.ImageView.disposeAll();jobs[1].resolve();const stale=await pending;
-  assert.equal(c.node,null);assert.equal(stale.node,null);
-  ctx.ImageView.disposeAll();c.dispose();stale.dispose();
+  c.dispose();jobs[1].resolve();const stale=await pending;
+  assert.equal(c.node,null);assert.ok(stale.node);
+  stale.dispose();c.dispose();stale.dispose();
   assert.equal(made.length,2);assert.deepEqual(revoked,['blob:1','blob:2']);
 });
-test('failed initial mount releases its URL and is removed from global ownership', async()=>{
+test('failed initial mount releases its URL without returning an owner', async()=>{
   const {jobs,revoked}=mountHarness();
   const failure=new Error('decode unavailable'),pending=ctx.ImageView.mount('<svg/>',[10,10],{side:'head',layer:'sheet'});
   const rejected=assert.rejects(pending,error=>error===failure);jobs[0].reject(failure);await rejected;
-  assert.deepEqual(revoked,['blob:1']);ctx.ImageView.disposeAll();assert.deepEqual(revoked,['blob:1']);
+  assert.deepEqual(revoked,['blob:1']);
 });
 
 test('board original RGB only, once per source; custom paint and alpha retained',()=>{
@@ -739,4 +739,8 @@ test('asset client drains a bounded FIFO without rejecting multi-project bursts'
     assert.equal(values.filter(r=>/unavailable/i.test(r.reason?.message)).length,1,'bounded queue rejects overflow only');
     assert.equal(listeners.size,0);
   } finally {c.dispose();}
+});
+
+test('image owners expose only explicit disposal, not a global disposal registry', () => {
+  assert.equal('disposeAll' in ctx.ImageView, false);
 });

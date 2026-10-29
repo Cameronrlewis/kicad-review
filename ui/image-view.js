@@ -4,11 +4,13 @@
   const wheelFactor = (delta,mode,sensitivity=1) =>
     Math.exp(-.0015*Math.max(-400,Math.min(400,delta*(mode===1?16:mode===2?200:1)*sensitivity)));
 
+  // test seam
   const replacePaints=(text,paints)=>text.replace(
     /((?:\b(?:fill|stroke)\s*=\s*["']|\b(?:fill|stroke)\s*:\s*))(#[0-9a-f]{6})(?=\s*(?:!important)?[;"'])/gi,
     (all,prefix,hex)=>prefix+(paints.get(hex.toLowerCase())||hex));
 
   // The full-image owner outlives this session. Only transient artwork belongs here.
+  // test seam
   function gestureSession({capture,restore,makeCrop,setTimer=setTimeout,clearTimer=clearTimeout}) {
     let ticket=0,disposed=false,timer=null,snapshot=null,crop=null,cropBox=null;
     const cancelTimer=()=>{if(timer!==null)clearTimer(timer);timer=null;};
@@ -35,6 +37,7 @@
     if(root.localName!=='svg'||root.querySelector('parsererror'))throw Error('invalid crop source');
     return root;
   }
+  // test seam
   function vectorCrop(source,box,options,parsed) {
     const root=(parsed||parseVector(source)).cloneNode(true), [x,y,w,h]=box;
     if(box.length!==4||![x,y,w,h].every(Number.isFinite)||w<=0||h<=0)throw Error('invalid crop box');
@@ -110,6 +113,7 @@
   }
 
   const rgbHex=rgb=>'#'+rgb.slice(0,3).map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+  // test seam
   function layerPaints(text,original,rgb) {
     const expected=rgbHex(original).toLowerCase(), replacement=rgbHex(rgb);
     return text.replace(/(\b(?:fill|stroke)\s*(?:=\s*["']|:\s*))((?:#[\da-f]{3}(?:[\da-f]{3})?|rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)))(?=\s*(?:!important)?[;"'])/gi,
@@ -328,14 +332,11 @@
     };
   }
 
-  const live = new Set();
   async function mount(text, size, options) {
-    const c=controller(text,options), dispose=c.dispose.bind(c);
-    c.dispose=()=>{dispose();live.delete(c);}; live.add(c);
+    const c=controller(text,options);
     try {await c.setAppearance(new Map());return c;}
     catch(error){c.dispose();throw error;}
   }
   globalThis.ImageView={assetClient,snapshotScale,wheelFactor,gestureSession,vectorCrop,cropRegion,replacePaints,controller,layerPaints,boardLayer,rgbHex,mount,comparisonSource,visibleHotspots,boardDrawGate,
-    disposeAll(){for(const c of [...live])c.dispose();},
     segmentDistance,polygonDistance,primitiveDistance,inspectHit,searchComponents,searchNets,pinPosition};
 })();
