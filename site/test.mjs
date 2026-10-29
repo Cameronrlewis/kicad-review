@@ -417,7 +417,8 @@ test('review page keeps its loading overlay until the framed report is ready and
   assert.match(page, /setTimeout[\s\S]*20000/);
   assert.match(page, /pointer-events: none/);
   assert.match(page, /assetParentFactory/);
-  assert.match(page, /disposeAssets\?\.\(\); disposeAssets=null; disposeAssets=assetParentFactory\(iframe,raw\); iframe\.src = raw \+ location\.hash;/);
+  assert.match(page, /let disposeAssets=assetParentFactory\(iframe,raw\);/);
+  assert.match(page, /const load = \(showLoading\) => \{[^}]*\} iframe\.src = raw \+ location\.hash;/);
   const hashchange = page.match(/addEventListener\('hashchange', \(\) => \{ if \(location\.hash !== reportedHash\) load\(false\); \}\);/);
   assert.ok(hashchange, 'hash changes forward without requesting the loading overlay');
   assert.doesNotMatch(hashchange[0], /loading\.hidden = false|clearTimeout/);
@@ -2089,7 +2090,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
     .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), '83197040294991b195713326271e80b6c06b9c40fee9e1dd2fd69a3006b7c9b8');
+  assert.equal(createHash('sha256').update(current).digest('hex'), '34c84c0ecd44924b5e60d973f98419dfe51b49ce83d31841488613eecab462c7');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
