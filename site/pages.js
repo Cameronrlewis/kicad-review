@@ -319,6 +319,7 @@ function reviewOverflow(items) {
 }
 // This parent owns the only network capability. The child supplies identities, not URLs.
 export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
+  const IMAGE_ASSET_LIMITS={svg:8*1024*1024,json:4*1024*1024};
   let declarations,disposed=false;const jobs=new Map();
   const manifest=()=>declarations ||= fetcher(raw,{credentials:'include',cache:'no-cache',redirect:'error',signal:AbortSignal.timeout(15000)}).then(async r=>{
     if(!r.ok||r.redirected)throw Error('Asset unavailable');
@@ -350,7 +351,7 @@ export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
       if(!response.ok||response.redirected||!response.body||response.headers.get('ETag')!==`"${a.digest}"`
         ||response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase()!==mime)throw Error('Asset unavailable');
       const reader=response.body.getReader(),parts=[];let size=0;
-      const max=(a.kind==='svg'?8:4)*1024*1024;
+      const max=IMAGE_ASSET_LIMITS[a.kind];
       try {for(;;){const {value,done}=await reader.read();if(done)break;
         size+=value.byteLength;if(size>max)throw Error('Asset too large');parts.push(value);}}
       finally {await reader.cancel();reader.releaseLock();}

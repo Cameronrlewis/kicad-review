@@ -2894,6 +2894,9 @@ def has_drawing(text):
     return re.search(r"<(path|polyline|polygon|circle|rect|line|ellipse|text)\b", text) is not None
 
 
+IMAGE_ASSET_LIMITS = {'svg': 8 * 1024 * 1024, 'json': 4 * 1024 * 1024}
+
+
 def add_blob(blobs, content):
     """Store text or bytes gzip+base64 in blobs, deduplicated by content; return its key."""
     if content is None:
@@ -3183,6 +3186,12 @@ def image_asset_declarations(projects):
 def finalize_report(data, assets_dir):
     """Share hosted declarations and sidecars without removing any offline blob."""
     data['assets'] = image_asset_declarations(data['projects'])
+    for key, meta in list(data['assets'].items()):
+        size = len(gzip.decompress(base64.b64decode(data['blobs'][key], validate=True)))
+        cap = IMAGE_ASSET_LIMITS[meta['kind']]
+        if size > cap:
+            print(f"Warning: {meta['kind']} asset {key} decoded size {size} exceeds {cap} bytes; keeping inline.", file=sys.stderr)
+            del data['assets'][key]
     write_image_assets(data['blobs'], data['assets'], assets_dir)
     payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
     return inline_page(f'window.REVIEW_DATA = {payload};')

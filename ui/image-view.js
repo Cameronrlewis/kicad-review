@@ -284,11 +284,11 @@
       :{pos:[a.x,a.y],notes:['pin endpoint unavailable in this revision; retaining original point']};
   }
 
+  const IMAGE_ASSET_LIMITS={svg:8*1024*1024,json:4*1024*1024};
   let assetClientSerial=0;
   // One opaque-frame client per view; only its parent can complete declared requests.
   function assetClient(host,allowed,scope=window) {
     const pending=new Map(),queue=[],prefix='asset-'+(++assetClientSerial)+'-';let serial=0,sequence=0,disposed=false,backoff=null;
-    const limit=kind=>kind==='svg'?8*1024*1024:4*1024*1024;
     // Bursts wait FIFO; deadlines start only when one of eight network slots opens.
     const pump=()=>{
       while(!disposed&&backoff===null&&pending.size<8&&queue.length){
@@ -310,7 +310,7 @@
         queue.splice(i<0?queue.length:i,0,p);
         if(backoff===null)backoff=setTimeout(()=>{backoff=null;pump();},150);
       }
-      else if(r.error||typeof r.text!=='string'||new TextEncoder().encode(r.text).length>limit(p.kind))p.reject(Error('Asset unavailable'));
+      else if(r.error||typeof r.text!=='string'||new TextEncoder().encode(r.text).length>IMAGE_ASSET_LIMITS[p.kind])p.reject(Error('Asset unavailable'));
       else p.resolve(r.text);
       pump();
     };

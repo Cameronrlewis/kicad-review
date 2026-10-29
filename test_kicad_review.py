@@ -4727,3 +4727,22 @@ def image_asset_contract_regressions():
     print('ok atomic asset validation, deterministic names, legacy artwork finalization')
 
 image_asset_contract_regressions()
+
+# Hosted size limits use decoded UTF-8 bytes, not compressed or character counts.
+for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
+    blobs = {}
+    boundary = kr.add_blob(blobs, 'x' * cap)
+    oversized = kr.add_blob(blobs, 'é' * (cap // 2) + 'x')
+    project = {'sheets': [{'svgThemes': {'light': {'base': boundary, 'head': oversized}}}
+                           if kind == 'svg' else {'hotspots': {'base': boundary, 'head': oversized}}]}
+    data = {'projects': [project], 'blobs': blobs}
+    with TemporaryDirectory() as directory, patch.object(kr, 'inline_page', side_effect=lambda script: script), patch('sys.stderr') as log:
+        html = kr.finalize_report(data, directory)
+        embedded = json.loads(html.removeprefix('window.REVIEW_DATA = ').removesuffix(';'))
+        assert boundary in embedded['assets'], 'exact cap must remain lazy'
+        assert oversized not in embedded['assets'], 'oversized asset must stay inline'
+        assert embedded['blobs'][oversized] == blobs[oversized], 'inline fallback lost'
+        assert sorted(p.name for p in pathlib.Path(directory).iterdir()) == [boundary + '.' + kind + '.gz']
+        warning = ''.join(str(call.args[0]) for call in log.write.call_args_list)
+        assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
+print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
