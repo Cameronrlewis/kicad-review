@@ -170,8 +170,8 @@ for (const indexed of [true, false]) test(`BR02 hiding one physical side preserv
 
 test('BR02 resize reuses physical marker visibility without indexed or legacy body scans', () => {
   const {api, s} = viewer();
-  const host = {getBoundingClientRect:() => ({width:412, height:500})};
-  s.appState = {phone:true}; s.mode = 'side'; s.revision = 'head';
+  const host = {getBoundingClientRect:() => ({width:960, height:500})};
+  s.appState = {}; s.single = true; s.mode = 'side'; s.revision = 'head';
   s.allowedSides = ['base', 'head']; s.available = {base:true, head:true};
   s.hostsBySide = Object.fromEntries(s.allowedSides.map(side => [side, {...host, querySelector:() => null, classList:{toggle() {}}}]));
   s.stage = host; s.renderer.setSize = () => {};

@@ -146,7 +146,7 @@ export const CHECKS = [
    const b=new THREE3D.THREE.Box3().setFromObject(outlines[0]);
    if(b.min.distanceTo(p.bounds.min)>1e-6||b.max.distanceTo(p.bounds.max)>1e-6)return 'outline uses other revision box';
  }
- return S.phone||st.selected.length===2||'changed focus cleared base outline';
+ return st.selected.length===2||'changed focus cleared base outline';
 `],
 
   ["BR02 processed missing list keeps revision identity", "v=3d&m=side", `
@@ -241,28 +241,6 @@ export const CHECKS = [
     if(S.part3d||document.querySelector('[data-part3d-inspector]'))return '3D hash navigation retained stale part identity';
     Review3D.onPartPick({...part,side:'head'});S.v='board';await draw();
     return !S.part3d&&!document.querySelector('[data-part3d-inspector]')||'navigation retained stale 3D identity';
-  `],
-  ["BR02 processed phone chrome and tools stay reachable", "v=3d&m=side", `
-    if(!proj().board.parts3d)return 'skip';
-    if(innerWidth>700)return true;
-    const inside=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight};
-    if(document.documentElement.scrollWidth>innerWidth)return 'phone shell overflow';
-    const toolbar=document.querySelector('#toolbar');
-    if(toolbar.scrollHeight>toolbar.clientHeight)return 'phone wrapped toolbar controls clipped';
-    const status=document.querySelector('#statusbar');
-    if(status.scrollHeight>status.clientHeight)return 'phone status controls clipped';
-    for(const menu of document.querySelectorAll('.report-chrome details')) {
-      const summary=menu.querySelector('summary');summary.focus();
-      if(!inside(summary)||document.activeElement!==summary)return 'phone header action unreachable';
-      menu.open=true;
-      if(!inside(menu.querySelector('.bench-popover')))return 'phone header popup outside viewport';
-      menu.open=false;
-    }
-    for(const control of document.querySelectorAll('#zoombar [data-3d-assembled],#zoombar .light3d summary')) {
-      control.focus();control.scrollIntoView({block:'nearest',inline:'nearest'});
-      if(!inside(control)||control.getBoundingClientRect().height<44||document.activeElement!==control)return 'phone 3D tool unreachable';
-    }
-    return document.documentElement.scrollWidth<=innerWidth||'phone tool focus caused page overflow';
   `],
   ["BR02 processed inspector whole screen", "v=3d&m=side", `
     if(!proj().board.parts3d)return 'skip';
@@ -799,14 +777,6 @@ export const CHECKS = [
     await Review3D.show(document.querySelector('#stage'),p,S);
     const hosts=document.querySelectorAll('#stage .view3d'),st=Review3D.state;
     if(st.loading||st.roots[1]||!st.roots[0]||!hosts[1].textContent.includes('Board not in this revision')||hosts[1].querySelector('img'))return 'absent revision borrowed model/poster';
-    if(S.phone) {
-      // Plan Global Constraints / Dependencies on 05: Side keeps the requested revision,
-      // including its explicit empty state. The spec's Base/Head switch reaches Base;
-      // an absent Head must never silently draw Base or count it as Head's first frame.
-      if(st.firstFrame||hosts[1].hidden||!hosts[0].hidden||st.visibleSides.join()!=='head')return 'absent requested Head drew the Base revision';
-      Review3D.setRevision('base');await Review3D.sampleFrame();
-      if(hosts[0].hidden||!hosts[1].hidden||st.visibleSides.join()!=='base')return 'available Base could not be reached';
-    }
     return st.firstFrame&&st.posterBySide.base.hidden||'available Base never drew a genuine frame';
   `],
   ["BR02 processed cancelled vendor decode cannot revive session", "", `
@@ -4671,10 +4641,9 @@ CHECKS.push(
     if(!st?.firstFrame)return '3D fixture has no first frame';
     if(document.querySelectorAll('#stage canvas').length!==1)return 'expected one shared canvas';
     if(st.renderers.length!==1||st.cameras.length!==2)return 'renderer/camera ownership';
-    const narrow=Boolean(S.phone);
-    if(narrow?st.visibleSides.length!==1:st.visibleSides.join(',')!=='base,head')return 'revision viewport routing';
+    if(st.visibleSides.join(',')!=='base,head')return 'revision viewport routing';
     if(st.views!==Review3D.session().views||st.views.some(v=>!v.host||!v.camera||!v.scene))return 'view diagnostics';
-    return st.drawCallsByViewport.length===(narrow?1:2)||'missing viewport counters';
+    return st.drawCallsByViewport.length===2||'missing viewport counters';
   `],
   ['BR02 single renderer head only', 'v=3d&m=side', `
     if(!proj().board.parts3d)return 'skip';
@@ -4751,22 +4720,6 @@ CHECKS.push(
 );
 
 CHECKS.push(
- ['BR02 processed canonical revision and empty phone side', 'v=3d&m=side', `
-   if(!proj().board.parts3d)return 'skip';
-   const stage=document.querySelector('#stage'), p=structuredClone(proj()), app={...S,phone:true,revision:'head',m:'side',s:null};
-   for(const key of ['model3d','parts3d','assets3d','poster3d','coverage3dBySide'])delete p.board[key].head;
-   await Review3D.show(stage,p,app);
-   if(Review3D.state.revision!=='head'||Review3D.state.visibleSides.join(',')!=='head')return 'requested absent Head changed revision';
-   const host=stage.querySelector('.view3d:not([hidden])');
-   if(!host?.textContent.includes('Board not in this revision')||host.querySelector('[data-poster]'))return 'empty Head borrowed Base content';
-   Review3D.setRevision('base');await Review3D.sampleFrame();
-   if(Review3D.state.visibleSides.join(',')!=='base'||!Review3D.state.firstFrame)return 'Base revision inaccessible';
-   if(S.revision!=='base')return 'app state not synchronized';
-   Review3D.setRevision('head');
-   if(Review3D.state.visibleSides.join(',')!=='head'||!host.querySelector('[data-revision-empty]'))return 'Head round trip failed';
-   app.phone=false;Review3D.resize();
-   return Review3D.state.views.every(v=>v.visible)||'resize did not consume canonical phone state';
- `],
  ['BR02 processed equal digest materials stay immutable across roles', 'v=3d&m=side', `
    if(!proj().board.parts3d)return 'skip';
    const p=structuredClone(proj()), stage=document.querySelector('#stage');
@@ -4810,7 +4763,7 @@ CHECKS.push(
           };
         }
       };
-      await Review3D.show(stage,proj(),{...S,m:mode,phone:false,s:null});
+      await Review3D.show(stage,proj(),{...S,m:mode,s:null});
       const st=Review3D.state, host=Review3D.session().hostsBySide[side];
       if(st.renderers.length!==1||!st.decodedScenes.length||!calls)return 'fault injected before view construction';
       if(!st.errorsBySide[side]?.includes('injected view build'))return 'build error not reported';
@@ -4873,24 +4826,10 @@ CHECKS.push(
     for(const v of ['board','3d',...proj().sheets.map(s=>'sheet:'+s.path)]) {
       if(new URLSearchParams(encodeState({...S,v,revision:'head'})).has('revision'))return 'default Head persisted in '+v;
     }
-    const base=decodeState(encodeState({...S,revision:'base',layout:'phone'}));
-    return base.revision==='base'&&base.layout==='phone'||'explicit compatibility state lost';
+    const base=decodeState(encodeState({...S,revision:'base'}));
+    return base.revision==='base'||'explicit revision state lost';
   `]
 );
-
-CHECKS.push(['BR02 processed compatibility phone predicate fractional widths', 'v=3d&m=side', `
- if(!proj().board.parts3d)return 'skip';
- const frame=document.createElement('iframe');frame.style.cssText='position:absolute;left:-2000px;height:40px;border:0';document.body.appendChild(frame);
- try {
-   const run=frame.contentWindow.Function('S','('+sync3DPhone.toString()+')();return S.phone;');
-   for(const [width,expected]of [[699.5,true],[700,true],[700.5,false],[701,false]]){
-     frame.style.width=width+'px';frame.getBoundingClientRect();
-     if(run({})!==expected)return 'wrong responsive boundary at '+width;
-   }
-   frame.style.width='1200px';frame.getBoundingClientRect();
-   return run({layout:'phone'})||'forced phone layout ignored';
- }finally{frame.remove();}
-`]);
 
 CHECKS.push(
   ['BR02 processed studio environment, tone mapping and no direct lights', 'v=3d&m=side', `
@@ -4961,7 +4900,6 @@ CHECKS.push(
     // Page-level overflow at 412 px belongs to 05's shell (bench-menu popover); the 3D tools must be reachable by scrolling the toolbar.
     tools.scrollIntoView({inline:'center',block:'nearest'});
     { const r=tools.getBoundingClientRect(); if(r.left<0||r.right>innerWidth)return 'tools unreachable '+JSON.stringify(r); }
-    const b=tools.querySelector('[data-3d-assembled]');
     for(const el of tools.querySelectorAll('button,summary,select,input')){
       const name=el.getAttribute('aria-label')||el.title||el.closest('label')?.textContent||el.textContent;
       if(!name.trim())return 'unnamed control '+el.outerHTML.slice(0,60);
@@ -4969,14 +4907,12 @@ CHECKS.push(
     const light=tools.querySelector('.light3d'); light.open=true; await new Promise(r=>setTimeout(r,50));
     tools.scrollIntoView({inline:'center',block:'nearest'});const m=light.querySelector('.light-menu').getBoundingClientRect(), tb=document.querySelector('#toolbar').getBoundingClientRect();
     if(m.left<0||m.right>innerWidth||m.top<tb.bottom||m.bottom>innerHeight)return 'light menu clipped '+JSON.stringify(m);
-    for(const el of light.querySelectorAll('select,input')){const r=el.getBoundingClientRect(); if(innerWidth<=700&&r.height<43)return 'phone target too small '+r.height;}
     const ex=light.querySelector('[data-3d-exposure]'); ex.value='2'; ex.dispatchEvent(new Event('input',{bubbles:true}));
     if(Review3D.state.lighting.exposure!==2)return 'exposure slider not wired';
     light.querySelector('[data-3d-rig]').value='photo'; light.querySelector('[data-3d-rig]').dispatchEvent(new Event('change',{bubbles:true}));
     if(Review3D.state.lighting.rig!=='photo'||Review3D.state.lighting.exposure!==1.2)return 'preset did not apply its exposure';
     light.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
     if(light.open||document.activeElement!==light.querySelector('summary'))return 'Escape did not close and refocus';
-    const r=b.getBoundingClientRect(); if(innerWidth<=700&&r.height<43)return 'phone Assembled target too small';
     return true;
   `]
 );
@@ -5088,18 +5024,10 @@ CHECKS.push(["BR02 processed overlay bare board hides ghosts and markers", "v=3d
  if(!g?.object.parent||!h)return 'initial ghost or marker absent';
  let ghostMeshes=[];g.object.traverse(n=>{if(n.isMesh)ghostMeshes.push(n);});
  if(!ghostMeshes.length||ghostMeshes.some(n=>!n.visible))return 'initial ghost meshes hidden';
- const originalRoute={phone:S.phone,m:S.m};
- try {
-   for(const phone of [false,true]) {
-     Object.assign(S,{phone,m:'overlay'});Review3D.resize();
-     const routedGhost=st.ghosts.find(x=>x.ref==='R1');
-     const routedMarker=st.highlights.find(x=>x.marker&&x.side==='head');
-     if(!routedGhost?.object.parent||!routedMarker||routedMarker.marker.el.hidden)return phone?'narrow overlay representation hidden':'wide overlay representation hidden';
-   }
- } finally {
-   Object.assign(S,originalRoute);Review3D.resize();
- }
- if(S.phone!==originalRoute.phone||S.m!==originalRoute.m||st.phone!==originalRoute.phone)return 'overlay route not restored';
+ Review3D.resize();
+ const routedGhost=st.ghosts.find(x=>x.ref==='R1');
+ const routedMarker=st.highlights.find(x=>x.marker&&x.side==='head');
+ if(!routedGhost?.object.parent||!routedMarker||routedMarker.marker.el.hidden)return 'overlay representation hidden after resize';
  Review3D.setAssembled(false);
  if(st.ghosts.some(g=>g.object.parent&&(()=>{let visible=false;g.object.traverse(n=>{if(n.isMesh&&n.visible)visible=true;});return visible;})()))return 'bare ghost visible';
  if(st.highlights.some(h=>h.marker&&!h.marker.el.hidden))return 'bare marker visible';
@@ -5108,7 +5036,7 @@ CHECKS.push(["BR02 processed overlay bare board hides ghosts and markers", "v=3d
  Review3D.setAssembled(true);
  if(!g.object.parent||!g.object.visible||h.marker.el.hidden)return 'overlay representation not restored';
  Review3D.focus(proj().changes.find(c=>c.ref==='R12'),false);await Review3D.sampleFrame();
- console.log('BOARD_PROOF '+JSON.stringify({mode:'overlay',phone:S.phone,calls:st.drawCallsByViewport,changedParts:st.changedParts}));
+ console.log('BOARD_PROOF '+JSON.stringify({mode:'overlay',calls:st.drawCallsByViewport,changedParts:st.changedParts}));
  return st.drawCallsByViewport.every(n=>n<100+st.changedParts)||'comparison call budget exceeded';
 `]);
 

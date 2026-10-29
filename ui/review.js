@@ -232,7 +232,7 @@ function select(view) { S.part3d = null; renderInspector(); const library = Stri
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
   if (q.has("p")) out.p = +q.get("p");
-  for (const k of ["v", "m", "s", "t", "revision", "layout"]) if (q.has(k)) out[k] = q.get(k);
+  for (const k of ["v", "m", "s", "t", "revision"]) if (q.has(k)) out[k] = q.get(k);
   for (const k of ["x", "y", "z"]) if (q.has(k)) out[k] = +q.get(k);
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
   if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
@@ -246,7 +246,6 @@ function valid(st) {   // drop anything that does not exist in this report
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   if (["base", "head"].includes(st.revision)) out.revision = st.revision;
-  if (st.layout === "phone") out.layout = st.layout;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
   if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
@@ -267,7 +266,7 @@ function applyState(st) {
   const v = valid(st);
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
-                     revision: v.revision ?? "head", layout: v.layout ?? null, layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? null, camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? null, camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
@@ -566,9 +565,7 @@ function viewport(stage, label, kind) {
   }
   return world;
 }
-// Compatibility boundary until 05 owns the shared responsive state; never infer width in Review3D.
-function sync3DPhone() { S.phone = matchMedia('(max-width: 700px)').matches || S.layout === 'phone'; }
-window.addEventListener('resize', () => { sync3DPhone(); if (S.v === '3d') window.Review3D?.resize(); });
+window.addEventListener('resize', () => { if (S.v === '3d') window.Review3D?.resize(); });
 let gen = 0;
 async function draw() {
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
@@ -581,7 +578,6 @@ async function draw() {
     disposeBoardRenderers();
     appearanceSchematics.clear();
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
-    sync3DPhone();
     await window.Review3D.show(stage, proj(), S, {single:window.REVIEW_DATA.mode === "single"});
     return;
   }
@@ -1571,7 +1567,6 @@ function encodeState(s = S) {
   const q = new URLSearchParams();
   q.set("p", s.p); q.set("v", s.v); q.set("m", s.m);
   if (s.revision === "base") q.set("revision", s.revision);
-  if (s.layout === "phone") q.set("layout", s.layout);
   for (const k of ["x", "y", "z"]) if (Number.isFinite(s[k])) q.set(k, +s[k].toFixed(3));
   if (s.s) q.set("s", s.s);
   if (s.t && s.t !== "changes") q.set("t", s.t);
