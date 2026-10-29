@@ -1802,12 +1802,16 @@ return true;
     const want = REVIEW_DATA.projects[1].board.layers, n = L?.querySelectorAll("[data-layer]").length, m = L?.querySelectorAll("[data-layer] .mark").length;
     return !!L && n >= want.length && m === want.filter(l => l.changed).length && document.querySelector("#layers").children.length === 0 || JSON.stringify([!!L, n, want.length, m, want.filter(l => l.changed).length, S.t, S.v]);`],
   ["toggling a layer removes it from the drawing", "p=1&v=board&t=appearance", `
-    await new Promise(r => setTimeout(r, 800));
+    // The eye toggles persisted appearance, so establish a visible layer first.
+    await applyState({...S,layers:proj().board.layers.map(l=>l.name)});
     ${BOARD_POINT_PROBE}
     const point=boardDiff?occupied({layer:'F.Cu'}):null;
     if(boardDiff && !point) return 'no visible F.Cu geometry to test';
     const cb = document.querySelector('#appearance-root [data-layer="F.Cu"] .eye-btn'); cb.click();
-    await new Promise(r => setTimeout(r, 800));
+    const stage=document.querySelector('#stage'),deadline=performance.now()+15000;
+    while(stage.dataset.imageReady!=='true'&&performance.now()<deadline)await new Promise(r=>setTimeout(r,10));
+    if(stage.dataset.imageReady!=='true')return 'layer visibility redraw did not settle';
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
     if(point) {
       const {pane,object,screen}=point;
       if(pane.renderer.hitTest(screen).some(o=>o===object)) return 'hidden layer remains hittable';
