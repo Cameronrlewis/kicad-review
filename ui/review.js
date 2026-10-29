@@ -1372,7 +1372,9 @@ function downloadBom(kind) {
   const x = proj().parts.exports; if (!x || typeof x[kind] !== "string") return;
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([kind === "csv" ? x.csv : x.fab], { type: "text/csv;charset=utf-8" }));
-  a.download = `${proj().name.replace(/[^\w.-]+/g, "_")}-${kind === "csv" ? "bom.csv" : `bom-${x.preset}.csv`}`;
+  const name = proj().name.replace(/[^\w.-]+/g, "_");
+  const stem = /[a-z0-9]/i.test(name) ? name : "bom";
+  a.download = `${stem}-${kind === "csv" ? "bom.csv" : `bom-${x.preset}.csv`}`;
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }

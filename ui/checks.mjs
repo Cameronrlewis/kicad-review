@@ -1220,7 +1220,7 @@ export const CHECKS = [
       || document.querySelector('.bom-table a[href^=javascript]') || !document.querySelector('.bom-table').textContent.includes('<img src=x onerror=alert(1)>')) return 'escaping';
   const mpnRow = [...document.querySelectorAll('.bom-row')].find(r => r.querySelector('.bom-refs')?.textContent === 'R1');
   if (!mpnRow?.querySelector('.bom-delta')?.textContent.includes('~') || !mpnRow.textContent.includes('RC0603')) return 'BOM MPN-only change';
-  const marks = [...document.querySelectorAll('.bom-row.changed .bom-delta')].map(c => c.firstChild.textContent).sort().join('');
+  const marks = [...document.querySelectorAll('.bom-row.changed .bom-delta')].map(c => c.firstChild?.textContent ?? '').sort().join('');
   if (marks !== '+~~') return 'change marks ' + marks;
   document.querySelector('[data-parts-view=problems]').click();
   const row = [...document.querySelectorAll('.parts-row')].find(r => r.querySelector('.parts-refs')?.textContent === 'R1');
@@ -1310,7 +1310,7 @@ export const CHECKS = [
   `],
   ["Parts fixture BOM downloads save the exact export text", "", `
     if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
-    const parts = REVIEW_DATA.projects[0].parts, saved = [], originalExports = {...parts.exports};
+    const project = REVIEW_DATA.projects[0], parts = project.parts, saved = [], originalExports = {...parts.exports}, originalName = project.name;
     const create = URL.createObjectURL; URL.createObjectURL = blob => { saved.push({blob}); return 'blob:fixture/' + saved.length; };
     const click = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { saved[saved.length - 1].name = this.download; saved[saved.length - 1].href = this.href; };
     try {
@@ -1328,11 +1328,19 @@ export const CHECKS = [
       if (document.querySelector('[data-bom-download=fab]').textContent.trim() !== 'PCBWay ↓') return 'pcbway label';
       document.querySelector('[data-bom-download=fab]').click();
       if (saved[2].name !== 'Parts-bom-pcbway.csv' || await saved[2].blob.text() !== parts.exports.fab) return 'pcbway download';
+      for (const [name, stem] of [['', 'bom'], ['..', 'bom'], ['!!!', 'bom'], ['._-', 'bom'], ['Board / rev.1', 'Board_rev.1']]) {
+        project.name = name;
+        document.querySelector('[data-bom-download=csv]').click();
+        document.querySelector('[data-bom-download=fab]').click();
+        if (saved.at(-2).name !== stem + '-bom.csv' || saved.at(-1).name !== stem + '-bom-pcbway.csv') return 'project filename ' + JSON.stringify({name, saved:saved.slice(-2).map(s => s.name)});
+        if (await saved.at(-2).blob.text() !== parts.exports.csv || await saved.at(-1).blob.text() !== parts.exports.fab) return 'filename fallback changed export bytes';
+      }
+      project.name = originalName;
       parts.exports.fab = null; parts.exports.fabError = 'JLCPCB export unavailable: X1 alone exceeds 2048 UTF-8 bytes'; renderPanel();
       if (document.querySelector('[data-bom-download=fab]') || !document.querySelector('[data-bom-download=csv]') || !document.querySelector('.bom-export-error')?.textContent.includes('X1') || !document.querySelector('.bom-row')) return 'fabrication failure must retain report, CSV and diagnostic';
       delete parts.exports; renderPanel();
       return !document.querySelector('[data-bom-download]') || 'no exports, no buttons';
-    } finally { URL.createObjectURL = create; HTMLAnchorElement.prototype.click = click; parts.exports = originalExports; S.partsView = 'problems'; renderPanel(); }
+    } finally { URL.createObjectURL = create; HTMLAnchorElement.prototype.click = click; project.name = originalName; parts.exports = originalExports; S.partsView = 'problems'; renderPanel(); }
   `],
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;
