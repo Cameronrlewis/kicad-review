@@ -4,8 +4,15 @@ import {createServer} from 'node:http';
 import {gzipSync} from 'node:zlib';
 import {privateAsset} from './worker.js';
 import {reportCsp} from './csp.js';
-const {FrameCDP}=await import(process.env.FRAME_CDP||'/Users/cameron/Code/kicad-review-study/tmp/01-schematic-and-board-images/harness/frame-cdp.mjs');
-test('report CSP allows WebAssembly compilation but blocks JavaScript eval in the browser',async()=>{
+const {FrameCDP}=await import(process.env.FRAME_CDP||'./test-cdp.mjs');
+const port=Number(process.env.CDP_PORT||9223);
+let skip;
+try {
+  if(!Number.isInteger(port)||port<1||port>65535||port===9222)throw Error('Use a dedicated port other than 9222');
+  const response=await fetch(`http://127.0.0.1:${port}/json/version`,{signal:AbortSignal.timeout(1000)});
+  if(!response.ok)throw Error('Chrome debug endpoint unavailable');
+} catch {skip=`No dedicated Chrome debug port reachable at ${port}; run headless Chrome and set CDP_PORT (never 9222).`;}
+test('report CSP allows WebAssembly compilation but blocks JavaScript eval in the browser',{skip},async()=>{
   const server=createServer((req,res)=>{
     res.writeHead(200,{'Content-Type':'text/html','Content-Security-Policy':reportCsp});
     // Run inside the page: DevTools evaluation itself can bypass CSP eval restrictions.
@@ -36,7 +43,7 @@ test('report CSP allows WebAssembly compilation but blocks JavaScript eval in th
 for(const [digest,kind,path] of [
   ['abcdef123456','svg','/r/o/r/a/42/assets/abcdef123456.svg'],
   ['c'.repeat(64),'board.glb','/r/o/r/a/42/3d/'+'c'.repeat(64)+'/board.glb']
-]) test('browser revalidates the same private asset after access revocation: '+kind,async()=>{
+]) test('browser revalidates the same private asset after access revocation: '+kind,{skip},async()=>{
   let allowed=true, checks=0;
   const svg=gzipSync('<svg xmlns="http://www.w3.org/2000/svg"><text>private-ink</text></svg>');
   const server=createServer(async(req,res)=>{

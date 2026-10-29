@@ -3690,7 +3690,7 @@ for (const failure of ['open', 'close']) test(`browser cache test releases its H
   const result = spawnSync(process.execPath, ['--import', new URL('./css-loader.mjs', import.meta.url).pathname,
     '--test', new URL('./asset-cache.test.mjs', import.meta.url).pathname], {
     encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, NODE_TEST_CONTEXT: undefined, FRAME_CDP: 'data:text/javascript,' + encodeURIComponent(probe) },
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, CDP_PORT: '9223', FRAME_CDP: 'data:text/javascript,' + encodeURIComponent("globalThis.fetch=async()=>new Response('{}');"+probe) },
   });
   assert.equal(result.error, undefined, `cache test must exit without hanging: ${result.error}`);
   assert.equal(result.signal, null);

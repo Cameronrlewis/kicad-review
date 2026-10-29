@@ -91,3 +91,23 @@ Cloudflare Workers' free plan has 100,000 requests a day and costs $0. Reports a
 - A review whose artifact expired shows “expired — rerun”.
 - The report page's Copy link may be limited inside the sandbox.
 - Sign-in tokens last 8 hours and are refreshed for up to 6 months.
+
+### Optional private-asset browser checks
+
+`site/asset-cache.test.mjs` uses Node 22's built-in fetch and WebSocket with
+`site/test-cdp.mjs`; no study checkout or npm package is required. It skips with
+an explanation when no dedicated Chrome debug endpoint is reachable. These
+checks are not CI gates because they require an already-running Chrome.
+
+Start a separate **headless** Chrome with a fresh temporary profile and a debug
+port such as 9223, then run from the repository root:
+
+```sh
+CDP_PORT=9223 node --import ./site/css-loader.mjs --test site/asset-cache.test.mjs
+node --test site/test-cdp.test.mjs
+```
+
+Never use the study browser on port 9222. The helper creates and closes only its
+own test tabs; it does not activate windows or stop Chrome. Stop your dedicated
+headless Chrome and remove its temporary profile afterward. `FRAME_CDP` may
+point to an alternate module exporting the same `FrameCDP` API.
