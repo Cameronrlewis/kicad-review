@@ -140,6 +140,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   let timer, body, startupScript, initialAppearance;
   try {
     body = (async () => {
+  await send("Emulation.setDeviceMetricsOverride", {width,height,deviceScaleFactor:dpr,mobile:false,...lifecycle.viewport});
   if (name === "board geometry pin flipped Wipe Thermal") await send("Emulation.setDeviceMetricsOverride", {width,height:1080,deviceScaleFactor:2,mobile:false});
   // The framing check tests final geometry, not the two-pane camera animation.
   await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });

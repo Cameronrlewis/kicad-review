@@ -45,6 +45,7 @@ const MARK_STYLE_FIXTURE = `
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
   ["Fab limits vendor isolation and phone coverage", "v=board&t=checks", `
+    if(innerWidth!==412 || innerHeight!==915) return 'fab phone coverage requires 412 × 915 viewport';
     const p=proj(), previous=p.checks, old=S.checks;
     const original=previous.flatMap(c=>c.violations).find(v=>v.where?.board && v.pos);
     if(!original) return 'vendor isolation requires a located board violation';
@@ -94,7 +95,7 @@ export const CHECKS = [
           text.includes('Compared with base')) return 'not-run optional comparison metadata misrepresented';
       return true;
     } finally {p.checks=previous;S.checks=old;renderPanel();}
-  `],
+  `, {viewport:{width:412,height:915}}],
 ["Fab limits ledger", "", `
   const p = proj(), previous = p.checks, previousMode = D.mode;
   const c = {name:'fab_limits', title:'Fab limits',vendor:'jlcpcb',level:'informational',status:'warn',
