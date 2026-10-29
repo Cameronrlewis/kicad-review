@@ -287,11 +287,11 @@
   let assetClientSerial=0;
   // One opaque-frame client per view; only its parent can complete declared requests.
   function assetClient(host,allowed,scope=window) {
-    const pending=new Map(),queue=[],prefix='asset-'+(++assetClientSerial)+'-';let serial=0,disposed=false;
+    const pending=new Map(),queue=[],prefix='asset-'+(++assetClientSerial)+'-';let serial=0,disposed=false,backoff=null;
     const limit=kind=>kind==='svg'?8*1024*1024:4*1024*1024;
     // Bursts wait FIFO; deadlines start only when one of eight network slots opens.
     const pump=()=>{
-      while(!disposed&&pending.size<8&&queue.length){
+      while(!disposed&&backoff===null&&pending.size<8&&queue.length){
         const p=queue.shift(),requestId=prefix+(++serial);
         p.timer=setTimeout(()=>{
           pending.delete(requestId);p.reject(Error('Asset timeout; retry available'));pump();
@@ -305,7 +305,11 @@
       const r=e.data?.kicadReviewAssetResult,p=pending.get(r?.requestId);
       if(e.source!==host||!p||r.digest!==p.digest)return;
       pending.delete(r.requestId);clearTimeout(p.timer);
-      if(r.error||typeof r.text!=='string'||new TextEncoder().encode(r.text).length>limit(p.kind))p.reject(Error('Asset unavailable'));
+      if(r.error==='Busy; retry'){
+        queue.unshift(p);
+        if(backoff===null)backoff=setTimeout(()=>{backoff=null;pump();},150);
+      }
+      else if(r.error||typeof r.text!=='string'||new TextEncoder().encode(r.text).length>limit(p.kind))p.reject(Error('Asset unavailable'));
       else p.resolve(r.text);
       pump();
     };
@@ -315,7 +319,7 @@
         if(disposed||queue.length>=128||!/^[0-9a-f]{12}$/.test(digest)||!['svg','json'].includes(kind)||allowed[digest]?.kind!==kind)return Promise.reject(Error('Asset unavailable'));
         return new Promise((resolve,reject)=>{queue.push({digest,kind,resolve,reject});pump();});
       },
-      dispose(){disposed=true;scope.removeEventListener('message',receive);
+      dispose(){disposed=true;clearTimeout(backoff);backoff=null;scope.removeEventListener('message',receive);
         for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('Asset view disposed'));}pending.clear();
         for(const p of queue)p.reject(Error('Asset view disposed'));queue.length=0;}
     };

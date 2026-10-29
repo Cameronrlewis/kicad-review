@@ -3500,14 +3500,14 @@ test('asset parent bounds concurrency, times out, rejects oversized decoded SVG 
 });
 
 function assetClientHarness() {
-  const listeners = {}, sent = [], timers = new Map(); let id = 0;
+  const listeners = {}, sent = [], timers = new Map(), delays = new Map(); let id = 0;
   const parent = { postMessage: value => sent.push(value) };
   const source = readFileSync(new URL('../ui/image-view.js', import.meta.url), 'utf8');
   const context = { parent, console, TextEncoder,
     addEventListener: (n, f) => { listeners[n] = f; }, removeEventListener: n => { delete listeners[n]; },
-    setTimeout: f => { timers.set(++id, f); return id; }, clearTimeout: key => timers.delete(key) };
+    setTimeout: (f, delay) => { const key = ++id; delays.set(key, delay); timers.set(key, () => { timers.delete(key); f(); }); return key; }, clearTimeout: key => timers.delete(key) };
   const client = runInNewContext(`${source}; ImageView.assetClient(parent,{'${imageId}':{kind:'svg'}},globalThis)`, context);
-  return { client: {request: id => client.get(id,'svg'), dispose: () => client.dispose()}, sent, timers, listeners,
+  return { client: {request: id => client.get(id,'svg'), dispose: () => client.dispose()}, sent, timers, delays, listeners,
     result(value, from = parent) { listeners.message?.({ source: from, data: { kicadReviewAssetResult: value } }); } };
 }
 test('asset child accepts only parent results for pending digest, times out and retries in a new view', async () => {
@@ -3527,6 +3527,51 @@ test('asset child accepts only parent results for pending digest, times out and 
   for (const timer of [...next.timers.values()]) timer(); await timeout;
   const last = next.client.request(imageId), message = next.sent.at(-1).kicadReviewAsset;
   next.result({ requestId: message.requestId, digest: imageId, text: imageText }); assert.equal(await last, imageText);
+});
+test('asset child retries Busy replies after backoff and resolves the text', async () => {
+  const h = assetClientHarness(), p = h.client.request(imageId);
+  p.catch(() => {});
+  const first = h.sent[0].kicadReviewAsset;
+  assert.equal(h.delays.get([...h.timers.keys()][0]), 15000);
+  h.result({ ...first, error: 'Busy; retry' });
+  assert.equal(h.sent.length, 1, 'no immediate retry');
+  assert.equal(h.timers.size, 1, 'Busy schedules a backoff');
+  const [key, retry] = [...h.timers][0];
+  assert.ok(h.delays.get(key) >= 100 && h.delays.get(key) <= 250);
+  const queued = h.client.request(imageId);
+  assert.equal(h.sent.length, 1, 'new requests cannot bypass backoff');
+  retry();
+  assert.equal(h.sent.length, 3);
+  const next = h.sent[1].kicadReviewAsset;
+  assert.notEqual(next.requestId, first.requestId);
+  assert.equal(h.delays.get([...h.timers.keys()][0]), 15000);
+  h.result({ ...next, text: imageText });
+  assert.equal(await p, imageText, 'Busy request retries ahead of newly queued work');
+  h.result({ ...h.sent[2].kicadReviewAsset, text: 'queued' });
+  assert.equal(await queued, 'queued'); assert.equal(h.timers.size, 0);
+  h.client.dispose();
+});
+test('asset child disposal during Busy backoff rejects without posting again', async () => {
+  const h = assetClientHarness(), p = h.client.request(imageId);
+  const rejected = assert.rejects(p, /disposed/i);
+  h.result({ ...h.sent[0].kicadReviewAsset, error: 'Busy; retry' });
+  const callbacks = [...h.timers.values()];
+  h.client.dispose();
+  await rejected;
+  assert.equal(h.timers.size, 0);
+  for (const timer of callbacks) timer();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.listeners.message, undefined);
+});
+test('asset child rejects non-Busy errors without scheduling retry', async () => {
+  const h = assetClientHarness();
+  for (const error of ['revoked', 'Busy; retry later']) {
+    const p = h.client.request(imageId), rejected = assert.rejects(p, /Asset unavailable/);
+    h.result({ ...h.sent.at(-1).kicadReviewAsset, error });
+    await rejected;
+    assert.equal(h.timers.size, 0);
+  }
+  assert.equal(h.sent.length, 2); h.client.dispose();
 });
 test('asset child rejects oversized and error replies without caching a false success', async () => {
   const h = assetClientHarness();
