@@ -21,6 +21,7 @@ jobs:
         with:
           node-version: 22
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
+      - run: node --test ui/image-view.test.mjs
       - name: Build browser fixtures
         run: |
           echo "CHROME=google-chrome" >> "$GITHUB_ENV"

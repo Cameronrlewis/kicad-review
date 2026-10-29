@@ -16,6 +16,7 @@ jobs:
         with:
           persist-credentials: false
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
+      - run: node --test ui/image-view.test.mjs
       - run: npx --yes wrangler@4.148.0 deploy --var DEPLOY_SHA:${{ github.sha }}
         working-directory: site
         env:
