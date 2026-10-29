@@ -4028,23 +4028,30 @@ test('asset parent actual wrapper hash navigation preserves transport and manife
   const listeners=new Map(),calls=[],sent=[],navigations=[],controls=new Map();
   const iframe={contentWindow:{postMessage:value=>sent.push(value)},addEventListener(){},set src(value){navigations.push(value);}};
   const loading={hidden:false},location={hash:'#v=board'};
+  let hold=false,release,activeSignal;
   const context={location,history:{replaceState(){}},AbortController,AbortSignal,Blob,TextDecoder,setTimeout,clearTimeout,
     document:{getElementById:id=>id==='review-report'?iframe:loading,documentElement:{dataset:{theme:'dark'}},
       querySelector:selector=>{if(!controls.has(selector))controls.set(selector,{});return controls.get(selector);}},
     MutationObserver:class{observe(){}},
     addEventListener:(name,fn)=>{if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},
     removeEventListener:(name,fn)=>listeners.get(name)?.delete(fn),
-    fetch:async url=>{calls.push(url);return new Response(url.endsWith('/raw')?storedImageReport():imageText,{headers:assetHeaders()});}};
+    fetch:async (url,options)=>{calls.push(url);
+      if(hold&&!url.endsWith('/raw')){activeSignal=options.signal;return new Promise(resolve=>{release=()=>resolve(new Response(imageText,{headers:assetHeaders()}));});}
+      return new Response(url.endsWith('/raw')?storedImageReport():imageText,{headers:assetHeaders()});}};
   context.window=context;
   runInNewContext(script,context);
   assert.deepEqual(navigations,['/r/o/r/a/42/raw#v=board']);
   assert.equal(listeners.get('message').size,2);
   const first=[...listeners.get('message')][0],ask={source:iframe.contentWindow,data:{kicadReviewAsset:{requestId:'one',digest:imageId,kind:'svg'}}};
   await first(ask);assert.equal(sent.at(-1).kicadReviewAssetResult.text,imageText);
+  hold=true;const inFlight=first({...ask,data:{kicadReviewAsset:{...ask.data.kicadReviewAsset,requestId:'inflight'}}});
+  await settleAsset();
   location.hash='#v=sheet:/left/';for(const fn of listeners.get('hashchange'))fn();
+  assert.equal(activeSignal.aborted,false,'hash navigation does not abort active jobs');
+  hold=false;release();await inFlight;
   assert.equal(listeners.get('message').size,2);assert.equal(listeners.get('message').has(first),true);
   assert.equal(navigations.at(-1),'/r/o/r/a/42/raw#v=sheet:/left/');
-  await first(ask);assert.equal(calls.length,3,'hash navigation reuses transport');
+  await first(ask);assert.equal(calls.length,4,'hash navigation reuses transport');
   assert.equal(calls.filter(url=>url.endsWith('/raw')).length,1,'hash navigation reuses allowlist');
   for(const fn of listeners.get('pagehide'))fn();assert.equal(listeners.get('message').size,1);
 });
