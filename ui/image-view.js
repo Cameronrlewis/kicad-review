@@ -320,8 +320,10 @@
         if(disposed||queue.length>=128||!/^[0-9a-f]{12}$/.test(digest)||!['svg','json'].includes(kind)||allowed[digest]?.kind!==kind)return Promise.reject(Error('Asset unavailable'));
         return new Promise((resolve,reject)=>{queue.push({digest,kind,resolve,reject,seq:++sequence});pump();});
       },
-      dispose(){disposed=true;clearTimeout(backoff);backoff=null;scope.removeEventListener('message',receive);
-        for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('Asset view disposed'));}pending.clear();
+      dispose(){if(disposed)return;disposed=true;clearTimeout(backoff);backoff=null;scope.removeEventListener('message',receive);
+        for(const [requestId,p] of pending){
+          try {host.postMessage({kicadReviewAssetCancel:{requestId}},'*');}catch { /* Disposal must still release local work. */ }
+          clearTimeout(p.timer);p.reject(Error('Asset view disposed'));}pending.clear();
         for(const p of queue)p.reject(Error('Asset view disposed'));queue.length=0;}
     };
   }

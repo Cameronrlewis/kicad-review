@@ -3447,7 +3447,7 @@ function assetBridgeHarness({ fetcher = async () => new Response(imageText, { he
     },
   });
   listeners.pagehide = stop;
-  return { sent, calls, timers, listeners, stop, message: (value, source = iframe.contentWindow) => listeners.message({ source, data: { kicadReviewAsset: value } }) };
+  return { sent, calls, timers, listeners, stop, cancel: requestId => listeners.message({source:iframe.contentWindow,data:{kicadReviewAssetCancel:{requestId}}}), message: (value, source = iframe.contentWindow) => listeners.message({ source, data: { kicadReviewAsset: value } }) };
 }
 const settleAsset = async () => { for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
 test('asset parent ignores foreign windows, forged IDs and unsupported kinds', async () => {
@@ -4144,4 +4144,39 @@ test('deployment provenance reports the serving commit, never a fabricated fallb
       }
     }
   } finally { restore(); }
+});
+
+test('asset disposal cancels only pending child requests, once', async () => {
+  const h = assetClientHarness();
+  const promises = Array.from({length:10}, () => h.client.request(imageId));
+  const rejected = promises.map(p => assert.rejects(p, /disposed/i));
+  const ids = h.sent.map(m => m.kicadReviewAsset.requestId);
+  h.client.dispose(); h.client.dispose();
+  await Promise.all(rejected);
+  assert.deepEqual(h.sent.filter(m => m.kicadReviewAssetCancel).map(m => m.kicadReviewAssetCancel.requestId), ids);
+  assert.equal(h.timers.size, 0);
+});
+
+test('asset parent cancellation validates source and ID, frees slots and never replies', async () => {
+  const h = assetBridgeHarness({fetcher: (_, {signal}) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(Error('aborted')));
+  })});
+  try {
+    const jobs = Array.from({length:8}, (_, i) => h.message({requestId:'cancel'+i,digest:imageId,kind:'svg'}));
+    await settleAsset();
+    const cancel = (requestId, source) => h.listeners.message({source,data:{kicadReviewAssetCancel:{requestId}}});
+    await cancel('cancel0', {});
+    assert.equal(h.calls[1][1].signal.aborted, false);
+    // Obtain the trusted source through the harness's default message path.
+    h.cancel('missing'); h.cancel({}); h.cancel('x'.repeat(65));
+    assert.equal(h.timers.size, 8);
+    h.cancel('cancel0');
+    assert.equal(h.calls[1][1].signal.aborted, true);
+    assert.equal(h.timers.size, 7);
+    h.message({requestId:'replacement',digest:imageId,kind:'svg'});
+    await settleAsset();
+    assert.equal(h.calls.length, 10, 'cancellation immediately frees a slot');
+    assert.equal(h.sent.length, 0, 'cancelled job sends no reply');
+    h.stop(); await Promise.all(jobs);
+  } finally { h.stop(); }
 });

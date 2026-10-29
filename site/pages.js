@@ -328,12 +328,19 @@ export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
     return JSON.parse(text.slice(start+prefix.length,end).trim().replace(/;$/,'')).assets||{};
   }).catch(e=>{declarations=null;throw e;});
   const receive=async e=>{
+    if(disposed||e.source!==iframe.contentWindow)return;
+    const cancel=e.data?.kicadReviewAssetCancel;
+    if(cancel){
+      if(typeof cancel.requestId!=='string'||!/^[\w-]{1,64}$/.test(cancel.requestId))return;
+      const job=jobs.get(cancel.requestId);if(!job)return;
+      job.cancelled=true;clearTimeout(job.timer);jobs.delete(cancel.requestId);job.abort.abort();return;
+    }
     const a=e.data?.kicadReviewAsset;
     if(disposed||e.source!==iframe.contentWindow||!a||typeof a.requestId!=='string'||!/^[\w-]{1,64}$/.test(a.requestId)
       ||!/^[0-9a-f]{12}$/.test(a.digest)||!['svg','json'].includes(a.kind)||jobs.has(a.requestId))return;
     const reply={requestId:a.requestId,digest:a.digest};
     if(jobs.size>=8){iframe.contentWindow.postMessage({kicadReviewAssetResult:{...reply,error:'Busy; retry'}},'*');return;}
-    const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),15000);jobs.set(a.requestId,{abort,timer});
+    const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),15000),job={abort,timer,cancelled:false};jobs.set(a.requestId,job);
     try {
       const allowed=await manifest();
       if(disposed||abort.signal.aborted||allowed[a.digest]?.kind!==a.kind)throw Error('Asset unavailable');
@@ -349,8 +356,8 @@ export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
       finally {await reader.cancel();reader.releaseLock();}
       reply.text=new TextDecoder('utf-8',{fatal:true}).decode(await new Blob(parts).arrayBuffer());
     } catch {reply.error='Asset unavailable; retry';}
-    finally {clearTimeout(timer);jobs.delete(a.requestId);}
-    if(!disposed)iframe.contentWindow.postMessage({kicadReviewAssetResult:reply},'*');
+    finally {clearTimeout(timer);if(jobs.get(a.requestId)===job)jobs.delete(a.requestId);}
+    if(!disposed&&!job.cancelled)iframe.contentWindow.postMessage({kicadReviewAssetResult:reply},'*');
   };
   scope.addEventListener('message',receive);
   return ()=>{disposed=true;scope.removeEventListener('message',receive);for(const job of jobs.values()){clearTimeout(job.timer);job.abort.abort();}jobs.clear();};
