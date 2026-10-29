@@ -263,7 +263,7 @@ window.Review3D = (() => {
     const menu = bar.querySelector(".camera-presets"), popup = bar.querySelector(".camera-menu");
     for (const [d, p, w] of [[menu, popup, 180], [bar.querySelector(".light3d"), bar.querySelector(".light-menu"), 240]]) {
       d.ontoggle = () => { if (!d.open) { d.querySelector("summary").focus(); return; } const r = d.getBoundingClientRect(); p.style.top = document.querySelector("#toolbar").getBoundingClientRect().bottom + 4 + "px"; p.style.left = Math.max(0, Math.min(r.left, innerWidth - w)) + "px"; };
-      d.onkeydown = e => { if (e.key === "Escape") { d.open = false; d.querySelector("summary").focus(); e.stopPropagation(); } };
+      d.onkeydown = e => { if (e.key === "Escape") { d.open = false; e.stopPropagation(); } };
     }
     bar.querySelector("[data-3d-assembled]").onclick = () => setAssembled(true);
     bar.querySelector("[data-3d-bare]").onclick = () => setAssembled(false);

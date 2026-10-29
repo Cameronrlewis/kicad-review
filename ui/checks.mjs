@@ -5338,11 +5338,13 @@ CHECKS.push(['BR02 processed menus restore focus on every close','v=3d&m=side',`
    for(const close of ['summary','programmatic','Escape']) {
      menu.open=true;await new Promise(r=>setTimeout(r,30));
      menu.querySelector('button').focus();
-     if(close==='summary')summary.click();
-     else if(close==='Escape')menu.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+     let focusCount=0;const countFocus=()=>focusCount++;
+     if(close==='Escape'){summary.addEventListener('focus',countFocus);menu.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));}
+     else if(close==='summary')summary.click();
      else menu.open=false;
      await new Promise(r=>setTimeout(r,30));
      if(menu.open||document.activeElement!==summary)return selector+' close focus '+close;
+     if(close==='Escape'){summary.removeEventListener('focus',countFocus);if(focusCount!==1)return selector+' Escape focused summary '+focusCount+' times';}
    }
  }
  return true;
