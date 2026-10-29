@@ -3,7 +3,36 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {gzipSync} from 'node:zlib';
 import {privateAsset} from './worker.js';
+import {reportCsp} from './csp.js';
 const {FrameCDP}=await import(process.env.FRAME_CDP||'/Users/cameron/Code/kicad-review-study/tmp/01-schematic-and-board-images/harness/frame-cdp.mjs');
+test('report CSP allows WebAssembly compilation but blocks JavaScript eval in the browser',async()=>{
+  const server=createServer((req,res)=>{
+    res.writeHead(200,{'Content-Type':'text/html','Content-Security-Policy':reportCsp});
+    // Run inside the page: DevTools evaluation itself can bypass CSP eval restrictions.
+    res.end(`<script>
+      const result={};
+      const bytes=new Uint8Array([0,97,115,109,1,0,0,0]);
+      try {
+        result.valid=WebAssembly.validate(bytes);
+        result.compiled=new WebAssembly.Module(bytes) instanceof WebAssembly.Module;
+      } catch(error) { result.wasmError=String(error); }
+      try { eval('1'); result.evalBlocked=false; }
+      catch(error) { result.evalBlocked=error instanceof EvalError; }
+      window.cspResult=result;
+    </script>`);
+  });
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  let browser;
+  try {
+    browser=await FrameCDP.open();
+    await browser.root('Page.navigate',{url:'http://127.0.0.1:'+server.address().port});
+    await browser.waitRoot('!!window.cspResult');
+    assert.deepEqual(await browser.evalRoot('window.cspResult'),{valid:true,compiled:true,evalBlocked:true});
+  } finally {
+    try {await browser?.close();}
+    finally {server.closeAllConnections();await new Promise(r=>server.close(r));}
+  }
+});
 for(const [digest,kind,path] of [
   ['abcdef123456','svg','/r/o/r/a/42/assets/abcdef123456.svg'],
   ['c'.repeat(64),'board.glb','/r/o/r/a/42/3d/'+'c'.repeat(64)+'/board.glb']

@@ -530,8 +530,12 @@ test('review route shows the repository after a pull-access check and refreshes 
   } finally { restore(); }
 });
 
-test('shared CSP module preserves the original report sandbox and wrapper policies', () => {
-  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'");
+test('shared CSP module permits report WebAssembly without weakening sandbox or wrapper policies', () => {
+  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'");
+  assert.match(reportCsp, /'wasm-unsafe-eval'/);
+  assert.doesNotMatch(reportCsp, /'unsafe-eval'/);
+  assert.match(reportCsp, /connect-src 'none'/);
+  assert.doesNotMatch(reportCsp, /allow-same-origin/);
   assert.equal(frameCsp, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
 });
 
