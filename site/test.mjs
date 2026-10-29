@@ -3343,11 +3343,13 @@ for (const [digest, kind, mime] of [
   const url = 'https://site/r/Cameronrlewis/repo/a/42/' + path;
   const first = await privateAsset(new Request(url), digest, kind, load);
   assert.equal(first.status, 200); assert.equal(first.headers.get('Cache-Control'), 'private,no-cache');
+  assert.equal(first.headers.get('Content-Security-Policy'), "default-src 'none'; sandbox");
   assert.equal(first.headers.get('ETag'), '"' + digest + '"');
   assert.equal(first.headers.get('Vary'), 'Cookie'); assert.equal(first.headers.get('Content-Type'), mime);
   const req = new Request(url, { headers: { 'If-None-Match': first.headers.get('ETag') } });
   const reused = await privateAsset(req, digest, kind, load);
   assert.equal(reused.status, 304); assert.equal(reused.headers.get('Cache-Control'), 'private,no-cache');
+  assert.equal(reused.headers.get('Content-Security-Policy'), "default-src 'none'; sandbox");
   allowed = false;
   const denied = await privateAsset(req, digest, kind, load);
   assert.equal(denied.status, 404); assert.equal(calls, 3);

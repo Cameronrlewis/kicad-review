@@ -296,6 +296,7 @@ export async function privateAsset(request, digest, kind, load) {
     return new Response(result.body, { status: result.status, headers });
   }
   const headers = { 'Content-Type': kind === 'svg' ? 'image/svg+xml' : kind === 'board.glb' ? 'model/gltf-binary' : 'application/json',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
     'Content-Encoding': 'gzip', 'Cache-Control': 'private,no-cache', ETag: `"${digest}"`, Vary: 'Cookie', 'X-Content-Type-Options': 'nosniff' };
   const matched = (request.headers.get('If-None-Match') || '').split(',').some(tag =>
     tag.trim().replace(/^W\//, '') === headers.ETag || tag.trim() === '*');
