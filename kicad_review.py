@@ -3543,7 +3543,9 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
+            vendor = FAB_VENDOR_LABELS.get(c.get('vendor'), c.get('vendor'))
+            title = f"{c['title']} · {vendor}" if vendor else c['title']
+            lines.append(f"| {md(p['name'])} | {md(title)} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
                          f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c.get('fixed', '—')} |")
     for p in data['projects']:
         for c in p['checks']:

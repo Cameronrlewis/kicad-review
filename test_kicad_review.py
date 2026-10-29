@@ -4551,6 +4551,8 @@ data = {'base':'a'*40,'head':'b'*40,'reason':'fab regression','links':{},
         'projects':[project('First',[jl,pw]),project('Second',[jl_other])]}
 block = kr.checks_markdown(data)
 assert block.startswith('\n### Checks\n')
+assert '| First | Fab limits · JLCPCB (required) |' in block, 'FAB-06 vendor-qualified JLCPCB table row'
+assert '| First | Fab limits · PCBWay (required) |' in block, 'FAB-06 vendor-qualified PCBWay table row'
 expected = ('**First**: Fab limits (JLCPCB): 1 violations',
             '**First**: Fab limits (PCBWay): 1 violations',
             '**Second**: Fab limits (JLCPCB): 2 violations')
