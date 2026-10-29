@@ -54,7 +54,11 @@ export class FrameCDP {
   async waitRoot(expression) {
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
-      if (await this.evalRoot(expression)) return;
+      try {if (await this.evalRoot(expression)) return;}
+      catch (error) {
+        // Navigation can replace the execution context between readiness probes.
+        if (!/Execution context was destroyed|Cannot find context/.test(error.message)) throw error;
+      }
       await new Promise(resolve => setTimeout(resolve, 25));
     }
     throw Error('Chrome page readiness timeout');

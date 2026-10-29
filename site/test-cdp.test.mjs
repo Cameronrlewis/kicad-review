@@ -16,3 +16,13 @@ test('CDP helper reports an unreachable dedicated Chrome port', async () => {
   await new Promise(resolve => server.close(resolve));
   await assert.rejects(FrameCDP.open(port), /fetch failed/);
 });
+
+test('CDP readiness retries when navigation replaces its execution context', async () => {
+  let attempts = 0;
+  const page = {async evalRoot() {
+    if (++attempts === 1) throw Error('Execution context was destroyed.');
+    return true;
+  }};
+  await FrameCDP.prototype.waitRoot.call(page, 'document.readyState === "complete"');
+  assert.equal(attempts, 2);
+});
