@@ -1305,6 +1305,7 @@ export const CHECKS = [
     const originalBom = REVIEW_DATA.bom, originalP = S.p, originalBoard = S.bomBoard, originalView = S.partsView;
     try {
       REVIEW_DATA.bom = {...originalBom, error: 'Repository BOM unavailable'};
+      document.querySelector('[data-tab=parts]').click();
       S.p = 0; S.bomBoard = 'all'; S.partsView = 'bom'; renderPanel();
       const chips = [...document.querySelectorAll('[data-bom-board]')];
       if (chips[0]?.textContent.trim() !== 'All boards (unavailable)' || chips[0]?.getAttribute('aria-pressed') !== 'false') return 'unavailable label or pressed state';
