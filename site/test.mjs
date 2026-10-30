@@ -4664,7 +4664,7 @@ test('BR02 design family waits on 06 report-kind.js', () => {
 });
 for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
   'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',
-  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'encoded-length', 'bad-host']) {
+  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'identity-length', 'encoded-length', 'bad-host']) {
   test('BR02 asset route ' + scenario, async () => {
     const digest = 'c'.repeat(64), kind = scenario === 'valid-parts' ? 'board-parts.json' : 'board.glb';
     const key = kind === 'board.glb' ? 'model' : 'parts', bytes = gzipSync(kind === 'board.glb' ? 'glTF' : '[]');
@@ -4713,8 +4713,8 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         // Oversized: valid bytes then endless filler; a whole-body read would pull every chunk.
         if (scenario === 'oversized') return new Response(new ReadableStream({ pull(c) {
           c.enqueue(pulls++ ? new Uint8Array(65536) : new Uint8Array(bytes)); if (pulls > 64) c.close(); } }));
-        if (scenario === 'declared-length') return new Response(new ReadableStream({ pull(c) {
-          pulls++; c.enqueue(new Uint8Array(bytes)); c.close(); } }, { highWaterMark: 0 }), { headers: { 'Content-Length': String(bytes.length + 5) } });
+        if (scenario === 'declared-length' || scenario === 'identity-length') return new Response(new ReadableStream({ pull(c) {
+          pulls++; c.enqueue(new Uint8Array(bytes)); c.close(); } }, { highWaterMark: 0 }), { headers: { 'Content-Length': String(bytes.length + 5), ...(scenario === 'identity-length' ? { 'Content-Encoding': 'identity' } : {}) } });
         // Encoded transfer: Content-Length counts encoded bytes, so only the read bound applies.
         if (scenario === 'encoded-length') return new Response(bytes, { headers: { 'Content-Encoding': 'gzip', 'Content-Length': String(bytes.length + 5) } });
         return new Response(['corrupt', 'not-gzip'].includes(scenario) ? 'not gzip' : bytes);
@@ -4765,9 +4765,9 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         assert.equal(response.status, 404, scenario);
         assert.match(response.headers.get('Cache-Control') || '', /no-store/, scenario);
         assert.equal(response.headers.get('ETag'), null, scenario);
-        if (!['corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length'].includes(scenario)) assert.equal(downloads, 0, scenario);
+        if (!['corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'identity-length'].includes(scenario)) assert.equal(downloads, 0, scenario);
         if (scenario === 'oversized') assert.ok(pulls <= 3, 'read stops past descriptor size: ' + pulls);
-        if (scenario === 'declared-length') assert.equal(pulls, 0, 'declared size checked before reading');
+        if (scenario === 'declared-length' || scenario === 'identity-length') assert.equal(pulls, 0, 'declared size checked before reading');
       }
     } finally { restore(); }
   });
