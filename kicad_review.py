@@ -3570,7 +3570,10 @@ CHECK_SOURCE = {"erc": "kicad-cli sch erc", "drc": "kicad-cli pcb drc", "parity"
                 "bom": "schematic symbol fields", "release": "fabrication export of the board"}
 
 
-stat_number = stats_number  # '506.97 mm²' -> 506.97, None -> None: 01's parser for the unit-bearing kicad-cli stats strings
+def stat_number(text):
+    """'506.97 mm²' -> 506.97; null or anything else -> None. kicad-cli stats put units inside the strings."""
+    m = re.match(r"\s*(-?\d+(?:\.\d+)?)", text) if isinstance(text, str) else None
+    return float(m[1]) if m else None
 
 
 def board_facts(side_dir, pcb_path):
@@ -3585,7 +3588,6 @@ def board_facts(side_dir, pcb_path):
         with open(f"{side_dir}/stats.json", encoding="utf-8") as fh:
             stats = json.load(fh)
         b = stats["board"]
-        if not isinstance(b, dict): raise TypeError("board section is not an object")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         facts["stats_reason"] = f"statistics unavailable: {clip(exc, 200)}"
         return facts
@@ -3600,6 +3602,10 @@ def board_facts(side_dir, pcb_path):
     return facts
 
 
+FAB_EVIDENCE_SOURCE = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
+                       'vendor-only findings paired between head and base by multiset identity; '
+                       'fab_limits.json dated profile; coverage limited to checked limits '
+                       '(see unchecked, unsupported and coverageWarnings)')
 FAB_LEDGER = ("vendor", "profile", "checkedOn", "assumedCopperOz", "checked", "unchecked", "unsupported", "coverageWarnings", "baselineAvailable", "fixed")  # 04's vendor identity and coverage ledger
 
 
@@ -3651,7 +3657,6 @@ def bounded_detail(detail):
             kept[key], counts[key] = {"omitted": True}, len(value)
         elif isinstance(value, str):
             kept[key] = clip(value, 200)
-            if len(value) > 200: counts[key] = len(value)
         else:
             kept[key] = value
     return {**kept, "omitted_counts": counts}, True

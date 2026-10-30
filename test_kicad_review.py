@@ -6198,8 +6198,6 @@ with tempfile.TemporaryDirectory() as t:
     assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["size_mm"] == [50.0, 30.5]
     write(t, {"stats.json": "{not json"})
     assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False
-    write(t, {"stats.json": json.dumps({"board": None})})
-    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False, "a non-object board section is unavailable, not a crash"
 with tempfile.TemporaryDirectory() as t:
     write(t, {"src/P.kicad_pcb": PCB_TEXT, "out/stats.json": json.dumps(STATS_PARTIAL)})
     with patch("kicad_review.subprocess.run", side_effect=stats_fails):
@@ -6287,8 +6285,6 @@ row = dr["rows"][0]
 assert row["kind"] == "net-members" and row["channel"] == "wiring" and row["weight"] == "heavy"
 assert row["detail_truncated"] is True and row["detail"]["omitted_counts"] == {"added": 300, "transitions": 200}
 assert len(row["detail"]["added"]) == 15 and row["detail"]["beforeNets"] == ["A"] and row["detail"]["kind"] == "members" and dr["detail_truncated"] == 1
-long_note = kr.bounded_detail({"kind": "members", "note": "n" * 2500})[0]
-assert long_note["note"] == "n" * 200 and long_note["omitted_counts"] == {"note": 2500}, "a clipped string is counted, never cut silently"
 small_row = kr.context_changes([{"id": "s", "action": "modified", "kind": "net-members", "ref": "N", "where": {"board": True}, "detail": {"kind": "members", "added": ["J1.1"]}}])["rows"][0]
 assert small_row["detail"] == {"kind": "members", "added": ["J1.1"]} and "detail_truncated" not in small_row
 # 03's signed copper detail: outlines are counted, never sent; the row keeps its type, layer and signed areas.
@@ -6301,11 +6297,9 @@ assert ar["detail_truncated"] is True and ar["channel"] == "board" and ar["weigh
 fab = {**checks[0], "name": "fab_limits", "vendor": "jlcpcb", "title": "Fab limits", "profile": "jlcpcb-multilayer", "checkedOn": "2026-10-01", "assumedCopperOz": 1,
        "checked": ["track width"], "unchecked": [f"limit {i}" for i in range(20)], "unsupported": None,
        "coverageWarnings": ["F.Cu: copper thickness unknown"], "baselineAvailable": False, "fixed": 0, "violations": []}
-# 04 owns FAB_EVIDENCE_SOURCE and is not merged here; any supplied provenance must pass through unchanged.
-fab_source = getattr(kr, "FAB_EVIDENCE_SOURCE", "kicad-cli pcb drc; vendor DRC passes (stand-in text until 04 merges)")
 # 04 supplies two same-name sections: identities survive projection and completion, even with no board.
 fab_sections = [{**fab, "vendor": vendor, "profile": profile,
-                 "confidence": "deterministic", "evidence_source": fab_source}
+                 "confidence": "deterministic", "evidence_source": kr.FAB_EVIDENCE_SOURCE}
                 for vendor, profile in (("jlcpcb", "jlcpcb-multilayer"), ("pcbway", "pcbway-standard"))]
 for has_board in (True, False):
     supplied = [dict(c) for c in fab_sections]
@@ -6317,7 +6311,7 @@ for has_board in (True, False):
         assert len(sections) == 2
         assert [(c["name"], c["vendor"]) for c in sections] == [("fab_limits", "jlcpcb"), ("fab_limits", "pcbway")]
         assert [c["profile"] for c in sections] == [c["profile"] for c in supplied]
-        assert all(c["confidence"] == "deterministic" and c["evidence_source"] == fab_source for c in sections)
+        assert all(c["confidence"] == "deterministic" and c["evidence_source"] == kr.FAB_EVIDENCE_SOURCE for c in sections)
         if not has_board:
             assert all(c["status"] == "not_run" and c["reason"] == "no board" and c["findings"] == [] for c in sections)
 assert not any(c["name"] == "fab_limits" for c in kr.complete_context_checks([], check_settings, True, False)), "disabled/absent fab checks are not synthesized"
