@@ -3611,6 +3611,41 @@ def read_optional_json(path, default=None):
 CHANNELS = ("components","wiring","routing","rules","board","visual")
 
 
+def dedupe_electrical(rows, typed):
+    """Drop generic metadata keys that a typed rule or stackup row already describes.
+
+    Typed rule refs are rule_values keys; meta:pro flattens design_settings under "board.",
+    named classes by name and pattern lists by index, so map each ref to that flattened prefix.
+    """
+    refs = {r["ref"] for r in typed if r["kind"] in ("rule", "stackup")}
+    prefixes = {"board." + k if k.startswith("rules.") else k for k in refs
+                if k.startswith(("rules.", "net_settings.classes.")) or k == "net_settings.netclass_patterns"}
+    under = lambda key, p: key == p or key.startswith((p + ".", p + "["))
+    result = []
+    for row in rows:
+        uid = row.get("uuid")
+        if uid == "meta:dru" and "custom rules" in refs:
+            continue
+        if uid == "meta:pro":
+            superseded = lambda key: any(under(key, p) for p in prefixes)
+        elif uid == "meta:setup":
+            superseded = lambda key: "stackup" in refs and under(key, "stackup")
+        else:
+            result.append(row)
+            continue
+        row = dict(row)
+        if "changes" in row:
+            row["changes"] = [c for c in row["changes"] if not superseded(c[0])]
+            if not row["changes"]:
+                continue
+        else:
+            row["props"] = {k: v for k, v in row.get("props", {}).items() if not superseded(k)}
+            if not row["props"]:
+                continue
+        result.append(row)
+    return result
+
+
 def classify_change(row, document=None):
     r = dict(row)
     k = r["kind"]
@@ -3749,8 +3784,13 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
                 pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
             row['svgCompare'] = pair
-    objs, _rule_issues = project_pair(p)
-    changes = diff_objects(objs["base"], objs["head"])
+    objs, source_issues = project_pair(p)
+    det = read_optional_json("review/detect.json", {})
+    extra, issues = electrical_changes(p, out, objs, {s: det.get(s, "") for s in ("base", "head")})
+    changes = [classify_change(r) for r in dedupe_electrical(diff_objects(objs["base"], objs["head"]), extra)] + extra
+    present = {d for d, suffix in (("schematic", ".kicad_sch"), ("board", ".kicad_pcb"))
+               if any(pathlib.Path(s, p["dir"], p["name"] + suffix).is_file() for s in ("base", "head"))}
+    summary = electrical_summary(changes, source_issues + issues, present)
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
     inspect = image_pair(None, None)
@@ -3772,8 +3812,9 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 scene = board_geometry(pcb)
                 # Child pads, text and graphics use their owning footprint's UUID;
                 # standalone tracks/vias/zones use their own. Never match by net/ref.
+                # Derived electrical rows carry anchors, not owner UUIDs, so they never claim objects.
                 ids = {(r["kind"], r.get("uuid_before", r["uuid"]) if side == "base" else r["uuid"]): r["id"]
-                       for r in changes if (r.get("where") or {}).get("board")
+                       for r in changes if r.get("uuid") and (r.get("where") or {}).get("board")
                        and r["action"] != ("added" if side == "base" else "removed")}
                 for obj in scene["objects"]:
                     uid = obj["changeUuid"]
@@ -3823,7 +3864,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": changes, "checks": project_checks(p, settings, objs, waivers),
+            "changes": changes, "summary": summary, "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {})}

@@ -3231,11 +3231,19 @@ try:
                 assert json.dumps(off, sort_keys=True) == json.dumps(legacy, sort_keys=True)
                 # Golden JSON bytes from the pre-libraries parent, with inventory enabled.
                 import hashlib
-                legacy_shape = copy.deepcopy(off)
+                def legacy_projection(project):
+                    projected = {k: v for k, v in project.items() if k != "summary"}
+                    projected["changes"] = [{k: v for k, v in r.items() if k not in
+                        {"channel", "weight", "document", "detail", "anchors"}} for r in project["changes"]
+                        if r["kind"] not in {"net-added", "net-removed", "net-joined", "net-split", "net-renamed",
+                                             "net-members", "board-pad-net", "wires", "copper", "rule", "stackup"}]
+                    return projected
+                legacy_shape = copy.deepcopy(legacy_projection(off))
                 legacy_shape['board'].pop('inspect', None)
                 for row in legacy_shape['sheets'] + legacy_shape['board']['layers']:
                     for key in ('hotspots', 'svgThemes', 'sourceRGBThemes'): row.pop(key, None)
                 assert hashlib.sha256(json.dumps(legacy_shape, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
+                assert "summary" in off and isinstance(off["summary"]["channels"], list)
                 assert comment_markdown({**d2, "projects": [off]}, [], "") == comment_markdown({**d2, "projects": [legacy]}, [], "")
         with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.build_project", return_value=off):
             kicad_review.cmd_report(None)
@@ -6000,3 +6008,75 @@ def test_br03_summary():
     assert electrical_summary([t],[],{"board"})["headline"]=="No headline changes"
 test_br03_summary()
 print('ok BR03 classification and summary')
+
+
+def test_br03_build_integration():
+    from kicad_review import dedupe_electrical
+    import base64, gzip
+    assert kr.flatten({"net_settings":{"netclass_patterns":[{"pattern":"X","netclass":"D"}]}}).keys() == {
+        "net_settings.netclass_patterns.0.pattern","net_settings.netclass_patterns.0.netclass"}
+    typed=[{"kind":"rule","ref":"rules.min_clearance"},{"kind":"rule","ref":"net_settings.classes.Default.clearance"},
+           {"kind":"rule","ref":"net_settings.netclass_patterns"},{"kind":"rule","ref":"custom rules"},
+           {"kind":"stackup","ref":"stackup"}]
+    generic=[{"uuid":"meta:pro","kind":"design rules","changes":[[k,"a","b"] for k in (
+                "board.rules.min_clearance","board.rules.min_clearance_extra","net_settings.classes.Default.clearance",
+                "net_settings.classes.Default.track_width","net_settings.netclass_patterns.0.pattern",
+                "net_settings.netclass_patterns.0.netclass","erc.pin_not_connected")]},
+             {"uuid":"meta:setup","kind":"design rules","changes":[["stackup.layer[F.Cu].thickness","a","b"],["pad_to_mask_clearance","a","b"]]},
+             {"uuid":"meta:dru","kind":"design rules","changes":[["custom rules","a","b"]]},
+             {"uuid":"meta:pro","kind":"design rules","action":"added","props":{"board.rules.min_clearance":"0.2"}},
+             {"uuid":"fp","kind":"footprint","changes":[["board.rules.min_clearance","a","b"]]}]
+    kept=dedupe_electrical(generic,typed)
+    assert [x[0] for x in kept[0]["changes"]]==["board.rules.min_clearance_extra","net_settings.classes.Default.track_width",
+                                                 "erc.pin_not_connected"], kept
+    assert [x[0] for x in kept[1]["changes"]]==["pad_to_mask_clearance"] and len(kept)==3 and kept[2]["uuid"]=="fp"
+    assert len(generic[0]["changes"])==7, "dedupe_electrical must not mutate its input rows"
+    assert dedupe_electrical(generic,[])==generic
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={"dir":"p","name":"p","status":"modified"}
+            settings=kr.load_settings()
+            for side,clearance in (("base",0.2),("head",0.25)):
+                write(side,{"p/p.kicad_sch":'(kicad_sch (uuid root) (symbol (uuid r) (at 1 2 0) (property "Reference" "R1")))',
+                    "p/p.kicad_pro":json.dumps({"board":{"design_settings":{"rules":{"min_clearance":clearance},"unrelated":side}},
+                      "net_settings":{"netclass_patterns":[{"pattern":"X*","netclass":side}]}})})
+                write('review/p/'+side,{"sch/p.svg":'<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',
+                    "netlist.net":'(export (nets))',"erc.json":'{"sheets":[]}'})
+            write('review',{"detect.json":json.dumps({"base":"b"*40,"head":"h"*40})})
+            project=kr.build_project(p,{},settings)
+            assert 'summary' in project and 'electrical_summary' not in project, 'BR03 summary wire field renamed'
+            wiring=next(c for c in project['summary']['channels'] if c['channel']=='wiring')
+            assert wiring=={'channel':'wiring','total':0,'heavy':0,'status':'complete'}, 'BR03 zero-row wiring unavailable'
+            assert sum(r["kind"]=="rule" and r["ref"]=="rules.min_clearance" for r in project["changes"])==1
+            generic=[x[0] for r in project["changes"] if r.get("uuid")=="meta:pro" for x in r.get("changes",[])]
+            assert "board.unrelated" in generic
+            assert not any(k.startswith("board.rules.") or k.startswith("net_settings.netclass_patterns") for k in generic)
+            for side in ("base","head"):
+                f=pathlib.Path(side)/"p/p.kicad_pro"; saved=f.read_text(); f.write_text('{broken')
+                with contextlib.redirect_stderr(io.StringIO()):
+                    incomplete=kr.build_project(p,{},settings)
+                assert incomplete["sheets"] and any(i["channel"]=="rules" for i in incomplete["summary"]["incomplete"])
+                assert not any(r["kind"]=="rule" or r.get("uuid")=="meta:pro" for r in incomplete["changes"])
+                f.write_text(saved)
+            other=kr.build_project(p,{},settings,change_offset=len(project["changes"]))
+            kr.assign_ids([project,other])
+            ids=[r["id"] for proj in (project,other) for r in proj["changes"]]
+            assert len(ids)==len(set(ids))
+            for side,net in (("base","GND"),("head","VCC")):
+                pcb=br03_pcb("fp",[("physical-pad","1",0,net)]).replace('(kicad_pcb ',
+                    '(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) ')
+                write(side,{"p/p.kicad_pcb":pcb})
+                write("review/p/"+side,{"pcb/p-F_Cu.svg":'<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',"drc.json":'{"violations":[],"unconnected_items":[],"schematic_parity":[]}'})
+            blobs={}; board_project=kr.build_project(p,blobs,settings)
+            owner=next(r for r in board_project["changes"] if r["kind"]=="footprint")
+            derived=next(r for r in board_project["changes"] if r["kind"]=="board-pad-net")
+            assert derived["id"]!=owner["id"] and "uuid" not in derived
+            for side in ("base","head"):
+                blob=board_project["board"]["geometry"][side]
+                scene=json.loads(gzip.decompress(base64.b64decode(blobs[blob])))
+                physical=[o for o in scene["objects"] if o["changeUuid"]=="fp"]
+                assert physical and all(o["changeIds"]==[owner["id"]] for o in physical)
+        finally: os.chdir(old)
+test_br03_build_integration()
+print('ok BR03 build integration, rule dedup and stable IDs')
