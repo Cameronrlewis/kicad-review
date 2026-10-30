@@ -1392,6 +1392,51 @@ export const CHECKS = [
       return !document.querySelector('[data-bom-download]') || 'no exports, no buttons';
     } finally { URL.createObjectURL = create; HTMLAnchorElement.prototype.click = click; project.name = originalName; parts.exports = originalExports; S.partsView = 'problems'; renderPanel(); }
   `],
+  ["Parts fixture BOM Table view layout exposes columns without page overflow", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  setDock('panel', true); resizeRightDock(300, false);
+  document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+  if (innerWidth >= 900) {
+    document.querySelector('[data-panel-wide]').click();
+    if ([...document.querySelectorAll('[data-bom-sort]')].filter(b => b.getBoundingClientRect().width > 0).length !== 6) return 'wide dock must expose all six sortable headers';
+    if ([...document.querySelectorAll('.bom-mpn-inline')].some(n => n.getBoundingClientRect().width > 0)) return 'wide dock must hide duplicate inline MPN';
+    document.querySelector('[data-panel-wide]').click();
+  }
+  document.querySelector('[data-panel-table]').click();
+  if (document.documentElement.scrollWidth > innerWidth) return 'Table view must scroll inside the panel, never the page';
+  const keys = [...document.querySelectorAll('[data-bom-sort]')].filter(b => b.getClientRects().length && b.getBoundingClientRect().width > 0).map(b => b.dataset.bomSort);
+  if (keys.join('|') !== 'qty|part|refs|mpn|lcsc|datasheet') return 'Table view headers ' + keys;
+  return ![...document.querySelectorAll('.bom-mpn-inline')].some(n => n.getBoundingClientRect().width > 0) || 'Table view must hide duplicate inline MPN';
+`],
+  ["Parts fixture BOM whole screen is contained and readable", "", `
+  if (REVIEW_DATA.repo !== 'example/parts' || innerWidth < 900) return 'skip';
+  resizeRightDock(300, false);
+  document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+  const panel = document.querySelector('#panel').getBoundingClientRect(), stage = document.querySelector('#stage').getBoundingClientRect();
+  if (document.documentElement.scrollWidth > innerWidth) return 'the page overflows sideways';
+  const out = [...document.querySelectorAll('#panel .parts-view button, #panel .bom-head button, #panel .bom-chips button, #panel .bom-table thead th button')]
+    .filter(b => b.getClientRects().length && b.getBoundingClientRect().width > 0)
+    .filter(b => { const r = b.getBoundingClientRect(); return r.left < panel.left - .5 || r.right > panel.right + .5; });
+  if (out.length) return 'controls outside the dock: ' + out.map(b => b.textContent.trim());
+  for (const k of ['mpn', 'lcsc', 'datasheet']) if (document.querySelector('[data-bom-sort=' + k + ']').getBoundingClientRect().width) return 'narrow mode must hide ' + k;
+  const scroller = document.querySelector('#panel .parts-scroll');
+  if (scroller.scrollWidth > scroller.clientWidth + 1) return 'the table scrolls sideways inside the narrow dock';
+  const part = document.querySelector('.bom-row .bom-part').getBoundingClientRect();
+  if (part.width < 80) return 'narrow PART column must stay readable, got ' + part.width;
+  if (stage.width < innerWidth * .4) return 'the dock leaves the drawing too narrow';
+  const ctx = document.createElement('canvas').getContext('2d', {willReadFrequently: true});
+  const px = css => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); return [...ctx.getImageData(0, 0, 1, 1).data]; };
+  const over = (f, b) => [0, 1, 2].map(i => f[i] * f[3] / 255 + b[i] * (1 - f[3] / 255));
+  const lum = c => { const [r, g, b] = c.map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
+  const background = el => { for (let e = el; e; e = e.parentElement) { const c = px(getComputedStyle(e).backgroundColor); if (c[3] > 250) return c.slice(0, 3); } return px(getComputedStyle(document.body).backgroundColor).slice(0, 3); };
+  const low = [];
+  for (const sel of ['.bom-summary', '.bom-downloads button', '.bom-chips .check-chip', '.bom-table thead th button', '.bom-cat th', '.bom-row .bom-part b', '.bom-row .bom-part small', '.bom-row .bom-refs', '.bom-row .bom-qty', '.bom-row a']) {
+    const el = document.querySelector('#panel ' + sel); if (!el) continue;
+    const bg = background(el), fg = over(px(getComputedStyle(el).color), bg), [a, b] = [lum(fg), lum(bg)].sort((x, y) => y - x);
+    const ratio = (a + .05) / (b + .05); if (ratio < 4.5) low.push(sel + ' ' + ratio.toFixed(2));
+  }
+  return low.length ? 'low contrast in ' + document.documentElement.dataset.theme + ': ' + low : true;
+`],
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;
     const line = (ref, supplier, mpn = ref) => ({refs:[ref], key:ref, value:ref, footprint:'F', lcsc:'C1', mpn, datasheet:null, problems:[], supplier});
