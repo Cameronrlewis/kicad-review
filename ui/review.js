@@ -284,7 +284,7 @@ addEventListener('pagehide', disposeAssets);
 function svgText(id) {
   if (!id) return Promise.resolve(null);
   if (assetTextLoads.has(id)) return Promise.all([assetTextLoads.get(id), decodedAsset(id)]).then(([text]) => text);
-  if (id in cache) return cache[id].then(asset => Object.hasOwn(asset, 'text') ? asset.text : assetText(id));
+  if (id in cache) return cache[id].then(asset => Object.hasOwn(asset, 'text') ? asset.text : asset?.charCodeAt ? asset : assetText(id));
   // Share the in-flight text with validation, without retaining it in a JSON cache record.
   return Promise.all([assetText(id), decodedAsset(id)]).then(([text]) => text);
 }
@@ -1839,12 +1839,14 @@ async function renderElectricalPins() {
 async function electricalControls(dock, row) {
   dock.querySelector(".electrical-targets")?.remove();
   if (!row?.anchors) return;
+  const hasBoard = boardAvailable(proj());
+  const sheets = [...new Set(Object.values(row.anchors).flat().map(a => a.sheet).filter(s => s != null))];
+  if (!hasBoard && !sheets.length) return;
   const controls = document.createElement("div"); controls.className = "electrical-targets";
   const add = (label, target) => { const b = document.createElement("button"); b.type = "button";
     b.textContent = label; b.dataset.electricalTarget = target.kind;
     b.onclick = () => electricalTarget(row, target); controls.append(b); };
-  if (boardAvailable(proj())) add("Board net", {kind: "board"});
-  const sheets = [...new Set(Object.values(row.anchors).flat().map(a => a.sheet).filter(s => s != null))];
+  if (hasBoard) add("Board net", {kind: "board"});
   for (const sheet of sheets) add("Pins on " + sheet, {kind: "sheet", sheet});
   (dock.querySelector("#insp-body") || dock).append(controls);
   // Unit anchors are alternatives for one logical sheet/reference/pin; one resolved pin is sufficient.
