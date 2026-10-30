@@ -4795,3 +4795,26 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
         warning = ''.join(str(call.args[0]) for call in log.write.call_args_list)
         assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
+# Ask (spec 09): the [ask] setting.
+import copy
+import kicad_review as kr
+assert kr.DEFAULT_SETTINGS["ask"] == {"enabled": False}
+def load_ask(toml_text):
+    with tempfile.TemporaryDirectory() as d:
+        old = os.getcwd()
+        os.chdir(d)
+        try:
+            write(d, {"base/kicad-review.toml": toml_text})
+            return kr.load_settings(("base",))
+        finally:
+            os.chdir(old)
+assert load_ask("[ask]\nenabled = true\n")["ask"] == {"enabled": True}
+assert load_ask("")["ask"] == {"enabled": False}
+for bad, message in (('[ask]\nenabled = "yes"\n', "ask.enabled must be true or false"), ("ask = 3\n", "ask must be a table")):
+    try:
+        load_ask(bad)
+        raise AssertionError("invalid [ask] must stop the review")
+    except SystemExit as exc:
+        assert message in str(exc.code), exc.code
+assert '"libraries", "pdf", "ask")' in open("kicad_review.py", encoding="utf-8").read(), "opted-out reports must drop the ask table"
+print("ok ask setting")

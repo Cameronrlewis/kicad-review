@@ -1864,6 +1864,7 @@ DEFAULT_SETTINGS = {
     "waivers": {"enabled": False},
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
+    "ask": {"enabled": False},
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package"}
 
@@ -1890,7 +1891,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "ask"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -1943,6 +1944,8 @@ def load_settings(roots=("base", "head")):
             sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
     if not isinstance(settings["waivers"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: waivers.enabled must be true or false")
+    if not isinstance(settings["ask"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: ask.enabled must be true or false")
     if settings["threads"]["block_merge"] and not settings["threads"]["enabled"]:
         sys.exit(f"{SETTINGS_FILE}: threads.block_merge needs threads.enabled = true")
     return settings
@@ -3299,7 +3302,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "ask") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
