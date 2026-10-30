@@ -5166,18 +5166,20 @@ print("ok BR03 cmd_copper bounded orchestration")
 BR03_EMPTY_NETLIST = '(export (components) (nets))'
 
 
+BR03_BAD_PROJECTION = '(export (components (comp (ref (bad)))) (nets))'
+bad_netlists = ['(export)','(export (components))','(other (nets))',
+    '(export (nets) (nets))','junk (export (nets))','(export (nets))(garbage)',
+    '(export (nets)','(export (nets) trailing)',
+    '(export (nets (net (name A) (node (ref U1)))))',
+    '(export (nets (net (name A) (node (ref U1) (pin (bad))))))',
+    '(export (nets (net (node (ref U1) (pin 1)))))',
+    '(export-other (nets))',BR03_BAD_PROJECTION]
+
+
 def test_br03_netlist_export():
     import subprocess
     from unittest.mock import patch
     from kicad_review import export_netlist, validate_netlist, read_netlist, validated_net_members
-    BR03_BAD_PROJECTION = '(export (components (comp (ref (bad)))) (nets))'
-    bad_netlists = ['(export)','(export (components))','(other (nets))',
-        '(export (nets) (nets))','junk (export (nets))','(export (nets))(garbage)',
-        '(export (nets)','(export (nets) trailing)',
-        '(export (nets (net (name A) (node (ref U1)))))',
-        '(export (nets (net (name A) (node (ref U1) (pin (bad))))))',
-        '(export (nets (net (node (ref U1) (pin 1)))))',
-        '(export-other (nets))',BR03_BAD_PROJECTION]
     with tempfile.TemporaryDirectory() as td:
         target, pending, marker = (pathlib.Path(td)/n for n in
                                   ('netlist.net','netlist.pending.net','netlist.net.error'))
@@ -5300,6 +5302,88 @@ def test_br03_interfaces_unavailable():
 test_br03_netlist_export()
 test_br03_interfaces_unavailable()
 print("ok BR03 shared bounded netlist evidence and interfaces unavailable result")
+
+
+# BR03 Task 6.3: pairwise electrical assembly never turns unknown schematic evidence into removals.
+def test_br03_electrical_pair():
+    from kicad_review import electrical_changes, read_copper
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={"dir":"p","name":"p"}; out=pathlib.Path("review/p")
+            text='(export (nets (net (name A) (node (ref U1) (pin 1)))))'
+            good={"/a":obj("U1","1","/")}
+            ambiguous={**good,"/b":obj("U1","1","/")}
+            for side in ("base","head"):
+                write(side,{"p/p.kicad_sch":"(kicad_sch)"})
+                write(str(out/side),{"netlist.net":text})
+            for objects in ({"base":good,"head":ambiguous},{"base":ambiguous,"head":good}):
+                rows,issues=electrical_changes(p,str(out),objects,{"base":"b"*40,"head":"h"*40})
+                assert any(i["channel"]=="wiring" and i.get("unknown") for i in issues)
+                assert not any(r["kind"].startswith("net-") for r in rows), "BR03 fabricated ambiguous removal"
+            for side in ("base","head"):
+                for bad in bad_netlists:
+                    (out/side/"netlist.net").write_text(bad)
+                    rows,issues=electrical_changes(p,str(out),{"base":good,"head":good},{})
+                    assert any(i["channel"]=="wiring" for i in issues)
+                    assert not any(r["kind"].startswith("net-") for r in rows)
+                (out/side/"netlist.net").write_text(text)
+            for side in ("base","head"):
+                file=out/side/"netlist.net"; file.unlink()
+                rows,issues=electrical_changes(p,str(out),{"base":good,"head":good},{})
+                assert any(i["channel"]=="wiring" for i in issues)
+                assert not any(r["kind"].startswith("net-") for r in rows)
+                file.write_text(text)
+                marker=out/side/'netlist.net.error'; marker.write_text('boom: timed out after 60 seconds')
+                with patch('kicad_review.export_netlist') as export:
+                    rows,issues=electrical_changes(p,str(out),{'base':good,'head':good},{})
+                export.assert_not_called()
+                assert any(i['channel']=='wiring' for i in issues)
+                assert not any(r['kind'].startswith('net-') for r in rows), 'BR03 ignored netlist error marker'
+                marker.unlink()
+            file=out/"copper-diff.json"
+            artifact={"rows":[{"net":"GND","layer":"F.Cu","addedMm2":1,"removedMm2":0,
+                        "addedContours":[[[0,0],[1,0],[1,1]]],"removedContours":[]}],"incomplete":[]}
+            for field in ("area","point"):
+                bad=json.loads(json.dumps(artifact))
+                if field=="area": bad["rows"][0]["addedMm2"]=10**399
+                else: bad["rows"][0]["addedContours"][0][0][0]=10**399
+                file.write_text(json.dumps(bad)); assert read_copper(file)[0]==[] and read_copper(file)[1]
+        finally: os.chdir(old)
+
+
+def test_br03_pad_evidence():
+    from kicad_review import electrical_changes
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={"dir":"p","name":"p"}; out=pathlib.Path("review/p")
+            def schematic(net):
+                node='(net (name '+net+') (node (ref D1) (pin C)))' if net else ''
+                return ('(export (components (comp (ref D1) (libsource (lib Device) (part D))))'
+                        '(libparts (libpart (lib Device) (part D) (pins (pin (num C)))))'
+                        '(nets '+node+'))')
+            def assembled(board_before,board_after,sch_before,sch_after,fail=False):
+                objects={}
+                for side,net,sch in (("base",board_before,sch_before),("head",board_after,sch_after)):
+                    write(side,{"p/p.kicad_sch":"(kicad_sch)","p/p.kicad_pcb":br03_pcb("fp",[("pad","C",0,net)])})
+                    write(str(out/side),{"netlist.net":"broken" if fail else schematic(sch)})
+                    objects[side]={**kr.pcb_objects(pathlib.Path(side,"p/p.kicad_pcb")),
+                                   "/d":obj("D1","1","/")}
+                write(str(out),{"copper-diff.json":json.dumps({"rows":[],"incomplete":[]})})
+                rows,issues=electrical_changes(p,str(out),objects,{})
+                return next(r for r in rows if r["detail"]["kind"]=="pad-net")["detail"]
+            assert assembled("A","","A","")["boardOnly"] is False, "BR03 synchronized disconnection misclassified"
+            assert assembled("","A","","A")["boardOnly"] is False
+            assert assembled("A","B","A","A")["boardOnly"] is True
+            unknown=assembled("A","B","A","B",fail=True)
+            assert unknown["boardOnly"] is None and "unknown" in unknown["evidenceNote"]
+        finally: os.chdir(old)
+
+
+test_br03_electrical_pair()
+test_br03_pad_evidence()
+print("ok BR03 pairwise electrical assembly and pad evidence")
 # Board inspection adapter: derive mm-units inspection graph and facts from retained scene
 scene = {'copperStack':['F.Cu','In1.Cu','In2.Cu','B.Cu'],
          'nets':[{'id':1,'name':'12'}], 'warnings':[], 'complete':True,

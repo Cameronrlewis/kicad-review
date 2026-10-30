@@ -3198,6 +3198,141 @@ def diff_board_pins(base, head, base_pads, head_pads, commits):
     return rows
 
 
+def read_copper(path):
+    """Strict reader of the optional copper-diff.json; any malformed field makes routing unavailable."""
+    unavailable = lambda reason: ([], [{"channel": "routing", "reason": reason}])
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"),
+                          parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
+        if not isinstance(data, dict) or not isinstance(data.get("rows"), list) or not isinstance(data.get("incomplete"), list):
+            raise ValueError("bad envelope")
+        rows = []
+        for x in data["rows"]:
+            if not isinstance(x.get("net"), str) or not isinstance(x.get("layer"), str):
+                raise ValueError("bad identity")
+            for key in ("addedMm2", "removedMm2"):
+                # math.isfinite raises OverflowError for integers too large for a float.
+                if type(x.get(key)) not in (int, float) or not math.isfinite(x[key]) or x[key] < 0:
+                    raise ValueError("bad area")
+            for key in ("addedContours", "removedContours"):
+                if not isinstance(x.get(key), list):
+                    raise ValueError("bad contours")
+                for ring in x[key]:
+                    if not isinstance(ring, list) or len(ring) < 3:
+                        raise ValueError("bad ring")
+                    for pt in ring:
+                        if not isinstance(pt, list) or len(pt) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in pt):
+                            raise ValueError("bad point")
+            r = electrical_row("copper", f"{x['net'] or '(unconnected)'} on {x['layer']}", channel="routing", weight="medium",
+                               detail={"kind": "area", **{k: x[k] for k in ("layer", "addedMm2", "removedMm2", "addedContours", "removedContours")}},
+                               where={"board": True})
+            r["document"] = "board"
+            pts = [pt for key in ("addedContours", "removedContours") for ring in x[key] for pt in ring]
+            r["box"] = [min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)] if pts else None
+            rows.append(r)
+        issues = data["incomplete"]
+        if any(not isinstance(i, dict) or i.get("channel") != "routing" or not isinstance(i.get("reason"), str) for i in issues):
+            raise ValueError("bad issues")
+        return rows, issues
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return unavailable("Copper comparison missing or malformed")
+
+
+def schematic_pin_ids(text, objects):
+    """Pins proven to exist: a uniquely resolved component whose exported libpart enumerates the pin.
+
+    A missing net node alone is never proof of disconnection; without this proof a pin stays unknown.
+    """
+    root = parse_sexpr(text)
+    libraries = {}
+    for part in findall(find(root, "libparts") or [], "libpart"):
+        libraries[(val(part, "lib"), val(part, "part"))] = {
+            val(pin, "num") for pin in findall(find(part, "pins") or [], "pin") if val(pin, "num")}
+    refs = {}
+    for o in objects.values():
+        if o["kind"] == "symbol":
+            refs.setdefault(o["props"].get("reference", o.get("ref", "")), []).append(o)
+    result = set()
+    components = findall(find(root, "components") or [], "comp")
+    for comp in components:
+        ref = val(comp, "ref")
+        candidates = refs.get(ref, [])
+        identities = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1")) for o in candidates]
+        if not ref or "?" in ref or not candidates or len(identities) != len(set(identities)):
+            continue
+        sheets = {sheet for sheet, _ in identities}
+        if len(sheets) != 1 or None in sheets:
+            continue
+        if sum(val(c, "ref") == ref for c in components) != 1:
+            continue
+        source = find(comp, "libsource")
+        result.update(ref + "." + pin for pin in libraries.get((val(source, "lib"), val(source, "part")), set()))
+    return result
+
+
+def electrical_changes(p, out, objs, commits):
+    """Net, wire, board-pad, copper and rule rows for one project pair, plus channel incompleteness issues.
+
+    A present schematic with missing, malformed or ambiguous netlist evidence makes the whole
+    schematic membership pair unknown: no net rows, and board-pad board-only status unknown.
+    """
+    roots = {s: posixpath.join(s, p["dir"]) for s in ("base", "head")}
+    members, anchors, issues = {}, {}, []
+    known_pins = {"base": set(), "head": set()}
+    usable = True
+    for side, root in roots.items():
+        members[side], anchors[side] = {}, {}
+        if not pathlib.Path(root, p["name"] + ".kicad_sch").is_file():
+            continue  # An absent schematic is an absent side, not unknown evidence.
+        try:
+            text = read_netlist(pathlib.Path(out) / side)
+            members[side], anchors[side], found = validated_net_members(text, objs[side], commits.get(side, ""))
+            known_pins[side] = schematic_pin_ids(text, objs[side])
+            issues += [{**i, "document": "schematic"} for i in found]
+            if any(i.get("unknown") for i in found):
+                usable = False
+        except (OSError, ValueError, TypeError, IndexError, KeyError, AttributeError) as exc:
+            usable = False
+            issues.append({"channel": "wiring", "document": "schematic",
+                           "reason": f"{side} netlist unavailable: {str(exc)[:500]}"})
+    netrows = diff_nets(members["base"], members["head"]) if usable else []
+    for r in netrows:
+        for side, key in (("base", "beforeNets"), ("head", "afterNets")):
+            pins = set().union(*(members[side][n] for n in r["detail"][key]))
+            r["anchors"][side] = [a for pin in sorted(pins) for a in anchors[side].get(pin, [])]
+        first = next(iter(r["anchors"]["head"] or r["anchors"]["base"]), None)
+        r["where"] = {"sheet": first["sheet"]} if first else None
+    pcbs = {s: pathlib.Path(root, p["name"] + ".kicad_pcb") for s, root in roots.items()}
+    padrows = diff_board_pins(objs["base"], objs["head"], board_pads(pcbs["base"]), board_pads(pcbs["head"]), commits)
+
+    def pin_net(side, key):
+        """Schematic net of a pin: None means unknown; "" means a proven pin with no net assignment."""
+        if not usable:
+            return None
+        found = [name for name, pins in members[side].items() if key in pins]
+        if len(found) == 1:
+            return found[0]
+        if found:
+            return None
+        return "" if key in known_pins[side] else None
+
+    for r in padrows:
+        bp, hp = r["anchors"]["base"][0], r["anchors"]["head"][0]
+        before, after = pin_net("base", bp["ref"] + "." + bp["pin"]), pin_net("head", hp["ref"] + "." + hp["pin"])
+        r["detail"]["boardOnly"] = (None if before is None or after is None else
+                                    (before, after) != (r["detail"]["before"], r["detail"]["after"]))
+        if r["detail"]["boardOnly"] is None:
+            r["detail"]["evidenceNote"] = "Schematic assignment unavailable; board-only status unknown"
+    copperrows, found = read_copper(pathlib.Path(out) / "copper-diff.json") if any(f.is_file() for f in pcbs.values()) else ([], [])
+    issues += [{**i, "document": "board"} for i in found]
+    try:
+        rulerows = diff_rules(roots["base"], roots["head"], p["name"])
+    except (OSError, ValueError, TypeError, AttributeError, IndexError):
+        rulerows = []
+        issues.append({"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"})
+    return netrows + diff_wires(objs["base"], objs["head"]) + padrows + copperrows + rulerows, issues
+
+
 def ohms(value):
     if not value or len(value) > 32:
         return None
