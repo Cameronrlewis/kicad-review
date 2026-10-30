@@ -6130,19 +6130,41 @@ assert len(lp["properties"]["Note"]) == 200 and lp["properties"]["Note"] == "n" 
 assert parts["R1"]["properties_truncated"] is False and parts["R1"]["incomplete_fields"] == [] and parts["R1"]["value"] == "10k"
 assert kr.context_parts({"/uuid-3": long_part})["R1"]["mpn"] is None, "absent identity stays null, not an empty string"
 # Shared BOM cases (spec 08 fixture): every part's bom is 08's bom_identity, with the same included flags, excludedReason, line keys and quantities.
-# The fixture and 08's parts_lines arrive when 08 merges; until then this branch carries only 08's bom_identity handoff.
-bom_fixture = pathlib.Path(__file__).parent / "ui" / "fixtures" / "bom-cases.json"
-if bom_fixture.exists():
-    bom_cases = json.load(open(bom_fixture, encoding="utf-8"))
-    for case in bom_cases:
-        for oid, obj in case["objects"].items():
-            b = kr.bom_identity(obj)
-            assert b["included"] is case["expect"]["included"][oid] and b["excludedReason"] == case["expect"]["excludedReason"][oid], (case["name"], oid, b)
+# The fixture is 08 Task 3's file, byte-identical (08 handoff); it is required. 08's parts_lines is not on this branch
+# (only bom_identity may be handed off), so line keys and quantities are asserted through 09's own parts[].bom records,
+# grouped the way 10 consumes them; 08's parts_lines leg joins once 08 merges.
+bom_cases = json.load(open(pathlib.Path(__file__).parent / "ui" / "fixtures" / "bom-cases.json", encoding="utf-8"))
+assert bom_cases, "shared BOM cases must not be empty"
+for case in bom_cases:
+    for oid, obj in case["objects"].items():
+        b = kr.bom_identity(obj)
+        assert b["included"] is case["expect"]["included"][oid] and b["excludedReason"] == case["expect"]["excludedReason"][oid], (case["name"], oid, b)
+    expect = sorted([(e["key"], e["refs"], e["quantity"], e["mpn"]) for e in case["expect"]["lines"]])
+    ctx_lines = {}
+    placed_objs = {oid: {**o, "props": {"reference": kr.base_ref(o["ref"]), **o["props"]}} for oid, o in case["objects"].items()}  # project_objects' shape
+    for rec in kr.context_parts(placed_objs).values():
+        if rec["bom"]["included"]:
+            ctx_lines.setdefault(rec["bom"]["key"], {"refs": [], "mpn": rec["bom"]["mpn"]})["refs"].append(rec["bom"]["ref"])
+    assert sorted((k, l["refs"], len(l["refs"]), l["mpn"]) for k, l in ctx_lines.items()) == expect, case["name"]
+    if hasattr(kr, "ref_ranges"):  # 08's parts_lines (08 Task 3) is merged
         lines = sorted(kr.parts_lines(case["objects"]), key=lambda line: line["key"])
-        expect = sorted(case["expect"]["lines"], key=lambda line: line["key"])
-        assert [(l["refs"], len(l["refs"]), l["mpn"], l["key"]) for l in lines] == [(e["refs"], e["quantity"], e["mpn"], e["key"]) for e in expect], case["name"]
-else:
-    print("pending 08 merge: ui/fixtures/bom-cases.json absent, shared BOM cases not asserted")
+        assert [(l["key"], l["refs"], len(l["refs"]), l["mpn"]) for l in lines] == expect, case["name"]
+# Forward indexes describe the same pins in netlist order; only single-pin unconnected- nets are unconnected; pin functions are never cut silently.
+fwd = netlist({"U1": ("MCU", "LQFP", "MCU:M"), "R1": ("10k", "R_0402", "Device:R")},
+              {"A": [("R1", "2", "", "passive")], "B": [("U1", "1", "", "passive"), ("R1", "1", "", "passive")],
+               "unconnected-bus": [("U1", "3", "", "passive"), ("R1", "3", "", "passive")],
+               "unconnected-(U1-Pad4)": [("U1", "4", "f" * 61, "passive")]})
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"netlist.net": fwd})
+    fctx = kr.side_context(t, objs, net_cap=1)
+    fb = {n["id"]: n for n in fctx["nets"]}
+    assert fb["B"]["pins"] == ["U1.1"] and fb["B"]["pin_records"] == [{"ref": "U1", "pin": "1"}], fb["B"]
+    assert fb["unconnected-bus"]["pin_count"] == 2 and fctx["unconnected_pins"] == 1, "a connected net named unconnected- stays a net"
+    fu1 = next(p for p in fctx["parts"] if p["ref"] == "U1")
+    assert {"pin": "3", "net": "unconnected-bus"} in fu1["pins"] and "R1" in fu1["neighbors"]
+    cut_fn = next(v for v in fu1["pins"] if v["pin"] == "4")
+    assert cut_fn["fn"] == "f" * 60 and cut_fn["fn_truncated"] is True, cut_fn
+    assert all("fn_truncated" not in v for v in fu1["pins"] if v["pin"] != "4")
 placed = {"/bom-u1": {"kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "props": {"reference": "R1", "Value": "10k", "Footprint": "R_0402", "dnp": "yes"}}}
 assert kr.context_parts(placed)["R1"]["bom"] == kr.bom_identity(placed["/bom-u1"]) and kr.context_parts(placed)["R1"]["bom"]["excludedReason"] == "dnp"
 print("ok ask parts and nets")

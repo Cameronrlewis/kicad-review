@@ -3460,23 +3460,26 @@ def keep(value, n):
 
 
 def netlist_context(text, net_cap, pin_cap):
-    """Nets as {id, pin_count, pins[REF.PIN], more} and, per part, its pins {pin, net, fn}. Single-pin unconnected nets are counted, not listed.
+    """Nets as {id, pin_count, pins[REF.PIN], pin_records[{ref, pin}], more} and, per part, its pins {pin, net, fn, fn_truncated?}. Single-pin unconnected- nets are counted, not listed; a connected net keeps its name whatever it starts with.
     `text` must be the return value of 03's read_netlist, which already enforces the single export root, unique net names and identity fields. This function adds only the components check the context needs."""
     root = parse_sexpr(text)
     if not root or root[0] != "export" or find(root, "components") is None:
         raise ValueError("netlist has no components section")
     _, nets = parse_netlist(text)
     out, by_ref, unconnected = [], {}, 0
-    fn = lambda n: {"fn": clip(n["function"], 60)} if n["function"] else {}
+    def fn(n):
+        value, cut = keep(n["function"], 60)
+        return {"fn": value, "fn_truncated": True} if cut else {"fn": value} if value else {}  # never cut silently; fit_context reads the mark
     for raw in sorted(nets, key=lambda k: natural(str(k))):
         name, nodes = str(raw), nets[raw]
-        if name.startswith("unconnected-"):
+        if name.startswith("unconnected-") and len(nodes) == 1:  # KiCad's generated name for a lone pin
             unconnected += len(nodes)
             for n in nodes:
                 by_ref.setdefault(n["ref"], []).append({"pin": n["pin"], "net": None, **fn(n)})
             continue
         pins = [f'{n["ref"]}.{n["pin"]}' for n in nodes]
         out.append({"id": name, "pin_count": len(pins), "pins": pins[:net_cap],
+                    "pin_records": [{"ref": n["ref"], "pin": n["pin"]} for n in nodes[:net_cap]],  # same nodes, same order as pins
                     **({"more": len(pins) - net_cap} if len(pins) > net_cap else {})})
         for n in nodes:
             by_ref.setdefault(n["ref"], []).append({"pin": n["pin"], "net": name, **fn(n)})
@@ -3543,7 +3546,6 @@ def side_context(side_dir, objs, net_cap=40, pin_cap=64):
         refs = {ref for ref, entries in pins.items() if any(v["net"] == n["id"] for v in entries)}
         n["name"] = n["id"]
         n["sheet_paths"] = sorted({part["sheet"] for part in parts if part["ref"] in refs and part["sheet"] is not None})
-        n["pin_records"] = [{"ref": ref, "pin": v["pin"]} for ref, entries in pins.items() for v in entries if v["net"] == n["id"]][:net_cap]
         n.update(hierarchical_labels=None, global_labels=None, local_labels=None)
         n["labels_unavailable"] = "KiCad netlist does not retain label kinds; no geometric connectivity inference"
     return {"netlist_available": reason is None, "netlist_reason": reason, "parts": parts, "nets": nets,
