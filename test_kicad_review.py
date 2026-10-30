@@ -3661,7 +3661,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "design", "github", "interfaces", "release")}, "run_id": "", "projects": []}
             legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
@@ -4795,3 +4795,29 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
         warning = ''.join(str(call.args[0]) for call in log.write.call_args_list)
         assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
+
+# ---- Design page (spec 06). Shared helpers for every DP-S block below. ----
+import json as _dpjson, re as _dpre, base64 as _dpb64, gzip as _dpgz
+from tempfile import TemporaryDirectory as _DpTmp
+_dp_erc = lambda uuid, kind: _dpjson.dumps({"sheets": [{"uuid_path": "/", "violations": [{"type": kind, "severity": "error", "description": kind,
+    "items": [{"uuid": uuid, "description": "Symbol U1 pin 1", "pos": {"x": 0.5, "y": 0.5}}]}]}]})
+_dp_pcb = lambda extra: ('(kicad_pcb (version 20260206) (layers (0 "F.Cu" signal) (2 "B.Cu" signal)) (gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "e1"))' + extra + ')')
+
+# DP-S1: the setting is off by default, validated, and kept out of opted-out reports.
+assert kr.DEFAULT_SETTINGS["design"] == {"enabled": False}
+for bad in ('"yes"', "1", "[]"):
+    with _DpTmp() as t:
+        write(t, {"kicad-review.toml": "[design]\nenabled = " + bad + "\n"})
+        old = os.getcwd(); os.chdir(t)
+        try:
+            kr.load_settings(("",))
+            raise AssertionError("design.enabled = " + bad + " accepted")
+        except SystemExit as e:
+            assert "design.enabled must be true or false" in str(e)
+        finally:
+            os.chdir(old)
+assert "design" not in kr.filtered_settings(kr.load_settings(("nowhere",))), "an opted-out report carries no design key"
+_on = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); _on["design"]["enabled"] = True
+assert kr.filtered_settings(_on)["design"] == {"enabled": True}
+assert kr.filtered_settings(_on)["checks"] == kr.filtered_settings({**_on, "design": {"enabled": False}})["checks"]
+print("ok DP-S1 design setting, validation and opt-out")

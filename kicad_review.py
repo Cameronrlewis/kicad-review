@@ -1864,6 +1864,7 @@ DEFAULT_SETTINGS = {
     "waivers": {"enabled": False},
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
+    "design": {"enabled": False},  # head-only design snapshot on default-branch pushes, version tags and manual snapshot runs
 }
 CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package"}
 
@@ -1890,7 +1891,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "design"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -1938,6 +1939,8 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: inventory.enabled must be true or false")
     if not isinstance(settings["libraries"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: libraries.enabled must be true or false")
+    if not isinstance(settings["design"]["enabled"], bool):
+        sys.exit(f"{SETTINGS_FILE}: design.enabled must be true or false")
     for key, value in (("threads.block_merge", settings["threads"]["block_merge"]), ("github.check_runs", settings["github"]["check_runs"])):
         if not isinstance(value, bool):
             sys.exit(f"{SETTINGS_FILE}: {key} must be true or false")
@@ -3291,22 +3294,27 @@ def merge_supplier(projects, lookup):
         parts["supplier"] = {**lookup["supplier"], "looked_up": len(looked_up), "not_looked_up": counts}
 
 
+def filtered_settings(settings):
+    """Keep opted-out report data compatible; embedded UI bytes may change."""
+    report_settings = {k: v for k, v in settings.items()
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "design") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+    if not settings["parts"]["enabled"]:
+        report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
+    if settings["checks"].get("interfaces") == "off":  # opted-out report settings stay identical
+        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}
+        report_settings.pop("interfaces", None)
+    if settings["checks"].get("release") == "off":  # opted-out report settings stay identical
+        report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
+    return report_settings
+
+
 def cmd_report(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     blobs = {}
     env = os.environ
     settings = load_settings()
-    # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
-    report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
-    if not settings["parts"]["enabled"]:
-        report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
-    if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
-        report_settings["checks"] = {k: v for k, v in settings["checks"].items() if k != "interfaces"}
-        report_settings.pop("interfaces", None)
-    if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
-        report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
+    report_settings = filtered_settings(settings)
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
