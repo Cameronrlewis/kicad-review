@@ -5,6 +5,22 @@ on:
 permissions:
   contents: read
 jobs:
+  # The light and dark full suites each take ~15-30 min on software GL; running both in one job overran its timeout.
+  dark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CHECK_TIMEOUT: 60000
+      CHECK_WALL_TIMEOUT: 120000
+      CHROME: google-chrome
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: node ui/check.mjs --dark
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -29,7 +45,6 @@ jobs:
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
           python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js"), ("images", "review-data-images.js")]]'
       - run: node ui/check.mjs
-      - run: node ui/check.mjs --dark
       - run: node ui/check.mjs --no-skip "Waivers"
       - run: node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "selection-only address"
