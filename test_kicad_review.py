@@ -1699,6 +1699,7 @@ for suffix in ('', ' --dark'):
 assert "data['mode'] = 'single'" in test_wf and 'review-data-3d-processed.js' in test_wf
 # BR02 processed fixture: CI builds it with inline_page and runs every processed check light and dark.
 assert '("processed", "review-data-3d-processed.js")' in test_wf, 'TS-S1 processed fixture missing'
+runner = pathlib.Path('ui/check.mjs').read_text()
 for command in (
     'node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"',
     'node ui/check.mjs --no-skip "BR02 processed" --dark --page "$PAGES/processed.html"',
