@@ -3528,7 +3528,8 @@ def side_context(side_dir, objs, net_cap=40, pin_cap=64):
     """Parts and nets of one revision, read only through 03's read_netlist (marker first, then strict validation). If the netlist is missing or unusable the nets stay empty and the reason says why; nothing is built from geometry."""
     nets, pins, unconnected, reason = [], {}, 0, None
     try:
-        nets, pins, unconnected = netlist_context(read_netlist(side_dir), net_cap, pin_cap)
+        text = read_netlist(side_dir)
+        nets, pins, unconnected = netlist_context(text, net_cap, pin_cap)
     except FileNotFoundError:
         reason = "no netlist was exported for this revision"
     except ValueError as exc:
@@ -3537,6 +3538,14 @@ def side_context(side_dir, objs, net_cap=40, pin_cap=64):
         reason = clip(exc, 500) if marker else f"netlist unreadable: {clip(exc, 200)}"
     except OSError as exc:  # ponytail: unreadable file; reported, never a stack trace in a review
         reason = f"netlist unreadable: {clip(exc, 200)}"
+    labels, label_reason = None, "KiCad netlist does not retain label kinds; no geometric connectivity inference"
+    if reason is None:
+        try:
+            labels = read_label_membership(side_dir, text)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            label_reason = clip(exc, 500)
     parts = []
     for rec in context_parts(objs).values():
         mine = pins.get(rec["ref"], [])
@@ -3549,8 +3558,16 @@ def side_context(side_dir, objs, net_cap=40, pin_cap=64):
         refs = {ref for ref, entries in pins.items() if any(v["net"] == n["id"] for v in entries)}
         n["name"] = n["id"]
         n["sheet_paths"] = sorted({part["sheet"] for part in parts if part["ref"] in refs and part["sheet"] is not None})
-        n.update(hierarchical_labels=None, global_labels=None, local_labels=None)
-        n["labels_unavailable"] = "KiCad netlist does not retain label kinds; no geometric connectivity inference"
+        if labels is None:
+            n.update(hierarchical_labels=None, global_labels=None, local_labels=None, labels_unavailable=label_reason)
+        else:
+            rec = labels.get(n["id"], {})
+            for key in LABEL_KINDS.values():
+                items = rec.get(key, [])
+                n[key] = items[:CONTEXT_LIST]
+                if len(items) > CONTEXT_LIST:
+                    n[f"{key}_more"] = len(items) - CONTEXT_LIST
+            n["labels_unavailable"] = None
     return {"netlist_available": reason is None, "netlist_reason": reason, "parts": parts, "nets": nets,
             "unconnected_pins": unconnected}
 
@@ -3689,6 +3706,16 @@ def export_label_membership(src_dir, name, out):
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as exc:  # AttributeError: a non-object erc.json
         target.unlink(missing_ok=True)
         marker.write_text(" ".join(f"label kinds unavailable: {exc}".split())[:500], encoding="utf-8")
+
+
+def read_label_membership(side_dir, netlist_text):
+    marker = pathlib.Path(side_dir, "labels.json.error")
+    if marker.exists():
+        raise ValueError(marker.read_text(encoding="utf-8")[:500] or "label kinds unavailable")
+    doc = json.loads(pathlib.Path(side_dir, "labels.json").read_text(encoding="utf-8"))
+    if not isinstance(doc, dict) or doc.get("version") != 1 or doc.get("netlist_sha256") != hashlib.sha256(netlist_text.encode("utf-8")).hexdigest():
+        raise ValueError("label membership does not belong to this revision's netlist")
+    return doc["nets"]
 
 
 CONTEXT_LIMIT = 200_000  # bytes: the spec's target for design-context.json

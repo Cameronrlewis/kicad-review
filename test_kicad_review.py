@@ -6559,3 +6559,28 @@ with tempfile.TemporaryDirectory() as t:
             kr.render_side(f"{t}/src", "P", f"{t}/out", netlist=True, ask=ask_on)
         assert labels.call_count == (1 if ask_on else 0), "Ask-only: Ask-off runs no extra KiCad command"
 print("ok ask label kinds are KiCad-verified or fail closed")
+
+
+# Ask (spec 09, Task 3D): verified label lists fill the nets; anything else keeps the null fallback with a reason.
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"netlist.net": nt})
+    digest = hashlib.sha256(pathlib.Path(t, "netlist.net").read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    many = [{"text": f"L{i}", "sheet": "/"} for i in range(20)]
+    write(t, {"labels.json": json.dumps({"version": 1, "netlist_sha256": digest, "unattached": 0, "probes": 21,
+              "nets": {"12": {"local_labels": many, "global_labels": [{"text": "G", "sheet": "/pwr/"}], "hierarchical_labels": []}}})})
+    ctx = kr.side_context(t, objs, net_cap=15, pin_cap=2)
+    n12, vbus = (next(n for n in ctx["nets"] if n["id"] == k) for k in ("12", "VBUS"))
+    assert n12["labels_unavailable"] is None and n12["global_labels"] == [{"text": "G", "sheet": "/pwr/"}] and n12["hierarchical_labels"] == []
+    assert len(n12["local_labels"]) == 15 and n12["local_labels_more"] == 5
+    assert vbus["labels_unavailable"] is None and all(vbus[k] == [] for k in ("local_labels", "global_labels", "hierarchical_labels")), "verified: no labels"
+    write(t, {"labels.json": json.dumps({"version": 1, "netlist_sha256": "0" * 64, "nets": {}})})
+    stale = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert stale["local_labels"] is None and "this revision" in stale["labels_unavailable"]
+    write(t, {"labels.json.error": "label kinds unavailable: x.kicad_sch has buses; bus membership is not resolved"})
+    failed = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert failed["global_labels"] is None and "bus membership" in failed["labels_unavailable"]
+    pathlib.Path(t, "labels.json.error").unlink(); pathlib.Path(t, "labels.json").unlink()
+    legacy = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert legacy["hierarchical_labels"] is None and legacy["labels_unavailable"], "no producer output: Task 3's fail-closed fallback"
+print("ok ask nets carry verified label kinds")
+
