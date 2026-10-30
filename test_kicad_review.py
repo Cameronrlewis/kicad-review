@@ -4863,3 +4863,44 @@ with _DpTmp() as t:
     finally:
         os.chdir(old_cwd)
 print("ok DP-S2 single-revision project ignores the base side")
+
+# DP-S3: a design report skips the base side of the libraries, release and interface checks, even when base inputs are on disk.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side, pin_type, rx_or_txd in (("base", "input", "TXD"), ("head", "passive", "RX")):
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1"))))', f"{side}/H/H.kicad_pcb": _dp_pcb(""),
+                      f"{side}/H/Parts.kicad_sym": '(kicad_symbol_lib (version 20231120) (symbol "LDO" (property "Reference" "U") (symbol "LDO_1_1" '
+                                                   f'(pin {pin_type} line (at 0 0 0) (length 2.54) (name "IN" (effects)) (number "1" (effects))))))',
+                      f"review/H/{side}/sch/H.svg": '<svg viewBox="0 0 100 50"><path d="M0 0H5"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc("u-" + side, "pin_not_connected"), f"review/H/{side}/drc.json": "{}",
+                      f"review/H/{side}/netlist.net": '(export (version "E") (components ) (nets (net (code "1") (name "TX") '
+                                                      '(node (ref "U1") (pin "1") (pinfunction "TX") (pintype "output")) '
+                                                      f'(node (ref "U2") (pin "1") (pinfunction "{rx_or_txd}") (pintype "output")))))'})
+        settings = {**json.loads(json.dumps(kr.DEFAULT_SETTINGS)), "libraries": {"enabled": True}}
+        settings["checks"] = {**settings["checks"], "release": "required", "interfaces": "required"}
+        project = {"dir": "H", "name": "H", "status": "modified"}
+        seen = {}
+        real_run_check = kr.run_check
+        def spy(name, settings, head, base, waivers=None):
+            seen.setdefault(name, []).append((head is not None, base is not None))
+            return real_run_check(name, settings, head, base, waivers)
+        with patch("kicad_review.run_check", side_effect=spy):
+            compared = kr.build_project(project, {}, settings)
+            assert all(seen[n] == [(True, True)] for n in ("release", "interfaces")), seen  # the comparison path reads base
+            assert compared["libraries"][0]["status"] == "modified", compared.get("libraries")
+            ic = next(c for c in compared["checks"] if c["name"] == "interfaces")
+            assert ic["errors"] == 0 and ic["fixed"] == 1, ic  # the base-only TXD finding counts as fixed
+            seen.clear()
+            one = kr.build_project(project, {}, settings, single=True)
+        assert all(seen[n] == [(True, False)] for n in ("release", "interfaces")), seen  # head is read, base never is
+        assert "libraries" not in one, "a design report must not carry library changes"
+        ic = next(c for c in one["checks"] if c["name"] == "interfaces")
+        assert ic["errors"] == 0 and ic["violations"] == [] and ic["new_errors"] == 0 and ic["fixed"] == 0, ic
+        rc = next(c for c in one["checks"] if c["name"] == "release")
+        assert [v["type"] for v in rc["violations"]] == ["missing_package"] and rc["fixed"] == 0, rc
+        assert all(not v["new"] for c in one["checks"] for v in c["violations"]), one["checks"]
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S3 single-revision project skips base libraries, release and interface checks")
