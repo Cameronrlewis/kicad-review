@@ -6132,7 +6132,9 @@ assert kr.context_parts({"/uuid-3": long_part})["R1"]["mpn"] is None, "absent id
 # Shared BOM cases (spec 08 fixture): every part's bom is 08's bom_identity, with the same included flags, excludedReason, line keys and quantities.
 # The fixture is 08 Task 3's file, byte-identical (08 handoff); it is required. 08's parts_lines is not on this branch
 # (only bom_identity may be handed off), so line keys and quantities are asserted through 09's own parts[].bom records,
-# grouped the way 10 consumes them; 08's parts_lines leg joins once 08 merges.
+# grouped the way 10 consumes them. The parts_lines leg is skipped only while the 08 handoff block stands in
+# kicad_review.py; 08's merge replaces that block, and from then on the leg is required (no name-based guess).
+bom_handoff = "# ---- 08 handoff: bom_identity" in pathlib.Path(kr.__file__).read_text(encoding="utf-8")
 bom_cases = json.load(open(pathlib.Path(__file__).parent / "ui" / "fixtures" / "bom-cases.json", encoding="utf-8"))
 assert bom_cases, "shared BOM cases must not be empty"
 for case in bom_cases:
@@ -6146,7 +6148,7 @@ for case in bom_cases:
         if rec["bom"]["included"]:
             ctx_lines.setdefault(rec["bom"]["key"], {"refs": [], "mpn": rec["bom"]["mpn"]})["refs"].append(rec["bom"]["ref"])
     assert sorted((k, l["refs"], len(l["refs"]), l["mpn"]) for k, l in ctx_lines.items()) == expect, case["name"]
-    if hasattr(kr, "ref_ranges"):  # 08's parts_lines (08 Task 3) is merged
+    if not bom_handoff:  # 08's bom_identity and parts_lines (08 Task 3) are merged
         lines = sorted(kr.parts_lines(case["objects"]), key=lambda line: line["key"])
         assert [(l["key"], l["refs"], len(l["refs"]), l["mpn"]) for l in lines] == expect, case["name"]
 # Forward indexes describe the same pins in netlist order; only single-pin unconnected- nets are unconnected; pin functions are never cut silently.
@@ -6165,6 +6167,9 @@ with tempfile.TemporaryDirectory() as t:
     cut_fn = next(v for v in fu1["pins"] if v["pin"] == "4")
     assert cut_fn["fn"] == "f" * 60 and cut_fn["fn_truncated"] is True, cut_fn
     assert all("fn_truncated" not in v for v in fu1["pins"] if v["pin"] != "4")
+if bom_handoff:
+    print(f"pending 08 merge: 08 handoff block in place, parts_lines leg of {len(bom_cases)} shared BOM cases not asserted "
+          "(bom_identity eligibility and context_parts keys/quantities asserted)")
 placed = {"/bom-u1": {"kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "props": {"reference": "R1", "Value": "10k", "Footprint": "R_0402", "dnp": "yes"}}}
 assert kr.context_parts(placed)["R1"]["bom"] == kr.bom_identity(placed["/bom-u1"]) and kr.context_parts(placed)["R1"]["bom"]["excludedReason"] == "dnp"
 print("ok ask parts and nets")
