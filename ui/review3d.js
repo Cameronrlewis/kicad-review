@@ -2,7 +2,7 @@
 /* Lazy 3D board viewer. The three.js bundle remains inert until this view opens. */
 window.Review3D = (() => {
   const style = document.createElement("style");
-  style.textContent = `.mode-3d [data-poster]{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.mode-3d [hidden]{display:none!important}.mode-3d .error3d{position:absolute;bottom:16px;left:16px;right:16px;z-index:3;padding:12px;background:var(--surface);color:var(--text);border:1px solid var(--line)}.mode-3d .error3d{overflow-wrap:anywhere;max-height:calc(100% - 32px);overflow:auto;box-sizing:border-box}.mode-3d .error3d button{min-height:32px;cursor:pointer;color:var(--text);background:var(--surface);border:1px solid var(--line);padding:4px 12px}.mode-3d .error3d p{margin:0 0 8px}.mode-3d button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.mode-3d .view3d{min-width:0;position:relative}.mode-3d .view3d.one{grid-column:1/-1}.mode-3d canvas{display:block;width:100%;height:100%}.mode-3d .marker3d,.tip3d{position:absolute;z-index:2;pointer-events:none;transform:translate(-50%,-100%);font:700 13px system-ui,sans-serif;line-height:1;white-space:nowrap;color:var(--text);text-shadow:0 1px 2px var(--paper),1px 0 2px var(--paper),-1px 0 2px var(--paper),0 -1px 2px var(--paper)}.tip3d{text-shadow:none;padding:3px 5px;background:var(--surface);border:1px solid var(--line);border-radius:3px}.loading,.empty3d{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);margin:0}#modes button[aria-disabled=true]{cursor:not-allowed;opacity:.55}`;
+  style.textContent = `.mode-3d [hidden]{display:none!important}.mode-3d .error3d{position:absolute;bottom:16px;left:16px;right:16px;z-index:3;padding:12px;background:var(--surface);color:var(--text);border:1px solid var(--line)}.mode-3d .error3d{overflow-wrap:anywhere;max-height:calc(100% - 32px);overflow:auto;box-sizing:border-box}.mode-3d .error3d button{min-height:32px;cursor:pointer;color:var(--text);background:var(--surface);border:1px solid var(--line);padding:4px 12px}.mode-3d .error3d p{margin:0 0 8px}.mode-3d button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.mode-3d .view3d{min-width:0;position:relative}.mode-3d .view3d.one{grid-column:1/-1}.mode-3d canvas{display:block;width:100%;height:100%}.mode-3d .marker3d,.tip3d{position:absolute;z-index:2;pointer-events:none;transform:translate(-50%,-100%);font:700 13px system-ui,sans-serif;line-height:1;white-space:nowrap;color:var(--text);text-shadow:0 1px 2px var(--paper),1px 0 2px var(--paper),-1px 0 2px var(--paper),0 -1px 2px var(--paper)}.tip3d{text-shadow:none;padding:3px 5px;background:var(--surface);border:1px solid var(--line);border-radius:3px}.loading,.empty3d{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);margin:0}#modes button[aria-disabled=true]{cursor:not-allowed;opacity:.55}`;
   document.head.appendChild(style);
   let active = null, bundle;
   const gunzip = b64 => new Response(new Blob([Uint8Array.from(atob(b64), c => c.charCodeAt(0))]).stream().pipeThrough(new DecompressionStream("gzip")));
@@ -33,6 +33,7 @@ window.Review3D = (() => {
     try {
       let bytes;
       if (window.REVIEW_DATA.blobs[id]) bytes = await guardSession(s, decode3d({b64:window.REVIEW_DATA.blobs[id]}, s));
+      // parked for Task 9A: authorized model/index requests replace embedded bytes.
       else if (board.assets3d?.[side]?.parts && typeof requestAsset3d === 'function')
         bytes = await requestAsset3d(board.assets3d[side].parts, 'board-parts.json', s);
       else throw Error('3D part index unavailable');
@@ -50,6 +51,7 @@ window.Review3D = (() => {
       return [];
     }
   }
+  // parked for Task 9A: bytes/gzip sources also decode authorized broker responses.
   function decode3d(source, s) {
     if (s.dead) return Promise.reject(new DOMException('Viewer closed', 'AbortError'));
     try {
@@ -135,7 +137,7 @@ window.Review3D = (() => {
     for (const t of textures) t.dispose();
     for (const target of new Set(s.environments.values())) target.dispose();
     geometries.clear(); materials.clear(); textures.clear(); s.environments.clear();
-    s.renderer?.dispose(); s.canvas?.remove();
+    s.renderer?.forceContextLoss(); s.renderer?.dispose(); s.canvas?.remove();
   }
   function parseByDigest(s, digest, bytes, parser) {
     const existing = s.parses.get(digest);
@@ -153,7 +155,7 @@ window.Review3D = (() => {
   const sideRoot = (s, side) => s.roots[s.allowedSides.indexOf(side)];
   function dispose() {
     if (!active) return;
-    const s = active; closeSession(s); clearInterval(s.themeTimer);
+    const s = active; closeSession(s);
     for (const [node, afterRender] of s.renderHooks) node.onAfterRender = afterRender;
     s.renderHooks.length = 0;
     s.views.forEach(v => { clearTimeout(v.tip); v.controls.dispose(); });
@@ -206,7 +208,7 @@ window.Review3D = (() => {
     for (const control of menu.querySelectorAll('select,input')) control.disabled = !s.renderer || !!s.contextLost;
     const stats = s.project.board.coverage3dBySide?.[s.revision];
     menu.querySelector('.coverage3d').textContent = stats
-      ? '3D coverage: ' + stats.withModel + ' of ' + stats.footprints + ' parts have models'
+      ? '3D coverage: ' + stats.withModel + ' of ' + stats.footprints + ' parts have models' + (stats.warnings?.length ? ' · ' + stats.warnings.join('; ') : '')
       : '3D coverage unavailable';
   }
 
@@ -262,8 +264,9 @@ window.Review3D = (() => {
     bar.innerHTML = `<details class="camera-presets"><summary title="3D camera orientations"><svg class="i" aria-hidden="true"><use href="#kr-i-cube"></use></svg>Camera</summary><div class="camera-menu">${["Top","Bottom","Front","Back","Left","Right","3D","Reset"].map(n => `<button data-3d-camera="${n.toLowerCase()}" title="${n} camera view">${n}</button>`).join("")}</div></details>${toolsHtml()}`;
     const menu = bar.querySelector(".camera-presets"), popup = bar.querySelector(".camera-menu");
     for (const [d, p, w] of [[menu, popup, 180], [bar.querySelector(".light3d"), bar.querySelector(".light-menu"), 240]]) {
-      d.ontoggle = () => { if (!d.open) { d.querySelector("summary").focus(); return; } const r = d.getBoundingClientRect(); p.style.top = document.querySelector("#toolbar").getBoundingClientRect().bottom + 4 + "px"; p.style.left = Math.max(0, Math.min(r.left, innerWidth - w)) + "px"; };
-      d.onkeydown = e => { if (e.key === "Escape") { d.open = false; e.stopPropagation(); } };
+      const focusSummary = () => { const summary=d.querySelector("summary"); if(document.activeElement!==summary)summary.focus(); };
+      d.ontoggle = () => { if (!d.open) { focusSummary(); return; } const r = d.getBoundingClientRect(); p.style.top = document.querySelector("#toolbar").getBoundingClientRect().bottom + 4 + "px"; p.style.left = Math.max(0, Math.min(r.left, innerWidth - w)) + "px"; };
+      d.onkeydown = e => { if (e.key === "Escape") { d.open = false; focusSummary(); e.stopPropagation(); } };
     }
     bar.querySelector("[data-3d-assembled]").onclick = () => setAssembled(true);
     bar.querySelector("[data-3d-bare]").onclick = () => setAssembled(false);
@@ -418,6 +421,7 @@ window.Review3D = (() => {
     }
   }
 
+  // Task 8A retains this desktop state integration API, independent of phone routing.
   function setRevision(side) {
     const s = active; if (!s || !s.allowedSides.includes(side)) return;
     const changed = s.revision !== side; s.revision = side; s.state.revision = side;
@@ -582,15 +586,25 @@ window.Review3D = (() => {
     else v.host.querySelector('.tip3d')?.remove();
   }
   function installPartInput(v) {
-    const options={signal:active.abort.signal}; let down=null;
-    v.host.addEventListener('pointerdown',e=>{down=e.button===0?[e.clientX,e.clientY,e.pointerId]:null;},options);
+    const owner = active, options={signal:owner.abort.signal}; let down=null, hoverFrame=0, latest;
+    const cancelHover=()=>{cancelAnimationFrame(hoverFrame);hoverFrame=0;latest=null;};
+    v.host.addEventListener('pointerdown',e=>{cancelHover();down=e.button===0?[e.clientX,e.clientY,e.pointerId]:null;},options);
     v.host.addEventListener('pointercancel',()=>{down=null;},options);
     v.host.addEventListener('pointerup',e=>{
       const start=down;down=null;
       if(!start||e.pointerId!==start[2]||Math.hypot(e.clientX-start[0],e.clientY-start[1])>4)return;
       pick(v,e);
     },options);
-    v.host.addEventListener('pointermove',e=>{if(!e.buttons)hover(v,e);},options);
+    v.host.addEventListener('pointermove',e=>{
+      if(e.buttons){cancelHover();return;}
+      latest = e;
+      if (hoverFrame) return;
+      hoverFrame = requestAnimationFrame(() => {
+        hoverFrame = 0;
+        if (!owner.dead && active === owner && !latest.buttons) hover(v,latest);
+      });
+    },options);
+    owner.abort.signal.addEventListener('abort',cancelHover,{once:true});
   }
   function clearPartTooltips() { for(const v of active.views){clearTimeout(v.tip);v.host.querySelector('.tip3d')?.remove();} }
   function clearPartSelection() {
@@ -762,6 +776,7 @@ window.Review3D = (() => {
       refs:new Set(), changesByRef:{}, indexedSides:new Set(), hiddenGroups:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
       revision:single ? 'head' : ['base', 'head'].includes(appState.revision) ? appState.revision : 'head',
       abort:new AbortController(), partWarn:new Set(), pending:new Map(), urls:new Set(), worker:null, nextId:0,
+      // parked for Task 9A: per-session broker correlation and replay protection.
       assetId:0, assetNonce:crypto.randomUUID(), animationFrames:new Set(),
       available:Object.fromEntries(sides.map(side => [side, !!(model[side] || project.board.poster3d?.[side] || project.board.assets3d?.[side]?.model || model.errors?.[side])])),
       geometries:new Set(), materials:new Set(), textures:new Set(), environments:new Map(), comparisonMaterials:new Map(),
@@ -961,13 +976,14 @@ window.Review3D = (() => {
     const signal = session.abort.signal;
     const media = matchMedia('(prefers-color-scheme: dark)'); let signature = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|');
     const theme = () => { const next = [bg(), css('--added'), css('--removed'), css('--modified'), css('--accent')].join('|'); if (signature !== next) { signature = next; recolour(); } };
-    document.addEventListener('kr-theme-change', theme, {signal}); media.addEventListener('change', theme, {signal}); session.themeTimer = setInterval(theme, 250);
+    document.addEventListener('kr-theme-change', theme, {signal}); media.addEventListener('change', theme, {signal});
     if (appState.s) { const c = session.changes.find(c => c.id === appState.s); if (c) focus(c, !appState.camera3d); }
     // Preserve show()'s ready-on-return contract without bypassing the scheduler.
     // Offscreen/hidden sessions and navigation settle this wait without drawing.
     if (session.raf) await new Promise(resolve => { session.frameReady = resolve; });
   }
-  // Node contracts consume the unchanged helper; the browser API stays private.
-  if (typeof module === 'object' && module.exports) module.exports = {parseByDigest};
-  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,sampleFrame,session:()=>active,poster3d,state:undefined};
+  // Node and headless browser contracts share one explicit test seam.
+  const testSeam = {sampleFrame, session:()=>active, poster3d, parseByDigest, releaseGpu};
+  if (typeof module !== 'undefined') module.exports = testSeam;
+  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,testSeam};
 })();

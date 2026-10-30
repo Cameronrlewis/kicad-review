@@ -59,6 +59,7 @@ function pixels(name,bearing,w=256,h=128) {
   }
   return out;
 }
+// Desktop high-DPR GPUs also benefit: reduce fill cost during sustained slow rotation.
 function framePolicy(cap,now,onDpr) {
   let slow=0,ratio=cap,idleAt=null,dead=false;
   return {

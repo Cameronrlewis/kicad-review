@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 
-// Exercise the production helper without adding a public test-only viewer API.
+// Exercise the production helper through the shared explicit test seam.
 function cache() {
   const window = {};
   const document = {createElement: () => ({}), head: {appendChild() {}}};
@@ -11,6 +11,7 @@ function cache() {
   const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8');
   runInNewContext(source, {window, document, DOMException, module});
   assert.equal('parseByDigest' in window.Review3D, false, 'cache helper stays out of the browser API');
+  assert.equal(module.exports, window.Review3D.testSeam);
   const owner = {parses:new Map(), decodedScenes:[], dead:false, state:{parseCount:0}};
   return {owner, parseByDigest:(digest, bytes, parser) => module.exports.parseByDigest(owner, digest, bytes, parser)};
 }
@@ -204,4 +205,46 @@ test('BR02 bare board releases independent outlines without resurrecting hidden 
   api.setAssembled(true);
   assert.equal(s.selected.length, 0);
   assert.equal(s.assembled, true);
+});
+
+
+test('BR02 GPU release force-loses each retired renderer before disposal', () => {
+  const window = {}, module = {exports:{}};
+  runInNewContext(readFileSync(new URL('./review3d.js', import.meta.url), 'utf8'), {
+    window, module, document:{createElement:()=>({}), head:{appendChild(){}}}
+  });
+  let live = 0;
+  for (let i=0;i<20;i++) {
+    live++;
+    const order=[];
+    module.exports.releaseGpu({roots:[],views:[],environments:new Map(),renderer:{
+      forceContextLoss(){live--;order.push('lose');}, dispose(){order.push('dispose');}
+    }});
+    assert.deepEqual(order,['lose','dispose']);
+    assert.equal(live,0);
+  }
+});
+
+
+test('BR02 hover raycasts coalesce to the latest event and cancel on teardown', () => {
+  const listeners = {}, frames = new Map(), controller = new AbortController();
+  const window = {hovers:[]}, owner = {abort:controller};
+  let id=0;
+  const source=readFileSync(new URL('./review3d.js',import.meta.url),'utf8')
+    .replace('let active = null, bundle;', 'let active = window.owner, bundle;')
+    .replace('function hover(v,e) {', 'function hover(v,e) { window.hovers.push(e); return;')
+    .replace('const testSeam = {', 'const testSeam = {installPartInput,');
+  window.owner=owner;
+  runInNewContext(source,{window,document:{createElement:()=>({}),head:{appendChild(){}}},
+    requestAnimationFrame:fn=>{frames.set(++id,fn);return id;},cancelAnimationFrame:id=>frames.delete(id)});
+  window.Review3D.testSeam.installPartInput({host:{addEventListener:(name,fn)=>listeners[name]=fn}});
+  for(let x=0;x<30;x++)listeners.pointermove({clientX:x,buttons:0});
+  assert.equal(frames.size,1);assert.equal(window.hovers.length,0);
+  [...frames.values()][0]();frames.clear();
+  assert.equal(window.hovers.length,1);assert.equal(window.hovers[0].clientX,29);
+  listeners.pointermove({clientX:30,buttons:0});
+  listeners.pointerdown({button:0,clientX:30,clientY:0,pointerId:1});
+  assert.equal(frames.size,0,'queued hover must not erase a subsequent click tooltip');
+  listeners.pointermove({clientX:31,buttons:0});controller.abort();owner.dead=true;
+  assert.equal(frames.size,0);assert.equal(window.hovers.length,1);
 });

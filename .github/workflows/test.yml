@@ -21,6 +21,15 @@ jobs:
         with:
           node-version: 22
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
+      - run: node --test ui/*.test.mjs
+      - name: Run 3D processor integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPS="$RUNNER_TEMP/meshopt"; OUT="$RUNNER_TEMP/br02"; export OUT
+          mkdir -p "$OUT"
+          npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0
+          PROCESS3D_INTEGRATION=1 NODE_PATH="$DEPS/node_modules" node --test ui/compress3d.test.mjs
       - name: Build browser fixtures
         run: |
           echo "CHROME=google-chrome" >> "$GITHUB_ENV"

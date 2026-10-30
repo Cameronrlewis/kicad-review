@@ -250,14 +250,22 @@ def kept_refs(base, head):
 def metadata3d(side, objects, keep, finish, missing):
     """One revision's footprint identity, placement and model coverage, in board millimetres."""
     reasons = {r["ref"]: r["reason"] for r in missing if r["side"] in (side, "both")}
-    footprints, refs = [], set()
+    footprints, warnings, skipped = [], [], set()
+    counts = {}
+    for obj in objects.values():
+        if obj['kind'] == 'footprint':
+            counts[obj['ref']] = counts.get(obj['ref'], 0) + 1
     for uid, obj in sorted(objects.items()):
         if obj["kind"] != "footprint":
             continue
         ref = obj["ref"]
-        if ref in refs:
-            raise ValueError("duplicate reference: " + ref)
-        refs.add(ref)
+        if not ref or '*' in ref or counts[ref] > 1:
+            reason = 'unannotated footprint' if not ref or '*' in ref else 'duplicate reference'
+            warning = f"{ref or '(empty reference)'} ({uid}): {reason} skipped"
+            warnings.append(warning)
+            skipped.add(ref)
+            print(f"::warning::{warning}")
+            continue
         reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
         box, pos = obj.get("box"), obj.get("pos")
         valid_pos = (isinstance(pos, (list, tuple)) and len(pos) >= 2
@@ -275,7 +283,7 @@ def metadata3d(side, objects, keep, finish, missing):
         footprints.append({"uuid": uid, "ref": ref, "side": "bottom" if layer.startswith("B.") else "top",
                            "pos": list(pos), "box": box,
                            "hasModel": bool(obj.get("has_model")) and reason is None, "reason": reason})
-    return {"version": 1, "side": side, "keep": sorted(set(keep)), "finish": finish, "footprints": footprints}
+    return {"version": 1, "side": side, "keep": sorted(set(keep)), "finish": finish, "footprints": footprints, "warnings": warnings, "skippedRefs": sorted(skipped)}
 
 
 def prepare3d(p):
@@ -357,12 +365,19 @@ def normalize_poster(path):
 
     KiCad 10 on macOS can return a smaller drawable area than the requested size.
     Keep the prescribed argv and pixels; transparent padding avoids distortion.
+    Normal-sized PNGs use a cheap header/end check; only smaller local exports need decoding.
     KiCad emits non-interlaced 8-bit RGB(A). Reject other/corrupt output rather
     than advertising a nonconforming successful still. No image dependency.
     """
     png = path.read_bytes()
     if png[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError('not a PNG')
+    if (len(png) >= 45 and png[-12:] == b'\x00\x00\x00\x00IEND\xaeB`\x82'
+            and png[8:16] == b'\x00\x00\x00\x0dIHDR'
+            and struct.unpack('>IIBBBBB', png[16:29]) in
+            ((1600, 1000, 8, 2, 0, 0, 0), (1600, 1000, 8, 6, 0, 0, 0))
+            and zlib.crc32(png[12:29]) == struct.unpack('>I', png[29:33])[0]):
+        return
     offset, chunks, compressed = 8, [], bytearray()
     while offset < len(png):
         if offset + 12 > len(png):
@@ -444,6 +459,8 @@ def export_glb(p, side, out, *, model=True):
     def run(argv, name, log):
         dest = folder / name
         dest.unlink(missing_ok=True)
+        marker = folder / (name + ".failed")
+        marker.unlink(missing_ok=True)
         try:
             proc = subprocess.run(argv, capture_output=True, text=True)
             (folder / log).write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
@@ -452,6 +469,7 @@ def export_glb(p, side, out, *, model=True):
         except OSError as error:
             (folder / log).write_text(str(error), encoding="utf-8")
         dest.unlink(missing_ok=True)
+        marker.write_text("export attempted and failed")
         return False
 
     if model:
@@ -464,6 +482,7 @@ def export_glb(p, side, out, *, model=True):
             normalize_poster(folder / "poster.png")
         except (OSError, ValueError, zlib.error) as error:
             (folder / "poster.png").unlink(missing_ok=True)
+            (folder / "poster.png.failed").write_text("normalization attempted and failed")
             with (folder / "poster.log").open('a', encoding='utf-8') as log:
                 log.write(f'\nPoster normalization failed: {error}\n')
 
@@ -488,11 +507,23 @@ def render_cache_complete(cache, p, side, settings):
     if need_still and pathlib.Path(board_path(p, side)).is_file():
         if settings["3d"]["enabled"]:
             raw = cache / "board.raw.glb"
-            if not raw.is_file() or not raw.stat().st_size:
+            if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
                 return False
         poster = cache / "poster.png"
-        return poster_size(poster) == (1600, 1000)
+        return poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()
     return True
+
+
+def glb_input_digest(p, side):
+    """Hash framed paths and bytes directly, without expanding binary data into repr strings."""
+    digest = hashlib.sha256()
+    inputs = glb_inputs(p, side)
+    if inputs is not None:
+        board, models = inputs
+        for value in (board, *(value for name, data in models for value in (name.encode(), data))):
+            digest.update(len(value).to_bytes(8, 'big'))
+            digest.update(value)
+    return digest.hexdigest()
 
 
 def render_cache(p, side, det, settings):
@@ -503,7 +534,7 @@ def render_cache(p, side, det, settings):
     # Normalize only input/output locations so the same revision can move from Head to Base.
     inputs = {"settings": settings, "tool": render_tool_identity(),
               "glb": glb_argv("PCB", pathlib.Path(".")), "poster": poster_argv("PCB", pathlib.Path(".")),
-              "board_models": hashlib.sha256(repr(glb_inputs(p, side)).encode()).hexdigest()}
+              "board_models": glb_input_digest(p, side)}
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
@@ -559,7 +590,7 @@ def cmd_render(args):
             if need_still and pathlib.Path(board_path(p, side)).is_file():
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
-                    for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log"):
+                    for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
                         source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
                         dest = pathlib.Path(out) / name
                         dest.unlink(missing_ok=True)
@@ -2738,14 +2769,12 @@ def artifact3d(raw, suffix, root=pathlib.Path('review/3d')):
     (root / name).write_bytes(packed)
     return {'digest': digest, 'artifactName': name, 'bytes': len(packed)}
 
-def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
+def attach3d(board, out, blobs):
     """Attach stills independently, and coverage/index/assets only for verified processed sets."""
-    if any(side not in ('base','head') for side in allowed_sides):
-        raise ValueError('invalid allowed 3D side')
     board.pop('coverage3d', None)
     board.update({key:{side:None for side in ('base','head')}
                   for key in ('parts3d','poster3d','coverage3dBySide','assets3d')})
-    for side in allowed_sides:
+    for side in ("base", "head"):
         folder = pathlib.Path(out,side)
         poster = folder / 'poster.png'
         try:
@@ -2775,6 +2804,12 @@ def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
             if stats['footprints']!=len(parts) or stats['withModel']+stats['placeholders']!=len(parts):
                 raise ValueError('inconsistent coverage')
             stats = {key: stats[key] for key in (*fields, 'warnings') if key in stats}
+            # The verified part index owns coverage; legacy log rows serve only unprocessed sides.
+            board['no_model'] = [row for row in board.get('no_model', []) if row['side'] != side and row['side'] != 'both'] + [
+                {**row, 'side': 'head' if side == 'base' else 'base'}
+                for row in board.get('no_model', []) if row['side'] == 'both'
+            ] + [{'ref':part['ref'], 'side':side, 'reason':part.get('reason') or 'no model in footprint',
+                  'uuid':part['uuid']} for part in parts if not part['hasModel']]
             board['parts3d'][side] = add_blob(blobs,raw['parts.json'])
             board['coverage3dBySide'][side] = stats
             board['assets3d'][side] = {'model':artifact3d(raw['board.glb'],'board.glb'),
@@ -2787,11 +2822,11 @@ def attach3d(board, out, blobs, allowed_sides=('base', 'head')):
         board['coverage3d'] = coverage
 
 
-def model3d_missing(out, objs, allowed_sides=('base', 'head')):
+def model3d_missing(out, objs):
     """Missing 3D models from KiCad's export log and footprints without a model declaration."""
     missing = {}
     add = lambda ref, side, reason: missing.setdefault((ref, reason), set()).add(side)
-    for side in allowed_sides:
+    for side in ("base", "head"):
         log = f"{out}/{side}/glb.log"
         if os.path.exists(log):
             with open(log, encoding="utf-8") as fh:
@@ -2804,7 +2839,7 @@ def model3d_missing(out, objs, allowed_sides=('base', 'head')):
     for (ref, reason), sides in sorted(missing.items(), key=lambda e: (natural(e[0][0]), e[0][1])):
         side = "both" if sides == {"base", "head"} else next(iter(sides))
         # The block is rendered from the footprint's board-space data, including unchanged parts.
-        obj = next((o for s in allowed_sides for o in objs[s].values()
+        obj = next((o for s in ("base", "head") for o in objs[s].values()
                     if o["kind"] == "footprint" and o["ref"] == ref and s in sides), None)
         row = {"ref": ref, "side": side, "reason": reason}
         if obj:
@@ -2887,18 +2922,17 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                  "supplier": None,  # Filled only when DigiKey lookup is enabled.
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
-    allowed_sides = ('base', 'head')  # Snapshot integration will restrict this to ('head',).
     if settings["3d"]["enabled"]:
-        models = {side: f"{out}/{side}/board.glb" for side in allowed_sides}
+        models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
                             for side, path in models.items()}
         board["model3d"].update({"enabled": True,
                                  "changed": board["model3d"].get("base") != board["model3d"].get("head"),
-                                 "errors": {side: "3D export unavailable" for side in allowed_sides
+                                 "errors": {side: "3D export unavailable" for side in ("base", "head")
                                             if has[side] and not board["model3d"].get(side)}})
-        board["no_model"] = model3d_missing(out, objs, allowed_sides)
+        board["no_model"] = model3d_missing(out, objs)
     if settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False):
-        attach3d(board, out, blobs, allowed_sides)
+        attach3d(board, out, blobs)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None

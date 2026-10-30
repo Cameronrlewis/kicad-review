@@ -1133,7 +1133,7 @@ assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in t
 for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
-assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
+assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
 print("ok TS-S1 CI browser matrix")
 print("ok")
 
@@ -3844,7 +3844,7 @@ def br02_metadata_contract():
             assert data['head']['keep'] == ['J1', 'J2', 'R1', 'R12', 'R2'], data['head']
             assert data['base']['finish'] == 'ENIG' and data['head']['finish'] == 'ENEPIG'
             for side, d in data.items():
-                assert set(d) == {'version', 'side', 'keep', 'finish', 'footprints'}
+                assert set(d) == {'version', 'side', 'keep', 'finish', 'footprints', 'warnings', 'skippedRefs'}
                 assert d['version'] == 1 and d['side'] == side and len(d['footprints']) == 5
                 objs = kr.pcb_objects(f'{side}/P/P.kicad_pcb')
                 for f in d['footprints']:
@@ -4061,7 +4061,8 @@ def br02_poster_dimensions():
         # Already conforming stills are left byte-identical.
         exact = br02_png()
         dest.write_bytes(exact)
-        kr.normalize_poster(dest)
+        with patch.object(kr.zlib, 'decompressobj', side_effect=AssertionError('normal PNG must not decompress')):
+            kr.normalize_poster(dest)
         assert dest.read_bytes() == exact
         for bad in (b'not PNG', br02_png()[:-10], br02_png(1601, 1)):
             def cli(args, **kw):
@@ -4100,11 +4101,15 @@ def br02_task2a_metadata_contract():
         'props':{'layer':'F.Cu'},'pos':[7,8,0],'box':None}}
     logo = kicad_review.metadata3d('head',padless,[], '', [])['footprints'][0]
     assert logo['box']==[6,7,8,9] and not logo['hasModel'], 'BR02 padless estimate'
-    try:
-        kicad_review.metadata3d('base',{**base,'duplicate':base['stable']},[], '', [])
-        assert False, 'BR02 duplicate reference must fail metadata'
-    except ValueError as e:
-        assert 'duplicate reference' in str(e)
+    duplicate = kicad_review.metadata3d('base',{**base,'duplicate':base['stable']},[], '', [])
+    assert all(f['ref'] != 'R1' for f in duplicate['footprints'])
+    assert len(duplicate['warnings']) == 2 and all('R1' in w for w in duplicate['warnings'])
+    unannotated = kicad_review.metadata3d('head', {
+        'logo1':{**padless['logo'], 'ref':'REF**'},
+        'logo2':{**padless['logo'], 'ref':'REF**'},
+        'valid':padless['logo']}, [], '', [])
+    assert [f['ref'] for f in unannotated['footprints']] == ['LOGO1']
+    assert len(unannotated['warnings']) == 2
     # Reference fallback with a changed UUID must keep the old and new identity.
     replaced = {'new-id': {**base['stable'], 'props': {'layer':'B.Cu'}}}
     assert kicad_review.kept_refs({'old-id':base['stable']}, replaced) == ['R1']
@@ -4145,7 +4150,7 @@ def br02_task2a_metadata_contract():
         assert '::warning::R1: malformed bounding box' in out.getvalue(), f'BR02 warning emitted for bad box {bad_box}'
     both = [{'ref':'R1','side':'both','reason':'file not found'}]
     assert not kicad_review.metadata3d('head',base,[], '', both)['footprints'][1]['hasModel']
-    print('ok BR02 metadata rename/delete, UUID fallback, bottom models, finite estimates and duplicate rejection')
+    print('ok BR02 metadata rename/delete, UUID fallback, bottom models, finite estimates and per-footprint skip warnings')
 
 
 br02_task2a_metadata_contract()
@@ -4179,8 +4184,8 @@ def br02_task2a_prepare_contract():
                     (property "Reference" "R1")))''')
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 kicad_review.prepare3d({'dir':'P','name':'P'})
-            assert not base_meta.exists(), 'BR02 invalid metadata removes stale processing input'
-            assert 'P: 3D processing unavailable: duplicate reference: R1' in output.getvalue()
+            assert base_meta.exists() and len(json.loads(base_meta.read_text())['warnings']) == 2
+            assert 'R1 (one): duplicate reference skipped' in output.getvalue()
             # Exercise the actual CLI and the same sanitized directory used by render.
             project = {'dir':'nested/P', 'name':'P'}
             source = pathlib.Path('head/nested/P/P.kicad_pcb')
@@ -4194,7 +4199,7 @@ def br02_task2a_prepare_contract():
             assert not pathlib.Path('review', kicad_review.project_id(project['dir']), 'base').exists()
             target = pathlib.Path('review', kicad_review.project_id(project['dir']), 'head', 'board-3d-input.json')
             assert json.loads(target.read_text()) == {
-                'version':1, 'side':'head', 'keep':[], 'finish':'ENEPIG', 'footprints':[]}
+                'version':1, 'side':'head', 'keep':[], 'finish':'ENEPIG', 'footprints':[], 'warnings':[], 'skippedRefs':[]}
             # Malformed board leaves no stale input and later projects still run.
             p_bad = {'dir': 'bad/P1', 'name': 'P1'}
             p_good = {'dir': 'good/P2', 'name': 'P2'}
@@ -4232,7 +4237,7 @@ def br02_task2a_prepare_contract():
             assert not stale_base_meta.exists(), 'BR02 malformed base unlinks base input'
             assert not stale_head_meta.exists(), 'BR02 malformed base unlinks head input when comparison cannot be computed'
             assert 'P3: 3D processing unavailable:' in output.getvalue()
-            # Per-side metadata failure: when both boards parse but one has invalid metadata, valid side is preserved.
+            # Duplicate references are skipped individually; both revision inputs remain available with warnings.
             p_side_bad = {'dir': 'badside/P4', 'name': 'P4'}
             pathlib.Path('base/badside/P4').mkdir(parents=True)
             pathlib.Path('base/badside/P4/P4.kicad_pcb').write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
@@ -4245,8 +4250,8 @@ def br02_task2a_prepare_contract():
             base_p4_meta = pathlib.Path('review', kicad_review.project_id(p_side_bad['dir']), 'base', 'board-3d-input.json')
             head_p4_meta = pathlib.Path('review', kicad_review.project_id(p_side_bad['dir']), 'head', 'board-3d-input.json')
             assert base_p4_meta.exists() and json.loads(base_p4_meta.read_text())['finish'] == 'ENIG', 'BR02 valid base preserved'
-            assert not head_p4_meta.exists(), 'BR02 invalid head metadata unlinked'
-            assert 'P4: 3D processing unavailable: duplicate reference: R1' in output.getvalue()
+            assert head_p4_meta.exists() and len(json.loads(head_p4_meta.read_text())['warnings']) == 2
+            assert 'R1 (u1): duplicate reference skipped' in output.getvalue()
             # Malformed head board unlinks both sides' inputs; comparison keep set cannot be computed.
             p_head_bad = {'dir': 'badhead/P5', 'name': 'P5'}
             pathlib.Path('base/badhead/P5').mkdir(parents=True)
@@ -4313,7 +4318,7 @@ with tempfile.TemporaryDirectory() as t:
     finally:
         os.chdir(old)
 
-# BR02 head-only attachment never probes stale base files.
+# BR02 comparison attachments include both revisions and keep revision-local coverage.
 from unittest.mock import patch
 with tempfile.TemporaryDirectory() as t:
     old=os.getcwd();os.chdir(t)
@@ -4335,26 +4340,11 @@ with tempfile.TemporaryDirectory() as t:
             (folder/'board-processed.json').write_text(json.dumps({'hashes':{
                 name:hashlib.sha256(value).hexdigest() for name,value in values.items()}}))
             payloads[side]=(values,poster)
-        reads=pathlib.Path.read_bytes;texts=pathlib.Path.read_text;stat=pathlib.Path.stat
-        def checked(method):
-            def call(path,*args,**kwargs):
-                assert not path.is_relative_to(root/'base'), 'BR02 single must not probe base'
-                return method(path,*args,**kwargs)
-            return call
-        blobs={};board={'model3d':{'base':None,'head':'head-model'}}
-        with patch.object(pathlib.Path,'read_bytes',checked(reads)), \
-             patch.object(pathlib.Path,'read_text',checked(texts)), \
-             patch.object(pathlib.Path,'stat',checked(stat)):
-            kicad_review.attach3d(board,str(root),blobs,allowed_sides=('head',))
-        expected={}
-        head_values,head_poster=payloads['head']
-        kicad_review.add_blob(expected,head_poster)
-        kicad_review.add_blob(expected,head_values['parts.json'])
-        assert blobs==expected, 'BR02 single blob snapshot contains base'
-        assert all(board[key]['base'] is None for key in
-                   ('parts3d','poster3d','coverage3dBySide','assets3d'))
+        blobs={};board={'model3d':{'base':'base-model','head':'head-model'}}
+        kicad_review.attach3d(board,str(root),blobs)
         assert board['coverage3d']['footprints']==1
-        assert len(list(pathlib.Path('review/3d').iterdir()))==2
+        assert board['coverage3dBySide']['base']['footprints']==2
+        assert len(list(pathlib.Path('review/3d').iterdir()))==4
     finally:
         os.chdir(old)
 
@@ -4363,7 +4353,7 @@ with tempfile.TemporaryDirectory() as t:
     folder=pathlib.Path(t,'head');folder.mkdir()
     png=b'\x89PNG\r\n\x1a\nhead-only-still';(folder/'poster.png').write_bytes(png)
     board={};blobs={}
-    kicad_review.attach3d(board,t,blobs,allowed_sides=('head',))
+    kicad_review.attach3d(board,t,blobs)
     expected={};poster_id=kicad_review.add_blob(expected,png)
     assert blobs==expected and board['poster3d']=={'base':None,'head':poster_id}
     assert board['parts3d']=={'base':None,'head':None} and 'coverage3d' not in board
@@ -4374,11 +4364,12 @@ def br02_task4a_attachment_contract():
     from unittest.mock import patch
     import kicad_review as kr
 
-    def processed(folder, count=1, triangles=1):
+    def processed(folder, count=1, triangles=1, missing=False):
         folder.mkdir(parents=True, exist_ok=True)
         parts = [{'uuid': 'u'+str(i), 'ref': 'R'+str(i), 'side': 'top',
-                  'box': [0,0,0,1,1,1], 'hasModel': True, 'reason': None} for i in range(count)]
-        stats = {'footprints': count, 'withModel': count, 'placeholders': 0,
+                  'box': [0,0,0,1,1,1], 'hasModel': not (missing and i == 0),
+                  'reason': 'processor missing model' if missing and i == 0 else None} for i in range(count)]
+        stats = {'footprints': count, 'withModel': count-int(missing), 'placeholders': int(missing),
                  'triangles': triangles, 'primitives': count, 'warnings': []}
         values = {'board.glb': b'glTF-model', 'parts.json': json.dumps(parts).encode(),
                   'stats.json': json.dumps(stats).encode()}
@@ -4396,8 +4387,9 @@ def br02_task4a_attachment_contract():
             root = pathlib.Path('review/P')
             _, base_stats = processed(root/'base', count=2, triangles=5)
             _, head_stats = processed(root/'head')
-            board = {}; blobs = {}
+            board = {'no_model':[{'ref':'R0','side':'both','reason':'stale log'}]}; blobs = {}
             kr.attach3d(board, str(root), blobs)
+            assert board['no_model'] == [], 'verified modeled parts override stale missing-model log rows'
             assert board['coverage3d'] == head_stats
             assert board['coverage3dBySide'] == {'base': base_stats, 'head': head_stats}
             assert board['parts3d']['base'] != board['parts3d']['head']
@@ -4430,13 +4422,11 @@ def br02_task4a_attachment_contract():
                 with contextlib.redirect_stdout(io.StringIO()):
                     kr.attach3d(board, str(root), {})
                 assert board['coverage3dBySide']['head'] is None
-            try:
-                kr.attach3d({}, str(root), {}, allowed_sides=('other',))
-            except ValueError:
-                pass
-            else:
-                raise AssertionError('invalid allowed side accepted')
-
+            processed(root/'head', missing=True)
+            board = {'no_model':[{'ref':'STALE','side':'both','reason':'stale log'}]}
+            kr.attach3d(board, str(root), {})
+            assert board['no_model'] == [{'ref':'R0', 'side':'head',
+                'reason':'processor missing model', 'uuid':'u0'}], 'missing rows derive from verified parts only'
             # Actual build/report integration: design-only attaches PNG without model/index files.
             import shutil
             shutil.rmtree(root)
@@ -4526,22 +4516,26 @@ br02_task4a_attachment_contract()
 # BR02: processing is pair-specific, its integration gate is required, assets are individual files.
 wf = pathlib.Path('.github/workflows/review.yml').read_text()
 assert 'prepare-3d' in wf and '--cache .processed-3d-cache' in wf, 'BR02 pair-specific processing workflow'
-assert 'name: Run 3D processor integration tests' in wf, 'BR02 required integration gate'
-step = wf.split('name: Run 3D processor integration tests', 1)[1].split('\n      - name:', 1)[0]
-assert 'continue-on-error: true' not in step and 'node --test tools/ui/compress3d.test.mjs' in step, 'BR02 integration failures must block workflow'
-assert 'INPUT_ARCHIVE=false' in wf and 'INPUT_RETENTION-DAYS=90' in wf, 'BR02 individual immutable assets'
+ci = pathlib.Path('.github/workflows/test.yml').read_text()
+assert 'name: Run 3D processor integration tests' not in wf, 'consumer reviews must not run tool integration tests'
+step = ci.split('name: Run 3D processor integration tests', 1)[1].split('\n      - name:', 1)[0]
+assert 'PROCESS3D_INTEGRATION=1' in step and 'node --test ui/compress3d.test.mjs' in step
+assert 'continue-on-error: true' not in step, 'self-test integration gate must block failures'
+assert 'INPUT_ARCHIVE=false' in wf and 'INPUT_RETENTION-DAYS=90' in wf
 assert '_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/dist/upload/index.js' in wf
-assert step.count("steps.detect.outputs.changed == 'true'") == 1 and '&&' not in step.split('run:', 1)[0]
-assert wf.index('name: Install 3D compression dependencies') < wf.index('name: Run 3D processor integration tests') < wf.index('name: Compress 3D board models')
 for name in ('Install 3D compression dependencies', 'Compress 3D board models', 'Upload digest-keyed 3D assets'):
     block = wf.split('name: ' + name, 1)[1].split('\n      - name:', 1)[0]
-    assert 'continue-on-error: true' not in block, 'BR02 setup and asset upload failures are fatal'
-assert wf.count("'tools/ui/compress3d.cjs', 'base/kicad-review.toml'") == 2, 'BR02 processor source namespaces both raw caches'
-assert '.processed-3d-cache' in wf.split('name: Cache 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
+    assert 'continue-on-error: true' in block, 'optional 3D must not fail consumer reviews'
+    assert 'hashFiles(' in block.split('run:', 1)[0], '3D steps need actual assets'
+assert wf.count("'tools/ui/compress3d.cjs', 'base/kicad-review.toml'") == 2
+cache = wf.split('name: Cache 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
+assert '.processed-3d-cache' in cache and 'hashFiles(' in cache
+assert 'github.run_id' not in cache and 'github.run_attempt' not in cache
+assert 'restore-keys:' in cache
 assert 'uses: ./tools/.github/actions/upload-3d-assets' in wf
 assert 'using: node24' in pathlib.Path('.github/actions/upload-3d-assets/action.yml').read_text()
 assert wf.index('name: Upload report\n') < wf.index('name: Upload digest-keyed 3D assets') < wf.index('name: Screenshots of changed drawings')
-assert 'INPUT_OVERWRITE=false INPUT_INCLUDE-HIDDEN-FILES=false' in wf, 'BR02 bundled action needs explicit boolean defaults'
+assert 'INPUT_OVERWRITE=true INPUT_INCLUDE-HIDDEN-FILES=false' in wf
 print('ok BR02 pair-specific processing workflow, required integration gate and immutable assets')
 
 
@@ -4616,3 +4610,51 @@ html = kicad_review.inline_page(pathlib.Path('ui/sample/review-data-3d.js').read
 assert worker_tag in html, 'BR02 inline decode worker source'
 assert pathlib.Path('ui/three-studio.js').read_text() in html and html.index('window.ThreeStudio') < html.index('window.Review3D'), 'BR02 studio script precedes the viewer'
 print('ok BR02 inline decode worker source')
+
+
+# Best-effort failures are complete attempts, not an invitation to export forever.
+def br02_failed_export_cache_contract():
+    import copy, os, subprocess, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as t:
+        try:
+            os.chdir(t)
+            pathlib.Path('base/P').mkdir(parents=True)
+            pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb)')
+            out = pathlib.Path('review/P/base')
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            settings['3d']['enabled'] = True
+            p = {'dir':'P','name':'P'}
+            with patch.object(kr.subprocess, 'run', side_effect=OSError('no CLI')):
+                kr.export_glb(p, 'base', str(out))
+            (out/'.complete').write_text('complete')
+            assert kr.render_cache_complete(out, p, 'base', settings), 'failed exports must be cacheable'
+            assert (out/'board.raw.glb.failed').exists() and (out/'poster.png.failed').exists()
+            with patch.object(kr.subprocess, 'run') as run:
+                def success(args, **kw):
+                    pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
+                    return subprocess.CompletedProcess(args, 0, '', '')
+                run.side_effect = success
+                kr.export_glb(p, 'base', str(out))
+            assert not (out/'board.raw.glb.failed').exists() and not (out/'poster.png.failed').exists()
+            pathlib.Path('review/detect.json').write_text(json.dumps({
+                'base':'a'*40, 'head':'b'*40, 'projects':[{**p, 'status':'removed'}]}))
+            with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side'), \
+                 patch.object(kr, 'render_tool_identity', return_value='test'), \
+                 patch.object(kr.subprocess, 'run', side_effect=OSError('no CLI')) as run:
+                kr.cmd_render(None)
+                assert run.call_count == 2
+                kr.cmd_render(None)
+                assert run.call_count == 2, 'failed best-effort exports must not rerender next run'
+            with patch.object(kr, 'glb_inputs', return_value=(b'board', [('body.step', b'asset')])):
+                expected = hashlib.sha256()
+                for value in (b'board', b'body.step', b'asset'):
+                    expected.update(len(value).to_bytes(8, 'big')); expected.update(value)
+                assert kr.glb_input_digest(p, 'base') == expected.hexdigest()
+        finally:
+            os.chdir(old)
+    print('ok BR02 failed export attempts cache and successful retries clear markers')
+
+br02_failed_export_cache_contract()

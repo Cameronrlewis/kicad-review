@@ -233,7 +233,6 @@ function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
   if (q.has("p")) out.p = +q.get("p");
   for (const k of ["v", "m", "s", "t", "revision"]) if (q.has(k)) out[k] = q.get(k);
-  if (!q.has("revision") && q.has("revision3d")) out.revision = q.get("revision3d");
   for (const k of ["x", "y", "z"]) if (q.has(k)) out[k] = +q.get(k);
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
   if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
@@ -257,8 +256,8 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Array.isArray(st.camera3d) && st.camera3d.length === 6 && st.camera3d.every(Number.isFinite)) out.camera3d = st.camera3d;
   if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
   if (st.assembled3d === false) out.assembled3d = false;
-  if (st.lighting3d && LIGHT_RIGS3D.includes(st.lighting3d.rig)) {   // unknown rig = default light; numbers are clamped by the viewer
-    // The raw development template can omit the optional 3D scripts.
+  if (st.lighting3d && LIGHT_RIGS3D.includes(st.lighting3d.rig)) {   // unknown rig = default light; shared studio policy clamps numbers
+    // Shared studio presets own persisted lighting defaults and clamping.
     out.lighting3d = window.ThreeStudio.normalizeLighting(st.lighting3d);
   }
   return out;
@@ -267,7 +266,7 @@ function applyState(st) {
   const v = valid(st);
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
-                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? {rig:"bench",bearing:60,exposure:1.35}, camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
@@ -566,7 +565,6 @@ function viewport(stage, label, kind) {
   }
   return world;
 }
-window.addEventListener('resize', () => { if (S.v === '3d') window.Review3D?.resize(); });
 let gen = 0;
 async function draw() {
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
@@ -1497,7 +1495,7 @@ function renderPanel() {
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
-    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
+    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}" data-no-model-side="${esc(x.side)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   bindRightDock();
   for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
     const attribute = input.hasAttribute("data-list-search") ? "search" : input.hasAttribute("data-list-sort") ? "sort" : "group";
@@ -1546,7 +1544,7 @@ function renderPanel() {
   bindInventory();
   bindCards();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => {
-    const row = p.board.no_model.find(x => x.ref === b.dataset.noModel); if(!row)return;
+    const row = p.board.no_model.find(x => x.ref === b.dataset.noModel && x.side === b.dataset.noModelSide); if(!row)return;
     const side=row.side==='both'?(S.revision||'head'):row.side;
     const part=window.Review3D?.state?.parts[side]?.find(x=>x.ref===row.ref);
     if(part) {
@@ -1577,7 +1575,7 @@ function encodeState(s = S) {
   if (Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
   if (s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
   if (s.assembled3d === false) q.set("asm", "0");
-  if (s.lighting3d) { const l = window.Review3D?.normalizeLighting(s.lighting3d) ?? s.lighting3d; if (l.rig !== "bench" || l.bearing !== 60 || l.exposure !== 1.35) q.set("lt", [l.rig, l.bearing, l.exposure].join(",")); }
+  if (s.lighting3d) { const l = window.Review3D?.normalizeLighting(s.lighting3d) ?? s.lighting3d; if (["rig", "bearing", "exposure"].some(key => l[key] !== window.ThreeStudio.PRESETS.bench[key])) q.set("lt", [l.rig, l.bearing, l.exposure].join(",")); }
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;

@@ -100,37 +100,31 @@ jobs:
           fi
 
       - name: Cache 3D compression dependencies and processed models
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != ''
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cache/kicad-review-meshopt
             .processed-3d-cache
-          # Save newly processed pairs, not only the first immutable dependency-cache entry.
-          key: meshopt-4.2.1-0.22.0-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Input-addressed snapshots; prefix restores reuse prior processed entries.
+          key: meshopt-4.2.1-0.22.0-${{ runner.os }}-${{ hashFiles('tools/ui/compress3d.cjs', 'review/**/board.raw.glb', 'base/**/*.kicad_pcb', 'head/**/*.kicad_pcb', 'base/kicad-review.toml', 'head/kicad-review.toml') }}
           restore-keys: meshopt-4.2.1-0.22.0-${{ runner.os }}-
 
       - name: Install 3D compression dependencies
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != ''
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           DEPS="$HOME/.cache/kicad-review-meshopt"
           mkdir -p "$DEPS"
           if [ ! -d "$DEPS/node_modules/meshoptimizer" ]; then
-            npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0
+            npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0 || { echo "::warning::3D compression dependencies unavailable; keeping raw GLBs."; exit 0; }
           fi
 
-      - name: Run 3D processor integration tests
-        if: steps.detect.outputs.changed == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="$RUNNER_TEMP/br02"; mkdir -p "$OUT"; export OUT
-          PROCESS3D_INTEGRATION=1 NODE_PATH="$HOME/.cache/kicad-review-meshopt/node_modules" node --test tools/ui/compress3d.test.mjs
-
       - name: Compress 3D board models
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != ''
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -220,7 +214,8 @@ jobs:
           retention-days: 90
 
       - name: Upload digest-keyed 3D assets
-        if: steps.detect.outputs.changed == 'true'
+        if: steps.detect.outputs.changed == 'true' && hashFiles('review/3d/kicad-3d-*.gz') != ''
+        continue-on-error: true
         # A node action receives Actions runtime credentials; a plain run step does not.
         uses: ./tools/.github/actions/upload-3d-assets
         env:
@@ -235,7 +230,7 @@ jobs:
               env INPUT_NAME="$(basename "$asset")" INPUT_PATH="$PWD/$asset" \
                 INPUT_ARCHIVE=false INPUT_RETENTION-DAYS=90 \
                 INPUT_IF-NO-FILES-FOUND=error INPUT_COMPRESSION-LEVEL=0 \
-                INPUT_OVERWRITE=false INPUT_INCLUDE-HIDDEN-FILES=false \
+                INPUT_OVERWRITE=true INPUT_INCLUDE-HIDDEN-FILES=false \
                 GITHUB_OUTPUT="$output" node "$action"
               rm -f "$output"
             done

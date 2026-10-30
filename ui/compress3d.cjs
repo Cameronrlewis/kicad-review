@@ -23,6 +23,11 @@ function snapshotParts(document,metadata) {
   const bottom=boardBoxes.length?Math.min(...boardBoxes.map(b=>b[1])):0;
   const top=boardBoxes.length?Math.max(...boardBoxes.map(b=>b[4])):.0016;
   const boxes=new Map();
+  const skipped=new Set((metadata.skippedRefs || []).filter(Boolean));
+  function skippedOwner(n,seen=new Set()) {
+    if(seen.has(n))return false;seen.add(n);
+    return skipped.has(n.getName()) || n.listParents().some(p=>p.propertyType==='Node'&&skippedOwner(p,seen));
+  }
   function owner(n,seen=new Set()) {
     if(seen.has(n)) return null;seen.add(n);
     if(refs.has(n.getName())) return refs.get(n.getName());
@@ -32,6 +37,7 @@ function snapshotParts(document,metadata) {
     return null;
   }
   for(const n of nodes) {
+    if(skippedOwner(n)) {n.dispose();continue;}
     const f=owner(n), b=bounds(n);
     const mName=n.getMesh()?.getName()||'';
     const nName=n.getName()||'';
@@ -127,7 +133,7 @@ async function batchDocument(document) {
 module.exports={maskRGB,padStyle,processorKey,snapshotParts,applyMaterials,batchDocument};
 
 function budgetWarnings(counts,metadata) {
-  const warnings=[];
+  const warnings=[...(metadata.warnings || [])];
   if(counts.triangles>600000)warnings.push('triangle budget exceeded after one body-only pass');
   const changed=new Set(metadata.footprints.filter(f=>metadata.keep?.includes(f.ref)).map(f=>f.uuid)).size;
   if(counts.primitives>=100+changed)warnings.push('hard draw-call budget exceeded: owner decision required');
@@ -254,6 +260,11 @@ async function cachedCompress(input,output,metadata,partsPath,statsPath,cacheRoo
         if(error.code!=='ENOENT')throw error;
       }
     }
+    const oldBefore=Date.now()-30*24*60*60*1000;
+    for(const name of await fs.readdir(cacheRoot)) if(/^[0-9a-f]{64}$/.test(name)&&name!==key) {
+      const candidate=path.join(cacheRoot,name);
+      if((await fs.stat(candidate)).mtimeMs<oldBefore)await fs.rm(candidate,{recursive:true,force:true});
+    }
     if(!await valid()) {
       const temp=await fs.mkdtemp(path.join(cacheRoot,'.build-'));
       try {
@@ -263,6 +274,7 @@ async function cachedCompress(input,output,metadata,partsPath,statsPath,cacheRoo
         await fs.rm(entry,{recursive:true,force:true});await fs.rename(temp,entry);
       } finally {await fs.rm(temp,{recursive:true,force:true});}
     }
+    const now=new Date();await fs.utimes(entry,now,now);
     for(let i=0;i<files.length;i++)await fs.copyFile(path.join(entry,files[i]),destinations[i]);
     await fs.copyFile(path.join(entry,'manifest.json'),manifestPath);return true;
   } catch(error) {

@@ -690,9 +690,29 @@ test('BR02 restored raw pair A B A and corrupt cache cannot cross indexes',integ
     mkdirSync(stale);writeFileSync(pathJoin(stale,'partial'),'x');
     mkdirSync(live);writeFileSync(pathJoin(live,'partial'),'x');
     const old=new Date(Date.now()-2*60*60*1000);utimesSync(stale,old,old);
+    const expired=pathJoin(cache,'e'.repeat(64)),recent=pathJoin(cache,'f'.repeat(64));
+    mkdirSync(expired);mkdirSync(recent);
+    const monthAgo=new Date(Date.now()-31*24*60*60*1000);utimesSync(expired,monthAgo,monthAgo);
     // Sweep abandoned builds only, preserving a concurrent live temp build.
     writeFileSync(input,original);
     assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true);
     assert.equal(existsSync(stale),false);assert.equal(existsSync(live),true);
+    assert.equal(existsSync(expired),false);assert.equal(existsSync(recent),true);
   } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('BR02 skipped ambiguous footprints preserve valid indexed geometry and coverage warnings',integration,async()=>{
+  const {d,metadata}=makeDocument(['R1','REF**']);
+  metadata.footprints=metadata.footprints.filter(p=>p.ref==='R1');
+  const board=d.createNode().setMesh(d.getRoot().listMeshes()[0].clone().setName('board_PCB'));
+  d.getRoot().listScenes()[0].addChild(board);
+  metadata.skippedRefs=['REF**',''];
+  metadata.warnings=['REF** (logo): unannotated footprint skipped'];
+  const result=await P.processDocument(d,metadata);
+  assert.deepEqual(result.parts.map(p=>p.ref),['R1']);
+  assert.equal(result.stats.footprints,1);
+  assert.deepEqual(result.stats.warnings,metadata.warnings);
+  assert.ok(d.getRoot().listNodes().some(n=>n.getMesh()&&n.getExtras().role==='fr4'), 'empty references must not discard unnamed board geometry');
+  assert.ok(!d.getRoot().listNodes().some(n=>n.getName()==='REF**'&&n.getMesh()));
 });

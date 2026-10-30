@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { createHash } from 'node:crypto';
+import { createHash, webcrypto } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal, milestoneGroups } from './worker.js';
@@ -3300,12 +3300,12 @@ test('BR02 report embeds the decode worker and permits only blob workers', () =>
 });
 
 test('BR02 broker enforces source and names and has a valid positive control',async()=>{
-  const listeners=[],sent=[],fetches=[], digest='a'.repeat(64);
+  const listeners=[],sent=[],fetches=[], digest=createHash('sha256').update(new Uint8Array([103,108,84,70])).digest('hex');
   const child={postMessage:(message,origin,transfer)=>sent.push({message,origin,transfer})};
   const window={addEventListener:(name,fn)=>{if(name==='message')listeners.push(fn)}};
   const document={querySelector:selector=>{assert.equal(selector,'#review-report');return {contentWindow:child};}};
   runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
-    window,document,Map,Number,ArrayBuffer,Uint8Array,Error,
+    window,document,crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
     fetch:async(url,options)=>{fetches.push({url,options});return {
       ok:true,arrayBuffer:async()=>new Uint8Array([103,108,84,70]).buffer};}
   });
@@ -3337,7 +3337,7 @@ test('BR02 broker deduplicates inflight requests and replies on fetch failure',a
   const gate=new Promise(r=>release=r);
   runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
     window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
-    Map,Number,ArrayBuffer,Error,fetch:async()=>{count++;await gate;return {ok:false}}});
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{count++;await gate;return {ok:false}}});
   const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'b'.repeat(64),kind:'board-parts.json'};
   const a=listener({source:child,data}),b=listener({source:child,data:{...data,id:2}});
   release();await Promise.all([a,b]);assert.equal(count,1);
@@ -3349,6 +3349,8 @@ test('BR02 broker deduplicates inflight requests and replies on fetch failure',a
 
 test('BR02 broker limits distinct inflight assets and transfers independent deduplicated buffers',async()=>{
   let listener,release;const fetches=[],sent=[],buffers=[];
+  const payloads=new Map([1,2,3,4].map(i=>{const bytes=new Uint8Array([1,2,3,i]);return [createHash('sha256').update(bytes).digest('hex'),bytes];}));
+  const digests=[...payloads.keys()];
   const child={postMessage:(message,origin,transfer)=>{
     assert.equal(origin,'*');
     if(message.bytes){
@@ -3362,13 +3364,13 @@ test('BR02 broker limits distinct inflight assets and transfers independent dedu
   const gate=new Promise(r=>release=r);
   runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
     window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
-    Map,Number,ArrayBuffer,Error,fetch:async url=>{
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async url=>{
       fetches.push(url);await gate;
-      return {ok:true,arrayBuffer:async()=>new Uint8Array([1,2,3]).buffer};
+      return {ok:true,arrayBuffer:async()=>payloads.get(url.split('/').at(-2)).buffer};
     }});
-  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'c'.repeat(64),kind:'board.glb'};
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:digests[0],kind:'board.glb'};
   const requests=[listener({source:child,data})];
-  for(let i=2;i<=4;i++)requests.push(listener({source:child,data:{...data,id:i,digest:String(i).repeat(64)}}));
+  for(let i=2;i<=4;i++)requests.push(listener({source:child,data:{...data,id:i,digest:digests[i-1]}}));
   requests.push(listener({source:child,data:{...data,id:5}}));
   await listener({source:child,data:{...data,id:6,kind:'board-parts.json'}});
   assert.equal(fetches.length,4,'duplicate shares a slot; different kind needs its own slot');
@@ -3379,7 +3381,7 @@ test('BR02 broker limits distinct inflight assets and transfers independent dedu
   assert.equal(replies.length,5);assert.equal(new Set(buffers).size,5);
   assert.ok(buffers.every(b=>b.byteLength===0),'each reply buffer was transferred');
   assert.ok(replies.every(m=>m.nonce===data.nonce&&m.gzip===false));
-  for(const reply of replies)assert.deepEqual([...new Uint8Array(reply.bytes)],[1,2,3]);
+  for(const reply of replies)assert.deepEqual([...new Uint8Array(reply.bytes)].slice(0,3),[1,2,3]);
   await listener({source:child,data:{...data,id:7,kind:'board-parts.json'}});
   assert.equal(fetches.length,5,'settled assets release their slots');
   assert.equal(sent.at(-1).id,7);assert.ok(sent.at(-1).bytes);
@@ -3393,7 +3395,7 @@ test('BR02 broker drops success and error replies when the report frame changes'
     const gate=new Promise(r=>release=r);
     runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
       window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>frame},
-      Map,Number,ArrayBuffer,Error,fetch:async()=>{
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{
         await gate;
         if(outcome==='network')throw Error('network failure');
         return {ok:outcome!=='http',arrayBuffer:async()=>{
@@ -3418,7 +3420,7 @@ test('BR02 broker reports network and body errors and allows retry',async()=>{
     const child={postMessage:m=>replies.push(m)};
     runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
       window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
-      Map,Number,ArrayBuffer,Error,fetch:async()=>{
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{
         count++;
         if(count===1&&outcome==='network')throw Error('network failure');
         return {ok:true,arrayBuffer:async()=>{
@@ -3426,7 +3428,7 @@ test('BR02 broker reports network and body errors and allows retry',async()=>{
           return new ArrayBuffer(4);
         }};
       }});
-    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'e'.repeat(64),kind:'board.glb'};
+    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:createHash('sha256').update(new Uint8Array(4)).digest('hex'),kind:'board.glb'};
     await listener({source:child,data});
     assert.equal(replies[0].error,outcome+' failure');
     assert.equal(replies[0].nonce,data.nonce);assert.equal(replies[0].id,1);assert.ok(!replies[0].bytes);
@@ -3441,8 +3443,8 @@ test('BR02 broker caps duplicate waiters per asset',async()=>{
   const gate=new Promise(r=>release=r);
   runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
     window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
-    Map,Number,ArrayBuffer,Error,fetch:async()=>{count++;await gate;return {ok:true,arrayBuffer:async()=>new ArrayBuffer(4)}}});
-  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'f'.repeat(64),kind:'board.glb'};
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{count++;await gate;return {ok:true,arrayBuffer:async()=>new ArrayBuffer(4)}}});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:createHash('sha256').update(new Uint8Array(4)).digest('hex'),kind:'board.glb'};
   const requests=[];
   for(let id=1;id<=17;id++)requests.push(listener({source:child,data:{...data,id}}));
   assert.equal(replies.length,1);
@@ -3456,7 +3458,7 @@ test('BR02 broker distinguishes authorization denial from retryable unavailabili
     let listener;const replies=[];const child={postMessage:m=>replies.push(m)};
     runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
       window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
-      Map,Number,ArrayBuffer,Error,fetch:async()=>({ok:false,status})});
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>({ok:false,status})});
     await listener({source:child,data:{kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:status,digest:'9'.repeat(64),kind:'board.glb'}});
     assert.equal(replies[0].error,'Model access denied. Refresh the review link or sign in, then retry.');
   }
@@ -3466,4 +3468,23 @@ test('BR02 broker rejects endpoints outside the authenticated model route',()=>{
   for(const endpoint of ['https://evil/model/','//evil/','/r/o/r/a/12/raw','/r/o/r/a/no/3d/','/s/token/3d/']){
     assert.throws(()=>runInNewContext(`(${threeClient.toString()})(${JSON.stringify({endpoint})})`,{Error}),/invalid model endpoint/);
   }
+});
+
+
+test('BR02 broker verifies SHA-256 before transferring models and allows retry',async()=>{
+  let listener;const sent=[],bytes=new Uint8Array([103,108,84,70]);
+  const digest=createHash('sha256').update(bytes).digest('hex');
+  const child={postMessage:message=>sent.push(message)};
+  let corrupt=true;
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+    fetch:async()=>({ok:true,arrayBuffer:async()=>corrupt?new ArrayBuffer(4):bytes.buffer})
+  });
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest,kind:'board.glb'};
+  await listener({source:child,data});
+  assert.equal(sent[0].error,'Model digest mismatch. Retry.');
+  assert.equal(sent[0].bytes,undefined);
+  corrupt=false;await listener({source:child,data:{...data,id:2}});
+  assert.deepEqual([...new Uint8Array(sent[1].bytes)],[...bytes]);
 });

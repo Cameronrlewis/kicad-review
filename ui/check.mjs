@@ -76,6 +76,8 @@ const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 async function setupTab() {
 await send("Runtime.enable");
+// Headless focus events need virtual focus, not a foreground window.
+await send("Emulation.setFocusEmulationEnabled", { enabled:true });
 await send("Runtime.addBinding", { name:"__flipTheme" });
 await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: false });
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
