@@ -546,7 +546,9 @@ test('report CSP and both iframe sandboxes allow only the BOM downloads token', 
   }
   assert.ok(!reportCsp.includes('allow-same-origin') && /connect-src 'none'/.test(reportCsp));
   // Preserve the optional 02 worker directive once that plan has merged.
-  if (reportCsp.includes('worker-src')) assert.match(reportCsp, /worker-src blob:/);
+  // 02 has not merged here: pin its absence, never condition on the policy under test.
+  // On rebase onto 02, replace this with assert.match(reportCsp, /worker-src blob:/).
+  assert.doesNotMatch(reportCsp, /(?:^|;)\s*worker-src\b/);
 });
 
 test('artifact frame and raw route redirect unsigned users without GitHub calls', async () => {
