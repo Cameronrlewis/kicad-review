@@ -1889,14 +1889,18 @@ function card(r) {
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
     <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${r.weight ? '<span class="weight">'+esc(r.weight)+'</span>' : ''}${electricalDetail(r)}</button>`;
 }
+function channelLabel(channel) {
+  return Object.hasOwn(ELECTRICAL_CHANNELS, channel) ? ELECTRICAL_CHANNELS[channel] : null;
+}
 function electricalSummaryHtml() {
   const s=proj().summary;
-  if(!s) return {top:'',bottom:''};
+  if(!s) return {top:'',status:'',incomplete:''};
   const channels=(s.channels||[]).filter(c=>c.status&&c.status!=='not_applicable')
-    .map(c=>`${esc(ELECTRICAL_CHANNELS[c.channel]||c.channel)}: ${esc(c.status)} (${esc(c.total??0)})`).join(' · ');
-  const issues=(s.incomplete||[]).map(i=>`<div>${esc(ELECTRICAL_CHANNELS[i.channel]||i.channel)}: ${esc(i.reason)}</div>`).join('');
+    .map(c=>`${esc(channelLabel(c.channel)??c.channel)}: ${esc(c.status)} (${esc(c.total??0)})`).join(' · ');
+  const issues=(s.incomplete||[]).map(i=>`<div>${esc(channelLabel(i.channel)??i.channel)}: ${esc(i.reason)}</div>`).join('');
   return {top:s.headline?`<div class="electrical-headline">${esc(s.headline)}</div>`:'',
-    bottom:(channels?`<div class="electrical-headline muted">${channels}</div>`:'')+(issues?`<div class="electrical-incomplete" role="note">${issues}</div>`:'')};
+    status:channels?`<div class="electrical-status muted">${channels}</div>`:'',
+    incomplete:issues?`<div class="electrical-incomplete" role="note">${issues}</div>`:''};
 }
 function inventoryHtml() {
   // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
@@ -1937,6 +1941,7 @@ function goToObject(i) {
 function bindInventory() {
   for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
 }
+// ponytail: pages of 50 visible cards; search narrows the full embedded list.
 const CHANGE_PAGE_SIZE = 50, changePage = {key:'',index:0,ids:[]};
 // Explicit user grouping wins; default is channel when the report carries channel data.
 function changeGroup() {
@@ -1964,9 +1969,10 @@ function cardsHtml() {
   const pages=Math.max(1,Math.ceil(rows.length/CHANGE_PAGE_SIZE));
   changePage.index=Math.max(0,Math.min(pages-1,changePage.index));
   const start=changePage.index*CHANGE_PAGE_SIZE;
+  const g = changeGroup();
   let previous;
   return (rows.slice(start,start+CHANGE_PAGE_SIZE).map(r => {
-    const g = changeGroup(), group = g === "channel" ? ELECTRICAL_CHANNELS[r.channel] || "Other" : g ? r[g] : null;
+    const group = g === "channel" ? channelLabel(r.channel) || "Other" : g ? r[g] : null;
     const heading = g && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
     previous = group;
     return heading + card(r);
@@ -2171,7 +2177,7 @@ function referenceRanges(refs) {
 }
 function dockListTools(name, state) {
   const options = (values, current) => values.map(([v, label]) => `<option value="${v}" ${v === (current || "") ? "selected" : ""}>${label}</option>`).join("");
-  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" ${name === "changes" ? 'maxlength="200" ' : ""}data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "Default groups"], ["none", "No groups"], ...(name === "changes" ? [["channel", "Group: channel"]] : []), ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
+  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" ${name === "changes" ? 'maxlength="200" ' : ""}data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "Auto (channel if reported)"], ["none", "No groups"], ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
@@ -2188,6 +2194,7 @@ function renderPanel() {
   const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
+  const summary = electricalSummaryHtml();
   $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
     (panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
@@ -2196,7 +2203,7 @@ function renderPanel() {
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
-    ${f.all ? "" : electricalSummaryHtml().top}<div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${f.all ? "" : electricalSummaryHtml().bottom}${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
+    ${f.all ? "" : summary.top}<div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${f.all ? "" : summary.status}${summary.incomplete}${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   bindRightDock();
   for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
     const attribute = input.hasAttribute("data-list-search") ? "search" : input.hasAttribute("data-list-sort") ? "sort" : "group";

@@ -816,7 +816,7 @@ export const CHECKS = [
     return count>0||'no sheets checked';
   `],
   ["BR03 grouped electrical rows and old v1 fallback", "", `
-  const p=proj(), old=p.changes, summary=p.summary;
+  const p=proj(), old=p.changes, summary=p.summary, filter={...S.filter}, savedTab=S.t;
   try {
     p.changes=[{id:'c903',kind:'net-members',ref:'USB',action:'modified',channel:'wiring',weight:'heavy',
       detail:{kind:'members',added:['U1.19','R2.1'],removed:['J1.3'],beforeNets:['USB'],afterNets:['USB'],transitions:[{pin:'U1.19',before:['A'],after:['C']}]},where:null},
@@ -834,7 +834,7 @@ export const CHECKS = [
     delete p.summary; p.changes=[{id:'c905',kind:'symbol',ref:'R1',action:'added',props:{Value:'1k'},where:null}];
     S.filter.q=''; renderPanel();
     return document.querySelector('#panel .card[data-id="c905"]') ? true : 'old report failed';
-  } finally {p.changes=old; p.summary=summary; S.filter.q=''; renderPanel();}
+  } finally {p.changes=old; p.summary=summary; S.filter=filter; S.t=savedTab; renderPanel();}
 `],
   ["BR03 hostile text and full array search", "", `
   const p=proj(), changes=p.changes, summary=p.summary, filter={...S.filter};

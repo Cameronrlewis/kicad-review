@@ -744,4 +744,5 @@ body.shot #image-search { display:none; }
 .weight { font:11px var(--font-mono); margin-left:var(--space-1); color:var(--muted); }
 .electrical-incomplete { border-left:3px solid var(--modified); padding:var(--space-2); overflow-wrap:anywhere; }
 .electrical-headline { padding:var(--space-2); overflow-wrap:anywhere; }
+.electrical-status { padding:var(--space-2); overflow-wrap:anywhere; }
 .member-transition { font:11px var(--font-mono); overflow-wrap:anywhere; }
