@@ -4552,3 +4552,223 @@ test('ask: a consumer that stops early cancels the upstream body and releases it
   await collect(sseEvents(done));
   assert.equal(done.locked, false);
 });
+
+// Reuse the existing top-level worker binding; do not import it again.
+
+const ctxDoc = { version: 1, kind: 'kicad-review-design-context', base: 'a'.repeat(40), head: 'b'.repeat(40), reason: 'x', truncated: false,
+  projects: [{ name: 'Thermal_Camera', dir: 'Thermal_Camera', status: 'modified', revisions: { head: { nets: [{ id: '12', pin_count: 1, pins: ['U1.1'] }] } } }] };
+const kvFake = () => { const m = new Map(); return { m, get: async (k) => m.get(k) ?? null, put: async (k, v) => { m.set(k, v); } }; };
+const askEnv = (extra = {}) => ({ ...env, ANTHROPIC_API_KEY: 'sk-test', ASK_KV: kvFake(), ...extra });
+const apiBase = 'https://api.github.com/repos/Cameronrlewis/repo';
+function askMocks({ toml = '[ask]\nenabled = true\n', anthropic, seen = [], artifacts = [{id:56,name:'kicad-review-aaaaaaa-bbbbbbb-pass.context.json',expired:false,digest:'sha256:abc'}], contextBody = JSON.stringify(ctxDoc) } = {}) {
+  return async (url, options = {}) => {
+    seen.push({ url: String(url), options });
+    if (url === apiBase) return repoOk();
+    if (String(url).startsWith(`${apiBase}/contents/kicad-review.toml`)) return toml === null ? new Response('{}', { status: 404 }) : new Response(toml);
+    if (url === `${apiBase}/actions/artifacts/55`) return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9 } }));
+    if (url === `${apiBase}/actions/runs/9/artifacts?per_page=100`) return new Response(JSON.stringify({ artifacts }));
+    if (url === `${apiBase}/actions/artifacts/56/zip`) return new Response(null, { status: 302, headers: { Location: 'https://blob.example/ctx' } });
+    if (url === 'https://blob.example/ctx') return new Response(contextBody);
+    if (url === 'https://api.anthropic.com/v1/messages') return anthropic(options);
+    throw new Error('unexpected fetch ' + url);
+  };
+}
+const answerStream = () => new Response(streamOf(
+  sse('message_start', { message: { usage: { cache_read_input_tokens: 0 } } }),
+  sse('content_block_delta', { delta: { type: 'text_delta', text: 'U1 pin 1 is on [net:12].' } }), sse('message_stop', {})));
+const askPost = async (path, body, e, cookie, origin = 'https://site.example') => worker.fetch(request(path, { method: 'POST',
+  headers: { ...(origin ? { Origin: origin } : {}), 'Content-Type': 'application/json', Cookie: `s=${cookie}` }, body: JSON.stringify(body) }), e);
+
+test('ask route: unconfigured, foreign origin and non-JSON are refused before GitHub or the model', async () => {
+  const seen = [];
+  const restore = mockFetch(async (url) => { seen.push(url); throw new Error('unexpected fetch'); });
+  try {
+    const cookie = await signedIn({ t: 'access-secret' });
+    assert.equal((await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [] }, env, cookie)).status, 503, 'no key and no KV');
+    const e = askEnv();
+    assert.equal((await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [] }, e, cookie, 'https://evil.example')).status, 403);
+    assert.equal((await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [] }, e, cookie, null)).status, 403);
+    const plain = await worker.fetch(request('/r/Cameronrlewis/repo/a/55/ask', { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'text/plain', Cookie: `s=${cookie}` }, body: '{}' }), e);
+    assert.equal(plain.status, 415);
+    assert.deepEqual(seen, []);
+  } finally { restore(); }
+});
+
+test('ask route: opt-in comes from the default branch, so a pull request cannot turn Ask on for itself', async () => {
+  const cookie = await signedIn({ t: 'access-secret' }), seen = [];
+  for (const toml of [null, '[ask]\nenabled = false\n', '[threads]\nenabled = true\n', 'notes = '+String.fromCharCode(34).repeat(3)+'\n[ask]\nenabled = true\n'+String.fromCharCode(34).repeat(3)]) {
+    seen.length = 0;
+    const restore = mockFetch(askMocks({ toml, seen, anthropic: () => { throw new Error('the model must not be called'); } }));
+    try {
+      const response = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, askEnv(), cookie);
+      assert.equal(response.status, 403);
+      assert.match((await response.json()).error, /not turned on/);
+      assert.ok(seen.some((s) => s.url === `${apiBase}/contents/kicad-review.toml?ref=main`), 'reads the default branch');
+      assert.ok(!seen.some((s) => s.url.includes('anthropic')));
+    } finally { restore(); }
+  }
+});
+
+test('ask route: the complete shipped example can opt in without removing its arrays', async () => {
+  const { readFileSync } = await import('node:fs');
+  // Task 13 later adds an opted-out [ask] table; retain every other byte of the shipped example.
+  const example = readFileSync(new URL('../examples/kicad-review.toml', import.meta.url), 'utf8');
+  const enabled = /^\[ask\]\s*$/m.test(example)
+    ? example.replace(/(\[ask\][\s\S]*?\benabled\s*=\s*)false/, '$1true')
+    : example + '\n[ask]\nenabled = true\n';
+  assert.match(enabled, /required_fields = \["Value", "Footprint"\]/);
+  const cookie = await signedIn({ t: 'access-secret' });
+  for (const [toml, status, calls] of [[enabled, 200, 1],
+    [enabled.replace(/(\[ask\][\s\S]*?\benabled\s*=\s*)true/, '$1false'), 403, 0],
+    [enabled.replace(/(\[ask\][\s\S]*?\benabled\s*=\s*)true/, '$1"true"'), 403, 0],
+    [enabled + '\n[ask]\nenabled=true\n', 403, 0]]) {
+    const seen = [], restore = mockFetch(askMocks({ toml, seen, anthropic: answerStream }));
+    try {
+      const r = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, askEnv(), cookie);
+      assert.equal(r.status, status);
+      const response = await r.text();
+      if (status === 200) assert.match(response, /event: answer\n/);
+      assert.equal(seen.filter(s => s.url.includes('anthropic')).length, calls);
+    } finally { restore(); }
+  }
+});
+
+test('ask route: streams BoardRepo events, caches the context block, counts the daily cap', async () => {
+  const cookie = await signedIn({ t: 'access-secret' }), seen = [], e = askEnv({ ASK_DAILY_LIMIT: '2' });
+  const restore = mockFetch(askMocks({ seen, anthropic: answerStream }));
+  try {
+    const response = await askPost('/r/Cameronrlewis/repo/a/55/ask', { project: 'Thermal_Camera', messages: [{ role: 'user', text: 'What is on net 12?' }] }, e, cookie);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/event-stream/);
+    const text = await response.text();
+    assert.deepEqual([...text.matchAll(/^event: (\w+)$/gm)].map((m) => m[1]), ['status', 'start', 'answer_delta', 'answer', 'done']);
+    assert.match(text, /"remaining":1/);
+    const call = seen.find((s) => s.url === 'https://api.anthropic.com/v1/messages');
+    const sent = JSON.parse(call.options.body);
+    assert.equal(call.options.headers['x-api-key'], 'sk-test');
+    assert.equal(sent.model, 'claude-sonnet-5-5'); assert.equal(sent.stream, true);
+    assert.deepEqual(sent.system[1].cache_control, { type: 'ephemeral' });
+    assert.deepEqual(sent.messages, [{ role: 'user', content: 'What is on net 12?' }]);
+    assert.match(sent.system[1].text, /"Thermal_Camera"/);
+    await (await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'again' }] }, e, cookie)).text();
+    const third = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'again' }] }, e, cookie);
+    assert.equal(third.status, 429);
+    assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 2, 'the capped request never reaches the model');
+  } finally { restore(); }
+});
+
+test('ask route: bad bodies and unknown projects never reach the model', async () => {
+  const cookie = await signedIn({ t: 'access-secret' }), seen = [];
+  const restore = mockFetch(askMocks({ seen, anthropic: () => { throw new Error('the model must not be called'); } }));
+  try {
+    const e = askEnv();
+    assert.equal((await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'x'.repeat(4001) }] }, e, cookie)).status, 400);
+    assert.equal((await askPost('/r/Cameronrlewis/repo/a/55/ask', { project: 'Nope', messages: [{ role: 'user', text: 'hi' }] }, e, cookie)).status, 400);
+    assert.equal(seen.filter(s => s.url.includes('anthropic')).length, 0);
+  } finally { restore(); }
+});
+
+test('ask route: missing, expired, malformed, disabled and oversized context calls no model', async () => {
+  const cookie=await signedIn({t:'access-secret'});
+  for(const [options,status,pattern] of [
+    [{artifacts:[]},404,/no design data/],
+    [{artifacts:[{id:56,name:'kicad-review-aaaaaaa-bbbbbbb-pass.context.json',expired:true}]},404,/no design data/],
+    [{contextBody:'{}'},502,/known format/],
+    [{contextBody:'{not json'},502,/known format/],
+    [{contextBody:'x'.repeat(400001)},502,/too large/],
+    [{contextBody:JSON.stringify({version:1,projects:[],disabled_reason:'Select fewer projects'})},413,/Select fewer/],
+  ]) {
+    const seen=[],restore=mockFetch(askMocks({...options,seen,anthropic:()=>{throw Error('unexpected model');}}));
+    try{const r=await askPost('/r/Cameronrlewis/repo/a/55/ask',{messages:[{role:'user',text:'hi'}]},askEnv(),cookie);assert.equal(r.status,status);assert.match((await r.json()).error,pattern);assert.equal(seen.filter(s=>s.url.includes('anthropic')).length,0);}finally{restore();}
+  }
+});
+
+test('ask context limit counts complete UTF-8 documents at the exact boundary', async () => {
+  const cookie=await signedIn({t:'access-secret'}), prefix=JSON.stringify({...ctxDoc,padding:''});
+  const exact=prefix.slice(0,-2)+'µ'.repeat(Math.floor((400000-Buffer.byteLength(prefix))/2))+prefix.slice(-2);
+  const remaining=400000-Buffer.byteLength(exact), body=exact.slice(0,-2)+'x'.repeat(remaining)+exact.slice(-2);
+  assert.equal(Buffer.byteLength(body),400000);
+  for(const [contextBody,status] of [[body,200],[body+' ',502]]){
+    const restore=mockFetch(askMocks({contextBody,anthropic:answerStream}));
+    try{assert.equal((await askPost('/r/Cameronrlewis/repo/a/55/ask',{messages:[{role:'user',text:'hi'}]},askEnv(),cookie)).status,status);}finally{restore();}
+  }
+});
+
+test('ask KV quota is best effort under simultaneous reads, not a billing ceiling', async () => {
+  const e=askEnv({ASK_DAILY_LIMIT:'1'}),cookie=await signedIn({t:'access-secret'});
+  e.ASK_KV.get=async()=>null; // models arbitrary stale reads
+  const seen=[],restore=mockFetch(askMocks({seen,anthropic:answerStream}));
+  try {const replies=await Promise.all(Array.from({length:8},()=>askPost('/r/Cameronrlewis/repo/a/55/ask',{messages:[{role:'user',text:'hi'}]},e,cookie)));assert.ok(replies.every(r=>r.status===200));assert.equal(seen.filter(s=>s.url.includes('anthropic')).length,8);}finally{restore();}
+});
+
+test('ask route: KV one-write-per-second rejection preserves every already-started answer', async () => {
+  const e = askEnv(), cookie = await signedIn({ t: 'access-secret' }), written = new Set();
+  let rejected = 0;
+  e.ASK_KV.get = async () => null; // concurrent requests may see the same stale daily value
+  e.ASK_KV.put = async key => {
+    // All requests share one logical second; the fake deterministically enforces one write per key.
+    if (written.has(key)) { rejected++; throw Error('429: maximum 1 write per second per key'); }
+    written.add(key);
+  };
+  const seen = [], restore = mockFetch(askMocks({ seen, anthropic: answerStream }));
+  try {
+    const replies = await Promise.all(Array.from({ length: 4 }, () => askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, e, cookie)));
+    assert.ok(replies.every(r => r.status === 200));
+    const bodies = await Promise.all(replies.map(r => r.text()));
+    assert.equal(rejected, 3);
+    assert.equal(seen.filter(s => s.url.includes('anthropic')).length, 4, 'no billable model retry');
+    for (const text of bodies) {
+      assert.match(text, /event: answer\n/);
+      assert.match(text, /event: done\n/);
+      assert.doesNotMatch(text, /event: error\n/);
+    }
+    assert.equal(bodies.filter(text => text.includes('Daily counter unavailable')).length, 3);
+  } finally { restore(); }
+});
+
+test('ask insight: summary and three questions are generated once per run and cached by artifact digest', async () => {
+  const cookie = await signedIn({ t: 'access-secret' }), seen = [], e = askEnv();
+  const reply = () => new Response(JSON.stringify({ content: [{ type: 'text', text: 'Here: {"summary":"A USB-C powered camera board.","questions":["What powers it?","Which pins drive the LED?","What changed?","extra"]}' }] }));
+  const restore = mockFetch(askMocks({ seen, anthropic: reply }));
+  try {
+    const first = await (await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie)).json();
+    assert.deepEqual(first, { summary: 'A USB-C powered camera board.', questions: ['What powers it?', 'Which pins drive the LED?', 'What changed?'], cached: false });
+    const second = await (await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie)).json();
+    assert.equal(second.cached, true);
+    assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 1);
+    assert.ok([...e.ASK_KV.m.keys()].some((k) => k.startsWith('ask:insight:sha256:abc:')));
+  } finally { restore(); }
+});
+test('ask insight: rejects empty summaries and fewer than three usable questions without caching', async () => {
+  for (const text of [
+    '{"summary":"","questions":["A?","B?","C?"]}',
+    '{"summary":"A board.","questions":[]}',
+    '{"summary":"A board."}',
+    '{"summary":"A board.","questions":["A?",null,"C?"]}',
+    '{"summary":"A board.","questions":["A?","B?"]}'
+  ]) {
+    const cookie = await signedIn({ t: 'insight-invalid' }), e = askEnv();
+    const restore = mockFetch(askMocks({ anthropic: () => new Response(JSON.stringify({ content: [{ type: 'text', text }]})) }));
+    try {
+      const response = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+      assert.equal(response.status, 502);
+      assert.match((await response.json()).error, /summary|questions/i);
+      assert.equal([...e.ASK_KV.m.keys()].some((k) => k.startsWith('ask:insight:')), false);
+    } finally { restore(); }
+  }
+});
+test('ask insight: coalesces concurrent cold requests and returns generated data when KV writes reject', async () => {
+  const cookie = await signedIn({ t: 'insight-concurrent' }), seen = [];
+  const e = askEnv({ ASK_KV: { get: async () => null, put: async () => { throw new Error('KV write rate limit'); } } });
+  const restore = mockFetch(askMocks({ seen, anthropic: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response(JSON.stringify({ content: [{ type: 'text', text: 'Here: {"summary":"A USB-C board.","questions":["A?","B?","C?"]}' }] }));
+  } }));
+  try {
+    const path = '/r/Cameronrlewis/repo/a/55/ask/insight';
+    const responses = await Promise.all([1, 2, 3].map(() => askPost(path, { project: 'Thermal_Camera' }, e, cookie)));
+    const bodies = await Promise.all(responses.map(async (r) => { assert.equal(r.status, 200); return r.json(); }));
+    assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 1);
+    assert.ok(bodies.every((b) => b.summary === 'A USB-C board.' && b.questions.length === 3 && b.cached === false));
+  } finally { restore(); }
+});

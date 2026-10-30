@@ -1,4 +1,6 @@
-// Ask about this design: the Worker side. Pure helpers first; the route is added in the next task.
+// Ask about this design: the Worker side. Pure helpers first, then the route.
+import { json, accessFailure, sessionResponse } from './threads.js';
+
 export const LIMITS = { question: 4000, message: 16000, messages: 24, history: 20 };   // BoardRepo's limits
 
 export function validateAsk(body) {
@@ -160,4 +162,121 @@ export async function* answerEvents(body, remaining) {
   yield ['answer', { text: answer }];
   if (questions.length) yield ['followups', { questions }];
   yield ['done', {}];
+}
+
+const MAX_CONTEXT = 400_000;   // bytes; the workflow aims for 200,000
+const reportName = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
+// 06's design snapshot artifact: its context sits beside it as kicad-design-<sha7>.context.json in the same run.
+const snapshotName = /^kicad-design-[0-9a-f]{7}\.html$/;
+const anthropicUrl = 'https://api.anthropic.com/v1/messages';
+// ponytail: coalesce same-isolate cold misses; cross-isolate exact-once generation is deferred and is not promised.
+const insightFlights = new Map();
+
+export async function loadContext(owner, repo, id, token, gh) {
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
+  try {
+    const meta = await gh(`${root}/artifacts/${id}`, token);
+    if (!meta.ok) return { status: 404, error: 'This review was not found.' };
+    const report = await meta.json();
+    const snapshot = snapshotName.test(report.name || '');
+    if (!snapshot && !reportName.test(report.name || '')) return { status: 404, error: 'This artifact is not a reviewed design.' };
+    if (report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'This review has expired.' };
+    const list = await gh(`${root}/runs/${report.workflow_run.id}/artifacts?per_page=100`, token);
+    if (!list.ok) return { status: 502, error: 'GitHub did not answer. Try again.' };
+    const name = report.name.slice(0, -5) + '.context.json';
+    const artifact = ((await list.json()).artifacts || []).find((a) => !a.expired && a.name === name && /^\d{1,20}$/.test(String(a.id)));
+    if (!artifact) return { status: 404, error: 'This review has no design data. Turn on [ask] in kicad-review.toml and re-run the review.' };
+    const download = await gh(`${root}/artifacts/${artifact.id}/zip`, token, { redirect: 'manual' });
+    if (download.status !== 302) return { status: 502, error: 'GitHub did not answer. Try again.' };
+    const location = new URL(download.headers.get('Location'));
+    if (location.protocol !== 'https:' || location.username || location.password) return { status: 502, error: 'GitHub did not answer. Try again.' };
+    const blob = await fetch(location.href, { redirect: 'manual' });
+    const body = blob.ok ? await blob.text() : '';
+    if (!body || new TextEncoder().encode(body).byteLength > MAX_CONTEXT) return { status: 502, error: 'The design data is missing or too large.' };
+    let doc;
+    try { doc = JSON.parse(body); } catch { return {status:502,error:'The design data is not in a known format.'}; }
+    if (doc?.version !== 1 || !Array.isArray(doc.projects)) return { status: 502, error: 'The design data is not in a known format.' };
+    if (doc.disabled_reason) return { status: 413, error: String(doc.disabled_reason) };
+    // Both kinds share one schema; a snapshot must say so (mode single, base null) and a report must not.
+    if (doc.kind !== 'kicad-review-design-context' || (doc.mode === 'single') !== snapshot || (snapshot && doc.base !== null)) return { status: 502, error: 'The design data does not match this artifact.' };
+    return { doc, key: String(artifact.digest || `${artifact.id}`) };
+  } catch { return { status: 502, error: 'GitHub did not answer. Try again.' }; }
+}
+
+const asJson = (text) => { const a = text.indexOf('{'), b = text.lastIndexOf('}'); return a >= 0 && b > a ? JSON.parse(text.slice(a, b + 1)) : null; };
+
+export async function askRoute(request, env, { owner, repo, id, rest }, { access, gh }) {
+  const url = new URL(request.url);
+  if (!env.ANTHROPIC_API_KEY || !env.ASK_KV) return json({ error: 'Ask is not set up on this site.' }, 503);
+  if (request.headers.get('Origin') !== url.origin) return json({ error: 'Forbidden' }, 403);
+  if (!String(request.headers.get('Content-Type') || '').startsWith('application/json')) return json({ error: 'Send JSON' }, 415);
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return accessFailure(allowed);
+  const done = (result) => sessionResponse(result, allowed);
+  let body;
+  try { body = await request.json(); } catch { return done(json({ error: 'Send JSON' }, 400)); }
+  const insight = rest === '/insight';
+  const checked = insight ? { messages: [] } : validateAsk(body);
+  if (checked.error) return done(json({ error: checked.error }, 400));
+  const token = allowed.s.token, login = String(allowed.s.login || '').toLowerCase();
+  // The owner's opt-in lives on the default branch, so a pull request cannot enable Ask for itself.
+  const toml = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/kicad-review.toml?ref=${encodeURIComponent(allowed.repo.default_branch || 'main')}`, token,
+    { headers: { Accept: 'application/vnd.github.raw+json' } });
+  if (toml.status !== 404 && !toml.ok) return done(json({ error: 'GitHub did not answer. Try again.' }, 502));
+  if (!toml.ok || !askOptedIn(await toml.text())) return done(json({ error: 'Ask is not turned on for this repository. Add [ask] enabled = true to kicad-review.toml on the default branch.' }, 403));
+  const loaded = await loadContext(owner, repo, id, token, gh);
+  if (!loaded.doc) return done(json({ error: loaded.error }, loaded.status));
+  const projects = loaded.doc.projects, project = typeof body?.project === 'string' ? projects.find((p) => p.dir === body.project) : projects[0];
+  if (!project) return done(json({ error: 'That project is not in this review.' }, 400));
+  const { projects: _all, ...header } = loaded.doc;
+  const system = systemBlocks(JSON.stringify({ ...header, project }));
+  const call = (payload) => fetch(anthropicUrl, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, body: JSON.stringify(payload) });
+  if (insight) {
+    const key = `ask:insight:${loaded.key}:${project.dir}`;
+    const cached = await env.ASK_KV.get(key);
+    let hit = null;
+    try { hit = cached && JSON.parse(cached); } catch { /* KV is a cache: a corrupt entry is regenerated. */ }
+    if (hit) {
+      if (typeof hit.summary === 'string' && hit.summary.trim() && Array.isArray(hit.questions) && hit.questions.length === 3) return done(json({ ...hit, cached: true }));
+    }
+    let pending = insightFlights.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const upstream = await call(anthropicRequest({ model: env.ASK_SUMMARY_MODEL || env.ASK_MODEL || 'claude-sonnet-5-5', maxTokens: 700, stream: false, system,
+          messages: [{ role: 'user', content: 'Write a two-sentence summary of this board for a new team member and three questions a reviewer could ask about it. Answer with JSON only: {"summary": "...", "questions": ["...", "...", "..."]}' }] }));
+        if (!upstream.ok) throw new Error('provider');
+        let parsed = null;
+        try { parsed = asJson(String((await upstream.json()).content?.[0]?.text || '')); } catch { /* handled below */ }
+        const summary = typeof parsed?.summary === 'string' ? parsed.summary.trim().slice(0, 1500) : '';
+        const questions = Array.isArray(parsed?.questions) ? parsed.questions.filter((q) => typeof q === 'string' && q.trim()).map((q) => q.trim().slice(0, 200)).filter(Boolean).slice(0, 3) : [];
+        if (!summary || questions.length !== 3) throw new Error('incomplete');
+        const result = { summary, questions };
+        try { await env.ASK_KV.put(key, JSON.stringify(result), { expirationTtl: 90 * 86400 }); } catch { /* KV is a best-effort cache; return the successful generation. */ }
+        return result;
+      })();
+      insightFlights.set(key, pending);
+    }
+    try { return done(json({ ...(await pending), cached: false })); }
+    catch (error) {
+      const incomplete = error.message === 'incomplete';
+      return done(json({ error: incomplete ? 'The model provider returned an incomplete summary or fewer than three usable questions. Try again.' : 'The model provider did not return a complete summary. Try again.' }, 502));
+    } finally { if (insightFlights.get(key) === pending) insightFlights.delete(key); }
+  }
+  const limit = Number(env.ASK_DAILY_LIMIT) || 50, day = `ask:day:${login}:${new Date().toISOString().slice(0, 10)}`;
+  const used = Number(await env.ASK_KV.get(day)) || 0;
+  if (used >= limit) return done(json({ error: 'Daily question limit reached. Try again tomorrow.', code: 'quota' }, 429));
+  const upstream = await call(anthropicRequest({ model: env.ASK_MODEL || 'claude-sonnet-5-5', maxTokens: 1500, stream: true, system, messages: checked.messages }));
+  if (!upstream.ok || !upstream.body) return done(json({ error: 'The model provider did not answer. Try again.' }, 502));
+  // ponytail: read-then-write counter; best-effort only: arbitrary concurrency and eventually consistent/stale KV reads can lose increments and produce unbounded overshoot. This is not a billing bound; use provider billing limits, or require owner-approved serialized quota storage before relying on a hard cap.
+  let quotaSaved = true;
+  try { await env.ASK_KV.put(day, String(used + 1), { expirationTtl: 2 * 86400 }); }
+  catch { quotaSaved = false; } // KV may reject concurrent writes to one key; never discard a paid-for answer or retry the model.
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({ async start(controller) {
+    const send = (event, data) => controller.enqueue(encoder.encode(frame(event, data)));
+    send('status', { text: quotaSaved ? 'Reading the design…' : 'Daily counter unavailable; this answer will continue. Remaining count is an estimate.' });
+    for await (const [event, data] of answerEvents(upstream.body, limit - used - 1)) send(event, data);
+    controller.close();
+  } });
+  return done(new Response(stream, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store' } }));
 }

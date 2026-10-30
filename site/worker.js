@@ -6,6 +6,7 @@ export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute } from './threads.js';
+import { askRoute } from './ask.js';
 import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
 
@@ -397,6 +398,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
         user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
+        ask: Boolean(env.ANTHROPIC_API_KEY && env.ASK_KV),
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -803,6 +805,11 @@ const routes = {
       if (request.method === 'GET' && assetRoute) {
         const [, owner, repo, id, digest, kind] = assetRoute;
         return digestAsset(request, env, owner, repo, id, digest, kind);
+      }
+      const askMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/ask(\/insight)?$/);
+      if (request.method === 'POST' && askMatch) {
+        const result = await askRoute(request, env, { owner: askMatch[1], repo: askMatch[2], id: askMatch[3], rest: askMatch[4] || '' }, { access, gh });
+        return response(result.body, { status: result.status, headers: result.headers });
       }
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {
