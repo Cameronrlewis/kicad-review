@@ -4662,7 +4662,8 @@ test('legacy metadata shares in-flight builds but is never cached', async () => 
 test('BR02 design family waits on 06 report-kind.js', () => {
   assert.ok(!existsSync(new URL('./report-kind.js', import.meta.url)), '06 Task 4A follow-up: make readArtifactHtml/served3d (artifact3d and lazy shell) accept the '
     + "design family via verifyReportFamily('design',name,data.report.head), flip the 'design' row to a 200 control, "
-    + 'add the both-family conditional/revocation flow, then delete this test');
+    + 'add the both-family conditional/revocation flow, flip the design-snapshot shell tests to '
+    + "'BR02 authenticated design snapshot opens 3D after stripping' (Task 9B), then delete this test");
 });
 for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
   'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',

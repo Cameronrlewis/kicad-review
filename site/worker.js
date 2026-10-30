@@ -1,6 +1,6 @@
 import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { currentBody, currentReport, readStoredData } from './report-shell.js';
+import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';

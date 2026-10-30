@@ -55,7 +55,8 @@ export function declaredAssets(data) {
 // descriptor and no other consumer. Blob IDs in model3d/parts3d stay unchanged; 01's
 // image/hotspot and poster blobs are kept because something other than those slots names them.
 export function lazy3dData(input) {
-  // Deep clone everything but the blob payloads (strings, so a shallow copy is independent).
+  // Deliberate deviation from structuredClone(input): deep clone everything but the blob payloads,
+  // which are strings (a shallow copy is independent), so multi-MB base64 is never copied.
   const data = structuredClone({ ...input, blobs: undefined }); data.blobs = { ...input.blobs };
   const valid = (a, kind) => a && /^[0-9a-f]{64}$/.test(a.digest)
     && a.artifactName === `kicad-3d-${a.digest}-${kind}.gz` && Number.isFinite(a.bytes) && a.bytes > 0;

@@ -193,8 +193,8 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = f
   const runLink = run ? link(run, 'Open run ↗') : '';
   const models = `${path}/a/${encodeURIComponent(id)}/3d/`;
   // Lazy 3D models: only this authenticated wrapper fetches; the sandboxed report asks it by digest.
-  const script = reportFrameScript(raw) + (/^\/r\/[^/]+\/[^/]+\/a\/\d+\/3d\/$/.test(models)
-    ? `<script>(${threeClient.toString()})(${JSON.stringify({ endpoint: models }).replace(/</g, '\\u003c')});</script>` : '');
+  // threeClient validates the endpoint itself and installs no broker for a malformed one.
+  const script = reportFrameScript(raw) + `<script>(${threeClient.toString()})(${JSON.stringify({ endpoint: models }).replace(/</g, '\\u003c')});</script>`;
   const sharing = share ? shareControls(`${path}/a/${encodeURIComponent(id)}/share`, `${path}/share/revoke`) : '';
   const readiness = mergeBadge(Number.isInteger(pull) ? 'Checking…' : 'Not a PR', Number.isInteger(pull) ? 'Checking merge readiness…' : 'Merge readiness requires a pull request.');
   const readinessScript = Number.isInteger(pull) ? `<script>(${readinessClient.toString()})(${JSON.stringify({ readiness: `${path}/pull/${pull}/readiness`, reviewHead: match ? match[2] : null }).replace(/</g, '\\u003c')});</script>` : '';
