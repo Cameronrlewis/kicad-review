@@ -3243,11 +3243,16 @@ def schematic_pin_ids(text, objects):
 
     A missing net node alone is never proof of disconnection; without this proof a pin stays unknown.
     """
+    def identity(node):
+        key = (val(node, "lib"), val(node, "part"))
+        return key if all(isinstance(k, str) and k for k in key) else None
+
     root = parse_sexpr(text)
     libraries = {}
     for part in findall(find(root, "libparts") or [], "libpart"):
-        libraries[(val(part, "lib"), val(part, "part"))] = {
-            val(pin, "num") for pin in findall(find(part, "pins") or [], "pin") if val(pin, "num")}
+        if identity(part):
+            libraries[identity(part)] = {
+                val(pin, "num") for pin in findall(find(part, "pins") or [], "pin") if val(pin, "num")}
     refs = {}
     for o in objects.values():
         if o["kind"] == "symbol":
@@ -3265,8 +3270,7 @@ def schematic_pin_ids(text, objects):
             continue
         if sum(val(c, "ref") == ref for c in components) != 1:
             continue
-        source = find(comp, "libsource")
-        result.update(ref + "." + pin for pin in libraries.get((val(source, "lib"), val(source, "part")), set()))
+        result.update(ref + "." + pin for pin in libraries.get(identity(find(comp, "libsource")), set()))
     return result
 
 

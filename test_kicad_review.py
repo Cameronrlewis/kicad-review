@@ -5379,6 +5379,18 @@ def test_br03_pad_evidence():
             unknown=assembled("A","B","A","B",fail=True)
             assert unknown["boardOnly"] is None and "unknown" in unknown["evidenceNote"]
         finally: os.chdir(old)
+    from kicad_review import schematic_pin_ids
+    d={"/d":obj("D1","1","/")}
+    pins='(pins (pin (num C)))'
+    assert schematic_pin_ids('(export (components (comp (ref D1) (libsource (lib Device) (part D))))'
+                             '(libparts (libpart (lib Device) (part D) '+pins+')) (nets))',d)=={"D1.C"}
+    for comp,lib in (('(comp (ref D1))','(libpart '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib Device) (part D)))','(libpart (lib Device) '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib Device)))','(libpart (lib Device) '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib "") (part "")))','(libpart (lib "") (part "") '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib (x)) (part D)))','(libpart (lib (x)) (part D) '+pins+')')):
+        text='(export (components '+comp+') (libparts '+lib+') (nets))'
+        assert schematic_pin_ids(text,d)==set(), "BR03 missing library identity proved a disconnected pin: "+text
 
 
 test_br03_electrical_pair()
