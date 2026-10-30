@@ -2,6 +2,7 @@ import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from
 import { reportCsp, frameCsp } from './csp.js';
 import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
+import { verifyReportFamily } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
@@ -283,11 +284,11 @@ async function storedReport(artifact, active) {
   return blob;
 }
 
-const comparisonReport = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
-// Reports whose 3D assets artifact3d serves from their own run.
-// ponytail: design snapshots fail closed until 06's verifyReportFamily (site/report-kind.js) merges and binds name to data.report.head.
-const served3d = (metadata, data) => data?.report?.kind == null && comparisonReport.test(metadata.name)
-  && /^\d{1,20}$/.test(String(metadata.workflow_run?.id));
+// Reports whose 3D assets artifact3d serves from their own run: comparison reports, and
+// design snapshots whose name binds to the stored (unstripped) data.report.head.
+const served3d = (metadata, data) => /^\d{1,20}$/.test(String(metadata.workflow_run?.id))
+  && (data?.report?.kind == null ? verifyReportFamily('comparison', metadata.name)
+    : data.report.kind === 'design' && verifyReportFamily('design', metadata.name, data.report.head));
 
 const reportBuilds = new Map();
 // ponytail: one cold build at a time per isolate (peak ~ one report's transient copies); raise only if queued cold loads time out.

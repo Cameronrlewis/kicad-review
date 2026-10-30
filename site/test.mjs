@@ -103,7 +103,7 @@ test('history checks access before timeline calls', async () => {
 });
 
 import { CHECKS } from '../ui/checks.mjs';
-import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -4657,13 +4657,18 @@ test('legacy metadata shares in-flight builds but is never cached', async () => 
   } finally { h.done(); }
 });
 
-// 06's verifyReportFamily (site/report-kind.js) merges after 02 (ORDER.md), so design
-// reports fail closed here. Hard tripwire: this fails as soon as 06's verifier exists on the branch.
-test('BR02 design family waits on 06 report-kind.js', () => {
-  assert.ok(!existsSync(new URL('./report-kind.js', import.meta.url)), '06 Task 4A follow-up: make readArtifactHtml/served3d (artifact3d and lazy shell) accept the '
-    + "design family via verifyReportFamily('design',name,data.report.head), flip the 'design' row to a 200 control, "
-    + 'add the both-family conditional/revocation flow, flip the design-snapshot shell tests to '
-    + "'BR02 authenticated design snapshot opens 3D after stripping' (Task 9B), then delete this test");
+test('BR02 report family binds design names to the full head SHA', () => {
+  const head = 'b'.repeat(40);
+  assert.ok(verifyReportFamily('comparison', 'kicad-review-aaaaaaa-bbbbbbb-pass.html'));
+  assert.ok(verifyReportFamily('comparison', 'kicad-review-none-bbbbbbb-fail.html'));
+  assert.ok(!verifyReportFamily('comparison', 'kicad-design-bbbbbbb.html', head));
+  for (const name of ['kicad-design-bbbbbbb.html', 'kicad-design-bbbbbbb.context.json', 'kicad-design-downloads-bbbbbbb'])
+    assert.ok(verifyReportFamily('design', name, head), name);
+  for (const [name, sha] of [['kicad-design-bbbbbbb.html', 'd'.repeat(40)], ['kicad-design-bbbbbbb.html', 'bbbbbbb'],
+    ['kicad-design-bbbbbbb.html', 'B'.repeat(40)], ['kicad-design-bbbbbbb.html', undefined], ['kicad-review-aaaaaaa-bbbbbbb-pass.html', head],
+    ['kicad-design-bbbbbbb.htm', head], ['kicad-design-downloads-bbbbbbb.html', head], ['kicad-design-bbbbbbb', head], ['x/kicad-design-bbbbbbb.html', head]])
+    assert.ok(!verifyReportFamily('design', name, sha), name + ' ' + sha);
+  assert.ok(!verifyReportFamily('other', 'kicad-design-bbbbbbb.html', head));
 });
 for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
   'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',
@@ -4729,7 +4734,7 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         : scenario === 'short-digest' ? digest.slice(0, 12) + '/board.glb' : digest + '/' + kind;
       const endpoint = '/r/Cameronrlewis/repo/a/12/3d/' + suffix;
       const response = await call(endpoint, { headers: scenario === 'no-session' ? {} : { Cookie: `s=${sealed}` } });
-      if (['valid', 'valid-parts', 'second-page', 'encoded-length'].includes(scenario)) {
+      if (['valid', 'valid-parts', 'design', 'second-page', 'encoded-length'].includes(scenario)) {
         assert.equal(response.status, 200); assert.equal(downloads, 1);
         assert.equal(response.headers.get('Content-Encoding'), 'gzip');
         assert.equal(response.headers.get('Content-Type'), kind === 'board.glb' ? 'model/gltf-binary' : 'application/json');
@@ -4737,7 +4742,7 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         assert.equal(response.headers.get('ETag'), '"' + digest + '"');
         assert.equal(response.headers.get('Vary'), 'Cookie');
         assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
-        if (['valid', 'valid-parts'].includes(scenario)) {
+        if (['valid', 'valid-parts', 'design'].includes(scenario)) {
           const conditional = { headers: { Cookie: `s=${sealed}`, 'If-None-Match': response.headers.get('ETag') } };
           const denied = async (label) => {
             const before = { accessChecks, metadataChecks, downloads };
@@ -4788,6 +4793,7 @@ test('BR02 image route rejects 64-character 3D model digests', async () => {
 });
 
 import { lazy3dData, currentBody } from './report-shell.js';
+import { verifyReportFamily } from './report-kind.js';
 test('BR02 lazy stripping is opt-in and retains blobs used outside 3D',async()=>{
   const digest='d'.repeat(64);
   const asset=kind=>({digest,artifactName:`kicad-3d-${digest}-${kind}.gz`,bytes:32});
@@ -4922,8 +4928,9 @@ async function assertEmbeddedShell(h) {
   assert.equal(h.threeRequests.length, 0); assert.equal(h.model + h.parts, 0);
 }
 
-test('BR02 authenticated comparison report opens lazy 3D through the broker after stripping', async () => {
-  const h = await lazy3dHarness();
+for (const [family, title] of [['comparison', 'BR02 authenticated comparison report opens lazy 3D through the broker after stripping'],
+  ['design', 'BR02 authenticated design snapshot opens 3D after stripping']]) test(title, async () => {
+  const h = await lazy3dHarness({ family });
   try {
     await assertStrippedShell(h);
     const glb = await h.open('model'), parts = await h.open('parts');
@@ -4941,11 +4948,12 @@ test('BR02 authenticated comparison report opens lazy 3D through the broker afte
   } finally { h.restore(); }
 });
 
-for (const scenario of ['bad-name', 'no-pull', 'expired-html', 'expired-sibling', 'other-run']) {
-  test('BR02 authenticated lazy 3D fails closed: ' + scenario, async () => {
-    const h = await lazy3dHarness({ scenario: scenario === 'no-pull' || scenario === 'expired-html' ? 'valid' : scenario });
+for (const family of ['comparison', 'design']) for (const scenario of ['bad-name', ...(family === 'design' ? ['head-mismatch'] : []), 'no-pull', 'expired-html', 'expired-sibling', 'other-run']) {
+  test(`BR02 authenticated lazy 3D fails closed: ${family} ${scenario}`, async () => {
+    const h = await lazy3dHarness({ family, scenario: scenario === 'no-pull' || scenario === 'expired-html' ? 'valid' : scenario });
     try {
-      if (scenario === 'bad-name') await assertEmbeddedShell(h);
+      // Unverifiable names keep their embedded models: never stripped, never silently served.
+      if (scenario === 'bad-name' || scenario === 'head-mismatch') await assertEmbeddedShell(h);
       else if (scenario !== 'no-pull' && scenario !== 'expired-html') await assertStrippedShell(h);
       // A previously issued ETag must never turn a denial into 304.
       const etags = { model: `"${h.files.model.digest}"`, parts: `"${h.files.parts.digest}"` };
@@ -4965,22 +4973,6 @@ for (const scenario of ['bad-name', 'no-pull', 'expired-html', 'expired-sibling'
     } finally { h.restore(); }
   });
 }
-
-// 06's verifyReportFamily is not on this branch (tripwire: 'BR02 design family waits on 06 report-kind.js').
-// Until it lands the 3D route fails closed for design snapshots, so their authenticated shell keeps the
-// embedded models (served3d); the tripwire's follow-up flips this to the comparison test's stripped positive flow.
-for (const scenario of ['valid', 'head-mismatch']) test('BR02 authenticated design snapshot keeps embedded 3D until 06 verifier: ' + scenario, async () => {
-  const h = await lazy3dHarness({ family: 'design', scenario });
-  try {
-    await assertEmbeddedShell(h);
-    for (const key of ['model', 'parts']) {
-      await assert.rejects(h.open(key), /Model unavailable/);
-      const direct = await h.route(key, `"${h.files[key].digest}"`);
-      assert.equal(direct.status, 404); assert.match(direct.headers.get('Cache-Control'), /no-store/);
-    }
-    assert.equal(h.model + h.parts, 0);
-  } finally { h.restore(); }
-});
 
 test('BR02 guest shares keep embedded 3D blobs and never install the model broker', async () => {
   const digest = 'e'.repeat(64), data = { version: 1, blobs: { model: 'embedded-glb' }, projects: [{ board: { model3d: { head: 'model' },
