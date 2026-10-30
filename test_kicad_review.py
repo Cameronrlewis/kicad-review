@@ -4796,7 +4796,6 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
         assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
 # Ask (spec 09): the [ask] setting.
-import copy
 import kicad_review as kr
 assert kr.DEFAULT_SETTINGS["ask"] == {"enabled": False}
 def load_ask(toml_text):
@@ -4816,5 +4815,23 @@ for bad, message in (('[ask]\nenabled = "yes"\n', "ask.enabled must be true or f
         raise AssertionError("invalid [ask] must stop the review")
     except SystemExit as exc:
         assert message in str(exc.code), exc.code
-assert '"libraries", "pdf", "ask")' in open("kicad_review.py", encoding="utf-8").read(), "opted-out reports must drop the ask table"
+def ask_report_settings(toml_text):
+    with tempfile.TemporaryDirectory() as d:
+        old = os.getcwd()
+        os.chdir(d)
+        try:
+            os.makedirs("review")
+            os.makedirs("base")
+            with open("review/detect.json", "w") as fh:
+                json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "test", "projects": []}, fh)
+            with open("base/kicad-review.toml", "w") as fh:
+                fh.write(toml_text)
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": os.devnull, "GITHUB_STEP_SUMMARY": os.devnull}, clear=True):
+                with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
+                    kr.cmd_report(SimpleNamespace())
+            return json.load(open("review/data.json"))["settings"]
+        finally:
+            os.chdir(old)
+assert ask_report_settings("[ask]\nenabled = true\n")["ask"] == {"enabled": True}, "enabled Ask must reach REVIEW_DATA.settings"
+assert "ask" not in ask_report_settings(""), "opted-out reports must drop the ask table"
 print("ok ask setting")
