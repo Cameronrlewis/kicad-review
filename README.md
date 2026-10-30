@@ -375,7 +375,7 @@ and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `
 `box`, `where`); and `blobs` (gzip + base64 SVG text, optional board-scene JSON, and opted-in GLB bytes). When `3d.enabled` is true
 on every review, `board.model3d` has base/head GLB blob ids (or `null`), `enabled`, `changed`, and
 an `errors` map for unavailable exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
-footprint`). Positions and boxes are drawing millimetres. With `parts.enabled`, `projects[].parts` also has `summary` (`components`, `unique`, `withMpn`, `byCategory`) and `exports` (`preset`, `csv`, `fab`: the download file texts), and each `lines[]` entry has `category`, `refsCompressed` and `manufacturer`; with two or more projects, the top-level `bom` (`boards`, `error`, `summary`, `lines`, `exports`; Task 5A) also appears. All are additive and absent in older reports, which show only the Problems view.
+footprint`). Positions and boxes are drawing millimetres. With `parts.enabled`, `projects[].parts` also has `summary` (`components`, `unique`, `withMpn`, `byCategory`) and `exports` (`preset`, `csv`, `fab`: the download file texts), and each `lines[]` entry has `category`, `refsCompressed` and `manufacturer`; with two or more projects, the top-level `bom` (`boards`, `error`, `summary`, `lines`, `exports`) also appears. All are additive and absent in older reports, which show only the Problems view.
 
 Unchanged sheets, board layers (including blank layers), board geometry, and enabled 3D views remain
 available at both revisions. The viewer labels these views “No layout changes”, “No schematic changes
