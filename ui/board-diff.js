@@ -94,15 +94,28 @@
     gl.uniform1f(gl.getUniformLocation(pane.program,'headAlpha'),alpha);
     gl.drawArrays(gl.TRIANGLES,0,3); gl.disable(gl.SCISSOR_TEST);
   }
+  const sceneNetMaps = new WeakMap();
+  function sceneNetName(scene, id) {
+    const nets = scene?.nets;
+    if (!Array.isArray(nets)) return undefined;
+    let map = sceneNetMaps.get(nets);
+    if (!map) {
+      map = new Map(nets.map(n => [n.id, n.name]));
+      sceneNetMaps.set(nets, map);
+    }
+    return map.get(id);
+  }
   function electricalNetNames(row,side) {
     const d=row?.detail;
     return d?.kind==='members' ? (side==='base'?d.beforeNets:d.afterNets)||[]
       : d?.kind==='pad-net' ? [side==='base'?d.before:d.after].filter(Boolean) : [];
   }
   function electricalNetMatch(scene,object,row,side) {
-    const name=scene?.nets?.find(n=>n.id===object.net)?.name;
-    if(name && electricalNetNames(row,side).includes(name)) return true;
-    const d=row?.detail;
+    if(!row) return false;
+    const names=electricalNetNames(row,side);
+    const name=sceneNetName(scene,object.net);
+    if(name && names.includes(name)) return true;
+    const d=row.detail;
     if(d?.kind!=='pad-net') return false;
     const anchors=row.anchors?.[side]||[];
     return anchors.some(a=>a.board && a.uuid===object.changeUuid &&
@@ -252,8 +265,10 @@
               if (mode === 'semantic') {
                 if (i === 0) {
                   renderer.setScene(scenes.head || scenes.base,'head');
+                  renderer.setAppearance(electricalLook(look,selectedRow,scenes.head ? 'head' : 'base'));
                   renderer.draw({...options,filter:o=>!actionFor(o,actions),override:(o,normal)=>({...normal,opacity:normal.opacity*.2})});
                   renderer.setScene(scene,side);
+                  renderer.setAppearance(electricalLook(look,selectedRow,side));
                   renderer.draw({...options,clear:false,grid:false,filter:o=>!!actionFor(o,actions)});
                 } else renderer.draw({...options,filter:o=>!!actionFor(o,actions)});
               } else renderer.draw(options);
@@ -264,8 +279,10 @@
             } else composite(pane,mode === 'overlay' ? 1 : 0,mode === 'blend' ? state.blend : 1);
             if (mode==='overlay' && look.markStyle==='recolour') for (const side of pane.sides) {
               renderer.setScene(pane.scenes[side],side);
+              renderer.setAppearance(electricalLook(look,selectedRow,side));
               renderer.draw({clear:false,grid:false,background:[1,1,1,1],filter:o=>!!actionFor(o,actions),override:(o,normal)=>({...normal,color:window.BoardMarks.pickColor(actionFor(o,actions),[255,255,255]).map(v=>v/255)})});
             }
+            renderer.setAppearance(look);
             marks(pane,state,look,actions,mode==='overlay'?[255,255,255]:background.slice(0,3).map(v=>v*255),selectedRow);
           }
         } catch (error) { controller.dispose(); onLost?.(error); }

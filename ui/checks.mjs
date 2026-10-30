@@ -3602,6 +3602,7 @@ return true;
   ["BR03 net selection masks", "v=board", `
     ${MARK_STYLE_FIXTURE}
     const p=proj(), saved=p.changes, savedNets=scene.nets, savedRef=object.reference, savedNum=object.number, savedNet=object.net;
+    let origSetAppearance=null;
     const row={id:'c903',kind:'net-members',action:'modified',
       detail:{kind:'members',beforeNets:['GND'],afterNets:['GND']},anchors:{base:[],head:[]}};
     const padRow={id:'c904',kind:'board-pad-net',action:'modified',
@@ -3626,6 +3627,8 @@ return true;
       const before=JSON.stringify(Appearance.get());
       let selected=0;
       const drawOpts=[];
+      const appearances=[];
+      origSetAppearance=new Map();
       for(const pane of boardDiff.panes) {
         const draw=pane.renderer.draw.bind(pane.renderer);
         pane.renderer.draw=opts=>{
@@ -3635,23 +3638,42 @@ return true;
           }
           return draw(opts);
         };
+        if(pane.renderer.setAppearance) {
+          const origSet=pane.renderer.setAppearance.bind(pane.renderer);
+          origSetAppearance.set(pane,origSet);
+          pane.renderer.setAppearance=app=>{
+            appearances.push(app);
+            return origSet(app);
+          };
+        }
       }
       boardDiff.render();
       if(!selected) return 'net selection did not reach neutral mask';
       if(object.changeIds.join(',')!=='c0') return 'derived net stole scene identity';
 
+      const baseTint=appearances.some(a=>a.netColors?.GND && a.netColors.GND[0]===1 && a.netColors.GND[1]===0.3);
+      const headTint=appearances.some(a=>a.netColors?.GND && a.netColors.GND[0]===0.3 && a.netColors.GND[1]===1);
+      if(!baseTint || !headTint) return 'electricalLook netColors did not reach setAppearance per side';
+
       // Verify pad-net anchor match and before/after side mapping
       object.net=0; // No net name match: test pure anchor matching
       S.s=padRow.id;
       drawOpts.length=0;
+      appearances.length=0;
       boardDiff.render();
       if(drawOpts.length<2) return 'did not draw selection masks';
+
+      const padBaseTint=appearances.some(a=>a.netColors?.NET_A && a.netColors.NET_A[0]===1 && a.netColors.NET_A[1]===0.3);
+      const padHeadTint=appearances.some(a=>a.netColors?.NET_B && a.netColors.NET_B[0]===0.3 && a.netColors.NET_B[1]===1);
+      if(!padBaseTint || !padHeadTint) return 'pad-net electricalLook netColors did not reach setAppearance per side';
+
       const [baseCall,headCall]=drawOpts.slice(-2);
       const netAObj={net:2,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
       const netBObj={net:3,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
       const headObj={...object,changeUuid:'head-style'};
       const badPinObj={...object,number:'2'};
       const badRefObj={...object,reference:'U2'};
+      const badPadUuidObj={...object,uuid:'other-pad'};
 
       if(!baseCall.filter(object)) return 'pad-net base anchor failed to match';
       if(baseCall.filter(headObj)) return 'pad-net base anchor matched head uuid';
@@ -3662,6 +3684,7 @@ return true;
       if(!headCall.filter(netBObj) || headCall.filter(netAObj)) return 'pad-net head side afterNets mapping failed';
 
       if(baseCall.filter(badPinObj) || baseCall.filter(badRefObj)) return 'pad-net anchor matched wrong pin or ref';
+      if(baseCall.filter(badPadUuidObj)) return 'pad-net anchor matched wrong padUuid';
 
       // Test unguarded scene.nets access: missing scene.nets should not throw
       delete scene.nets;
@@ -3672,7 +3695,9 @@ return true;
       }
 
       scene.nets=savedNets;
+      appearances.length=0;
       S.s=null; boardDiff.render();
+      if(appearances.some(a=>a.netColors?.GND || a.netColors?.NET_A || a.netColors?.NET_B)) return 'temporary net color persisted in setAppearance';
       return JSON.stringify(Appearance.get())===before || 'temporary colour persisted';
     } finally {
       p.changes=saved;
@@ -3680,6 +3705,7 @@ return true;
       if(savedRef!==undefined) object.reference=savedRef; else delete object.reference;
       if(savedNum!==undefined) object.number=savedNum; else delete object.number;
       if(savedNet!==undefined) object.net=savedNet; else delete object.net;
+      if(origSetAppearance) for(const [pane,origSet] of origSetAppearance) pane.renderer.setAppearance=origSet;
       S.s=null; disposeBoardRenderers(); await draw();
     }
   `],
