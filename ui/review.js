@@ -1416,7 +1416,7 @@ function bomSource() {
 function renderBomWithBoards() {
   const repo = D.bom;
   const chips = repo ? [["all", repo.error ? "All boards (unavailable)" : "All boards"], ...D.projects.map((p, i) => [String(i), p.name])] : [];
-  const pressed = k => k === "all" ? S.bomBoard === "all" : S.bomBoard !== "all" && k === String(S.p);
+  const pressed = k => k === "all" ? !!(repo && !repo.error && S.bomBoard === "all") : (S.bomBoard === "project" || !!(repo && repo.error && S.bomBoard === "all")) && k === String(S.p);
   const picker = repo ? `<div class="filters bom-boards" role="group" aria-label="Board">${chips.map(([k, label]) => `<button type="button" class="check-chip" data-bom-board="${esc(k)}" aria-pressed="${pressed(k)}">${esc(label)}</button>`).join("")}</div>` : "";
   const note = repo && repo.error && S.bomBoard === "all" ? `<p class="bom-export-error">${esc(repo.error)}</p>` : "";
   return picker + note + renderBom(bomSource());

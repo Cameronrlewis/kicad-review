@@ -1300,8 +1300,24 @@ export const CHECKS = [
   const qty = [...document.querySelectorAll('.bom-row .bom-qty')].map(c => c.textContent).join('|');
   return qty === '3|1|1|1|1' || 'combined quantities ' + qty;
 `],
+  ["Multi-board BOM: unavailable repository falls back to project", "", `
+    if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+    const originalBom = REVIEW_DATA.bom, originalP = S.p, originalBoard = S.bomBoard, originalView = S.partsView;
+    try {
+      REVIEW_DATA.bom = {...originalBom, error: 'Repository BOM unavailable'};
+      S.p = 0; S.bomBoard = 'all'; S.partsView = 'bom'; renderPanel();
+      const chips = [...document.querySelectorAll('[data-bom-board]')];
+      if (chips[0]?.textContent.trim() !== 'All boards (unavailable)' || chips[0]?.getAttribute('aria-pressed') !== 'false') return 'unavailable label or pressed state';
+      if (chips[1]?.getAttribute('aria-pressed') !== 'true') return 'project chip not pressed';
+      if (!document.querySelector('.bom-export-error')?.textContent.includes('Repository BOM unavailable')) return 'missing repository diagnostic';
+      if (!document.querySelector('.bom-summary')?.textContent.startsWith('4 components')) return 'project fallback summary';
+      if (![...document.querySelectorAll('[data-bom-board]')].some(b => b.textContent.trim() === 'Beta')) return 'missing Beta chip';
+      return true;
+    } finally { REVIEW_DATA.bom = originalBom; S.p = originalP; S.bomBoard = originalBoard; S.partsView = originalView; renderPanel(); }
+  `],
   ["Multi-board BOM: a board chip shows that project; All boards saves the combined files", "", `
   if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+  const originalP = S.p, originalBoard = S.bomBoard, originalView = S.partsView;
   document.querySelector('[data-tab=parts]').click();
   document.querySelector('[data-parts-view=bom]').click();
   const names = [], saved = [], clickAnchor = HTMLAnchorElement.prototype.click, createUrl = URL.createObjectURL;
@@ -1314,9 +1330,11 @@ export const CHECKS = [
     document.querySelector('[data-bom-board="all"]').click();
     if (!document.querySelector('.bom-summary')?.textContent.startsWith('7 components')) return 'All boards summary';
     document.querySelector('[data-bom-download=csv]').click();
-    if (names[0] !== 'Beta-bom.csv' || names[1] !== 'all-boards-bom.csv') return 'download names ' + names;
-    return await saved[1].text() === REVIEW_DATA.bom.exports.csv || 'combined CSV bytes differ from the embedded export';
-  } finally { HTMLAnchorElement.prototype.click = clickAnchor; URL.createObjectURL = createUrl; }
+    document.querySelector('[data-bom-download=fab]').click();
+    if (names[0] !== 'Beta-bom.csv' || names[1] !== 'all-boards-bom.csv' || names[2] !== 'all-boards-bom-jlcpcb.csv') return 'download names ' + names;
+    if (await saved[1].text() !== REVIEW_DATA.bom.exports.csv) return 'combined CSV bytes differ from the embedded export';
+    return await saved[2].text() === REVIEW_DATA.bom.exports.fab || 'combined fab bytes differ from the embedded export';
+  } finally { HTMLAnchorElement.prototype.click = clickAnchor; URL.createObjectURL = createUrl; S.p = originalP; S.bomBoard = originalBoard; S.partsView = originalView; renderPanel(); }
 `],
   ["Parts fixture BOM empty state and prototype-named categories", "", `
     if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
