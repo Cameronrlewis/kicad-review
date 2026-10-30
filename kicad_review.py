@@ -293,7 +293,9 @@ def cache_renders(args=None):
 
 
 def cmd_copper(args):
-    # ponytail: recompute pair-specific copper once per run; 120 s per project, no polygon cache.
+    # ponytail: recompute pair-specific copper once per run; no polygon cache.
+    # Each existing revision gets 120 s for CLI refill plus 60 s for collection;
+    # reserve another 60 s for startup, signed booleans and JSON serialization.
     det = json.loads(pathlib.Path("review/detect.json").read_text())
     script = pathlib.Path(__file__).resolve().parent / "tools" / "copper_area.py"
     for p in det["projects"]:
@@ -304,7 +306,8 @@ def cmd_copper(args):
         if any(f.exists() for f in paths):
             try:
                 run = subprocess.run([sys.executable, str(script), *[str(f) if f.exists() else "-" for f in paths]],
-                                     capture_output=True, text=True, timeout=120, check=True)
+                                     capture_output=True, text=True,
+                                     timeout=180 * sum(f.exists() for f in paths) + 60, check=True)
                 result = json.loads(run.stdout)
             except (subprocess.SubprocessError, ValueError, OSError) as exc:
                 result = {"rows": [], "incomplete": [{"channel": "routing", "reason": f"Copper comparison unavailable: {type(exc).__name__}"}]}
@@ -1278,11 +1281,11 @@ MM_RULE_KEYS = {"min_clearance", "min_track_width", "min_via_diameter", "min_thr
                 "min_text_height", "min_text_thickness", "solder_mask_to_copper_clearance"}
 
 
-def rule_values(root: str, name: str, board_tree=None) -> dict[str, object]:
+def rule_values(root: str, name: str) -> dict[str, object]:
     """Read rule sources without flatten's stringification; absent revisions are empty.
 
-    Callers that already parsed the board can pass its S-expression tree to avoid
-    parsing the same board again solely for stackup extraction.
+    Malformed project JSON returns an explicit _unavailable marker; independent
+    custom rules and board stackup remain readable.
     """
     out = {}
 
@@ -1298,7 +1301,11 @@ def rule_values(root: str, name: str, board_tree=None) -> dict[str, object]:
 
     pro = pathlib.Path(root) / (name + ".kicad_pro")
     if pro.exists():
-        data = json.loads(pro.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(pro.read_text(encoding="utf-8"))
+        except ValueError:
+            out["_unavailable"] = f"Project rules unavailable: malformed {pro.name}"
+            data = {}
         board = data.get("board") or {}
         design_settings = board.get("design_settings") or {}
         walk(design_settings.get("rules") or {}, "rules")
@@ -1312,12 +1319,7 @@ def rule_values(root: str, name: str, board_tree=None) -> dict[str, object]:
     if dru.exists():
         out["custom rules"] = dru.read_text(encoding="utf-8").replace("\r\n", "\n")
     pcb = pathlib.Path(root) / (name + ".kicad_pcb")
-    if board_tree is not None:
-        setup = find(board_tree, "setup") or []
-        stack = find(setup, "stackup")
-        if stack:
-            out["stackup"] = stack
-    elif pcb.exists():
+    if pcb.exists():
         setup = find(parse_sexpr(pcb.read_text(encoding="utf-8")), "setup") or []
         stack = find(setup, "stackup")
         if stack:
@@ -1329,6 +1331,17 @@ def diff_rules(base_root, head_root, name) -> list[dict]:
     """Describe dimensional constraints, ordered assignments, custom text and stackup."""
     b, h = rule_values(base_root, name), rule_values(head_root, name)
     rows = []
+    unavailable = {"before": b.pop("_unavailable", None), "after": h.pop("_unavailable", None)}
+    if any(unavailable.values()):
+        row = electrical_row("rules-unavailable", "Project rules unavailable", channel="rules",
+                             detail={"kind": "unavailable", **unavailable})
+        row["document"] = "board"
+        rows.append(row)
+        # Unknown project rules must not become fabricated additions or removals.
+        for values in (b, h):
+            for key in list(values):
+                if key.startswith(("rules.", "net_settings.")):
+                    del values[key]
     for key in sorted(b.keys() | h.keys()):
         before, after = b.get(key), h.get(key)
         if before == after:
@@ -2551,8 +2564,8 @@ def diff_nets(base, head):
 
 
 def wire_counts(objects):
-    """Multiset of schematic wire segments, per sheet; source endpoints rounded once to 0.001 mm and sorted."""
-    result = Counter()
+    """Connected collinear wire runs per sheet; source endpoints rounded once to 0.001 mm."""
+    lines = {}
     for o in objects.values():
         if o["kind"] != "wire":
             continue
@@ -2560,10 +2573,28 @@ def wire_counts(objects):
         if raw_pts is None:
             values = [float(x) for x in re.findall(r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", o.get("props", {}).get("points", ""))]
             raw_pts = [values[i:i + 2] for i in range(0, len(values), 2)]
-        pts = [tuple(round(x, 3) + 0.0 for x in p) for p in raw_pts]
+        pts = [tuple(round(round(x, 3) * 1000) for x in p) for p in raw_pts]
         sheet = (o.get("where") or {}).get("sheet", "/")
         for a, b in zip(pts, pts[1:]):
-            result[(sheet, *sorted((a, b)))] += 1
+            a, b = sorted((a, b))
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            divisor = math.gcd(dx, dy)
+            if not divisor:
+                continue
+            dx, dy = dx // divisor, dy // divisor
+            # Integer direction and line offset avoid floating-point slope tolerances.
+            key = (sheet, dx, dy, dx * a[1] - dy * a[0])
+            lines.setdefault(key, []).append((a, b))
+    result = Counter()
+    for (sheet, *_), segments in lines.items():
+        merged = []
+        for a, b in sorted(segments):
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+            else:
+                merged.append((a, b))
+        for a, b in merged:
+            result[(sheet, tuple(x / 1000 for x in a), tuple(x / 1000 for x in b))] = 1
     return result
 
 
@@ -2600,6 +2631,8 @@ def board_pads(path):
         if uid not in objects:
             continue
         pads = findall(fp, "pad")
+        fp_at = at(fp)
+        fp_angle = fp_at[2] if fp_at and len(fp_at) > 2 else 0.0
         counts, seen = Counter(p[1] for p in pads), Counter()
         result[uid] = []
         for p in pads:
@@ -2607,6 +2640,8 @@ def board_pads(path):
             seen[number] += 1
             suffix = "#" + str(seen[number]) if counts[number] > 1 else ""
             geom = [x for x in p[1:] if not (isinstance(x, list) and x and x[0] in ("net", "uuid", "tstamp", "pinfunction", "pintype"))]
+            geom = [(["at", *x[1:3], str(round(((float(x[3]) if len(x) > 3 else 0.0) - fp_angle) % 360, 3) % 360)]
+                     if isinstance(x, list) and x and x[0] == "at" else x) for x in geom]
             result[uid].append({"uuid": val(p, "uuid") or val(p, "tstamp"), "number": number,
                                 "geom": pad_geometry(geom),
                                 "net": objects[uid]["props"].get("pad " + number + suffix + " net") or ""})

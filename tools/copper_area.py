@@ -14,6 +14,10 @@ import tempfile
 import pcbnew
 
 
+REFILL_TIMEOUT = 120
+MAX_CONTOUR_POINTS = 20000  # Shared across all rows and both signs of one comparison.
+
+
 def refill_board(path):
     """Refill with the revision's adjacent project and custom-rule context."""
     # ponytail: let the KiCad CLI establish project/custom-rule context; no SWIG project loader.
@@ -30,11 +34,16 @@ def refill_board(path):
         # timestamp tick still proves a save, even on coarse-resolution filesystems.
         os.utime(target, ns=(0, 0))
         original = (target.stat().st_mtime_ns, target.stat().st_size)
+        # KiCad 10.0.6 exports can check zones but cannot save their fills; the
+        # pcbnew.LoadBoard suppresses custom-rule initialization errors, so a
+        # standalone Fill cannot fail closed on invalid rules.
+        # This repeats render's DRC, deliberately, until a project-aware fill-only
+        # API is available. Each revision gets its own timeout, not half a pair's.
         run = subprocess.run(
             ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-error",
              "--exit-code-violations", "--refill-zones", "--save-board",
              "-o", str(root / "drc.json"), str(target)],
-            capture_output=True, text=True, timeout=55)
+            capture_output=True, text=True, timeout=REFILL_TIMEOUT)
         if run.returncode not in (0, 5):
             detail = (run.stderr or run.stdout or "no diagnostic output").strip()
             raise RuntimeError(
@@ -65,7 +74,7 @@ def collect(path):
     out = {}
 
     def add(layer, net, poly):
-        key = (board.GetLayerName(layer), net or "")
+        key = (board.GetStandardLayerName(layer), net or "")
         if key not in out:
             out[key] = pcbnew.SHAPE_POLY_SET()
         out[key].BooleanAdd(poly)
@@ -103,19 +112,26 @@ def collect(path):
     return out
 
 
-def contours(poly):
-    """Return outer and hole contours as numeric millimetre points, never SVG."""
-    result = []
+def contours(poly, limit=None):
+    """Return bounded whole contours in millimetres plus an explicit truncation flag."""
+    remaining = MAX_CONTOUR_POINTS if limit is None else limit
+    result, truncated = [], False
     for i in range(poly.OutlineCount()):
-        for line in [poly.Outline(i), *[poly.Hole(i, j) for j in range(poly.HoleCount(i))]]:
+        for j in range(-1, poly.HoleCount(i)):
+            line = poly.Outline(i) if j == -1 else poly.Hole(i, j)
+            count = line.PointCount()
+            if count > remaining:
+                truncated = True
+                continue
             result.append([[line.CPoint(k).x / 1e6, line.CPoint(k).y / 1e6]
-                           for k in range(line.PointCount())])
-    return result
+                           for k in range(count)])
+            remaining -= count
+    return result, truncated
 
 
 def compare(base, head):
     """Compute true signed differences without mutating either input union."""
-    rows = []
+    rows, remaining = [], MAX_CONTOUR_POINTS
     for layer, net in sorted(base.keys() | head.keys()):
         before = base.get((layer, net), pcbnew.SHAPE_POLY_SET())
         after = head.get((layer, net), pcbnew.SHAPE_POLY_SET())
@@ -127,9 +143,17 @@ def compare(base, head):
         a, r = added.Area() / 1e12, removed.Area() / 1e12
         if max(a, r) <= 0.05:
             continue
+        added_contours, added_truncated = contours(added, remaining)
+        remaining -= sum(map(len, added_contours))
+        removed_contours, removed_truncated = contours(removed, remaining)
+        remaining -= sum(map(len, removed_contours))
         rows.append({"net": net, "layer": layer, "addedMm2": a, "removedMm2": r,
-                     "addedContours": contours(added), "removedContours": contours(removed)})
-    return {"rows": rows, "incomplete": []}
+                     "addedContours": added_contours, "removedContours": removed_contours,
+                     "truncated": added_truncated or removed_truncated})
+    incomplete = ([{"channel": "routing", "reason":
+                   f"Copper contours truncated at {MAX_CONTOUR_POINTS} points; areas remain complete"}]
+                  if any(row["truncated"] for row in rows) else [])
+    return {"rows": rows, "incomplete": incomplete}
 
 
 if __name__ == "__main__":

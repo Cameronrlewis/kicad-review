@@ -21,7 +21,7 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
     u = square(0, 0, 2, 2); u.BooleanAdd(square(1, 0, 3, 2)); u.Simplify()
     assert abs(u.Area()/1e12 - 6) < 1e-9
     hole = square(0, 0, 4, 4); hole.BooleanSubtract(square(1, 1, 3, 3))
-    assert len(copper.contours(hole)) == 2
+    assert len(copper.contours(hole)[0]) == 2
     assert not copper.compare({("F.Cu", "A"): square(0, 0, 1, 1)},
                               {("F.Cu", "A"): square(0, 0, 1.05, 1)})["rows"]
     # Strict threshold, deterministic rows, missing sides, and numeric-looking names.
@@ -42,6 +42,21 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
     assert [r["removedMm2"] for r in removed["rows"]] == [4.0, 2.0]
     assert all(r["addedMm2"] == 0 and not r["addedContours"] for r in removed["rows"])
     assert [-2.0, -1.0] in added["rows"][1]["addedContours"][0]
+    # Coordinate budget spans every row and both signs; exact areas are unaffected.
+    from unittest.mock import patch
+    with patch.object(copper, "MAX_CONTOUR_POINTS", 4):
+        bounded = copper.compare({}, polys)
+        signed = copper.compare({("F.Cu", "GND"): a}, {("F.Cu", "GND"): b})["rows"][0]
+    assert sum(len(c) for key in ("addedContours", "removedContours") for c in signed[key]) <= 4
+    assert signed["truncated"] and signed["addedMm2"] == signed["removedMm2"] == 2.0
+    assert copper.contours(a, 3) == ([], True)
+    assert sum(len(c) for r in bounded["rows"] for key in ("addedContours", "removedContours")
+               for c in r[key]) <= 4
+    assert [r["addedMm2"] for r in bounded["rows"]] == [4.0, 2.0]
+    assert bounded["rows"][1]["truncated"] and bounded["incomplete"]
+    points, truncated = copper.contours(hole, 7)
+    assert len(points) == 1 and truncated, "do not emit a partially cut contour"
+    assert not result["truncated"]
     # Refill failures preserve actionable CLI diagnostics (and never reach LoadBoard).
     import pathlib
     import tempfile
@@ -62,6 +77,7 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
         source = pathlib.Path(tmp) / "fixture.kicad_pcb"
         source.write_text("stale")
         def silent_success(*args, **kwargs):
+            assert kwargs["timeout"] == 120, "each revision needs an independent refill budget"
             target = pathlib.Path(args[0][-1])
             target.write_text("refilled")
             return type("Run", (), {"returncode": 0, "stderr": "", "stdout": ""})()
@@ -93,7 +109,12 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
         assert copper.collect("fixture") == {}, "hidden fields must not contribute copper"
         for field in fields:
             field.SetVisible(True)
-            assert copper.collect("fixture")[("F.Cu", "")].Area() > 0
+            original = copper.collect("fixture")
+            assert original[("F.Cu", "")].Area() > 0
+            board.SetLayerName(pcbnew.F_Cu, "Renamed front copper")
+            renamed = copper.collect("fixture")
+            assert set(renamed) == set(original) == {("F.Cu", "")}
+            assert copper.compare(original, renamed)["rows"] == []
             field.SetVisible(False)
         fields[0].SetLayer(pcbnew.F_SilkS)
         fields[0].SetVisible(True)
@@ -4094,9 +4115,9 @@ def br03_pcb(fp, pads):
 def test_br03_wires():
     from kicad_review import diff_wires, wire_counts
     wire = lambda *pts, sheet="/": {"kind":"wire", "where":{"sheet":sheet}, "points_mm":list(pts)}
-    r, = diff_wires({"a":wire((0,0),(1,0)), "b":wire((1,0),(0,0))},
-                   {"c":wire((1.0004,0),(0,0))})
-    assert r["detail"] == {"kind":"wires", "drawn":0, "erased":1}
+    assert diff_wires({"a":wire((0,0),(1,0)), "b":wire((1,0),(0,0))},
+                      {"c":wire((1.0004,0),(0,0))}) == []
+    r, = diff_wires({}, {"c":wire((0,0),(1,0))})
     assert (r["kind"], r["ref"], r["weight"], r["channel"]) == (
         "wires", "Wires drawn / erased", "medium", "wiring")
     assert diff_wires({}, {}) == []
@@ -4104,18 +4125,24 @@ def test_br03_wires():
                       {"b":wire((1,2),(0,0))}) == []
     assert wire_counts({"a":wire((0,0),(1,0),(2,0))}) == wire_counts(
         {"b":wire((1,0),(0,0)), "c":wire((2,0),(1,0))})
-    r, = diff_wires({"a":wire((0,0),(2,0))},
-                   {"b":wire((0,0),(1,0)), "c":wire((1,0),(2,0))})
-    assert r["detail"] == {"kind":"wires", "drawn":2, "erased":1}
+    assert diff_wires({"a":wire((0,0),(2,0))},
+                      {"b":wire((0,0),(1,0)), "c":wire((1,0),(2,0))}) == []
+    assert diff_wires({"a":wire((0,0),(2,2))},
+                      {"b":wire((2,2),(1,1)), "c":wire((0,0),(1,1))}) == []
+    for start, joint, end in (((0,0),(0,1),(0,2)), ((0,2),(1,1),(2,0))):
+        assert diff_wires({"a":wire(start,end)}, {"b":wire(start,joint), "c":wire(end,joint)}) == []
+    assert len(wire_counts({"a":wire((0,0),(1,0)), "b":wire((2,0),(3,0))})) == 2
+    assert len(wire_counts({"a":wire((0,0),(1,0)), "b":wire((1,0),(1,1))})) == 2
+    assert diff_wires({"a":wire((0,0),(3,0))},
+                      {"b":wire((0,0),(2,0)), "c":wire((1,0),(3,0))}) == []
     r, = diff_wires({"a":wire((0,0),(1,0),sheet="/a/")},
                    {"b":wire((0,0),(1,0),sheet="/b/")})
     assert r["detail"] == {"kind":"wires", "drawn":1, "erased":1}
     assert wire_counts({"ignored":{"kind":"bus"}}) == {}
     # Synthetic wires without points_mm using props.points string
     syn_wire = lambda pts: {"kind": "wire", "where": {"sheet": "/"}, "props": {"points": pts}}
-    r_syn, = diff_wires({"a": syn_wire("(0, 0) (1, 0)"), "b": syn_wire("(1, 0) (0, 0)")},
-                        {"c": syn_wire("(1.0004, 0) (0, 0)")})
-    assert r_syn["detail"] == {"kind": "wires", "drawn": 0, "erased": 1}
+    assert diff_wires({"a": syn_wire("(0, 0) (1, 0)"), "b": syn_wire("(1, 0) (0, 0)")},
+                      {"c": syn_wire("(1.0004, 0) (0, 0)")}) == []
 
 
 def test_br03_wire_parser():
@@ -4132,8 +4159,7 @@ def test_br03_wire_parser():
           (wire (pts (xy 2 0) (xy 1 0)) (uuid second))
           (junction (at 1 0) (uuid joint))
           (bus (pts (xy 0 0) (xy 3 0)) (uuid ignored)))''')
-        r, = kr.diff_wires(base, kr.sch_objects(td, "test"))
-        assert r["detail"] == {"kind":"wires", "drawn":2, "erased":1}
+        assert kr.diff_wires(base, kr.sch_objects(td, "test")) == []
 
 
 def test_br03_board_pins():
@@ -4318,6 +4344,25 @@ def test_br03_pad_geometry_format():
         assert (r["detail"]["before"], r["detail"]["after"]) == ("GND", "B")
 
 
+def test_br03_pad_rotation_fallback():
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td) / 'b.kicad_pcb', pathlib.Path(td) / 'h.kicad_pcb'
+        base = br03_pcb('fp', [('p1', '1', 0, 'GND'), ('p2', '1', 2, 'A')])
+        base = base.replace('(uuid p1)', '').replace('(uuid p2)', '')
+        b.write_text(base)
+        bp = kr.board_pads(b)
+        for angle in (90, 180, 360, -90):
+            head = base.replace('(at 0 0)', f'(at 0 0 {angle})', 1)
+            head = head.replace('(at 0 0) (size', f'(at 0 0 {angle}) (size')
+            head = head.replace('(at 2 0) (size', f'(at 2 0 {angle}) (size')
+            h.write_text(head.replace('(net "GND")', '(net "B")'))
+            hp = kr.board_pads(h)
+            assert [p['geom'] for p in bp['fp']] == [p['geom'] for p in hp['fp']]
+            row, = kr.diff_board_pins(kr.pcb_objects(b), kr.pcb_objects(h), bp, hp, {})
+            assert (row['detail']['before'], row['detail']['after']) == ('GND', 'B')
+
+
 def test_br03_board_parse_once():
     # board_pads reads the PCB through one parse, shared with the footprint and pad net lookup.
     import pathlib
@@ -4340,9 +4385,10 @@ def test_br03_board_parse_once():
 
 for test in (test_br03_wires, test_br03_wire_parser, test_br03_board_pins, test_br03_pad_pair_identity,
              test_br03_pad_net_parser, test_br03_object_pairs, test_br03_wire_rounding,
-             test_br03_pad_geometry_format, test_br03_board_parse_once, test_br03_pad_metadata_fallback):
+             test_br03_pad_geometry_format, test_br03_board_parse_once, test_br03_pad_metadata_fallback,
+             test_br03_pad_rotation_fallback):
     test()
-print("ok BR03 physical pads and wires (10 tests)")
+print("ok BR03 physical pads and wires (11 tests)")
 
 
 def test_br03_typed_rules():
@@ -4423,23 +4469,21 @@ def test_br03_typed_rules():
         assert row['detail'] == {'kind': 'text',
                                  'before': ['stackup', ['layer', 'dielectric 1', ['thickness', '.2']]],
                                  'after': ['stackup', ['layer', 'dielectric 1', ['thickness', '.3']]]}
-        # Passing parsed board trees avoids re-reading the PCB when callers already parsed it.
-        (b/'p.kicad_pro').write_text(json.dumps({}), encoding='utf-8')
-        (h/'p.kicad_pro').write_text(json.dumps({}), encoding='utf-8')
-        from kicad_review import parse_sexpr
-        base_tree = parse_sexpr((b/'p.kicad_pcb').read_text())
-        head_tree = parse_sexpr((h/'p.kicad_pcb').read_text())
-        from unittest.mock import patch
-        with patch('kicad_review.parse_sexpr', side_effect=AssertionError('unexpected PCB parse')):
-            assert __import__('kicad_review').rule_values(b, 'p', base_tree)['stackup'] == ['stackup', ['layer', 'dielectric 1', ['thickness', '.2']]]
-            assert __import__('kicad_review').rule_values(h, 'p', head_tree)['stackup'] == ['stackup', ['layer', 'dielectric 1', ['thickness', '.3']]]
+        # Malformed project data is unknown, not an empty source or removed rules.
+        (b/'p.kicad_pro').write_text(json.dumps(pro), encoding='utf-8')
         (h/'p.kicad_pro').write_text('{invalid', encoding='utf-8')
-        try:
-            rule_values(h, 'p')
-        except json.JSONDecodeError:
-            pass  # Task 6 owns incomplete-channel handling, not this extractor.
-        else:
-            assert False, 'Malformed existing project JSON must propagate'
+        assert rule_values(h, 'p')['_unavailable']
+        rows = diff_rules(b, h, 'p')
+        unavailable, = [r for r in rows if r['detail']['kind'] == 'unavailable']
+        assert unavailable['channel'] == 'rules' and unavailable['document'] == 'board'
+        assert unavailable['detail']['before'] is None
+        assert unavailable['detail']['after']
+        assert not any(r['ref'].startswith(('rules.', 'net_settings.')) for r in rows)
+        assert any(r['kind'] == 'stackup' for r in rows)
+        reverse = diff_rules(h, b, 'p')
+        assert not any(r['ref'].startswith(('rules.', 'net_settings.')) for r in reverse)
+        (b/'p.kicad_pro').write_text('{invalid', encoding='utf-8')
+        assert any(r['detail']['kind'] == 'unavailable' for r in diff_rules(b, h, 'p'))
 
 
 test_br03_typed_rules()
@@ -4458,7 +4502,7 @@ def test_br03_cmd_copper():
             write('base', {'p/p.kicad_pcb': 'board', 'q/q.kicad_pcb': 'board'})
             write('head', {'q/q.kicad_pcb': 'board'})
             ok = subprocess.CompletedProcess([], 0, json.dumps({'rows': [], 'incomplete': []}), '')
-            outcomes = [ok, subprocess.TimeoutExpired('python', 120),
+            outcomes = [ok, subprocess.TimeoutExpired('python', 240),
                         subprocess.CalledProcessError(2, ['python'], stderr='failed'),
                         OSError('missing interpreter'), subprocess.CompletedProcess([], 0, 'not json', '')]
             for outcome in outcomes:
@@ -4473,12 +4517,13 @@ def test_br03_cmd_copper():
                     elif isinstance(outcome, OSError):
                         assert 'missing interpreter' in stderr.getvalue()
                     elif isinstance(outcome, subprocess.TimeoutExpired):
-                        assert 'timed out after 120 seconds' in stderr.getvalue()
+                        assert 'timed out after 240 seconds' in stderr.getvalue()
                     else:
                         assert 'Expecting value' in stderr.getvalue()
                 assert run.call_count == 2, 'BR03 copper failure stopped subsequent project'
                 first, second = run.call_args_list
-                assert first.kwargs == {'capture_output': True, 'text': True, 'timeout': 120, 'check': True}
+                assert first.kwargs == {'capture_output': True, 'text': True, 'timeout': 240, 'check': True}
+                assert second.kwargs['timeout'] == 420
                 assert first.args[0][-2:] == ['base/p/p.kicad_pcb', '-']
                 assert second.args[0][-2:] == ['base/q/q.kicad_pcb', 'head/q/q.kicad_pcb']
                 result = json.loads(pathlib.Path('review/p/copper-diff.json').read_text())
