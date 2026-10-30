@@ -172,6 +172,27 @@ const anthropicUrl = 'https://api.anthropic.com/v1/messages';
 // ponytail: coalesce same-isolate cold misses; cross-isolate exact-once generation is deferred and is not promised.
 const insightFlights = new Map();
 
+// Refuses before buffering when Content-Length is over the limit; otherwise stops reading at the first byte past it.
+// Returns the text, '' for an empty body, or null when over the limit.
+async function readBounded(response, max) {
+  const declared = Number(response.headers.get('Content-Length'));
+  if (Number.isFinite(declared) && declared > max) { await response.body?.cancel().catch(() => {}); return null; }
+  if (!response.body) return '';
+  const reader = response.body.getReader(), chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel().catch(() => {}); return null; }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) { all.set(chunk, at); at += chunk.byteLength; }
+  return new TextDecoder().decode(all);
+}
+
 export async function loadContext(owner, repo, id, token, gh) {
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
   try {
@@ -191,8 +212,8 @@ export async function loadContext(owner, repo, id, token, gh) {
     const location = new URL(download.headers.get('Location'));
     if (location.protocol !== 'https:' || location.username || location.password) return { status: 502, error: 'GitHub did not answer. Try again.' };
     const blob = await fetch(location.href, { redirect: 'manual' });
-    const body = blob.ok ? await blob.text() : '';
-    if (!body || new TextEncoder().encode(body).byteLength > MAX_CONTEXT) return { status: 502, error: 'The design data is missing or too large.' };
+    const body = blob.ok ? await readBounded(blob, MAX_CONTEXT) : null;
+    if (!body) return { status: 502, error: 'The design data is missing or too large.' };
     let doc;
     try { doc = JSON.parse(body); } catch { return {status:502,error:'The design data is not in a known format.'}; }
     if (doc?.version !== 1 || !Array.isArray(doc.projects)) return { status: 502, error: 'The design data is not in a known format.' };
@@ -204,6 +225,10 @@ export async function loadContext(owner, repo, id, token, gh) {
 }
 
 const asJson = (text) => { const a = text.indexOf('{'), b = text.lastIndexOf('}'); return a >= 0 && b > a ? JSON.parse(text.slice(a, b + 1)) : null; };
+// Unset or not a whole number: the default of 50. An explicit 0 disables questions and cold insight generation.
+const dailyLimit = (env) => { const raw = String(env.ASK_DAILY_LIMIT ?? '').trim(), n = raw === '' ? NaN : Number(raw); return Number.isInteger(n) && n >= 0 ? n : 50; };
+// null when KV cannot be read: the counter is then unknown, so the caller treats the count as 0 and says so.
+const readDay = async (env, day) => { try { return Number(await env.ASK_KV.get(day)) || 0; } catch { return null; } };
 
 export async function askRoute(request, env, { owner, repo, id, rest }, { access, gh }) {
   const url = new URL(request.url);
@@ -230,10 +255,13 @@ export async function askRoute(request, env, { owner, repo, id, rest }, { access
   if (!project) return done(json({ error: 'That project is not in this review.' }, 400));
   const { projects: _all, ...header } = loaded.doc;
   const system = systemBlocks(JSON.stringify({ ...header, project }));
-  const call = (payload) => fetch(anthropicUrl, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, body: JSON.stringify(payload) });
+  // A transport failure is a missing upstream answer, not an uncaught 500.
+  const call = (payload) => fetch(anthropicUrl, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, body: JSON.stringify(payload) }).catch(() => null);
+  const limit = dailyLimit(env), day = `ask:day:${login}:${new Date().toISOString().slice(0, 10)}`;
   if (insight) {
     const key = `ask:insight:${loaded.key}:${project.dir}`;
-    const cached = await env.ASK_KV.get(key);
+    let cached = null;
+    try { cached = await env.ASK_KV.get(key); } catch { /* KV is a cache: a read error is a miss. */ }
     let hit = null;
     try { hit = cached && JSON.parse(cached); } catch { /* KV is a cache: a corrupt entry is regenerated. */ }
     if (hit) {
@@ -241,15 +269,20 @@ export async function askRoute(request, env, { owner, repo, id, rest }, { access
     }
     let pending = insightFlights.get(key);
     if (!pending) {
+      // Cold generation is a paid call, so it counts against the same daily cap as questions. Cache hits are free.
       pending = (async () => {
+        const used = await readDay(env, day);
+        if ((used ?? 0) >= limit) throw new Error('quota');
         const upstream = await call(anthropicRequest({ model: env.ASK_SUMMARY_MODEL || env.ASK_MODEL || 'claude-sonnet-5-5', maxTokens: 700, stream: false, system,
           messages: [{ role: 'user', content: 'Write a two-sentence summary of this board for a new team member and three questions a reviewer could ask about it. Answer with JSON only: {"summary": "...", "questions": ["...", "...", "..."]}' }] }));
-        if (!upstream.ok) throw new Error('provider');
+        if (!upstream?.ok) throw new Error('provider');
         let parsed = null;
         try { parsed = asJson(String((await upstream.json()).content?.[0]?.text || '')); } catch { /* handled below */ }
         const summary = typeof parsed?.summary === 'string' ? parsed.summary.trim().slice(0, 1500) : '';
         const questions = Array.isArray(parsed?.questions) ? parsed.questions.filter((q) => typeof q === 'string' && q.trim()).map((q) => q.trim().slice(0, 200)).filter(Boolean).slice(0, 3) : [];
         if (!summary || questions.length !== 3) throw new Error('incomplete');
+        // Counted only after a usable answer. Written only when the counter was readable, so an unknown count is never overwritten.
+        if (used !== null) { try { await env.ASK_KV.put(day, String(used + 1), { expirationTtl: 2 * 86400 }); } catch { /* best effort, as for questions */ } }
         const result = { summary, questions };
         try { await env.ASK_KV.put(key, JSON.stringify(result), { expirationTtl: 90 * 86400 }); } catch { /* KV is a best-effort cache; return the successful generation. */ }
         return result;
@@ -258,24 +291,27 @@ export async function askRoute(request, env, { owner, repo, id, rest }, { access
     }
     try { return done(json({ ...(await pending), cached: false })); }
     catch (error) {
+      if (error.message === 'quota') return done(json({ error: 'Daily question limit reached. Try again tomorrow.', code: 'quota' }, 429));
       const incomplete = error.message === 'incomplete';
       return done(json({ error: incomplete ? 'The model provider returned an incomplete summary or fewer than three usable questions. Try again.' : 'The model provider did not return a complete summary. Try again.' }, 502));
     } finally { if (insightFlights.get(key) === pending) insightFlights.delete(key); }
   }
-  const limit = Number(env.ASK_DAILY_LIMIT) || 50, day = `ask:day:${login}:${new Date().toISOString().slice(0, 10)}`;
-  const used = Number(await env.ASK_KV.get(day)) || 0;
-  if (used >= limit) return done(json({ error: 'Daily question limit reached. Try again tomorrow.', code: 'quota' }, 429));
+  const used = await readDay(env, day);
+  if ((used ?? 0) >= limit) return done(json({ error: 'Daily question limit reached. Try again tomorrow.', code: 'quota' }, 429));
   const upstream = await call(anthropicRequest({ model: env.ASK_MODEL || 'claude-sonnet-5-5', maxTokens: 1500, stream: true, system, messages: checked.messages }));
-  if (!upstream.ok || !upstream.body) return done(json({ error: 'The model provider did not answer. Try again.' }, 502));
+  if (!upstream?.ok || !upstream.body) return done(json({ error: 'The model provider did not answer. Try again.' }, 502));
   // ponytail: read-then-write counter; best-effort only: arbitrary concurrency and eventually consistent/stale KV reads can lose increments and produce unbounded overshoot. This is not a billing bound; use provider billing limits, or require owner-approved serialized quota storage before relying on a hard cap.
-  let quotaSaved = true;
-  try { await env.ASK_KV.put(day, String(used + 1), { expirationTtl: 2 * 86400 }); }
-  catch { quotaSaved = false; } // KV may reject concurrent writes to one key; never discard a paid-for answer or retry the model.
+  // Counted when the request is sent, not when an answer arrives: a dropped upstream still costs the question. A refund would be a second KV write that can fail the same way, so none is made.
+  let quotaSaved = used !== null;
+  if (quotaSaved) {
+    try { await env.ASK_KV.put(day, String(used + 1), { expirationTtl: 2 * 86400 }); }
+    catch { quotaSaved = false; } // KV may reject concurrent writes to one key; never discard a paid-for answer or retry the model.
+  }
   const encoder = new TextEncoder();
   const stream = new ReadableStream({ async start(controller) {
     const send = (event, data) => controller.enqueue(encoder.encode(frame(event, data)));
     send('status', { text: quotaSaved ? 'Reading the design…' : 'Daily counter unavailable; this answer will continue. Remaining count is an estimate.' });
-    for await (const [event, data] of answerEvents(upstream.body, limit - used - 1)) send(event, data);
+    for await (const [event, data] of answerEvents(upstream.body, limit - (used ?? 0) - 1)) send(event, data);
     controller.close();
   } });
   return done(new Response(stream, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store' } }));

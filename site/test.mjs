@@ -4772,3 +4772,119 @@ test('ask insight: coalesces concurrent cold requests and returns generated data
     assert.ok(bodies.every((b) => b.summary === 'A USB-C board.' && b.questions.length === 3 && b.cached === false));
   } finally { restore(); }
 });
+
+test('ask insight: a corrupt or wrong-shape cache entry is regenerated and overwritten', async () => {
+  const cookie = await signedIn({ t: 'insight-corrupt' });
+  for (const bad of ['{not json', '{"summary":"","questions":[]}']) {
+    const seen = [], e = askEnv();
+    const key = 'ask:insight:sha256:abc:Thermal_Camera';
+    e.ASK_KV.m.set(key, bad);
+    const reply = () => new Response(JSON.stringify({ content: [{ type: 'text', text: '{"summary":"A USB-C board.","questions":["A?","B?","C?"]}' }] }));
+    const restore = mockFetch(askMocks({ seen, anthropic: reply }));
+    try {
+      const response = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).cached, false);
+      assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 1);
+      assert.deepEqual(JSON.parse(e.ASK_KV.m.get(key)), { summary: 'A USB-C board.', questions: ['A?', 'B?', 'C?'] });
+    } finally { restore(); }
+  }
+});
+
+test('ask route: KV read failures are a cache miss (insight) or an unknown counter (answer), never a 500', async () => {
+  const cookie = await signedIn({ t: 'kv-read-fail' });
+  const failing = () => { throw Error('KV read error'); };
+  // Insight: the cache read fails, so the summary is generated.
+  const e1 = askEnv(); e1.ASK_KV.get = failing;
+  const seen1 = [];
+  const reply = () => new Response(JSON.stringify({ content: [{ type: 'text', text: '{"summary":"A board.","questions":["A?","B?","C?"]}' }] }));
+  const restore1 = mockFetch(askMocks({ seen: seen1, anthropic: reply }));
+  try {
+    const response = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e1, cookie);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).cached, false);
+  } finally { restore1(); }
+  // Answer: the counter cannot be read, so the answer streams, says so, and never writes a guessed count.
+  const e2 = askEnv({ ASK_DAILY_LIMIT: '5' }); e2.ASK_KV.get = failing;
+  const restore2 = mockFetch(askMocks({ anthropic: answerStream }));
+  try {
+    const response = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, e2, cookie);
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /Daily counter unavailable/);
+    assert.match(text, /event: done\n/);
+    assert.equal(e2.ASK_KV.m.size, 0, 'no counter write from an unknown count');
+  } finally { restore2(); }
+});
+
+test('ask route: a transport failure to the model is a 502, for questions and for insight', async () => {
+  const cookie = await signedIn({ t: 'transport-fail' });
+  const dropped = () => { throw new TypeError('fetch failed'); };
+  const restore1 = mockFetch(askMocks({ anthropic: dropped }));
+  try {
+    const r = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, askEnv(), cookie);
+    assert.equal(r.status, 502);
+    assert.match((await r.json()).error, /did not answer/);
+  } finally { restore1(); }
+  const restore2 = mockFetch(askMocks({ anthropic: dropped }));
+  try {
+    const r = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, askEnv(), cookie);
+    assert.equal(r.status, 502);
+  } finally { restore2(); }
+});
+
+test('ask insight: cold generation counts against the daily cap, cache hits do not', async () => {
+  const cookie = await signedIn({ t: 'insight-cap' }), seen = [];
+  const e = askEnv({ ASK_DAILY_LIMIT: '1' });
+  const reply = () => new Response(JSON.stringify({ content: [{ type: 'text', text: '{"summary":"A board.","questions":["A?","B?","C?"]}' }] }));
+  const restore = mockFetch(askMocks({ seen, anthropic: reply, contextBody: JSON.stringify({ ...ctxDoc, projects: [...ctxDoc.projects, { ...ctxDoc.projects[0], name: 'Second', dir: 'Second' }] }) }));
+  try {
+    const first = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+    assert.equal(first.status, 200);
+    const cold = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Second' }, e, cookie);
+    assert.equal(cold.status, 429);
+    assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 1, 'the capped cold call never reaches the model');
+    const hit = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+    assert.equal(hit.status, 200);
+    assert.equal((await hit.json()).cached, true);
+  } finally { restore(); }
+});
+
+test('ask route: a daily limit of 0 disables questions and cold insight; unset still means 50', async () => {
+  const cookie = await signedIn({ t: 'limit-zero' }), seen = [];
+  const restore = mockFetch(askMocks({ seen, anthropic: () => { throw new Error('the model must not be called'); } }));
+  try {
+    const e = askEnv({ ASK_DAILY_LIMIT: '0' });
+    const q = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, e, cookie);
+    assert.equal(q.status, 429);
+    const i = await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+    assert.equal(i.status, 429);
+    assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 0);
+  } finally { restore(); }
+});
+
+test('ask context download is refused by Content-Length and stops reading past the limit', async () => {
+  const cookie = await signedIn({ t: 'bounded-read' });
+  let pulls = 0;
+  const huge = () => new ReadableStream({ pull(c) { pulls++; if (pulls > 1000) c.close(); else c.enqueue(new Uint8Array(100_000).fill(32)); } });
+  const base = askMocks({ anthropic: answerStream });
+  const restore = mockFetch(async (url, options) => {
+    if (url === 'https://blob.example/ctx') return new Response(huge(), { headers: { 'Content-Length': '400001' } });
+    return base(url, options);
+  });
+  try {
+    const r = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, askEnv(), cookie);
+    assert.equal(r.status, 502);
+    assert.ok(pulls <= 1, 'a declared oversize body is cancelled; only the stream constructor prefetch may have run');
+  } finally { restore(); }
+  pulls = 0;
+  const restore2 = mockFetch(async (url, options) => {
+    if (url === 'https://blob.example/ctx') return new Response(huge());
+    return base(url, options);
+  });
+  try {
+    const r = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, askEnv(), cookie);
+    assert.equal(r.status, 502);
+    assert.ok(pulls <= 10, `reading stopped after ${pulls} chunks`);
+  } finally { restore2(); }
+});
