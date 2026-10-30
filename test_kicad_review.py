@@ -6444,7 +6444,11 @@ assert "archive: false" in copy_step and "retention-days: 90" in copy_step
 assert wf.index("- name: Upload report") < wf.index("- name: Copy design context") < wf.index("- name: Screenshots of changed drawings")
 # 06 must be merged first. Its inert Ask-guarded hook is required once 06 merges.
 # 09 Task 5 enables the snapshot producer and tests ask-on and ask-off outputs.
-snapshot_merged = any(line.strip().startswith("- name:") and "design snapshot" in line.lower() for line in wf.splitlines())
+snapshot_merged = (
+    hasattr(kr, "cmd_snapshot")
+    or "design" in getattr(kr, "DEFAULT_SETTINGS", {})
+    or any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines())
+)
 if snapshot_merged:
     assert "- name: Upload design snapshot context" in wf, "merge 06 before 09 snapshot integration"
     snap = wf[wf.index("- name: Upload design snapshot context"):]
@@ -6455,7 +6459,11 @@ if snapshot_merged:
     assert "retention-days: 90" not in snap, "snapshot context follows the repository snapshot retention variable, not comparison-report retention"
 else:
     # 06 is unmerged (plan-context.md:60; controller: Plans 02, 04, 06 NOT merged).
-    # Flip to unconditional assert once 06 merges (before 09 Task 5 snapshot integration / final merge).
+    # Guard against partial merges or renaming: fail if any part of 06 lands without the context upload hook.
+    assert not hasattr(kr, "cmd_snapshot"), "06's cmd_snapshot is merged: Upload design snapshot context hook must be present in review.yml"
+    assert "design" not in getattr(kr, "DEFAULT_SETTINGS", {}), "06's design settings are merged: Upload design snapshot context hook must be present in review.yml"
+    assert not any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines()), \
+        "06 snapshot workflow steps are present: Upload design snapshot context hook must be present in review.yml"
     print("pending 06 merge: 06's Upload design snapshot context hook not in review.yml (plan-context.md:60; flip to unconditional assert once 06 merges)")
 print("ok ask context upload step")
 
