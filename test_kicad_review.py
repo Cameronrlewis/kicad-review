@@ -5959,3 +5959,44 @@ with tempfile.TemporaryDirectory() as td:
         assert not issues and not warnings and all("meta:pro" in x and "meta:dru" in x for x in objs.values())
     finally: os.chdir(old)
 print('ok BR03 project_pair guards optional rules')
+
+
+def test_br03_summary():
+    from kicad_review import electrical_summary, classify_change
+    rows=[kr.electrical_row("net-added","X","added"),kr.electrical_row("net-joined","Y")]
+    s=electrical_summary(rows,[{"channel":"routing","reason":"pcbnew unavailable"}])
+    assert s["headline"]=="1 nets added · 1 net joins"
+    assert next(c for c in s["channels"] if c["channel"]=="routing")["status"]=="incomplete"
+    metadata=[classify_change({"kind":"design rules","ref":key,"uuid":key,"where":None,
+        "action":"modified","changes":[["unrelated","a","b"]]}) for key in ("meta:setup","meta:pro","meta:dru","meta:title_block:board")]
+    assert all(r["document"]=="board" for r in metadata)
+    s=electrical_summary(metadata,[],{"board"})
+    assert len(s["documents"])==1 and s["documents"][0]["document"]=="board"
+    assert sum(c["total"] for c in s["documents"][0]["channels"])==4
+    assert next(c for c in s["channels"] if c["channel"]=="wiring")["status"]=="complete"
+    assert next(c for c in electrical_summary([],[],set())["channels"] if c["channel"]=="wiring")["status"]=="not_applicable"
+    assert next(c for c in electrical_summary([],[{"document":"schematic","channel":"wiring","reason":"head netlist unavailable"}],{"schematic"})["channels"] if c["channel"]=="wiring")["status"]=="incomplete"
+    assert classify_change({"kind":"footprint","action":"modified","changes":[["footprint","a","b"]]})["weight"]=="heavy"
+    assert classify_change({"kind":"symbol","action":"modified","changes":[["position","a","b"]]})["weight"]=="light"
+    pad={**kr.electrical_row("board-pad-net","D1.C",channel="wiring",weight="heavy"),"document":"board"}
+    def status(summary,channel):
+        return next(c for c in summary["channels"] if c["channel"]==channel)
+    s=electrical_summary([pad],[],{"board"})
+    assert status(s,"wiring")=={"channel":"wiring","total":1,"heavy":1,"status":"complete"}
+    zero=electrical_summary([],[],{"board"})
+    assert status(zero,"wiring")=={"channel":"wiring","total":0,"heavy":0,"status":"complete"}
+    assert status(s["documents"][0],"wiring")["status"]=="complete"
+    sch={**kr.electrical_row("net-added","A",channel="wiring"),"document":"schematic"}
+    s=electrical_summary([sch,pad],[{"document":"board","channel":"routing","reason":"pcbnew unavailable"}],{"board","schematic"})
+    docs={d["document"]:d for d in s["documents"]}
+    assert status(s,"routing")["status"]=="incomplete"
+    assert status(docs["schematic"],"wiring")["status"]=="complete"
+    assert status(docs["schematic"],"routing")["status"]=="not_applicable"
+    assert docs["schematic"]["incomplete"]==[]
+    assert status(docs["board"],"wiring")["total"]==1
+    assert status(docs["board"],"routing")["status"]=="incomplete"
+    # tracks never count as components in the headline
+    t=classify_change({"kind":"track","action":"added","changes":[]})
+    assert electrical_summary([t],[],{"board"})["headline"]=="No headline changes"
+test_br03_summary()
+print('ok BR03 classification and summary')

@@ -3608,6 +3608,67 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
+CHANNELS = ("components","wiring","routing","rules","board","visual")
+
+
+def classify_change(row, document=None):
+    r = dict(row)
+    k = r["kind"]
+    channel = ("components" if k in ("symbol","footprint") else "wiring" if k in
+               ("wire","bus","junction","no connect","power symbol","label","global label","hierarchical label")
+               else "routing" if k in ("track","via","zone") else "rules" if k == "design rules"
+               else "board" if k == "board outline" else "visual")
+    props = {x[0].lower() for x in r.get("changes",[])}
+    heavy = channel == "rules" or channel == "components" and (r["action"] != "modified" or "footprint" in props)
+    weight = "heavy" if heavy else "medium" if channel in ("routing","board") or k == "wire" else "light"
+    r.setdefault("channel",channel); r.setdefault("weight",weight)
+    r.setdefault("document",document or ("board" if (r.get("where") or {}).get("board") or r.get("uuid") in ("meta:setup","meta:pro","meta:dru","meta:title_block:board") else "schematic"))
+    if "position" in props and r.get("pos") and r.get("pos_before"):
+        a,b = r["pos_before"][:2],r["pos"][:2]
+        r.setdefault("detail",{"kind":"position","before":a,"after":b,
+                              "distanceMm":sum((x-y)**2 for x,y in zip(a,b))**0.5})
+    return r
+
+
+def electrical_summary(rows, issues, present=None):
+    present = present if present is not None else {"schematic","board"}
+    # Legacy issues infer their producer; new producers always set document explicitly.
+    unique = {(i.get("document") or ("schematic" if i["channel"]=="wiring" else "board"),
+               i["channel"],i["reason"]) for i in issues}
+    issues = [{"document":d,"channel":c,"reason":r} for d,c,r in sorted(unique)]
+    def headline(selected):
+        component = lambda r: r["kind"] in ("symbol","footprint")
+        counts = [
+            (sum(component(r) and r["action"] == "added" for r in selected),"added"),
+            (sum(component(r) and any(k.lower() == "value" for k,*_ in r.get("changes",[])) for r in selected),"values"),
+            (sum(component(r) and any(k.lower() == "footprint" for k,*_ in r.get("changes",[])) for r in selected),"footprints"),
+            (sum(r["kind"] == "net-added" for r in selected),"nets added"),
+            (sum(r["kind"] == "net-removed" for r in selected),"nets removed"),
+            (sum(r["kind"] == "net-joined" for r in selected),"net joins"),
+            (sum(component(r) and any(k == "position" for k,*_ in r.get("changes",[])) for r in selected),"moved")]
+        return " · ".join(f"{n} {label}" for n,label in counts if n) or "No headline changes"
+    def channels(selected, documents, selected_issues):
+        producers = {"schematic":{"components","wiring","visual"},
+                     "board":{"components","wiring","routing","rules","board","visual"}}
+        applicable = set().union(*(producers[d] for d in documents)) if documents else set()
+        applicable |= {r.get("channel") for r in selected}
+        applicable |= {i["channel"] for i in selected_issues}
+        return [{"channel":c,"total":sum(r.get("channel") == c for r in selected),
+                 "heavy":sum(r.get("channel") == c and r.get("weight") == "heavy" for r in selected),
+                 "status":"incomplete" if any(i["channel"] == c for i in selected_issues) else
+                          "complete" if c in applicable else "not_applicable"}
+                for c in CHANNELS]
+    documents = []
+    for d in ("schematic","board"):
+        if d not in present: continue
+        selected = [r for r in rows if r.get("document") == d]
+        found = [i for i in issues if i["document"] == d]
+        documents.append({"document":d,"headline":headline(selected),
+                          "channels":channels(selected,{d},found),"incomplete":found})
+    return {"headline":headline(rows),"channels":channels(rows,present,issues),
+            "incomplete":issues,"documents":documents}
+
+
 def build_project(p, blobs, settings, waivers=None, change_offset=0):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
