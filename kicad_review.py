@@ -3588,6 +3588,7 @@ def board_facts(side_dir, pcb_path):
         with open(f"{side_dir}/stats.json", encoding="utf-8") as fh:
             stats = json.load(fh)
         b = stats["board"]
+        if not isinstance(b, dict): raise TypeError("board section is not an object")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         facts["stats_reason"] = f"statistics unavailable: {clip(exc, 200)}"
         return facts
@@ -3602,10 +3603,6 @@ def board_facts(side_dir, pcb_path):
     return facts
 
 
-FAB_EVIDENCE_SOURCE = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
-                       'vendor-only findings paired between head and base by multiset identity; '
-                       'fab_limits.json dated profile; coverage limited to checked limits '
-                       '(see unchecked, unsupported and coverageWarnings)')
 FAB_LEDGER = ("vendor", "profile", "checkedOn", "assumedCopperOz", "checked", "unchecked", "unsupported", "coverageWarnings", "baselineAvailable", "fixed")  # 04's vendor identity and coverage ledger
 
 
