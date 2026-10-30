@@ -13,12 +13,13 @@ export function askClient(config) {
   async function question(q) {
     try {
       const response = await post(config.ask, { project: q.project, messages: q.messages });
-      if (!response.ok || !response.body) return failure(q.id, response);
+      if (!response.ok || !response.body) return await failure(q.id, response);
       const reader = response.body.getReader(), decoder = new TextDecoder();
       let buffer = '', terminal = false;
       for (;;) {
         const { value, done } = await reader.read();
-        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        // Normalise CRLF so a delimiter split across chunks still matches; a trailing CR waits for its LF.
+        buffer = (buffer + decoder.decode(value || new Uint8Array(), { stream: !done })).replace(/\r\n/g, '\n');
         for (let at = buffer.indexOf('\n\n'); at >= 0; at = buffer.indexOf('\n\n')) {
           const block = buffer.slice(0, at);
           buffer = buffer.slice(at + 2);
@@ -41,9 +42,12 @@ export function askClient(config) {
     const { id, project } = q;
     try {
       const response = await post(config.insight, { project });
-      if (!response.ok) return failure(id, response);
+      if (!response.ok) return await failure(id, response);
       emit(id, 'insight', await response.json());
-    } catch { emit(id, 'error', { message: 'The summary could not be loaded.', code: 'network' }); }
+    } catch {
+      emit(id, 'error', { message: 'The summary could not be loaded.', code: 'network' });
+      emit(id, 'done', {});
+    }
   }
   addEventListener('message', (event) => {
     if (event.source !== iframe.contentWindow || !event.data || typeof event.data !== 'object') return;

@@ -4983,3 +4983,26 @@ test('review page embeds the Ask relay only when the site is configured for it',
   assert.match(page, /kicadReviewAskQuestion/);
   assert.ok(page.includes('{"ask":"/r/owner/repo/a/42/ask","insight":"/r/owner/repo/a/42/ask/insight"}'));
 });
+
+test('ask client: insight HTTP errors become one error event and done', async () => {
+  const page = bootAsk(async () => new Response(JSON.stringify({ error: 'Daily question limit reached.' }), { status: 429 }));
+  await page.send({ kicadReviewAskInsight: { id: 'insight:P:2', project: 'P' } });
+  await tick();
+  assert.deepEqual(page.posts.map((p) => p.kicadReviewAskEvent.event), ['error', 'done']);
+  assert.equal(page.posts[0].kicadReviewAskEvent.data.message, 'Daily question limit reached.');
+});
+
+test('ask client: insight network failure emits error and done', async () => {
+  const page = bootAsk(async () => { throw new TypeError('offline'); });
+  await page.send({ kicadReviewAskInsight: { id: 'insight:P:3', project: 'P' } });
+  await tick();
+  assert.deepEqual(page.posts.map((p) => [p.kicadReviewAskEvent.id, p.kicadReviewAskEvent.event]), [['insight:P:3', 'error'], ['insight:P:3', 'done']]);
+});
+
+test('ask client: CRLF frames split across chunks are parsed', async () => {
+  const page = bootAsk(async () => new Response(streamOf('event: answer\r', '\ndata: {"text":"Hi"}\r\n\r\nevent: done\r\ndata: {}\r\n\r\n')));
+  await page.send({ kicadReviewAskQuestion: { id: 'crlf', project: 'P', messages: [{ role: 'user', text: 'hi' }] } });
+  await tick();
+  assert.deepEqual(page.posts.map((p) => p.kicadReviewAskEvent.event), ['answer', 'done']);
+  assert.deepEqual(page.posts[0].kicadReviewAskEvent.data, { text: 'Hi' });
+});
