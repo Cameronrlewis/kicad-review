@@ -1,6 +1,7 @@
 import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { currentBody, readStoredData } from './report-shell.js';
+import { currentBody, currentReport, readStoredData } from './report-shell.js';
+import { reportCache } from './report-cache.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
@@ -246,8 +247,12 @@ async function pdfDownload(owner, repo, id, active) {
 }
 
 export function assetFromReport(html, id, kind) {
+  return assetFromData(readStoredData(html), id, kind);
+}
+
+function assetFromData(data, id, kind) {
   if (!/^[0-9a-f]{12}$/.test(id) || !['svg', 'json'].includes(kind)) return null;
-  const data = readStoredData(html), meta = data?.assets?.[id], encoded = data?.blobs?.[id];
+  const meta = data?.assets?.[id], encoded = data?.blobs?.[id];
   if (meta?.kind !== kind || typeof encoded !== 'string') return null;
   try { return unbase64(encoded); } catch { return null; }
 }
@@ -278,6 +283,24 @@ async function storedReport(artifact, active) {
   return blob;
 }
 
+// Only call after access() and reportArtifact() have validated this request.
+async function cachedReport(artifact, active) {
+  const { metadata, base } = artifact;
+  // Legacy metadata without an immutable upload identity remains uncached.
+  const key = metadata.size_in_bytes != null && metadata.updated_at != null
+    ? JSON.stringify([base, metadata.workflow_run?.repository_id, metadata.size_in_bytes, metadata.updated_at]) : null;
+  const hit = key && reportCache.get(key);
+  if (hit) return hit;
+  const stored = await (await storedReport(artifact, active)).text();
+  const data = readStoredData(stored);
+  const raw = currentReport(stored, { lazyAssets: true, storedData: data }) ?? stored;
+  // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
+  // Count shared/fallback strings twice rather than under-account retained report bytes.
+  const entry = { stored, data, raw, bytes: 6 * stored.length + 2 * raw.length };
+  if (key) reportCache.set(key, entry);
+  return entry;
+}
+
 function assetError() {
   return new Response('Asset unavailable. Try again.', { status: 404,
     headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'private,no-store' } });
@@ -304,12 +327,14 @@ export async function privateAsset(request, digest, kind, load) {
 }
 
 // Stored metadata/expiry/name/zip/download sequence; returns the stored HTML or a failure Response.
+// The validated result now includes parsed data and the raw body for isolate-local reuse.
 async function readArtifactHtml(owner, repo, id, active, repository) {
   try {
     const artifact = await reportArtifact(owner, repo, id, active, repository);
     if (!artifact || artifact.expired) return assetError();
     // ponytail: read the existing HTML envelope per asset; add range/indexed companion delivery only if Worker CPU or GitHub download traces require it.
-    return await (await storedReport(artifact, active)).text();
+    // Measured Worker CPU now requires caching that envelope and its processed forms.
+    return await cachedReport(artifact, active);
   } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(); }
 }
 
@@ -321,7 +346,7 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
     active = allowed.s;
     const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
     if (stored instanceof Response) return stored;
-    return assetFromReport(stored, digest, kind) || assetError();
+    return assetFromData(stored.data, digest, kind) || assetError();
   });
   return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
     encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
@@ -360,7 +385,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
-    return sessionResponse(await currentBody(await storedReport(artifact, active), { lazyAssets: true }), {
+    return sessionResponse((await cachedReport(artifact, active)).raw, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Security-Policy': reportCsp,

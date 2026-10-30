@@ -47,14 +47,16 @@ export function declaredAssets(data) {
 
 // Returns the stored report rebuilt with the current interface, or null to serve it unchanged
 // (no recognisable data script: a foreign or hand-edited file).
-export function currentReport(stored, { lazyAssets = false } = {}) {
+export function currentReport(stored, { lazyAssets = false, storedData } = {}) {
   const start = stored.indexOf(DATA);
   const end = start < 0 ? -1 : stored.indexOf('</script>', start);
   if (end < 0) return null;
   let data = stored.slice(start + '<script>'.length, end);   // payload escapes every "<", so no early </script>
   if (lazyAssets) {
-    const payload = readStoredData(stored);
-    if (!payload) return null;
+    const original = storedData === undefined ? readStoredData(stored) : storedData;
+    if (!original) return null;
+    // Keep cached blobs intact for subsequent authenticated asset requests.
+    const payload = { ...original, blobs: { ...original.blobs } };
     const descriptors = declaredAssets(payload);
     if (Object.keys(descriptors).length) {
       for (const id of Object.keys(descriptors)) delete payload.blobs[id];

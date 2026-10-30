@@ -4259,3 +4259,92 @@ test('3D camera retains desktop OrbitControls with direct-touch mappings disable
   const source=readFileSync(new URL('../ui/review3d.js',import.meta.url),'utf8');
   assert.match(source,/controls\.touches\s*=\s*\{ONE:null,TWO:null\}/);
 });
+
+// Warm isolate cache must never become an authorization or artifact-liveness cache.
+test('report cache reuses raw parsing and assets but revalidates every request', async () => {
+  const sealed = await signedIn();
+  let mode = 'ok', downloads = 0, parses = 0, metadataCalls = 0, updated = '2026-10-29T00:00:00Z';
+  const data = imageData(); data.cacheProbe = 'cache-parse-probe-01';
+  const stored = storedImageReport(data), originalParse = JSON.parse;
+  JSON.parse = function(value, ...args) {
+    if (typeof value === 'string' && value.includes('cache-parse-probe-01')) parses++;
+    return originalParse.call(this, value, ...args);
+  };
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo') || url.endsWith('/other')) return mode === 'denied'
+      ? new Response('{}', { status: 404 }) : Response.json({ id: url.endsWith('/other') ? 99 : 5,
+        owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
+    if (url.endsWith('/artifacts/987654')) {
+      metadataCalls++;
+      return mode === 'missing' ? new Response('{}', { status: 404 }) : Response.json({
+        name: 'kicad-review.html', size_in_bytes: stored.length, updated_at: updated,
+        expired: mode === 'expired', expires_at: mode === 'past' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z',
+        workflow_run: { repository_id: 5 } });
+    }
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/cache-probe' } });
+    assert.equal(url, 'https://signed.example/cache-probe'); downloads++; return new Response(stored);
+  });
+  const get = (suffix = '/raw', repo = 'repo') => call(`/r/Cameronrlewis/${repo}/a/987654${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+  try {
+    const first = await get(), body = await first.text(); assert.equal(first.status, 200);
+    const parsed = parses; assert.equal(parsed, 1);
+    const second = await get(); assert.equal(await second.text(), body); assert.equal(second.status, 200);
+    assert.equal(downloads, 1); assert.equal(parses, parsed);
+    const asset = await get(`/assets/${imageId}.svg`); assert.equal(asset.status, 200);
+    assert.deepEqual(Buffer.from(await asset.arrayBuffer()), gzipSync(imageText));
+    assert.equal(downloads, 1); assert.equal(parses, parsed); assert.equal(metadataCalls, 3);
+    for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
+      assert.equal((await get(suffix, 'other')).status, 404);
+      for (mode of ['denied', 'expired', 'past', 'missing']) assert.equal((await get(suffix)).status, 404);
+      mode = 'ok';
+    }
+    assert.equal(downloads, 1);
+    updated = '2026-10-29T01:00:00Z'; assert.equal((await get()).status, 200); assert.equal(downloads, 2);
+  } finally { restore(); JSON.parse = originalParse; }
+});
+
+test('report LRU enforces byte and entry ceilings, refreshes recency and rejects oversized entries', async () => {
+  const { ReportCache } = await import('./report-cache.js');
+  const cache = new ReportCache(10, 3);
+  cache.set('a', { bytes: 4 }); cache.set('b', { bytes: 4 });
+  assert.equal(cache.get('a').bytes, 4);
+  cache.set('c', { bytes: 4 }); assert.equal(cache.get('b'), undefined);
+  assert.equal(cache.bytes, 8);
+  cache.set('a', { bytes: 7 }); assert.equal(cache.get('c'), undefined); assert.equal(cache.bytes, 7);
+  cache.set('huge', { bytes: 11 }); assert.equal(cache.get('huge'), undefined); assert.equal(cache.bytes, 7);
+  const count = new ReportCache(100, 2);
+  for (const key of ['a', 'b', 'c']) count.set(key, { bytes: 1 });
+  assert.equal(count.get('a'), undefined); assert.equal(count.bytes, 2);
+});
+
+test('raw handler evicts least recently used reports by retained bytes before entry ceiling', async () => {
+  const { reportCache } = await import('./report-cache.js');
+  const ceiling = reportCache.maxBytes;
+  const sealed = await signedIn(), stored = storedImageReport(), downloads = [];
+  let downloading;
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    const artifact = url.match(/\/artifacts\/(87650[1-3])$/);
+    if (artifact) return Response.json({ name: 'kicad-review.html', size_in_bytes: stored.length,
+      updated_at: '2026-10-29T00:00:00Z', workflow_run: { repository_id: 5 } });
+    const zip = url.match(/\/artifacts\/(87650[1-3])\/zip$/);
+    if (zip) { downloading = zip[1]; return new Response(null, { status: 302, headers: { Location: 'https://signed.example/lru' } }); }
+    assert.equal(url, 'https://signed.example/lru'); downloads.push(downloading); return new Response(stored);
+  });
+  const get = async id => {
+    const result = await call(`/r/Cameronrlewis/repo/a/${id}/raw`, { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(result.status, 200); await result.arrayBuffer();
+  };
+  try {
+    reportCache.entries.clear(); reportCache.bytes = 0;
+    await get('876501');
+    reportCache.maxBytes = reportCache.bytes * 2;
+    await get('876502'); await get('876501'); await get('876503');
+    assert.equal(reportCache.entries.size, 2);
+    assert.ok(reportCache.bytes <= reportCache.maxBytes);
+    await get('876502');
+    assert.deepEqual(downloads, ['876501', '876502', '876503', '876502']);
+  } finally {
+    restore(); reportCache.entries.clear(); reportCache.bytes = 0; reportCache.maxBytes = ceiling;
+  }
+});
