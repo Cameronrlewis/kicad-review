@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+const BR03_HOTSPOT_CONTRACT=JSON.parse(readFileSync(new URL('./fixtures/br03-hotspot-contract.json',import.meta.url),'utf8'));
 // These dependency-free browser functions are shared by CDP and Safari WebDriver
 // calibration. Compare actual composited screenshots, not a second SVG renderer.
 export async function softnessProbe(phase, scale) {
@@ -3680,6 +3682,83 @@ return true;
       if(savedNet!==undefined) object.net=savedNet; else delete object.net;
       S.s=null; disposeBoardRenderers(); await draw();
     }
+  `],
+  ["BR03 producer hotspot handoff", "", `
+    const fixture=${JSON.stringify(BR03_HOTSPOT_CONTRACT)}, p=proj(), oldSheets=p.sheets;
+    const saved=Object.fromEntries(Object.keys(fixture.blobs).map(id=>[id,{blob:D.blobs[id],cached:cache[id]}]));
+    try {
+      p.sheets=fixture.sheets;
+      for(const [id,blob] of Object.entries(fixture.blobs)) {D.blobs[id]=blob;delete cache[id];}
+      if(p.sheets[0].hotspots.base!==p.sheets[1].hotspots.base) return 'producer not revision-wide';
+      const row={anchors:{base:[{uuid:'placed',ref:'U1',pin:'12',sheet:'/left/'}],head:[]}};
+      const base=await electricalManifest('/left/','base'), head=await electricalManifest('/left/','head');
+      const right=await electricalManifest('/right/','base');
+      if(base?.sheet!=='/left/' || right?.sheet!=='/right/' || right.elements[0].ref!=='U2') return 'views adapter lost instance';
+      const pins=electricalPins(row,'base','/left/',base), expected=base.elements[0].pins.find(p=>p.number==='12');
+      if(pins.length!==1 || pins[0].ref!=='U1' || pins[0].number!=='12' || pins[0].x!==expected.x || pins[0].y!==expected.y) return 'base-only numeric pin lost';
+      if(electricalPins(row,'base','/right/',right).length || electricalPins(row,'head','/left/',head).length) return 'base pin leaked across instance/revision';
+      if(!base.elements[0].pins.some(p=>p.number==='1' && p.name==='123') || expected.name!=='456') return 'numeric pin names changed';
+      return true;
+    } finally {
+      p.sheets=oldSheets;
+      for(const [id,old] of Object.entries(saved)) {
+        old.blob===undefined?delete D.blobs[id]:D.blobs[id]=old.blob;
+        old.cached===undefined?delete cache[id]:cache[id]=old.cached;
+      }
+    }
+  `],
+  ["BR03 pin identity and missing hotspot compatibility", "", `
+    const r={anchors:{head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/',commit:D.head}],base:[]}};
+    const manifest={elements:[{uuid:'u',ref:'U1',unit:'1',pins:[{number:'1',name:'A',x:10,y:20}]}]};
+    const pins=electricalPins(r,'head','/a/',manifest);
+    if(pins.length!==1 || pins[0].x!==10 || pins[0].number!=='1') return 'wrong pin';
+    if(electricalPins(r,'head','/b/',manifest).length) return 'cross-instance highlight';
+    if(electricalPins(r,'base','/a/',null).length) return 'missing old manifest failed';
+    const p=proj(), sheets=p.sheets, row={...r,id:'c906',detail:{kind:'members'}};
+    const id='__br03_manifest';
+    // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide envelope as spec 01.
+    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',views:[
+      {sheet:'/a/',elements:manifest.elements},{sheet:'/b/',elements:manifest.elements}]})});
+    try {
+      p.sheets=[{path:'/a/',hotspots:{head:id}},{path:'/b/',hotspots:{head:id}}];
+      const view=await electricalManifest('/a/','head');
+      if(!view || electricalPins(row,'head','/a/',view).length!==1) return 'manifest envelope adapter';
+      const dock=document.createElement('div'); document.body.append(dock); await electricalControls(dock,row); dock.remove();
+      return dock.querySelector('[data-electrical-target]') ? true : 'missing member navigation control';
+    } finally {p.sheets=sheets; previous===undefined?delete cache[id]:cache[id]=previous;}
+  `],
+  ["BR03 inner layer fallback and saved selection", "v=board", `
+    const p=proj(), layers=p.board.layers, changes=p.changes, saved=S.s;
+    if(!layers.length) return 'required SVG board fixture absent';
+    const row={id:'c907',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu'},anchors:{base:[],head:[]}};
+    try {
+      p.board.layers=[...layers,{...layers[0],name:'In1_Cu'}]; p.changes=[...changes,row];
+      changeBoardAppearance({layers:{'In1.Cu':{visible:false}}});
+      S.layers=[]; await electricalTarget(row,{kind:'board'});
+      if(!S.layers.includes('In1_Cu') || S.layers.includes('In1.Cu')) return 'canonical/exported names confused';
+      if(!glAppearance().layers['In1.Cu']?.visible) return 'Appearance eye still hidden';
+      if(!currentView().layers.some(l=>l.name==='In1_Cu')) return 'SVG fallback lost inner layer';
+      const link=encodeState(), decoded=valid(decodeState('#'+link));
+      if(!decoded.layers?.includes('In1_Cu') || decoded.s!==row.id) return 'saved link loses selection';
+      await applyState(decodeState('#'+link));
+      return S.layers.includes('In1_Cu') && S.s===row.id || 'reload loses selected layer';
+    } finally {p.board.layers=layers; p.changes=changes; S.s=saved; await draw();}
+  `],
+  ["BR03 missing pin locations note", "", `
+    const p=proj(), sheets=p.sheets, row={id:'c910',anchors:{base:[],head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/'}]}};
+    const id='__br03_bad_manifest', prior=cache[id], dock=document.createElement('div');document.body.append(dock);
+    try {
+      const cases=[['empty',{}],['missing-side',{base:id}],['missing-blob',{head:'__not_in_blobs'}],
+        ['malformed',{head:id},'{'],['missing-sheet',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/other/',elements:[]}]})],
+        ['unresolved-pin',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/a/',elements:[{uuid:'u',ref:'U1',pins:[]}]}]})]];
+      for(const [name,hotspots,text] of cases) {
+        cache[id]=Promise.resolve({text:text||'{}'});p.sheets=[{path:'/a/',hotspots}];
+        await electricalControls(dock,row);
+        if(!dock.querySelector('.electrical-pin-unavailable')?.textContent.includes('Pin locations unavailable')) return name+': missing unavailable note';
+        if(dock.querySelector('img,script')) return name+': unsafe note';
+      }
+      return true;
+    } finally {dock.remove();p.sheets=sheets;prior===undefined?delete cache[id]:cache[id]=prior;}
   `],
   ["board mark style survives reload and project changes", "v=board", `
     ${MARK_STYLE_FIXTURE}

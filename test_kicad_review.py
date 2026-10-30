@@ -6101,3 +6101,39 @@ def test_br03_build_integration():
         finally: os.chdir(old)
 test_br03_build_integration()
 print('ok BR03 build integration, rule dedup and stable IDs')
+
+def test_br03_hotspot_contract():
+    """01's real sheet_hotspots + add_blob output is the literal fixture 03's browser checks consume."""
+    with tempfile.TemporaryDirectory() as td:
+        manifests={}
+        for side in ('base','head'):
+            root=pathlib.Path(td)/side
+            pins='(pin input line (at -5 0 0) (length 2) (name "123") (number "1"))'
+            if side=='base':
+                pins+='(pin input line (at 5 0 180) (length 2) (name "456") (number "12"))'
+            shared=('(kicad_sch (uuid child) (paper A4) '
+                '(lib_symbols (symbol "Test:Pair" (symbol "Pair_0_1" '
+                '(rectangle (start -1 -1) (end 1 1))) (symbol "Pair_1_1" '+pins+'))) '
+                '(symbol (uuid placed) (lib_id "Test:Pair") (unit 1) (at 100 50 0) '
+                '(property "Reference" "U?") (property "Value" "Pair") '
+                '(instances (project "P" (path "/root/left" (reference "U1") (unit 1)) '
+                '(path "/root/right" (reference "U2") (unit 1))))))')
+            write(str(root),{'P.kicad_sch':'(kicad_sch (uuid root) (paper A4) '+
+                  sheet('Left','shared.kicad_sch','left')+sheet('Right','shared.kicad_sch','right')+')',
+                  'shared.kicad_sch':shared})
+            manifests[side]=kr.sheet_hotspots(str(root),'P')
+            views={v['sheet']:v for v in manifests[side]['views']}
+            left,right=(views[s]['elements'][0] for s in ('/left/','/right/'))
+            assert left['uuid']==right['uuid']=='placed' and (left['ref'],right['ref'])==('U1','U2')
+            assert [(p['number'],p['name']) for p in left['pins']]==(
+                [('1','123'),('12','456')] if side=='base' else [('1','123')])
+        blobs={}
+        ids={s:kr.add_blob(blobs,json.dumps(m,sort_keys=True)) for s,m in manifests.items()}
+        contract={'sheets':[{'path':path,'hotspots':dict(ids)} for path in ('/left/','/right/')],
+                  'blobs':blobs}
+        fixture=pathlib.Path('ui/fixtures/br03-hotspot-contract.json')
+        if os.environ.get('BR03_WRITE_FIXTURES')=='1':
+            fixture.write_text(json.dumps(contract,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+        assert json.loads(fixture.read_text(encoding='utf-8'))==contract, 'BR03 hotspot producer contract drift'
+test_br03_hotspot_contract()
+print('ok BR03 hotspot producer contract')

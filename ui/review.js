@@ -1693,6 +1693,7 @@ function afterDraw(view) {
   drawImageSelection();
   drawPins();
   mountImageSearch();
+  void renderElectricalPins();
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
@@ -1763,6 +1764,12 @@ const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:$
 function goTo(id) {
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
   if (!r) return Promise.resolve();
+  if (r.detail && ["members", "pad-net", "area"].includes(r.detail.kind)) {
+    const sheet = Object.values(r.anchors || {}).flat().find(a => a.sheet != null)?.sheet;
+    if (boardAvailable(proj())) return electricalTarget(r, {kind: "board"});
+    if (sheet != null) return electricalTarget(r, {kind: "sheet", sheet});
+    S.s = r.id; markSelected(); saveHash(); return Promise.resolve();
+  }
   S.s = id;
   if (S.v === "3d") { markSelected(); window.Review3D?.focus(r); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); return Promise.resolve(); }
   const view = viewOf(r) ?? S.v;
@@ -1770,6 +1777,89 @@ function goTo(id) {
     const box = boardDiff?.bounds(id,r.action === "removed" ? "base" : "head") || rowBox(r, r.action === "removed" ? "base" : "head"); if (S.v === "3d") window.Review3D?.focus(r); else if (box) zoomTo(box); markSelected(); saveHash(); };
   if (view !== S.v) { const library = String(S.v).startsWith("lib:") || tabsChange(view); S.v = view; S.x = S.y = S.z = null; renderNav(); if (library) renderPanel(); }
   return draw().then(zoom);
+}
+// ---- Electrical rows: spec 01's revision-wide hotspot manifests locate anchored pins; copper rows reveal their layer.
+async function electricalManifest(sheetPath, side) {
+  const id = proj().sheets.find(s => s.path === sheetPath)?.hotspots?.[side];
+  if (!id) return null;
+  try {
+    const m = JSON.parse(await svgText(id));
+    return m?.version === 1 && m.units === "mm" ? m.views?.find(v => v.sheet === sheetPath) || null : null;
+  } catch { return null; }
+}
+function electricalPins(row, side, sheetPath, manifest) {
+  const anchors = (row.anchors?.[side] || []).filter(a => a.sheet === sheetPath), result = [];
+  for (const a of anchors) for (const e of manifest?.elements || []) {
+    if (a.uuid ? e.uuid !== a.uuid : e.ref !== a.ref) continue;
+    for (const p of e.pins || []) if (String(p.number) === String(a.pin))
+      result.push({uuid: e.uuid, ref: e.ref, number: String(p.number), x: p.x, y: p.y});
+  }
+  return result;
+}
+async function electricalTarget(row, target) {
+  S.s = row.id;
+  if (target.kind === "board") {
+    S.v = "board";
+    if (row.detail?.kind === "area") {
+      const layer = proj().board.layers.find(l => canon(l.name) === row.detail.layer);
+      if (layer) changeBoardAppearance({layers: {[canon(layer.name)]: {visible: true}}});
+    }
+  } else S.v = "sheet:" + target.sheet;
+  S.x = S.y = S.z = null; renderNav(); renderPanel(); await draw();
+  let box = row.box;
+  if (target.kind === "sheet") {
+    const pins = (await Promise.all(["base", "head"].map(async side => electricalPins(row, side, target.sheet,
+      await electricalManifest(target.sheet, side))))).flat();
+    if (pins.length) box = [Math.min(...pins.map(p => p.x)) - 1, Math.min(...pins.map(p => p.y)) - 1,
+      Math.max(...pins.map(p => p.x)) + 1, Math.max(...pins.map(p => p.y)) + 1];
+  }
+  if (box) zoomTo(box);
+  await renderElectricalPins(); markSelected(); saveHash();
+}
+let electricalPinGeneration = 0;
+async function renderElectricalPins() {
+  const generation = ++electricalPinGeneration, row = proj().changes.find(r => r.id === S.s), view = S.v;
+  document.querySelectorAll(".electrical-pin").forEach(e => e.remove());
+  if (!row?.anchors || !view?.startsWith("sheet:")) return;
+  const sheet = view.slice(6), manifests = await Promise.all(["base", "head"].map(s => electricalManifest(sheet, s)));
+  if (generation !== electricalPinGeneration || S.s !== row.id || S.v !== view) return;
+  for (const world of document.querySelectorAll("#stage .world")) {
+    const revisions = ["base", "head"].filter(side => world.querySelector(`.stack.${side}`));
+    for (const side of revisions) {
+      const manifest = manifests[side === "base" ? 0 : 1];
+      for (const pin of electricalPins(row, side, sheet, manifest)) {
+        const ring = document.createElement("span"); ring.className = "electrical-pin " + side;
+        ring.style.left = pin.x * PX + "px"; ring.style.top = pin.y * PX + "px";
+        ring.setAttribute("role", "img"); ring.setAttribute("aria-label", pin.ref + "." + pin.number + " " + side);
+        world.append(ring);
+      }
+    }
+  }
+}
+async function electricalControls(dock, row) {
+  dock.querySelector(".electrical-targets")?.remove();
+  if (!row?.anchors) return;
+  const controls = document.createElement("div"); controls.className = "electrical-targets";
+  const add = (label, target) => { const b = document.createElement("button"); b.type = "button";
+    b.textContent = label; b.dataset.electricalTarget = target.kind;
+    b.onclick = () => electricalTarget(row, target); controls.append(b); };
+  if (boardAvailable(proj())) add("Board net", {kind: "board"});
+  const sheets = [...new Set(Object.values(row.anchors).flat().map(a => a.sheet).filter(s => s != null))];
+  for (const sheet of sheets) add("Pins on " + sheet, {kind: "sheet", sheet});
+  (dock.querySelector("#insp-body") || dock).append(controls);
+  // Unit anchors are alternatives for one logical sheet/reference/pin; one resolved pin is sufficient.
+  const resolved = await Promise.all(sheets.flatMap(sheet => ["base", "head"].map(async side => {
+    const anchors = (row.anchors[side] || []).filter(a => a.sheet === sheet);
+    if (!anchors.length) return true;
+    const pins = electricalPins(row, side, sheet, await electricalManifest(sheet, side));
+    return anchors.some(a => pins.some(p => String(p.number) === String(a.pin) &&
+      (a.uuid ? p.uuid === a.uuid : p.ref === a.ref)));
+  })));
+  if (!controls.isConnected || dock.querySelector(".electrical-targets") !== controls) return;
+  if (resolved.some(ok => !ok)) {
+    const note = document.createElement("p"); note.className = "electrical-pin-unavailable";
+    note.textContent = "Pin locations unavailable in this report"; controls.append(note);
+  }
 }
 // ---- Threads: anchors pin a discussion to a KiCad object (UUID, reference fallback) or a point, in mm. ----
 const round3 = n => Math.round(n * 1000) / 1000;
@@ -2601,6 +2691,7 @@ function renderInspector() {
   }
   dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
   $("#insp-toggle").onclick = () => { inspectorClosed = !inspectorClosed; inspectorLayout(); persistInspector(); renderInspector(); };
+  void electricalControls(dock, proj().changes.find(r => r.id === S.s));
 }
 let inspectorHeight = 176, inspectorClosed = false;
 try { const saved = JSON.parse(localStorage.getItem("kr.inspector") || "null"); if (saved) { inspectorHeight = Number(saved.height) || 176; inspectorClosed = saved.closed === true; } } catch {}
