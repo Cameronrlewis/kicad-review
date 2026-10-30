@@ -4348,3 +4348,49 @@ test('raw handler evicts least recently used reports by retained bytes before en
     restore(); reportCache.entries.clear(); reportCache.bytes = 0; reportCache.maxBytes = ceiling;
   }
 });
+
+test('concurrent cold raw and asset requests share one build and failed builds can retry', async () => {
+  const sealed = await signedIn(), data = imageData(); data.cacheProbe = 'single-flight-probe-01';
+  const stored = storedImageReport(data), originalParse = JSON.parse;
+  let downloads = 0, parses = 0, fail = false, metadataCalls = 0, allValidated, release;
+  const count = 10;
+  let validated = new Promise(resolve => { allValidated = resolve; });
+  let gate = new Promise(resolve => { release = resolve; });
+  JSON.parse = function(value, ...args) {
+    if (typeof value === 'string' && value.includes('single-flight-probe-01')) parses++;
+    return originalParse.call(this, value, ...args);
+  };
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (/\/artifacts\/76543[12]$/.test(url)) {
+      if (++metadataCalls === count) allValidated();
+      return Response.json({ name: 'kicad-review.html', size_in_bytes: stored.length,
+        updated_at: '2026-10-29T00:00:00Z', workflow_run: { repository_id: 5 } });
+    }
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/single-flight' } });
+    assert.equal(url, 'https://signed.example/single-flight'); downloads++;
+    await gate; await new Promise(resolve => setTimeout(resolve, 50)); // let every waiter reach the shared build
+    return fail ? new Response('unavailable', { status: 503 }) : new Response(stored);
+  });
+  const get = (id, index = 0) => call(`/r/Cameronrlewis/repo/a/${id}${index < 2 ? '/raw' : `/assets/${imageId}.svg`}`,
+    { headers: { Cookie: `s=${sealed}` } });
+  const batch = async (id, status) => {
+    const pending = Array.from({ length: count }, (_, index) => get(id, index));
+    await validated; release();
+    const responses = await Promise.all(pending);
+    for (const response of responses) { assert.equal(response.status, status); await response.arrayBuffer(); }
+  };
+  try {
+    await batch('765431', 200);
+    assert.equal(downloads, 1); assert.equal(parses, 1); assert.equal(metadataCalls, count);
+    metadataCalls = 0; fail = true;
+    validated = new Promise(resolve => { allValidated = resolve; });
+    gate = new Promise(resolve => { release = resolve; });
+    await batch('765432', 404);
+    assert.equal(downloads, 2); assert.equal(parses, 1);
+    fail = false;
+    const retried = await get('765432'); assert.equal(retried.status, 200); await retried.arrayBuffer();
+    assert.equal(downloads, 3); assert.equal(parses, 2);
+    assert.equal((await get('765432')).status, 200); assert.equal(downloads, 3);
+  } finally { release(); restore(); JSON.parse = originalParse; }
+});

@@ -283,6 +283,8 @@ async function storedReport(artifact, active) {
   return blob;
 }
 
+const reportBuilds = new Map();
+
 // Only call after access() and reportArtifact() have validated this request.
 async function cachedReport(artifact, active) {
   const { metadata, base } = artifact;
@@ -291,14 +293,24 @@ async function cachedReport(artifact, active) {
     ? JSON.stringify([base, metadata.workflow_run?.repository_id, metadata.size_in_bytes, metadata.updated_at]) : null;
   const hit = key && reportCache.get(key);
   if (hit) return hit;
-  const stored = await (await storedReport(artifact, active)).text();
-  const data = readStoredData(stored);
-  const raw = currentReport(stored, { lazyAssets: true, storedData: data }) ?? stored;
-  // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
-  // Count shared/fallback strings twice rather than under-account retained report bytes.
-  const entry = { stored, data, raw, bytes: 6 * stored.length + 2 * raw.length };
-  if (key) reportCache.set(key, entry);
-  return entry;
+  // Authorization and artifact liveness were checked independently by every waiter.
+  // Share cold work too: a page's parallel raw/asset requests must not multiply peak memory.
+  if (key && reportBuilds.has(key)) return reportBuilds.get(key);
+  const build = (async () => {
+    const stored = await (await storedReport(artifact, active)).text();
+    const data = readStoredData(stored);
+    const raw = currentReport(stored, { lazyAssets: true, storedData: data }) ?? stored;
+    // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
+    // Count shared/fallback strings twice rather than under-account retained report bytes.
+    // Stored HTML is temporary: only parsed data (4x envelope allowance) and raw body remain.
+    const entry = { data, raw, bytes: 4 * stored.length + 2 * raw.length };
+    if (key) reportCache.set(key, entry);
+    return entry;
+  })();
+  if (!key) return build;
+  reportBuilds.set(key, build);
+  try { return await build; }
+  finally { reportBuilds.delete(key); }
 }
 
 function assetError() {
