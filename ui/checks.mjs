@@ -2902,6 +2902,36 @@ return true;
       for (const m of ["overlay","wipe","blend","semantic"]) { p.board.geometry = {base:"glOk", head:"glOk"}; S.m = m; await draw(); if (svgOk() || boardView.renderers.length !== 1 || !boardDiff) return "mode " + m; }
       return true;
     } finally { BoardGL.create = create; p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.m = "side"; }`],
+  ["board fallback initializes live state before palette decode", "v=board&x=10&y=20&z=5", `
+    const p=proj(); if(!p.board?.changed) return 'skip';
+    const geometry=p.board.geometry, appearance=Appearance.get(), original=applyAppearance;
+    let release, entered, drawing;
+    const blocked=new Promise(r=>release=r), started=new Promise(r=>entered=r);
+    try {
+      delete p.board.geometry; await draw();
+      Appearance.patch({flip:true});
+      const immediate=document.querySelector('#stage .world').style.transform.includes('scale(-');
+      await draw();
+      if(!immediate) return 'connected camera waits for fallback redraw';
+      boardView.failed=S.p; boardView.note='WebGL unavailable — showing SVG';
+      applyAppearance=snapshot=>{
+        const pending=original(snapshot);
+        entered();
+        return pending.then(()=>blocked);
+      };
+      drawing=draw(); await started;
+      const vp=document.querySelector('#stage .vp'), world=vp?.querySelector('.world');
+      if(!world?.style.transform.includes('scale(-') || !vp.classList.contains('flip')) return 'live camera waits for palette decode';
+      if(!/WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent)) return 'live fallback notice waits for palette decode';
+      if(S.x!==10 || S.y!==20 || S.z!==5) return 'live camera changed';
+      if(document.querySelector('#stage').dataset.imageReady==='true') return 'palette decode reported ready early';
+      return true;
+    } finally {
+      release(); if(drawing) await drawing;
+      applyAppearance=original; p.board.geometry=geometry;
+      boardView.failed=null; boardView.note=null; Appearance.patch({flip:appearance.flip}); await draw();
+    }
+  `],
   ["board flip adapters mirror camera, overlays and pointer", "v=board&x=10&y=20&z=5", `
     const p = proj(); if (!p.board?.changed) return "skip";
     const geometry=p.board.geometry; delete p.board.geometry;

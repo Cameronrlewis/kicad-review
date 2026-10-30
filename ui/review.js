@@ -620,8 +620,9 @@ Appearance.subscribe(snapshot => {
     afterDraw(currentView());
   }
   if (S.v === "board") {
-    if (boardView.renderers.length) apply();
-    else {
+    // Keep the connected camera in step while fallback artwork decodes off-stage.
+    apply();
+    if (!boardView.renderers.length) {
       // Redraw from cached original SVG, never recolour a recolour.
       const cursor = boardCursor;
       draw().then(() => { const vp = $("#stage .vp"); if (cursor && vp) updateCoordinates(vp,cursor); });
@@ -924,6 +925,10 @@ async function draw() {
     if (c.sheet) appearanceSchematics.add(c);
     else if (c.controller) appearanceBoardImages.add(c);
   }
+  // The stage is already live. Initialize its camera, overlays and fallback notice
+  // before palette decoding yields; image readiness still waits for that decode.
+  if (view && !placed()) fit(); else apply(); afterDraw(view);
+  statusText('.status-message', stage.querySelector('.image-error')?.textContent || (S.v === 'board' && boardView.note ? boardView.note : 'Ready'));
   try { await applyAppearance(Appearance.get()); }
   catch (error) {
     if (my !== gen) { releaseImageStage(stage); return; }
@@ -935,7 +940,6 @@ async function draw() {
   if (my !== gen) { releaseImageStage(stage); return; }
   const msg = $("#statusbar .status-message");
   if (msg) msg.textContent = stage.querySelector(".image-error")?.textContent || (S.v === "board" && boardView.note ? boardView.note : "Ready");
-  if (view && !placed()) fit(); else apply(); afterDraw(view);
   for (const vp of document.querySelectorAll("#stage .vp.sheet")) schematicResize.observe(vp);
   refreshAppearance();
   saveHash(true); // Navigation must be reflected in the address before readiness.
