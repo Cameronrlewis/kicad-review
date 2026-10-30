@@ -5814,22 +5814,52 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
         assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
 
-# BR03 Task 6.2: unreadable optional rules keep symbols and drop unknown metadata on both sides.
+# BR03 Task 6.2: unreadable optional rules keep symbols, drop unknown metadata on both sides, and warn.
+import contextlib, hashlib
 from kicad_review import project_pair
+DRU = b'(rule "wide" (constraint clearance (min 0.2mm)))\xff'  # non-UTF-8 bytes: the .dru hash is byte-based
+def pair_with_warnings():
+    with contextlib.redirect_stderr(io.StringIO()) as log:
+        objs, issues = project_pair({"dir": "p", "name": "p"})
+    return objs, issues, log.getvalue()
+def assert_symbols_kept(objs):
+    assert all(any(o["kind"] == "symbol" for o in x.values()) for x in objs.values())
 with tempfile.TemporaryDirectory() as td:
     old = os.getcwd(); os.chdir(td)
     try:
         for side in ("base", "head"):
             write(side, {"p/p.kicad_sch": '(kicad_sch (symbol (uuid s) (at 1 2 0) (property "Reference" "R1")))',
                          "p/p.kicad_pro": '{"board":{"design_settings":{"rules":{"min_clearance":0.2}}}}'})
+            pathlib.Path(side, "p/p.kicad_dru").write_bytes(DRU)
+        objs, issues, warnings = pair_with_warnings()
+        assert not issues and not warnings and all("meta:pro" in x and "meta:dru" in x for x in objs.values())
+        assert all(x["meta:dru"]["props"]["custom rules"] == hashlib.sha1(DRU).hexdigest()[:10] for x in objs.values())
+        # Malformed .pro on each side in turn.
         for side in ("base", "head"):
             file = pathlib.Path(side) / "p/p.kicad_pro"; valid = file.read_text(); file.write_text('{broken')
-            objs, issues = project_pair({"dir": "p", "name": "p"})
-            assert issues and issues[0]["channel"] == "rules"
-            assert all(any(o["kind"] == "symbol" for o in x.values()) for x in objs.values())
+            objs, issues, warnings = pair_with_warnings()
+            assert issues and issues[0]["channel"] == "rules" and issues[0]["unknownMeta"] == "meta:pro"
+            assert_symbols_kept(objs)
             assert all("meta:pro" not in x for x in objs.values()), "BR03 unknown metadata became removal"
+            assert all("meta:dru" in x for x in objs.values()), "valid .dru must survive a bad .pro"
+            assert f"{side}/p/p.kicad_pro: optional rules unavailable" in warnings
             file.write_text(valid)
-        objs, issues = project_pair({"dir": "p", "name": "p"})
-        assert not issues and all("meta:pro" in x for x in objs.values())
+        # Unreadable .dru on head only (a directory makes read_bytes raise IsADirectoryError).
+        dru = pathlib.Path("head/p/p.kicad_dru"); dru.unlink(); dru.mkdir()
+        objs, issues, warnings = pair_with_warnings()
+        assert issues and issues[0]["channel"] == "rules" and issues[0]["unknownMeta"] == "meta:dru"
+        assert_symbols_kept(objs)
+        assert all("meta:dru" not in x for x in objs.values()), "one-sided unreadable .dru must not show as removal"
+        assert all("meta:pro" in x for x in objs.values()), "valid .pro must survive a bad .dru"
+        assert "head/p/p.kicad_dru: optional rules unavailable" in warnings
+        # Unreadable .dru on both sides: still symmetric suppression.
+        pathlib.Path("base/p/p.kicad_dru").unlink(); pathlib.Path("base/p/p.kicad_dru").mkdir()
+        objs, issues, warnings = pair_with_warnings()
+        assert issues and all("meta:dru" not in x for x in objs.values()) and all("meta:pro" in x for x in objs.values())
+        dru.rmdir(); pathlib.Path("base/p/p.kicad_dru").rmdir()
+        # Recovery: both files readable again, no issues, nothing suppressed.
+        for side in ("base", "head"): pathlib.Path(side, "p/p.kicad_dru").write_bytes(DRU)
+        objs, issues, warnings = pair_with_warnings()
+        assert not issues and not warnings and all("meta:pro" in x and "meta:dru" in x for x in objs.values())
     finally: os.chdir(old)
 print('ok BR03 project_pair guards optional rules')
