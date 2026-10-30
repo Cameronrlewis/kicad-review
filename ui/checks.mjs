@@ -111,7 +111,7 @@ const BOARD_LIFECYCLE_FIXTURE = `
 
 const MARK_STYLE_FIXTURE = `
     // The template may lack retained board data; enable the real toolbar against a retained fixture.
-    const object={kind:'pad',uuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
+    const object={kind:'pad',uuid:'style',changeUuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
       box:[2000,2000,6000,6000],geometry:{primitive:{shape:'circle',center:[4000,4000],size:[4000,4000],angle:0}}};
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[object]};
     disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
@@ -3596,6 +3596,34 @@ return true;
     if(Appearance.get().markStyle!=='recolour') return 'theme import reset marks';
     Appearance.reset(); if(Appearance.get().markStyle!=='outline') return 'reset';
     button.click(); return true;
+  `],
+  ["BR03 net selection masks", "v=board", `
+    ${MARK_STYLE_FIXTURE}
+    const p=proj(), saved=p.changes, row={id:'c903',kind:'net-members',action:'modified',
+      detail:{kind:'members',beforeNets:['GND'],afterNets:['GND']},anchors:{base:[],head:[]}};
+    try {
+      p.changes=[row]; scene.nets=[{id:0,name:''},{id:1,name:'GND'}]; object.net=1;
+      const mount=()=>{
+        disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
+        boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:p.changes,state:S,appearance:glAppearance});
+        boardView.useGL=true; S.s=row.id; boardDiff.render();
+      };
+      mount();
+      const before=JSON.stringify(Appearance.get());
+      let selected=0;
+      for(const pane of boardDiff.panes) {
+        const draw=pane.renderer.draw.bind(pane.renderer);
+        pane.renderer.draw=opts=>{
+          if(opts.mask && opts.filter?.(object)) selected++;
+          return draw(opts);
+        };
+      }
+      boardDiff.render();
+      if(!selected) return 'net selection did not reach neutral mask';
+      if(object.changeIds.join(',')!=='c0') return 'derived net stole scene identity';
+      S.s=null; boardDiff.render();
+      return JSON.stringify(Appearance.get())===before || 'temporary colour persisted';
+    } finally {p.changes=saved; S.s=null; disposeBoardRenderers(); await draw();}
   `],
   ["board mark style survives reload and project changes", "v=board", `
     ${MARK_STYLE_FIXTURE}

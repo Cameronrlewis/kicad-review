@@ -94,7 +94,26 @@
     gl.uniform1f(gl.getUniformLocation(pane.program,'headAlpha'),alpha);
     gl.drawArrays(gl.TRIANGLES,0,3); gl.disable(gl.SCISSOR_TEST);
   }
-  function marks(pane, state, look, actions, background) {
+  function electricalNetNames(row,side) {
+    const d=row?.detail;
+    return d?.kind==='members' ? (side==='base'?d.beforeNets:d.afterNets)||[]
+      : d?.kind==='pad-net' ? [side==='base'?d.before:d.after].filter(Boolean) : [];
+  }
+  function electricalNetMatch(scene,object,row,side) {
+    const name=scene?.nets.find(n=>n.id===object.net)?.name;
+    if(name && electricalNetNames(row,side).includes(name)) return true;
+    const d=row?.detail;
+    if(d?.kind!=='pad-net') return false;
+    const anchorSide=side==='base'?'base':'head';
+    const anchors=row.anchors?.[anchorSide]||[];
+    return anchors.some(a=>a.board && a.uuid===object.changeUuid &&
+      a.padUuid===object.uuid && a.ref===object.reference && String(a.pin)===String(object.number));
+  }
+  function electricalLook(look,row,side) {
+    return {...look,netColors:{...look.netColors,...Object.fromEntries(
+      electricalNetNames(row,side).map(n=>[n,side==='base'?[1,.3,.3,1]:[.3,1,.3,1]]))}};
+  }
+  function marks(pane, state, look, actions, background, selectedRow) {
     const {renderer} = pane, hud = pane.markHud, {gl} = renderer, M = window.BoardMarks;
     const palette = Object.fromEntries(Object.keys(M.styles).map(a=>[a,M.pickColor(a,background)]));
     hud.replaceChildren();
@@ -166,9 +185,12 @@
       const alpha=state.m==='blend' && side==='head'?state.blend:1;
       if (!alpha) continue;
       renderer.setScene(pane.scenes[side],side);
-      renderer.draw({target:pane.targets[0],mask:true,marks:true,filter:o=>o.changeIds?.includes(state.s)});
+      renderer.setAppearance(electricalLook(look,selectedRow,side));
+      renderer.draw({target:pane.targets[0],mask:true,marks:true,
+        filter:o=>o.changeIds?.includes(state.s) || electricalNetMatch(pane.scenes[side],o,selectedRow,side)});
       effect('added',alpha,clips?.[side],true);
     }
+    renderer.setAppearance(look);
   }
   function mount({stage, scenes, changes, state, appearance, onLost, attachPanZoom}) {
     const panes = [], actions = actionMap(changes), sideMode = state.m === 'side';
@@ -179,7 +201,7 @@
       render() {
         if (disposed) return;
         try {
-          const look = getAppearance(), bg = look.background || [0,16,35,1];
+          const look = getAppearance(), selectedRow = changes.find(r=>r.id===state.s), bg = look.background || [0,16,35,1];
           const background = look.boardBackground || [bg[0]/255,bg[1]/255,bg[2]/255,bg[3] ?? 1];
           for (const pane of panes) {
             const {vp,canvas,renderer} = pane, {gl} = renderer;
@@ -193,7 +215,7 @@
             const mode = state.m;
             for (const [i,side] of ['base','head'].entries()) {
               const scene = pane.scenes[side], overlay = mode === 'overlay';
-              renderer.setScene(scene,side);
+              renderer.setScene(scene,side); renderer.setAppearance(electricalLook(look,selectedRow,side));
               const options = {target:pane.targets[i], background:overlay ? [1,1,1,1] : i && mode !== 'wipe' && !sideMode ? [0,0,0,0] : background,
                 grid: !overlay && (sideMode || mode === 'wipe' || i === 0)};
               if (look.markStyle === 'recolour' && !overlay) options.override = (o,normal) => {
@@ -217,7 +239,7 @@
               renderer.setScene(pane.scenes[side],side);
               renderer.draw({clear:false,grid:false,background:[1,1,1,1],filter:o=>!!actionFor(o,actions),override:(o,normal)=>({...normal,color:window.BoardMarks.pickColor(actionFor(o,actions),[255,255,255]).map(v=>v/255)})});
             }
-            marks(pane,state,look,actions,mode==='overlay'?[255,255,255]:background.slice(0,3).map(v=>v*255));
+            marks(pane,state,look,actions,mode==='overlay'?[255,255,255]:background.slice(0,3).map(v=>v*255),selectedRow);
           }
         } catch (error) { controller.dispose(); onLost?.(error); }
       },
