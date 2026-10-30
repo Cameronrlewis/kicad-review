@@ -1,0 +1,143 @@
+Task 4.2 RED/GREEN evidence
+==========================
+Base SHA: 03ef15556d3ed7f9457e0290fffe2552f2e160cf
+
+Command variables used below:
+W=/Users/cameron/Code/kicad-review-worktrees/03-net-and-copper-changes
+S=/Users/cameron/Code/kicad-review-study/tmp/03-net-and-copper-changes
+T=/private/tmp/claude-501/-Users-cameron-Claude-KiCAD-Assistant/9e120098-9064-40d4-9198-28e57f844058/scratchpad
+KICAD_PY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
+KICAD_IMAGE=kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+Local producer commands set PATH=/Applications/KiCad/KiCad.app/Contents/MacOS:$PATH and TMPDIR=$T.
+
+RED: local KiCad 10.0.0 / Python 3.9.13
+--------------------------------------
+Command: "$KICAD_PY" "$S/copper_local_probe.py" "$W/tools/copper_area.py"
+Before implementation: exit 1.
+  File "copper_local_probe.py", line 6, in <module>
+    spec.loader.exec_module(copper)
+FileNotFoundError: [Errno 2] No such file or directory: '/Users/cameron/Code/kicad-review-worktrees/03-net-and-copper-changes/tools/copper_area.py'
+Raw output: $T/task42-local-red.txt
+This imports only the producer, never the Python 3.11+ host module.
+The prior Task 1 API probe at that scratch filename was preserved at $T/copper_task1_api_gate.py.
+
+RED: pinned KiCad 10.0.6 / Python 3.13.5
+---------------------------------------
+Command: TMPDIR="$T" /Users/cameron/Code/kicad-review-worktrees/ci-probe br03-task42-red "$T/task42-red"
+The helper copied the read-only workflow template and ran the pinned container.
+Inner command from /w/probe: BR03_PCBNEW_TEST=1 python3 test_kicad_review.py
+Before implementation: exit 1 at spec.loader.exec_module(copper).
+FileNotFoundError: [Errno 2] No such file or directory: '/w/probe/tools/copper_area.py'
+BR03 pinned polygon RED confirmed: missing producer
+Probe result: success (the runner asserted the expected failure).
+Run: https://github.com/Cameronrlewis/kicad-review/actions/runs/40579296186
+Raw output: $T/task42-red/out/probe-out/stdout.txt
+
+GREEN: local polygons
+---------------------
+Command: "$KICAD_PY" "$S/copper_local_probe.py" "$W/tools/copper_area.py"
+Exit 0: BR03 local polygon probe PASS
+Covers signed differences of equal-area displaced shapes, 6 mm2 overlap union,
+outer/hole contours, and exclusion at exactly 0.05 mm2.
+
+GREEN: actual project-context producer, both KiCad versions
+---------------------------------------------------------
+Local command:
+"$KICAD_PY" "$S/collect_probe.py" "$W/tools/copper_area.py" "$T/task42-collect-local" "$W/ui/fixtures/vf-order-4.kicad_pcb"
+Exit 0:
+project-lo standalone minimum 100000
+project-hi standalone minimum 500000
+custom-lo standalone minimum 100000
+custom-hi standalone minimum 100000
+BR03 collect/context probe PASS {'project-lo': 26.458862662662, 'project-hi': 24.594003505469, 'custom-lo': 26.458862662662, 'custom-hi': 22.7388458149705}
+Raw output: $T/task42-collect-local.txt
+Assertions also verify overlap union area, holes, exact signed inner-layer changes,
+no F.Cu change, stale-fill equality and unchanged source PCB/project/custom-rule hashes.
+
+GREEN: thermal relief, through-hole pad, via, arc and unconnected copper
+---------------------------------------------------------------------
+Local command:
+"$KICAD_PY" "$T/task42-green/primitive_probe.py" "$W/tools/copper_area.py" "$W/ui/fixtures/vf-order-4.kicad_pcb" "$T/task42-primitive-local"
+Exit 0:
+BR03 thermal/drill/via/arc probe PASS inner solid-disc union mm2 6.242888403148 F.Cu thermal union mm2 35.9714405657005
+Raw output: $T/task42-primitive-local.txt
+The inner-layer through-hole pad + via exports approximate two solid discs,
+not drill-subtracted annuli. The producer matches KiCad's exported polygons,
+including thermal gaps, numeric net "12", and separate unconnected copper.
+
+GREEN: full pinned suite and producer probes
+-------------------------------------------
+Command: TMPDIR="$T" /Users/cameron/Code/kicad-review-worktrees/ci-probe br03-task42-green "$T/task42-green"
+Run: https://github.com/Cameronrlewis/kicad-review/actions/runs/40579948475
+Result: success; inner runner rc=0.
+Versions: kicad-cli 10.0.6; pcbnew 10.0.6; Python 3.13.5.
+Inputs were code and synthetic fixtures only, no private design data or secrets.
+Probe copies renamed pre-existing synthetic example labels to BR03_Probe to
+satisfy ci-probe's private-design-name guard. Producer code was not modified.
+
+Inner commands from /w/probe/project:
+BR03_PCBNEW_TEST=1 python3 test_kicad_review.py
+python3 /w/probe/copper_local_probe.py /w/probe/project/tools/copper_area.py
+python3 /w/probe/collect_probe.py /w/probe/project/tools/copper_area.py /w/out/collect /w/probe/project/ui/fixtures/vf-order-4.kicad_pcb
+python3 /w/probe/primitive_probe.py /w/probe/project/tools/copper_area.py /w/probe/project/ui/fixtures/vf-order-4.kicad_pcb /w/out/primitive
+python3 tools/copper_area.py /w/out/collect/base/p.kicad_pcb /w/out/collect/head/p.kicad_pcb
+
+Relevant output:
+Ran 8 tests ... OK
+Ran 6 tests ... OK
+Ran 10 tests ... OK
+ok BR03 signed copper polygons
+ok BR03 electrical membership
+ok BR03 review identity regressions (8 tests)
+ok BR03 net graph regressions (4 tests)
+ok BR03 physical pads and wires (10 tests)
+ok BR03 typed rules, assignments and stackup
+BR03 local polygon probe PASS
+BR03 collect/context probe PASS [same project/custom-rule areas as local]
+BR03 thermal/drill/via/arc probe PASS inner solid-disc union mm2 6.242888403148 F.Cu thermal union mm2 35.9714405657005
+BR03 standalone JSON PASS 508 bytes
+Standalone JSON: one GND/In1.Cu row, addedMm2=2.0, removedMm2=2.0,
+nonempty numeric contours, incomplete=[].
+Raw logs: $T/task42-green/out/probe-out/{full-suite.txt,stdout.txt,stderr.txt}
+Both disposable probe branches were deleted by ci-probe.
+
+GREEN: standalone local CLI
+--------------------------
+Command executed through a Python subprocess wrapper with check=True and timeout=120:
+"$KICAD_PY" "$W/tools/copper_area.py" "$T/task42-collect-local/base/p.kicad_pcb" "$T/task42-collect-local/head/p.kicad_pcb"
+Exit 0: BR03 local standalone JSON PASS 508 bytes 5.89 s
+Exactly one GND/In1.Cu row: 2.0 mm2 added and 2.0 mm2 removed.
+JSON: $T/task42-local-copper-diff.json
+Stderr: $T/task42-local-cli-stderr.txt
+Command: "$KICAD_PY" "$W/tools/copper_area.py" - -
+Exit 0: {"rows":[],"incomplete":[]}
+Command: "$KICAD_PY" "$W/tools/copper_area.py" "$T/not-a-board.kicad_pcb" -
+Expected nonzero exit: RuntimeError: project-context refill failed
+No fallback to an empty/default board was accepted.
+
+GREEN: host full suite before commit
+------------------------------------
+Command: cd "$W" && TMPDIR="$T" python3 test_kicad_review.py
+Exit 0, all top-level assertions and embedded test groups passed.
+Relevant final output:
+ok BR03 electrical membership
+ok BR03 review identity regressions (8 tests)
+ok BR03 net graph regressions (4 tests)
+ok BR03 physical pads and wires (10 tests)
+ok BR03 typed rules, assignments and stackup
+Raw output: $T/task42-host-full.txt
+Command: git -C "$W" diff --check
+Result: clean.
+
+Scope/observations
+------------------
+Task 4.2's introductory Files list mentions host/workflow changes, but its explicit
+checklist delegates host orchestration to Task 4.3; Task 4.3 separately owns those
+files and tests. This commit implements only the producer and opt-in polygon group.
+The plan's project-context CLI refill refines the spec's raw filler example;
+independent project-only and custom-rule-only sensitivity passed on both versions.
+No new dependency, parser change, UI/site change, or production network call.
+Existing KiCad bindings emit duplicate image-handler debug diagnostics on stderr;
+local collect additionally logs a wxApp traits assertion, but returns 0 and passes
+all assertions. Standalone stdout remains exactly one valid JSON object.
+No KiCad GUI observation or browser check was performed in this producer-only task.
