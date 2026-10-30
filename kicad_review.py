@@ -2913,8 +2913,6 @@ def net_members(text, objects, commit):
 
 def validate_netlist(text):
     """Raise ValueError unless text is exactly one usable netlist export."""
-    if re.match(r"\s*\(\s*export\b", text) is None:
-        raise ValueError("not a netlist export")
     # parse_sexpr returns only the first expression, so reject truncated or trailing content here.
     depth, quoted, escaped, roots, end = 0, False, False, 0, None
     for index, char in enumerate(text):
@@ -2935,6 +2933,8 @@ def validate_netlist(text):
     if quoted or depth != 0 or roots != 1 or text[end:].strip():
         raise ValueError("incomplete or trailing netlist content")
     root = parse_sexpr(text)
+    if not isinstance(root, list) or not root or root[0] != "export":
+        raise ValueError("not a netlist export")
     if any(not isinstance(field, list) or not field or not isinstance(field[0], str) for field in root[1:]):
         raise ValueError("bad export field")
     sections = findall(root, "nets")
@@ -2957,7 +2957,10 @@ def validate_netlist(text):
         names.add(name)
         for node in findall(net, "node"):
             identity(node, "ref"); identity(node, "pin")
-    parse_netlist(text)  # The legacy projection must also succeed, so every consumer sees the same envelope.
+    try:  # The legacy projection must also succeed, so every consumer sees the same envelope.
+        parse_netlist(text)
+    except (TypeError, AttributeError, IndexError, KeyError) as exc:
+        raise ValueError(f"malformed netlist projection: {exc}") from exc
 
 
 def validated_net_members(text, objects, commit):

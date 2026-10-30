@@ -5170,18 +5170,21 @@ def test_br03_netlist_export():
     import subprocess
     from unittest.mock import patch
     from kicad_review import export_netlist, validate_netlist, read_netlist, validated_net_members
+    BR03_BAD_PROJECTION = '(export (components (comp (ref (bad)))) (nets))'
     bad_netlists = ['(export)','(export (components))','(other (nets))',
         '(export (nets) (nets))','junk (export (nets))','(export (nets))(garbage)',
         '(export (nets)','(export (nets) trailing)',
         '(export (nets (net (name A) (node (ref U1)))))',
         '(export (nets (net (name A) (node (ref U1) (pin (bad))))))',
-        '(export (nets (net (node (ref U1) (pin 1)))))']
+        '(export (nets (net (node (ref U1) (pin 1)))))',
+        '(export-other (nets))',BR03_BAD_PROJECTION]
     with tempfile.TemporaryDirectory() as td:
         target, pending, marker = (pathlib.Path(td)/n for n in
                                   ('netlist.net','netlist.pending.net','netlist.net.error'))
         cases = [(7,BR03_EMPTY_NETLIST,'failed after partial output'),
                  (0,None,''),(0,'(export)',''),(0,'(export (nets))(garbage)',''),
-                 (0,'(export (nets)',''),(None,None,'timeout'),(None,None,'oserror')]
+                 (0,'(export (nets)',''),(0,'(export-other (nets))',''),(0,BR03_BAD_PROJECTION,''),
+                 (None,None,'timeout'),(None,None,'oserror')]
         def export_result(cmd, **kwargs):
             assert not target.exists() and not marker.exists() and not pending.exists(), 'stale export not cleared'
             assert pathlib.Path(cmd[cmd.index('-o')+1]) == pending, 'non-atomic output path'
