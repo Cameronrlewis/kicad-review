@@ -4649,16 +4649,67 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
     destination.write_text('window.REVIEW_DATA = ' + json.dumps(data, separators=(',', ':')).replace('<', '\\u003c') + ';\n')
     return image_project, image_blobs
 
+def image_fixture_content(raw):
+    """Compare report structure and exact decoded assets, not platform gzip bytes."""
+    prefix, suffix = b'window.REVIEW_DATA = ', b';\n'
+    assert raw.startswith(prefix) and raw.endswith(suffix), 'invalid image fixture wrapper'
+    data = json.loads(raw[len(prefix):-len(suffix)])
+    # Python 3.12 delegates mtime=0 headers to zlib (OS=3 on Linux), while
+    # Python 3.13 uses OS=255. Deflate output can also vary by zlib version.
+    data['blobs'] = {key: gzip.decompress(base64.b64decode(value, validate=True))
+                     for key, value in data['blobs'].items()}
+    return data
+
+
+def image_fixture_comparison_regressions():
+    payload = b'<svg><path d="M0 0h100"/></svg>' * 20
+    encode = lambda data: ('window.REVIEW_DATA = ' + json.dumps(data) + ';\n').encode()
+    blob = lambda level: base64.b64encode(gzip.compress(payload, compresslevel=level, mtime=0)).decode()
+    original = {'version': 1, 'projects': [{'svg': 'asset'}], 'blobs': {'asset': blob(9)}}
+    expected = image_fixture_content(encode(original))
+    recompressed = copy.deepcopy(original)
+    recompressed['blobs']['asset'] = blob(1)
+    assert recompressed['blobs'] != original['blobs']
+    assert image_fixture_content(encode(recompressed)) == expected
+    header = bytearray(base64.b64decode(original['blobs']['asset']))
+    header[9] = 3 if header[9] != 3 else 255
+    recompressed['blobs']['asset'] = base64.b64encode(header).decode()
+    assert image_fixture_content(encode(recompressed)) == expected
+    for change in ('metadata', 'reference', 'content', 'key', 'missing', 'extra'):
+        changed = copy.deepcopy(original)
+        if change == 'metadata':
+            changed['version'] = 2
+        elif change == 'reference':
+            changed['projects'][0]['svg'] = 'other'
+        elif change == 'content':
+            changed['blobs']['asset'] = base64.b64encode(gzip.compress(payload + b' ', mtime=0)).decode()
+        elif change == 'key':
+            changed['blobs']['other'] = changed['blobs'].pop('asset')
+        elif change == 'missing':
+            changed['blobs'].clear()
+        else:
+            changed['blobs']['extra'] = blob(9)
+        assert image_fixture_content(encode(changed)) != expected, change
+    print('ok image fixture comparison ignores gzip encoding but detects structure and decoded-byte drift')
+
+
+image_fixture_comparison_regressions()
+
 with TemporaryDirectory() as directory:
     generated_data = pathlib.Path(directory, 'review-data-images.js')
     generated_svg = pathlib.Path(directory, 'image-layer-overlap.svg')
     image_project, image_blobs = generate_image_fixture(missing_projects, missing_blobs, generated_data, generated_svg)
     for generated, committed in ((generated_data, pathlib.Path('ui/sample/review-data-images.js')),
                                  (generated_svg, pathlib.Path('ui/fixtures/image-layer-overlap.svg'))):
-        # Updating fixtures is explicit; ordinary test runs only compare bytes.
+        # Updating fixtures is explicit; ordinary test runs only compare bytes
+        # after decoding report blobs, or directly for the standalone SVG.
         if os.environ.get('REGENERATE_IMAGE_FIXTURES') == '1':
             committed.write_bytes(generated.read_bytes())
-        assert committed.read_bytes() == generated.read_bytes(), f'{committed} drift; run REGENERATE_IMAGE_FIXTURES=1 python3 test_kicad_review.py'
+        committed_content, generated_content = committed.read_bytes(), generated.read_bytes()
+        if generated == generated_data:
+            committed_content = image_fixture_content(committed_content)
+            generated_content = image_fixture_content(generated_content)
+        assert committed_content == generated_content, f'{committed} drift; run REGENERATE_IMAGE_FIXTURES=1 python3 test_kicad_review.py'
 print('ok additive image finalization, missing sides, repeated-instance and four-layer fixtures')
 
 # Asset filenames and MIME kinds are never inferred from user-controlled names.
