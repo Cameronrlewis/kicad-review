@@ -1808,10 +1808,16 @@ return true;
     const point=boardDiff?occupied({layer:'F.Cu'}):null;
     if(boardDiff && !point) return 'no visible F.Cu geometry to test';
     const cb = document.querySelector('#appearance-root [data-layer="F.Cu"] .eye-btn'); cb.click();
-    const stage=document.querySelector('#stage'),deadline=performance.now()+15000;
-    while(stage.dataset.imageReady!=='true'&&performance.now()<deadline)await new Promise(r=>setTimeout(r,10));
-    if(stage.dataset.imageReady!=='true')return 'layer visibility redraw did not settle';
-    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    // Palette decoding can settle on the old stage while the fallback redraw is
+    // still mounting its replacement. Only the connected composition's draw gate
+    // certifies that every layer and the final camera have finished rendering.
+    const deadline=performance.now()+15000;
+    const rendered=()=>{
+      const stage=document.querySelector('#stage');
+      return stage?.isConnected&&stage.dataset.boardReady!==undefined&&stage.dataset.boardReady===stage.dataset.generation;
+    };
+    while(!rendered()&&performance.now()<deadline)await new Promise(r=>requestAnimationFrame(r));
+    if(!rendered())return 'layer visibility redraw did not settle';
     if(point) {
       const {pane,object,screen}=point;
       if(pane.renderer.hitTest(screen).some(o=>o===object)) return 'hidden layer remains hittable';

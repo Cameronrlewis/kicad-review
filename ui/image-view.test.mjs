@@ -3,6 +3,39 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {gunzipSync} from 'node:zlib';
+import {CHECKS} from './checks.mjs';
+
+test('layer toggle check waits for the connected board generation, not an earlier palette decode', async () => {
+  const expression=CHECKS.find(([name])=>name==='toggling a layer removes it from the drawing')[2];
+  const old={dataset:{generation:'1',boardReady:'1',imageReady:'true'},isConnected:true};
+  let stage=old,frames=0;
+  const S={layers:['F_Cu']},location={hash:''};
+  const tick=callback=>{
+    frames++;
+    // The old stage's palette settles before the replacement composition is ready.
+    old.dataset.imageReady='true';
+    if(frames===4){old.isConnected=false;stage={dataset:{generation:'2',boardReady:'1'},isConnected:true};}
+    if(frames===5)stage.dataset.boardReady='2';
+    callback();
+  };
+  const result=await vm.runInNewContext(`(async()=>{${expression}})()`,{
+    S,location,boardDiff:null,
+    proj:()=>({board:{layers:[{name:'F_Cu'}]}}),
+    applyState:async state=>Object.assign(S,state),
+    performance:{now:()=>frames*1000},setTimeout:tick,requestAnimationFrame:tick,
+    document:{querySelector:selector=>{
+      if(selector==='#stage')return stage;
+      if(selector.includes('.eye-btn'))return {click(){
+        S.layers=[];location.hash='#l=';old.dataset.generation='2';
+        delete old.dataset.boardReady;old.dataset.imageReady='false';
+      }};
+      if(selector==='#stage .layer[data-layer="F_Cu"]')return stage===old?{hidden:true}:null;
+      throw Error('Unexpected selector '+selector);
+    }}
+  });
+  assert.equal(result,true);
+  assert.equal(frames,5);
+});
 const ctx = {console,setTimeout,clearTimeout,TextEncoder}; vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(new URL('./image-view.js', import.meta.url), 'utf8'), ctx);
 test('snapshot and wheel work are bounded', () => {
