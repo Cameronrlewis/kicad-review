@@ -26,7 +26,8 @@ jobs:
           echo "CHROME=google-chrome" >> "$GITHUB_ENV"
           export PAGES=$(mktemp -d)
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
-          python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js")]]'
+          python3 ui/build-fixtures.py "$PAGES"
+      - run: node --import ./site/css-loader.mjs --test ui/*.test.mjs
       - run: node ui/check.mjs
       - run: node ui/check.mjs --dark
       - run: node ui/check.mjs --no-skip "Waivers"
@@ -40,3 +41,4 @@ jobs:
       - run: node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"
+      - run: node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"

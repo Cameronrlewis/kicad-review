@@ -1157,7 +1157,9 @@ export const CHECKS = [
   S.partsFilter.changed = false; renderPanel();
   const line = [...document.querySelectorAll('.parts-row')].find(r => r.textContent.includes('R7'));
   if (!line.classList.contains('changed') || line.children[1].textContent !== 'R6, R7' || line.querySelector('strong').textContent !== 'R7'
-    || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 2) return 'changed marking';
+    || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 3) return 'changed marking';
+  const changedGroups = [...document.querySelectorAll('.parts-row.changed .parts-refs')].map(c => c.textContent).sort().join('|');
+  if (changedGroups !== 'J5|R1|R6, R7') return 'changed reference groups ' + changedGroups;
   REVIEW_DATA.projects[0].parts.supplier = null; renderPanel();
   if (document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
   if (valid({t:'parts'}).t !== 'parts') return 'hash';
@@ -1169,6 +1171,16 @@ export const CHECKS = [
   parts.supplier = {fetched_at:'invalid <timestamp>'}; renderPanel();
   if (!document.querySelector('.parts-age.stale') || document.querySelector('.parts-age').textContent.includes('NaN')
       || [...document.querySelectorAll('.parts-stock')].some(c => !c.classList.contains('stale') || c.textContent.includes('✔'))) return 'invalid timestamp';
+  const savedLines = parts.lines;
+  parts.lines = [{refs:['U1'], key:'unit-conflict', value:'TL072', footprint:'SOIC-8', lcsc:'C123', mpn:'A',
+    problems:['unit_identity_conflict']}];
+  S.partsFilter.problems = true; renderPanel();
+  const unitRow = document.querySelector('.parts-row');
+  if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 1 · 1 ⚠'
+      || !unitRow?.classList.contains('problem') || !unitRow.children[0].textContent.includes('⚠')
+      || unitRow.querySelector('.problem-tag')?.textContent !== 'UNITS'
+      || unitRow.querySelector('.problem-tag')?.title !== 'conflicting identities across symbol units') return 'unit identity conflict';
+  parts.lines = savedLines; S.partsFilter.problems = false; renderPanel();
   const savedProblems = parts.lines.map(l => l.problems);
   parts.lines.forEach(l => l.problems = ['missing_mpn', 'unavailable']); renderPanel();
   if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 5') return 'zero blocking count';
@@ -1181,6 +1193,302 @@ export const CHECKS = [
   if (!document.querySelector('.parts-footprint')?.textContent.includes('R_0402 → R_0603')) return 'footprint change';
   delete REVIEW_DATA.projects[0].parts; renderPanel();
   return document.querySelector('[data-tab=parts]').disabled && S.t === 'changes';
+`],
+  ["Parts fixture BOM search values only and category heading padding", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    document.querySelector('[data-tab=parts]').click();
+    for (const view of ['bom', 'problems']) {
+      S.partsView = view;
+      for (const q of ['footprint', 'refs', 'category', 'datasheet']) {
+        S.partsFilter.q = q; renderPanel();
+        if (document.querySelectorAll(view === 'bom' ? '.bom-row' : '.parts-row').length) return view + ' matched key ' + q;
+      }
+      for (const q of ['Resistors', 'R1', 'RC0603', 'ESP32']) {
+        S.partsFilter.q = q; renderPanel();
+        if (!document.querySelectorAll(view === 'bom' ? '.bom-row' : '.parts-row').length) return view + ' missing value ' + q;
+      }
+    }
+    S.partsFilter.q = ''; S.partsView = 'bom'; renderPanel();
+    const heading = document.querySelector('.bom-cat th'), style = getComputedStyle(heading);
+    const expected = getComputedStyle(document.documentElement).getPropertyValue('--sp-2').trim();
+    const probe = document.createElement('div'); probe.style.padding = expected; document.body.append(probe);
+    const padding = getComputedStyle(probe).paddingLeft; probe.remove();
+    return style.paddingLeft === padding && style.paddingRight === padding || 'category heading padding ' + style.padding;
+  `],
+  ["Parts fixture BOM view groups, counts, sorts and escapes", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  if (document.querySelector('.bom-table') || !document.querySelector('.parts-row')) return 'the Problems view must stay the default';
+  document.querySelector('[data-parts-view=bom]').click();
+  const text = sel => document.querySelector(sel)?.textContent.trim();
+  if (text('.bom-summary') !== '6 components · 5 unique parts · 4 with MPN') return 'summary ' + text('.bom-summary');
+  const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
+  if (chips !== 'All 6|Resistors 3|Connectors 1|ICs & Modules 2') return 'chips ' + chips;
+  const heads = [...document.querySelectorAll('.bom-cat')].map(r => r.textContent.trim()).join('|');
+  if (heads !== 'Resistors 3|Connectors 1|ICs & Modules 2') return 'headings ' + heads;
+  const refs = () => [...document.querySelectorAll('.bom-row .bom-refs')].map(c => c.textContent).join('|');
+  if (refs() !== 'R1|R6-R7|J5|U4|U5') return 'refs ' + refs();
+  document.querySelector('[data-bom-sort=qty]').click();
+  document.querySelector('[data-bom-sort=qty]').click();
+  if (refs() !== 'R6-R7|R1|J5|U4|U5' || document.querySelector('[data-bom-sort=qty]').closest('th').getAttribute('aria-sort') !== 'descending') return 'qty descending ' + refs();
+  document.querySelector('[data-bom-cat="Resistors"]').click();
+  if (document.querySelectorAll('.bom-row').length !== 2 || document.querySelectorAll('.bom-cat').length !== 1) return 'category filter';
+  document.querySelector('[data-bom-cat=""]').click();
+  const q = document.querySelector('[data-list-search=parts]'); q.value = 'esp32'; q.dispatchEvent(new Event('input'));
+  if (document.querySelectorAll('.bom-row').length !== 1) return 'search';
+  S.partsFilter.q = ''; renderPanel();
+  if (document.querySelector('.bom-table img') || [...document.querySelectorAll('.bom-table a')].some(a => !/^https?:/.test(a.href) || a.rel !== 'noopener noreferrer' || a.target !== '_blank')
+      || document.querySelector('.bom-table a[href^=javascript]') || !document.querySelector('.bom-table').textContent.includes('<img src=x onerror=alert(1)>')) return 'escaping';
+  const mpnRow = [...document.querySelectorAll('.bom-row')].find(r => r.querySelector('.bom-refs')?.textContent === 'R1');
+  if (!mpnRow?.querySelector('.bom-delta')?.textContent.includes('~') || !mpnRow.textContent.includes('RC0603')) return 'BOM MPN-only change';
+  const marks = [...document.querySelectorAll('.bom-row.changed .bom-delta')].map(c => c.firstChild?.textContent ?? '').sort().join('');
+  if (marks !== '+~~') return 'change marks ' + marks;
+  document.querySelector('[data-parts-view=problems]').click();
+  const row = [...document.querySelectorAll('.parts-row')].find(r => r.querySelector('.parts-refs')?.textContent === 'R1');
+  return document.querySelectorAll('.parts-row').length === 5 && !document.querySelector('.bom-table') && row?.textContent.includes('~') && row.textContent.includes('OLD-MPN → RC0603') || 'MPN-only change must show badge and old/new MPN in Problems';
+`],
+  ["Parts fixture BOM renders the same from old lines with key and nulls and from compact lines", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalChanges = parts.changes;
+  const slim = l => l && Object.fromEntries(Object.entries(l).filter(([k, v]) => k !== 'key' && v !== null));
+  const snapshot = () => {
+    setDock('panel', true); S.t = 'parts';
+    S.partsView = 'problems'; renderPanel(); const problems = [...document.querySelectorAll('.parts-row')].map(r => r.textContent + '/' + r.className).join('|');
+    S.partsView = 'bom'; renderPanel(); const bom = [...document.querySelectorAll('.bom-row')].map(r => r.textContent + '/' + r.className).join('|');
+    const inspector = [];
+    for (const ref of ['R1', 'J5', 'U4']) { S.s = null; S.io = null; S.ig = {object: {ref, kind: 'symbol'}}; const d = inspectorProperties(); inspector.push(JSON.stringify([d?.base, d?.head])); }
+    S.ig = null;
+    return {problems, bom, inspector: inspector.join('|')};
+  };
+  try {
+    if (!originalLines.some(l => 'key' in l) || !originalLines.some(l => l.mpn === null)) return 'fixture must keep the old line shape (key and null fields)';
+    if (!originalChanges.some(c => c.before === null) || !originalChanges.some(c => c.before && 'key' in c.before)) return 'fixture changes must keep the old shape (key, null before)';
+    // The fixture's keys are placeholders; give the old shape the real canonical key so it can be compared with the restored one.
+    const canon = l => l && {...l, key: JSON.stringify([l.value, l.footprint, l.lcsc || '', l.mpn || '', l.category, l.manufacturer ?? null, l.datasheet ?? null])};
+    parts.lines = originalLines.map(canon);
+    parts.changes = originalChanges.map(c => ({...c, before: canon(c.before), after: canon(c.after)}));
+    const oldLines = parts.lines, oldChanges = parts.changes;
+    const old = snapshot();
+    if (!old.problems || !old.bom || !old.inspector.includes('part.mpn')) return 'old-shape views rendered nothing';
+    parts.lines = oldLines.map(slim);
+    parts.changes = oldChanges.map(c => ({...c, before: slim(c.before), after: slim(c.after)}));
+    if (parts.lines.some(l => 'key' in l) || parts.changes.some(c => c.after && 'key' in c.after)) return 'compaction failed';
+    const compact = snapshot();
+    for (const k of Object.keys(old)) if (old[k] !== compact[k]) return 'compact data renders ' + k + ' differently';
+    return true;
+  } finally { parts.lines = originalLines; parts.changes = originalChanges; S.s = null; S.ig = null; S.partsView = 'problems'; renderPanel(); }
+`],
+  ["Parts fixture BOM MPN removal keeps the previous number and change badge", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalChanges = parts.changes;
+  try {
+    const before = parts.lines[0], after = {...before, mpn:null, problems:['missing_mpn']};
+    parts.lines = [after, ...parts.lines.slice(1)];
+    parts.changes = [{action:'mpn', refs:['R1'], before, after}];
+    setDock('panel', true); S.t = 'parts'; S.partsView = 'problems'; renderPanel();
+    const row = [...document.querySelectorAll('.parts-row')].find(r => r.querySelector('.parts-refs')?.textContent === 'R1');
+    if (!row?.querySelector('.parts-mpn')?.textContent.includes('RC0603 → —') || !row.classList.contains('changed') || !row.children[0].textContent.includes('~')) return 'Problems must show removed MPN, missing marker and badge';
+    document.querySelector('[data-parts-view=bom]').click();
+    const bom = [...document.querySelectorAll('.bom-row')].find(r => r.querySelector('.bom-refs')?.textContent === 'R1');
+    return !!bom?.classList.contains('changed') && bom.querySelector('.bom-delta')?.textContent.includes('~') && bom.children[4].textContent === '—' || 'BOM MPN removal badge/missing value';
+  } finally { parts.lines = originalLines; parts.changes = originalChanges; S.partsView = 'problems'; renderPanel(); }
+`],
+  ["Parts fixture BOM Table view sorts both ways", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, original = parts.lines;
+  try {
+    setDock('panel', true);
+    document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+    document.querySelector('[data-panel-table]').click();
+    // Behavior only at Task 6: Task 8 owns column visibility, widths and page containment.
+    const seed = original[0];
+    parts.lines = [
+      {...seed, refs:['R10'], refsCompressed:'R10', value:'Alpha', mpn:'Z9', lcsc:'C3', datasheet:'https://z.example'},
+      {...seed, refs:['R2'], refsCompressed:'R2', value:'Zulu', mpn:'A2', lcsc:'C1', datasheet:'https://a.example'},
+      {...seed, refs:['R1'], refsCompressed:'R1', value:'Beta', mpn:'M5', lcsc:'C2', datasheet:'https://m.example'}
+    ];
+    for (const [key, asc] of [['part','R10|R1|R2'], ['refs','R1|R2|R10'], ['mpn','R2|R1|R10'], ['lcsc','R2|R1|R10'], ['datasheet','R2|R1|R10']]) {
+      S.bomFilter = {category:'', sort:'qty', dir:1}; renderPanel();
+      document.querySelector('[data-bom-sort=' + key + ']').click();
+      const order = () => [...document.querySelectorAll('.bom-refs')].map(c => c.textContent).join('|');
+      if (order() !== asc) return key + ' ascending ' + order();
+      document.querySelector('[data-bom-sort=' + key + ']').click();
+      if (order() !== asc.split('|').reverse().join('|')) return key + ' descending ' + order();
+    }
+    // BOM-only symbol has no PCB footprint/geometry and must still appear.
+    parts.lines = [{...seed, key:'bom-only', category:'Mechanical', refs:['H1'], refsCompressed:'H1', value:'Watch glass', footprint:'', mpn:null}];
+    S.bomFilter = {category:'',sort:'refs',dir:1}; renderPanel();
+    if (!document.querySelector('.bom-table').textContent.includes('Watch glass') || !document.querySelector('.bom-cat').textContent.includes('Mechanical')) return 'BOM-only symbol omitted';
+    return true;
+  } finally { parts.lines = original; S.panelTable = false; S.bomFilter = {category:'',sort:'refs',dir:1}; renderPanel(); }
+`],
+  ["Parts fixture BOM view old report and unknown category", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, originalSummary = parts.summary, originalExports = parts.exports;
+  const line = parts.lines[3], originalCategory = line.category;
+  try {
+    delete parts.summary; delete parts.exports; S.t = 'parts'; S.partsView = 'bom'; renderPanel();
+    if (document.querySelector('[data-parts-view]') || document.querySelector('.bom-table') || document.querySelectorAll('.parts-row').length !== 5) return 'a report from before the BOM view must show only the Problems view';
+    parts.summary = {components: 6, unique: 5, withMpn: 4, byCategory: {Resistors: 3, Connectors: 1, 'ICs & Modules': 2}};
+    line.category = 'Antennas & RF'; renderPanel();
+    const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
+    if (!chips.endsWith('Antennas & RF 1') || !document.querySelector('.bom-table').textContent.includes('Antennas & RF')) return 'unknown category ' + chips;
+    line.category = undefined; renderPanel();
+    return [...document.querySelectorAll('.bom-cat')].map(r => r.textContent.trim()).includes('Other 1') || 'a line without a category belongs to Other';
+  } finally {
+    parts.summary = originalSummary; parts.exports = originalExports; line.category = originalCategory; S.partsView = 'problems'; renderPanel();
+  }
+`],
+  ["Multi-board BOM: All boards view combines boards with qualified references", "", `
+  if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  document.querySelector('[data-parts-view=bom]').click();
+  const chips = [...document.querySelectorAll('[data-bom-board]')].map(b => b.textContent.trim()).join('|');
+  if (chips !== 'All boards|Alpha|Beta') return 'board chips ' + chips;
+  const summary = document.querySelector('.bom-summary')?.textContent.trim();
+  if (summary !== '7 components · 5 unique parts · 5 with MPN') return 'combined summary ' + summary;
+  const refs = [...document.querySelectorAll('.bom-row .bom-refs')].map(c => c.textContent).join('|');
+  if (refs !== 'Alpha:R1-R2; Beta:R1|Beta:R2|Alpha:C1|Beta:C1|Alpha:U1') return 'combined refs ' + refs;
+  const qty = [...document.querySelectorAll('.bom-row .bom-qty')].map(c => c.textContent).join('|');
+  return qty === '3|1|1|1|1' || 'combined quantities ' + qty;
+`],
+  ["Multi-board BOM: unavailable repository falls back to project", "", `
+    if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+    const originalBom = REVIEW_DATA.bom, originalP = S.p, originalBoard = S.bomBoard, originalView = S.partsView;
+    try {
+      REVIEW_DATA.bom = {...originalBom, error: 'Repository BOM unavailable'};
+      document.querySelector('[data-tab=parts]').click();
+      S.p = 0; S.bomBoard = 'all'; S.partsView = 'bom'; renderPanel();
+      const chips = [...document.querySelectorAll('[data-bom-board]')];
+      if (chips[0]?.textContent.trim() !== 'All boards (unavailable)' || chips[0]?.getAttribute('aria-pressed') !== 'false') return 'unavailable label or pressed state';
+      if (chips[1]?.getAttribute('aria-pressed') !== 'true') return 'project chip not pressed';
+      if (!document.querySelector('.bom-export-error')?.textContent.includes('Repository BOM unavailable')) return 'missing repository diagnostic';
+      if (!document.querySelector('.bom-summary')?.textContent.startsWith('4 components')) return 'project fallback summary';
+      if (![...document.querySelectorAll('[data-bom-board]')].some(b => b.textContent.trim() === 'Beta')) return 'missing Beta chip';
+      return true;
+    } finally { REVIEW_DATA.bom = originalBom; S.p = originalP; S.bomBoard = originalBoard; S.partsView = originalView; renderPanel(); }
+  `],
+  ["Multi-board BOM: a board chip shows that project; All boards saves the combined files", "", `
+  if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+  const originalP = S.p, originalBoard = S.bomBoard, originalView = S.partsView;
+  document.querySelector('[data-tab=parts]').click();
+  document.querySelector('[data-parts-view=bom]').click();
+  const names = [], saved = [], clickAnchor = HTMLAnchorElement.prototype.click, createUrl = URL.createObjectURL;
+  HTMLAnchorElement.prototype.click = function () { names.push(this.download); };
+  URL.createObjectURL = blob => { saved.push(blob); return 'blob:fixture/' + saved.length; };
+  try {
+    document.querySelector('[data-bom-board="1"]').click();
+    if (!document.querySelector('.bom-summary')?.textContent.startsWith('3 components')) return 'Beta summary ' + document.querySelector('.bom-summary')?.textContent;
+    document.querySelector('[data-bom-download=csv]').click();
+    document.querySelector('[data-bom-board="all"]').click();
+    if (!document.querySelector('.bom-summary')?.textContent.startsWith('7 components')) return 'All boards summary';
+    if (document.querySelector('[data-bom-download=fab]').textContent.trim() !== 'JLCPCB review file ↓') return 'combined file must not imply upload readiness';
+    document.querySelector('[data-bom-download=csv]').click();
+    document.querySelector('[data-bom-download=fab]').click();
+    if (names[0] !== 'Beta-bom.csv' || names[1] !== 'all-boards-bom.csv' || names[2] !== 'all-boards-bom-jlcpcb.csv') return 'download names ' + names;
+    if (new TextDecoder('utf-8', {ignoreBOM:true}).decode(await saved[1].arrayBuffer()) !== '\uFEFF' + REVIEW_DATA.bom.exports.csv) return 'combined CSV bytes differ from the embedded export';
+    return await saved[2].text() === REVIEW_DATA.bom.exports.fab || 'combined fab bytes differ from the embedded export';
+  } finally { HTMLAnchorElement.prototype.click = clickAnchor; URL.createObjectURL = createUrl; S.p = originalP; S.bomBoard = originalBoard; S.partsView = originalView; renderPanel(); }
+`],
+  ["Parts fixture BOM empty state and prototype-named categories", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalSummary = parts.summary;
+    try {
+      setDock('panel', true); S.t = 'parts'; S.partsView = 'bom';
+      S.partsFilter.q = ''; S.bomFilter = {category:'Resistors',sort:'refs',dir:1};
+      parts.lines = []; parts.summary = {components:0,unique:0,withMpn:0,byCategory:{}}; renderPanel();
+      if (document.querySelector('.bom-summary')?.textContent !== '0 components · 0 unique parts · 0 with MPN'
+          || document.querySelectorAll('.bom-row, .bom-cat').length || S.bomFilter.category !== ''
+          || !document.querySelector('.parts-scroll').textContent.includes('No parts match these filters.')) return 'empty BOM';
+      parts.lines = ['constructor', '__proto__'].map((category, i) => ({...originalLines[0], category, refs:['A' + i], refsCompressed:'A' + i}));
+      parts.summary = {components:2,unique:2,withMpn:2,byCategory:{}}; renderPanel();
+      const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
+      if (chips !== 'All 2|constructor 1|__proto__ 1' || document.querySelectorAll('.bom-row').length !== 2) return 'prototype category ' + chips;
+      const chip = document.querySelector('[data-bom-cat="__proto__"]'); chip.focus(); chip.click();
+      if (document.activeElement?.dataset.bomCat !== '__proto__' || document.querySelectorAll('.bom-row').length !== 1) return 'category focus/filter';
+      const sort = document.querySelector('[data-bom-sort=qty]'); sort.focus(); sort.click();
+      if (document.activeElement?.dataset.bomSort !== 'qty' || document.activeElement.closest('th').getAttribute('aria-sort') !== 'ascending') return 'sort focus';
+      return true;
+    } finally { parts.lines = originalLines; parts.summary = originalSummary; S.partsView = 'problems'; S.bomFilter = {category:'',sort:'refs',dir:1}; renderPanel(); }
+  `],
+  ["Parts fixture BOM downloads save the exact export text", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    const project = REVIEW_DATA.projects[0], parts = project.parts, saved = [], originalExports = {...parts.exports}, originalName = project.name;
+    const create = URL.createObjectURL; URL.createObjectURL = blob => { saved.push({blob}); return 'blob:fixture/' + saved.length; };
+    const click = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { saved[saved.length - 1].name = this.download; saved[saved.length - 1].href = this.href; };
+    try {
+      document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+      const label = [...document.querySelectorAll('[data-bom-download]')].map(b => b.textContent.trim()).join('|');
+      if (label !== 'JLCPCB ↓|CSV ↓') return 'buttons ' + label;
+      document.querySelector('[data-bom-download=fab]').click();
+      document.querySelector('[data-bom-download=csv]').click();
+      if (saved.length !== 2 || saved[0].name !== 'Parts-bom-jlcpcb.csv' || saved[1].name !== 'Parts-bom.csv') return 'names ' + JSON.stringify(saved.map(s => s.name));
+      if (await saved[0].blob.text() !== parts.exports.fab || new TextDecoder('utf-8', {ignoreBOM:true}).decode(await saved[1].blob.arrayBuffer()) !== '\uFEFF' + parts.exports.csv) return 'bytes differ from the embedded export';
+      if (!saved.every(s => s.blob.type.startsWith('text/csv') && s.href.startsWith('blob:fixture/'))) return 'CSV blob type or URL';
+      const csv = document.querySelector('[data-bom-download=csv]'); csv.focus(); renderPanel();
+      if (document.activeElement?.dataset.bomDownload !== 'csv') return 'download focus';
+      parts.exports.preset = 'pcbway'; renderPanel();
+      if (document.querySelector('[data-bom-download=fab]').textContent.trim() !== 'PCBWay ↓') return 'pcbway label';
+      document.querySelector('[data-bom-download=fab]').click();
+      if (saved[2].name !== 'Parts-bom-pcbway.csv' || await saved[2].blob.text() !== parts.exports.fab) return 'pcbway download';
+      for (const [name, stem] of [['', 'bom'], ['..', 'bom'], ['!!!', 'bom'], ['._-', 'bom'], ['Board / rev.1', 'Board_rev.1']]) {
+        project.name = name;
+        document.querySelector('[data-bom-download=csv]').click();
+        document.querySelector('[data-bom-download=fab]').click();
+        if (saved.at(-2).name !== stem + '-bom.csv' || saved.at(-1).name !== stem + '-bom-pcbway.csv') return 'project filename ' + JSON.stringify({name, saved:saved.slice(-2).map(s => s.name)});
+        if (await saved.at(-2).blob.text() !== parts.exports.csv || await saved.at(-1).blob.text() !== parts.exports.fab) return 'filename fallback changed export bytes';
+      }
+      project.name = originalName;
+      parts.exports.fab = null; parts.exports.fabError = 'JLCPCB export unavailable: X1 alone exceeds 2048 UTF-8 bytes'; renderPanel();
+      if (document.querySelector('[data-bom-download=fab]') || !document.querySelector('[data-bom-download=csv]') || !document.querySelector('.bom-export-error')?.textContent.includes('X1') || !document.querySelector('.bom-row')) return 'fabrication failure must retain report, CSV and diagnostic';
+      delete parts.exports; renderPanel();
+      return !document.querySelector('[data-bom-download]') || 'no exports, no buttons';
+    } finally { URL.createObjectURL = create; HTMLAnchorElement.prototype.click = click; project.name = originalName; parts.exports = originalExports; S.partsView = 'problems'; renderPanel(); }
+  `],
+  ["Parts fixture BOM Table view layout exposes columns without page overflow", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  setDock('panel', true); resizeRightDock(300, false);
+  document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+  if (innerWidth >= 900) {
+    document.querySelector('[data-panel-wide]').click();
+    if ([...document.querySelectorAll('[data-bom-sort]')].filter(b => b.getBoundingClientRect().width > 0).length !== 6) return 'wide dock must expose all six sortable headers';
+    if ([...document.querySelectorAll('.bom-mpn-inline')].some(n => n.getBoundingClientRect().width > 0)) return 'wide dock must hide duplicate inline MPN';
+    document.querySelector('[data-panel-wide]').click();
+  }
+  document.querySelector('[data-panel-table]').click();
+  if (document.documentElement.scrollWidth > innerWidth) return 'Table view must scroll inside the panel, never the page';
+  const keys = [...document.querySelectorAll('[data-bom-sort]')].filter(b => b.getClientRects().length && b.getBoundingClientRect().width > 0).map(b => b.dataset.bomSort);
+  if (keys.join('|') !== 'qty|part|refs|mpn|lcsc|datasheet') return 'Table view headers ' + keys;
+  return ![...document.querySelectorAll('.bom-mpn-inline')].some(n => n.getBoundingClientRect().width > 0) || 'Table view must hide duplicate inline MPN';
+`],
+  ["Parts fixture BOM whole screen is contained and readable", "", `
+  if (REVIEW_DATA.repo !== 'example/parts' || innerWidth < 900) return 'skip';
+  resizeRightDock(300, false);
+  document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+  const panel = document.querySelector('#panel').getBoundingClientRect(), stage = document.querySelector('#stage').getBoundingClientRect();
+  if (document.documentElement.scrollWidth > innerWidth) return 'the page overflows sideways';
+  const out = [...document.querySelectorAll('#panel .parts-view button, #panel .bom-head button, #panel .bom-chips button, #panel .bom-table thead th button')]
+    .filter(b => b.getClientRects().length && b.getBoundingClientRect().width > 0)
+    .filter(b => { const r = b.getBoundingClientRect(); return r.left < panel.left - .5 || r.right > panel.right + .5; });
+  if (out.length) return 'controls outside the dock: ' + out.map(b => b.textContent.trim());
+  for (const k of ['mpn', 'lcsc', 'datasheet']) if (document.querySelector('[data-bom-sort=' + k + ']').getBoundingClientRect().width) return 'narrow mode must hide ' + k;
+  const scroller = document.querySelector('#panel .parts-scroll');
+  if (scroller.scrollWidth > scroller.clientWidth + 1) return 'the table scrolls sideways inside the narrow dock';
+  const part = document.querySelector('.bom-row .bom-part').getBoundingClientRect();
+  if (part.width < 80) return 'narrow PART column must stay readable, got ' + part.width;
+  if (stage.width < innerWidth * .4) return 'the dock leaves the drawing too narrow';
+  const ctx = document.createElement('canvas').getContext('2d', {willReadFrequently: true});
+  const px = css => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); return [...ctx.getImageData(0, 0, 1, 1).data]; };
+  const over = (f, b) => [0, 1, 2].map(i => f[i] * f[3] / 255 + b[i] * (1 - f[3] / 255));
+  const lum = c => { const [r, g, b] = c.map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
+  const background = el => { for (let e = el; e; e = e.parentElement) { const c = px(getComputedStyle(e).backgroundColor); if (c[3] > 250) return c.slice(0, 3); } return px(getComputedStyle(document.body).backgroundColor).slice(0, 3); };
+  const low = [];
+  for (const sel of ['.bom-summary', '.bom-downloads button', '.bom-chips .check-chip', '.bom-table thead th button', '.bom-cat th', '.bom-row .bom-part b', '.bom-row .bom-part small', '.bom-row .bom-refs', '.bom-row .bom-qty', '.bom-row a']) {
+    const el = document.querySelector('#panel ' + sel); if (!el) continue;
+    const bg = background(el), fg = over(px(getComputedStyle(el).color), bg), [a, b] = [lum(fg), lum(bg)].sort((x, y) => y - x);
+    const ratio = (a + .05) / (b + .05); if (ratio < 4.5) low.push(sel + ' ' + ratio.toFixed(2));
+  }
+  return low.length ? 'low contrast in ' + document.documentElement.dataset.theme + ': ' + low : true;
 `],
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;

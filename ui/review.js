@@ -1326,11 +1326,11 @@ function renderChecks() {
   return `<p class="check-coverage">${esc(c.title)}: ${det.length ? `detected ${esc(det.map(([k, n]) => `${k} ${n}`).join(", "))}` : "nothing detected"}${cv.protected[1] ? ` · ${cv.protected[0]} of ${cv.protected[1]} connector signal pins protected` : ""}</p>`; }).join("")}${ran.filter(c => c.package).map(c => `<details class="package"><summary>Package (${c.package.files.length} files) · SHA-256 ${esc((c.package.sha256 || "").slice(0, 12))}…</summary><ul>${c.package.files.map(f => `<li>${esc(f.path)} · ${(f.bytes / 1024).toFixed(1)} kB</li>`).join("")}</ul><p class="muted mono">${esc(c.package.sha256 || "")}</p></details>`).join("")}<div class="checks-list">${totalShown ? groupHtml : '<p class="muted">No violations match these filters. <button class="show-all">Show all</button></p>'}</div>`;
 }
 S.partsFilter = { problems: false, changed: false };
-const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"]);
+const PARTS_BLOCKING = new Set(["missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "unit_identity_conflict", "out_of_stock", "not_found", "discontinued"]);
 // One rule for every count, filter, sort and ⚠: a problem blocks ordering the part.
 const blocking = l => l.problems.some(p => PARTS_BLOCKING.has(p));
 const partsProblemCount = parts => parts.lines.filter(blocking).length;
-const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at DigiKey", ambiguous: "several DigiKey matches", discontinued: "discontinued", unavailable: "lookup unavailable" };
+const PARTS_PROBLEMS = { missing_lcsc: "missing LCSC number", bad_lcsc: "LCSC number malformed", lcsc_conflict: "one LCSC number on several values", placeholder: "placeholder value", mpn_footprint_conflict: "one MPN on several footprints", unit_identity_conflict: "conflicting identities across symbol units", missing_mpn: "MPN missing", out_of_stock: "out of stock", not_found: "not found at DigiKey", ambiguous: "several DigiKey matches", discontinued: "discontinued", unavailable: "lookup unavailable" };
 function partsAge(s) {
   if (s?.skipped) return {text: `DigiKey lookup skipped: ${esc(s.skipped)}`, stale:true};
   if (!s || !s.fetched_at) return { text: `Supplier lookup not run${s && s.error ? `: ${esc(s.error)}` : ""}`, stale: true };
@@ -1359,13 +1359,82 @@ function fieldChangesHtml(parts) {
     `<tr><td>${esc(r.refs.join(", "))}</td><td>${esc(r.field)}</td><td>${esc(r.before ?? "—")}</td><td>${esc(r.after ?? "—")}</td></tr>`).join("")}</tbody></table>` : "")
     + (parts.dnp_mismatch?.length ? `<p class="dnp-mismatch">⚠ DNP differs between schematic and board: ${esc(parts.dnp_mismatch.join(", "))}</p>` : "");
 }
+S.partsView = "problems";   // ponytail: not in the link hash; add a key when deep links to the BOM view are needed
+S.bomFilter = { category: "", sort: "refs", dir: 1 };
+S.bomBoard = "all";   // "all": the repository BOM (REVIEW_DATA.bom) when present; "project": the project at S.p
+const BOM_SORTS = { qty: l => l.refs.length, part: l => l.value, refs: l => l.refs[0], mpn: l => l.mpn || "", lcsc: l => l.lcsc || "", datasheet: l => l.datasheet || "" };
+const bomCategory = l => l.category || "Other";
+const BOM_FAB_LABEL = { jlcpcb: "JLCPCB", pcbway: "PCBWay" };
+function partsSearchText(line) {
+  return [line.value, line.footprint, ...(line.refs || []), line.mpn, line.lcsc, bomCategory(line)].filter(Boolean).join(" ").toLowerCase();
+}
+function bomDownloadsHtml(parts) {
+  const x = parts.exports; if (!x) return "";
+  return `<span class="bom-downloads">${typeof x.fab === "string" ? `<button type="button" data-bom-download="fab">${esc(BOM_FAB_LABEL[x.preset] || x.preset)}${parts.combined ? " review file" : ""} ↓</button>` : ""}<button type="button" data-bom-download="csv">CSV ↓</button></span>${x.fabError ? `<p class="bom-export-error" role="status">${esc(x.fabError)}</p>` : ""}`;
+}
+function downloadBom(kind) {
+  const src = bomSource(), x = src.exports; if (!x || typeof x[kind] !== "string") return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([kind === "csv" ? "\uFEFF" + x.csv : x.fab], { type: "text/csv;charset=utf-8" }));
+  const name = src.name.replace(/[^\w.-]+/g, "_");
+  const stem = /[a-z0-9]/i.test(name) ? name : "bom";
+  a.download = `${stem}-${kind === "csv" ? "bom.csv" : `bom-${x.preset}.csv`}`;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+function bomRows(parts) {
+  const f = S.bomFilter, q = (S.partsFilter.q || "").toLowerCase(), key = BOM_SORTS[f.sort] || BOM_SORTS.refs;
+  return parts.lines.filter(l => (!f.category || bomCategory(l) === f.category) && (!q || partsSearchText(l).includes(q)))
+    .sort((a, b) => f.dir * (f.sort === "qty" ? key(a) - key(b) : String(key(a)).localeCompare(String(key(b)), undefined, { numeric: true })));
+}
+function bomRow(l, cs) {
+  const sheet = /^https?:\/\//i.test(l.datasheet || "") ? `<a href="${esc(l.datasheet)}" rel="noopener noreferrer" target="_blank">datasheet</a>` : "—";
+  const marks = cs.map(r => ({ added: ["+", "added"], swapped: ["~", "changed"], value: ["~", "changed"], footprint: ["~", "changed"], mpn: ["~", "changed"] })[r.action]).filter(Boolean);
+  const mark = marks.map(([glyph]) => glyph).join(""), label = [...new Set(marks.map(([, text]) => text))].join(", ");
+  return `<tr class="bom-row${cs.length ? " changed" : ""}"><td class="bom-delta" title="${esc(cs.map(r => r.action).join(", "))}">${mark}${label ? `<span class="sr-only">${esc(label)}</span>` : ""}</td><td class="bom-qty">${l.refs.length}</td><td class="bom-part"><b>${esc(l.value || "—")}</b><small>${esc(l.footprint)}</small>${l.mpn ? `<small class="bom-mpn-inline">${esc(l.mpn)}</small>` : ""}</td><td class="bom-refs" title="${esc(l.refs.join(", "))}">${esc(l.refsCompressed ?? l.refs.join(", "))}</td><td>${esc(l.mpn || "—")}</td><td>${esc(l.lcsc || "—")}</td><td>${sheet}</td></tr>`;
+}
+function renderBom(parts) {
+  const s = parts.summary, byCategory = s.byCategory || {}, f = S.bomFilter, n = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const counts = Object.create(null);   // from the lines, so a category the summary does not know still gets a chip and a group
+  for (const l of parts.lines) counts[bomCategory(l)] = (counts[bomCategory(l)] || 0) + l.refs.length;
+  const cats = [...Object.keys(byCategory).filter(c => counts[c]), ...Object.keys(counts).filter(c => !Object.hasOwn(byCategory, c))];
+  if (f.category && !counts[f.category]) f.category = "";
+  const rows = bomRows(parts), changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
+  const th = (k, label) => `<th scope="col" aria-sort="${f.sort === k ? (f.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-bom-sort="${k}">${label}</button></th>`;
+  const groups = cats.map(c => ({ c, rs: rows.filter(l => bomCategory(l) === c) })).filter(g => g.rs.length);
+  return `<div class="bom-head"><p class="bom-summary">${n(s.components, "component")} · ${n(s.unique, "unique part")} · ${s.withMpn} with MPN</p>${bomDownloadsHtml(parts)}</div>
+    <div class="filters bom-chips" role="group" aria-label="Category">${[["", "All", s.components], ...cats.map(c => [c, c, counts[c]])].map(([c, label, count]) => `<button type="button" class="check-chip" data-bom-cat="${esc(c)}" aria-pressed="${f.category === c}">${esc(label)} ${count}</button>`).join("")}</div>
+    <div class="dock-list-tools"><input type="search" data-list-search="parts" aria-label="Search parts" placeholder="Search parts…" value="${esc(S.partsFilter.q || "")}"></div>
+    <div class="parts-scroll"><table class="bom-table"><thead><tr><th scope="col"><span class="sr-only">Change</span></th>${th("qty", "QTY")}${th("part", "PART")}${th("refs", "REFS")}${th("mpn", "MPN")}${th("lcsc", "LCSC")}${th("datasheet", "DATASHEET")}</tr></thead>${groups.map(({ c, rs }) => `<tbody><tr class="bom-cat"><th scope="rowgroup" colspan="7">${esc(c)} <span class="muted">${rs.reduce((total, l) => total + l.refs.length, 0)}</span></th></tr>${rs.map(l => bomRow(l, changes(l))).join("")}</tbody>`).join("")}</table>${groups.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>`;
+}
+function bomSource() {
+  const repo = D.bom;
+  if (repo && !repo.error && S.bomBoard === "all") {   // changes carry board-qualified refs, so badges match combined lines
+    const changes = D.projects.flatMap(p => (p.parts?.changes || []).map(c => ({ ...c, refs: c.refs.map(r => `${p.name}:${r}`) })));
+    return { name: "all-boards", combined: true, summary: repo.summary, lines: repo.lines, exports: repo.exports, changes };
+  }
+  const project = proj(), parts = project.parts;
+  return { name: project.name, summary: parts.summary, lines: parts.lines, exports: parts.exports, changes: parts.changes };
+}
+function renderBomWithBoards() {
+  const repo = D.bom;
+  const chips = repo ? [["all", repo.error ? "All boards (unavailable)" : "All boards"], ...D.projects.map((p, i) => [String(i), p.name])] : [];
+  const pressed = k => k === "all" ? !!(repo && !repo.error && S.bomBoard === "all") : (S.bomBoard === "project" || !!(repo && repo.error && S.bomBoard === "all")) && k === String(S.p);
+  const picker = repo ? `<div class="filters bom-boards" role="group" aria-label="Board">${chips.map(([k, label]) => `<button type="button" class="check-chip" data-bom-board="${esc(k)}" aria-pressed="${pressed(k)}">${esc(label)}</button>`).join("")}</div>` : "";
+  const note = repo && repo.error && S.bomBoard === "all" ? `<p class="bom-export-error">${esc(repo.error)}</p>` : "";
+  return picker + note + renderBom(bomSource());
+}
 function renderParts() {
-  const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter;
+  const parts = proj().parts, bom = parts.summary && S.partsView === "bom";   // reports from before the BOM view have no summary
+  return (parts.summary ? `<div class="filters parts-view" role="group" aria-label="Parts view">${[["problems", "Problems"], ["bom", "BOM"]].map(([k, label]) => `<button type="button" class="check-chip" data-parts-view="${k}" aria-pressed="${(k === "bom") === !!bom}">${label}</button>`).join("")}</div>` : "") + (bom ? renderBomWithBoards() : renderPartsProblems(parts));
+}
+function renderPartsProblems(parts) {
+  const age = partsAge(parts.supplier), f = S.partsFilter;
   const changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
-  const shown = rows.filter(r => (!f.q || JSON.stringify(r.line).toLowerCase().includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
+  const shown = rows.filter(r => (!f.q || partsSearchText(r.line).includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => f.sort === "reference" ? a.line.refs[0].localeCompare(b.line.refs[0], undefined, {numeric:true}) : Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
   const notLookedUp = [["no_mpn", "no MPN"], ["invalid_mpn", "invalid MPN"], ["run_limit", "run limit"]]
@@ -1399,7 +1468,7 @@ function renderParts() {
       const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
       const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn ? `<span class="parts-mpn"> ${esc(l.mpn)}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~", mpn: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn || cs.some(r => r.before && r.after && r.before.mpn !== r.after.mpn) ? `<span class="parts-mpn"> ${changeText("mpn")}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : p === "unit_identity_conflict" ? "UNITS" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
@@ -1450,7 +1519,7 @@ function dockListTools(name, state) {
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
-  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
+  const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-parts-view", "data-bom-cat", "data-bom-sort", "data-bom-board", "data-bom-download", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
   const p = proj(), f = S.filter;
   if (S.t === "parts" && !p.parts) S.t = "changes";
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
@@ -1499,6 +1568,14 @@ function renderPanel() {
     });
   }
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-parts-view]")) b.onclick = () => { S.partsView = b.dataset.partsView; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-cat]")) b.onclick = () => { S.bomFilter.category = b.dataset.bomCat; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-sort]")) b.onclick = () => { const f = S.bomFilter, k = b.dataset.bomSort; f.dir = f.sort === k ? -f.dir : 1; f.sort = k; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-bom-board]")) b.onclick = () => {
+    if (b.dataset.bomBoard === "all") { S.bomBoard = "all"; renderPanel(); }
+    else { S.bomBoard = "project"; openProject(Number(b.dataset.bomBoard)); }
+  };
+  for (const b of document.querySelectorAll("#panel [data-bom-download]")) b.onclick = () => downloadBom(b.dataset.bomDownload);
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };
@@ -1814,10 +1891,13 @@ function inspectorProperties() {
     objects.forEach((o, i) => flatten(target, o, objects.length > 1 ? `geometry ${i+1}.` : "geometry."));
   }
   const ref = selected.ref || inventory?.ref;
-  const part = p.parts?.lines?.find(l => l.refs?.includes(ref));
+  // Compact reports omit a BOM line's key and null fields; restore both (same formula as kicad_review.bom_identity) so the inspector reads the same.
+  const full = l => l && { value: l.value, footprint: l.footprint, lcsc: l.lcsc ?? null, mpn: l.mpn ?? null, manufacturer: l.manufacturer ?? null, category: l.category, datasheet: l.datasheet ?? null,
+    key: l.key ?? JSON.stringify([l.value, l.footprint, l.lcsc || "", l.mpn || "", l.category, l.manufacturer ?? null, l.datasheet ?? null]), ...l };
+  const part = full(p.parts?.lines?.find(l => l.refs?.includes(ref)));
   if (part) { flatten(base, part, "part."); flatten(head, part, "part."); }
   for (const change of p.parts?.changes || []) if (change.refs?.includes(ref)) {
-    flatten(base, change.before, "part."); flatten(head, change.after, "part.");
+    flatten(base, full(change.before), "part."); flatten(head, full(change.after), "part.");
   }
   flatten(base, selected.before); flatten(head, selected.after);
   for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }

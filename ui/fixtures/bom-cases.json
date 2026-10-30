@@ -1,0 +1,372 @@
+[
+  {
+    "name": "eligibility",
+    "objects": {
+      "fitted": {
+        "kind": "symbol",
+        "ref": "R1",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805"
+        }
+      },
+      "excluded": {
+        "kind": "symbol",
+        "ref": "R2",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805",
+          "in_bom": "no"
+        }
+      },
+      "dnp": {
+        "kind": "symbol",
+        "ref": "R3",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805",
+          "dnp": "yes"
+        }
+      },
+      "unannotated": {
+        "kind": "symbol",
+        "ref": "R?",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805"
+        }
+      },
+      "unannotated-unit": {
+        "kind": "symbol",
+        "ref": "R? unit 2",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805"
+        }
+      },
+      "footprint": {
+        "kind": "footprint",
+        "ref": "R4",
+        "props": {}
+      }
+    },
+    "expect": {
+      "included": {
+        "fitted": true,
+        "excluded": false,
+        "dnp": false,
+        "unannotated": false,
+        "unannotated-unit": false,
+        "footprint": false
+      },
+      "excludedReason": {
+        "fitted": null,
+        "excluded": "excluded",
+        "dnp": "dnp",
+        "unannotated": "unannotated",
+        "unannotated-unit": "unannotated",
+        "footprint": "not_symbol"
+      },
+      "lines": [
+        {
+          "refs": [
+            "R1"
+          ],
+          "quantity": 1,
+          "mpn": null,
+          "key": "[\"10k\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
+        }
+      ]
+    }
+  },
+  {
+    "name": "multi-unit",
+    "objects": {
+      "1": {
+        "kind": "symbol",
+        "ref": "U1",
+        "props": {
+          "Value": "TL072",
+          "Footprint": "R_0805"
+        }
+      },
+      "2": {
+        "kind": "symbol",
+        "ref": "U1 unit 2",
+        "props": {
+          "Value": "TL072",
+          "Footprint": "R_0805"
+        }
+      },
+      "3": {
+        "kind": "symbol",
+        "ref": "U1 unit 3",
+        "props": {
+          "Value": "TL072",
+          "Footprint": "R_0805"
+        }
+      }
+    },
+    "expect": {
+      "included": {
+        "1": true,
+        "2": true,
+        "3": true
+      },
+      "excludedReason": {
+        "1": null,
+        "2": null,
+        "3": null
+      },
+      "lines": [
+        {
+          "refs": [
+            "U1"
+          ],
+          "quantity": 1,
+          "mpn": null,
+          "key": "[\"TL072\",\"R_0805\",\"\",\"\",\"ICs & Modules\",null,null]"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unit-identity-conflict",
+    "objects": {
+      "a": {
+        "kind": "symbol",
+        "ref": "U1",
+        "props": {
+          "Value": "TL072",
+          "Footprint": "R_0805",
+          "MPN": "A"
+        }
+      },
+      "b": {
+        "kind": "symbol",
+        "ref": "U1 unit 2",
+        "props": {
+          "Value": "TL072",
+          "Footprint": "R_0805",
+          "MPN": "B"
+        }
+      }
+    },
+    "expect": {
+      "included": {
+        "a": true,
+        "b": true
+      },
+      "excludedReason": {
+        "a": null,
+        "b": null
+      },
+      "lines": [
+        {
+          "refs": [
+            "U1"
+          ],
+          "quantity": 1,
+          "mpn": "A",
+          "key": "[\"TL072\",\"R_0805\",\"\",\"A\",\"ICs & Modules\",null,null]",
+          "problems": [
+            "missing_lcsc",
+            "unit_identity_conflict"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "missing-mpn-is-distinct",
+    "objects": {
+      "a": {
+        "kind": "symbol",
+        "ref": "R1",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805",
+          "MPN": "A"
+        }
+      },
+      "b": {
+        "kind": "symbol",
+        "ref": "R2",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805"
+        }
+      }
+    },
+    "expect": {
+      "included": {
+        "a": true,
+        "b": true
+      },
+      "excludedReason": {
+        "a": null,
+        "b": null
+      },
+      "lines": [
+        {
+          "refs": [
+            "R1"
+          ],
+          "quantity": 1,
+          "mpn": "A",
+          "key": "[\"10k\",\"R_0805\",\"\",\"A\",\"Resistors\",null,null]"
+        },
+        {
+          "refs": [
+            "R2"
+          ],
+          "quantity": 1,
+          "mpn": null,
+          "key": "[\"10k\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unclipped-values",
+    "objects": {
+      "a": {
+        "kind": "symbol",
+        "ref": "R1",
+        "props": {
+          "Value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxA",
+          "Footprint": "R_0805"
+        }
+      },
+      "b": {
+        "kind": "symbol",
+        "ref": "R2",
+        "props": {
+          "Value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxB",
+          "Footprint": "R_0805"
+        }
+      }
+    },
+    "expect": {
+      "included": {
+        "a": true,
+        "b": true
+      },
+      "excludedReason": {
+        "a": null,
+        "b": null
+      },
+      "lines": [
+        {
+          "refs": [
+            "R1"
+          ],
+          "quantity": 1,
+          "mpn": null,
+          "key": "[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxA\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
+        },
+        {
+          "refs": [
+            "R2"
+          ],
+          "quantity": 1,
+          "mpn": null,
+          "key": "[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxB\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
+        }
+      ]
+    }
+  },
+  {
+    "name": "delimiter-safe-key",
+    "objects": {
+      "a": {
+        "kind": "symbol",
+        "ref": "R1",
+        "props": {
+          "Value": "a|b",
+          "Footprint": "c"
+        }
+      },
+      "b": {
+        "kind": "symbol",
+        "ref": "R2",
+        "props": {
+          "Value": "a",
+          "Footprint": "b|c"
+        }
+      }
+    },
+    "expect": {
+      "included": {
+        "a": true,
+        "b": true
+      },
+      "excludedReason": {
+        "a": null,
+        "b": null
+      },
+      "lines": [
+        {
+          "refs": [
+            "R1"
+          ],
+          "quantity": 1,
+          "mpn": null,
+          "key": "[\"a|b\",\"c\",\"\",\"\",\"Resistors\",null,null]"
+        },
+        {
+          "refs": [
+            "R2"
+          ],
+          "quantity": 1,
+          "mpn": null,
+          "key": "[\"a\",\"b|c\",\"\",\"\",\"Resistors\",null,null]"
+        }
+      ]
+    }
+  },
+  {
+    "name": "lcsc-normalization",
+    "objects": {
+      "a": {
+        "kind": "symbol",
+        "ref": "R1",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805",
+          "LCSC": " c123 "
+        }
+      },
+      "b": {
+        "kind": "symbol",
+        "ref": "R2",
+        "props": {
+          "Value": "10k",
+          "Footprint": "R_0805",
+          "LCSC": "C123"
+        }
+      }
+    },
+    "expect": {
+      "included": {
+        "a": true,
+        "b": true
+      },
+      "excludedReason": {
+        "a": null,
+        "b": null
+      },
+      "lines": [
+        {
+          "refs": [
+            "R1",
+            "R2"
+          ],
+          "quantity": 2,
+          "mpn": null,
+          "key": "[\"10k\",\"R_0805\",\"C123\",\"\",\"Resistors\",null,null]"
+        }
+      ]
+    }
+  }
+]

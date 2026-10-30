@@ -26,6 +26,21 @@ assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]
 import json
 import pickle
 from kicad_review import Quoted, is_net_number
+from kicad_review import compact_bom_lines
+
+_l = {"value": "1k", "footprint": "F", "lcsc": None, "mpn": "M", "manufacturer": None, "datasheet": None, "category": "Resistors", "key": "k", "refs": ["R1"], "problems": []}
+_slim = {"value": "1k", "footprint": "F", "mpn": "M", "category": "Resistors", "refs": ["R1"], "problems": []}
+_in = {"projects": [{"parts": {"lines": [_l], "changes": [{"action": "added", "refs": ["R1"], "before": None, "after": _l},
+                                                         {"action": "removed", "refs": ["R1"], "before": _l, "after": None}], "exports": {"csv": "x"}}},
+                    {"name": "no parts"}],
+       "bom": {"error": "Combined BOM unavailable", "lines": [], "exports": None}}
+_out = compact_bom_lines(_in)
+assert _out["projects"][0]["parts"]["lines"] == [_slim] and _out["projects"][0]["parts"]["exports"] == {"csv": "x"}
+assert [(c["before"], c["after"]) for c in _out["projects"][0]["parts"]["changes"]] == [(None, _slim), (_slim, None)], "added/removed sides"
+assert _out["projects"][1] == {"name": "no parts"}, "a project without parts is untouched"
+assert _out["bom"] == _in["bom"], "repo BOM error case keeps its shape"
+assert "key" in _l and _l["lcsc"] is None and "bom" not in compact_bom_lines({"projects": []}), "input is not mutated; no bom stays absent"
+print("ok compact_bom_lines")
 numeric_tokens = parse_sexpr('(net "12" 12)')
 assert numeric_tokens == ['net', '12', '12']
 assert isinstance(numeric_tokens[1], Quoted) and not is_net_number(numeric_tokens[1])
@@ -156,7 +171,9 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
                    capture_output=True, text=True)
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
-assert "typeof " not in js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
+# BOM downloads deliberately use typeof to reject unavailable export strings.
+assert 'typeof x.fab === "string"' in js and 'typeof x[kind] !== "string"' in js, "missing BOM export string guard"
+assert "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")
@@ -1039,8 +1056,15 @@ print("ok TS-S2 release zip and CSV contents")
 # TS-S1: CI exercises default, real 3D and unchanged two-project pages without extra installs.
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
-assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
-for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
+assert "google-chrome" in test_wf and "CHROME" in test_wf and 'python3 ui/build-fixtures.py "$PAGES"' in test_wf, "TS-S1 CI browser setup"
+assert "node --import ./site/css-loader.mjs --test ui/*.test.mjs" in test_wf, "CI must run sandbox downloads"
+with tempfile.TemporaryDirectory() as output:
+    subprocess.run([sys.executable, "ui/build-fixtures.py", output], check=True)
+    assert {p.name for p in pathlib.Path(output).iterdir()} == {"3d.html", "two.html", "parts.html", "multiboard.html"}
+    text = pathlib.Path(output, "multiboard.html").read_text(encoding="utf-8")
+    data = json.loads(text.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
+    assert data["bom"]["summary"]["components"] == 7 and data["bom"]["boards"] == ["Alpha", "Beta"]
+for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
@@ -1117,6 +1141,330 @@ assert diff_parts(new, footprint)[0]["action"] == "footprint", "same value and L
 assert parts_lines({"r": sym("R1", "1k", "C1", ds="HTTPS://x/r.pdf")})[0]["datasheet"] == "HTTPS://x/r.pdf", "scheme is case-insensitive"
 print("ok parts diff")
 
+# BOM view helpers: categories, reference ranges, summary (spec 08).
+from kicad_review import BOM_CATEGORIES, bom_category, bom_summary, ref_ranges
+assert ref_ranges(["R1", "R3", "R7", "R8", "R9", "R10", "R11", "R12", "R17"]) == "R1, R3, R7-R12, R17"
+assert ref_ranges([f"C{n}" for n in (1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 14, 15, 17)]) == "C1-C8, C11-C12, C14-C15, C17"
+assert ref_ranges(["R10", "R2", "R1"]) == "R1-R2, R10", "natural order"
+assert ref_ranges(["R5", "R5A", "R6"]) == "R5, R5A, R6", "a suffix breaks the run and stays literal"
+assert ref_ranges(["U1A", "U1B", "U2"]) == "U1A, U1B, U2", "sub-parts never join"
+assert ref_ranges(["R01", "R02", "R03"]) == "R01, R02, R03", "leading zeros stay literal"
+assert ref_ranges(["R1", "R01", "R2"]) == "R01, R1-R2", "equal natural keys use deterministic literal tie-break; padded references stay separate"
+assert ref_ranges(["R1", "C1", "R2", "C2"]) == "C1-C2, R1-R2", "prefixes stay apart"
+assert ref_ranges(["R1", "R1", "R2"]) == "R1-R2" and ref_ranges([]) == ""
+assert ref_ranges(["TP", "R0", "R1"]) == "R0, R1, TP", "non-numeric and zero references stay literal"
+assert ref_ranges([f"R{n}" for n in range(1, 501)]) == "R1-R500"
+for ref, lib, want in (("R7", None, "Resistors"), ("r7", None, "Resistors"), ("C3", None, "Capacitors"), ("FB1", None, "Inductors & Ferrites"),
+                       ("LED3", None, "Diodes & LEDs"), ("Q2", None, "Transistors"), ("U4", None, "ICs & Modules"), ("P1", None, "Connectors"),
+                       ("TP5", None, "Test Points"), ("MH2", None, "Mechanical"), ("X1", "Device:Crystal", "Other"), ("SW1", "Switch:SW_SPST", "Other"),
+                       ("MOT1", "Device:R_Small", "Resistors"), ("ANT1", "Device:Antenna", "Other"), ("A1", "Connector:USB_C_Receptacle", "Connectors"),
+                       ("ZZ1", "Device:L7805", "Other"), ("", None, "Other"), ("U1", "Connector:Conn_01x02", "ICs & Modules")):
+    assert bom_category(ref, lib) == want, (ref, lib, bom_category(ref, lib))
+summary = bom_summary([{"category": "Other", "refs": ["X1"], "mpn": "TBD"}, {"category": "Resistors", "refs": ["R1", "R2"], "mpn": "RC0805"},
+                       {"category": "Capacitors", "refs": ["C1"], "mpn": None}])
+assert summary == {"components": 4, "unique": 3, "withMpn": 1, "byCategory": {"Resistors": 2, "Capacitors": 1, "Other": 1}}, summary
+assert list(summary["byCategory"]) == [c for c in BOM_CATEGORIES if c in summary["byCategory"]], "chip order"
+assert bom_summary([]) == {"components": 0, "unique": 0, "withMpn": 0, "byCategory": {}}
+print("ok bom helpers")
+
+# BOM lines: the MPN splits a part, units count once, every line carries category and ranges.
+from kicad_review import base_ref, bom_identity
+assert base_ref("U1 unit 2") == "U1" and base_ref("R1") == "R1" and base_ref(None) == ""
+from pathlib import Path
+sym2 = lambda ref, v, mpn=None, lib="Device:R_Small", mf=None: {"kind": "symbol", "ref": ref, "props": {
+    "Value": v, "Footprint": "R_0805", "Datasheet": "~", "symbol": lib, **({"MPN": mpn} if mpn else {}), **({"Manufacturer": mf} if mf else {})}}
+two = parts_lines({"a": sym2("R1", "5.1k", "A"), "b": sym2("R2", "5.1k", "B")})
+assert [(l["refs"], l["mpn"]) for l in two] == [(["R1"], "A"), (["R2"], "B")] and two[0]["key"] != two[1]["key"], two
+three = parts_lines({"a": sym2("R1", "5.1k", "A"), "b": sym2("R2", "5.1k", "B"), "c": sym2("R3", "5.1k")})
+assert len(three) == 3 and [l["mpn"] for l in three] == ["A", "B", None], "no MPN is its own line too"
+one = parts_lines({"a": sym2("R1", "5.1k", "A"), "b": sym2("R2", "5.1k", "A"), "c": sym2("R3", "5.1k", "A")})
+assert len(one) == 1 and one[0]["refs"] == ["R1", "R2", "R3"] and one[0]["refsCompressed"] == "R1-R3" and one[0]["category"] == "Resistors", one
+units = parts_lines({"a": sym2("U1", "TL072", lib="Amplifier_Operational:TL072"), "b": sym2("U1 unit 2", "TL072", lib="Amplifier_Operational:TL072"),
+                     "c": sym2("U1 unit 3", "TL072", lib="Amplifier_Operational:TL072")})
+assert len(units) == 1 and units[0]["refs"] == ["U1"] and units[0]["category"] == "ICs & Modules", units
+fitted = parts_lines({"a": sym2("R1", "1k"), "b": {**sym2("R2", "1k"), "props": {**sym2("R2", "1k")["props"], "dnp": "yes"}},
+                      "c": {**sym2("R3", "1k"), "props": {**sym2("R3", "1k")["props"], "in_bom": "no"}}})
+assert len(fitted) == 1 and fitted[0]["refs"] == ["R1"], "DNP and excluded parts stay out of the BOM"
+unannotated = parts_lines({"a": sym2("U?", "TL072"), "b": sym2("U? unit 2", "TL072")})
+assert unannotated == [] and bom_summary(unannotated)["components"] == 0
+only_symbol = sym2('H1', 'Watch glass', lib='Mechanical:Housing')
+only_symbol['props'].update(Footprint='', on_board='no')
+mechanical = parts_lines({'only-symbol': only_symbol})
+assert len(mechanical) == 1 and mechanical[0]['category'] == 'Mechanical' and mechanical[0]['refs'] == ['H1'] and bom_summary(mechanical)['components'] == 1
+assert parts_lines({"a": sym2("R1", "1k", mf="Yageo")})[0]["manufacturer"] == "Yageo"
+old = parts_lines({"a": sym2("R1", "5.1k", "A")})
+assert [r["action"] for r in diff_parts(old, parts_lines({"a": sym2("R1", "5.1k", "B")}))] == ["mpn"], "an MPN-only edit is a change"
+assert [r['action'] for r in diff_parts(old, parts_lines({'a': sym2('R1', '5.1k')}))] == ['mpn'], 'removing an MPN is a change too'
+# Exercise actual parser property values after the concurrent quoted-token fix; do not coerce them first.
+from kicad_review import parse_sexpr, properties
+raw_props = properties(parse_sexpr('(symbol (property "Value" "10k") (property "Footprint" "R_0805") (property "MPN" "RC"))'))
+raw_objs = {ref: {'kind': 'symbol', 'ref': ref, 'props': dict(raw_props)} for ref in ('R1', 'R2')}
+raw_lines = parts_lines(raw_objs)
+assert len(raw_lines) == 1 and raw_lines[0]['value'] == raw_props['Value'] and raw_lines[0]['footprint'] == raw_props['Footprint']
+assert raw_lines[0]['category'] == bom_category('R1', raw_props['Value']) == 'Resistors'
+assert raw_lines[0]['refsCompressed'] == ref_ranges(raw_lines[0]['refs']) == 'R1-R2'
+assert json.loads(json.dumps(raw_lines))[0]['value'] == '10k'
+assert json.loads(json.dumps(raw_lines))[0]['footprint'] == 'R_0805'
+# Category and ordering metadata must not disappear into the first grouped reference.
+metadata_objects = {"tp": sym2("TP1", "", lib=""), "h": sym2("H1", "", lib="")}
+for obj in metadata_objects.values():
+    obj["props"]["Footprint"] = ""
+assert len(parts_lines(metadata_objects)) == 2, "test points and mechanical parts must not merge"
+from kicad_review import bom_repository
+category_combined = bom_repository([{"name": name, "objects": metadata_objects, "lines": parts_lines(metadata_objects)}
+                                    for name in ("Alpha", "Beta")], "jlcpcb")
+assert len(category_combined["lines"]) == 2 and all(len(l["refs"]) == 2 for l in category_combined["lines"])
+for prop, values in (("Manufacturer", ("Yageo", "Vishay")), ("Datasheet", ("https://a.test", "https://b.test"))):
+    objects = {str(i): sym2(f"R{i}", "10k", "RC") for i in (1, 2)}
+    for obj, value in zip(objects.values(), values):
+        obj["props"][prop] = value
+    lines = parts_lines(objects)
+    assert len(lines) == 2 and len({l["key"] for l in lines}) == 2, (prop, lines)
+    combined = bom_repository([{"name": "Alpha", "objects": objects, "lines": lines},
+                               {"name": "Beta", "objects": objects, "lines": lines}], "pcbway")
+    assert len(combined["lines"]) == 2 and all(len(l["refs"]) == 2 for l in combined["lines"]), (prop, combined)
+    assert {l[prop.lower()] for l in combined["lines"]} == set(values)
+print("ok bom lines")
+
+# Vendored planner (Task 4A): the body is the pinned upstream bom_csv.py, and the licence header sits above it.
+import hashlib as _vh
+_vendored = pathlib.Path(__file__).with_name("vendor") / "bom_csv.py"
+_data = _vendored.read_bytes()
+_start = _data.index(b'"""Plan the JLC BOM CSV')
+assert _vh.sha256(_data[_start:]).hexdigest() == "3deebff2f36376a561b4014dbbf6ea6c66cd4325b1f614c6bfe4def466569bec", "vendored body differs from kicad-jlcpcb-tools bom_csv.py at 9209edcd"
+for marker in (b"MIT License", b"Copyright (c) 2022 bouni", b"9209edcdd682fc4df51e3a0325f967b78ef254ee"):
+    assert marker in _data[:_start], marker
+import kicad_review as _kr
+assert _kr.vendor_bom_csv.BOM_LINE_MAX_BYTES == 2046 and _kr.vendor_bom_csv.BOM_HEADER == ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
+print("ok vendored bom_csv")
+
+# BOM files: generic CSV, JLCPCB through the vendored planner with the 2,048-byte limit, PCBWay, and spreadsheet-formula neutering.
+import csv as _csv, io as _io2
+from kicad_review import BOM_LINE_MAX_BYTES, BOM_JLCPCB_HEADER, bom_exports, csv_line
+read = lambda text: list(_csv.reader(_io2.StringIO(text, newline="")))
+assert BOM_LINE_MAX_BYTES == 2048
+many = parts_lines({f"r{n}": sym2(f"R{n}", "10kΩ", "RC") for n in range(1, 801)})
+fab = bom_exports(many, "jlcpcb")["fab"]
+rows = read(fab)
+assert rows[0] == ["Comment", "Designator", "Footprint", "LCSC", "Quantity"] and len(rows) > 2, len(rows)
+assert max(len(line.encode("utf-8")) for line in fab.splitlines(keepends=True)) <= BOM_LINE_MAX_BYTES, "every line within the limit"
+assert sum(int(r[4]) for r in rows[1:]) == 800 and all(len(r[1].split(",")) == int(r[4]) for r in rows[1:]), "quantities add up, one per chunk"
+assert [ref for r in rows[1:] for ref in r[1].split(",")] == [f"R{n}" for n in range(1, 801)], "no reference lost or reordered"
+lone = [{"category": "Other", "refs": ["X1"], "value": "v" * 3000, "footprint": "F", "lcsc": None, "mpn": None, "manufacturer": None, "datasheet": None}]
+failed = bom_exports(lone, "jlcpcb")
+assert failed["fab"] is None and 'X1' in failed['fabError'] and '2048' in failed['fabError']
+assert read(failed['csv'])[1][2] == 'v' * 3000, 'generic CSV stays lossless'
+assert read(bom_exports(unannotated, 'jlcpcb')['fab']) == [list(BOM_JLCPCB_HEADER)]
+risky = [{"category": "Other", "refs": ["X1"], "value": "=HYPERLINK(\"http://x\")", "footprint": "+3V3", "lcsc": "@x", "mpn": "-1", "manufacturer": None, "datasheet": None}]
+assert read(bom_exports(risky, "jlcpcb")["fab"])[1] == ["'=HYPERLINK(\"http://x\")", "X1", "'+3V3", "'@x", "1"]
+assert csv_line(["a,b", None, 3]) == '"a,b",,3\r\n'
+mixed = parts_lines({"a": sym2("C1", "1u", lib="Device:C_Small"), "b": sym2("R1", "1k", "RC", mf="Yageo"), "c": sym2("R2", "1k", "RC", mf="Yageo")})
+generic = read(bom_exports(mixed, "jlcpcb")["csv"])
+assert generic[0] == ["Category", "Quantity", "Value", "Footprint", "References", "MPN", "LCSC", "Datasheet"]
+assert [r[0] for r in generic[1:]] == ["Resistors", "Capacitors"] and generic[1][1] == "2" and generic[1][4] == "R1, R2", generic
+pcbway = bom_exports(mixed, "pcbway")
+assert pcbway["preset"] == "pcbway" and read(pcbway["fab"])[:2] == [["Designator", "Qty", "Manufacturer", "Mfg Part #", "Description/Value", "Package/Footprint"], ["R1,R2", "2", "Yageo", "RC", "1k", "R_0805"]]
+assert read(bom_exports([], "jlcpcb")["fab"]) == [["Comment", "Designator", "Footprint", "LCSC", "Quantity"]]
+# Round-trip hostile cells, including CR/LF, in both layouts and the generic CSV.
+for value in ['a,b', 'a"b', 'a\r\nb', '\tleading', '\rleading', '=1', '+1', '-1', '@x']:
+    safe = "'" + value if value[:1] in "=+-@\t\r" else value
+    line = {**risky[0], 'value': value, 'footprint': value, 'mpn': value, 'lcsc': value, 'manufacturer': value}
+    for preset in ('jlcpcb', 'pcbway'):
+        x = bom_exports([line], preset)
+        assert read(x['csv'])[1][2:8] == [safe, safe, 'X1', safe, safe, '']
+        cells = read(x['fab'])[1]
+        assert cells == ([safe, 'X1', safe, safe, '1'] if preset == 'jlcpcb' else ['X1', '1', safe, safe, safe, safe])
+        if preset == 'jlcpcb':
+            assert len(csv_line(cells).encode('utf-8')) <= BOM_LINE_MAX_BYTES
+for preset in ('jlcpcb', 'pcbway'):
+    objs = {'a': sym2('R1', '1k', 'display-mpn'), 'b': sym2('R2', '1k', 'display-mpn')}
+    objs['a']['props']['Order Code'] = 'CUSTOM-A'; objs['b']['props']['Order Code'] = 'CUSTOM-B'
+    displayed = parts_lines(objs)
+    x = bom_exports(displayed, preset, 'Order Code', objs)
+    assert [row[3] for row in read(x['fab'])[1:]] == ['CUSTOM-A', 'CUSTOM-B']
+    assert len(displayed) == 1 and displayed[0]['mpn'] == 'display-mpn' and displayed[0]['lcsc'] is None
+    default = bom_exports(displayed, preset, None, objs)
+    assert read(default['fab'])[1][3] == ('' if preset == 'jlcpcb' else 'display-mpn')
+# Fabrication ordering follows the same first eligible unit as the displayed BOM.
+for rejected_props in ({'in_bom': 'no'}, {'dnp': 'yes'}):
+    excluded_unit = sym2('U1 unit 2', 'TL072', 'EXCLUDED-MPN')
+    excluded_unit['props'].update(rejected_props, LCSC='C999', **{'Order Code': 'EXCLUDED-ORDER'})
+    fitted_unit = sym2('U1', 'TL072', 'FITTED-MPN')
+    fitted_unit['props'].update(LCSC='c123', **{'Order Code': 'FITTED-ORDER'})
+    later_unit = sym2('U1 unit 3', 'TL072', 'LATER-MPN')
+    later_unit['props'].update(LCSC='C456', **{'Order Code': 'LATER-ORDER'})
+    unit_objects = {'excluded': excluded_unit, 'fitted': fitted_unit, 'later': later_unit}
+    displayed = parts_lines(unit_objects)
+    assert len(displayed) == 1 and displayed[0]['refs'] == ['U1']
+    assert (displayed[0]['mpn'], displayed[0]['lcsc']) == ('FITTED-MPN', 'C123')
+    for preset, default_order in (('jlcpcb', 'C123'), ('pcbway', 'FITTED-MPN')):
+        for part_field, want in ((None, default_order), ('Order Code', 'FITTED-ORDER')):
+            exported = bom_exports(displayed, preset, part_field, unit_objects)
+            assert exported['fabError'] is None, exported
+            rows = read(exported['fab'])
+            assert len(rows) == 2 and rows[1][3] == want, (rejected_props, preset, part_field, rows)
+            assert rows[1][1 if preset == 'jlcpcb' else 0] == 'U1'
+            assert rows[1][4 if preset == 'jlcpcb' else 1] == '1'
+            assert read(exported['csv'])[1][5:7] == ['FITTED-MPN', 'C123']
+    assert (displayed[0]['mpn'], displayed[0]['lcsc']) == ('FITTED-MPN', 'C123')
+    assert 'orderingPart' not in displayed[0], 'fabrication fields must remain transient'
+print('ok bom eligible-unit ordering')
+# The build_project path passes objects; all supported aliases must survive that path.
+from kicad_review import LCSC_FIELDS, MPN_FIELDS
+for lcsc_alias in LCSC_FIELDS:
+    for mpn_alias in MPN_FIELDS:
+        alias_obj = sym2('R1', '1k')
+        alias_obj['props'].update({lcsc_alias: 'C123', mpn_alias: 'ABC'})
+        alias_objects = {'a': alias_obj}
+        alias_lines = parts_lines(alias_objects)
+        assert alias_lines[0]['lcsc'] == 'C123' and alias_lines[0]['mpn'] == 'ABC'
+        for preset, want in (('jlcpcb', 'C123'), ('pcbway', 'ABC')):
+            exported = bom_exports(alias_lines, preset, None, alias_objects)
+            assert exported['fabError'] is None and read(exported['fab'])[1][3] == want, (lcsc_alias, mpn_alias, preset, exported)
+            custom = bom_exports(alias_lines, preset, 'Order Code', alias_objects)
+            assert read(custom['fab'])[1][3] == '', 'explicit missing custom field must not fall back to aliases'
+raw_csv = read(bom_exports(raw_lines, 'jlcpcb', None, raw_objs)['csv'])
+assert raw_csv[1][2:5] == ['10k', 'R_0805', 'R1, R2'], 'raw parser Value/Footprint serialize without coercion at grouping time'
+# Owner decision 2026-10-26: option A, separate writers. Pin the release-writer behaviour without executing KiCad.
+import kicad_review as _bomkr
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as d:
+    pro = pathlib.Path(d, 'only.kicad_pro'); pro.write_text('{}')
+    pro.with_suffix('.kicad_sch').write_text('(kicad_sch)')
+    for preset in ('jlcpcb', 'pcbway'):
+        with patch.object(_bomkr, 'kicad_cli') as cli:
+            _bomkr.release_project(str(pro), 'v0', {'fabrication': {'preset': preset, 'part_field': 'Order Code'}}, d, 'only')
+        args = cli.call_args.args
+        assert args[:3] == ('sch', 'export', 'bom') and '--exclude-dnp' in args
+        assert 'Order Code' in args[args.index('--fields') + 1]
+        assert args[args.index('--group-by') + 1] == 'Value,Footprint,Order Code'
+        assert args[args.index('--labels') + 1].split(',') == (['Comment', 'Designator', 'Footprint', 'LCSC Part #'] if preset == 'jlcpcb' else list(_bomkr.BOM_PCBWAY_HEADER))
+# Shared cases with the vendored planner: the adapter writes exactly the rows that plan_bom plans.
+import kicad_review as kr
+groups = [kr.vendor_bom_csv.BomGroup("10kΩ", tuple(f"R{n}" for n in range(1, 801)), "R_0805", "C1")]
+planned = [[str(c) for c in row] for row in kr.vendor_bom_csv.plan_bom(groups, None).lines]
+shared = [{"category": "Resistors", "refs": [f"R{n}" for n in range(1, 801)], "value": "10kΩ", "footprint": "R_0805", "lcsc": "C1", "mpn": None, "manufacturer": None, "datasheet": None}]
+# LCSC C1 must split successfully under the stricter written-record limit.
+assert read(kr.bom_jlcpcb_csv(shared))[1:] == planned
+for count in range(300, 701):
+    refs = [f"R{n}" for n in range(1, count + 1)]
+    exported = kr.bom_exports([{**shared[0], "refs": refs}], "jlcpcb")
+    assert exported["fabError"] is None, (count, exported["fabError"])
+    assert max(len(row.encode("utf-8")) for row in exported["fab"].splitlines(keepends=True)) <= 2048, count
+    rows = read(exported["fab"])[1:]
+    assert [ref for row in rows for ref in row[1].split(",")] == refs, count
+    assert sum(int(row[4]) for row in rows) == count, count
+# The same 800 references with LCSC "C123" plan within the stricter rule, so the adapter writes exactly the planner's rows.
+groups = [kr.vendor_bom_csv.BomGroup("10kΩ", tuple(f"R{n}" for n in range(1, 801)), "R_0805", "C123")]
+planned = [[str(c) for c in row] for row in kr.vendor_bom_csv.plan_bom(groups, None).lines]
+shared = [{**shared[0], "lcsc": "C123"}]
+assert read(kr.bom_jlcpcb_csv(shared))[1:] == planned and read(kr.bom_jlcpcb_csv(shared))[0] == list(kr.vendor_bom_csv.BOM_HEADER)
+# Line edges, measured as written with the CRLF. A value of 2,031 characters gives a 2,048-byte record (written); 2,032 gives 2,049 (refused).
+edge = lambda n: [{"category": "Other", "refs": ["X1"], "value": "v" * n, "footprint": "R_0805", "lcsc": "C1", "mpn": None, "manufacturer": None, "datasheet": None}]
+assert len(kr.bom_jlcpcb_csv(edge(2031)).splitlines(keepends=True)[1].encode("utf-8")) == 2048
+try:
+    kr.bom_jlcpcb_csv(edge(2032))
+except ValueError as exc:
+    assert "X1" in str(exc) and "2048" in str(exc), exc
+else:
+    raise AssertionError("a 2,049-byte record with its CRLF must be refused, including the reserved CRLF bytes")
+print("ok bom files")
+
+# Repository BOM (Owner decision 2026-10-26: combined BOM): board-qualified references; lines join only on identical identity.
+import json as _rjson
+import kicad_review as kr
+_fixture = _rjson.loads(pathlib.Path(__file__).with_name("ui").joinpath("fixtures", "bom-multiboard.json").read_text(encoding="utf-8"))
+boards = [{"name": b["name"], "objects": b["objects"], "lines": kr.parts_lines(b["objects"])} for b in _fixture["boards"]]
+combined = kr.bom_repository(boards, "jlcpcb")
+assert combined["error"] is None
+by_key = {f"{l['mpn']}/{l['lcsc'] or '-'}": l for l in combined["lines"]}
+joined = by_key["RC0805/C17414"]
+assert joined["refs"] == ["Alpha:R1", "Alpha:R2", "Beta:R1"] and joined["boards"] == {"Alpha": 2, "Beta": 1}, joined
+assert joined["refsCompressed"] == "Alpha:R1-R2; Beta:R1", joined["refsCompressed"]
+assert by_key["RC0805FR/C17414"]["refs"] == ["Beta:R2"], "same value and footprint, different MPN: never joined"
+assert by_key["CC0603/C14663"]["refs"] == ["Alpha:C1"] and by_key["CC0603/-"]["refs"] == ["Beta:C1"], "a missing LCSC is a different line"
+assert by_key["TL072/-"]["refs"] == ["Alpha:U1"], "units count once; the DNP R3 stays out"
+assert combined["summary"] == {"components": 7, "unique": 5, "withMpn": 5, "byCategory": {"Resistors": 4, "Capacitors": 2, "ICs & Modules": 1}}, combined["summary"]
+rows = read(combined["exports"]["csv"])
+assert rows[0] == list(kr.BOM_HEADER) and rows[1] == ["Resistors", "3", "10k", "R_0805", "Alpha:R1, Alpha:R2, Beta:R1", "RC0805", "C17414", ""], rows[1]
+assert rows[2][4] == "Beta:R2" and len(rows) == 6, rows
+fab = read(combined["exports"]["fab"])
+assert fab[0] == ["Comment", "Designator", "Footprint", "LCSC", "Quantity"]
+assert fab[1] == ["10k", "Alpha:R1,Alpha:R2,Beta:R1", "R_0805", "C17414", "3"], fab[1]
+assert fab[2] == ["10k", "Beta:R2", "R_0805", "C17414", "1"], fab[2]
+assert fab[3] == ["100n", "Alpha:C1", "C_0603", "C14663", "1"] and fab[4] == ["100n", "Beta:C1", "C_0603", "", "1"] and fab[5] == ["TL072", "Alpha:U1", "SOIC-8", "", "1"], fab
+custom = kr.bom_repository(boards, "jlcpcb", "Order Code")
+cust = read(custom["exports"]["fab"])
+assert cust[1] == ["10k", "Alpha:R1,Alpha:R2", "R_0805", "CUST-A", "2"] and cust[2] == ["10k", "Beta:R1", "R_0805", "CUST-B", "1"], cust[1:3]
+assert cust[3] == ["10k", "Beta:R2", "R_0805", "", "1"], "a missing ordering field leaves its cell blank"
+dup = kr.bom_repository([boards[0], {**boards[1], "name": "Alpha"}], "jlcpcb")
+assert dup["error"] and dup["exports"] is None and dup["lines"] == [], dup
+assert read(kr.bom_repository([], "jlcpcb")["exports"]["fab"]) == [list(kr.BOM_JLCPCB_HEADER)]
+# PCBWay keeps every qualified reference, including custom ordering-field splits.
+pcbway = kr.bom_repository(boards, "pcbway")
+assert read(pcbway["exports"]["fab"])[1] == ["Alpha:R1,Alpha:R2,Beta:R1", "3", "Yageo", "RC0805", "10k", "R_0805"]
+pcbway_custom = kr.bom_repository(boards, "pcbway", "Order Code")
+assert [row[:4] for row in read(pcbway_custom["exports"]["fab"])[1:3]] == [
+    ["Alpha:R1,Alpha:R2", "2", "Yageo", "CUST-A"], ["Beta:R1", "1", "Yageo", "CUST-B"]]
+for exported, ref_column in ((combined, 1), (pcbway, 0), (custom, 1), (pcbway_custom, 0)):
+    assert sorted(ref for row in read(exported["exports"]["fab"])[1:] for ref in row[ref_column].split(",")) == sorted(
+        ref for line in combined["lines"] for ref in line["refs"]), "no qualified reference lost or duplicated"
+# All four carried identity fields matter, not just the canonical BOM key.
+import copy as _rcopy
+before = _rcopy.deepcopy(boards)
+for identity_field, different in (("key", "different-key"), ("category", "Other"),
+                                  ("manufacturer", "Another maker"), ("datasheet", "https://example.test/part.pdf")):
+    split_boards = _rcopy.deepcopy(boards)
+    beta_shared = next(line for line in split_boards[1]["lines"] if line["mpn"] == "RC0805")
+    beta_shared[identity_field] = different
+    split = kr.bom_repository(split_boards, "jlcpcb")
+    assert split["summary"]["components"] == 7 and split["summary"]["unique"] == 6, (identity_field, split)
+    assert all(not {"Alpha:R1", "Beta:R1"} <= set(line["refs"]) for line in split["lines"])
+# A board name is not a symbol reference: its literal " unit " must not be stripped.
+unit_named = [{**boards[0], "name": "Control unit A"}, boards[1]]
+for preset, want in (("jlcpcb", "C17414"), ("pcbway", "RC0805")):
+    named = kr.bom_repository(unit_named, preset)
+    named_rows = read(named["exports"]["fab"])
+    assert all(row[3] == want for row in named_rows[1:] if "Control unit A:R1" in row[1 if preset == "jlcpcb" else 0]), named_rows
+    custom_named = kr.bom_repository(unit_named, preset, "Order Code")
+    assert any(row[3] == "CUST-A" and "Control unit A:R1" in row[1 if preset == "jlcpcb" else 0]
+               for row in read(custom_named["exports"]["fab"])[1:])
+assert boards == before, "combining/exporting does not mutate project lines or objects"
+assert combined["boards"] == ["Alpha", "Beta"]
+blank = kr.bom_repository([{**boards[0], "name": ""}], "jlcpcb")
+assert blank["error"] and blank["exports"] is None and blank["lines"] == []
+empty = kr.bom_repository([], "jlcpcb")
+assert empty["boards"] == [] and empty["error"] is None and empty["summary"] == kr.bom_summary([])
+print("ok repository bom")
+
+bom_cases = json.loads((Path(__file__).parent / "ui/fixtures/bom-cases.json").read_text(encoding="utf-8"))
+for case in bom_cases:
+    identities = {i: bom_identity(o) for i, o in case["objects"].items()}
+    expected = case["expect"]
+    assert {i: b["included"] for i, b in identities.items()} == expected["included"], case["name"]
+    assert {i: b["excludedReason"] for i, b in identities.items()} == expected["excludedReason"], case["name"]
+    for i, b in identities.items():
+        p = case["objects"][i]["props"]
+        assert b["value"] == p.get("Value", "") and b["footprint"] == p.get("Footprint", ""), case["name"]
+        assert b["key"] == json.dumps([b["value"], b["footprint"], b["lcsc"] or "", b["mpn"] or "", b["category"], b["manufacturer"], b["datasheet"]], ensure_ascii=False, separators=(",", ":")), case["name"]
+    actual = parts_lines(case["objects"])
+    assert len(actual) == len(expected["lines"]), (case["name"], actual)
+    for got, want in zip(actual, expected["lines"]):
+        assert {k: (len(got["refs"]) if k == "quantity" else got[k]) for k in want} == want, (case["name"], got)
+        assert all(identities[i]["key"] == got["key"] for i in identities
+                   if identities[i]["ref"] in got["refs"] and "unit_identity_conflict" not in got["problems"]), case["name"]
+contract_obj = {"kind": "symbol", "ref": "R1 unit 2", "props": {
+    "Value": "10kΩ", "Footprint": "R_0805", " LCSC Part # ": " c123 ", "Mfg Part #": " RC ",
+    "Mfr.": " Yageo ", "Datasheet": "HTTPS://example.test/rc.pdf", "symbol": "Device:R_Small"}}
+assert bom_identity(contract_obj) == {
+    "included": True, "excludedReason": None, "ref": "R1", "value": "10kΩ", "footprint": "R_0805",
+    "lcsc": "C123", "mpn": "RC", "manufacturer": "Yageo", "datasheet": "HTTPS://example.test/rc.pdf",
+    "category": "Resistors", "key": '["10kΩ","R_0805","C123","RC","Resistors","Yageo","HTTPS://example.test/rc.pdf"]'}
+contract_obj["props"]["Datasheet"] = "javascript:alert(1)"
+assert bom_identity(contract_obj)["datasheet"] is None
+print("ok bom shared cases")
+
+
 # Project payload and report settings omit opted-out features; supplier lookup remains deferred.
 import copy
 here = os.getcwd()
@@ -1152,7 +1500,10 @@ try:
                     lines = {s: parts_lines(objects[s]) for s in ("base", "head")}
                     mark_new_problems(lines["base"], lines["head"])
                     assert {k: p["parts"][k] for k in ("lines", "changes", "supplier")} == {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]), "supplier": None}
-                    assert set(p["parts"]) == {"lines", "changes", "supplier", "coverage", "field_changes", "dnp_mismatch"}
+                    assert set(p["parts"]) == {"lines", "changes", "supplier", "summary", "exports", "coverage", "field_changes", "dnp_mismatch"}
+                    assert p["parts"]["summary"] == {"components": 1, "unique": 1, "withMpn": 0, "byCategory": {"Resistors": 1}}
+                    assert p["parts"]["exports"]["preset"] == "jlcpcb" and p["parts"]["exports"]["fab"].startswith("Comment,Designator,Footprint,LCSC,Quantity\r\n")
+                    assert p["parts"]["lines"][0]["category"] == "Resistors" and p["parts"]["lines"][0]["refsCompressed"] == "R1"
                     assert p["parts"]["changes"][0]["action"] == "swapped"
                     assert all("supplier" not in line for line in p["parts"]["lines"])
                 html = pathlib.Path("review/kicad-review.html").read_text()
@@ -1162,12 +1513,52 @@ try:
                 embedded = json.loads(payload)
                 assert embedded == opted_out_embedded
                 del embedded["blobs"]
-                assert embedded == data
+                assert embedded == compact_bom_lines(data)
+                assert all("key" not in l and None not in l.values() for q in embedded["projects"] if "parts" in q for l in q["parts"]["lines"]), "embedded lines drop key and null fields"
+                assert all("key" in l for q in data["projects"] if "parts" in q for l in q["parts"]["lines"]), "data.json keeps them"
+                changed_lines = lambda d: [x for q in d["projects"] if "parts" in q for c in q["parts"]["changes"] for x in (c["before"], c["after"]) if x]
+                assert all("key" not in x and None not in x.values() for x in changed_lines(embedded)), "embedded change lines drop key and null fields"
+                assert not parts_enabled or (changed_lines(data) and all("key" in x for x in changed_lines(data))), "data.json change lines keep key"
+                assert "bom" not in data, "single-project reports keep their existing payload shape"
+        # Report-level BOM appears in both offline HTML and JSON only with multiple opted-in projects.
+        multi_projects = [{"dir": b["name"], "name": b["name"], "status": "modified"} for b in boards]
+        write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": multi_projects})})
+        board_objects = {b["name"]: b["objects"] for b in boards}
+        for enabled in (False, True):
+            settings["parts"]["enabled"] = enabled
+            with patch("kicad_review.project_objects", side_effect=lambda path, name: board_objects[name]), \
+                 patch("kicad_review.load_settings", return_value=settings), patch("sys.stdout", new=io.StringIO()):
+                kicad_review.cmd_report(None)
+            multi_data = json.loads(pathlib.Path("review/data.json").read_text())
+            embedded = json.loads(pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
+            del embedded["blobs"]
+            assert embedded == compact_bom_lines(multi_data)
+            assert ("bom" in multi_data) == enabled
+            if enabled:
+                assert embedded["bom"]["lines"] and all("key" not in l and None not in l.values() for l in embedded["bom"]["lines"]), "embedded repo lines drop key and null fields"
+                assert all("key" in l for l in multi_data["bom"]["lines"]), "data.json repo lines keep key"
+                assert multi_data["bom"] == combined
+                assert multi_data["bom"]["summary"]["components"] == sum(p["parts"]["summary"]["components"] for p in multi_data["projects"])
+            else:
+                no_sink = []
+                build_project(project, {}, settings, None, 0, no_sink)
+                assert no_sink == [], "disabled parts must not append repository BOM inputs"
         settings["parts"]["enabled"] = True
+        sink = []
+        with_sink = build_project(project, {}, settings, None, 0, sink)
+        assert [(s["name"], s["lines"]) for s in sink] == [(project["name"], with_sink["parts"]["lines"])], "build_project hands the head lines to the repository BOM"
+        assert sink[0]["objects"] == objects["head"], "the sink carries head properties, not base properties"
         with patch("kicad_review.project_objects", return_value={}):
             empty = build_project(project, {}, settings)["parts"]
             assert {k: empty[k] for k in ("lines", "changes", "supplier", "field_changes", "dnp_mismatch")} == {"lines": [], "changes": [], "supplier": None, "field_changes": [], "dnp_mismatch": []}
             assert empty["coverage"]["base"] is None and all(v == [0, 0] for v in empty["coverage"]["head"].values())
+            assert empty["summary"] == {"components": 0, "unique": 0, "withMpn": 0, "byCategory": {}} and empty["exports"]["fab"] == "Comment,Designator,Footprint,LCSC,Quantity\r\n"
+            with patch('kicad_review.bom_jlcpcb_csv', side_effect=ValueError('X1 exceeds 2048 bytes')):
+                usable = build_project(project, {}, settings)['parts']
+                assert usable['exports']['fab'] is None and usable['exports']['csv'] and '2048' in usable['exports']['fabError']
+                assert usable['summary']['components'] == 0
+            settings["fabrication"]["preset"] = "pcbway"
+            assert build_project(project, {}, settings)["parts"]["exports"]["preset"] == "pcbway"
 finally:
     os.chdir(here)
 print("ok parts report data")
@@ -1190,6 +1581,24 @@ conflict = {"refs": ["R2"], "value": "1k", "lcsc": "C1", "problems": ["lcsc_conf
 m = parts_markdown({"projects": [{"name": "C", "parts": {"lines": [conflict], "supplier": None,
     "changes": [{"action": "added", "refs": ["R2"], "before": None, "after": conflict}]}}]})
 assert "1 with a problem" in m and "R2 one LCSC number on several values" in m, "conflict counts as a problem: " + m
+# Otherwise-valid units must not hide their identity disagreement behind a clean report.
+from kicad_review import BLOCKING, mark_new_problems
+unit_objects = {str(i): {"kind": "symbol", "ref": ref, "props": {
+    "Value": "TL072", "Footprint": "SOIC-8", "LCSC": "C123", "MPN": mpn}}
+    for i, (ref, mpn) in enumerate((("U1", "A"), ("U1 unit 2", "B")))}
+unit_lines = parts_lines(unit_objects)
+assert len(unit_lines) == 1 and unit_lines[0]["refs"] == ["U1"], unit_lines
+assert unit_lines[0]["problems"] == ["unit_identity_conflict"], unit_lines
+assert BLOCKING & set(unit_lines[0]["problems"]), "unit identity conflict blocks ordering"
+unit_parts = {"lines": unit_lines, "changes": diff_parts([], unit_lines), "supplier": None}
+for canonical in (False, True):
+    if canonical:
+        mark_new_problems([], unit_lines)
+    unit_markdown = parts_markdown({"projects": [{"name": "Units", "parts": unit_parts}]})
+    assert "1 line, 1 with a problem." in unit_markdown, unit_markdown
+    assert "1 problem introduced" in unit_markdown, unit_markdown
+    assert "U1 conflicting identities across symbol units" in unit_markdown, unit_markdown
+print("ok unit identity conflict report")
 print("ok parts markdown")
 
 # A large introduced-parts list stays within GitHub's comment limit, preserving checks.
@@ -1350,10 +1759,12 @@ print("ok fabrication requires successful tool checkout")
 import textwrap
 script = textwrap.dedent(notes_step.split("run: |\n", 1)[1])
 tool_source = pathlib.Path(kicad_review.__file__).read_text()
+vendor_source = pathlib.Path(kicad_review.__file__).with_name("vendor").joinpath("bom_csv.py").read_text()
 with tempfile.TemporaryDirectory() as t:
     try:
         os.chdir(t)
         write(t, {"review/data.json": json.dumps(rdata), "tools/kicad_review.py": tool_source,
+                  "tools/vendor/bom_csv.py": vendor_source,
                   "bin/gh": "#!" + sys.executable + "\nimport os, pathlib, sys\nif sys.argv[2] == 'view':\n p = pathlib.Path('view-count'); n = int(p.read_text()) if p.exists() else 0; p.write_text(str(n + 1)); print('changed notes' if n and os.environ['BODY_CHANGED'] == '1' else 'human notes')\nelif sys.argv[2] == 'edit':\n pathlib.Path('edited').write_text('yes')\n"})
         pathlib.Path("bin/gh").chmod(0o755)
         for changed in (False, True):
@@ -1727,7 +2138,9 @@ with tempfile.TemporaryDirectory() as d:
     kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
     try:
         os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
-        cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        with patch("sys.stdout", new=io.StringIO()) as diagnostics:
+            cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+        assert diagnostics.getvalue() == "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
     finally:
         kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
     assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
@@ -1776,8 +2189,9 @@ with tempfile.TemporaryDirectory() as d:
         pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
-                with patch("kicad_review.subprocess.run", side_effect=failure):
+                with patch("kicad_review.subprocess.run", side_effect=failure), patch("sys.stdout", new=io.StringIO()) as diagnostics:
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
+                assert diagnostics.getvalue() == "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
                 assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
     finally:
         os.chdir(old_cwd)
@@ -2158,9 +2572,10 @@ print("ok bom readiness comment")
 # Grouped lines: every reference's MPN and values are checked, and the comment names only the offending references.
 L = parts_lines({"1": symp("R1", Value="10k", Footprint="0805", MPN="TBD"), "2": symp("R2", Value="10k", Footprint="0805", MPN="AP2112"),
                  "3": symp("R3", Value="10k", Footprint="0805"), "4": symp("U1", Value="LDO", Footprint="SOT23", MPN="AP2112")})
-r = next(l for l in L if "R1" in l["refs"])
-assert "placeholder" in r["problems"] and "mpn_footprint_conflict" in r["problems"], r
-assert r["problem_refs"] == {"placeholder": ["R1"], "mpn_footprint_conflict": ["R2"]}, r
+# Different MPNs are different BOM lines, so R1 (TBD), R2 (AP2112) and R3 (none) each own a line.
+r, r2 = next(l for l in L if "R1" in l["refs"]), next(l for l in L if "R2" in l["refs"])
+assert r["problems"] == ["missing_lcsc", "placeholder"] and r["problem_refs"] == {"placeholder": ["R1"]}, r
+assert "mpn_footprint_conflict" in r2["problems"] and r2["problem_refs"] == {"mpn_footprint_conflict": ["R2"]}, r2
 u = next(l for l in L if "U1" in l["refs"])
 assert u["problem_refs"] == {"mpn_footprint_conflict": ["U1"]}, u
 mark_new_problems([], L)

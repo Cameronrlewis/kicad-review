@@ -17,6 +17,8 @@ import csv
 import datetime
 import gzip
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
@@ -1429,7 +1431,7 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
             nickname, _, item = identity.rpartition(":")
             if identity == key or ((c["kind"], nickname) not in libraries and item == c["item"]
                                    and by_item.get((c["kind"], item)) == {c["lib"]}):
-                users.add(o["ref"].split(" unit ")[0])
+                users.add(base_ref(o["ref"]))
         users = sorted(users, key=natural)
         svg, sizes = {}, {}
         for side in ("base", "head"):
@@ -1822,11 +1824,11 @@ def bom_violations(objs, fields):
         if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
             continue
         missing = [f for f in fields if (p.get(f) or "").strip() in ("", "~")]
-        if missing and not o["ref"].split(" unit ")[0] in {v["ref"] for v in out}:
-            out.append({"type": "missing_fields", "severity": "error", "ref": o["ref"].split(" unit ")[0],
-                        "description": f"{o['ref'].split(' unit ')[0]} has no {', '.join(missing)}",
+        if missing and not base_ref(o["ref"]) in {v["ref"] for v in out}:
+            out.append({"type": "missing_fields", "severity": "error", "ref": base_ref(o["ref"]),
+                        "description": f"{base_ref(o['ref'])} has no {', '.join(missing)}",
                         "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
-                        "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
+                        "key": ("bom", base_ref(o["ref"]), tuple(missing))})
     return out
 
 
@@ -2012,6 +2014,11 @@ COVERAGE_FIELDS = {
 }
 
 
+def base_ref(ref):
+    """Strip the parser's symbol-unit suffix from a reference."""
+    return (ref or "").split(" unit ")[0]
+
+
 def bom_parts(objs):
     """BOM symbols, one entry per reference (units of one part count once); DNP, excluded and unannotated parts left out."""
     out = {}
@@ -2019,7 +2026,7 @@ def bom_parts(objs):
         p = o["props"]
         if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
             continue
-        out.setdefault(o["ref"].split(" unit ")[0], p)
+        out.setdefault(base_ref(o["ref"]), p)
     return out
 
 
@@ -2036,27 +2043,46 @@ def bom_coverage(objs, settings):
     return cov
 
 
+def bom_identity(obj):
+    """Canonical BOM contract for one schematic object (spec 08). Fields are unclipped; display clipping belongs to 09."""
+    p = obj.get("props") or {}
+    ref = base_ref(obj.get("ref"))  # units of one part share their base reference
+    reason = ("not_symbol" if obj.get("kind") != "symbol" else "dnp" if p.get("dnp") == "yes" else
+              "excluded" if p.get("in_bom") == "no" else "unannotated" if ref.endswith("?") else None)
+    value, footprint = p.get("Value", ""), p.get("Footprint", "")
+    lcsc, mpn = (field(p, LCSC_FIELDS) or "").upper() or None, field(p, MPN_FIELDS)
+    ds = field(p, ("datasheet",))
+    datasheet = ds if ds and ds.lower().startswith(("http://", "https://")) else None
+    manufacturer, category = field(p, MANUFACTURER_FIELDS), bom_category(ref, p.get("symbol"))
+    return {"included": reason is None, "excludedReason": reason, "ref": ref, "value": value, "footprint": footprint,
+            "lcsc": lcsc, "mpn": mpn, "manufacturer": manufacturer,
+            "datasheet": datasheet, "category": category,
+            # ensure_ascii=False, compact separators. 10 uses this key as received from 09 and never recomputes it.
+            "key": json.dumps([value, footprint, lcsc or "", mpn or "", category, manufacturer, datasheet], ensure_ascii=False, separators=(",", ":"))}
+
+
 def parts_lines(objs):
-    """One line per distinct part on the schematic (Value + Footprint + LCSC), with what blocks a supplier lookup."""
-    lines = {}
+    """One line per distinct part on the schematic (Value + Footprint + LCSC + MPN + category + manufacturer + datasheet),
+    with what blocks a supplier lookup."""
+    lines, first_key, conflicts = {}, {}, set()
     for o in objs.values():
-        p = o["props"]
-        if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
+        b = bom_identity(o)
+        if not b["included"]:
             continue
-        lcsc = (field(p, LCSC_FIELDS) or "").upper() or None
-        ds = field(p, ("datasheet",))
-        line = lines.setdefault((p.get("Value", ""), p.get("Footprint", ""), lcsc), {
-            "value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "lcsc": lcsc,
-            "mpn": field(p, MPN_FIELDS), "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
-            "refs": [], "problems": []})
-        if o["ref"] not in line["refs"]:
-            line["refs"].append(o["ref"])
+        if first_key.setdefault(b["ref"], b["key"]) != b["key"]:
+            conflicts.add(b["ref"])  # units of one reference disagree: count once and flag below
+            continue
+        line = lines.setdefault(b["key"], {
+            "value": b["value"], "footprint": b["footprint"], "lcsc": b["lcsc"], "mpn": b["mpn"],
+            "manufacturer": b["manufacturer"], "category": b["category"], "datasheet": b["datasheet"],
+            "key": b["key"], "refs": [], "problems": []})
+        if b["ref"] not in line["refs"]:
+            line["refs"].append(b["ref"])
             # Per-reference values: a grouped line can hide one reference's MPN or placeholder behind another's.
-            line.setdefault("_each", []).append((o["ref"], field(p, MPN_FIELDS), (p.get("Value", ""), field(p, MPN_FIELDS), lcsc)))
+            line.setdefault("_each", []).append((b["ref"], b["mpn"], (b["value"], b["mpn"], b["lcsc"])))
     by_lcsc = {}
     for l in lines.values():
         l["refs"].sort(key=natural)
-        l["key"] = "|".join([l["value"], l["footprint"], l["lcsc"] or ""])
         if l["lcsc"] and not re.fullmatch(r"C\d+", l["lcsc"]):
             l["problems"].append("bad_lcsc")
         if not l["lcsc"]:
@@ -2082,7 +2108,221 @@ def parts_lines(objs):
         if hit:
             l["problems"].append("mpn_footprint_conflict")
             l.setdefault("problem_refs", {})["mpn_footprint_conflict"] = hit
+        l["refsCompressed"] = ref_ranges(l["refs"])
+        if conflicts.intersection(l["refs"]):
+            l["problems"].append("unit_identity_conflict")
     return sorted(lines.values(), key=lambda l: natural(l["refs"][0]))
+
+
+# ---- BOM view: categories, reference ranges and summary (spec 08). ----
+
+BOM_CATEGORIES = ("Resistors", "Capacitors", "Inductors & Ferrites", "Diodes & LEDs", "Transistors",
+                  "ICs & Modules", "Connectors", "Test Points", "Mechanical", "Other")
+BOM_PREFIXES = {"R": "Resistors", "RN": "Resistors", "RV": "Resistors", "C": "Capacitors", "L": "Inductors & Ferrites",
+                "FB": "Inductors & Ferrites", "D": "Diodes & LEDs", "LED": "Diodes & LEDs", "Q": "Transistors",
+                "U": "ICs & Modules", "IC": "ICs & Modules", "J": "Connectors", "P": "Connectors", "CN": "Connectors",
+                "TP": "Test Points", "H": "Mechanical", "MH": "Mechanical"}
+# KiCad library nicknames that say what a part is when its reference prefix does not.
+BOM_LIBRARY_WORDS = (("connector", "Connectors"), ("testpoint", "Test Points"), ("mountinghole", "Mechanical"),
+                     ("transistor", "Transistors"), ("mcu", "ICs & Modules"), ("regulator", "ICs & Modules"),
+                     ("amplifier", "ICs & Modules"), ("memory", "ICs & Modules"), ("interface", "ICs & Modules"),
+                     ("sensor", "ICs & Modules"), ("rf_module", "ICs & Modules"))
+
+
+def bom_category(ref, lib_id):
+    """Category from the reference prefix (R, C, L/FB, D/LED, Q, U, J/P, TP, H/MH), then the symbol name
+    (Device:R_Small is an R), then the library nickname (Connector_Generic); Other for the rest."""
+    prefix = re.match(r"[A-Za-z]+", ref or "")
+    if prefix and prefix.group(0).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[prefix.group(0).upper()]
+    library, _, item = (lib_id or "").rpartition(":")
+    head = re.match(r"([A-Za-z]+)(?:_|$)", item)  # "R_Small" is an R; "L7805" is not an inductor
+    if head and head.group(1).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[head.group(1).upper()]
+    return next((category for word, category in BOM_LIBRARY_WORDS if word in library.lower()), "Other")
+
+
+def ref_ranges(refs):
+    """['R1','R3','R7','R8','R9','R12'] -> 'R1, R3, R7-R9, R12'. Runs of two or more join. Prefixes stay apart;
+    sub-parts (U1A), suffixes (R5A), leading zeros (R01) and non-numeric references stay literal and break a run."""
+    out, run = [], []
+
+    def flush():
+        out.append(f"{run[0][0]}{run[0][1]}-{run[-1][0]}{run[-1][1]}" if len(run) > 1 else "".join(run[0]))
+        run.clear()
+
+    for ref in sorted(set(refs), key=lambda ref: (natural(ref), ref)):
+        m = re.fullmatch(r"([A-Za-z_]+)([1-9]\d*)", ref)
+        if m and run and run[-1][0] == m.group(1) and int(run[-1][1]) + 1 == int(m.group(2)):
+            run.append(m.groups())
+            continue
+        if run:
+            flush()
+        if m:
+            run.append(m.groups())
+        else:
+            out.append(ref)
+    if run:
+        flush()
+    return ", ".join(out)
+
+
+def bom_summary(lines):
+    """Header numbers of the BOM view; byCategory counts components and keeps BOM_CATEGORIES order."""
+    by = Counter()
+    for line in lines:
+        by[line["category"]] += len(line["refs"])
+    return {"components": sum(by.values()), "unique": len(lines), "withMpn": sum(1 for l in lines if present(l["mpn"])),
+            "byCategory": {c: by[c] for c in BOM_CATEGORIES if by[c]}}
+
+
+# Vendored bom_csv.py (Bouni/kicad-jlcpcb-tools, MIT; commit and licence in vendor/bom_csv.py). Loaded by path, so this
+# module's own bom_csv(lines) writer keeps its name.
+_VENDOR_SPEC = importlib.util.spec_from_file_location("vendor_bom_csv", pathlib.Path(__file__).with_name("vendor") / "bom_csv.py")
+vendor_bom_csv = importlib.util.module_from_spec(_VENDOR_SPEC)
+_VENDOR_SPEC.loader.exec_module(vendor_bom_csv)
+
+
+# ---- BOM files for the report (spec 08): the generic CSV, the JLCPCB file through the vendored planner, and PCBWay. ----
+# ponytail: ceiling: these writers serve the report only; the release (07) keeps KiCad's own export (Owner decision 2026-10-26:
+# option A). Ceiling of the JLCPCB file: the planner splits by the bytes-less-CRLF rule, so its configured budget reserves two
+# bytes for the CRLF before planning. A split therefore fits the stricter written-record limit instead of refusing an otherwise
+# splittable group; a reference that cannot fit still refuses the whole file (fail closed).
+
+BOM_LINE_MAX_BYTES = vendor_bom_csv.BOM_LINE_MAX_BYTES  # 2048, the vendored rule; JLCPCB rejects longer designator cells
+# Configure this private, path-loaded planner once; the vendored source and logic stay unchanged.
+vendor_bom_csv.BOM_LINE_MAX_BYTES = BOM_LINE_MAX_BYTES - 2
+BOM_JLCPCB_HEADER = ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
+BOM_PCBWAY_HEADER = ("Designator", "Qty", "Manufacturer", "Mfg Part #", "Description/Value", "Package/Footprint")
+BOM_HEADER = ("Category", "Quantity", "Value", "Footprint", "References", "MPN", "LCSC", "Datasheet")
+
+
+def neutral(text):
+    """A cell a spreadsheet would run as a formula (=, +, -, @, tab, CR) gets a leading quote. Applied once per cell."""
+    text = "" if text is None else str(text)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def csv_line(cells):
+    """One CSV line with CRLF; every cell passes through neutral()."""
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\r\n").writerow([neutral(c) for c in cells])
+    return out.getvalue()
+
+
+def bom_order(lines):
+    return sorted(lines, key=lambda l: (BOM_CATEGORIES.index(l["category"]), natural(l["refs"][0])))
+
+
+def bom_csv(lines):
+    return csv_line(BOM_HEADER) + "".join(
+        csv_line([l["category"], len(l["refs"]), l["value"], l["footprint"], ", ".join(l["refs"]), l["mpn"], l["lcsc"], l["datasheet"]])
+        for l in bom_order(lines))
+
+
+def bom_fabrication_lines(lines, objects, part_field, preset):
+    """Split ordering fields separately without changing displayed LCSC/MPN lines."""
+    if objects is None:
+        if part_field and part_field != PRESETS[preset]["part_field"]:
+            raise ValueError("Custom fabrication.part_field needs head symbol properties")
+        return lines
+    selected = (part_field.strip().lower(),) if part_field else (LCSC_FIELDS if preset == "jlcpcb" else MPN_FIELDS)
+    by_ref = {}
+    for obj in objects.values():
+        identity = bom_identity(obj)
+        # Repository inputs carry the board separately: strip symbol units before qualifying,
+        # never interpret a literal " unit " in a project name as a symbol-unit suffix.
+        ref = f"{obj['_bomBoard']}:{identity['ref']}" if "_bomBoard" in obj else identity["ref"]
+        if not identity["included"] or ref in by_ref:
+            continue  # match parts_lines: the first eligible unit supplies each reference's fields
+        number = field(obj["props"], selected)
+        if preset == "jlcpcb" and not part_field:
+            number = number.upper() if number else None  # same normalization as parts_lines
+        by_ref[ref] = number
+    out = []
+    for line in lines:
+        groups = {}
+        for ref in line["refs"]:
+            groups.setdefault(by_ref.get(ref), []).append(ref)
+        out.extend({**line, "refs": refs, "orderingPart": number} for number, refs in groups.items())
+    return out
+
+
+def bom_jlcpcb_csv(lines):
+    """Comment, Designator, Footprint, LCSC, Quantity. The vendored planner (vendor_bom_csv.plan_bom) decides every row,
+    so a longer designator list continues on another row of the same part with its own Quantity. This adapter adds the
+    formula guard before planning and fails closed: a reference that cannot fit, or a written record over
+    BOM_LINE_MAX_BYTES including its CRLF, raises ValueError instead of writing an oversize row."""
+    groups = [vendor_bom_csv.BomGroup(neutral(l["value"]), tuple(neutral(ref) for ref in l["refs"]), neutral(l["footprint"]),
+                                      neutral(l.get("orderingPart", l["lcsc"]))) for l in bom_order(lines)]
+    plan = vendor_bom_csv.plan_bom(groups, None)
+    if plan.warnings:
+        raise ValueError(f"JLCPCB export unavailable ({BOM_LINE_MAX_BYTES} UTF-8 bytes including CRLF): {plan.warnings[0]}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
+    out = [csv_line(BOM_JLCPCB_HEADER)]
+    for row in plan.lines:
+        text = csv_line(row)
+        if len(text.encode("utf-8")) > BOM_LINE_MAX_BYTES:
+            raise ValueError(f"JLCPCB export unavailable: the BOM row for {row[1].split(',')[0]} is {len(text.encode('utf-8'))} UTF-8 bytes with its line break, over {BOM_LINE_MAX_BYTES}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
+        out.append(text)
+    return "".join(out)
+
+
+def bom_pcbway_csv(lines):
+    return csv_line(BOM_PCBWAY_HEADER) + "".join(
+        csv_line([",".join(l["refs"]), len(l["refs"]), l["manufacturer"], l.get("orderingPart", l["mpn"]), l["value"], l["footprint"]]) for l in bom_order(lines))
+
+
+def bom_exports(lines, preset, part_field=None, objects=None):
+    """Keep report/generic CSV usable if fabrication export fails."""
+    out = {"preset": preset, "csv": bom_csv(lines), "fab": None, "fabError": None}
+    try:
+        fabrication = bom_fabrication_lines(lines, objects, part_field, preset)
+        out["fab"] = bom_pcbway_csv(fabrication) if preset == "pcbway" else bom_jlcpcb_csv(fabrication)
+    except ValueError as exc:
+        out["fabError"] = str(exc)
+    return out
+
+
+def bom_repository(boards, preset, part_field=None):
+    """Combined BOM across the repository's projects (Owner decision 2026-10-26). A board line joins another board's line
+    only when key, category, manufacturer and datasheet all match. Board-qualified references stay distinct;
+    quantities add only inside a joined line."""
+    names = [b["name"] for b in boards]
+    if len(set(names)) != len(names) or not all(names):
+        return {"boards": names, "error": "Combined BOM unavailable: project names must be unique and non-empty.", "summary": bom_summary([]), "lines": [], "exports": None}
+    joined, objects = {}, {}
+    for b in boards:
+        for uid, obj in b["objects"].items():
+            objects[(b["name"], uid)] = {**obj, "_bomBoard": b["name"]}
+        for line in b["lines"]:
+            ident = json.dumps([line["key"], line["category"], line["manufacturer"], line["datasheet"]], ensure_ascii=False, separators=(",", ":"))
+            comb = joined.setdefault(ident, {"key": line["key"], "category": line["category"], "value": line["value"], "footprint": line["footprint"],
+                                             "lcsc": line["lcsc"], "mpn": line["mpn"], "manufacturer": line["manufacturer"], "datasheet": line["datasheet"],
+                                             "refs": [], "boards": {}})
+            comb["refs"] += [(b["name"], ref) for ref in line["refs"]]
+            comb["boards"][b["name"]] = len(line["refs"])
+    lines = []
+    for comb in joined.values():
+        runs = {}
+        for name, ref in comb["refs"]:
+            runs.setdefault(name, []).append(ref)
+        lines.append({**comb, "refs": [f"{name}:{ref}" for name, ref in comb["refs"]],
+                      "refsCompressed": "; ".join(f"{name}:{ref_ranges(refs)}" for name, refs in runs.items())})
+    lines = bom_order(lines)
+    return {"boards": names, "error": None, "summary": bom_summary(lines), "lines": lines,
+            "exports": bom_exports(lines, preset, part_field, objects)}
+
+
+def compact_bom_lines(data):
+    """Copy of the report data with each BOM line's derived `key` and null optional fields left out, for the embedded page only.
+    Python keeps both in memory and in review/data.json; the page never reads `key` and treats a missing optional field as null."""
+    slim = lambda l: l and {k: v for k, v in l.items() if k != "key" and not (v is None and k in ("lcsc", "mpn", "manufacturer", "datasheet"))}
+    out = {**data, "projects": [{**p, "parts": {**p["parts"], "lines": [slim(l) for l in p["parts"]["lines"]],
+                                                 "changes": [{**r, "before": slim(r["before"]), "after": slim(r["after"])} for r in p["parts"]["changes"]]}}
+                                if p.get("parts") else p for p in data["projects"]]}
+    if data.get("bom"):
+        out["bom"] = {**data["bom"], "lines": [slim(l) for l in data["bom"]["lines"]]}
+    return out
 
 
 def diff_parts(base, head):
@@ -2094,7 +2334,7 @@ def diff_parts(base, head):
         x, y = b.get(ref), h.get(ref)
         if x and y and x["key"] == y["key"]:
             continue
-        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint"
+        action = "added" if not x else "removed" if not y else "swapped" if x["lcsc"] != y["lcsc"] else "value" if x["value"] != y["value"] else "footprint" if x["footprint"] != y["footprint"] else "mpn"
         r = rows.setdefault((action, x and x["key"], y and y["key"]), {"action": action, "refs": [], "before": x, "after": y})
         r["refs"].append(ref)
     return list(rows.values())
@@ -2123,7 +2363,7 @@ def mark_new_problems(base_lines, head_lines):
 
 def dnp_mismatches(objs):
     """References fitted on one of schematic and board and DNP on the other."""
-    sym = {o["ref"].split(" unit ")[0]: o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
+    sym = {base_ref(o["ref"]): o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
     fp = {o["ref"]: "dnp" in (o["props"].get("attributes") or "").split() for o in objs.values() if o["kind"] == "footprint"}
     return sorted((r for r in sym.keys() & fp.keys() if sym[r] != fp[r]), key=natural)
 
@@ -2339,7 +2579,7 @@ def interface_check(p, settings, objs, out_dir):
         path = f"{out_dir}/{s}/netlist.net"
         if not os.path.exists(path):
             return None, None
-        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
+        syms = {base_ref(o["ref"]): o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
         where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
         with open(path, encoding="utf-8") as fh:
             return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
@@ -2507,7 +2747,7 @@ def model3d_missing(out, objs):
     return rows
 
 
-def build_project(p, blobs, settings, waivers=None, change_offset=0):
+def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=None):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     pages = {}
@@ -2578,8 +2818,11 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         has_base = any(o["kind"] == "symbol" for o in objs["base"].values())
         parts = {"lines": lines["head"], "changes": diff_parts(lines["base"], lines["head"]),
                  "supplier": None,  # Filled only when DigiKey lookup is enabled.
+                 "summary": bom_summary(lines["head"]), "exports": bom_exports(lines["head"], settings["fabrication"]["preset"], settings["fabrication"].get("part_field"), objs["head"]),
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
+        if bom_sink is not None:  # repository BOM (Task 5A) reads the head lines and objects
+            bom_sink.append({"name": p["name"], "lines": lines["head"], "objects": objs["head"]})
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
@@ -2759,10 +3002,13 @@ def cmd_report(args):
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
     data["projects"] = []
     change_offset = 0
+    bom_boards = []
     for p in det["projects"]:
-        project = build_project(p, blobs, settings, waivers, change_offset)
+        project = build_project(p, blobs, settings, waivers, change_offset, bom_boards)
         data["projects"].append(project)
         change_offset += len(project["changes"])
+    if len(bom_boards) >= 2:  # repository-wide BOM, only when there are several projects (Owner decision 2026-10-26)
+        data["bom"] = bom_repository(bom_boards, settings["fabrication"]["preset"], settings["fabrication"].get("part_field"))
     if settings.get("digikey", {}).get("enabled"):
         try:
             with open("review/supplier.json", encoding="utf-8") as fh:
@@ -2779,7 +3025,7 @@ def cmd_report(args):
         data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
                            "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
-    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
+    payload = json.dumps(compact_bom_lines(data), separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
     with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
@@ -3052,8 +3298,9 @@ def cmd_summary(args):
 
 PROBLEM_TEXT = {"missing_lcsc": "missing LCSC number", "bad_lcsc": "LCSC number malformed", "lcsc_conflict": "one LCSC number on several values",
                 "placeholder": "placeholder value", "mpn_footprint_conflict": "one MPN on several footprints",
+                "unit_identity_conflict": "conflicting identities across symbol units",
                 "out_of_stock": "out of stock", "not_found": "not found at DigiKey", "ambiguous": "several DigiKey matches", "discontinued": "discontinued", "unavailable": "lookup unavailable"}
-BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "out_of_stock", "not_found", "discontinued"}
+BLOCKING = {"missing_lcsc", "bad_lcsc", "lcsc_conflict", "placeholder", "mpn_footprint_conflict", "unit_identity_conflict", "out_of_stock", "not_found", "discontinued"}
 
 
 def parts_markdown(data):
