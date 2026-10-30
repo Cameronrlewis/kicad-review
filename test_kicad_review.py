@@ -6140,6 +6140,7 @@ assert bom_cases, "shared BOM cases must not be empty"
 if bom_handoff:  # the skip is allowed only while this branch truly lacks 08: a merge that keeps the stand-in fails here
     kr_src = pathlib.Path(kr.__file__).read_text(encoding="utf-8")
     assert kr_src.count("\ndef bom_identity(") == 1, "08's bom_identity is merged: delete the 08 handoff block"
+    assert callable(getattr(kr, "parts_lines", None)), "kicad_review.parts_lines is missing or renamed: update the 08 handoff guard"
     assert not any("category" in l or "refsCompressed" in l for case in bom_cases for l in kr.parts_lines(case["objects"])), \
         "08's parts_lines is merged: delete the 08 handoff block so the shared parts_lines leg runs"
 for case in bom_cases:
