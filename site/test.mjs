@@ -2091,7 +2091,9 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     .replace('<meta name="deploy-sha" content="unknown">', '')
     .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>', '')
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
-    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
+    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '')
+    // BR02 lazy 3D model broker (authenticated wrapper only) is additive.
+    .replace(/<script>\(function threeClient\([\s\S]*?<\/script>/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
   assert.equal(createHash('sha256').update(current).digest('hex'), '34c84c0ecd44924b5e60d973f98419dfe51b49ce83d31841488613eecab462c7');
   const restore = shareCreationFetch();
@@ -4658,7 +4660,7 @@ test('legacy metadata shares in-flight builds but is never cached', async () => 
 // 06's verifyReportFamily (site/report-kind.js) merges after 02 (ORDER.md), so design
 // reports fail closed here. Hard tripwire: this fails as soon as 06's verifier exists on the branch.
 test('BR02 design family waits on 06 report-kind.js', () => {
-  assert.ok(!existsSync(new URL('./report-kind.js', import.meta.url)), '06 Task 4A follow-up: make readArtifactHtml/artifact3d accept the '
+  assert.ok(!existsSync(new URL('./report-kind.js', import.meta.url)), '06 Task 4A follow-up: make readArtifactHtml/served3d (artifact3d and lazy shell) accept the '
     + "design family via verifyReportFamily('design',name,data.report.head), flip the 'design' row to a 200 control, "
     + 'add the both-family conditional/revocation flow, then delete this test');
 });
@@ -4781,5 +4783,212 @@ test('BR02 image route rejects 64-character 3D model digests', async () => {
       const result = await call(path, { headers: { Cookie: `s=${sealed}` } });
       assert.equal(result.status, 404, path); assert.equal(result.headers.get('ETag'), null);
     }
+  } finally { restore(); }
+});
+
+import { lazy3dData, currentBody } from './report-shell.js';
+test('BR02 lazy stripping is opt-in and retains blobs used outside 3D',async()=>{
+  const digest='d'.repeat(64);
+  const asset=kind=>({digest,artifactName:`kicad-3d-${digest}-${kind}.gz`,bytes:32});
+  const data={version:1,blobs:{model:'large-base64',parts:'index-base64',poster:'png-base64'},
+    projects:[{board:{model3d:{base:'model',head:'model'},parts3d:{base:'parts',head:'parts'},
+      poster3d:{head:'poster'},assets3d:{base:{model:asset('board.glb'),parts:asset('board-parts.json')},
+        head:{model:asset('board.glb'),parts:asset('board-parts.json')}}}}]};
+  const lazy=lazy3dData(data);
+  assert.equal(lazy.projects[0].board.model3d.head,'model');
+  assert.equal(lazy.blobs.model,undefined);assert.equal(lazy.blobs.parts,undefined);
+  assert.equal(lazy.blobs.poster,'png-base64');assert.equal(data.blobs.model,'large-base64');
+  const shared=structuredClone(data);shared.projects[0].other='model';
+  assert.equal(lazy3dData(shared).blobs.model,'large-base64');
+  const stored='<script>window.REVIEW_DATA = '+JSON.stringify(data)+';</script>';
+  assert.match(currentReport(stored),/large-base64/);
+  assert.doesNotMatch(currentReport(stored,{lazy3d:true}),/large-base64/);
+  assert.match(await currentBody(new Response(stored)),/large-base64/);
+  assert.equal(currentReport('<p>legacy foreign body</p>'),null);
+});
+
+test('BR02 asset nonce rejects late old success and error replies',async()=>{
+  const source=readFileSync(new URL('../ui/review3d.js',import.meta.url),'utf8');
+  const match=source.match(/^([ \t]*)function requestAsset3d\(asset,kind,s\) \{[\s\S]*?^\1\}/m);
+  assert.ok(match,'actual requestAsset3d declaration');
+  const listeners=new Set(),sent=[],parent={postMessage:m=>sent.push(m)};
+  const window={parent,addEventListener:(_,fn)=>listeners.add(fn),removeEventListener:(_,fn)=>listeners.delete(fn)};
+  const request=runInNewContext('('+match[0]+')',{window,Promise,Error,DOMException,ArrayBuffer,Uint8Array,
+    crypto:globalThis.crypto,setTimeout,clearTimeout});
+  const bytes=new TextEncoder().encode('new indexed payload').buffer;
+  const digest=Buffer.from(await crypto.subtle.digest('SHA-256',bytes)).toString('hex');
+  const session=nonce=>({assetId:0,assetNonce:nonce,abort:new AbortController(),dead:false});
+  const old=session('11111111-1111-4111-8111-111111111111');
+  const a=request({digest:'a'.repeat(64)},'board.glb',old).catch(e=>e.name);
+  const oldMessage=sent[0];old.dead=true;old.abort.abort();assert.equal(await a,'AbortError');
+  const current=session('22222222-2222-4222-8222-222222222222');let settled=false;
+  const b=request({digest},'board-parts.json',current).finally(()=>{settled=true});
+  const emit=async data=>{await Promise.all([...listeners].map(fn=>fn({source:parent,data})));};
+  await emit({...oldMessage,error:'old request failed'});
+  await emit({...oldMessage,bytes:new Uint8Array([0]).buffer});
+  assert.equal(settled,false,'old nonce must not settle new id 1');
+  await emit({...sent[1],bytes,gzip:false});assert.deepEqual(await b,bytes);
+  assert.equal(listeners.size,0);
+});
+
+// Authenticated lazy 3D end to end in Node: real Worker dispatch for wrapper, raw report and
+// 3D route; the real parent broker; the real report-side requestAsset3d. Only GitHub is mocked.
+// fetch() in a browser removes HTTP gzip; the broker's fetch adapter does the same here.
+async function lazy3dHarness({ family = 'comparison', scenario = 'valid' } = {}) {
+  const head = 'b'.repeat(40), glb = Buffer.concat([Buffer.from('glTF'), Buffer.from([2, 0, 0, 0]), Buffer.alloc(24, 7)]);
+  const index = Buffer.from(JSON.stringify([{ ref: 'R16', uuid: '0a1b2c3d-0000-4000-8000-000000000001', hasModel: true, box: [0, 0, 0, 1, 1, 1] }]));
+  const files = { model: { kind: 'board.glb', raw: glb, id: 91 }, parts: { kind: 'board-parts.json', raw: index, id: 92 } };
+  for (const f of Object.values(files)) {
+    f.gz = gzipSync(f.raw); f.digest = createHash('sha256').update(f.raw).digest('hex');
+    f.descriptor = { digest: f.digest, artifactName: `kicad-3d-${f.digest}-${f.kind}.gz`, bytes: f.gz.length };
+  }
+  const data = { version: 1, blobs: { model: files.model.gz.toString('base64'), parts: files.parts.gz.toString('base64'), poster: 'png-base64' },
+    projects: [{ dir: 'Thermal_Camera', changes: [], board: { model3d: { base: null, head: 'model', enabled: true }, parts3d: { base: null, head: 'parts' }, poster3d: { head: 'poster' },
+      assets3d: { base: null, head: { model: files.model.descriptor, parts: files.parts.descriptor } } } }] };
+  if (family === 'design') data.report = { kind: 'design', head: scenario === 'head-mismatch' ? 'd'.repeat(40) : head };
+  const name = scenario === 'bad-name' ? 'other.html' : family === 'design' ? `kicad-design-${head.slice(0, 7)}.html` : 'kicad-review-aaaaaaa-bbbbbbb-pass.html';
+  const stored = '<script>window.REVIEW_DATA = ' + JSON.stringify(data) + ';</script>';
+  const h = { files, stored, name, html: 0, model: 0, parts: 0, threeRequests: [], replies: [], revoked: scenario === 'no-pull', expired: scenario === 'expired-html',
+    siblingExpired: scenario === 'expired-sibling', siblingRun: scenario === 'other-run' ? 10 : 9, sealed: await signedIn() };
+  h.restore = mockFetch(async url => {
+    url = String(url);
+    if (url.endsWith('/repos/Cameronrlewis/repo')) return h.revoked
+      ? Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })
+      : Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
+    if (url.endsWith('/actions/runs/9')) return Response.json({ status: 'completed', conclusion: 'success', event: 'push' });
+    if (url.endsWith('/artifacts/12')) return Response.json({ name, expired: h.expired, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
+    if (url === 'https://artifact.actions.githubusercontent.com/report') { h.html++; return new Response(stored); }
+    if (url.includes('/runs/9/artifacts?')) return Response.json({ artifacts: Object.values(files).map(f => ({ id: f.id, name: f.descriptor.artifactName,
+      expired: h.siblingExpired, workflow_run: { id: h.siblingRun } })) });
+    const zip = url.match(/\/artifacts\/(9[12])\/zip$/);
+    if (zip) return new Response(null, { status: 302, headers: { Location: `https://artifact.actions.githubusercontent.com/file${zip[1]}` } });
+    const file = Object.entries(files).find(([, f]) => url === `https://artifact.actions.githubusercontent.com/file${f.id}`);
+    if (file) { h[file[0]]++; return new Response(file[1].gz); }
+    throw Error('unexpected URL ' + url);
+  });
+  const cookie = { Cookie: `s=${h.sealed}` };
+  h.wrapper = async () => call('/r/Cameronrlewis/repo/a/12', { headers: cookie });
+  h.raw = async () => call('/r/Cameronrlewis/repo/a/12/raw', { headers: { ...cookie, 'Sec-Fetch-Dest': 'iframe' } });
+  h.route = async (kind, etag) => call(`/r/Cameronrlewis/repo/a/12/3d/${files[kind].digest}/${files[kind].kind}`,
+    { headers: etag ? { ...cookie, 'If-None-Match': etag } : cookie });
+  // Wire the real broker (parent) and real report-side request (child) through fake WindowProxies.
+  const childListeners = new Set(); let brokerListener;
+  const child = { postMessage: (message, origin, transfer) => { h.replies.push({ message, origin, transfer }); for (const fn of [...childListeners]) fn({ source: parentWindow, data: message }); } };
+  const parentWindow = { postMessage: message => brokerListener({ source: child, data: message, origin: 'null' }) };
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/Cameronrlewis/repo/a/12/3d/'})`, {
+    window: { addEventListener: (_, fn) => { brokerListener = fn; } }, document: { querySelector: () => ({ contentWindow: child }) },
+    Map, Number, ArrayBuffer, Uint8Array, Array, Error, String, crypto: globalThis.crypto,
+    fetch: async (url, options) => {
+      assert.equal(options.credentials, 'same-origin'); assert.equal(options.redirect, 'error');
+      const response = await call(url, { headers: cookie }); h.threeRequests.push({ url, status: response.status, headers: response.headers });
+      return response.ok && response.headers.get('Content-Encoding') === 'gzip'
+        ? new Response(gunzipSync(Buffer.from(await response.arrayBuffer()))) : response;
+    },
+  });
+  const source = readFileSync(new URL('../ui/review3d.js', import.meta.url), 'utf8');
+  const fn = source.match(/^([ \t]*)function requestAsset3d\(asset,kind,s\) \{[\s\S]*?^\1\}/m)[0];
+  const request = runInNewContext('(' + fn + ')', { window: { parent: parentWindow, addEventListener: (_, f) => childListeners.add(f),
+    removeEventListener: (_, f) => childListeners.delete(f) }, Promise, Error, DOMException, ArrayBuffer, Uint8Array, crypto: globalThis.crypto, setTimeout, clearTimeout });
+  const session = { assetId: 0, assetNonce: crypto.randomUUID(), abort: new AbortController(), dead: false };
+  h.open = key => request(files[key].descriptor, files[key].kind, session);
+  return h;
+}
+
+async function assertStrippedShell(h) {
+  const wrapper = await h.wrapper(), page = await wrapper.text();
+  assert.equal(wrapper.status, 200);
+  assert.ok(page.includes('{"endpoint":"/r/Cameronrlewis/repo/a/12/3d/"}'), 'wrapper installs the broker for this artifact id');
+  assert.match(wrapper.headers.get('Content-Security-Policy'), /connect-src 'self'/);
+  const raw = await h.raw(), served = readStoredData(await raw.text()), board = served.projects[0].board;
+  assert.equal(raw.status, 200);
+  assert.match(raw.headers.get('Content-Security-Policy'), /connect-src 'none'/);
+  assert.doesNotMatch(raw.headers.get('Content-Security-Policy'), /allow-same-origin/);
+  assert.equal(board.model3d.head, 'model'); assert.equal(board.parts3d.head, 'parts');
+  assert.deepEqual(board.assets3d.head, { model: h.files.model.descriptor, parts: h.files.parts.descriptor });
+  assert.equal(served.blobs.model, undefined); assert.equal(served.blobs.parts, undefined); assert.equal(served.blobs.poster, 'png-base64');
+  const original = readStoredData(h.stored);
+  assert.equal(original.blobs.model, h.files.model.gz.toString('base64')); assert.equal(original.blobs.parts, h.files.parts.gz.toString('base64'));
+  // Opening the report is not opening 3D: no route request and no model/index sibling download.
+  assert.equal(h.threeRequests.length, 0); assert.equal(h.model + h.parts, 0); assert.ok(h.html > 0);
+}
+
+// Reports the 3D route cannot serve keep their embedded models, so the authenticated view still renders 3D.
+async function assertEmbeddedShell(h) {
+  const raw = await h.raw(), served = readStoredData(await raw.text());
+  assert.equal(raw.status, 200);
+  assert.equal(served.blobs.model, h.files.model.gz.toString('base64')); assert.equal(served.blobs.parts, h.files.parts.gz.toString('base64'));
+  assert.equal(h.threeRequests.length, 0); assert.equal(h.model + h.parts, 0);
+}
+
+test('BR02 authenticated comparison report opens lazy 3D through the broker after stripping', async () => {
+  const h = await lazy3dHarness();
+  try {
+    await assertStrippedShell(h);
+    const glb = await h.open('model'), parts = await h.open('parts');
+    assert.equal(h.model, 1); assert.equal(h.parts, 1);
+    assert.deepEqual(h.threeRequests.map(r => r.url), ['model', 'parts'].map(k => `/r/Cameronrlewis/repo/a/12/3d/${h.files[k].digest}/${h.files[k].kind}`));
+    for (const [i, key] of ['model', 'parts'].entries()) {
+      const { status, headers } = h.threeRequests[i];
+      assert.equal(status, 200); assert.equal(headers.get('Content-Encoding'), 'gzip'); assert.equal(headers.get('Cache-Control'), 'private,no-cache');
+      assert.equal(headers.get('ETag'), `"${h.files[key].digest}"`); assert.equal(headers.get('Vary'), 'Cookie');
+    }
+    assert.equal(createHash('sha256').update(new Uint8Array(glb)).digest('hex'), h.files.model.digest);
+    assert.equal(new DataView(glb).getUint32(0, true), 0x46546c67, 'GLB magic, decoded exactly once');
+    assert.equal(JSON.parse(new TextDecoder().decode(parts))[0].ref, 'R16');
+    assert.ok(h.replies.every(r => r.message.gzip === false && r.transfer[0] === r.message.bytes && r.origin === '*'));
+  } finally { h.restore(); }
+});
+
+for (const scenario of ['bad-name', 'no-pull', 'expired-html', 'expired-sibling', 'other-run']) {
+  test('BR02 authenticated lazy 3D fails closed: ' + scenario, async () => {
+    const h = await lazy3dHarness({ scenario: scenario === 'no-pull' || scenario === 'expired-html' ? 'valid' : scenario });
+    try {
+      if (scenario === 'bad-name') await assertEmbeddedShell(h);
+      else if (scenario !== 'no-pull' && scenario !== 'expired-html') await assertStrippedShell(h);
+      // A previously issued ETag must never turn a denial into 304.
+      const etags = { model: `"${h.files.model.digest}"`, parts: `"${h.files.parts.digest}"` };
+      if (scenario === 'no-pull' || scenario === 'expired-html') {
+        await assertStrippedShell(h); assert.equal((await h.route('model')).status, 200); h.threeRequests.length = 0;
+        if (scenario === 'no-pull') h.revoked = true; else h.expired = true;
+      }
+      const before = h.model + h.parts;
+      for (const key of ['model', 'parts']) {
+        await assert.rejects(h.open(key), /Model (unavailable|access denied)/);
+        const direct = await h.route(key, etags[key]);
+        assert.equal(direct.status, 404, key); assert.match(direct.headers.get('Cache-Control'), /no-store/); assert.equal(direct.headers.get('ETag'), null);
+      }
+      assert.ok(h.threeRequests.every(r => r.status === 404), 'broker saw only denials');
+      if (scenario !== 'expired-sibling' && scenario !== 'other-run') assert.equal(h.model + h.parts, before, 'no asset body download');
+      assert.ok(h.replies.every(r => r.message.error && !r.message.bytes), 'no silent fallback bytes');
+    } finally { h.restore(); }
+  });
+}
+
+// 06's verifyReportFamily is not on this branch (tripwire: 'BR02 design family waits on 06 report-kind.js').
+// Until it lands the 3D route fails closed for design snapshots, so their authenticated shell keeps the
+// embedded models (served3d); the tripwire's follow-up flips this to the comparison test's stripped positive flow.
+for (const scenario of ['valid', 'head-mismatch']) test('BR02 authenticated design snapshot keeps embedded 3D until 06 verifier: ' + scenario, async () => {
+  const h = await lazy3dHarness({ family: 'design', scenario });
+  try {
+    await assertEmbeddedShell(h);
+    for (const key of ['model', 'parts']) {
+      await assert.rejects(h.open(key), /Model unavailable/);
+      const direct = await h.route(key, `"${h.files[key].digest}"`);
+      assert.equal(direct.status, 404); assert.match(direct.headers.get('Cache-Control'), /no-store/);
+    }
+    assert.equal(h.model + h.parts, 0);
+  } finally { h.restore(); }
+});
+
+test('BR02 guest shares keep embedded 3D blobs and never install the model broker', async () => {
+  const digest = 'e'.repeat(64), data = { version: 1, blobs: { model: 'embedded-glb' }, projects: [{ board: { model3d: { head: 'model' },
+    assets3d: { head: { model: { digest, artifactName: `kicad-3d-${digest}-board.glb.gz`, bytes: 40 } } } } }] };
+  assert.doesNotMatch(sharedPage({ token: 'a.b', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' }), /threeClient|kicad3d/);
+  const token = await guestToken(), restore = guestFetch(), originalMock = globalThis.fetch;
+  globalThis.fetch = (url, options) => url === shareBlob ? Promise.resolve(new Response(`<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`)) : originalMock(url, options);
+  try {
+    const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
+    assert.equal(raw.status, 200); assert.equal(readStoredData(await raw.text()).blobs.model, 'embedded-glb');
   } finally { restore(); }
 });

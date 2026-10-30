@@ -283,6 +283,12 @@ async function storedReport(artifact, active) {
   return blob;
 }
 
+const comparisonReport = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
+// Reports whose 3D assets artifact3d serves from their own run.
+// ponytail: design snapshots fail closed until 06's verifyReportFamily (site/report-kind.js) merges and binds name to data.report.head.
+const served3d = (metadata, data) => data?.report?.kind == null && comparisonReport.test(metadata.name)
+  && /^\d{1,20}$/.test(String(metadata.workflow_run?.id));
+
 const reportBuilds = new Map();
 // ponytail: one cold build at a time per isolate (peak ~ one report's transient copies); raise only if queued cold loads time out.
 let buildTail = Promise.resolve();
@@ -302,7 +308,9 @@ async function cachedReport(artifact, active) {
   const build = buildTail.then(async () => {
     const stored = await (await storedReport(artifact, active)).text();
     const data = readStoredData(stored);
-    const raw = currentReport(stored, { lazyAssets: true, storedData: data }) ?? stored;
+    // Only the authenticated wrapper's raw report is built here; guest/share keep embedded blobs.
+    // Models are stripped only when artifact3d would serve them, so no report loses its 3D view.
+    const raw = currentReport(stored, { lazyAssets: true, lazy3d: served3d(metadata, data), storedData: data }) ?? stored;
     // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
     // Count shared/fallback strings twice rather than under-account retained report bytes.
     // Stored HTML is temporary: only parsed data (4x envelope allowance) and raw body remain.
@@ -384,7 +392,6 @@ async function readExactly(response, size) {
   }
 }
 
-const comparisonReport = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
 // 3D assets come only from the validated report's own run, named by a descriptor in its stored data.
 async function artifact3d(request, env, owner, repo, id, digest, kind) {
   let active;
@@ -397,8 +404,7 @@ async function artifact3d(request, env, owner, repo, id, digest, kind) {
       const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
       if (stored instanceof Response) return stored;
       const { metadata, data } = stored, run = String(metadata.workflow_run?.id);
-      // ponytail: design snapshots fail closed until 06's verifyReportFamily (site/report-kind.js) merges and binds name to data.report.head.
-      if (data?.report?.kind != null || !comparisonReport.test(metadata.name) || !/^\d{1,20}$/.test(run)) return assetError();
+      if (!served3d(metadata, data)) return assetError();
       const key = kind === 'board.glb' ? 'model' : 'parts', name = `kicad-3d-${digest}-${kind}.gz`;
       const descriptor = (Array.isArray(data.projects) ? data.projects : []).flatMap((p) => ['base', 'head'].map((side) => p?.board?.assets3d?.[side]?.[key]))
         .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0);

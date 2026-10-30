@@ -6745,3 +6745,69 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     return true;
   } finally {assetText=original;window.setTimeout=nativeTimeout;client.dispose();}
 `]);
+
+// BR02 Task 9B: offline reports decode embedded models only; hosted lazy shells ask the parent broker.
+CHECKS.push(["BR02 processed offline has no model fetch", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ if(!Review3D.state.firstFrame)return 'no genuine model frame';
+ const requests=performance.getEntriesByType('resource').filter(r=>/\\/3d\\//.test(r.name));
+ return requests.length===0||'offline requested hosted models';
+`]);
+// Session fault matrix (Task 5A) for broker replies: the head model blob is stripped as in the
+// hosted lazy shell and a same-origin iframe stands in for the authenticated parent WindowProxy.
+CHECKS.push(...['parent-corrupt-reply','parent-delayed-reply'].map(fault=>["BR02 processed session fault "+fault,"v=3d&m=side",`
+ if(!proj().board.parts3d)return 'skip';
+ const fault=${JSON.stringify(fault)}, p=structuredClone(proj()), stage=document.querySelector('#stage'), head=p.board.assets3d?.head?.model;
+ if(!head)return 'processed fixture has no head model descriptor';
+ const frame=document.createElement('iframe');frame.hidden=true;document.body.appendChild(frame);
+ const fake=frame.contentWindow, requests=[], parentProperty=Object.getOwnPropertyDescriptor(window,'parent');
+ fake.addEventListener('message',e=>{if(e.data?.kicad3d===1)requests.push(e.data);});
+ const reply=data=>window.dispatchEvent(new MessageEvent('message',{source:fake,data}));
+ const wait=async test=>{for(let i=0;i<300&&!test();i++)await new Promise(r=>setTimeout(r,10));return test();};
+ const embedded=Uint8Array.from(atob(REVIEW_DATA.blobs[p.board.model3d.head]),c=>c.charCodeAt(0));
+ const decoded=await new Response(new Blob([embedded]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+ p.board.model3d.head='br02-lazy-head';
+ Object.defineProperty(window,'parent',{value:fake,configurable:true});
+ try {
+   const opened=Review3D.show(stage,p,S);
+   if(!await wait(()=>requests.length))return 'no broker request';
+   const q=requests[0];
+   if(q.kicad3d!==1||q.kind!=='board.glb'||q.digest!==head.digest||!/^[-0-9a-f]{36}$/.test(q.nonce)||q.id!==1)return 'bad broker request '+JSON.stringify(q);
+   if(fault==='parent-corrupt-reply') {
+     const bad=decoded.slice(0);new Uint8Array(bad)[100]^=1;
+     reply({kicad3d:1,nonce:q.nonce,id:q.id,bytes:bad,gzip:false});
+     await opened;
+     const st=Review3D.state;
+     if(st.loading)return 'corrupt reply left loading unsettled';
+     if(!/digest mismatch/.test(st.errorsBySide.head||''))return 'digest mismatch not reported: '+st.errorsBySide.head;
+     if(st.roots[1])return 'corrupt bytes reached the loader';
+     if(!st.roots[0])return 'valid base lost';
+     if(!document.querySelector('#stage [data-poster="head"]:not([hidden])'))return 'head poster lost';
+     const retry=stage.querySelector('[data-3d-retry]');if(!retry)return 'no accessible retry';
+     requests.length=0;retry.click();
+     if(!await wait(()=>requests.length))return 'retry sent no broker request';
+     if(requests[0].nonce===q.nonce)return 'retry reused the old session nonce';
+     reply({kicad3d:1,nonce:requests[0].nonce,id:requests[0].id,bytes:decoded.slice(0),gzip:false});
+     if(!await wait(()=>Review3D.state.firstFrame&&Review3D.state.roots[1]&&!Review3D.state.loading))return 'verified retry did not render head';
+     if(Review3D.state.errorsBySide.head)return 'verified retry kept the error';
+   } else {
+     // Navigation while the broker is still answering: the old session must settle and stay dead.
+     Review3D.dispose();await opened;
+     await Review3D.show(stage,proj(),S);
+     const current=Review3D.state,canvases=[...stage.querySelectorAll('canvas')];
+     reply({kicad3d:1,nonce:q.nonce,id:q.id,bytes:decoded.slice(0),gzip:false});
+     reply({kicad3d:1,nonce:q.nonce,id:q.id,error:'late failure'});
+     await new Promise(r=>setTimeout(r,200));
+     if(Review3D.state!==current)return 'late reply replaced newer session';
+     const settled=[...stage.querySelectorAll('canvas')];
+     if(settled.length!==canvases.length||settled.some((c,i)=>c!==canvases[i]))return 'late reply resurrected canvas';
+     if(!current.firstFrame||current.loading||current.errorsBySide.head)return 'newer session disturbed by late reply';
+   }
+   Review3D.dispose();
+   const counts=Review3D.state.resourceCounts;
+   return counts.workers===0&&counts.urls===0&&counts.pending===0||'session leaked owned resources';
+ } finally {
+   if(parentProperty)Object.defineProperty(window,'parent',parentProperty);else delete window.parent;
+   frame.remove();Review3D.dispose();
+ }
+`]));

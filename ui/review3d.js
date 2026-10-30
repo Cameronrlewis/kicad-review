@@ -28,15 +28,49 @@ window.Review3D = (() => {
     s.resizeObserver?.disconnect(); s.intersectionObserver?.disconnect();
     s.resourceCounts.workers = s.resourceCounts.urls = s.resourceCounts.pending = 0;
   }
+  // Hosted lazy reports keep the blob ID but drop its payload; the authenticated parent
+  // broker then serves the same-run asset named by this additive descriptor.
+  function asset3d(board, side, key, kind) {
+    const a = board.assets3d?.[side]?.[key];
+    return a && /^[0-9a-f]{64}$/.test(a.digest) && a.artifactName === `kicad-3d-${a.digest}-${kind}.gz`
+      && Number.isFinite(a.bytes) && a.bytes > 0 ? a : null;
+  }
+  // Embedded bytes first; otherwise a digest-verified broker reply. Fetch already removed HTTP gzip.
+  async function bytes3d(board, side, id, key, kind, s, missing) {
+    if (window.REVIEW_DATA.blobs[id]) return guardSession(s, decode3d({b64:window.REVIEW_DATA.blobs[id]}, s));
+    const asset = asset3d(board, side, key, kind); if (!asset) throw Error(missing);
+    const bytes = await guardSession(s, requestAsset3d(asset, kind, s));
+    return guardSession(s, decode3d({bytes, gzip:false}, s));
+  }
+  function requestAsset3d(asset,kind,s) {
+    if(window.parent===window)return Promise.reject(Error('Model is not embedded'));
+    if(s.dead||s.abort.signal.aborted)return Promise.reject(new DOMException('Viewer closed','AbortError'));
+    return new Promise((resolve,reject)=>{
+      const id=++s.assetId;
+      const finish=(error,bytes)=>{clearTimeout(timer);window.removeEventListener('message',receive);
+        s.abort.signal.removeEventListener('abort',cancel);error?reject(error):resolve(bytes)};
+      const cancel=()=>finish(new DOMException('Viewer closed','AbortError'));
+      const receive=async e=>{
+        // Nonce first: a reply for another session or document never settles this request.
+        if(e.source!==window.parent||e.data?.kicad3d!==1||e.data.nonce!==s.assetNonce||e.data.id!==id)return;
+        if(e.data.error)return finish(Error(e.data.error));
+        try {
+          if(!(e.data.bytes instanceof ArrayBuffer))throw Error('Invalid model response');
+          const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',e.data.bytes))]
+            .map(x=>x.toString(16).padStart(2,'0')).join('');
+          if(digest!==asset.digest)throw Error('3D asset digest mismatch');
+          if(s.dead)return cancel();finish(null,e.data.bytes);
+        } catch(error){finish(error);}
+      };
+      const timer=setTimeout(()=>finish(Error('Model request timed out. Retry.')),30000);
+      window.addEventListener('message',receive);s.abort.signal.addEventListener('abort',cancel,{once:true});
+      window.parent.postMessage({kicad3d:1,nonce:s.assetNonce,id,digest:asset.digest,kind},'*');
+    });
+  }
   async function loadPartIndex(board, side, s) {
     const id = board.parts3d?.[side]; if (!id) return [];
     try {
-      let bytes;
-      if (window.REVIEW_DATA.blobs[id]) bytes = await guardSession(s, decode3d({b64:window.REVIEW_DATA.blobs[id]}, s));
-      // parked for Task 9A: authorized model/index requests replace embedded bytes.
-      else if (board.assets3d?.[side]?.parts && typeof requestAsset3d === 'function')
-        bytes = await requestAsset3d(board.assets3d[side].parts, 'board-parts.json', s);
-      else throw Error('3D part index unavailable');
+      const bytes = await bytes3d(board, side, id, 'parts', 'board-parts.json', s, '3D part index unavailable');
       if (s.dead) return [];
       const {THREE:T} = THREE3D;
       const rows = ThreeParts.validate(JSON.parse(new TextDecoder().decode(bytes)));
@@ -51,7 +85,7 @@ window.Review3D = (() => {
       return [];
     }
   }
-  // parked for Task 9A: bytes/gzip sources also decode authorized broker responses; HTTP gzip is fetch-decoded.
+  // Sources: embedded base64 gzip, or verified broker bytes with gzip:false (HTTP gzip is fetch-decoded).
   function decode3d(source, s) {
     if (s.dead) return Promise.reject(new DOMException('Viewer closed', 'AbortError'));
     try {
@@ -778,7 +812,7 @@ window.Review3D = (() => {
       refs:new Set(), changesByRef:{}, indexedSides:new Set(), hiddenGroups:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
       revision:single ? 'head' : ['base', 'head'].includes(appState.revision) ? appState.revision : 'head',
       abort:new AbortController(), partWarn:new Set(), pending:new Map(), urls:new Set(), worker:null, nextId:0,
-      // parked for Task 9A: per-session broker correlation and replay protection.
+      // Per-session broker correlation: a fresh nonce per show, never reused across documents.
       assetId:0, assetNonce:crypto.randomUUID(), animationFrames:new Set(),
       available:Object.fromEntries(sides.map(side => [side, !!(model[side] || project.board.poster3d?.[side] || project.board.assets3d?.[side]?.model || model.errors?.[side])])),
       geometries:new Set(), materials:new Set(), textures:new Set(), environments:new Map(), comparisonMaterials:new Map(),
@@ -854,7 +888,7 @@ window.Review3D = (() => {
         if (!model[side]) return null;
         const digest = state.modelDigests[side] = project.board.assets3d?.[side]?.model?.digest || model[side];
         if (!session.decodedModels.has(digest)) {
-          const pending = guardSession(session, decode3d({b64:window.REVIEW_DATA.blobs[model[side]]}, session));
+          const pending = bytes3d(project.board, side, model[side], 'model', 'board.glb', session, '3D model unavailable');
           session.decodedModels.set(digest, pending);
           pending.catch(() => { if (session.decodedModels.get(digest) === pending) session.decodedModels.delete(digest); });
         }

@@ -51,23 +51,52 @@ export function declaredAssets(data) {
   return result;
 }
 
+// Authenticated lazy shell: drop model/index payloads that have a valid same-run asset
+// descriptor and no other consumer. Blob IDs in model3d/parts3d stay unchanged; 01's
+// image/hotspot and poster blobs are kept because something other than those slots names them.
+export function lazy3dData(input) {
+  // Deep clone everything but the blob payloads (strings, so a shallow copy is independent).
+  const data = structuredClone({ ...input, blobs: undefined }); data.blobs = { ...input.blobs };
+  const valid = (a, kind) => a && /^[0-9a-f]{64}$/.test(a.digest)
+    && a.artifactName === `kicad-3d-${a.digest}-${kind}.gz` && Number.isFinite(a.bytes) && a.bytes > 0;
+  const candidates = new Set(), removable = [];
+  for (const p of Array.isArray(data.projects) ? data.projects : []) for (const side of ['base', 'head']) {
+    const b = p?.board; if (!b) continue;
+    for (const [field, key, kind] of [['model3d', 'model', 'board.glb'], ['parts3d', 'parts', 'board-parts.json']]) {
+      const id = b[field]?.[side];
+      if (typeof id === 'string' && valid(b.assets3d?.[side]?.[key], kind)) {
+        candidates.add(id); removable.push([b[field], side, id]); b[field][side] = null;
+      }
+    }
+  }
+  const used = new Set();
+  const walk = o => {
+    if (typeof o === 'string') used.add(o);
+    else if (Array.isArray(o)) o.forEach(walk);
+    else if (o && typeof o === 'object') Object.values(o).forEach(walk);
+  };
+  for (const [key, value] of Object.entries(data)) if (key !== 'blobs') walk(value);
+  for (const [object, key, id] of removable) object[key] = id;
+  for (const id of candidates) if (!used.has(id)) delete data.blobs[id];
+  return data;
+}
+
 // Returns the stored report rebuilt with the current interface, or null to serve it unchanged
-// (no recognisable data script: a foreign or hand-edited file).
-export function currentReport(stored, { lazyAssets = false, storedData } = {}) {
+// (no recognisable data script: a foreign or hand-edited file). Offline, guest and share
+// callers keep every embedded blob; only the authenticated wrapper opts in to lazy stripping.
+export function currentReport(stored, { lazyAssets = false, lazy3d = false, storedData } = {}) {
   const start = stored.indexOf(DATA);
   const end = start < 0 ? -1 : stored.indexOf('</script>', start);
   if (end < 0) return null;
   let data = stored.slice(start + '<script>'.length, end);   // payload escapes every "<", so no early </script>
-  if (lazyAssets) {
+  if (lazyAssets || lazy3d) {
     const original = storedData === undefined ? readStoredData(stored) : storedData;
     if (!original) return null;
     // Keep cached blobs intact for subsequent authenticated asset requests.
-    const payload = { ...original, blobs: { ...original.blobs } };
-    const descriptors = declaredAssets(payload);
-    if (Object.keys(descriptors).length) {
-      for (const id of Object.keys(descriptors)) delete payload.blobs[id];
+    const payload = lazy3d ? lazy3dData(original) : { ...original, blobs: { ...original.blobs } };
+    if (lazyAssets) for (const id of Object.keys(declaredAssets(payload))) delete payload.blobs[id];
+    if (Object.keys(payload.blobs).length !== Object.keys(original.blobs || {}).length)
       data = `window.REVIEW_DATA = ${JSON.stringify(payload).replace(/</g, '\\u003c')};`;
-    }
   }
   // 3D: reuse the stored three.js bundle (vendored library, same for every report).
   const bundle = data.includes('"model3d"') ? stored.match(BUNDLE)?.[0] : null;
