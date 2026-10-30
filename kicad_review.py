@@ -1782,20 +1782,38 @@ def diff_rules(base_root, head_root, name) -> list[dict]:
     return rows
 
 
-def project_objects(proj_dir, name):
+def project_objects(proj_dir, name, issues=None):
     if not os.path.isdir(proj_dir):
         return {}
     objs = sch_objects(proj_dir, name)
     pcb = posixpath.join(proj_dir, f"{name}.kicad_pcb")
     if os.path.exists(pcb):
         objs.update(pcb_objects(pcb))
-    objs.update(pro_objects(posixpath.join(proj_dir, f"{name}.kicad_pro")))
-    dru = posixpath.join(proj_dir, f"{name}.kicad_dru")
-    if os.path.exists(dru):
-        with open(dru, encoding="utf-8") as fh:
-            objs["meta:dru"] = {"kind": "design rules", "ref": f"{name}.kicad_dru", "where": None,
-                                "props": {"custom rules": hashlib.sha1(fh.read().encode()).hexdigest()[:10]}}
+    for key, suffix, load in (
+        ("meta:pro", ".kicad_pro", pro_objects),
+        ("meta:dru", ".kicad_dru", lambda path: {"meta:dru": {
+            "kind": "design rules", "ref": name + ".kicad_dru", "where": None,
+            "props": {"custom rules": hashlib.sha1(pathlib.Path(path).read_bytes()).hexdigest()[:10]}}}),
+    ):
+        path = posixpath.join(proj_dir, name + suffix)
+        if not os.path.exists(path):
+            continue
+        try:
+            objs.update(load(path))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            if issues is not None:
+                issues.append({"channel": "rules", "reason": f"Unreadable {suffix} evidence", "unknownMeta": key})
+            print(f"{path}: optional rules unavailable: {exc}", file=sys.stderr)
     return objs
+
+
+def project_pair(p):
+    issues = []
+    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"], issues) for side in ("base", "head")}
+    for key in {i["unknownMeta"] for i in issues if "unknownMeta" in i}:
+        for side in objs:
+            objs[side].pop(key, None)
+    return objs, issues
 
 
 def object_pairs(base, head):
@@ -3531,7 +3549,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
                 pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
             row['svgCompare'] = pair
-    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    objs, _rule_issues = project_pair(p)
     changes = diff_objects(objs["base"], objs["head"])
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"

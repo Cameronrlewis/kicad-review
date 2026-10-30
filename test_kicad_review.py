@@ -1847,7 +1847,7 @@ try:
     project = {"dir": "P", "name": "P", "status": "modified"}
     write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [project]})})
     objects = {"base": {"r": sym("R1", "10k", "C1")}, "head": {"r": sym("R1", "10k", "C9")}}
-    with patch("kicad_review.project_objects", side_effect=lambda path, name: objects[path.split("/")[0]]), \
+    with patch("kicad_review.project_objects", side_effect=lambda path, name, issues=None: objects[path.split("/")[0]]), \
          patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
         for parts_enabled in (False, True):
             for models_enabled in (False, True):
@@ -5813,3 +5813,23 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
         warning = ''.join(str(call.args[0]) for call in log.write.call_args_list)
         assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
+
+# BR03 Task 6.2: unreadable optional rules keep symbols and drop unknown metadata on both sides.
+from kicad_review import project_pair
+with tempfile.TemporaryDirectory() as td:
+    old = os.getcwd(); os.chdir(td)
+    try:
+        for side in ("base", "head"):
+            write(side, {"p/p.kicad_sch": '(kicad_sch (symbol (uuid s) (at 1 2 0) (property "Reference" "R1")))',
+                         "p/p.kicad_pro": '{"board":{"design_settings":{"rules":{"min_clearance":0.2}}}}'})
+        for side in ("base", "head"):
+            file = pathlib.Path(side) / "p/p.kicad_pro"; valid = file.read_text(); file.write_text('{broken')
+            objs, issues = project_pair({"dir": "p", "name": "p"})
+            assert issues and issues[0]["channel"] == "rules"
+            assert all(any(o["kind"] == "symbol" for o in x.values()) for x in objs.values())
+            assert all("meta:pro" not in x for x in objs.values()), "BR03 unknown metadata became removal"
+            file.write_text(valid)
+        objs, issues = project_pair({"dir": "p", "name": "p"})
+        assert not issues and all("meta:pro" in x for x in objs.values())
+    finally: os.chdir(old)
+print('ok BR03 project_pair guards optional rules')
