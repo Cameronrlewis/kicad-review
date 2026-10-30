@@ -100,18 +100,19 @@
       : d?.kind==='pad-net' ? [side==='base'?d.before:d.after].filter(Boolean) : [];
   }
   function electricalNetMatch(scene,object,row,side) {
-    const name=scene?.nets.find(n=>n.id===object.net)?.name;
+    const name=scene?.nets?.find(n=>n.id===object.net)?.name;
     if(name && electricalNetNames(row,side).includes(name)) return true;
     const d=row?.detail;
     if(d?.kind!=='pad-net') return false;
-    const anchorSide=side==='base'?'base':'head';
-    const anchors=row.anchors?.[anchorSide]||[];
+    const anchors=row.anchors?.[side]||[];
     return anchors.some(a=>a.board && a.uuid===object.changeUuid &&
       a.padUuid===object.uuid && a.ref===object.reference && String(a.pin)===String(object.number));
   }
   function electricalLook(look,row,side) {
+    const names=electricalNetNames(row,side);
+    if(!names.length) return look;
     return {...look,netColors:{...look.netColors,...Object.fromEntries(
-      electricalNetNames(row,side).map(n=>[n,side==='base'?[1,.3,.3,1]:[.3,1,.3,1]]))}};
+      names.map(n=>[n,side==='base'?[1,.3,.3,1]:[.3,1,.3,1]]))}};
   }
   function marks(pane, state, look, actions, background, selectedRow) {
     const {renderer} = pane, hud = pane.markHud, {gl} = renderer, M = window.BoardMarks;

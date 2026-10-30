@@ -3599,10 +3599,22 @@ return true;
   `],
   ["BR03 net selection masks", "v=board", `
     ${MARK_STYLE_FIXTURE}
-    const p=proj(), saved=p.changes, row={id:'c903',kind:'net-members',action:'modified',
+    const p=proj(), saved=p.changes;
+    const row={id:'c903',kind:'net-members',action:'modified',
       detail:{kind:'members',beforeNets:['GND'],afterNets:['GND']},anchors:{base:[],head:[]}};
+    const padRow={id:'c904',kind:'board-pad-net',action:'modified',
+      detail:{kind:'pad-net',pin:'1',before:'NET_A',after:'NET_B'},
+      anchors:{
+        base:[{board:true,uuid:'style',padUuid:'style',ref:'U1',pin:'1'}],
+        head:[
+          {board:false,uuid:'style',padUuid:'style',ref:'U1',pin:'1'},
+          {board:true,uuid:'head-style',padUuid:'style',ref:'U1',pin:'1'}
+        ]
+      }};
     try {
-      p.changes=[row]; scene.nets=[{id:0,name:''},{id:1,name:'GND'}]; object.net=1;
+      p.changes=[row,padRow];
+      scene.nets=[{id:0,name:''},{id:1,name:'GND'},{id:2,name:'NET_A'},{id:3,name:'NET_B'}];
+      object.reference='U1'; object.number='1'; object.net=1;
       const mount=()=>{
         disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
         boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:p.changes,state:S,appearance:glAppearance});
@@ -3611,16 +3623,53 @@ return true;
       mount();
       const before=JSON.stringify(Appearance.get());
       let selected=0;
+      const drawOpts=[];
       for(const pane of boardDiff.panes) {
         const draw=pane.renderer.draw.bind(pane.renderer);
         pane.renderer.draw=opts=>{
-          if(opts.mask && opts.filter?.(object)) selected++;
+          if(opts.mask && opts.filter) {
+            drawOpts.push(opts);
+            if(opts.filter(object)) selected++;
+          }
           return draw(opts);
         };
       }
       boardDiff.render();
       if(!selected) return 'net selection did not reach neutral mask';
       if(object.changeIds.join(',')!=='c0') return 'derived net stole scene identity';
+
+      // Verify pad-net anchor match and before/after side mapping
+      object.net=0; // No net name match: test pure anchor matching
+      S.s=padRow.id;
+      drawOpts.length=0;
+      boardDiff.render();
+      if(drawOpts.length<2) return 'did not draw selection masks';
+      const [baseCall,headCall]=drawOpts.slice(-2);
+      const netAObj={net:2,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
+      const netBObj={net:3,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
+      const headObj={...object,changeUuid:'head-style'};
+      const badPinObj={...object,number:'2'};
+      const badRefObj={...object,reference:'U2'};
+
+      if(!baseCall.filter(object)) return 'pad-net base anchor failed to match';
+      if(baseCall.filter(headObj)) return 'pad-net base anchor matched head uuid';
+      if(!headCall.filter(headObj)) return 'pad-net head anchor failed to match';
+      if(headCall.filter(object)) return 'pad-net head anchor matched base uuid or non-board anchor';
+
+      if(!baseCall.filter(netAObj) || baseCall.filter(netBObj)) return 'pad-net base side beforeNets mapping failed';
+      if(!headCall.filter(netBObj) || headCall.filter(netAObj)) return 'pad-net head side afterNets mapping failed';
+
+      if(baseCall.filter(badPinObj) || baseCall.filter(badRefObj)) return 'pad-net anchor matched wrong pin or ref';
+
+      // Test unguarded scene.nets access: missing scene.nets should not throw
+      delete scene.nets;
+      try {
+        baseCall.filter(object);
+      } catch(e) {
+        return 'scene without nets threw: '+e.message;
+      }
+
+      scene.nets=[{id:0,name:''},{id:1,name:'GND'},{id:2,name:'NET_A'},{id:3,name:'NET_B'}];
       S.s=null; boardDiff.render();
       return JSON.stringify(Appearance.get())===before || 'temporary colour persisted';
     } finally {p.changes=saved; S.s=null; disposeBoardRenderers(); await draw();}
