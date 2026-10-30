@@ -56,3 +56,17 @@ test('emphasis, code and citations combine without breaking each other', () => {
   );
   assert.match(render('**Rail [net:/VBUS_5V]**', known), /<strong>Rail <button type="button" class="ask-link" data-ask-net="\/VBUS_5V">\/VBUS_5V<\/button><\/strong>/);
 });
+
+test('citation names are looked up exactly, without rewriting backticks, asterisks or private-use characters', () => {
+  const seen = [];
+  const names = ['a`b`c', 'AB', 'AB', 'x**y', 'x*y'];
+  const exact = { ref: () => false, net: n => { seen.push(n); return names.includes(n); } };
+  const html = render('[net:a`b`c] [net:AB] [net:AB] [net:x**y] [net:x*y]', exact);
+  assert.deepEqual(seen, names);
+  assert.ok(html.includes('data-ask-net="a`b`c">a`b`c</button>'));
+  assert.ok(html.includes('data-ask-net="AB">AB</button>'));
+  assert.ok(html.includes('data-ask-net="AB">AB</button>'));
+  assert.ok(html.includes('data-ask-net="x**y">x**y</button>'));
+  assert.ok(html.includes('data-ask-net="x*y">x*y</button>'));
+  assert.doesNotMatch(html, /missing|<strong>/);
+});
