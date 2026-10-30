@@ -6433,3 +6433,25 @@ with tempfile.TemporaryDirectory() as t:
     write(t, {"base/netlist.net.error":"failed after partial output"})
     assert kr.ask_index(f"{t}/base")["nets"] == {}
 print("ok ask context is written beside the report")
+
+# Ask (spec 09): the workflow uploads the context only when Ask is on, and never fails the review over it.
+wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+assert "steps.report.outputs.context_name" in wf and "review/design-context.json" in wf
+copy_step = wf[wf.index("- name: Copy design context"):]
+copy_step = copy_step[:copy_step.index("- name: Screenshots of changed drawings")]
+assert copy_step.count("if: steps.report.outputs.ask == 'true'") == 2 and copy_step.count("continue-on-error: true") == 2, copy_step
+assert "archive: false" in copy_step and "retention-days: 90" in copy_step
+assert wf.index("- name: Upload report") < wf.index("- name: Copy design context") < wf.index("- name: Screenshots of changed drawings")
+# 06 must be merged first. Its inert Ask-guarded hook is required, not an optional assertion.
+# 09 Task 5 enables the snapshot producer and tests ask-on and ask-off outputs.
+if "- name: Upload design snapshot context" in wf:
+    snap = wf[wf.index("- name: Upload design snapshot context"):]
+    snap = snap[:snap.index("\n      - name:", 1)] if "\n      - name:" in snap[1:] else snap
+    assert "steps.snapshot.outputs.context_name" in snap and "archive: false" in snap and "steps.snapshot.outputs.ask == 'true'" in snap, snap
+    assert "continue-on-error: true" in snap and "path: review/design/${{ steps.snapshot.outputs.context_name }}" in snap, snap
+    assert "retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in snap, snap
+    assert "retention-days: 90" not in snap, "snapshot context follows the repository snapshot retention variable, not comparison-report retention"
+else:
+    print("pending 06 merge: 06's Upload design snapshot context hook not in review.yml (plan-context.md:60)")
+print("ok ask context upload step")
+
