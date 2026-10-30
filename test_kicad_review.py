@@ -3959,6 +3959,7 @@ try:
     (snap_fab / "P-review-pcbway-positions.csv").write_text("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n")
     (snap_fab / "P-review-pcbway-bom.csv").write_text(",".join(label for _, label in kr.PRESETS["pcbway"]["bom"]) + "\n")
     dl_calls.clear()
+    pathlib.Path(case, "out/board.raw.glb.revision").write_text("b" * 40 + "\n")
     snap_entries = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40, policy=snap_policy, purpose="snapshot")
     assert all(e["error"] is None for e in snap_entries) and [c[0][3] for c in dl_calls] == ["pdf", "step"], (snap_entries, dl_calls)
     snap_manifest = json.loads(pathlib.Path(case, "out/downloads-snapshot/downloads.json").read_text())
@@ -4311,3 +4312,73 @@ for before, after in zip(raw_rows[1:], got[1:]):
     if before[6] == "Top" and rule(before[2]) is None:
         assert after[5] == f"{float(before[5]):.6f}", before  # unmatched top parts keep their angle
 print("ok cpl-rotation CPL regression")
+
+# ---- Whole-branch review: workflow command injection and snapshot provenance ----
+injected = "project%\r\n::error::forged,:"
+escaped = "project%25%0D%0A::error::forged,:"
+assert kr.workflow_command_escape(injected) == escaped
+assert kr.workflow_command_escape(injected, property=True) == "project%25%0D%0A%3A%3Aerror%3A%3Aforged%2C%3A"
+with patch("kicad_review.correct_positions", return_value=2), patch("kicad_review.load_cpl_table"), patch("kicad_review.load_cpl_overrides"), contextlib.redirect_stdout(io.StringIO()) as output:
+    kr.cpl_for_download("P.kicad_pro", injected, dl_settings, "raw", "dest")
+assert output.getvalue() == f"::notice::{escaped}: JLCPCB CPL rotation rules matched 2 rows (JLCKicadTools table, pinned)\n"
+with tempfile.TemporaryDirectory() as case:
+    raw, dest = pathlib.Path(case, "board.raw.glb"), pathlib.Path(case, "dest.glb")
+    raw.write_bytes(b"glTF")
+    with patch("kicad_review.shutil.copyfile", side_effect=OSError(injected)), contextlib.redirect_stdout(io.StringIO()) as output:
+        kr.glb_entry(str(raw), str(dest))
+    assert output.getvalue() == f"::warning::3D model (GLB): {escaped}\n"
+    source = dl_project(case, "P")
+    marker = pathlib.Path(case, "out/board.raw.glb.revision")
+    for revision in (None, "a" * 40, "b" * 7):
+        if revision is not None: marker.write_text(revision)
+        try:
+            export_downloads({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40, policy=dl_settings, purpose="snapshot")
+            raise AssertionError("unverified snapshot GLB accepted")
+        except ValueError as error:
+            assert "snapshot GLB revision" in str(error), error
+    assert not pathlib.Path(case, "out/downloads-snapshot").exists()
+with tempfile.TemporaryDirectory() as case:
+    source = dl_project(case, injected)
+    with patch("kicad_review.fab_parts", side_effect=ValueError), patch("kicad_review.release_project", side_effect=ValueError), contextlib.redirect_stdout(io.StringIO()) as output:
+        kr.fab_entry(f"{source}/{injected}.kicad_pro", injected, dl_settings, case, f"{case}/fab.zip")
+    assert output.getvalue().startswith(f"::warning::{escaped}: fabrication export failed")
+    assert len(output.getvalue().splitlines()) == 1
+    archive = pathlib.Path(case, "P-gerbers.zip")
+    with zipfile.ZipFile(archive, "w") as z: z.writestr("P.gtl", "data")
+    with patch("kicad_review.kibot_differences", return_value=[injected]), contextlib.redirect_stdout(io.StringIO()) as output:
+        kr.fab_notices(injected, dl_settings, [str(archive)])
+    assert output.getvalue() == f"::notice::{escaped}: jlcpcb fabrication differs from KiBot v1.9.1 template: {escaped}\n"
+    failure = {"kind": "pdf", "label": injected, "file": None, "error": injected}
+    with patch("kicad_review.fab_entry", return_value={**failure, "kind": "fab"}), patch("kicad_review.export_one", return_value=failure), patch("kicad_review.glb_entry", return_value={**failure, "kind": "glb"}), contextlib.redirect_stdout(io.StringIO()) as output:
+        export_downloads({"name": injected, "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert output.getvalue().splitlines() == [f"::warning::{escaped}: {escaped}: {escaped}"] * 3
+
+# Keep older workflow-command print sites covered by the same escaping contract.
+import ast
+commands = []
+for node in ast.walk(ast.parse(pathlib.Path(kr.__file__).read_text())):
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "print" or not node.args:
+        continue
+    arg = node.args[0]
+    if any(isinstance(part, ast.Constant) and isinstance(part.value, str) and part.value.startswith("::") for part in ast.walk(arg)):
+        commands.append(node)
+        assert isinstance(arg, ast.BinOp) and isinstance(arg.right, ast.Call) and isinstance(arg.right.func, ast.Name) and arg.right.func.id == "workflow_command_escape", node.lineno
+assert len(commands) >= 16
+print("ok workflow command injection and snapshot GLB revision gate")
+
+with tempfile.TemporaryDirectory() as case:
+    table = pathlib.Path(case, "table.csv")
+    for header in ('"Footprint pattern","Wrong","Offset X","Offset Y"',
+                   '"Footprint pattern","Rotation","Wrong","Offset Y"',
+                   '"Footprint pattern","Rotation","Offset X","Wrong"',
+                   '"Footprint pattern","Rotation","Offset X"',
+                   '"Footprint pattern","Rotation","Offset X","Offset Y","Extra"', ''):
+        data = (header + "\n").encode()
+        table.write_bytes(data)
+        with patch("kicad_review.CPL_TABLE_SHA256", hashlib.sha256(data).hexdigest()):
+            try:
+                kr.load_cpl_table(table)
+                raise AssertionError("invalid CPL header accepted")
+            except SystemExit as error:
+                assert "unexpected CPL rotation table header" in str(error), error
+print("ok complete CPL table header validation")

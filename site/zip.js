@@ -3,6 +3,13 @@ const u16 = (b, o) => new DataView(b.buffer, b.byteOffset, b.byteLength).getUint
 const u32 = (b, o) => new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(o, true);
 const fail = message => { throw new Error(message); };
 const names = new TextDecoder('utf-8', { fatal: true });
+// Bound the buffered directory independently of the archive's (up to 4 GB) size.
+const MAX_DIRECTORY_BYTES = 16 * 1024 * 1024;
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, byte) => {
+  let crc = byte;
+  for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  return crc >>> 0;
+});
 
 export async function exactRange(range, start, end, total, stream = false) {
   if (!Number.isSafeInteger(total) || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end >= total) fail('bad range');
@@ -38,6 +45,7 @@ export async function zipEntries(range, total) {
   if (u16(tail, end + 4) || u16(tail, end + 6) || u16(tail, end + 8) !== count || offset + size !== start + end) fail('bad directory');
   if (!count) { if (size !== 0) fail('bad directory'); return []; }
   if (size < count * 46) fail('bad directory');
+  if (size > MAX_DIRECTORY_BYTES) fail('central directory exceeds 16 MiB limit');
   const dir = await exactRange(range, offset, offset + size - 1, total), out = [], unique = new Set();
   let p = 0;
   for (let i = 0; i < count; i++) {
@@ -63,12 +71,19 @@ export async function zipEntryStream(range, entry) {
   if (!(entry.flags & 8) && (u32(head, 14) !== entry.crc || u32(head, 18) !== entry.size || u32(head, 22) !== entry.bytes)) fail('bad entry');
   const name = await exactRange(range, entry.offset + 30, entry.offset + 30 + n - 1, entry.total);
   if (names.decode(name) !== entry.name) fail('bad entry');
-  if (!entry.size) return new Response(new Uint8Array(0)).body;
-  let body = await exactRange(range, start, start + entry.size - 1, entry.total, true);
+  let body = entry.size ? await exactRange(range, start, start + entry.size - 1, entry.total, true) : new Response(new Uint8Array(0)).body;
   if (entry.method === 8) body = body.pipeThrough(new DecompressionStream('deflate-raw'));
-  let seen = 0;
+  let seen = 0, crc = 0xffffffff;
   return body.pipeThrough(new TransformStream({
-    transform(chunk, controller) { seen += chunk.byteLength; if (seen > entry.bytes) fail('bad entry length'); controller.enqueue(chunk); },
-    flush() { if (seen !== entry.bytes) fail('bad entry length'); },
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (seen > entry.bytes) fail('bad entry length');
+      for (const byte of chunk) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
+      controller.enqueue(chunk);
+    },
+    flush() {
+      if (seen !== entry.bytes) fail('bad entry length');
+      if (((crc ^ 0xffffffff) >>> 0) !== entry.crc) fail('CRC-32 mismatch');
+    },
   }));
 }

@@ -27,10 +27,22 @@ Only numeric colour data is reused; no KiCad GPL implementation source is copied
 
 Six toolbar icon variants and their derived inline SVG symbols are reused under
 CC-BY-SA-4.0. Authors, source, modifications and complete license: ui/icons/LICENSE.
-Only this artwork is share-alike; application code and the repository's existing
-licensing are unchanged. The theme-control disc icon is original project artwork.
+This artwork is licensed under CC-BY-SA-4.0. The theme-control disc icon is
+original project artwork.
 
 KiCad colour values, theme key names and layer mappings are data derived from
 KiCad 10.0 (commit 3e051f88), common/settings/builtin_color_themes.h and
 color_settings.cpp, KiCad Contributors, https://www.kicad.org/.
 No KiCad program source is included.
+
+# Vendored fabrication data and templates
+
+The unmodified JLCKicadTools CPL rotation data in cpl_rotations/ is distributed
+under GNU GPL v3. Source revision, attribution and data details:
+cpl_rotations/SOURCE.md. Complete license: cpl_rotations/LICENSE.
+
+The unmodified KiBot v1.9.1 JLCPCB and PCBWay templates in
+kibot_templates/v1.9.1/ are distributed under GNU AGPL v3. Source revision,
+attribution and template details: kibot_templates/v1.9.1/SOURCE.md.
+Complete license: kibot_templates/v1.9.1/LICENSE.
+These vendored materials carry their own license terms.

@@ -37,6 +37,12 @@ KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
 
 
+def workflow_command_escape(value, *, property=False):
+    """Escape GitHub workflow-command data, with extra separators for properties."""
+    value = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return value.replace(":", "%3A").replace(",", "%2C") if property else value
+
+
 def git(*args, check=True):
     r = subprocess.run(["git", "-c", "core.quotePath=false", *args], capture_output=True, text=True)
     if check and r.returncode:
@@ -147,7 +153,7 @@ def cmd_detect(args):
         try:
             review = load_settings(("",))["release"]["review"]
         except (SystemExit, tomllib.TOMLDecodeError, OSError):
-            print("::warning::Cannot read tag review settings; tag review stays off.")
+            print("::warning::" + workflow_command_escape("Cannot read tag review settings; tag review stays off."))
             review = False
         if not review:
             with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
@@ -346,7 +352,7 @@ def cmd_render(args):
                             # ponytail: unit 1 drawing; compare all units' pins, add unit views when requested.
                             pathlib.Path(f"{dest}/{lib_slug(c)}.svg").write_bytes(made[0].read_bytes())
                         except OSError:
-                            print(f"::warning::No drawing for library item {c['lib']}:{c['item']} ({side})")
+                            print("::warning::" + workflow_command_escape(f"No drawing for library item {c['lib']}:{c['item']} ({side})"))
 
     cache_renders()
 
@@ -1834,8 +1840,9 @@ def load_cpl_table(path=CPL_TABLE):
     data = pathlib.Path(path).read_bytes()
     if hashlib.sha256(data).hexdigest() != CPL_TABLE_SHA256:
         raise SystemExit(f"{path}: not the pinned CPL rotation table")
-    rows = list(csv.reader(data.decode("utf-8").splitlines()))
-    if rows[0][0] != "Footprint pattern":  # the header cells are quoted in the source; only the first cell is checked
+    rows = list(csv.reader(data.decode("utf-8").splitlines(), skipinitialspace=True))
+    # The pinned source has whitespace before the final quoted header cell.
+    if not rows or rows[0] != ["Footprint pattern", "Rotation", "Offset X", "Offset Y"]:
         raise SystemExit(f"{path}: unexpected CPL rotation table header")
     table = []
     for row in rows[1:]:
@@ -1922,7 +1929,7 @@ def cpl_for_download(pro, name, settings, raw, dest):
         shutil.copyfile(raw, dest)  # no PCBWay rotation source is pinned, so PCBWay positions stay KiCad's
         return dest
     matched = correct_positions(raw, dest, load_cpl_table(), load_cpl_overrides(overrides_path))
-    print(f"::notice::{name}: JLCPCB CPL rotation rules matched {matched} rows (JLCKicadTools table, pinned)")
+    print("::notice::" + workflow_command_escape(f"{name}: JLCPCB CPL rotation rules matched {matched} rows (JLCKicadTools table, pinned)"))
     return dest
 
 
@@ -1948,7 +1955,7 @@ def fab_entry(pro, name, settings, fab_dir, dest):
             fab_notices(name, settings, parts)
         entry["file"] = os.path.basename(dest)
     except expected:
-        print(f"::warning::{name}: fabrication export failed (incomplete outputs, invalid CSV/archive or CPL overrides)")
+        print("::warning::" + workflow_command_escape(f"{name}: fabrication export failed (incomplete outputs, invalid CSV/archive or CPL overrides)"))
         entry["error"] = "fabrication export failed"
         try:
             if os.path.lexists(dest):
@@ -1968,10 +1975,10 @@ def glb_entry(raw, dest):
             shutil.copyfile(raw, dest)
             entry["file"] = os.path.basename(dest)
         else:
-            print("::warning::3D model (GLB): board.raw.glb was not produced")
+            print("::warning::" + workflow_command_escape("3D model (GLB): board.raw.glb was not produced"))
             entry["error"] = "GLB export missing"
     except OSError as e:
-        print(f"::warning::3D model (GLB): {e}")
+        print("::warning::" + workflow_command_escape(f"3D model (GLB): {e}"))
         entry["error"] = f"GLB export unavailable: {e}"
         try:
             if os.path.lexists(dest):
@@ -1998,7 +2005,8 @@ def write_download_manifest(dl, entries, *, policy=None, purpose="comparison"):
     if purpose == "snapshot" and policy is None:
         raise ValueError("snapshot downloads need the trusted snapshot policy")
     policy = DEFAULT_SETTINGS if policy is None else policy
-    download_directory("", purpose)  # validate before writing
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
     files = []
     for e in entries:
         item = {"kind": e["kind"], "label": e["label"]}
@@ -2022,10 +2030,20 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
         raise ValueError("head must be the full 40-character SHA")
     settings = settings if policy is None else policy
     name, dl = p["name"], download_directory(out, purpose)
+    pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
+    if purpose == "snapshot" and os.path.exists(pcb):
+        # Task 9A gate: the raw exporter must record its verified source revision.
+        # Never relabel comparison-head bytes as a different snapshot revision.
+        marker = pathlib.Path(out, "board.raw.glb.revision")
+        try:
+            revision = marker.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            revision = None
+        if revision != head:
+            raise ValueError("snapshot GLB revision must match the requested full SHA (Task 9A gate)")
     shutil.rmtree(dl, ignore_errors=True)
     os.makedirs(dl, exist_ok=True)
     stem = f"{safe_name(name)}-{head[:7]}"
-    pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
     entries = []
     if os.path.exists(pcb):
         fab_dir = f"{out}/" + ("fab-snapshot" if purpose == "snapshot" else "fab")
@@ -2041,7 +2059,7 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
         entries.append(glb_entry(f"{out}/board.raw.glb", dest))
     for e in entries:
         if e["error"] and e["kind"] != "fab":
-            print(f"::warning::{name}: {e['label']}: {e['error']}")
+            print("::warning::" + workflow_command_escape(f"{name}: {e['label']}: {e['error']}"))
     write_download_manifest(dl, entries, policy=settings, purpose=purpose)
     return entries
 
@@ -2082,7 +2100,7 @@ def fab_notices(name, settings, parts):
         with open(bom, newline="", encoding="utf-8-sig") as f:
             rows = list(csv.reader(f))
     for diff in kibot_differences(preset, names, rows):
-        print(f"::notice::{name}: {preset} fabrication differs from KiBot v1.9.1 template: {diff}")
+        print("::notice::" + workflow_command_escape(f"{name}: {preset} fabrication differs from KiBot v1.9.1 template: {diff}"))
 
 
 def violation(v, scale, where):
@@ -2565,7 +2583,7 @@ def load_waivers(ref):
         out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in out["active"]]
         out["invalid"] += invalid
     for m in out["invalid"]:
-        print(f"::warning::{m}")
+        print("::warning::" + workflow_command_escape(f"{m}"))
     return out
 
 
@@ -3319,7 +3337,7 @@ def cmd_shots(args):
         if r.returncode == 0 and os.path.exists(out):
             done.append(s)
         else:
-            print(f"::warning::Screenshot of {s['title']} failed: {r.stderr[-300:]}")
+            print("::warning::" + workflow_command_escape(f"Screenshot of {s['title']} failed: {r.stderr[-300:]}"))
     with open(f"review/images/shots.json", "w", encoding="utf-8") as fh:
         json.dump(done, fh, indent=2)
     print(f"{len(done)} screenshot(s)")
@@ -3342,21 +3360,21 @@ def cmd_summary(args):
                 for key in ("data", "repository", "pullRequest", "reviewThreads"):
                     review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
                 if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
-                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                    print("::warning::" + workflow_command_escape("review/threads.json has no review threads; thread counts left out"))
                 elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
                     # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
-                    print("::warning::review/threads.json is incomplete; thread counts left out")
+                    print("::warning::" + workflow_command_escape("review/threads.json is incomplete; thread counts left out"))
                 else:
                     threads = thread_counts(raw)
             except ValueError:
-                print("::warning::review/threads.json is not JSON; thread counts left out")
+                print("::warning::" + workflow_command_escape("review/threads.json is not JSON; thread counts left out"))
     issues = None
     if data["settings"].get("issues", {}).get("enabled") and os.path.exists("review/issues.json"):
         with open("review/issues.json", encoding="utf-8") as fh:
             try:
                 issues = touched_issues(json.load(fh), data)
             except ValueError:
-                print("::warning::review/issues.json is not JSON; issue links left out")
+                print("::warning::" + workflow_command_escape("review/issues.json is not JSON; issue links left out"))
     log = ""
     if os.environ.get("HISTORY") == "true":
         previous = ""
@@ -3635,7 +3653,7 @@ def cmd_pdf(args):
         fh.write(page)
     name = os.environ.get("PDF_NAME", "")
     if not re.fullmatch(r"kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.pdf", name):
-        print("::warning::PDF report failed: invalid PDF_NAME")
+        print("::warning::" + workflow_command_escape("PDF report failed: invalid PDF_NAME"))
         return
     out = os.path.abspath(f"review/{name}")
     try:
@@ -3648,7 +3666,7 @@ def cmd_pdf(args):
     except (OSError, subprocess.TimeoutExpired):
         if os.path.exists(out):
             os.remove(out)
-        print("::warning::PDF report failed: Chrome unavailable, failed or timed out")
+        print("::warning::" + workflow_command_escape("PDF report failed: Chrome unavailable, failed or timed out"))
         return
     print(f"{out}: {os.path.getsize(out) / 1e6:.2f} MB")
 

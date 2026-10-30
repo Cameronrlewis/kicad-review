@@ -3285,17 +3285,27 @@ test('data with replacement patterns is inserted literally', () => {
 import { deflateRawSync } from 'node:zlib';
 import { zipEntries, zipEntryStream, exactRange } from './zip.js';
 
+// Independent bitwise reference for ZIP fixture checksums.
+function fixtureCrc32(data) {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 function makeZip(files) {
   const parts = [], central = []; let offset = 0;
   for (const f of files) {
     const name = Buffer.from(f.name), body = f.deflate ? deflateRawSync(f.data) : f.data, method = f.deflate ? 8 : 0, extra = Buffer.alloc(4);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8);
-    local.writeUInt32LE(body.length, 18); local.writeUInt32LE(f.data.length, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(extra.length, 28);
+    local.writeUInt32LE(fixtureCrc32(f.data), 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(f.data.length, 22); local.writeUInt16LE(name.length, 26); local.writeUInt16LE(extra.length, 28);
     parts.push(local, name, extra, body);
     const entry = Buffer.alloc(46);
     entry.writeUInt32LE(0x02014b50, 0); entry.writeUInt16LE(20, 4); entry.writeUInt16LE(20, 6); entry.writeUInt16LE(method, 10);
-    entry.writeUInt32LE(body.length, 20); entry.writeUInt32LE(f.data.length, 24); entry.writeUInt16LE(name.length, 28); entry.writeUInt32LE(offset, 42);
+    entry.writeUInt32LE(fixtureCrc32(f.data), 16); entry.writeUInt32LE(body.length, 20); entry.writeUInt32LE(f.data.length, 24); entry.writeUInt16LE(name.length, 28); entry.writeUInt32LE(offset, 42);
     central.push(entry, name);
     offset += 30 + name.length + extra.length + body.length;
   }
@@ -3361,3 +3371,36 @@ test('zip reader validates directory, header and payload boundaries and exact ra
   await assert.rejects(new Response(stream).arrayBuffer(), /bad range length/);
 });
 
+
+test('zip reader rejects corrupted payloads and incorrect empty-entry CRC', async () => {
+  assert.equal(fixtureCrc32(Buffer.from('123456789')), 0xcbf43926);
+  for (const deflate of [false, true]) {
+    const zip = makeZip([{ name: 'a', data: Buffer.from('123456789'), deflate }]);
+    const [entry] = await zipEntries(rangeOf(zip), zip.length);
+    // For stored data, corrupt one payload byte. For deflate, change both recorded
+    // CRCs so decompression succeeds but its uncompressed CRC must still fail.
+    if (!deflate) zip[35] ^= 1;
+    else { entry.crc = (entry.crc ^ 1) >>> 0; zip.writeUInt32LE(entry.crc, 14); }
+    await assert.rejects(new Response(await zipEntryStream(rangeOf(zip), entry)).arrayBuffer(), /CRC-32 mismatch/);
+  }
+  const empty = makeZip([{ name: 'empty', data: Buffer.alloc(0) }]);
+  const [entry] = await zipEntries(rangeOf(empty), empty.length);
+  entry.crc = 1; empty.writeUInt32LE(1, 14);
+  await assert.rejects(async () => new Response(await zipEntryStream(rangeOf(empty), entry)).arrayBuffer(), /CRC-32 mismatch/);
+});
+
+test('zip reader caps central-directory allocation before fetching it', async () => {
+  const size = 16 * 1024 * 1024 + 1, total = size + 22;
+  const tail = Buffer.alloc(65557), end = tail.length - 22;
+  tail.writeUInt32LE(0x06054b50, end);
+  tail.writeUInt16LE(1, end + 8); tail.writeUInt16LE(1, end + 10);
+  tail.writeUInt32LE(size, end + 12);
+  let calls = 0;
+  const range = async (a, b) => {
+    calls++;
+    assert.equal(a, total - tail.length); assert.equal(b, total - 1);
+    return new Response(tail, { status: 206, headers: { 'Content-Range': `bytes ${a}-${b}/${total}` } });
+  };
+  await assert.rejects(zipEntries(range, total), /central directory exceeds 16 MiB limit/);
+  assert.equal(calls, 1);
+});
