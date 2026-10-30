@@ -3744,6 +3744,48 @@ return true;
       return S.layers.includes('In1_Cu') && S.s===row.id || 'reload loses selected layer';
     } finally {p.board.layers=layers; p.changes=changes; S.s=saved; await draw();}
   `],
+  ["BR03 copper selection", "v=board", `
+    const p=proj(), saved=p.changes, appearance=structuredClone(Appearance.get());
+    const row={id:'c908',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu',
+      addedMm2:1,removedMm2:1,addedContours:[[[4,4],[5,4],[5,5],[4,5]]],
+      removedContours:[[[3,4],[4,4],[4,5],[3,5]]]},anchors:{base:[],head:[]}};
+    const object={kind:'pad',uuid:'inner',changeUuid:'inner',changeIds:[],layers:['In1.Cu'],net:1,category:'pads',side:'front',hidden:false,
+      box:[3000,4000,5000,5000],geometry:{primitive:{shape:'rect',center:[4000,4500],size:[2000,1000],angle:0}}};
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],
+      layers:[{id:1,name:'In1.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''},{id:1,name:'GND'}],objects:[object]};
+    const mount=mode=>{
+      disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
+      Object.assign(S,{m:mode,x:4,y:4,z:40,s:row.id,wipe:.4,blend:.35});
+      boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:p.changes,state:S,appearance:glAppearance});
+      boardView.useGL=true; boardView.panes=boardDiff.panes; boardDiff.render();
+    };
+    try {
+      p.changes=[row]; S.layers=['In1_Cu']; Appearance.patch({layers:{'In1.Cu':{visible:true}}});
+      for(const mode of ['overlay','side','wipe','blend','semantic']) {
+        mount(mode);
+        const paths=[...document.querySelectorAll('.copper-selection path')];
+        if(paths.length!==2 || !paths.some(e=>e.dataset.action==='added') || !paths.some(e=>e.dataset.action==='removed')) return mode+': missing signed contours';
+        if(mode==='side') for(const pane of boardDiff.panes) {
+          const expected=pane.sides[0]==='base'?'removed':'added';
+          if(pane.markHud.querySelector('path')?.dataset.action!==expected) return 'side sign ownership';
+        }
+        if(mode==='wipe' && !paths.every(e=>e.closest('svg').style.clipPath.includes('inset'))) return 'wipe contours not clipped';
+        if(mode==='blend' && !paths.some(e=>e.dataset.action==='added' && e.closest('svg').style.opacity==='0.35')) return 'blend alpha';
+        for(const flip of [false,true]) {
+          Appearance.patch({flip}); S.x+=.25; S.z+=3; boardDiff.render();
+          for(const pane of boardDiff.panes) for(const path of pane.markHud.querySelectorAll('.copper-selection path')) {
+            const pt=path.dataset.action==='added'?[4,4]:[3,4], expected=pane.renderer.worldToScreen(pt);
+            const actual=path.getAttribute('d').match(/[-+]?[0-9]*\\.?[0-9]+/g).slice(0,2).map(Number);
+            if(actual.length!==2 || !actual.every(Number.isFinite)) return 'invalid projected coordinates';
+            if(actual.some((n,i)=>Math.abs(n-expected[i])>.01)) return 'projection drift after pan zoom flip';
+          }
+        }
+        S.s=null; boardDiff.render();
+        if(document.querySelector('.copper-selection')) return 'clear selection leaves contours';
+      }
+      return true;
+    } finally {p.changes=saved; Appearance.patch(appearance); S.s=null; disposeBoardRenderers(); await draw();}
+  `],
   ["BR03 missing pin locations note", "", `
     const p=proj(), sheets=p.sheets, row={id:'c910',anchors:{base:[],head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/'}]}};
     const id='__br03_bad_manifest', prior=cache[id], dock=document.createElement('div');document.body.append(dock);

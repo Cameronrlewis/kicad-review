@@ -114,6 +114,31 @@
     return {...look,netColors:{...look.netColors,...Object.fromEntries(
       names.map(n=>[n,side==='base'?[1,.3,.3,1]:[.3,1,.3,1]]))}};
   }
+  function selectedCopper(pane,row,state) {
+    if(row?.detail?.kind!=='area') return;
+    const width=pane.vp.clientWidth, height=pane.vp.clientHeight;
+    for(const side of pane.sides) {
+      if(!pane.scenes[side]) continue;
+      const action=side==='base'?'removed':'added', rings=row.detail[action+'Contours']||[];
+      if(!rings.length) continue;
+      const svg=document.createElementNS('http:'+'//www.w3.org/2000/svg','svg'); // split: no URL literal offline
+      svg.classList.add('copper-selection'); svg.dataset.side=side;
+      svg.setAttribute('width',width); svg.setAttribute('height',height);
+      svg.style.opacity=String(state.m==='blend' && side==='head'?state.blend:1);
+      if(state.m==='wipe') {
+        // Same boundary as clipRects: base owns the left of the split, head the right.
+        const cut=Math.max(0,Math.min(1,state.wipe))*width;
+        svg.style.clipPath=side==='base'? 'inset(0 '+(width-cut)+'px 0 0)' : 'inset(0 0 0 '+cut+'px)';
+      }
+      const path=document.createElementNS(svg.namespaceURI,'path');
+      // ponytail: only the selected row; one path per sign bounds DOM nodes, not polygon bytes.
+      path.setAttribute('d',rings.map(ring=>ring.map((p,i)=>{
+        const [x,y]=pane.renderer.worldToScreen(p); return (i?'L':'M')+x+' '+y;
+      }).join(' ')+'Z').join(' '));
+      path.dataset.action=action; path.setAttribute('aria-label',action+' copper on '+row.detail.layer);
+      svg.append(path); pane.markHud.append(svg);
+    }
+  }
   function marks(pane, state, look, actions, background, selectedRow) {
     const {renderer} = pane, hud = pane.markHud, {gl} = renderer, M = window.BoardMarks;
     const palette = Object.fromEntries(Object.keys(M.styles).map(a=>[a,M.pickColor(a,background)]));
@@ -191,6 +216,7 @@
         filter:o=>o.changeIds?.includes(state.s) || electricalNetMatch(pane.scenes[side],o,selectedRow,side)});
       effect('added',alpha,clips?.[side],true);
     }
+    selectedCopper(pane,selectedRow,state);
     renderer.setAppearance(look);
   }
   function mount({stage, scenes, changes, state, appearance, onLost, attachPanZoom}) {
