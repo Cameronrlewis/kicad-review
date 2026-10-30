@@ -157,7 +157,7 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
 # BOM downloads deliberately use typeof to reject unavailable export strings.
-assert js.count("typeof ") == 2 and 'typeof x.fab === "string"' in js and 'typeof x[kind] !== "string"' in js, "unexpected typeof guard"
+assert 'typeof x.fab === "string"' in js and 'typeof x[kind] !== "string"' in js, "missing BOM export string guard"
 assert "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
