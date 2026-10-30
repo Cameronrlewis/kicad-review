@@ -4850,6 +4850,33 @@ test('ask insight: cold generation counts against the daily cap, cache hits do n
   } finally { restore(); }
 });
 
+test('ask insight: a capped user is refused even while another user\'s cold flight is running for the same design', async () => {
+  const owner = await signedIn({ t: 'flight-owner', u: 'octocat' }), capped = await signedIn({ t: 'flight-capped', u: 'hubot' });
+  const e = askEnv({ ASK_DAILY_LIMIT: '1' });
+  const date = new Date().toISOString().slice(0, 10);
+  e.ASK_KV.m.set(`ask:day:hubot:${date}`, '1');
+  const seen = [];
+  const reply = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return new Response(JSON.stringify({ content: [{ type: 'text', text: '{"summary":"A board.","questions":["A?","B?","C?"]}' }] }));
+  };
+  const restore = mockFetch(askMocks({ seen, anthropic: reply }));
+  try {
+    const path = '/r/Cameronrlewis/repo/a/55/ask/insight';
+    const starter = askPost(path, { project: 'Thermal_Camera' }, e, owner);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const joiner = await askPost(path, { project: 'Thermal_Camera' }, e, capped);
+    assert.equal(joiner.status, 429);
+    assert.equal((await joiner.json()).code, 'quota');
+    const first = await starter;
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).cached, false);
+    assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 1, 'one shared model call, charged to the starter only');
+    assert.equal(e.ASK_KV.m.get(`ask:day:octocat:${date}`), '1');
+    assert.equal(e.ASK_KV.m.get(`ask:day:hubot:${date}`), '1', 'the capped user is not charged');
+  } finally { restore(); }
+});
+
 test('ask route: a daily limit of 0 disables questions and cold insight; unset still means 50', async () => {
   const cookie = await signedIn({ t: 'limit-zero' }), seen = [];
   const restore = mockFetch(askMocks({ seen, anthropic: () => { throw new Error('the model must not be called'); } }));

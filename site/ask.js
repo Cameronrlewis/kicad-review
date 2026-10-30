@@ -267,12 +267,14 @@ export async function askRoute(request, env, { owner, repo, id, rest }, { access
     if (hit) {
       if (typeof hit.summary === 'string' && hit.summary.trim() && Array.isArray(hit.questions) && hit.questions.length === 3) return done(json({ ...hit, cached: true }));
     }
+    // Cold generation is a paid call, so it counts against the same daily cap as questions. Cache hits are free.
+    // Each caller checks its own cap before joining a shared flight, so a capped user is never answered by another user's run.
+    const used = await readDay(env, day);
+    if ((used ?? 0) >= limit) return done(json({ error: 'Daily question limit reached. Try again tomorrow.', code: 'quota' }, 429));
     let pending = insightFlights.get(key);
     if (!pending) {
-      // Cold generation is a paid call, so it counts against the same daily cap as questions. Cache hits are free.
+      // Only the starter is charged, for the one model call; joiners share its result without a second charge.
       pending = (async () => {
-        const used = await readDay(env, day);
-        if ((used ?? 0) >= limit) throw new Error('quota');
         const upstream = await call(anthropicRequest({ model: env.ASK_SUMMARY_MODEL || env.ASK_MODEL || 'claude-sonnet-5-5', maxTokens: 700, stream: false, system,
           messages: [{ role: 'user', content: 'Write a two-sentence summary of this board for a new team member and three questions a reviewer could ask about it. Answer with JSON only: {"summary": "...", "questions": ["...", "...", "..."]}' }] }));
         if (!upstream?.ok) throw new Error('provider');
@@ -291,7 +293,6 @@ export async function askRoute(request, env, { owner, repo, id, rest }, { access
     }
     try { return done(json({ ...(await pending), cached: false })); }
     catch (error) {
-      if (error.message === 'quota') return done(json({ error: 'Daily question limit reached. Try again tomorrow.', code: 'quota' }, 429));
       const incomplete = error.message === 'incomplete';
       return done(json({ error: incomplete ? 'The model provider returned an incomplete summary or fewer than three usable questions. Try again.' : 'The model provider did not return a complete summary. Try again.' }, 502));
     } finally { if (insightFlights.get(key) === pending) insightFlights.delete(key); }
