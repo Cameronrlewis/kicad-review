@@ -3587,9 +3587,10 @@ def board_facts(side_dir, pcb_path):
             return facts
         with open(f"{side_dir}/stats.json", encoding="utf-8") as fh:
             stats = json.load(fh)
+        if not isinstance(stats, dict): raise TypeError("stats is not an object")
         b = stats["board"]
         if not isinstance(b, dict): raise TypeError("board section is not an object")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         facts["stats_reason"] = f"statistics unavailable: {clip(exc, 200)}"
         return facts
     size = [stat_number(b.get("width")), stat_number(b.get("height"))]
@@ -3599,7 +3600,7 @@ def board_facts(side_dir, pcb_path):
         "min_track_width_mm": stat_number(b.get("min_track_width")), "min_clearance_mm": stat_number(b.get("min_track_clearance")),
         "min_drill_mm": stat_number(b.get("min_drill_diameter")), "thickness_mm": stat_number(b.get("board_thickness")),
         "pads": stats.get("pads"), "vias": stats.get("vias"),
-        "components": {k: v.get("total") for k, v in (stats.get("components") or {}).items() if isinstance(v, dict)}})
+        "components": {k: v.get("total") for k, v in (stats.get("components") if isinstance(stats.get("components"), dict) else {}).items() if isinstance(v, dict)}})
     return facts
 
 

@@ -6182,6 +6182,7 @@ print("ok ask parts and nets")
 
 # Ask (spec 09): board facts, checks, changes, size.
 assert kr.stat_number("506.97 mm²") == 506.97 and kr.stat_number(None) is None and kr.stat_number("n/a") is None
+assert kr.stat_number(123) is None and kr.stat_number("") is None
 with tempfile.TemporaryDirectory() as t:
     write(t, {"pcb.kicad_pcb": '(kicad_pcb\n (layers\n  (0 "F.Cu" signal)\n  (4 "In1.Cu" signal)\n  (2 "B.Cu" signal)\n  (5 "F.SilkS" user)\n )\n)\n'})
     none = kr.board_facts(t, f"{t}/pcb.kicad_pcb")
@@ -6200,6 +6201,10 @@ with tempfile.TemporaryDirectory() as t:
     assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False
     write(t, {"stats.json": json.dumps({"board": None})})
     assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False, "a non-object board section is unavailable, not a crash"
+    write(t, {"stats.json": json.dumps({"board": {}, "components": "not_a_dict"})})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["components"] == {}, "non-dict components section defaults to empty dict"
+    write(t, {"stats.json": json.dumps([1, 2, 3])})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False, "non-object stats JSON is unavailable"
 with tempfile.TemporaryDirectory() as t:
     write(t, {"src/P.kicad_pcb": PCB_TEXT, "out/stats.json": json.dumps(STATS_PARTIAL)})
     with patch("kicad_review.subprocess.run", side_effect=stats_fails):
@@ -6289,6 +6294,8 @@ assert row["detail_truncated"] is True and row["detail"]["omitted_counts"] == {"
 assert len(row["detail"]["added"]) == 15 and row["detail"]["beforeNets"] == ["A"] and row["detail"]["kind"] == "members" and dr["detail_truncated"] == 1
 small_row = kr.context_changes([{"id": "s", "action": "modified", "kind": "net-members", "ref": "N", "where": {"board": True}, "detail": {"kind": "members", "added": ["J1.1"]}}])["rows"][0]
 assert small_row["detail"] == {"kind": "members", "added": ["J1.1"]} and "detail_truncated" not in small_row
+non_dict_row = kr.context_changes([{"id": "nd", "action": "modified", "kind": "wire", "ref": "", "detail": "x" * 2500}])["rows"][0]
+assert non_dict_row["detail"] == {"omitted": True} and non_dict_row["detail_truncated"] is True
 # 03's signed copper detail: outlines are counted, never sent; the row keeps its type, layer and signed areas.
 area = {"kind": "area", "layer": "F.Cu", "addedMm2": 12.5, "removedMm2": 0.0, "addedContours": [[[float(i), 0.0]] * 200 for i in range(40)], "removedContours": []}
 ar = kr.context_changes([{"id": "a1", "action": "modified", "kind": "copper", "ref": "F.Cu", "where": {"board": True}, "channel": "board", "weight": "heavy", "detail": area}])["rows"][0]
@@ -6350,6 +6357,9 @@ clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
 assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
 # 09 owns net_changes: 03's wiring status decides availability; a missing summary is unavailable, zero complete rows are available.
 assert kr.net_change_support(None) == {"available": False, "complete": False}
+assert kr.net_change_support({}) == {"available": False, "complete": False}
+assert kr.net_change_support({"channels": []}) == {"available": False, "complete": False}
+assert kr.net_change_support({"channels": [{"channel": "other", "status": "complete"}]}) == {"available": False, "complete": False}
 assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "complete"}]}) == {"available": True, "complete": True}
 assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "incomplete"}]}) == {"available": True, "complete": False}
 assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "not_applicable"}]}) == {"available": False, "complete": False}
