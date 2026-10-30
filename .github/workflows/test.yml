@@ -21,6 +21,7 @@ jobs:
         with:
           node-version: 22
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
+      - run: node --test ui/ask.test.mjs
       - run: node --test ui/image-view.test.mjs
       - name: Build browser fixtures
         run: |
@@ -42,6 +43,8 @@ jobs:
       - run: node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"
       - run: node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"
+      - run: node ui/check.mjs --no-skip "Ask"
+      - run: node ui/check.mjs --no-skip "Ask" --dark
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance"
       - run: node ui/check.mjs --no-skip "images compare and four copper layers" --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images gesture lifecycle" --page "$PAGES/images.html"
