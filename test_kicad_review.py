@@ -6444,7 +6444,7 @@ assert "archive: false" in copy_step and "retention-days: 90" in copy_step
 assert wf.index("- name: Upload report") < wf.index("- name: Copy design context") < wf.index("- name: Screenshots of changed drawings")
 # 06 must be merged first. Its inert Ask-guarded hook is required once 06 merges.
 # 09 Task 5 enables the snapshot producer and tests ask-on and ask-off outputs.
-snapshot_merged = "- name: Upload design snapshot" in wf or "- name: Upload design snapshot context" in wf
+snapshot_merged = any(line.strip().startswith("- name:") and "snapshot" in line.lower() for line in wf.splitlines())
 if snapshot_merged:
     assert "- name: Upload design snapshot context" in wf, "merge 06 before 09 snapshot integration"
     snap = wf[wf.index("- name: Upload design snapshot context"):]
@@ -6454,8 +6454,7 @@ if snapshot_merged:
     assert "retention-days: ${{ vars.KICAD_REVIEW_SNAPSHOT_DAYS || 90 }}" in snap, snap
     assert "retention-days: 90" not in snap, "snapshot context follows the repository snapshot retention variable, not comparison-report retention"
 else:
-    # 06 is unmerged (plan-context.md:60). Verify 06's snapshot step is not partially present or renamed.
-    assert "- name: Upload design snapshot" not in wf, "06's Upload design snapshot is present but Upload design snapshot context is missing"
+    # 06 is unmerged (plan-context.md:60). Flip to unconditional assert once 06 merges.
     print("pending 06 merge: 06's Upload design snapshot context hook not in review.yml (plan-context.md:60; flip to unconditional assert once 06 merges)")
 print("ok ask context upload step")
 
