@@ -3599,7 +3599,7 @@ return true;
   `],
   ["BR03 net selection masks", "v=board", `
     ${MARK_STYLE_FIXTURE}
-    const p=proj(), saved=p.changes;
+    const p=proj(), saved=p.changes, savedNets=scene.nets, savedRef=object.reference, savedNum=object.number, savedNet=object.net;
     const row={id:'c903',kind:'net-members',action:'modified',
       detail:{kind:'members',beforeNets:['GND'],afterNets:['GND']},anchors:{base:[],head:[]}};
     const padRow={id:'c904',kind:'board-pad-net',action:'modified',
@@ -3669,10 +3669,17 @@ return true;
         return 'scene without nets threw: '+e.message;
       }
 
-      scene.nets=[{id:0,name:''},{id:1,name:'GND'},{id:2,name:'NET_A'},{id:3,name:'NET_B'}];
+      scene.nets=savedNets;
       S.s=null; boardDiff.render();
       return JSON.stringify(Appearance.get())===before || 'temporary colour persisted';
-    } finally {p.changes=saved; S.s=null; disposeBoardRenderers(); await draw();}
+    } finally {
+      p.changes=saved;
+      if(savedNets!==undefined) scene.nets=savedNets; else delete scene.nets;
+      if(savedRef!==undefined) object.reference=savedRef; else delete object.reference;
+      if(savedNum!==undefined) object.number=savedNum; else delete object.number;
+      if(savedNet!==undefined) object.net=savedNet; else delete object.net;
+      S.s=null; disposeBoardRenderers(); await draw();
+    }
   `],
   ["board mark style survives reload and project changes", "v=board", `
     ${MARK_STYLE_FIXTURE}
