@@ -6048,3 +6048,101 @@ with tempfile.TemporaryDirectory() as t:
     finally:
         os.chdir(old)
 print("ok ask shares the netlist and statistics producers")
+
+# Ask (spec 09): parts and nets of one revision.
+nt = netlist({"U1": ("MCU", "LQFP", "MCU:M"), "R1": ("10k", "R_0402", "Device:R")},
+             {"12": [("U1", "1", "PA1", "bidirectional"), ("R1", "1", "", "passive")],
+              "VBUS": [("U1", str(i), "", "passive") for i in range(10, 70)],
+              "unconnected-(U1-Pad2)": [("U1", "2", "", "passive")]})
+nets, pins, unconnected = kr.netlist_context(nt, net_cap=15, pin_cap=64)
+by_id = {n["id"]: n for n in nets}
+assert list(by_id) == ["12", "VBUS"] and all(type(n["id"]) is str for n in nets), "numeric net names stay strings"
+assert by_id["12"]["pins"] == ["U1.1", "R1.1"] and "more" not in by_id["12"]
+assert by_id["VBUS"]["pin_count"] == 60 and len(by_id["VBUS"]["pins"]) == 15 and by_id["VBUS"]["more"] == 45
+assert unconnected == 1 and pins["U1"][0] == {"pin": "1", "net": "12", "fn": "PA1"}
+assert {"pin": "2", "net": None} in pins["U1"] and kr.clip("x" * 300) == "x" * 200
+unit = lambda ref, n, uuid, sheet="/pwr/": {"kind": "symbol", "ref": ref if n == "1" else f"{ref} unit {n}",
+    "props": {"reference": ref, "Value": "MCU", "Footprint": "LQFP", "Datasheet": "https://x/ds.pdf", "MPN": "STM32", "LCSC": "c123", "dnp": "no"},
+    "where": {"sheet": sheet}, "pos": [1, 2, 0]}
+objs = {"/pwr/uuid-1": unit("U1", "1", "uuid-1"), "/pwr/uuid-2": unit("U1", "2", "uuid-2"),
+        "/uuid-3": {**unit("R1", "1", "uuid-3", "/"), "props": {"reference": "R1", "Value": "10k", "Datasheet": "~", "dnp": "yes"}},
+        "/uuid-4": {"kind": "symbol", "ref": "#PWR01", "props": {"reference": "#PWR01"}, "where": {"sheet": "/"}},
+        "/uuid-5": {"kind": "power symbol", "ref": "GND", "props": {}, "where": {"sheet": "/"}}}
+parts = kr.context_parts(objs)
+assert list(parts) == ["R1", "U1"] and parts["U1"]["units"] == 2 and parts["U1"]["uuid"] == "uuid-1"
+assert parts["U1"]["lcsc"] == "C123" and parts["U1"]["mpn"] == "STM32" and parts["U1"]["datasheet"] == "https://x/ds.pdf"
+assert parts["R1"]["dnp"] is True and parts["R1"]["datasheet"] is None and parts["U1"]["sheet"] == "/pwr/"
+assert parts["R1"]["bom"]["excludedReason"] == "dnp" and parts["U1"]["bom"]["included"] is True and parts["U1"]["bom"]["mpn"] == "STM32"
+with tempfile.TemporaryDirectory() as t:
+    ctx = kr.side_context(t, objs)
+    assert ctx["netlist_available"] is False and ctx["nets"] == [] and ctx["netlist_reason"], "no netlist, no nets"
+    assert [p["ref"] for p in ctx["parts"]] == ["R1", "U1"]
+    write(t, {"netlist.net.error": "kicad-cli sch export netlist failed (1): boom"})
+    assert "boom" in kr.side_context(t, objs)["netlist_reason"]
+    pathlib.Path(t, "netlist.net.error").unlink()
+    for corrupt in ("(((", "(garbage)", "(export)", "(export (components))", "(export (nets))",
+                    "(export (components) (nets)) (", "(export (components) (nets)) (garbage)",
+                    '(export (components) (nets)) "unterminated'):
+        write(t, {"netlist.net": corrupt})
+        assert kr.side_context(t, objs)["netlist_available"] is False
+    write(t, {"netlist.net": "(export (components) (nets))"})
+    assert kr.side_context(t, objs)["netlist_available"] is True
+    write(t, {"netlist.net": "((("})
+    bad = kr.side_context(t, objs)
+    assert bad["netlist_available"] is False and "unreadable" in bad["netlist_reason"] and bad["nets"] == []
+    write(t, {"netlist.net": nt})
+    good = kr.side_context(t, objs, net_cap=15, pin_cap=2)
+    assert good["netlist_available"] is True and good["netlist_reason"] is None and good["unconnected_pins"] == 1
+    u1 = next(p for p in good["parts"] if p["ref"] == "U1")
+    assert u1["pin_count"] == 62 and len(u1["pins"]) == 2 and u1["pins_more"] == 60
+    good = kr.side_context(t, objs, net_cap=15, pin_cap=2)
+    kr.enrich_context(good, objs, [{"path":"/pwr/", "name":"Power", "page":"2"}, {"path":"/", "name":"Root", "page":"1"}])
+    u = next(p for p in good["parts"] if p["ref"] == "U1")
+    assert u["page"] == "2" and u["properties"]["MPN"] == "STM32" and "R1" in u["neighbors"] and "12" in u["nets"]
+    n = next(n for n in good["nets"] if n["id"] == "12")
+    assert set(n["pages"]) == {"1", "2"} and n["labels_unavailable"]
+    assert all(n[key] is None for key in ("hierarchical_labels", "global_labels", "local_labels"))
+    assert n["pin_records"] == [{"ref":"U1", "pin":"1"}, {"ref":"R1", "pin":"1"}]
+    assert {entry["net"] for entry in u["pins"]} <= set(u["nets"]) and u["neighbors"] == ["R1"]
+# Review Focus 2: a genuinely board-only project retains parts, not fabricated schematic data.
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"P.kicad_pcb": '(kicad_pcb (footprint "Test:R" (uuid "fp-r7") (layer "F.Cu") (at 10 20) (property "Reference" "R7") (property "Value" "4.7k")))'})
+    footprints = kr.pcb_objects(f"{t}/P.kicad_pcb")
+    board_only = kr.side_context(t, footprints)
+    kr.enrich_context(board_only, footprints, [])
+    assert board_only["nets"] == [] and board_only["netlist_available"] is False
+    assert len(board_only["parts"]) == 1
+    r7 = board_only["parts"][0]
+    assert (r7["ref"], r7["uuid"], r7["value"], r7["footprint"]) == ("R7", "fp-r7", "4.7k", "Test:R")
+    assert r7["source"] == "footprint" and r7["schematic_available"] is False and r7["schematic_reason"]
+    assert r7["sheet"] is None and r7["page"] is None and r7["sheet_name"] is None and r7["units"] is None
+    assert r7["connectivity_available"] is False and r7["connectivity_reason"] == board_only["netlist_reason"]
+    assert r7["pins"] == [] and r7["nets"] == [] and r7["neighbors"] == []
+    assert list(kr.context_parts({**objs, **footprints})) == ["R1", "U1"], "schematic parts take precedence over footprint fallback"
+# Source-field retention: identity keeps 2,000 code points; every cut or omitted property is named, never silent.
+# 45 properties in file order: Note (300 characters) is 5th, so it is kept but clipped; 13 properties after the 32nd are omitted.
+long_part = {**objs["/uuid-3"], "props": {"reference": "R1", "Value": "v" * 2500, "Datasheet": "https://x/ds.pdf", "dnp": "yes", "Note": "n" * 300, **{f"K{i}": "1" for i in range(40)}}}
+lp = kr.context_parts({"/uuid-3": long_part})["R1"]
+assert len(lp["value"]) == 2000 and "value" in lp["incomplete_fields"] and lp["properties_truncated"] is True
+assert len(lp["bom"]["value"]) == 2500, "the BOM identity is never clipped, so grouping stays exact"
+assert lp["properties_omitted"] == 45 - 32 and "properties" in lp["incomplete_fields"] and "properties.Note" in lp["incomplete_fields"]
+assert len(lp["properties"]["Note"]) == 200 and lp["properties"]["Note"] == "n" * 200
+assert parts["R1"]["properties_truncated"] is False and parts["R1"]["incomplete_fields"] == [] and parts["R1"]["value"] == "10k"
+assert kr.context_parts({"/uuid-3": long_part})["R1"]["mpn"] is None, "absent identity stays null, not an empty string"
+# Shared BOM cases (spec 08 fixture): every part's bom is 08's bom_identity, with the same included flags, excludedReason, line keys and quantities.
+# The fixture and 08's parts_lines arrive when 08 merges; until then this branch carries only 08's bom_identity handoff.
+bom_fixture = pathlib.Path(__file__).parent / "ui" / "fixtures" / "bom-cases.json"
+if bom_fixture.exists():
+    bom_cases = json.load(open(bom_fixture, encoding="utf-8"))
+    for case in bom_cases:
+        for oid, obj in case["objects"].items():
+            b = kr.bom_identity(obj)
+            assert b["included"] is case["expect"]["included"][oid] and b["excludedReason"] == case["expect"]["excludedReason"][oid], (case["name"], oid, b)
+        lines = sorted(kr.parts_lines(case["objects"]), key=lambda line: line["key"])
+        expect = sorted(case["expect"]["lines"], key=lambda line: line["key"])
+        assert [(l["refs"], len(l["refs"]), l["mpn"], l["key"]) for l in lines] == [(e["refs"], e["quantity"], e["mpn"], e["key"]) for e in expect], case["name"]
+else:
+    print("pending 08 merge: ui/fixtures/bom-cases.json absent, shared BOM cases not asserted")
+placed = {"/bom-u1": {"kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "props": {"reference": "R1", "Value": "10k", "Footprint": "R_0402", "dnp": "yes"}}}
+assert kr.context_parts(placed)["R1"]["bom"] == kr.bom_identity(placed["/bom-u1"]) and kr.context_parts(placed)["R1"]["bom"]["excludedReason"] == "dnp"
+print("ok ask parts and nets")

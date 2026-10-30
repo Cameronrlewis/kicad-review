@@ -2599,6 +2599,56 @@ def bom_coverage(objs, settings):
     return cov
 
 
+# ---- 08 handoff: bom_identity (08 Task 3) and the helpers it calls (base_ref; 08 Task 2's bom_category),
+# copied verbatim from feature/boardrepo-08-bom-view. 08's merge replaces this block; 09 never edits it. ----
+def base_ref(ref):
+    """Strip the parser's symbol-unit suffix from a reference."""
+    return (ref or "").split(" unit ")[0]
+
+
+def bom_identity(obj):
+    """Canonical BOM contract for one schematic object (spec 08). Fields are unclipped; display clipping belongs to 09."""
+    p = obj.get("props") or {}
+    ref = base_ref(obj.get("ref"))  # units of one part share their base reference
+    reason = ("not_symbol" if obj.get("kind") != "symbol" else "dnp" if p.get("dnp") == "yes" else
+              "excluded" if p.get("in_bom") == "no" else "unannotated" if ref.endswith("?") else None)
+    value, footprint = p.get("Value", ""), p.get("Footprint", "")
+    lcsc, mpn = (field(p, LCSC_FIELDS) or "").upper() or None, field(p, MPN_FIELDS)
+    ds = field(p, ("datasheet",))
+    datasheet = ds if ds and ds.lower().startswith(("http://", "https://")) else None
+    manufacturer, category = field(p, MANUFACTURER_FIELDS), bom_category(ref, p.get("symbol"))
+    return {"included": reason is None, "excludedReason": reason, "ref": ref, "value": value, "footprint": footprint,
+            "lcsc": lcsc, "mpn": mpn, "manufacturer": manufacturer,
+            "datasheet": datasheet, "category": category,
+            # ensure_ascii=False, compact separators. 10 uses this key as received from 09 and never recomputes it.
+            "key": json.dumps([value, footprint, lcsc or "", mpn or "", category, manufacturer, datasheet], ensure_ascii=False, separators=(",", ":"))}
+
+
+BOM_PREFIXES = {"R": "Resistors", "RN": "Resistors", "RV": "Resistors", "C": "Capacitors", "L": "Inductors & Ferrites",
+                "FB": "Inductors & Ferrites", "D": "Diodes & LEDs", "LED": "Diodes & LEDs", "Q": "Transistors",
+                "U": "ICs & Modules", "IC": "ICs & Modules", "J": "Connectors", "P": "Connectors", "CN": "Connectors",
+                "TP": "Test Points", "H": "Mechanical", "MH": "Mechanical"}
+# KiCad library nicknames that say what a part is when its reference prefix does not.
+BOM_LIBRARY_WORDS = (("connector", "Connectors"), ("testpoint", "Test Points"), ("mountinghole", "Mechanical"),
+                     ("transistor", "Transistors"), ("mcu", "ICs & Modules"), ("regulator", "ICs & Modules"),
+                     ("amplifier", "ICs & Modules"), ("memory", "ICs & Modules"), ("interface", "ICs & Modules"),
+                     ("sensor", "ICs & Modules"), ("rf_module", "ICs & Modules"))
+
+
+def bom_category(ref, lib_id):
+    """Category from the reference prefix (R, C, L/FB, D/LED, Q, U, J/P, TP, H/MH), then the symbol name
+    (Device:R_Small is an R), then the library nickname (Connector_Generic); Other for the rest."""
+    prefix = re.match(r"[A-Za-z]+", ref or "")
+    if prefix and prefix.group(0).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[prefix.group(0).upper()]
+    library, _, item = (lib_id or "").rpartition(":")
+    head = re.match(r"([A-Za-z]+)(?:_|$)", item)  # "R_Small" is an R; "L7805" is not an inductor
+    if head and head.group(1).upper() in BOM_PREFIXES:
+        return BOM_PREFIXES[head.group(1).upper()]
+    return next((category for word, category in BOM_LIBRARY_WORDS if word in library.lower()), "Other")
+# ---- end 08 handoff ----
+
+
 def parts_lines(objs):
     """One line per distinct part on the schematic (Value + Footprint + LCSC), with what blocks a supplier lookup."""
     lines = {}
@@ -3388,6 +3438,128 @@ def interface_check(p, settings, objs, out_dir):
     c = run_check("interfaces", settings, findings["head"], findings["base"])
     c["coverage"] = coverage
     return c
+
+
+# ---- Ask: the compact, factual design context a model answers from (spec 09). ----
+CONTEXT_LIST = 15
+
+
+def clip(value, n=200):
+    return str(value if value is not None else "")[:n]
+
+
+FIELD_LIMIT = 2000    # code points kept for identity fields (value, footprint, mpn, lcsc); 10's display cap
+PROPERTY_LIMIT = 200  # code points kept per extra KiCad property value
+PROPERTY_COUNT = 32   # extra properties kept per part, in file order
+
+
+def keep(value, n):
+    """(text cut to n code points, was_cut). A cut is always reported by the caller, never silent."""
+    text = "" if value is None else str(value)
+    return text[:n], len(text) > n
+
+
+def netlist_context(text, net_cap, pin_cap):
+    """Nets as {id, pin_count, pins[REF.PIN], more} and, per part, its pins {pin, net, fn}. Single-pin unconnected nets are counted, not listed.
+    `text` must be the return value of 03's read_netlist, which already enforces the single export root, unique net names and identity fields. This function adds only the components check the context needs."""
+    root = parse_sexpr(text)
+    if not root or root[0] != "export" or find(root, "components") is None:
+        raise ValueError("netlist has no components section")
+    _, nets = parse_netlist(text)
+    out, by_ref, unconnected = [], {}, 0
+    fn = lambda n: {"fn": clip(n["function"], 60)} if n["function"] else {}
+    for raw in sorted(nets, key=lambda k: natural(str(k))):
+        name, nodes = str(raw), nets[raw]
+        if name.startswith("unconnected-"):
+            unconnected += len(nodes)
+            for n in nodes:
+                by_ref.setdefault(n["ref"], []).append({"pin": n["pin"], "net": None, **fn(n)})
+            continue
+        pins = [f'{n["ref"]}.{n["pin"]}' for n in nodes]
+        out.append({"id": name, "pin_count": len(pins), "pins": pins[:net_cap],
+                    **({"more": len(pins) - net_cap} if len(pins) > net_cap else {})})
+        for n in nodes:
+            by_ref.setdefault(n["ref"], []).append({"pin": n["pin"], "net": name, **fn(n)})
+    return out, by_ref, unconnected
+
+
+def context_parts(objs):
+    """One record per placed reference; the units of a multi-unit symbol merge. Power symbols and #flags are not parts."""
+    parts = {}
+    # Prefer schematic identities; board-only projects retain footprint UUIDs without inventing sheets or connectivity.
+    symbols = [o for o in objs.values() if o.get("kind") == "symbol" and (o.get("props") or {}).get("reference") and not o["props"]["reference"].startswith("#")]
+    source = "symbol" if symbols else "footprint"
+    for key, o in objs.items():
+        p = o.get("props") or {}
+        ref = p.get("reference") or ""
+        if o.get("kind") != source or not ref or ref.startswith("#"):
+            continue
+        if source == "footprint": p = {**p, "Footprint": p.get("footprint", "")}
+        ds = field(p, ("datasheet",))
+        identity = {"value": p.get("Value", ""), "footprint": p.get("Footprint", ""), "mpn": field(p, MPN_FIELDS), "lcsc": (field(p, LCSC_FIELDS) or "").upper() or None}
+        cut = {name: (keep(v, FIELD_LIMIT) if v is not None else (None, False)) for name, v in identity.items()}
+        props = list(p.items())
+        clipped = [str(k) for k, v in props[:PROPERTY_COUNT] if keep(v, PROPERTY_LIMIT)[1]]
+        rec = parts.setdefault(ref, {
+            "ref": ref, "uuid": key.rsplit("/", 1)[-1],
+            "bom": bom_identity(o),  # 08's canonical contract, unclipped; the first unit's identity stands for the merged part, and grouping uses only this field
+            "value": cut["value"][0], "footprint": cut["footprint"][0], "mpn": cut["mpn"][0], "lcsc": cut["lcsc"][0],
+            "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
+            "sheet": (o.get("where") or {}).get("sheet") if source == "symbol" else None,
+            "source": source, "schematic_available": source == "symbol",
+            "schematic_reason": None if source == "symbol" else "no schematic symbols; part identity is the KiCad footprint UUID",
+            "properties": {str(k): keep(v, PROPERTY_LIMIT)[0] for k, v in props[:PROPERTY_COUNT]},
+            "properties_truncated": len(props) > PROPERTY_COUNT or bool(clipped),
+            "properties_omitted": max(0, len(props) - PROPERTY_COUNT),
+            "properties_clipped": clipped,
+            "incomplete_fields": [name for name in identity if cut[name][1]] + [f"properties.{k}" for k in clipped] + (["properties"] if len(props) > PROPERTY_COUNT else []),
+            "dnp": p.get("dnp") == "yes", "units": 0 if source == "symbol" else None})
+        if source == "symbol": rec["units"] += 1
+    return dict(sorted(parts.items(), key=lambda kv: natural(kv[0])))
+
+
+def side_context(side_dir, objs, net_cap=40, pin_cap=64):
+    """Parts and nets of one revision, read only through 03's read_netlist (marker first, then strict validation). If the netlist is missing or unusable the nets stay empty and the reason says why; nothing is built from geometry."""
+    nets, pins, unconnected, reason = [], {}, 0, None
+    try:
+        nets, pins, unconnected = netlist_context(read_netlist(side_dir), net_cap, pin_cap)
+    except FileNotFoundError:
+        reason = "no netlist was exported for this revision"
+    except ValueError as exc:
+        # read_netlist raises the marker's own text when the export failed, and a validation message for a corrupt file.
+        marker = os.path.exists(f"{side_dir}/netlist.net.error")  # ponytail: a reason-text check only; the read itself is 03's
+        reason = clip(exc, 500) if marker else f"netlist unreadable: {clip(exc, 200)}"
+    except OSError as exc:  # ponytail: unreadable file; reported, never a stack trace in a review
+        reason = f"netlist unreadable: {clip(exc, 200)}"
+    parts = []
+    for rec in context_parts(objs).values():
+        mine = pins.get(rec["ref"], [])
+        net_names = sorted({v["net"] for v in mine if v["net"] is not None}, key=natural)
+        neighbors = sorted({ref for ref, entries in pins.items() if ref != rec["ref"] and any(v["net"] in net_names for v in entries)}, key=natural)
+        parts.append({**rec, "nets": net_names, "neighbors": neighbors, "pin_count": len(mine), "pins": mine[:pin_cap],
+                      "connectivity_available": reason is None, "connectivity_reason": reason,
+                      **({"pins_more": len(mine) - pin_cap} if len(mine) > pin_cap else {})})
+    for n in nets:
+        refs = {ref for ref, entries in pins.items() if any(v["net"] == n["id"] for v in entries)}
+        n["name"] = n["id"]
+        n["sheet_paths"] = sorted({part["sheet"] for part in parts if part["ref"] in refs and part["sheet"] is not None})
+        n["pin_records"] = [{"ref": ref, "pin": v["pin"]} for ref, entries in pins.items() for v in entries if v["net"] == n["id"]][:net_cap]
+        n.update(hierarchical_labels=None, global_labels=None, local_labels=None)
+        n["labels_unavailable"] = "KiCad netlist does not retain label kinds; no geometric connectivity inference"
+    return {"netlist_available": reason is None, "netlist_reason": reason, "parts": parts, "nets": nets,
+            "unconnected_pins": unconnected}
+
+
+def enrich_context(rev, objs, sheets):
+    """Join exact sheet-path identities; do not infer electrical label membership from coordinates."""
+    pages = {pg["path"]: pg for pg in sheets}
+    for part in rev["parts"]:
+        pg = pages.get(part["sheet"], {})
+        part["page"] = pg.get("page")
+        part["sheet_name"] = pg.get("name")
+        part["page_reason"] = None if part["page"] is not None else "sheet instance page unavailable"
+    for net in rev["nets"]:
+        net["pages"] = [pages[path]["page"] for path in net["sheet_paths"] if path in pages]
 
 
 def interface_findings(comps, nets, patterns, where_of):
