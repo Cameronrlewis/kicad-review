@@ -5258,8 +5258,8 @@ return true;
     try {
       askSend('Current question retained'); await settle();
       const q=sent[0];
-      if (sent.length!==1 || q.project!==proj().dir || q.messages.length!==20) return 'client must transmit exactly the last 20 available messages';
-      return q.messages[0].text==='history 9' && q.messages.at(-1).role==='user' && q.messages.at(-1).text==='Current question retained' || 'transport lost the latest history window or current question';
+      if (sent.length!==1 || q.project!==proj().dir || q.messages.length!==19) return 'client must trim history to at most 20 messages leading with a user turn';
+      return q.messages[0].role==='user' && q.messages[0].text==='history 10' && q.messages.at(-1).role==='user' && q.messages.at(-1).text==='Current question retained' || 'transport lost the latest history window or current question';
     } finally { removeEventListener('message',capture); }`],
   ["Ask bounds streamed and completed history before the next question", "", askOpen + `
     askSend('A long answer'); const first=ASK.current;

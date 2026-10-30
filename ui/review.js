@@ -2208,10 +2208,9 @@ function askSend(text) {
   messages.push({ role: "user", text });
   ASK.log.push({ role: "user", text }, { role: "assistant", text: "" });
   ASK.busy = true; ASK.status = ""; ASK.current = "q" + (++askSeq); ASK.draft = "";
-  // ponytail: messages.slice(-20) transmits up to 20 messages per spec ("signed-in users send the last 20 messages")
-  // and plan test contract (ui/checks.mjs). Because valid history ending in a user turn has odd length, any 20-message
-  // slice starts with an assistant turn; site/ask.js:18 strips the leading non-user turn server-side before Anthropic.
-  parent.postMessage({ kicadReviewAskQuestion: { id: ASK.current, project: proj().dir, messages: messages.slice(-20) } }, "*");
+  let outgoing = messages.slice(-20);
+  while (outgoing.length && outgoing[0].role !== "user") outgoing.shift();
+  parent.postMessage({ kicadReviewAskQuestion: { id: ASK.current, project: proj().dir, messages: outgoing } }, "*");
   const input = $("#ask-input"); if (input) input.value = "";
   askRefresh();
 }
