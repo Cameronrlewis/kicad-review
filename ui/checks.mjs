@@ -3716,9 +3716,9 @@ return true;
     if(electricalPins(r,'base','/a/',null).length) return 'missing old manifest failed';
     const p=proj(), sheets=p.sheets, row={...r,id:'c906',detail:{kind:'members'}};
     const id='__br03_manifest';
-    // svgText's cache stores promises; provide the same revision-wide envelope as spec 01.
-    const previous=cache[id]; cache[id]=Promise.resolve(JSON.stringify({version:1,units:'mm',views:[
-      {sheet:'/a/',elements:manifest.elements},{sheet:'/b/',elements:manifest.elements}]}));
+    // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide envelope as spec 01.
+    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',views:[
+      {sheet:'/a/',elements:manifest.elements},{sheet:'/b/',elements:manifest.elements}]})});
     try {
       p.sheets=[{path:'/a/',hotspots:{head:id}},{path:'/b/',hotspots:{head:id}}];
       const view=await electricalManifest('/a/','head');
@@ -3752,7 +3752,7 @@ return true;
         ['malformed',{head:id},'{'],['missing-sheet',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/other/',elements:[]}]})],
         ['unresolved-pin',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/a/',elements:[{uuid:'u',ref:'U1',pins:[]}]}]})]];
       for(const [name,hotspots,text] of cases) {
-        cache[id]=Promise.resolve(text||'{}');p.sheets=[{path:'/a/',hotspots}];
+        cache[id]=Promise.resolve({text:text||'{}'});p.sheets=[{path:'/a/',hotspots}];
         await electricalControls(dock,row);
         if(!dock.querySelector('.electrical-pin-unavailable')?.textContent.includes('Pin locations unavailable')) return name+': missing unavailable note';
         if(dock.querySelector('img,script')) return name+': unsafe note';

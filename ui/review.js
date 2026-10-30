@@ -284,7 +284,7 @@ addEventListener('pagehide', disposeAssets);
 function svgText(id) {
   if (!id) return Promise.resolve(null);
   if (assetTextLoads.has(id)) return Promise.all([assetTextLoads.get(id), decodedAsset(id)]).then(([text]) => text);
-  if (id in cache) return cache[id].then(asset => Object.hasOwn(asset, 'text') ? asset.text : asset?.charCodeAt ? asset : assetText(id));
+  if (id in cache) return cache[id].then(asset => Object.hasOwn(asset, 'text') ? asset.text : assetText(id));
   // Share the in-flight text with validation, without retaining it in a JSON cache record.
   return Promise.all([assetText(id), decodedAsset(id)]).then(([text]) => text);
 }
