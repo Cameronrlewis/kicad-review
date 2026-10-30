@@ -294,6 +294,42 @@ def export_board_stats(pcb, out):
         return error
 
 
+def export_netlist(sch, out):
+    """Soft schematic connectivity evidence: validated netlist.net, or a one-line netlist.net.error."""
+    out = pathlib.Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    target, pending, marker = (out / n for n in ('netlist.net', 'netlist.pending.net', 'netlist.net.error'))
+    for path in (target, pending, marker):
+        path.unlink(missing_ok=True)
+    try:
+        run = subprocess.run(['kicad-cli', 'sch', 'export', 'netlist', '--format', 'kicadsexpr',
+                              '-o', str(pending), sch], capture_output=True, text=True, timeout=60)
+        if run.returncode:
+            raise ValueError(f'netlist export failed ({run.returncode}): {run.stderr or run.stdout}')
+        if not pending.is_file():
+            raise ValueError('netlist export produced no output')
+        validate_netlist(pending.read_text(encoding='utf-8'))
+        os.replace(pending, target)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        target.unlink(missing_ok=True)
+        reason = ' '.join(f'{sch}: connectivity unavailable: {exc}'.split())[:500]
+        marker.write_text(reason, encoding='utf-8')
+        print(reason, file=sys.stderr)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def read_netlist(out):
+    """The one consumer path: a failure marker wins over any coincident netlist.net."""
+    out = pathlib.Path(out)
+    marker = out / 'netlist.net.error'
+    if marker.exists():
+        raise ValueError(marker.read_text(encoding='utf-8')[:500] or 'netlist export unavailable')
+    text = (out / 'netlist.net').read_text(encoding='utf-8')
+    validate_netlist(text)
+    return text
+
+
 def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
@@ -337,7 +373,7 @@ def render_side(src_dir, name, out, netlist=False):
     if os.path.exists(sch):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
-            kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
+            export_netlist(sch, out)
     if os.path.exists(pcb):
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
@@ -477,7 +513,8 @@ def cmd_render(args):
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
-            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
+            # Connectivity evidence for every present schematic, whatever the check settings.
+            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
             if export_3d:
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
@@ -2874,6 +2911,60 @@ def net_members(text, objects, commit):
     return nets, anchors, issues
 
 
+def validate_netlist(text):
+    """Raise ValueError unless text is exactly one usable netlist export."""
+    if re.match(r"\s*\(\s*export\b", text) is None:
+        raise ValueError("not a netlist export")
+    # parse_sexpr returns only the first expression, so reject truncated or trailing content here.
+    depth, quoted, escaped, roots, end = 0, False, False, 0, None
+    for index, char in enumerate(text):
+        if quoted:
+            if escaped: escaped = False
+            elif char == "\\": escaped = True
+            elif char == '"': quoted = False
+        elif char == '"': quoted = True
+        elif char == "(":
+            if depth == 0:
+                roots += 1
+                if roots != 1: raise ValueError("trailing netlist expression")
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0: raise ValueError("unbalanced netlist")
+            if depth == 0: end = index + 1
+    if quoted or depth != 0 or roots != 1 or text[end:].strip():
+        raise ValueError("incomplete or trailing netlist content")
+    root = parse_sexpr(text)
+    if any(not isinstance(field, list) or not field or not isinstance(field[0], str) for field in root[1:]):
+        raise ValueError("bad export field")
+    sections = findall(root, "nets")
+    if len(sections) != 1:
+        raise ValueError("missing or duplicate nets section")
+    def identity(node, key):
+        fields = findall(node, key)
+        if len(fields) != 1 or len(fields[0]) != 2 or not isinstance(fields[0][1], str) or not fields[0][1]:
+            raise ValueError("invalid netlist " + key)
+        return fields[0][1]
+    names = set()
+    for net in sections[0][1:]:
+        if not isinstance(net, list) or not net or net[0] != "net":
+            raise ValueError("bad net")
+        if any(not isinstance(field, list) or not field for field in net[1:]):
+            raise ValueError("bad net field")
+        name = identity(net, "name")
+        if name in names:
+            raise ValueError("duplicate net name")
+        names.add(name)
+        for node in findall(net, "node"):
+            identity(node, "ref"); identity(node, "pin")
+    parse_netlist(text)  # The legacy projection must also succeed, so every consumer sees the same envelope.
+
+
+def validated_net_members(text, objects, commit):
+    validate_netlist(text)
+    return net_members(text, objects, commit)
+
+
 def electrical_row(kind, ref, action="modified", channel="wiring", weight="heavy", detail=None, where=None):
     return {"kind":kind, "ref":ref, "action":action, "channel":channel, "weight":weight,
             "detail":detail or {}, "where":where, "pos":None, "box":None,
@@ -3109,20 +3200,29 @@ def matches(name, patterns):
 def interface_check(p, settings, objs, out_dir):
     if settings["checks"].get("interfaces", "off") == "off":
         return None
+    def not_run(reason, incomplete=False):
+        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"],
+                "status": "not_run", "reason": reason, **({"incomplete": True} if incomplete else {}),
+                "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+    if not pathlib.Path("head", p["dir"], p["name"] + ".kicad_sch").is_file():
+        return not_run("no schematic")
     patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
-    def side(s):
-        path = f"{out_dir}/{s}/netlist.net"
-        if not os.path.exists(path):
-            return None, None
-        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
-        where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
-        with open(path, encoding="utf-8") as fh:
-            return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
-    (head, coverage), (base, _) = side("head"), side("base")
-    if head is None:
-        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"], "status": "not_run",
-                "reason": "no schematic", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
-    c = run_check("interfaces", settings, head, base)
+    findings, coverage = {}, None
+    for side in ("head", "base"):
+        if not pathlib.Path(side, p["dir"], p["name"] + ".kicad_sch").is_file():
+            findings[side] = None  # An absent base schematic is an empty baseline, not failed evidence.
+            continue
+        try:
+            text = read_netlist(pathlib.Path(out_dir) / side)
+            syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(side) or {}).values() if o["kind"] == "symbol"}
+            where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
+            findings[side], found = interface_findings(*parse_netlist(text), patterns, where_of)
+            if side == "head":
+                coverage = found
+        except (OSError, ValueError, TypeError, IndexError, KeyError, AttributeError) as exc:
+            # Never compute new/fixed counts against unavailable evidence for a present schematic.
+            return not_run(f"{side} netlist unavailable: {exc}", True)
+    c = run_check("interfaces", settings, findings["head"], findings["base"])
     c["coverage"] = coverage
     return c
 

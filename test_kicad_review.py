@@ -324,10 +324,12 @@ for theme, palette in kr.IMAGE_PALETTES.items():
 with patch.object(kr, 'kicad_cli') as cli, patch.object(kr.os.path, 'exists', return_value=True), \
      patch.object(kr, 'board_layers', return_value=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']), \
      patch.object(kr, 'sheet_pages', return_value=[]), \
-     patch.object(kr, 'export_board_stats', return_value=None) as stats_export:
+     patch.object(kr, 'export_board_stats', return_value=None) as stats_export, \
+     patch.object(kr, 'export_netlist') as netlist_export:
     with TemporaryDirectory() as d:
         kr.render_side(d, 'H', d, netlist=True)
         stats_export.assert_called_once_with(f'{d}/H.kicad_pcb', d)
+        netlist_export.assert_called_once_with(f'{d}/H.kicad_sch', d)  # bounded soft export, outside the theme loop
     commands = [call.args for call in cli.call_args_list]
     sheets = [c for c in commands if c[:3] == ('sch', 'export', 'svg')]
     boards = [c for c in commands if c[:3] == ('pcb', 'export', 'svg')]
@@ -342,7 +344,7 @@ with patch.object(kr, 'kicad_cli') as cli, patch.object(kr.os.path, 'exists', re
         assert pcb[pcb.index('--drill-shape-opt') + 1] == '0'
     assert sum(c[:2] == ('sch', 'erc') for c in commands) == 1
     assert sum(c[:2] == ('pcb', 'drc') and '--schematic-parity' in c for c in commands) == 1
-    assert sum(c[:3] == ('sch', 'export', 'netlist') for c in commands) == 1
+    assert not any(c[:3] == ('sch', 'export', 'netlist') for c in commands), 'netlist export is not fatal'
     assert not any(c[:3] == ('pcb', 'export', 'stats') for c in commands), 'no fatal or duplicate statistics export'
 print('ok canonical image palettes and dual-theme exports')
 
@@ -2578,6 +2580,7 @@ with tempfile.TemporaryDirectory() as d:
     os.chdir(d)
     for s in ("base", "head"):
         os.makedirs(f"review/p/{s}")
+        write(s, {"p/b.kicad_sch": "(kicad_sch)"})
         open(f"review/p/{s}/netlist.net", "w").write(netlist({"R1": ("10k", "", "Device:R")}, {"GND": [("R1", "1", "", "passive")]}))
     c = interface_check({"dir": "p", "name": "b"}, settings, {"base": {}, "head": {}}, "review/p")
     os.chdir(_cwd)
@@ -2630,10 +2633,13 @@ class FinalReviewTests(unittest.TestCase):
         settings["checks"]["interfaces"] = "required"
         settings["interfaces"] = {"uart_tx": ["SEND"]}
         with tempfile.TemporaryDirectory() as d:
-            os.makedirs(f"{d}/head")
-            with open(f"{d}/head/netlist.net", "w") as f:
-                f.write(netlist({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "SEND", "output")]}))
-            result = interface_check({}, settings, {}, d)
+            old=os.getcwd(); os.chdir(d)
+            try:
+                write('head',{'p/b.kicad_sch':'(kicad_sch)'})
+                write('review/p',{'head/netlist.net':netlist({}, {'TX': [
+                    ('U1','1','TX','output'),('U2','1','SEND','output')]})})
+                result=interface_check({'dir':'p','name':'b'},settings,{},'review/p')
+            finally: os.chdir(old)
         self.assertIn(("uart_tx_to_tx", "error"), types(result["violations"]))
 
     def test_ohms(self):
@@ -5155,6 +5161,142 @@ def test_br03_cmd_copper():
 import pathlib
 test_br03_cmd_copper()
 print("ok BR03 cmd_copper bounded orchestration")
+
+# BR03 Task 6.1: one bounded, validated netlist export shared by electrical and interfaces consumers.
+BR03_EMPTY_NETLIST = '(export (components) (nets))'
+
+
+def test_br03_netlist_export():
+    import subprocess
+    from unittest.mock import patch
+    from kicad_review import export_netlist, validate_netlist, read_netlist, validated_net_members
+    bad_netlists = ['(export)','(export (components))','(other (nets))',
+        '(export (nets) (nets))','junk (export (nets))','(export (nets))(garbage)',
+        '(export (nets)','(export (nets) trailing)',
+        '(export (nets (net (name A) (node (ref U1)))))',
+        '(export (nets (net (name A) (node (ref U1) (pin (bad))))))',
+        '(export (nets (net (node (ref U1) (pin 1)))))']
+    with tempfile.TemporaryDirectory() as td:
+        target, pending, marker = (pathlib.Path(td)/n for n in
+                                  ('netlist.net','netlist.pending.net','netlist.net.error'))
+        cases = [(7,BR03_EMPTY_NETLIST,'failed after partial output'),
+                 (0,None,''),(0,'(export)',''),(0,'(export (nets))(garbage)',''),
+                 (0,'(export (nets)',''),(None,None,'timeout'),(None,None,'oserror')]
+        def export_result(cmd, **kwargs):
+            assert not target.exists() and not marker.exists() and not pending.exists(), 'stale export not cleared'
+            assert pathlib.Path(cmd[cmd.index('-o')+1]) == pending, 'non-atomic output path'
+            if body is not None: pending.write_text(body,encoding='utf-8')
+            if error == 'timeout': raise subprocess.TimeoutExpired(cmd,60)
+            if error == 'oserror': raise OSError('executable unavailable')
+            return subprocess.CompletedProcess(cmd,rc,stdout='',stderr=error)
+        for rc,body,error in cases:
+            for f in (target,pending,marker): f.write_text('stale evidence')
+            with patch('kicad_review.subprocess.run',side_effect=export_result) as run, \
+                 _contextlib.redirect_stderr(io.StringIO()) as stderr:
+                export_netlist('p.kicad_sch',td)
+            assert run.call_count == 1 and run.call_args.kwargs['timeout'] == 60
+            assert not target.exists() and not pending.exists(), 'BR03 failed export reused stale evidence'
+            reason=marker.read_text(encoding='utf-8')
+            assert reason and len(reason)<=500 and '\n' not in reason
+            assert reason in stderr.getvalue()
+            if error == 'failed after partial output': assert error in reason
+            target.write_text(BR03_EMPTY_NETLIST)  # marker takes precedence over stale-but-valid output
+            try: read_netlist(td)
+            except ValueError as exc: assert reason in str(exc)
+            else: raise AssertionError('BR03 marker ignored')
+        rc,body,error = 0,BR03_EMPTY_NETLIST,''
+        pending.write_text('stale pending')
+        with patch('kicad_review.subprocess.run',side_effect=export_result), \
+             patch('kicad_review.os.replace',wraps=os.replace) as replace:
+            export_netlist('p.kicad_sch',td)
+        replace.assert_called_once_with(pending,target)
+        assert read_netlist(td)==BR03_EMPTY_NETLIST and not marker.exists() and not pending.exists()
+        # A long multi-line diagnostic stays one capped line.
+        rc,body,error = 3,None,'line one\nline two ' + 'x'*900
+        with patch('kicad_review.subprocess.run',side_effect=export_result), \
+             _contextlib.redirect_stderr(io.StringIO()):
+            export_netlist('p.kicad_sch',td)
+        reason = marker.read_text(encoding='utf-8')
+        assert len(reason) == 500 and '\n' not in reason and 'line one line two' in reason
+        # Empty nets are valid evidence, and numeric pin names plus escaped quotes stay strings.
+        validate_netlist(r'(export (nets (net (name "A\\\"B") (node (ref U1) (pin "12")))))')
+        # Since spec 01, render_side also walks sheet pages; stub it so only the netlist branch is observed.
+        with patch('kicad_review.os.path.exists',side_effect=lambda f:str(f).endswith('.kicad_sch')), \
+             patch('kicad_review.kicad_cli'), patch('kicad_review.sheet_pages',return_value=[]), \
+             patch('kicad_review.export_netlist') as export:
+            kr.render_side('src','p',td,netlist=True)
+            export.assert_called_once_with('src/p.kicad_sch',td)
+    for text in bad_netlists:
+        try:
+            validated_net_members(text,{},"b"*40)
+            raise AssertionError("BR03 malformed netlist accepted: "+text)
+        except ValueError:
+            pass
+    assert validated_net_members('(export (nets))',{},'b'*40) == ({},{},[])
+    for text in ('(export (nets))(garbage)', '(export (nets)'):
+        try: validated_net_members(text,{},'b'*40)
+        except ValueError: pass
+        else: raise AssertionError('trailing or truncated netlist accepted')
+    # Interfaces-off still schedules one schematic export per present revision.
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            settings=kr.load_settings()
+            settings["checks"]["interfaces"]="off"
+            settings["checks"]["release"]="off"
+            settings["3d"]["enabled"]=False
+            settings["libraries"]["enabled"]=False
+            write("review",{"detect.json":json.dumps({"projects":[{"dir":"p","name":"p","status":"modified"}]})})
+            with patch("kicad_review.load_settings",return_value=settings), \
+                 patch("kicad_review.render_side") as render, patch("kicad_review.cache_renders"), \
+                 _contextlib.redirect_stdout(io.StringIO()):
+                kr.cmd_render(None)
+            assert len(render.call_args_list)==2
+            assert all(c.kwargs["netlist"] is True for c in render.call_args_list)
+        finally: os.chdir(old)
+
+
+def test_br03_interfaces_unavailable():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={'dir':'p','name':'p'}; out=pathlib.Path('review/p')
+            for side in ('base','head'):
+                write(side,{'p/p.kicad_sch':'(kicad_sch)'})
+                write(str(out/side),{'netlist.net':BR03_EMPTY_NETLIST})
+            for level in ('required','informational'):
+                settings=kr.load_settings(); settings['checks']['interfaces']=level
+                for side in ('base','head'):
+                    target=out/side/'netlist.net'; marker=out/side/'netlist.net.error'
+                    for failure in ('missing','malformed','marker'):
+                        target.write_text(BR03_EMPTY_NETLIST)
+                        if failure=='missing': target.unlink()
+                        elif failure=='malformed': target.write_text('(export)')
+                        else: marker.write_text('boom: library table')
+                        with patch('kicad_review.export_netlist') as export:
+                            result=kr.interface_check(p,settings,{'base':{},'head':{}},str(out))
+                        export.assert_not_called()
+                        assert result['status']=='not_run' and result['incomplete'] is True
+                        assert side in result['reason'] and 'unavailable' in result['reason']
+                        if failure=='marker': assert 'boom: library table' in result['reason']
+                        assert result['level']==level
+                        assert result['violations']==[] and not any(result[k] for k in
+                            ('errors','warnings','new_errors','new_warnings','fixed'))
+                        marker.unlink(missing_ok=True); target.write_text(BR03_EMPTY_NETLIST)
+                assert kr.interface_check(p,settings,{'base':{},'head':{}},str(out))['status']=='pass'
+            pathlib.Path('base/p/p.kicad_sch').unlink()
+            (out/'base/netlist.net').unlink()
+            assert kr.interface_check(p,settings,{'base':{},'head':{}},str(out))['status']=='pass'
+            pathlib.Path('head/p/p.kicad_sch').unlink()
+            missing = kr.interface_check(p,settings,{'base':{},'head':{}},str(out))
+            assert missing['reason']=='no schematic' and 'incomplete' not in missing
+        finally: os.chdir(old)
+
+
+test_br03_netlist_export()
+test_br03_interfaces_unavailable()
+print("ok BR03 shared bounded netlist evidence and interfaces unavailable result")
 # Board inspection adapter: derive mm-units inspection graph and facts from retained scene
 scene = {'copperStack':['F.Cu','In1.Cu','In2.Cu','B.Cu'],
          'nets':[{'id':1,'name':'12'}], 'warnings':[], 'complete':True,
