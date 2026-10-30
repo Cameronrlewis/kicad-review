@@ -284,19 +284,22 @@ async function storedReport(artifact, active) {
 }
 
 const reportBuilds = new Map();
+// ponytail: one cold build at a time per isolate (peak ~ one report's transient copies); raise only if queued cold loads time out.
+let buildTail = Promise.resolve();
 
 // Only call after access() and reportArtifact() have validated this request.
 async function cachedReport(artifact, active) {
   const { metadata, base } = artifact;
-  // Legacy metadata without an immutable upload identity remains uncached.
+  // Legacy metadata without an immutable upload identity is shared in flight but never cached.
   const key = metadata.size_in_bytes != null && metadata.updated_at != null
     ? JSON.stringify([base, metadata.workflow_run?.repository_id, metadata.size_in_bytes, metadata.updated_at]) : null;
-  const hit = key && reportCache.get(key);
+  const flight = key ?? JSON.stringify(['legacy', base]);
+  const hit = reportCache.get(flight);
   if (hit) return hit;
   // Authorization and artifact liveness were checked independently by every waiter.
   // Share cold work too: a page's parallel raw/asset requests must not multiply peak memory.
-  if (key && reportBuilds.has(key)) return reportBuilds.get(key);
-  const build = (async () => {
+  if (reportBuilds.has(flight)) return reportBuilds.get(flight);
+  const build = buildTail.then(async () => {
     const stored = await (await storedReport(artifact, active)).text();
     const data = readStoredData(stored);
     const raw = currentReport(stored, { lazyAssets: true, storedData: data }) ?? stored;
@@ -306,11 +309,11 @@ async function cachedReport(artifact, active) {
     const entry = { data, raw, bytes: 4 * stored.length + 2 * raw.length };
     if (key) reportCache.set(key, entry);
     return entry;
-  })();
-  if (!key) return build;
-  reportBuilds.set(key, build);
+  });
+  buildTail = build.catch(() => {});
+  reportBuilds.set(flight, build);
   try { return await build; }
-  finally { reportBuilds.delete(key); }
+  finally { reportBuilds.delete(flight); }
 }
 
 function assetError() {

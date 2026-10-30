@@ -4300,7 +4300,7 @@ test('report cache reuses raw parsing and assets but revalidates every request',
     }
     assert.equal(downloads, 1);
     updated = '2026-10-29T01:00:00Z'; assert.equal((await get()).status, 200); assert.equal(downloads, 2);
-  } finally { restore(); JSON.parse = originalParse; }
+  } finally { restore(); JSON.parse = originalParse; (await import('./report-cache.js')).reportCache.clear(); }
 });
 
 test('report LRU enforces byte and entry ceilings, refreshes recency and rejects oversized entries', async () => {
@@ -4312,6 +4312,9 @@ test('report LRU enforces byte and entry ceilings, refreshes recency and rejects
   assert.equal(cache.bytes, 8);
   cache.set('a', { bytes: 7 }); assert.equal(cache.get('c'), undefined); assert.equal(cache.bytes, 7);
   cache.set('huge', { bytes: 11 }); assert.equal(cache.get('huge'), undefined); assert.equal(cache.bytes, 7);
+  for (const bytes of [NaN, Infinity, -1, undefined]) cache.set('bad', { bytes });
+  assert.equal(cache.get('bad'), undefined); assert.equal(cache.bytes, 7);
+  cache.clear(); assert.equal(cache.bytes, 0); assert.equal(cache.entries.size, 0);
   const count = new ReportCache(100, 2);
   for (const key of ['a', 'b', 'c']) count.set(key, { bytes: 1 });
   assert.equal(count.get('a'), undefined); assert.equal(count.bytes, 2);
@@ -4336,7 +4339,7 @@ test('raw handler evicts least recently used reports by retained bytes before en
     assert.equal(result.status, 200); await result.arrayBuffer();
   };
   try {
-    reportCache.entries.clear(); reportCache.bytes = 0;
+    reportCache.clear();
     await get('876501');
     reportCache.maxBytes = reportCache.bytes * 2;
     await get('876502'); await get('876501'); await get('876503');
@@ -4345,52 +4348,79 @@ test('raw handler evicts least recently used reports by retained bytes before en
     await get('876502');
     assert.deepEqual(downloads, ['876501', '876502', '876503', '876502']);
   } finally {
-    restore(); reportCache.entries.clear(); reportCache.bytes = 0; reportCache.maxBytes = ceiling;
+    restore(); reportCache.clear(); reportCache.maxBytes = ceiling;
   }
 });
 
-test('concurrent cold raw and asset requests share one build and failed builds can retry', async () => {
+// Cold-build harness: the download is held until all N requests have entered cachedReport
+// (each calls reportCache.get once), so the sharing assertions are not timing dependent.
+async function coldHarness({ legacy = false } = {}) {
+  const { reportCache } = await import('./report-cache.js');
+  reportCache.clear();
   const sealed = await signedIn(), data = imageData(); data.cacheProbe = 'single-flight-probe-01';
-  const stored = storedImageReport(data), originalParse = JSON.parse;
-  let downloads = 0, parses = 0, fail = false, metadataCalls = 0, allValidated, release;
-  const count = 10;
-  let validated = new Promise(resolve => { allValidated = resolve; });
-  let gate = new Promise(resolve => { release = resolve; });
+  const stored = storedImageReport(data), originalParse = JSON.parse, originalGet = reportCache.get;
+  const h = { downloads: 0, parses: 0, active: 0, maxActive: 0, fail: false, entered: 0, want: 0 };
+  let open; h.gate = new Promise(resolve => { open = resolve; });
   JSON.parse = function(value, ...args) {
-    if (typeof value === 'string' && value.includes('single-flight-probe-01')) parses++;
+    if (typeof value === 'string' && value.includes('single-flight-probe-01')) h.parses++;
     return originalParse.call(this, value, ...args);
+  };
+  reportCache.get = function(key) {
+    if (++h.entered === h.want) open();
+    return originalGet.call(this, key);
   };
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (/\/artifacts\/76543[12]$/.test(url)) {
-      if (++metadataCalls === count) allValidated();
-      return Response.json({ name: 'kicad-review.html', size_in_bytes: stored.length,
-        updated_at: '2026-10-29T00:00:00Z', workflow_run: { repository_id: 5 } });
-    }
+    if (/\/artifacts\/\d+$/.test(url)) return Response.json({ name: 'kicad-review.html',
+      ...(legacy ? {} : { size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z' }), workflow_run: { repository_id: 5 } });
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/single-flight' } });
-    assert.equal(url, 'https://signed.example/single-flight'); downloads++;
-    await gate; await new Promise(resolve => setTimeout(resolve, 50)); // let every waiter reach the shared build
-    return fail ? new Response('unavailable', { status: 503 }) : new Response(stored);
+    assert.equal(url, 'https://signed.example/single-flight'); h.downloads++;
+    h.maxActive = Math.max(h.maxActive, ++h.active);
+    await h.gate; await new Promise(resolve => setImmediate(resolve)); h.active--;
+    return h.fail ? new Response('unavailable', { status: 503 }) : new Response(stored);
   });
-  const get = (id, index = 0) => call(`/r/Cameronrlewis/repo/a/${id}${index < 2 ? '/raw' : `/assets/${imageId}.svg`}`,
-    { headers: { Cookie: `s=${sealed}` } });
-  const batch = async (id, status) => {
-    const pending = Array.from({ length: count }, (_, index) => get(id, index));
-    await validated; release();
-    const responses = await Promise.all(pending);
+  // Starts n requests for the given ids and releases the download once all have entered cachedReport.
+  h.batch = async (ids, status) => {
+    h.entered = 0; h.want = ids.length; h.gate = new Promise(resolve => { open = resolve; });
+    const responses = await Promise.all(ids.map((id, index) => call(`/r/Cameronrlewis/repo/a/${id}${index % 3 ? `/assets/${imageId}.svg` : '/raw'}`,
+      { headers: { Cookie: `s=${sealed}` } })));
     for (const response of responses) { assert.equal(response.status, status); await response.arrayBuffer(); }
   };
+  h.get = async id => { h.want = -1; const r = await call(`/r/Cameronrlewis/repo/a/${id}/raw`, { headers: { Cookie: `s=${sealed}` } }); await r.arrayBuffer(); return r; };
+  h.done = () => { open(); restore(); JSON.parse = originalParse; reportCache.get = originalGet; reportCache.clear(); };
+  return h;
+}
+
+test('concurrent cold raw and asset requests share one build and failed builds can retry', async () => {
+  const h = await coldHarness();
   try {
-    await batch('765431', 200);
-    assert.equal(downloads, 1); assert.equal(parses, 1); assert.equal(metadataCalls, count);
-    metadataCalls = 0; fail = true;
-    validated = new Promise(resolve => { allValidated = resolve; });
-    gate = new Promise(resolve => { release = resolve; });
-    await batch('765432', 404);
-    assert.equal(downloads, 2); assert.equal(parses, 1);
-    fail = false;
-    const retried = await get('765432'); assert.equal(retried.status, 200); await retried.arrayBuffer();
-    assert.equal(downloads, 3); assert.equal(parses, 2);
-    assert.equal((await get('765432')).status, 200); assert.equal(downloads, 3);
-  } finally { release(); restore(); JSON.parse = originalParse; }
+    await h.batch(Array(10).fill('765431'), 200);
+    assert.equal(h.downloads, 1); assert.equal(h.parses, 1);
+    h.fail = true;
+    await h.batch(Array(10).fill('765432'), 404);
+    assert.equal(h.downloads, 2); assert.equal(h.parses, 1);
+    h.fail = false;
+    assert.equal((await h.get('765432')).status, 200);
+    assert.equal(h.downloads, 3); assert.equal(h.parses, 2);
+    assert.equal((await h.get('765432')).status, 200); assert.equal(h.downloads, 3);
+  } finally { h.done(); }
+});
+
+test('cold builds for different artifacts run one at a time', async () => {
+  const h = await coldHarness();
+  try {
+    const first = h.batch(['765441', '765441', '765442', '765442'], 200);
+    await first;
+    assert.equal(h.downloads, 2); assert.equal(h.maxActive, 1);
+  } finally { h.done(); }
+});
+
+test('legacy metadata shares in-flight builds but is never cached', async () => {
+  const h = await coldHarness({ legacy: true });
+  try {
+    await h.batch(Array(6).fill('765451'), 200);
+    assert.equal(h.downloads, 1); assert.equal(h.parses, 1);
+    h.want = -1; await h.get('765451');
+    assert.equal(h.downloads, 2);
+  } finally { h.done(); }
 });

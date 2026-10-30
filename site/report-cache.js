@@ -16,8 +16,10 @@ export class ReportCache {
     return entry;
   }
 
+  clear() { this.entries.clear(); this.bytes = 0; }
+
   set(key, entry) {
-    if (entry.bytes > this.maxBytes) return;
+    if (!Number.isFinite(entry.bytes) || entry.bytes < 0 || entry.bytes > this.maxBytes) return;
     const previous = this.entries.get(key);
     if (previous) { this.bytes -= previous.bytes; this.entries.delete(key); }
     this.entries.set(key, entry);
