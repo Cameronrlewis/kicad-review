@@ -367,6 +367,21 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
     encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
 }
 
+// Exactly `size` bytes or null; a wrong declared length or a longer body is never buffered whole.
+async function readExactly(response, size) {
+  const declared = response.headers.get('Content-Length');
+  if (!response.body) return null;
+  if (declared != null && Number(declared) !== size) { await response.body.cancel(); return null; }
+  // Chunks, not a size-length buffer: the descriptor's claimed size is never allocated up front.
+  const chunks = [], reader = response.body.getReader();
+  for (let n = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) return n === size ? new Uint8Array(await new Blob(chunks).arrayBuffer()) : null;
+    if ((n += value.length) > size) { await reader.cancel(); return null; }
+    chunks.push(value);
+  }
+}
+
 const comparisonReport = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
 // 3D assets come only from the validated report's own run, named by a descriptor in its stored data.
 async function artifact3d(request, env, owner, repo, id, digest, kind) {
@@ -402,8 +417,8 @@ async function artifact3d(request, env, owner, repo, id, digest, kind) {
       // Share downloader's host policy; never forward GitHub authorization or follow further redirects.
       const body = await fetch(location, { redirect: 'error' });
       if (!body.ok) return assetError();
-      const bytes = new Uint8Array(await body.arrayBuffer());
-      return bytes.length === descriptor.bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
+      const bytes = await readExactly(body, descriptor.bytes);
+      return bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
     } catch { return assetError(); }
   });
   return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,

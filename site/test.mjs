@@ -4657,13 +4657,14 @@ test('legacy metadata shares in-flight builds but is never cached', async () => 
 
 // 06's verifyReportFamily (site/report-kind.js) merges after 02 (ORDER.md), so design
 // reports fail closed here; 06 Task 4A flips the 'design' row to a 200 control.
+test.todo('BR02 asset route design family serves 200 and both-family conditional flow (06 Task 4A: verifyReportFamily)');
 for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
   'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',
-  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'bad-host']) {
+  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'bad-host']) {
   test('BR02 asset route ' + scenario, async () => {
     const digest = 'c'.repeat(64), kind = scenario === 'valid-parts' ? 'board-parts.json' : 'board.glb';
     const key = kind === 'board.glb' ? 'model' : 'parts', bytes = gzipSync(kind === 'board.glb' ? 'glTF' : '[]');
-    let downloads = 0, accessChecks = 0, metadataChecks = 0;
+    let downloads = 0, accessChecks = 0, metadataChecks = 0, pulls = 0;
     let revoked = scenario === 'no-pull', expired = scenario === 'expired-html', siblingExpired = scenario === 'expired-sibling';
     const sealed = await signedIn();
     const asset = () => ({ id: 91, name: `kicad-3d-${digest}-${kind}.gz`, expired: siblingExpired, workflow_run: { id: 9 } });
@@ -4704,7 +4705,13 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
       if (url.endsWith('/artifacts/91/zip')) return new Response(null, { status: 302,
         headers: { Location: scenario === 'bad-host' ? 'https://evil.example/model' : 'https://artifact.actions.githubusercontent.com/file' } });
       if (url === 'https://artifact.actions.githubusercontent.com/file') {
-        downloads++; return new Response(['corrupt', 'not-gzip'].includes(scenario) ? 'not gzip' : bytes);
+        downloads++;
+        // Oversized: valid bytes then endless filler; a whole-body read would pull every chunk.
+        if (scenario === 'oversized') return new Response(new ReadableStream({ pull(c) {
+          c.enqueue(pulls++ ? new Uint8Array(65536) : new Uint8Array(bytes)); if (pulls > 64) c.close(); } }));
+        if (scenario === 'declared-length') return new Response(new ReadableStream({ pull(c) {
+          pulls++; c.enqueue(new Uint8Array(bytes)); c.close(); } }, { highWaterMark: 0 }), { headers: { 'Content-Length': String(bytes.length + 5) } });
+        return new Response(['corrupt', 'not-gzip'].includes(scenario) ? 'not gzip' : bytes);
       }
       throw Error('unexpected URL ' + url);
     });
@@ -4752,13 +4759,15 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         assert.equal(response.status, 404, scenario);
         assert.match(response.headers.get('Cache-Control') || '', /no-store/, scenario);
         assert.equal(response.headers.get('ETag'), null, scenario);
-        if (!['corrupt', 'not-gzip', 'size-mismatch'].includes(scenario)) assert.equal(downloads, 0, scenario);
+        if (!['corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length'].includes(scenario)) assert.equal(downloads, 0, scenario);
+        if (scenario === 'oversized') assert.ok(pulls <= 3, 'read stops past descriptor size: ' + pulls);
+        if (scenario === 'declared-length') assert.equal(pulls, 0, 'declared size checked before reading');
       }
     } finally { restore(); }
   });
 }
 
-test('BR02 image route rejects a 3D model digest and the 3D route a twelve-character image digest', async () => {
+test('BR02 image route rejects 64-character 3D model digests', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => { throw Error('unexpected URL ' + url); });
   try {
