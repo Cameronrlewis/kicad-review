@@ -725,6 +725,10 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 .insp-module dt { overflow-wrap:break-word; }
 
 /* BOM view (spec 08): Parts-tab view toggle, header, category chips, grouped table. Tokens only; no new colours. */
+/* ponytail: Desktop-only ceiling, controller ruling 2026-10-29. Task 8 deliberately omits
+   the <=899px 44px-target block, "BOM phone screen on the parts fixture" check,
+   both Pixel 7 CI lines and their TS-S1 tuple entries. If phone support returns,
+   restore those together from Task 8 and verify both themes at 412x915, DPR 2.625. */
 .bom-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:var(--sp-2); padding:var(--sp-2); border-bottom:1px solid var(--hair); }
 .bom-summary { margin:0; font:var(--fs-xs) var(--font-mono); font-variant-numeric:tabular-nums; color:var(--tx2); }
 .bom-downloads { display:flex; gap:var(--sp-2); }
@@ -748,7 +752,8 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 .bom-part b { display:block; font-weight:var(--fw-semibold); }
 .bom-part small { display:block; color:var(--tx2); }
 .bom-refs { font-family:var(--font-mono); }
-.bom-table a { color:var(--accent); }
+/* Text uses the contrast-safe accent; focus outlines use the accent fill (--acc). */
+.bom-table a { color:var(--acc-tx); }
 .bom-row.changed .bom-delta { color:var(--mod); box-shadow:inset 3px 0 var(--mod); }
 #panel:has(.bom-table) .parts-scroll { overflow-x:auto; max-width:100%; }
 #app.right-table .bom-table { min-width:800px; }
