@@ -6179,3 +6179,182 @@ if bom_handoff:
 placed = {"/bom-u1": {"kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "props": {"reference": "R1", "Value": "10k", "Footprint": "R_0402", "dnp": "yes"}}}
 assert kr.context_parts(placed)["R1"]["bom"] == kr.bom_identity(placed["/bom-u1"]) and kr.context_parts(placed)["R1"]["bom"]["excludedReason"] == "dnp"
 print("ok ask parts and nets")
+
+# Ask (spec 09): board facts, checks, changes, size.
+assert kr.stat_number("506.97 mm²") == 506.97 and kr.stat_number(None) is None and kr.stat_number("n/a") is None
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"pcb.kicad_pcb": '(kicad_pcb\n (layers\n  (0 "F.Cu" signal)\n  (4 "In1.Cu" signal)\n  (2 "B.Cu" signal)\n  (5 "F.SilkS" user)\n )\n)\n'})
+    none = kr.board_facts(t, f"{t}/pcb.kicad_pcb")
+    assert none["stats_available"] is False and none["copper_layers"] == ["F.Cu", "In1.Cu", "B.Cu"] and none["layers"][-1] == "F.SilkS"
+    outline_less = {"board": {"has_outline": False, "width": None, "height": None, "area": None, "front_copper_area": "506.97 mm²",
+                              "back_copper_area": "37.305 mm²", "min_track_clearance": "0.2000 mm", "min_track_width": "0.2000 mm",
+                              "min_drill_diameter": "0.3000 mm", "board_thickness": "1.6000 mm"},
+                    "pads": {"smd": 225}, "vias": {"through": 15}, "components": {"total": {"front": 55, "back": 1, "total": 56}}}
+    write(t, {"stats.json": json.dumps(outline_less)})
+    facts = kr.board_facts(t, f"{t}/pcb.kicad_pcb")
+    assert facts["stats_available"] is True and facts["has_outline"] is False and facts["size_mm"] is None
+    assert facts["front_copper_mm2"] == 506.97 and facts["min_track_width_mm"] == 0.2 and facts["components"]["total"] == 56
+    write(t, {"stats.json": json.dumps({**outline_less, "board": {**outline_less["board"], "has_outline": True, "width": "50.0000 mm", "height": "30.5 mm"}})})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["size_mm"] == [50.0, 30.5]
+    write(t, {"stats.json": "{not json"})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False
+    write(t, {"stats.json": json.dumps({"board": None})})
+    assert kr.board_facts(t, f"{t}/pcb.kicad_pcb")["stats_available"] is False, "a non-object board section is unavailable, not a crash"
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_pcb": PCB_TEXT, "out/stats.json": json.dumps(STATS_PARTIAL)})
+    with patch("kicad_review.subprocess.run", side_effect=stats_fails):
+        kr.render_side(f"{t}/src", "P", f"{t}/out", ask=True)
+    facts = kr.board_facts(f"{t}/out", f"{t}/src/P.kicad_pcb")
+    assert facts["stats_available"] is False and "stats failed" in facts["stats_reason"]
+    assert "size_mm" not in facts, "failed export never feeds partial or stale facts to the model"
+viol = lambda i, new=True: {"type": "unconnected_items", "severity": "error", "description": f"Missing connection {i}", "items": [f"Pad {i}"] * 6, "new": new, "pos": [999, 999]}
+checks = [{"name": "erc", "title": "ERC", "level": "required", "status": "fail", "errors": 20, "warnings": 0, "new_errors": 20, "new_warnings": 0,
+           "violations": [viol(i) for i in range(20)]},
+          {"name": "drc", "title": "DRC", "level": "required", "status": "not_run", "reason": "no board", "errors": 0, "warnings": 0, "new_errors": 0, "new_warnings": 0, "violations": []},
+          {"name": "interfaces", "title": "Interfaces", "level": "informational", "status": "warn", "errors": 0, "warnings": 1, "new_errors": 0, "new_warnings": 1,
+           "violations": [{**viol(1), "severity": "warning"}]}]
+cc = {c["name"]: c for c in kr.context_checks(checks)}
+assert cc["erc"]["confidence"] == "deterministic" and cc["erc"]["evidence_source"] == "kicad-cli sch erc"
+assert len(cc["erc"]["findings"]) == 15 and cc["erc"]["more"] == 5 and len(cc["erc"]["findings"][0]["items"]) == 4
+assert "pos" not in json.dumps(cc), "ERC and DRC positions never reach the model"
+assert cc["drc"]["status"] == "not_run" and cc["drc"]["reason"] == "no board", "checks that did not run are listed"
+assert cc["interfaces"]["confidence"] == "heuristic"
+mixed = {**checks[0], "violations": [{**viol(i), "confidence": conf, "evidence_source": source} for i, (conf, source) in enumerate([
+    ("deterministic", "netlist"), ("heuristic", "pattern matcher"), ("datasheet-backed", "https://vendor.example/ds.pdf page 3")])]}
+assert [(v["confidence"], v["evidence_source"]) for v in kr.context_checks([mixed])[0]["findings"]] == [(v["confidence"], v["evidence_source"]) for v in mixed["violations"]]
+unknown = kr.context_checks([{**checks[0], "name": "future", "violations": [viol(0)]}])[0]
+assert unknown["findings"][0]["confidence"] == "heuristic" and "unavailable" in unknown["evidence_source"]
+upstream = kr.context_checks([{**checks[0], "confidence": "datasheet-backed", "evidence_source": "vendor datasheet page 3", "violations": [viol(0)]}])[0]
+assert upstream["confidence"] == upstream["findings"][0]["confidence"] == "datasheet-backed"
+assert upstream["evidence_source"] == upstream["findings"][0]["evidence_source"] == "vendor datasheet page 3"
+rows = [{"id": f"c{i}", "action": "added", "kind": "wire", "ref": "", "where": {"sheet": "/"}, "props": {"points": "(0, 0)"}} for i in range(200)]
+rows.insert(0, {"id": "c0", "action": "modified", "kind": "symbol", "ref": "R16", "where": {"sheet": "/"}, "changes": [["Value", "10k", "4.7k"]],
+                "channel": "components", "weight": "heavy"})
+ch = kr.context_changes(rows)
+assert ch["total"] == 201 and len(ch["rows"]) == 150 and ch["more"] == 51 and ch["by_kind"] == {"symbol": 1, "wire": 200}
+assert ch["rows"][0]["changes"] == [["Value", "10k", "4.7k"]] and ch["rows"][0]["weight"] == "heavy" and ch["rows"][0]["sheet"] == "/"
+# An oversized design is cut in stages; counts and a truncated flag stay.
+big = netlist({"U1": ("MCU", "", "MCU:M")}, {f"N{i}": [("U1", str(j), "", "passive") for j in range(100)] for i in range(500)})
+def build(net_cap, pin_cap):
+    nets, _, _ = kr.netlist_context(big, net_cap, pin_cap)
+    return {"version": 1, "projects": [{"revisions": {"head": {"nets": nets}}}]}
+doc = kr.fit_context(build)
+size = len(json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+head_nets = doc["projects"][0]["revisions"]["head"]["nets"]
+assert size <= kr.CONTEXT_LIMIT and doc["truncated"] is True, size
+assert head_nets[0]["pin_count"] == 100 and len(head_nets[0]["pins"]) < 100 and head_nets[0]["more"] > 0
+fixed = kr.fit_context(lambda nc, pc: {"version":1, "projects":[{"revisions":{"head":{"parts":[{"ref":str(i),"value":"µ"*500,"pins":[]} for i in range(500)],"nets":[]}},"changes":{"total":12}}]})
+assert kr.context_bytes(fixed) <= kr.CONTEXT_LIMIT and fixed["disabled_reason"] and fixed["omitted"] == {"projects":1,"parts":500,"nets":0,"changes":12}
+# Fixed collections and project metadata can overflow even with every pin list empty.
+many_projects = [{"name": "µ"*500, "revisions": {"head": {"parts": [], "nets": [{"id": "N"*500, "pins": []}]}}, "changes": {"total": 7, "rows": [{"detail": "x"*500}]}} for _ in range(200)]
+ceiling = kr.fit_context(lambda nc, pc: {"version": 1, "projects": many_projects})
+assert ceiling["omitted"] == {"projects": 200, "parts": 0, "nets": 200, "changes": 1400} and ceiling["projects"] == []
+assert kr.context_bytes(ceiling) <= kr.CONTEXT_LIMIT and "Select fewer projects" in ceiling["disabled_reason"]
+boundary = {"version": 1, "projects": [], "padding": "", "truncated": False}
+boundary["padding"] = "µ"*((kr.CONTEXT_LIMIT-kr.context_bytes(boundary))//2)
+boundary["padding"] += "x"*(kr.CONTEXT_LIMIT-kr.context_bytes(boundary))
+assert kr.context_bytes(kr.fit_context(lambda nc, pc: copy.deepcopy(boundary))) == kr.CONTEXT_LIMIT
+boundary["padding"] += "x"
+# JSON true is one byte shorter than false; measure that final metadata too.
+at_next_stage = kr.fit_context(lambda nc, pc: copy.deepcopy(boundary))
+assert at_next_stage["truncated"] is True and kr.context_bytes(at_next_stage) == kr.CONTEXT_LIMIT
+boundary["padding"] += "x"
+assert kr.fit_context(lambda nc, pc: copy.deepcopy(boundary))["disabled_reason"]
+check_settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+missing_checks = {c["name"]: c for c in kr.complete_context_checks([], check_settings, False, False)}
+assert missing_checks["erc"]["reason"] == "no schematic" and missing_checks["drc"]["reason"] == "no board"
+assert missing_checks["interfaces"]["reason"] == "disabled in settings"
+ASK_REVISION_FIELDS = {"revision", "sheets", "parts", "nets", "unconnected_pins", "netlist_available", "netlist_reason", "board"}  # Shared spec 10 fixture contract.
+with patch("kicad_review.side_context", side_effect=lambda *a,**kw: {"parts":[],"nets":[],"unconnected_pins":0,"netlist_available":True,"netlist_reason":None}), patch("kicad_review.sheet_pages", side_effect=lambda root,name: [{"path":"/","name":root,"page":"1" if root.startswith("base") else "2"}]), patch("kicad_review.os.path.isfile", return_value=False):
+    for sides in (("base","head"),("base",),("head",)):
+        status = "added" if sides == ("head",) else "removed" if sides == ("base",) else "modified"
+        record=kr.project_context({"name":"P","dir":"P","status":status},"review/P",{"base":{},"head":{}},[],{"base":"base/P.kicad_pcb","head":"head/P.kicad_pcb"},[],[],sides,15,15,{"base":"a"*40,"head":"b"*40},check_settings)
+        for side in ("base","head"):
+            rev=record["revisions"][side]
+            if side not in sides: assert rev is None
+            else:
+                assert rev["revision"] == ("a" if side=="base" else "b")*40 and rev["sheets"][0]["page"] == ("1" if side=="base" else "2")
+                assert set(rev) == ASK_REVISION_FIELDS
+                assert "pins" not in rev, "the reverse connectivity index is parts[].pins, not revisions.*.pins"
+small = kr.fit_context(lambda nc, pc: {"version": 1, "projects": []})
+assert small["truncated"] is False
+# Typed change detail is bounded, never silently dropped: row type, channel, weight and every full count survive.
+big_detail = {"kind": "members", "added": [f"J{i}.1" for i in range(300)], "removed": [], "beforeNets": ["A"], "afterNets": ["B"],
+              "transitions": [{"pin": str(i), "before": ["A"], "after": ["B"]} for i in range(200)]}
+dr = kr.context_changes([{"id": "d1", "action": "modified", "kind": "net-members", "ref": "N", "where": {"board": True},
+                          "channel": "wiring", "weight": "heavy", "detail": big_detail}])
+row = dr["rows"][0]
+assert row["kind"] == "net-members" and row["channel"] == "wiring" and row["weight"] == "heavy"
+assert row["detail_truncated"] is True and row["detail"]["omitted_counts"] == {"added": 300, "transitions": 200}
+assert len(row["detail"]["added"]) == 15 and row["detail"]["beforeNets"] == ["A"] and row["detail"]["kind"] == "members" and dr["detail_truncated"] == 1
+long_note = kr.bounded_detail({"kind": "members", "note": "n" * 2500})[0]
+assert long_note["note"] == "n" * 200 and long_note["omitted_counts"] == {"note": 2500}, "a clipped string is counted, never cut silently"
+small_row = kr.context_changes([{"id": "s", "action": "modified", "kind": "net-members", "ref": "N", "where": {"board": True}, "detail": {"kind": "members", "added": ["J1.1"]}}])["rows"][0]
+assert small_row["detail"] == {"kind": "members", "added": ["J1.1"]} and "detail_truncated" not in small_row
+# 03's signed copper detail: outlines are counted, never sent; the row keeps its type, layer and signed areas.
+area = {"kind": "area", "layer": "F.Cu", "addedMm2": 12.5, "removedMm2": 0.0, "addedContours": [[[float(i), 0.0]] * 200 for i in range(40)], "removedContours": []}
+ar = kr.context_changes([{"id": "a1", "action": "modified", "kind": "copper", "ref": "F.Cu", "where": {"board": True}, "channel": "board", "weight": "heavy", "detail": area}])["rows"][0]
+assert ar["detail"]["kind"] == "area" and ar["detail"]["layer"] == "F.Cu" and ar["detail"]["addedMm2"] == 12.5
+assert ar["detail"]["addedContours"] == {"omitted": True} and ar["detail"]["omitted_counts"] == {"addedContours": 40} and ar["detail"]["removedContours"] == []
+assert ar["detail_truncated"] is True and ar["channel"] == "board" and ar["weight"] == "heavy"
+# 04's fab coverage ledger survives into the context check; long lists keep 15 items and a full count.
+fab = {**checks[0], "name": "fab_limits", "vendor": "jlcpcb", "title": "Fab limits", "profile": "jlcpcb-multilayer", "checkedOn": "2026-10-01", "assumedCopperOz": 1,
+       "checked": ["track width"], "unchecked": [f"limit {i}" for i in range(20)], "unsupported": None,
+       "coverageWarnings": ["F.Cu: copper thickness unknown"], "baselineAvailable": False, "fixed": 0, "violations": []}
+# 04 owns FAB_EVIDENCE_SOURCE and is not merged here; any supplied provenance must pass through unchanged.
+fab_source = getattr(kr, "FAB_EVIDENCE_SOURCE", "kicad-cli pcb drc; vendor DRC passes (stand-in text until 04 merges)")
+# 04 supplies two same-name sections: identities survive projection and completion, even with no board.
+fab_sections = [{**fab, "vendor": vendor, "profile": profile,
+                 "confidence": "deterministic", "evidence_source": fab_source}
+                for vendor, profile in (("jlcpcb", "jlcpcb-multilayer"), ("pcbway", "pcbway-standard"))]
+for has_board in (True, False):
+    supplied = [dict(c) for c in fab_sections]
+    if not has_board:
+        supplied = [{**c, "status": "not_run", "reason": "no board", "errors": 0, "warnings": 0,
+                     "new_errors": 0, "new_warnings": 0, "violations": []} for c in supplied]
+    for projected in (kr.context_checks(supplied), kr.complete_context_checks(supplied, check_settings, True, has_board)):
+        sections = [c for c in projected if c["name"] == "fab_limits"]
+        assert len(sections) == 2
+        assert [(c["name"], c["vendor"]) for c in sections] == [("fab_limits", "jlcpcb"), ("fab_limits", "pcbway")]
+        assert [c["profile"] for c in sections] == [c["profile"] for c in supplied]
+        assert all(c["confidence"] == "deterministic" and c["evidence_source"] == fab_source for c in sections)
+        if not has_board:
+            assert all(c["status"] == "not_run" and c["reason"] == "no board" and c["findings"] == [] for c in sections)
+assert not any(c["name"] == "fab_limits" for c in kr.complete_context_checks([], check_settings, True, False)), "disabled/absent fab checks are not synthesized"
+fc = kr.context_checks([fab])[0]
+assert fc["vendor"] == "jlcpcb"
+assert fc["unchecked"] == [f"limit {i}" for i in range(15)] and fc["unchecked_more"] == 5 and fc["baselineAvailable"] is False
+assert fc["profile"] == "jlcpcb-multilayer" and fc["coverageWarnings"] == ["F.Cu: copper thickness unknown"] and fc["fixed"] == 0 and fc["unsupported"] is None
+# Ledger clips are never silent: a string or item over 200 code points is cut, named in <field>_truncated, and feeds the aggregate flag.
+long_fab = {**fab, "profile": "p" * 250, "coverageWarnings": ["c" * 250, "short"], "checked": ["track width"]}
+lf = kr.context_checks([long_fab])[0]
+assert lf["profile"] == "p" * 200 and lf["profile_truncated"] is True
+assert lf["coverageWarnings"] == ["c" * 200, "short"] and lf["coverageWarnings_truncated"] is True and "checked_truncated" not in lf
+clean_fab = {"name": "fab_limits", "title": "Fab limits", "level": "required", "status": "pass", "errors": 0, "warnings": 0, "new_errors": 0,
+             "new_warnings": 0, "violations": [], "profile": "jlcpcb-multilayer", "checked": ["track width"], "unchecked": ["x"]}
+assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"checks": [lf], "revisions": {}}]})["truncated"] is True, "a ledger clip marks the whole context"
+assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"checks": kr.context_checks([clean_fab]), "revisions": {}}]})["truncated"] is False
+# Aggregate truncation: a part with 33 properties and one 300-character value is truncated, with its per-field marks named.
+wide = {"/uuid-w": {"kind": "symbol", "ref": "R9", "where": {"sheet": "/"}, "props": {"reference": "R9", "Value": "1k", "Note": "n" * 300, **{f"K{i}": "1" for i in range(30)}}}}
+assert len(wide["/uuid-w"]["props"]) == 33
+wide_parts = list(kr.context_parts(wide).values())
+wdoc = kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": wide_parts, "nets": []}}}]})
+wp = wdoc["projects"][0]["revisions"]["head"]["parts"][0]
+assert wdoc["truncated"] is True and wp["properties_truncated"] is True and wp["properties_omitted"] == 1
+assert "properties" in wp["incomplete_fields"] and "properties.Note" in wp["incomplete_fields"] and len(wp["properties"]["Note"]) == 200
+clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
+assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
+# 09 owns net_changes: 03's wiring status decides availability; a missing summary is unavailable, zero complete rows are available.
+assert kr.net_change_support(None) == {"available": False, "complete": False}
+assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "complete"}]}) == {"available": True, "complete": True}
+assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "incomplete"}]}) == {"available": True, "complete": False}
+assert kr.net_change_support({"channels": [{"channel": "wiring", "status": "not_applicable"}]}) == {"available": False, "complete": False}
+summary = {"headline": "1 nets added", "channels": [{"channel": "wiring", "status": "complete"}]}
+with patch("kicad_review.side_context", return_value={"parts": [], "nets": [], "unconnected_pins": 0, "netlist_available": True, "netlist_reason": None}), \
+     patch("kicad_review.sheet_pages", return_value=[]), patch("kicad_review.os.path.isfile", return_value=False):
+    for summary_in, expected in ((summary, ("1 nets added", {"available": True, "complete": True})), (None, (None, {"available": False, "complete": False}))):
+        rec = kr.project_context({"name": "P", "dir": "P", "status": "modified"}, "review/P", {"base": {}, "head": {}}, [],
+                                 {"base": "base/P.kicad_pcb", "head": "head/P.kicad_pcb"}, [], [], ("head",), 15, 15,
+                                 {"base": "a" * 40, "head": "b" * 40}, check_settings, summary=summary_in)
+        assert (rec["headline"], rec["net_changes"]) == expected and rec["revisions"]["base"] is None
+print("ok ask board facts checks changes size")

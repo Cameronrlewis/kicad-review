@@ -3564,6 +3564,216 @@ def enrich_context(rev, objs, sheets):
         net["pages"] = [pages[path]["page"] for path in net["sheet_paths"] if path in pages]
 
 
+CONTEXT_LIMIT = 200_000  # bytes: the spec's target for design-context.json
+CONTEXT_STAGES = ((40, 64), (15, 32), (5, 16), (0, 8), (0, 0))  # (pins kept per net, pins kept per part), least cut first
+CHECK_SOURCE = {"erc": "kicad-cli sch erc", "drc": "kicad-cli pcb drc", "parity": "kicad-cli pcb drc --schematic-parity",
+                "bom": "schematic symbol fields", "release": "fabrication export of the board"}
+
+
+stat_number = stats_number  # '506.97 mm²' -> 506.97, None -> None: 01's parser for the unit-bearing kicad-cli stats strings
+
+
+def board_facts(side_dir, pcb_path):
+    """Layers from the board file; size, areas and counts from `pcb export stats` when it ran. No outline means size_mm is None."""
+    names = board_layers(pcb_path)
+    facts = {"layers": names, "copper_layers": [n for n in names if n.endswith(".Cu")], "stats_available": False}
+    try:
+        if os.path.exists(f"{side_dir}/stats.json.error"):
+            with open(f"{side_dir}/stats.json.error", encoding="utf-8") as fh:
+                facts["stats_reason"] = clip(fh.read(), 500)
+            return facts
+        with open(f"{side_dir}/stats.json", encoding="utf-8") as fh:
+            stats = json.load(fh)
+        b = stats["board"]
+        if not isinstance(b, dict): raise TypeError("board section is not an object")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        facts["stats_reason"] = f"statistics unavailable: {clip(exc, 200)}"
+        return facts
+    size = [stat_number(b.get("width")), stat_number(b.get("height"))]
+    facts.update({
+        "stats_available": True, "has_outline": bool(b.get("has_outline")), "size_mm": size if None not in size else None,
+        "front_copper_mm2": stat_number(b.get("front_copper_area")), "back_copper_mm2": stat_number(b.get("back_copper_area")),
+        "min_track_width_mm": stat_number(b.get("min_track_width")), "min_clearance_mm": stat_number(b.get("min_track_clearance")),
+        "min_drill_mm": stat_number(b.get("min_drill_diameter")), "thickness_mm": stat_number(b.get("board_thickness")),
+        "pads": stats.get("pads"), "vias": stats.get("vias"),
+        "components": {k: v.get("total") for k, v in (stats.get("components") or {}).items() if isinstance(v, dict)}})
+    return facts
+
+
+FAB_LEDGER = ("vendor", "profile", "checkedOn", "assumedCopperOz", "checked", "unchecked", "unsupported", "coverageWarnings", "baselineAvailable", "fixed")  # 04's vendor identity and coverage ledger
+
+
+def ledger(check):
+    """04's fab coverage fields, copied unchanged except for size. A string or listed item over 200 code points is cut and named in `<field>_truncated`; a list keeps its first 15 items and its full count in `<field>_more`. fit_context reads every mark, so nothing is clipped silently."""
+    out = {}
+    for key in FAB_LEDGER:
+        if key not in check: continue
+        value = check[key]
+        if isinstance(value, list):
+            kept = [keep(item, 200) for item in value[:CONTEXT_LIST]]
+            out[key] = [text for text, _ in kept]
+            if len(value) > CONTEXT_LIST: out[f"{key}_more"] = len(value) - CONTEXT_LIST
+            if any(cut for _, cut in kept): out[f"{key}_truncated"] = True
+        elif isinstance(value, str):
+            out[key], cut = keep(value, 200)
+            if cut: out[f"{key}_truncated"] = True
+        else:
+            out[key] = value
+    return out
+
+
+def net_change_support(summary):
+    """03's wiring channel: complete with zero rows is available and complete; a missing summary or not_applicable is unavailable."""
+    wiring = next((c for c in (summary or {}).get("channels", []) if c.get("channel") == "wiring"), None)
+    return {"available": bool(wiring and wiring.get("status") != "not_applicable"), "complete": bool(wiring and wiring.get("status") == "complete")}
+
+
+DETAIL_BYTES = 2000  # JSON bytes of typed change detail kept verbatim per row
+
+
+GEOMETRY_KEYS = ("addedContours", "removedContours", "contours", "points")  # 03's signed copper outlines and point lists: counted, never sent to the model
+
+
+def bounded_detail(detail):
+    """(detail, truncated). Small detail is kept whole. Larger detail keeps its scalars and names, the first 15 items of each long list (members, transitions), and for geometry (copper contours, point lists) only a count. Every omitted part is named in omitted_counts, so the row's type, channel, weight and counts always survive."""
+    if len(json.dumps(detail, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) <= DETAIL_BYTES:
+        return detail, False
+    if not isinstance(detail, dict):
+        return {"omitted": True}, True  # a non-object detail keeps no raw text; the row flag and the context's detail_truncated count say so
+    kept, counts = {}, {}
+    for key, value in detail.items():
+        geometry = isinstance(value, list) and bool(value) and (key in GEOMETRY_KEYS or any(isinstance(item, list) for item in value))
+        if geometry:
+            kept[key], counts[key] = {"omitted": True}, len(value)
+        elif isinstance(value, list) and len(value) > CONTEXT_LIST:
+            kept[key], counts[key] = value[:CONTEXT_LIST], len(value)
+        elif isinstance(value, dict) and len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > DETAIL_BYTES:
+            kept[key], counts[key] = {"omitted": True}, len(value)
+        elif isinstance(value, str):
+            kept[key] = clip(value, 200)
+            if len(value) > 200: counts[key] = len(value)
+        else:
+            kept[key] = value
+    return {**kept, "omitted_counts": counts}, True
+
+
+def context_checks(checks, cap=CONTEXT_LIST):
+    """Every supplied check, including not_run, with provenance and vendor via ledger(c). Keep both fab_limits sections (jlcpcb/pcbway) as separate entries, never deduplicate by name. Positions are never included."""
+    out = []
+    for c in checks:
+        known = c["name"] in CHECK_SOURCE or c["name"] == "interfaces"
+        default_conf = "heuristic" if c["name"] == "interfaces" or not known else "deterministic"
+        default_source = CHECK_SOURCE.get(c["name"], "kicad-review interfaces check (name patterns on the netlist)" if c["name"] == "interfaces" else "unspecified producer; provenance unavailable")
+        def provenance(value, parent=None):
+            parent = parent or {}
+            confidence = value.get("confidence", parent.get("confidence", default_conf))
+            source = value.get("evidence_source", parent.get("evidence_source", default_source))
+            return {"confidence": confidence if confidence in ("deterministic", "heuristic", "datasheet-backed") else "heuristic",
+                    "evidence_source": source if isinstance(source, str) and source.strip() else "unspecified producer; provenance unavailable"}
+        finds = [{"type": v["type"], "severity": v["severity"], "description": clip(v["description"]), "new": bool(v.get("new")),
+                  "items": [clip(i, 120) for i in v.get("items", [])[:4]], **provenance(v, c)} for v in c.get("violations", [])[:cap]]
+        out.append({"name": c["name"], "title": c["title"], "level": c["level"], "status": c["status"], "reason": c.get("reason"),
+                    "errors": c["errors"], "warnings": c["warnings"], "new_errors": c["new_errors"], "new_warnings": c["new_warnings"],
+                    **provenance(c), **ledger(c),
+                    "findings": finds, **({"more": len(c["violations"]) - cap} if len(c.get("violations", [])) > cap else {})})
+    return out
+
+
+def context_changes(changes, cap=150):
+    """The change list: a count per kind plus the first `cap` rows (rows are already ordered most important kind first)."""
+    by_kind = {}
+    for r in changes:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+    rows = []
+    for r in changes[:cap]:
+        row_ = {"id": r.get("id"), "action": r["action"], "kind": r["kind"], "ref": clip(r.get("ref"), 100),
+                "sheet": (r.get("where") or {}).get("sheet") if (r.get("where") or {}).get("sheet") is not None else "board"}
+        if r.get("changes"):
+            row_["changes"] = [[clip(a, 60), clip(b, 100), clip(c, 100)] for a, b, c in r["changes"][:6]]
+            if len(r["changes"]) > 6: row_["changes_more"] = len(r["changes"]) - 6
+        elif r.get("props"):
+            row_["props"] = {clip(k, 60): clip(v, 100) for k, v in list(r["props"].items())[:6]}
+        for key in ("channel", "weight"):  # spec 03 adds these to change rows; absent on main
+            if r.get(key):
+                row_[key] = r[key]
+        if r.get("detail") is not None:
+            row_["detail"], cut = bounded_detail(r["detail"])
+            if cut: row_["detail_truncated"] = True  # never silent: the row says its detail was bounded
+        rows.append(row_)
+    return {"total": len(changes), "by_kind": by_kind, "rows": rows, "detail_truncated": sum(1 for row in rows if row.get("detail_truncated")),
+            **({"more": len(changes) - cap} if len(changes) > cap else {})}
+
+
+def complete_context_checks(checks, settings, has_schematic, has_board):
+    result = list(checks)
+    present = {c["name"] for c in result}
+    for name in ("erc", "drc", "parity", "bom", "release", "interfaces"):
+        if name in present: continue
+        level = settings["checks"].get(name, "off")
+        available = has_schematic if name in ("erc", "parity", "bom", "interfaces") else has_board
+        reason = "disabled in settings" if level == "off" else ("evidence unavailable" if available else "no schematic" if name in ("erc", "parity", "bom", "interfaces") else "no board")
+        result.append({"name": name, "title": CHECK_NAMES[name], "level": level, "status": "not_run", "reason": reason,
+                       "errors": 0, "warnings": 0, "new_errors": 0, "new_warnings": 0, "violations": []})
+    return context_checks(result)
+
+
+def project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap, pin_cap, revision_shas, settings, summary=None):
+    """Everything Ask knows about one project: both revisions, the sheet list, the change list, the check results, and 03's headline and wiring support."""
+    revisions = {}
+    for side in ("base", "head"):
+        if side not in sides:
+            revisions[side] = None
+            continue
+        rev = side_context(f"{out}/{side}", objs[side], net_cap, pin_cap)
+        rev["revision"] = revision_shas[side]
+        rev["sheets"] = [{k: pg.get(k) for k in ("path", "name", "file", "parent", "page")} for pg in sheet_pages(posixpath.join(side, p["dir"]), p["name"])]
+        enrich_context(rev, objs[side], rev["sheets"])
+        rev["board"] = board_facts(f"{out}/{side}", pcbs[side]) if os.path.isfile(pcbs[side]) else None
+        revisions[side] = rev
+    return {"name": p["name"], "dir": p["dir"], "status": p["status"],
+            "headline": clip((summary or {}).get("headline"), 200) if isinstance((summary or {}).get("headline"), str) else None,
+            "net_changes": net_change_support(summary),
+            "sheets": [{k: s.get(k) for k in ("path", "name", "file", "parent", "page", "status")} for s in sheets],
+            "revisions": revisions, "changes": context_changes(changes), "checks": complete_context_checks(checks, settings, bool(sheet_pages(posixpath.join("head", p["dir"]), p["name"])), os.path.isfile(pcbs["head"]))}
+
+
+def context_bytes(doc):
+    return len(json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def marked(node):
+    """True when any producer mark says something was cut, anywhere in the document: a truthy `*_truncated` flag or count (properties_truncated, detail_truncated, <field>_truncated), a `more` or `*_more` count (pins_more, unchecked_more), or a non-empty incomplete_fields."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key.endswith("_truncated") and value: return True
+            if (key == "more" or key.endswith("_more")) and value is not None: return True
+            if key == "incomplete_fields" and value: return True
+            if marked(value): return True
+    elif isinstance(node, list):
+        return any(marked(item) for item in node)
+    return False
+
+
+def fit_context(build, limit=CONTEXT_LIMIT):
+    """Supported-size ceiling: complete non-pin collections must fit after the five pin stages. `truncated` is true after any stage cut, or when any producer mark is set (`marked`)."""
+    for stage, (net_cap, pin_cap) in enumerate(CONTEXT_STAGES):
+        doc = build(net_cap, pin_cap)
+        doc["truncated"] = stage > 0 or marked(doc)
+        if context_bytes(doc) <= limit: return doc
+    # ponytail: no partial-project answers. Above 200,000 UTF-8 bytes after pin reduction, Ask is disabled for this run.
+    totals = {"projects": len(doc.get("projects", [])), "parts": 0, "nets": 0, "changes": 0}
+    for p in doc.get("projects", []):
+        totals["changes"] += p.get("changes", {}).get("total", 0)
+        for rev in p.get("revisions", {}).values():
+            if rev:
+                for key in ("parts", "nets"): totals[key] += len(rev.get(key, []))
+    disabled = {"version": 1, "kind": "kicad-review-design-context", "projects": [], "truncated": True,
+                "disabled_reason": "Design exceeds the 200,000-byte Ask ceiling after pin reduction. Select fewer projects in a new review; no model request was sent.",
+                "omitted": totals}
+    if context_bytes(disabled) > limit: raise ValueError("context limit cannot hold disabled envelope")
+    return disabled
+
+
 def interface_findings(comps, nets, patterns, where_of):
     """Design-review rules on one revision's netlist. Every finding carries its nets and pins as evidence."""
     out, detected = [], {}
