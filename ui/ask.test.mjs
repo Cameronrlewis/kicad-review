@@ -48,3 +48,11 @@ test('Markdown subset: paragraphs, lists, bold and code; other brackets stay tex
   assert.equal(render('', known), '');
   assert.equal(render(null, known), '');
 });
+
+test('emphasis, code and citations combine without breaking each other', () => {
+  assert.equal(
+    render('**Check [R16] now** and `[R16]` plus `**literal**` and `<b>`', known),
+    '<p><strong>Check <button type="button" class="ask-link" data-ask-ref="R16">R16</button> now</strong> and <code>[R16]</code> plus <code>**literal**</code> and <code>&lt;b&gt;</code></p>'
+  );
+  assert.match(render('**Rail [net:/VBUS_5V]**', known), /<strong>Rail <button type="button" class="ask-link" data-ask-net="\/VBUS_5V">\/VBUS_5V<\/button><\/strong>/);
+});

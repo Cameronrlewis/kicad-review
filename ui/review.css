@@ -739,3 +739,7 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 #image-results button:is(:hover,:focus-visible) { background:var(--surface-2); outline:2px solid var(--accent); outline-offset:-2px; }
 #image-results p { padding:var(--space-2); margin:0; }
 body.shot #image-search { display:none; }
+/* Ask answer chips: live names are buttons with a visible tint and border; unknown names are muted text with a dashed border. Focus uses the global :focus-visible ring. */
+.ask-link { font:inherit; font-family:var(--font-mono); font-size:var(--fs-sm); color:var(--acc-tx); background:var(--acc-bg); border:1px solid var(--acc-tx); border-radius:var(--r-2); padding:0 var(--sp-1); cursor:pointer; }
+.ask-link:hover { background:var(--surface-sel); }
+.ask-link.missing { color:var(--tx2); background:none; border:1px dashed var(--line); cursor:help; }

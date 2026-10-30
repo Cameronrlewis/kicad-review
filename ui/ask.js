@@ -3,21 +3,24 @@
 (function () {
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   const REF = /\[([^\[\]\n]+)\]/g;
-  const emphasis = t => esc(t).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  const CODE = /`([^`\n]+)`/g;
+  const SLOT = /(\d+)/g;
+  // Code spans and citations become placeholders before bold runs, so emphasis can wrap them and never sees their text.
   function inline(text, known) {
-    let out = "", last = 0;
-    for (const m of text.matchAll(REF)) {
-      const net = m[1].startsWith("net:"), name = net ? m[1].slice(4) : m[1];
-      if (!name) continue;
-      const exists = net ? known.net(name) : known.ref(name);
-      if (!net && !exists && !/^[A-Za-z]+\d+\w*$/.test(name)) continue;
-      out += emphasis(text.slice(last, m.index));
-      out += exists
-        ? `<button type="button" class="ask-link" data-ask-${net ? "net" : "ref"}="${esc(name)}">${esc(name)}</button>`
-        : `<span class="ask-link missing" title="Not found in this design">${esc(name)}</span>`;
-      last = m.index + m[0].length;
-    }
-    return out + emphasis(text.slice(last));
+    const slots = [];
+    const hold = html => `${slots.push(html) - 1}`;
+    const s = text.replace(/[]/g, "")
+      .replace(CODE, (_, code) => hold(`<code>${esc(code)}</code>`))
+      .replace(REF, (whole, body) => {
+        const net = body.startsWith("net:"), name = net ? body.slice(4) : body;
+        if (!name) return whole;
+        const exists = net ? known.net(name) : known.ref(name);
+        if (!net && !exists && !/^[A-Za-z]+\d+\w*$/.test(name)) return whole;
+        return hold(exists
+          ? `<button type="button" class="ask-link" data-ask-${net ? "net" : "ref"}="${esc(name)}">${esc(name)}</button>`
+          : `<span class="ask-link missing" title="Not found in this design">${esc(name)}</span>`);
+      });
+    return esc(s).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(SLOT, (_, i) => slots[i]);
   }
   function render(text, known) {
     const html = [];
