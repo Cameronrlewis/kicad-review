@@ -103,7 +103,7 @@ test('history checks access before timeline calls', async () => {
 });
 
 import { CHECKS } from '../ui/checks.mjs';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -4656,11 +4656,15 @@ test('legacy metadata shares in-flight builds but is never cached', async () => 
 });
 
 // 06's verifyReportFamily (site/report-kind.js) merges after 02 (ORDER.md), so design
-// reports fail closed here; 06 Task 4A flips the 'design' row to a 200 control.
-test.todo('BR02 asset route design family serves 200 and both-family conditional flow (06 Task 4A: verifyReportFamily)');
+// reports fail closed here. Hard tripwire: this fails as soon as 06's verifier exists on the branch.
+test('BR02 design family waits on 06 report-kind.js', () => {
+  assert.ok(!existsSync(new URL('./report-kind.js', import.meta.url)), '06 Task 4A follow-up: make readArtifactHtml/artifact3d accept the '
+    + "design family via verifyReportFamily('design',name,data.report.head), flip the 'design' row to a 200 control, "
+    + 'add the both-family conditional/revocation flow, then delete this test');
+});
 for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
   'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',
-  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'bad-host']) {
+  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'encoded-length', 'bad-host']) {
   test('BR02 asset route ' + scenario, async () => {
     const digest = 'c'.repeat(64), kind = scenario === 'valid-parts' ? 'board-parts.json' : 'board.glb';
     const key = kind === 'board.glb' ? 'model' : 'parts', bytes = gzipSync(kind === 'board.glb' ? 'glTF' : '[]');
@@ -4711,6 +4715,8 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
           c.enqueue(pulls++ ? new Uint8Array(65536) : new Uint8Array(bytes)); if (pulls > 64) c.close(); } }));
         if (scenario === 'declared-length') return new Response(new ReadableStream({ pull(c) {
           pulls++; c.enqueue(new Uint8Array(bytes)); c.close(); } }, { highWaterMark: 0 }), { headers: { 'Content-Length': String(bytes.length + 5) } });
+        // Encoded transfer: Content-Length counts encoded bytes, so only the read bound applies.
+        if (scenario === 'encoded-length') return new Response(bytes, { headers: { 'Content-Encoding': 'gzip', 'Content-Length': String(bytes.length + 5) } });
         return new Response(['corrupt', 'not-gzip'].includes(scenario) ? 'not gzip' : bytes);
       }
       throw Error('unexpected URL ' + url);
@@ -4720,7 +4726,7 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         : scenario === 'short-digest' ? digest.slice(0, 12) + '/board.glb' : digest + '/' + kind;
       const endpoint = '/r/Cameronrlewis/repo/a/12/3d/' + suffix;
       const response = await call(endpoint, { headers: scenario === 'no-session' ? {} : { Cookie: `s=${sealed}` } });
-      if (['valid', 'valid-parts', 'second-page'].includes(scenario)) {
+      if (['valid', 'valid-parts', 'second-page', 'encoded-length'].includes(scenario)) {
         assert.equal(response.status, 200); assert.equal(downloads, 1);
         assert.equal(response.headers.get('Content-Encoding'), 'gzip');
         assert.equal(response.headers.get('Content-Type'), kind === 'board.glb' ? 'model/gltf-binary' : 'application/json');
@@ -4728,7 +4734,7 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         assert.equal(response.headers.get('ETag'), '"' + digest + '"');
         assert.equal(response.headers.get('Vary'), 'Cookie');
         assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
-        if (scenario !== 'second-page') {
+        if (['valid', 'valid-parts'].includes(scenario)) {
           const conditional = { headers: { Cookie: `s=${sealed}`, 'If-None-Match': response.headers.get('ETag') } };
           const denied = async (label) => {
             const before = { accessChecks, metadataChecks, downloads };

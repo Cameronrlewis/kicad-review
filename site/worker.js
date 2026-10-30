@@ -371,7 +371,9 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
 async function readExactly(response, size) {
   const declared = response.headers.get('Content-Length');
   if (!response.body) return null;
-  if (declared != null && Number(declared) !== size) { await response.body.cancel(); return null; }
+  // A Content-Encoding reply's length counts encoded bytes; the read bound below still caps it.
+  // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
+  if (declared != null && !response.headers.has('Content-Encoding') && Number(declared) !== size) { await response.body.cancel(); return null; }
   // Chunks, not a size-length buffer: the descriptor's claimed size is never allocated up front.
   const chunks = [], reader = response.body.getReader();
   for (let n = 0; ;) {
