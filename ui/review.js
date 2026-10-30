@@ -1868,10 +1868,35 @@ function resolveAnchor(a) {
 }
 S.filter = { added: true, removed: true, modified: true, kind: "", q: "", all: false };
 const allViolations = () => proj().checks.flatMap(c => c.violations.map(v => ({ ...v, check: c.title })));
+const ELECTRICAL_CHANNELS={components:'Parts',wiring:'Wiring',routing:'Routing',rules:'Rules',board:'Board',visual:'Other'};
+function electricalDetail(r) {
+  const d=r.detail;
+  if(!d) return '';
+  if(d.kind==='members') return `<div class="member-chips">${[
+    ...(d.added||[]).map(s=>`<span class="chip added">+${esc(s)}</span>`),
+    ...(d.removed||[]).map(s=>`<span class="chip removed">−${esc(s)}</span>`)].join('')}</div>`+
+    `<div class="more">${esc((d.beforeNets||[]).join(' + '))} → ${esc((d.afterNets||[]).join(' + '))}</div>`+
+    (d.transitions||[]).map(t=>`<div class="member-transition">${esc(t.pin)}: ${esc((t.before||[]).join(' + ')||'(unconnected)')} → ${esc((t.after||[]).join(' + ')||'(unconnected)')}</div>`).join('');
+  if(d.kind==='area') return `<div class="more">${esc(d.layer)}: +${Number(d.addedMm2).toFixed(3)} / −${Number(d.removedMm2).toFixed(3)} mm²</div>`;
+  if(d.kind==='number') return `<div class="more">${esc(d.before??'—')} → ${esc(d.after??'—')} ${esc(d.unit)}</div>`;
+  if(d.kind==='pad-net') return `<div class="more">${esc(d.before||'(unconnected)')} → ${esc(d.after||'(unconnected)')}${d.boardOnly===true?' · board-only net change':d.boardOnly==null?' · '+esc(d.evidenceNote||'Schematic assignment unavailable'):''}</div>`;
+  if(d.kind==='wires') return `<div class="more">Wires drawn ${esc(d.drawn)} / erased ${esc(d.erased)}</div>`;
+  if(d.kind==='position') return `<div class="more">${Number(d.distanceMm).toFixed(3)} mm moved</div>`;
+  return `<div class="more">${esc(JSON.stringify(d.before??''))} → ${esc(JSON.stringify(d.after??''))}</div>`;
+}
 function card(r) {
   return `<button class="card" data-id="${esc(r.id)}" data-action="${esc(r.action)}" data-kind="${esc(r.kind)}" aria-selected="${S.s === r.id}">
     <span class="ref">${esc(r.ref || r.kind)}</span> <span class="kind">${esc(r.kind)}</span>
-    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span></button>`;
+    <span class="badge ${esc(r.action)}">${GLYPH[r.action] ?? ""} ${esc(r.action)}</span>${r.weight ? '<span class="weight">'+esc(r.weight)+'</span>' : ''}${electricalDetail(r)}</button>`;
+}
+function electricalSummaryHtml() {
+  const s=proj().summary;
+  if(!s) return {top:'',bottom:''};
+  const channels=(s.channels||[]).filter(c=>c.status&&c.status!=='not_applicable')
+    .map(c=>`${esc(ELECTRICAL_CHANNELS[c.channel]||c.channel)}: ${esc(c.status)} (${esc(c.total??0)})`).join(' · ');
+  const issues=(s.incomplete||[]).map(i=>`<div>${esc(ELECTRICAL_CHANNELS[i.channel]||i.channel)}: ${esc(i.reason)}</div>`).join('');
+  return {top:s.headline?`<div class="electrical-headline">${esc(s.headline)}</div>`:'',
+    bottom:(channels?`<div class="electrical-headline muted">${channels}</div>`:'')+(issues?`<div class="electrical-incomplete" role="note">${issues}</div>`:'')};
 }
 function inventoryHtml() {
   // Removed (base) rows match removed change rows, others match added/modified: a reused reference gets the right badge.
@@ -1881,7 +1906,7 @@ function inventoryHtml() {
   const place = o => o.sheet === undefined ? (o.layer || "board") : (proj().sheets.find(s => s.path === o.sheet)?.name || o.sheet);
   const q = S.filter.q.toLowerCase(), objs = (proj().objects || []).map((o, i) => ({ o, i }))
     .filter(({ o }) => !q || [o.ref, o.value, o.footprint, place(o)].some(v => String(v ?? "").toLowerCase().includes(q)));
-  const f = S.filter, groupFor = o => f.group === "action" ? changeFor(o)?.action || "unchanged" : o.kind;
+  const f = {...S.filter, group: ["kind","action"].includes(S.filter.group) ? S.filter.group : ""}, groupFor = o => f.group === "action" ? changeFor(o)?.action || "unchanged" : o.kind;
   if (f.sort) objs.sort((a, b) => String(f.sort === "kind" ? a.o.kind : a.o.ref).localeCompare(String(f.sort === "kind" ? b.o.kind : b.o.ref), undefined, {numeric:true}));
   if (f.group) objs.sort((a, b) => groupFor(a.o).localeCompare(groupFor(b.o)));
   let previous;
@@ -1913,13 +1938,19 @@ function bindInventory() {
   for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
 }
 const CHANGE_PAGE_SIZE = 50, changePage = {key:'',index:0,ids:[]};
+// Explicit user grouping wins; default is channel when the report carries channel data.
+function changeGroup() {
+  const g = S.filter.group;
+  return g === "none" ? "" : g || (proj().changes.some(r => r.channel) ? "channel" : "");
+}
 function filteredChangeRows() {
-  const f = S.filter, q = f.q.toLowerCase();
+  const f = S.filter, q = f.q.slice(0, 200).toLowerCase();
   let rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
-    && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
+    && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props, r.detail, r.anchors]).toLowerCase().includes(q)));
   if (f.sort === "reference") rows.sort((a, b) => String(a.ref).localeCompare(String(b.ref), undefined, {numeric:true}));
   if (f.sort === "kind") rows.sort((a, b) => a.kind.localeCompare(b.kind));
-  if (f.group) rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
+  if (changeGroup() === "channel") { const o = r => { const i = Object.keys(ELECTRICAL_CHANNELS).indexOf(r.channel); return i < 0 ? 5 : i; }; rows.sort((a, b) => o(a) - o(b)); }
+  else if (f.group && f.group !== "none") rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
   return rows;
 }
 function changeCardIds() {
@@ -1935,8 +1966,8 @@ function cardsHtml() {
   const start=changePage.index*CHANGE_PAGE_SIZE;
   let previous;
   return (rows.slice(start,start+CHANGE_PAGE_SIZE).map(r => {
-    const group = f.group ? r[f.group] : null;
-    const heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
+    const g = changeGroup(), group = g === "channel" ? ELECTRICAL_CHANNELS[r.channel] || "Other" : g ? r[g] : null;
+    const heading = g && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
     previous = group;
     return heading + card(r);
   }).join("") || '<p class="muted">No changes match.</p>')
@@ -2140,7 +2171,7 @@ function referenceRanges(refs) {
 }
 function dockListTools(name, state) {
   const options = (values, current) => values.map(([v, label]) => `<option value="${v}" ${v === (current || "") ? "selected" : ""}>${label}</option>`).join("");
-  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "No groups"], ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
+  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" ${name === "changes" ? 'maxlength="200" ' : ""}data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "Default groups"], ["none", "No groups"], ...(name === "changes" ? [["channel", "Group: channel"]] : []), ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
@@ -2165,7 +2196,7 @@ function renderPanel() {
     ${f.all ? "" : `<div class="filters">${["added", "removed", "modified"].map(a =>
       `<button class="chip-filter ${a}" data-action="${a}" aria-pressed="${f[a]}">${GLYPH[a]} ${a} ${c[a]}</button>`).join("")}
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
-    <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
+    ${f.all ? "" : electricalSummaryHtml().top}<div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${f.all ? "" : electricalSummaryHtml().bottom}${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   bindRightDock();
   for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
     const attribute = input.hasAttribute("data-list-search") ? "search" : input.hasAttribute("data-list-sort") ? "sort" : "group";

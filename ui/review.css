@@ -739,3 +739,9 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 #image-results button:is(:hover,:focus-visible) { background:var(--surface-2); outline:2px solid var(--accent); outline-offset:-2px; }
 #image-results p { padding:var(--space-2); margin:0; }
 body.shot #image-search { display:none; }
+
+.member-chips { display:flex; flex-wrap:wrap; gap:var(--space-1); margin-top:var(--space-1); }
+.weight { font:11px var(--font-mono); margin-left:var(--space-1); color:var(--muted); }
+.electrical-incomplete { border-left:3px solid var(--modified); padding:var(--space-2); overflow-wrap:anywhere; }
+.electrical-headline { padding:var(--space-2); overflow-wrap:anywhere; }
+.member-transition { font:11px var(--font-mono); overflow-wrap:anywhere; }

@@ -815,6 +815,55 @@ export const CHECKS = [
     }
     return count>0||'no sheets checked';
   `],
+  ["BR03 grouped electrical rows and old v1 fallback", "", `
+  const p=proj(), old=p.changes, summary=p.summary;
+  try {
+    p.changes=[{id:'c903',kind:'net-members',ref:'USB',action:'modified',channel:'wiring',weight:'heavy',
+      detail:{kind:'members',added:['U1.19','R2.1'],removed:['J1.3'],beforeNets:['USB'],afterNets:['USB'],transitions:[{pin:'U1.19',before:['A'],after:['C']}]},where:null},
+      {id:'c904',kind:'rule',ref:'min clearance',action:'modified',channel:'rules',weight:'heavy',
+      detail:{kind:'number',unit:'mm',before:0.2,after:0.25},where:null}];
+    p.summary={headline:'No headline changes',incomplete:[{channel:'routing',reason:'pcbnew unavailable'}]};
+    S.t='changes'; Object.assign(S.filter,{all:false,q:'',added:true,removed:true,modified:true,kind:'',group:''});
+    renderPanel();
+    const text=document.querySelector('#panel').textContent;
+    if(!text.includes('Wiring') || !text.includes('+U1.19') || !text.includes('−J1.3') || !text.includes('heavy')) return 'missing grouping or chips';
+    if(!text.includes('U1.19: A → C')) return 'pin destination missing';
+    if(!text.includes('pcbnew unavailable') || !text.includes('0.25')) return 'missing completeness or numeric detail';
+    S.filter.q='U1.19'; renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length!==1) return 'member search failed';
+    delete p.summary; p.changes=[{id:'c905',kind:'symbol',ref:'R1',action:'added',props:{Value:'1k'},where:null}];
+    S.filter.q=''; renderPanel();
+    return document.querySelector('#panel .card[data-id="c905"]') ? true : 'old report failed';
+  } finally {p.changes=old; p.summary=summary; S.filter.q=''; renderPanel();}
+`],
+  ["BR03 hostile text and full array search", "", `
+  const p=proj(), changes=p.changes, summary=p.summary, filter={...S.filter};
+  const hostile='</button><img src=x onerror=alert(1)>', savedTab=S.t;
+  try {
+    p.changes=Array.from({length:1501},(_,i)=>({id:'c'+(10000+i),kind:'rule',ref:'rule '+i,
+      action:['added','removed','modified'][i%3],channel:'rules',weight:'heavy',where:null,
+      detail:{kind:'text',before:'safe',after:i===1500?'FINAL_NEEDLE':hostile}}));
+    p.summary={headline:hostile,incomplete:[{channel:'routing',reason:hostile}]};
+    S.t='changes';Object.assign(S.filter,{all:false,q:'FINAL_NEEDLE',added:true,removed:true,modified:true,kind:'',group:''});
+    renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length!==1) return 'last searchable row missing';
+    S.filter.q='';renderPanel();
+    if(document.querySelector('#panel img')) return 'unsafe electrical detail';
+    if(!document.querySelector('#panel').textContent.includes(hostile)) return 'hostile text lost';
+    if(document.querySelectorAll('#panel .card[data-id]').length!==50 || !document.querySelector('[data-change-page="next"]')) return 'Changes page size changed';
+    for(const action of ['added','removed','modified']) {
+      Object.assign(S.filter,{added:false,removed:false,modified:false,[action]:true}); renderPanel();
+      const ids=[...document.querySelectorAll('#panel .card[data-id]')].map(e=>e.dataset.id);
+      if(!ids.length || ids.some(id=>p.changes.find(r=>r.id===id).action!==action)) return action+' toggle failed';
+    }
+    Object.assign(S.filter,{added:true,removed:true,modified:true,q:'no match anywhere'});renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length || !document.querySelector('.electrical-incomplete')?.textContent.includes(hostile)) return 'empty search hid incompleteness';
+    const unknown=electricalDetail({detail:{kind:'pad-net',before:'A',after:'B',boardOnly:null,evidenceNote:hostile}});
+    const probe=document.createElement('div');probe.innerHTML=unknown;
+    if(probe.querySelector('img') || !probe.textContent.includes(hostile) || probe.textContent.includes('board-only net change')) return 'uncertain pad labelled definite';
+    return true;
+  } finally {p.changes=changes;p.summary=summary;S.filter=filter;S.t=savedTab;renderPanel();}
+`],
   ["images large Changes dock pages retain every row and selection", "", `
     const p=D.projects.findIndex(p=>p.changes.length>100);
     if(p<0)return true;
