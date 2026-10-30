@@ -6582,5 +6582,29 @@ with tempfile.TemporaryDirectory() as t:
     pathlib.Path(t, "labels.json.error").unlink(); pathlib.Path(t, "labels.json").unlink()
     legacy = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
     assert legacy["hierarchical_labels"] is None and legacy["labels_unavailable"], "no producer output: Task 3's fail-closed fallback"
+    # Malformed labels.json: non-dict root, unparseable JSON, or malformed nets shape fails closed.
+    write(t, {"labels.json": "{"})
+    bad_json = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert bad_json["local_labels"] is None and bad_json["labels_unavailable"]
+    write(t, {"labels.json": json.dumps(["not", "a", "dict"])})
+    non_dict = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+    assert non_dict["local_labels"] is None and "this revision" in non_dict["labels_unavailable"]
+    for malformed_nets in (None, [1, 2], {"12": "not-a-dict"}, {"12": {"local_labels": "not-a-list"}}):
+        write(t, {"labels.json": json.dumps({"version": 1, "netlist_sha256": digest, "nets": malformed_nets})})
+        malformed = next(n for n in kr.side_context(t, objs)["nets"] if n["id"] == "12")
+        assert malformed["local_labels"] is None and "malformed" in malformed["labels_unavailable"]
+        try:
+            kr.read_label_membership(t, pathlib.Path(t, "netlist.net").read_text(encoding="utf-8"))
+            assert False, "expected ValueError on malformed nets"
+        except ValueError as exc:
+            assert "malformed" in str(exc)
+    # Task 4 size test: net label lists count toward CONTEXT_LIMIT.
+    def build_with_labels(net_cap, pin_cap):
+        nets, _, _ = kr.netlist_context(big, net_cap, pin_cap)
+        for i, n in enumerate(nets):
+            n["local_labels"] = [{"text": f"L{i}_{j}", "sheet": f"/sheet/{j}"} for j in range(10)]
+        return {"version": 1, "projects": [{"revisions": {"head": {"nets": nets}}}]}
+    doc_labels = kr.fit_context(build_with_labels)
+    assert kr.context_bytes(doc_labels) <= kr.CONTEXT_LIMIT and doc_labels["truncated"] is True
 print("ok ask nets carry verified label kinds")
 

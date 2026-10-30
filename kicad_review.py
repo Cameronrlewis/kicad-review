@@ -3715,7 +3715,13 @@ def read_label_membership(side_dir, netlist_text):
     doc = json.loads(pathlib.Path(side_dir, "labels.json").read_text(encoding="utf-8"))
     if not isinstance(doc, dict) or doc.get("version") != 1 or doc.get("netlist_sha256") != hashlib.sha256(netlist_text.encode("utf-8")).hexdigest():
         raise ValueError("label membership does not belong to this revision's netlist")
-    return doc["nets"]
+    nets = doc.get("nets")
+    if not isinstance(nets, dict) or any(
+        not isinstance(rec, dict) or any(not isinstance(rec.get(k, []), list) for k in LABEL_KINDS.values())
+        for rec in nets.values()
+    ):
+        raise ValueError("label membership nets is malformed")
+    return nets
 
 
 CONTEXT_LIMIT = 200_000  # bytes: the spec's target for design-context.json
