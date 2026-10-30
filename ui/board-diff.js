@@ -94,31 +94,25 @@
     gl.uniform1f(gl.getUniformLocation(pane.program,'headAlpha'),alpha);
     gl.drawArrays(gl.TRIANGLES,0,3); gl.disable(gl.SCISSOR_TEST);
   }
-  const sceneNetMaps = new WeakMap();
-  function sceneNetName(scene, id) {
-    const nets = scene?.nets;
-    if (!Array.isArray(nets)) return undefined;
-    let map = sceneNetMaps.get(nets);
-    if (!map) {
-      map = new Map(nets.map(n => [n.id, n.name]));
-      sceneNetMaps.set(nets, map);
-    }
-    return map.get(id);
-  }
   function electricalNetNames(row,side) {
     const d=row?.detail;
     return d?.kind==='members' ? (side==='base'?d.beforeNets:d.afterNets)||[]
       : d?.kind==='pad-net' ? [side==='base'?d.before:d.after].filter(Boolean) : [];
   }
-  function electricalNetMatch(scene,object,row,side) {
-    if(!row) return false;
+  // Net ids for this pass only: recomputed per draw, so no cache can outlive a scene edit.
+  function electricalNetIds(scene,row,side) {
     const names=electricalNetNames(row,side);
-    const name=sceneNetName(scene,object.net);
-    if(name && names.includes(name)) return true;
+    return new Set((scene?.nets||[]).filter(n=>n.name && names.includes(n.name)).map(n=>n.id));
+  }
+  function electricalNetMatch(netIds,object,row,side) {
+    if(!row) return false;
+    if(netIds.has(object.net)) return true;
     const d=row.detail;
     if(d?.kind!=='pad-net') return false;
+    // Board anchors carry no sheet (PCBs have none); KiCad identity is UUID, ref, pin and commit.
+    const commit=window.REVIEW_DATA?.[side];
     const anchors=row.anchors?.[side]||[];
-    return anchors.some(a=>a.board && a.uuid===object.changeUuid &&
+    return !!commit && anchors.some(a=>a.board && a.commit===commit && a.uuid===object.changeUuid &&
       a.padUuid===object.uuid && a.ref===object.reference && String(a.pin)===String(object.number));
   }
   function electricalLook(look,row,side) {
@@ -225,8 +219,9 @@
       if (!alpha) continue;
       renderer.setScene(pane.scenes[side],side);
       renderer.setAppearance(electricalLook(look,selectedRow,side));
+      const netIds=electricalNetIds(pane.scenes[side],selectedRow,side);
       renderer.draw({target:pane.targets[0],mask:true,marks:true,
-        filter:o=>o.changeIds?.includes(state.s) || electricalNetMatch(pane.scenes[side],o,selectedRow,side)});
+        filter:o=>o.changeIds?.includes(state.s) || electricalNetMatch(netIds,o,selectedRow,side)});
       effect('added',alpha,clips?.[side],true);
     }
     selectedCopper(pane,selectedRow,state);

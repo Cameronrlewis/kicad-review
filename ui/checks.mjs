@@ -3608,10 +3608,10 @@ return true;
     const padRow={id:'c904',kind:'board-pad-net',action:'modified',
       detail:{kind:'pad-net',pin:'1',before:'NET_A',after:'NET_B'},
       anchors:{
-        base:[{board:true,uuid:'style',padUuid:'style',ref:'U1',pin:'1'}],
+        base:[{board:true,uuid:'style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.base}],
         head:[
-          {board:false,uuid:'style',padUuid:'style',ref:'U1',pin:'1'},
-          {board:true,uuid:'head-style',padUuid:'style',ref:'U1',pin:'1'}
+          {board:false,uuid:'style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.head},
+          {board:true,uuid:'head-style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.head}
         ]
       }};
     try {
@@ -3685,6 +3685,12 @@ return true;
 
       if(baseCall.filter(badPinObj) || baseCall.filter(badRefObj)) return 'pad-net anchor matched wrong pin or ref';
       if(baseCall.filter(badPadUuidObj)) return 'pad-net anchor matched wrong padUuid';
+      const anchor=padRow.anchors.base[0];
+      anchor.commit='0000000';
+      const staleCommit=baseCall.filter(object);
+      anchor.commit=REVIEW_DATA.base;
+      if(staleCommit) return 'pad-net anchor matched a different commit';
+      if(!baseCall.filter(object)) return 'pad-net anchor failed after commit restore';
 
       // Test unguarded scene.nets access: missing scene.nets should not throw
       delete scene.nets;

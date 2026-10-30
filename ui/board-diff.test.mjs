@@ -84,6 +84,7 @@ test('BR03 net selection check restores scene and object fixture on failure path
     const boardView = {};
     const testContext = {
       proj: () => p,
+      REVIEW_DATA: { base: "base-commit", head: "head-commit" },
       document: { querySelector: () => ({ replaceChildren: () => {} }) },
       disposeBoardRenderers: () => {},
       BoardDiff: {
@@ -120,6 +121,7 @@ test('BR03 net selection check restores scene and object fixture on failure path
     let count = 0;
     const testContext = {
       proj: () => p,
+      REVIEW_DATA: { base: "base-commit", head: "head-commit" },
       document: { querySelector: () => ({ replaceChildren: () => {} }) },
       disposeBoardRenderers: () => {},
       BoardDiff: {
