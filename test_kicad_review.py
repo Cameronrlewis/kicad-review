@@ -1697,6 +1697,14 @@ assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 on
 for suffix in ('', ' --dark'):
     assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
 assert "data['mode'] = 'single'" in test_wf and 'review-data-3d-processed.js' in test_wf
+# BR02 processed fixture: CI builds it with inline_page and runs every processed check light and dark.
+assert '("processed", "review-data-3d-processed.js")' in test_wf, 'TS-S1 processed fixture missing'
+for command in (
+    'node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"',
+    'node ui/check.mjs --no-skip "BR02 processed" --dark --page "$PAGES/processed.html"',
+    'node --test ui/*.test.mjs',
+    'node ui/board-test.mjs'):
+    assert '      - run: ' + command in test_wf.splitlines(), 'TS-S1 CI missing ' + command
 # Image and supplemental fixture commands stay literal: CI and this contract change together.
 for command in (
     'node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"',
@@ -5103,7 +5111,8 @@ def br02_task4a_attachment_contract():
             if model_id:
                 assert gzip.decompress(base64.b64decode(restored['blobs'][model_id])).startswith(b'glTF')
     # Hardening: strict coverage shape and fail-closed poster reads.
-    with tempfile.TemporaryDirectory() as t:
+    # attach3d writes digest assets under the relative review/3d; keep them out of the checkout.
+    with tempfile.TemporaryDirectory() as t, contextlib.chdir(t):
         root = pathlib.Path(t)
         (root/'head').mkdir()
         for invalid in ({'footprints': 0, 'withModel': 0, 'placeholders': 0, 'triangles': 0,

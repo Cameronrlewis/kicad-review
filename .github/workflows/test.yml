@@ -22,6 +22,7 @@ jobs:
           node-version: 22
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
       - run: node --test ui/*.test.mjs
+      - run: node ui/board-test.mjs
       - name: Run 3D processor integration tests
         shell: bash
         run: |
@@ -35,7 +36,7 @@ jobs:
           echo "CHROME=google-chrome" >> "$GITHUB_ENV"
           export PAGES=$(mktemp -d)
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
-          python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js"), ("images", "review-data-images.js")]]'
+          python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js"), ("images", "review-data-images.js"), ("processed", "review-data-3d-processed.js")]]'
           python3 - <<'PYFIXTURE'
           import json, os, pathlib, kicad_review as k
           source = pathlib.Path('ui/sample/review-data-3d-processed.js').read_text()
@@ -57,6 +58,8 @@ jobs:
       - run: node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"
       - run: node ui/check.mjs --no-skip "BR02 single renderer head only" --page "$PAGES/single.html"
       - run: node ui/check.mjs --no-skip "BR02 single renderer head only" --dark --page "$PAGES/single.html"
+      - run: node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"
+      - run: node ui/check.mjs --no-skip "BR02 processed" --dark --page "$PAGES/processed.html"
       - run: node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"

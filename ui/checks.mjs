@@ -243,7 +243,7 @@ export const CHECKS = [
    const inspector=document.querySelector('[data-part3d-inspector]');
    if(!inspector||![ref,p.uuid,side].every(x=>inspector.textContent.includes(x)))return 'inspector identity missing';
  }
- if(!v.host.querySelector('.tip3d')?.textContent.includes(ref))return 'indexed hover absent';
+ if(!window.__br02PointerResult.tip.includes(ref))return 'indexed hover absent';
  for(const hidden of [[p.side],['bodies']]) {
    Review3D.setHidden(hidden);
    if(v.host.querySelector('.tip3d'))return 'hidden body tooltip remains visible';
@@ -285,12 +285,16 @@ export const CHECKS = [
     if(!proj().board.parts3d)return 'skip';
     for(const side of ['base','head']) {
       Review3D.setRevision(side);
-      document.querySelector('[data-no-model="U3"]').click();
+      // Verified indexes list each revision's missing parts separately; click this revision's row.
+      const row=ref=>document.querySelector('[data-no-model="'+ref+'"][data-no-model-side="'+side+'"]');
+      if(!row('U3')||!row('U4'))return 'missing list lacks a row for '+side;
+      if(!row('U4').textContent.includes(side==='base'?'Base':'Head'))return 'missing list row hides its revision';
+      row('U3').click();
       const c=proj().changes.find(c=>c.ref==='U3');
       if(S.s!==c.id||S.part3d)return 'changed missing part bypassed change selection';
       const st=Review3D.state,p=st.parts[side].find(p=>p.ref==='U3');
       if(!st.selected.some(o=>o.userData.uuid===p.uuid&&o.side===side))return 'changed missing list lost own revision';
-      document.querySelector('[data-no-model="U4"]').click();
+      row('U4').click();
       if(S.s||S.part3d?.side!==side||S.part3d?.ref!=='U4')return 'unchanged missing list fabricated a change';
     }
     return true;

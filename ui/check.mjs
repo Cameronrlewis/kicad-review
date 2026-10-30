@@ -191,14 +191,15 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
       const point=p.bounds.getCenter(new THREE3D.THREE.Vector3());v.camera.updateMatrixWorld(true);point.project(v.camera);
       const b=v.host.getBoundingClientRect();
       if(Math.abs(point.x)>1||Math.abs(point.y)>1)throw Error('target outside viewport');
-      window.__br02PointerUp=new Promise(resolve=>v.host.addEventListener('pointerup',()=>resolve(true),{once:true}));
+      // The pick tooltip lives 1200 ms; record it at pointerup (after the viewer's own listener) so slow software GL cannot expire it first.
+      window.__br02PointerUp=new Promise(resolve=>v.host.addEventListener('pointerup',()=>resolve(v.host.querySelector('.tip3d')?.textContent||''),{once:true}));
       return {x:b.left+(point.x+1)*b.width/2,y:b.top+(1-point.y)*b.height/2};
     })()`);
     if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception?.description);
     const q=prepared.result?.value;
     if(q) {
       for(const type of ['mouseMoved','mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent', {type,x:q.x,y:q.y,button:type==='mouseMoved'?'none':'left',buttons:type==='mousePressed'?1:0,clickCount:1});
-      await evaluate(`window.__br02PointerUp.then(()=>{window.__br02PointerResult=${JSON.stringify({side,ref})};return true})`);
+      await evaluate(`window.__br02PointerUp.then(tip=>{window.__br02PointerResult={...${JSON.stringify({side,ref})},tip};return true})`);
     }
   }
   // BR02 processed mesh miss: prepare the overlapping geometry before real host-centre input.
