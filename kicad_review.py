@@ -2646,11 +2646,14 @@ def run_check(name, settings, head, base, waivers=None):
     return result
 
 
-def project_checks(p, settings, objs, waivers=None):
+def project_checks(p, settings, objs, waivers=None, *, single=False):
     out_dir = f"review/{project_id(p['dir'])}"
-    sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
+    # Single-revision design report: the base checkout may still be on disk, but nothing is compared with it.
+    sch = lambda s: not (single and s == "base") and os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
 
     def side(s, f, k):
+        if single and s == "base":
+            return None
         src = posixpath.join(s, p["dir"], f"{p['name']}.{'kicad_sch' if k == 'erc' else 'kicad_pcb'}")
         if os.path.exists(src) and not os.path.exists(f"{out_dir}/{s}/{f}"):  # never drop a check because its output is missing
             sys.exit(f"kicad-cli wrote no {f} for {src}")
@@ -2675,11 +2678,11 @@ def project_checks(p, settings, objs, waivers=None):
             out.append({"name": "release", "title": CHECK_NAMES["release"], "level": settings["checks"]["release"], "status": "not_run",
                         "reason": "no board", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []})
         else:
-            side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) else None
+            side = lambda s: release_findings(f"{out_dir}/{s}/fab", p["name"], preset, pcb(s), objs[s]) if os.path.exists(pcb(s)) and not (single and s == "base") else None
             c = run_check("release", settings, side("head"), side("base"))
             c["package"] = package_summary(f"{out_dir}/head/fab")
             out.append(c)
-    ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}")
+    ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}", single=single)
     return out + ([ic] if ic else [])
 
 
@@ -2720,7 +2723,7 @@ def matches(name, patterns):
     return any(p.upper() in tokens or (name or "").upper() == p.upper() for p in patterns)
 
 
-def interface_check(p, settings, objs, out_dir):
+def interface_check(p, settings, objs, out_dir, *, single=False):
     if settings["checks"].get("interfaces", "off") == "off":
         return None
     patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
@@ -2732,7 +2735,7 @@ def interface_check(p, settings, objs, out_dir):
         where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
         with open(path, encoding="utf-8") as fh:
             return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
-    (head, coverage), (base, _) = side("head"), side("base")
+    (head, coverage), (base, _) = side("head"), ((None, None) if single else side("base"))
     if head is None:
         return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"], "status": "not_run",
                 "reason": "no schematic", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
@@ -2931,11 +2934,11 @@ def write_image_assets(blobs, assets, directory):
         (dest / filename).write_bytes(payload)
 
 
-def model3d_missing(out, objs):
+def model3d_missing(out, objs, which=("base", "head")):
     """Missing 3D models from KiCad's export log and footprints without a model declaration."""
     missing = {}
     add = lambda ref, side, reason: missing.setdefault((ref, reason), set()).add(side)
-    for side in ("base", "head"):
+    for side in which:
         log = f"{out}/{side}/glb.log"
         if os.path.exists(log):
             with open(log, encoding="utf-8") as fh:
@@ -2962,9 +2965,10 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
-def build_project(p, blobs, settings, waivers=None, change_offset=0):
+def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=False, context=None):
+    """single=True: the design as it is at head. The base side may still be on disk; it is not read."""
     out = f"review/{project_id(p['dir'])}"
-    sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
+    sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}") and not (single and s == "base")]
     theme_paths = {side: read_optional_json(f'{out}/{side}/sheet-images.json', {}) for side in sides}
     pages_by_side = {side: sheet_pages(posixpath.join(side, p['dir']), p['name']) for side in sides}
     hotspot_ids = image_pair(None, None)
@@ -2996,7 +3000,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         texts = pg.pop("svg")
         del pg["stem"]
         b, h = texts.get("base"), texts.get("head")
-        pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
+        pg["status"] = "unchanged" if single else "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
         pg["size"] = svg_size(h or b)
         pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
         pg['hotspots'] = {side: hotspot_ids[side] if texts.get(side) is not None else None for side in ('base', 'head')}
@@ -3012,16 +3016,16 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
     layers, changed = [], False
     names = sorted({f for s in sides if os.path.isdir(f"{out}/{s}/pcb") for f in os.listdir(f"{out}/{s}/pcb")})
     for f in names:
-        b, h = (svg_body(f"{out}/{s}/pcb/{f}") for s in ("base", "head"))
-        changed |= b != h
+        b, h = (svg_body(f"{out}/{s}/pcb/{f}") if s in sides else None for s in ("base", "head"))
+        changed |= b != h and not single
         if b is not None or h is not None:
             layers.append({"name": f[len(p["name"]) + 1: -4], "base": b, "head": h})
-    has = {s: os.path.isfile(board_path(p, s)) for s in ("base", "head")}
+    has = {s: os.path.isfile(board_path(p, s)) and not (single and s == "base") for s in ("base", "head")}
     board = {"changed": changed, "layers": [],
-             "status": "added" if not has["base"] else "removed" if not has["head"] else "modified" if changed else "unchanged"}
+             "status": "unchanged" if single else "added" if not has["base"] else "removed" if not has["head"] else "modified" if changed else "unchanged"}
     if layers:
         board["size"] = svg_size(next(t for l in layers for t in (l["head"], l["base"]) if t))
-        board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
+        board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"] and not single,
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
     for row in board['layers']:
@@ -3042,17 +3046,19 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
                 pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
             row['svgCompare'] = pair
-    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
-    changes = diff_objects(objs["base"], objs["head"])
+    objs = {side: {} if single and side == "base" else project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
+    changes = [] if single else diff_objects(objs["base"], objs["head"])
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
     inspect = image_pair(None, None)
     geometry = {}
     pcbs = {side: posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb") for side in ("base", "head")}
-    same_board = all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
+    same_board = not single and all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
     for side in ("base", "head"):
         pcb = pcbs[side]
         geometry[side] = None
+        if single and side == "base":
+            continue
         if side == "head" and same_board:
             geometry[side] = geometry["base"]
             inspect[side] = inspect["base"]
@@ -3097,29 +3103,46 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                  "supplier": None,  # Filled only when DigiKey lookup is enabled.
                  "coverage": {"base": bom_coverage(objs["base"], settings) if has_base else None, "head": bom_coverage(objs["head"], settings)},
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
+        if single:  # nothing is compared, so no part is added and no problem is new
+            parts["changes"] = parts["field_changes"] = []
+            parts["coverage"]["base"] = None
+            for line in parts["lines"]:
+                line["new_problems"] = []
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
         logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
-        board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
+        board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes())
+                            if os.path.exists(path) and not (single and side == "base") else None
                             for side, path in models.items()}
         board["model3d"].update({"enabled": True,
-                                 "changed": board["model3d"]["base"] != board["model3d"]["head"],
+                                 "changed": board["model3d"]["base"] != board["model3d"]["head"] and not single,
                                  "errors": {side: "3D export unavailable" for side in ("base", "head")
                                             if has[side] and not board["model3d"][side]}})
-        board["no_model"] = model3d_missing(out, objs)
+        board["no_model"] = model3d_missing(out, objs, ("head",) if single else ("base", "head"))
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None
-    if settings["libraries"]["enabled"]:
+    if settings["libraries"]["enabled"] and not single:
         roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
         items = {side: library_items(root) for side, root in roots.items()}
         libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
+    checks = project_checks(p, settings, objs, waivers, single=single)
+    if single:
+        absolute_checks(checks)
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": changes, "checks": project_checks(p, settings, objs, waivers),
+            "changes": changes, "checks": checks,
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {})}
+
+
+def absolute_checks(checks):
+    """A design report compares nothing, so no finding is new and none was fixed. Counts stay absolute."""
+    for c in checks:
+        for v in c["violations"]:
+            v["new"] = False
+        c["new_errors"] = c["new_warnings"] = c["fixed"] = 0
 
 
 def assign_ids(projects):

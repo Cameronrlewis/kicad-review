@@ -4821,3 +4821,45 @@ _on = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); _on["design"]["enabled"] = Tr
 assert kr.filtered_settings(_on)["design"] == {"enabled": True}
 assert kr.filtered_settings(_on)["checks"] == kr.filtered_settings({**_on, "design": {"enabled": False}})["checks"]
 print("ok DP-S1 design setting, validation and opt-out")
+
+# DP-S2: a design report reads only the head side, even when the base checkout and renders are on disk.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        for side, line, uuid, kind, extra in (("base", "M0 0H5", "u-base", "pin_not_connected", ""),
+                                              ("head", "M0 0H9", "u-head", "label_dangling", '(segment (start 1 1) (end 5 1) (width 0.2) (layer "F.Cu") (net "") (uuid "s1"))')):
+            symbol = '(symbol (lib_id "Device:R") (at 10 10 0) (uuid "s1") (property "Reference" "R1") (property "Value" "10k") (property "Footprint" "R_0603") (instances (project "H" (path "/" (reference "R1") (unit 1)))))' if side == "head" else ""
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1")))' + symbol + ')', f"{side}/H/H.kicad_pcb": _dp_pcb(extra),
+                      f"review/H/{side}/sch/H.svg": f'<svg viewBox="0 0 100 50"><path d="{line}"/></svg>',
+                      f"review/H/{side}/pcb/H-F_Cu.svg": f'<svg viewBox="0 0 10 10"><path d="{line}"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc(uuid, kind), f"review/H/{side}/drc.json": "{}",
+                      f"review/H/{side}/board.glb": f"{side} glb", f"review/H/{side}/glb.log": "Could not add 3D model for U9.\n" if side == "base" else ""})
+        settings = {**json.loads(json.dumps(kr.DEFAULT_SETTINGS)), "3d": {"enabled": True}, "parts": {"enabled": True}, "inventory": {"enabled": True}}
+        project = {"dir": "H", "name": "H", "status": "modified"}
+        compared = kr.build_project(project, {}, settings)
+        erc = next(c for c in compared["checks"] if c["name"] == "erc")
+        assert compared["sheets"][0]["status"] == "modified" and erc["new_errors"] == 1 and erc["fixed"] == 1, erc  # the comparison path is unchanged
+        assert [c["action"] for c in compared["parts"]["changes"]] == ["added"] and compared["parts"]["lines"][0]["new_problems"]
+        blobs = {}
+        one = kr.build_project(project, blobs, settings, single=True)
+        sheet = one["sheets"][0]
+        assert sheet["svg"]["base"] is None and sheet["svg"]["head"] and sheet["status"] == "unchanged", sheet
+        assert one["changes"] == [] and one["board"]["layers"][0]["svg"]["base"] is None, one["board"]
+        assert one["board"]["geometry"]["base"] is None and one["board"]["geometry"]["head"], one["board"].get("geometry")
+        assert one["board"]["model3d"]["base"] is None and one["board"]["model3d"]["head"], one["board"]["model3d"]
+        assert all(r["side"] != "base" for r in one["board"]["no_model"]), one["board"]["no_model"]
+        assert one["board"]["model3d"]["changed"] is False and one["board"]["changed"] is False and one["board"]["status"] == "unchanged"
+        erc = next(c for c in one["checks"] if c["name"] == "erc")
+        assert [v["uuids"] for v in erc["violations"]] == [["u-head"]] and erc["errors"] == 1, erc
+        assert erc["new_errors"] == 0 and erc["new_warnings"] == 0 and erc["fixed"] == 0 and not any(v["new"] for v in erc["violations"]), erc
+        assert all(c["fixed"] == 0 and c["new_errors"] == 0 for c in one["checks"]) and "libraries" not in one
+        assert one.get("objects"), "inventory-enabled single report must contain fixture objects"
+        assert any(item.get("ref") == "R1" for item in one["objects"]), one["objects"]
+        assert [l["refs"] for l in one["parts"]["lines"]] == [["R1"]] and one["parts"]["changes"] == [] and one["parts"]["lines"][0]["new_problems"] == []
+        assert one["parts"]["coverage"]["base"] is None
+        texts = [_dpgz.decompress(_dpb64.b64decode(b)) for b in blobs.values()]
+        assert texts and not any(b"M0 0H5" in x or b"base glb" in x for x in texts), "no base byte may reach a design report"
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S2 single-revision project ignores the base side")
