@@ -27,6 +27,20 @@ import json
 import pickle
 from kicad_review import Quoted, is_net_number
 from kicad_review import compact_bom_lines
+
+_l = {"value": "1k", "footprint": "F", "lcsc": None, "mpn": "M", "manufacturer": None, "datasheet": None, "category": "Resistors", "key": "k", "refs": ["R1"], "problems": []}
+_slim = {"value": "1k", "footprint": "F", "mpn": "M", "category": "Resistors", "refs": ["R1"], "problems": []}
+_in = {"projects": [{"parts": {"lines": [_l], "changes": [{"action": "added", "refs": ["R1"], "before": None, "after": _l},
+                                                         {"action": "removed", "refs": ["R1"], "before": _l, "after": None}], "exports": {"csv": "x"}}},
+                    {"name": "no parts"}],
+       "bom": {"error": "Combined BOM unavailable", "lines": [], "exports": None}}
+_out = compact_bom_lines(_in)
+assert _out["projects"][0]["parts"]["lines"] == [_slim] and _out["projects"][0]["parts"]["exports"] == {"csv": "x"}
+assert [(c["before"], c["after"]) for c in _out["projects"][0]["parts"]["changes"]] == [(None, _slim), (_slim, None)], "added/removed sides"
+assert _out["projects"][1] == {"name": "no parts"}, "a project without parts is untouched"
+assert _out["bom"] == _in["bom"], "repo BOM error case keeps its shape"
+assert "key" in _l and _l["lcsc"] is None and "bom" not in compact_bom_lines({"projects": []}), "input is not mutated; no bom stays absent"
+print("ok compact_bom_lines")
 numeric_tokens = parse_sexpr('(net "12" 12)')
 assert numeric_tokens == ['net', '12', '12']
 assert isinstance(numeric_tokens[1], Quoted) and not is_net_number(numeric_tokens[1])
@@ -1502,6 +1516,9 @@ try:
                 assert embedded == compact_bom_lines(data)
                 assert all("key" not in l and None not in l.values() for q in embedded["projects"] if "parts" in q for l in q["parts"]["lines"]), "embedded lines drop key and null fields"
                 assert all("key" in l for q in data["projects"] if "parts" in q for l in q["parts"]["lines"]), "data.json keeps them"
+                changed_lines = lambda d: [x for q in d["projects"] if "parts" in q for c in q["parts"]["changes"] for x in (c["before"], c["after"]) if x]
+                assert all("key" not in x and None not in x.values() for x in changed_lines(embedded)), "embedded change lines drop key and null fields"
+                assert not parts_enabled or (changed_lines(data) and all("key" in x for x in changed_lines(data))), "data.json change lines keep key"
                 assert "bom" not in data, "single-project reports keep their existing payload shape"
         # Report-level BOM appears in both offline HTML and JSON only with multiple opted-in projects.
         multi_projects = [{"dir": b["name"], "name": b["name"], "status": "modified"} for b in boards]
@@ -1518,6 +1535,8 @@ try:
             assert embedded == compact_bom_lines(multi_data)
             assert ("bom" in multi_data) == enabled
             if enabled:
+                assert embedded["bom"]["lines"] and all("key" not in l and None not in l.values() for l in embedded["bom"]["lines"]), "embedded repo lines drop key and null fields"
+                assert all("key" in l for l in multi_data["bom"]["lines"]), "data.json repo lines keep key"
                 assert multi_data["bom"] == combined
                 assert multi_data["bom"]["summary"]["components"] == sum(p["parts"]["summary"]["components"] for p in multi_data["projects"])
             else:

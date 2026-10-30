@@ -1249,16 +1249,34 @@ export const CHECKS = [
 `],
   ["Parts fixture BOM renders the same from old lines with key and nulls and from compact lines", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
-  const parts = REVIEW_DATA.projects[0].parts, original = parts.lines;
-  const bomRows = () => { setDock('panel', true); S.t = 'parts'; S.partsView = 'bom'; renderPanel(); return [...document.querySelectorAll('.bom-row')].map(r => r.textContent).join('|'); };
+  const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalChanges = parts.changes;
+  const slim = l => l && Object.fromEntries(Object.entries(l).filter(([k, v]) => k !== 'key' && v !== null));
+  const snapshot = () => {
+    setDock('panel', true); S.t = 'parts';
+    S.partsView = 'problems'; renderPanel(); const problems = [...document.querySelectorAll('.parts-row')].map(r => r.textContent + '/' + r.className).join('|');
+    S.partsView = 'bom'; renderPanel(); const bom = [...document.querySelectorAll('.bom-row')].map(r => r.textContent + '/' + r.className).join('|');
+    const inspector = [];
+    for (const ref of ['R1', 'J5', 'U4']) { S.s = null; S.io = null; S.ig = {object: {ref, kind: 'symbol'}}; const d = inspectorProperties(); inspector.push(JSON.stringify([d?.base, d?.head])); }
+    S.ig = null;
+    return {problems, bom, inspector: inspector.join('|')};
+  };
   try {
-    if (!original.some(l => 'key' in l) || !original.some(l => l.mpn === null)) return 'fixture must keep the old line shape (key and null fields)';
-    const old = bomRows();
-    if (!old) return 'old-shape BOM rendered no rows';
-    parts.lines = original.map(l => Object.fromEntries(Object.entries(l).filter(([k, v]) => k !== 'key' && v !== null)));
-    if (parts.lines.some(l => 'key' in l)) return 'compaction failed';
-    return bomRows() === old || 'compact lines render differently';
-  } finally { parts.lines = original; S.partsView = 'problems'; renderPanel(); }
+    if (!originalLines.some(l => 'key' in l) || !originalLines.some(l => l.mpn === null)) return 'fixture must keep the old line shape (key and null fields)';
+    if (!originalChanges.some(c => c.before === null) || !originalChanges.some(c => c.before && 'key' in c.before)) return 'fixture changes must keep the old shape (key, null before)';
+    // The fixture's keys are placeholders; give the old shape the real canonical key so it can be compared with the restored one.
+    const canon = l => l && {...l, key: JSON.stringify([l.value, l.footprint, l.lcsc || '', l.mpn || '', l.category, l.manufacturer ?? null, l.datasheet ?? null])};
+    parts.lines = originalLines.map(canon);
+    parts.changes = originalChanges.map(c => ({...c, before: canon(c.before), after: canon(c.after)}));
+    const oldLines = parts.lines, oldChanges = parts.changes;
+    const old = snapshot();
+    if (!old.problems || !old.bom || !old.inspector.includes('part.mpn')) return 'old-shape views rendered nothing';
+    parts.lines = oldLines.map(slim);
+    parts.changes = oldChanges.map(c => ({...c, before: slim(c.before), after: slim(c.after)}));
+    if (parts.lines.some(l => 'key' in l) || parts.changes.some(c => c.after && 'key' in c.after)) return 'compaction failed';
+    const compact = snapshot();
+    for (const k of Object.keys(old)) if (old[k] !== compact[k]) return 'compact data renders ' + k + ' differently';
+    return true;
+  } finally { parts.lines = originalLines; parts.changes = originalChanges; S.s = null; S.ig = null; S.partsView = 'problems'; renderPanel(); }
 `],
   ["Parts fixture BOM MPN removal keeps the previous number and change badge", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';

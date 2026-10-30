@@ -1891,10 +1891,13 @@ function inspectorProperties() {
     objects.forEach((o, i) => flatten(target, o, objects.length > 1 ? `geometry ${i+1}.` : "geometry."));
   }
   const ref = selected.ref || inventory?.ref;
-  const part = p.parts?.lines?.find(l => l.refs?.includes(ref));
+  // Compact reports omit a BOM line's key and null fields; restore both (same formula as kicad_review.bom_identity) so the inspector reads the same.
+  const full = l => l && { value: l.value, footprint: l.footprint, lcsc: l.lcsc ?? null, mpn: l.mpn ?? null, manufacturer: l.manufacturer ?? null, category: l.category, datasheet: l.datasheet ?? null,
+    key: l.key ?? JSON.stringify([l.value, l.footprint, l.lcsc || "", l.mpn || "", l.category, l.manufacturer ?? null, l.datasheet ?? null]), ...l };
+  const part = full(p.parts?.lines?.find(l => l.refs?.includes(ref)));
   if (part) { flatten(base, part, "part."); flatten(head, part, "part."); }
   for (const change of p.parts?.changes || []) if (change.refs?.includes(ref)) {
-    flatten(base, change.before, "part."); flatten(head, change.after, "part.");
+    flatten(base, full(change.before), "part."); flatten(head, full(change.after), "part.");
   }
   flatten(base, selected.before); flatten(head, selected.after);
   for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
