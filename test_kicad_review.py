@@ -5999,3 +5999,52 @@ with tempfile.TemporaryDirectory() as td:
         assert not issues and not warnings and all("meta:pro" in x and "meta:dru" in x for x in objs.values())
     finally: os.chdir(old)
 print('ok BR03 project_pair guards optional rules')
+
+# Ask (spec 09): Ask composes the shared producers; it adds no second export and no fatal path.
+import subprocess
+PCB_TEXT = '(kicad_pcb\n (layers\n  (0 "F.Cu" signal)\n )\n)\n'
+STATS_PARTIAL = {"board": {"has_outline": True, "width": "99 mm", "height": "88 mm"}}  # reused by Task 4's stale-output test
+def stats_fails(cmd, **kw):
+    if "stats" in cmd:
+        pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(STATS_PARTIAL))
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="stats failed after writing")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": "(kicad_sch)", "src/P.kicad_pcb": PCB_TEXT})
+    with patch.object(kr, "export_netlist") as netlist_export, \
+         patch.object(kr, "export_board_stats", return_value=None) as stats_export, \
+         patch.object(kr, "sheet_pages", return_value=[]), \
+         patch.object(kr.subprocess, "run", side_effect=stats_fails) as run:
+        kr.render_side(f"{t}/src", "P", f"{t}/out", ask=True)
+    netlist_export.assert_called_once_with(f"{t}/src/P.kicad_sch", f"{t}/out")
+    stats_export.assert_called_once_with(f"{t}/src/P.kicad_pcb", f"{t}/out")
+    assert not any("stats" in " ".join(c.args[0]) for c in run.call_args_list), "Ask must not add a second statistics exporter"
+    with patch.object(kr, "export_netlist") as netlist_export, patch.object(kr, "export_board_stats", return_value=None), patch.object(kr, "sheet_pages", return_value=[]), \
+         patch.object(kr.subprocess, "run", side_effect=stats_fails):  # plan omitted this patch; without it the Ask-off call hits real kicad-cli
+        kr.render_side(f"{t}/src", "P", f"{t}/out2")
+    netlist_export.assert_not_called()  # Ask off and netlist off: no netlist request
+# 03's soft failure, reached through the composed call: a failing netlist run writes the marker and never exits.
+def netlist_fails(cmd, **kw):
+    if "netlist" in cmd:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": "(kicad_sch)", "src/P.kicad_pcb": PCB_TEXT})
+    with patch.object(kr.subprocess, "run", side_effect=netlist_fails), patch.object(kr, "export_board_stats", return_value=None), patch.object(kr, "sheet_pages", return_value=[]):
+        kr.render_side(f"{t}/src", "P", f"{t}/out", ask=True)  # no SystemExit
+    assert not os.path.exists(f"{t}/out/netlist.net") and "boom" in pathlib.Path(t, "out", "netlist.net.error").read_text(encoding="utf-8")
+with tempfile.TemporaryDirectory() as t:
+    old = os.getcwd(); os.chdir(t)
+    try:
+        pr = {"dir": "G", "name": "G", "status": "unchanged"}
+        write(t, {"review/detect.json": json.dumps({"base": "1"*40, "head": "2"*40, "projects": [pr]}),
+                  "base/G/G.kicad_pcb": PCB_TEXT, "head/G/G.kicad_pcb": PCB_TEXT,
+                  "base/G/G.kicad_sch": "(kicad_sch)", "head/G/G.kicad_sch": "(kicad_sch)"})
+        for ask_on in (True, False):
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS); settings["ask"]["enabled"] = ask_on
+            with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.render_side") as render:
+                kr.cmd_render(None)
+            assert render.call_args.kwargs["netlist"] is True and render.call_args.kwargs["ask"] is ask_on
+    finally:
+        os.chdir(old)
+print("ok ask shares the netlist and statistics producers")

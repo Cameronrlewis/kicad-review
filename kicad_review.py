@@ -330,7 +330,7 @@ def read_netlist(out):
     return text
 
 
-def render_side(src_dir, name, out, netlist=False):
+def render_side(src_dir, name, out, netlist=False, ask=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
     with tempfile.TemporaryDirectory() as cfg:
@@ -372,8 +372,8 @@ def render_side(src_dir, name, out, netlist=False):
                 os.environ['KICAD_CONFIG_HOME'] = previous
     if os.path.exists(sch):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
-        if netlist:
-            export_netlist(sch, out)
+        if netlist or ask:
+            export_netlist(sch, out)  # 03's producer: bounded, soft, validated; one call per present schematic
     if os.path.exists(pcb):
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
@@ -514,7 +514,7 @@ def cmd_render(args):
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
             # Connectivity evidence for every present schematic, whatever the check settings.
-            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
+            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True, ask=bool(settings.get("ask", {}).get("enabled")))
             if export_3d:
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
