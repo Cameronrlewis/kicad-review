@@ -4915,3 +4915,71 @@ test('ask context download is refused by Content-Length and stops reading past t
     assert.ok(pulls <= 10, `reading stopped after ${pulls} chunks`);
   } finally { restore2(); }
 });
+
+import { askClient } from './ask-client.js';
+
+function bootAsk(fetchImpl) {
+  const posts = [], handlers = {}, frame = { postMessage: (data) => posts.push(JSON.parse(JSON.stringify(data))) };
+  const win = { contentWindow: frame };
+  runInNewContext(`(${askClient.toString()})({ask:'/ask',insight:'/ask/insight'})`, {
+    document: { getElementById: () => win }, addEventListener: (type, fn) => { handlers[type] = fn; }, fetch: fetchImpl,
+    TextDecoder, TextEncoder, URL, JSON, Uint8Array, Promise });
+  return { posts, send: (data, source = frame) => handlers.message({ source, data }) };
+}
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+test('ask client: answers the ready handshake only for the report frame', async () => {
+  const page = bootAsk(async () => { throw new Error('no fetch'); });
+  await page.send({ kicadReviewReady: true, ask: true }, {});
+  assert.deepEqual(page.posts, []);
+  await page.send({ kicadReviewReady: true, ask: false });
+  assert.deepEqual(page.posts, []);
+  await page.send({ kicadReviewReady: true, ask: true });
+  assert.deepEqual(page.posts, [{ kicadReviewAskReady: true }]);
+});
+
+test('ask client: relays a question and streams events back with the request id', async () => {
+  let sent;
+  const page = bootAsk(async (url, options) => { sent = { url, body: JSON.parse(options.body) };
+    return new Response(streamOf('event: status\ndata: {"text":"Reading"}\n\nevent: answer_delta\ndata: {"te', 'xt":"Hi"}\n\nevent: done\ndata: {}\n\n')); });
+  await page.send({ kicadReviewAskQuestion: { id: 'q1', project: 'P', messages: [{ role: 'user', text: 'hi' }] } });
+  await tick();
+  assert.equal(sent.url, '/ask');
+  assert.deepEqual(sent.body, { project: 'P', messages: [{ role: 'user', text: 'hi' }] });
+  assert.deepEqual(page.posts.map((p) => [p.kicadReviewAskEvent.id, p.kicadReviewAskEvent.event]), [['q1', 'status'], ['q1', 'answer_delta'], ['q1', 'done']]);
+  assert.deepEqual(page.posts[1].kicadReviewAskEvent.data, { text: 'Hi' });
+});
+
+test('ask client: HTTP errors become one error event and done; malformed requests are ignored', async () => {
+  const page = bootAsk(async () => new Response(JSON.stringify({ error: 'Daily question limit reached.' }), { status: 429 }));
+  await page.send({ kicadReviewAskQuestion: { id: 'q2', project: 'P', messages: [{ role: 'user', text: 'hi' }] } });
+  await tick();
+  assert.deepEqual(page.posts.map((p) => p.kicadReviewAskEvent.event), ['error', 'done']);
+  assert.equal(page.posts[0].kicadReviewAskEvent.data.message, 'Daily question limit reached.');
+  page.posts.length = 0;
+  await page.send({ kicadReviewAskQuestion: { id: 5, project: 'P', messages: 'no' } });
+  await page.send({ kicadReviewAskQuestion: null });
+  await tick();
+  assert.deepEqual(page.posts, []);
+});
+
+test('ask client: partial answer followed by clean EOF emits terminal failure', async () => {
+  const page = bootAsk(async () => new Response(streamOf(sse('answer_delta', { text: 'partial' }))));
+  await page.send({ kicadReviewAskQuestion: { id: 'eof', project: 'P', messages: [{ role: 'user', text: 'hi' }] } }); await tick();
+  assert.deepEqual(page.posts.map((p) => p.kicadReviewAskEvent.event), ['answer_delta', 'error', 'done']);
+});
+
+test('ask client: the insight request is a JSON POST answered as one insight event', async () => {
+  const page = bootAsk(async () => new Response(JSON.stringify({ summary: 'A board.', questions: ['Q1?', 'Q2?', 'Q3?'], cached: true })));
+  await page.send({ kicadReviewAskInsight: { id: 'insight:P:1', project: 'P' } });
+  await tick();
+  assert.deepEqual(page.posts, [{ kicadReviewAskEvent: { id: 'insight:P:1', event: 'insight', data: { summary: 'A board.', questions: ['Q1?', 'Q2?', 'Q3?'], cached: true } } }]);
+});
+
+test('review page embeds the Ask relay only when the site is configured for it', () => {
+  const args = { user: 'octocat', owner: 'owner', repo: 'repo', id: 42, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
+  assert.doesNotMatch(reviewPage(args), /kicadReviewAskQuestion/);
+  const page = reviewPage({ ...args, ask: true });
+  assert.match(page, /kicadReviewAskQuestion/);
+  assert.ok(page.includes('{"ask":"/r/owner/repo/a/42/ask","insight":"/r/owner/repo/a/42/ask/insight"}'));
+});
