@@ -107,25 +107,31 @@ export function followupSplitter() {
   };
 }
 
+// Comment-only blocks (": keepalive") are skipped; a data frame that is not JSON throws a SyntaxError.
+// The finally cancels an unfinished upstream body and releases the reader when the consumer stops early.
 export async function* sseEvents(body) {
   const reader = body.getReader(), decoder = new TextDecoder();
-  let buffer = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    for (let m = /\r?\n\r?\n/.exec(buffer); m; m = /\r?\n\r?\n/.exec(buffer)) {
-      const block = buffer.slice(0, m.index);
-      buffer = buffer.slice(m.index + m[0].length);
-      let event = 'message', data = '';
-      for (const line of block.split(/\r?\n/)) {
-        if (line.startsWith('event:')) event = line.slice(6).trim();
-        else if (line.startsWith('data:')) data += line.slice(5).trimStart();
+  let buffer = '', done = false;
+  try {
+    while (!done) {
+      const chunk = await reader.read();
+      done = chunk.done;
+      buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !done });
+      for (let m = /\r?\n\r?\n/.exec(buffer); m; m = /\r?\n\r?\n/.exec(buffer)) {
+        const block = buffer.slice(0, m.index);
+        buffer = buffer.slice(m.index + m[0].length);
+        let event = null, data = null;
+        for (const line of block.split(/\r?\n/)) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data = (data ?? '') + line.slice(5).trimStart();
+        }
+        if (event === null && data === null) continue;
+        yield { event: event ?? 'message', data: JSON.parse(data ?? '') };
       }
-      let parsed = null;
-      try { parsed = JSON.parse(data); } catch { /* keep null */ }
-      yield { event, data: parsed };
     }
-    if (done) return;
+  } finally {
+    if (!done) await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
@@ -142,8 +148,9 @@ export async function* answerEvents(body, remaining) {
       } else if (event === 'error') { yield ['error', { message: 'The model provider stopped the answer.', code: 'upstream_error' }]; return; }
       else if (event === 'message_stop') { completed = true; break; }
     }
-  } catch {
-    yield ['error', { message: 'The connection to the model provider dropped.', code: 'upstream_dropped' }];
+  } catch (e) {
+    if (e instanceof SyntaxError) yield ['error', { message: 'The model provider sent an unreadable answer.', code: 'upstream_error' }];
+    else yield ['error', { message: 'The connection to the model provider dropped.', code: 'upstream_dropped' }];
     return;
   }
   if (!completed) { yield ['error', { message: 'The connection to the model provider ended before completion.', code: 'upstream_dropped' }]; return; }

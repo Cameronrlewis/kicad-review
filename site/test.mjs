@@ -4526,3 +4526,29 @@ test('ask: an upstream error or a dropped connection ends in one error event and
   assert.deepEqual((await collect(answerEvents(dropped, 3))).map(([e]) => e), ['error']); // synchronous controller.error discards the queued start
   assert.deepEqual((await collect(answerEvents(streamOf(sse('message_start', { message: { usage: {} } }), sse('message_stop', {})), 3))).map(([e]) => e), ['start', 'error']);
 });
+
+test('ask: a malformed provider data frame ends in one error, not a partial answer; comments and pings are ignored', async () => {
+  const start = sse('message_start', { message: { usage: {} } });
+  const text = sse('content_block_delta', { delta: { type: 'text_delta', text: 'U1 is ' } });
+  const bad = await collect(answerEvents(streamOf(start, text, 'event: content_block_delta\ndata: {"delta":\n\n', sse('message_stop', {})), 3));
+  assert.deepEqual(bad.map(([e]) => e), ['start', 'answer_delta', 'error']);
+  assert.equal(bad.at(-1)[1].code, 'upstream_error');
+  const noData = await collect(answerEvents(streamOf(start, 'event: content_block_delta\n\n', sse('message_stop', {})), 3));
+  assert.deepEqual(noData.map(([e]) => e), ['start', 'error']);
+  const kept = await collect(answerEvents(streamOf(': keepalive\n\n', start, sse('ping', { type: 'ping' }), text, ':\n\n', sse('message_stop', {})), 3));
+  assert.deepEqual(kept.map(([e]) => e), ['start', 'answer_delta', 'answer', 'done']);
+});
+
+test('ask: a consumer that stops early cancels the upstream body and releases its reader', async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(c) { c.enqueue(new TextEncoder().encode(sse('message_start', { message: { usage: {} } }) + sse('content_block_delta', { delta: { type: 'text_delta', text: 'first' } }))); },
+    cancel() { cancelled = true; },
+  });
+  for await (const [event] of answerEvents(body, 3)) if (event === 'answer_delta') break;
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+  const done = streamOf(sse('message_start', { message: { usage: {} } }), sse('message_stop', {}));
+  await collect(sseEvents(done));
+  assert.equal(done.locked, false);
+});
