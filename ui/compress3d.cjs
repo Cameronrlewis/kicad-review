@@ -263,7 +263,10 @@ async function cachedCompress(input,output,metadata,partsPath,statsPath,cacheRoo
     const oldBefore=Date.now()-30*24*60*60*1000;
     for(const name of await fs.readdir(cacheRoot)) if(/^[0-9a-f]{64}$/.test(name)&&name!==key) {
       const candidate=path.join(cacheRoot,name);
-      if((await fs.stat(candidate)).mtimeMs<oldBefore)await fs.rm(candidate,{recursive:true,force:true});
+      try {if((await fs.stat(candidate)).mtimeMs<oldBefore)
+        await fs.rm(candidate,{recursive:true,force:true});} catch(error) {
+        if(error.code!=='ENOENT')throw error;
+      }
     }
     if(!await valid()) {
       const temp=await fs.mkdtemp(path.join(cacheRoot,'.build-'));

@@ -56,3 +56,13 @@ test('BR02 shared lighting normalization follows preset defaults and clamps step
     assert.deepEqual(plain(S.normalizeLighting({rig:'photo',bearing:NaN,exposure:Infinity})),{rig:'photo',bearing:120,exposure:1.75});
   } finally {S.PRESETS.photo=old;}
 });
+
+
+test('BR02 desktop DPR 3 drops after sustained slow frames and recovers after idle',()=>{
+  const window={};runInNewContext(readFileSync(new URL('./three-studio.js',import.meta.url),'utf8'),{window});
+  let now=0;const ratios=[],policy=window.ThreeStudio.framePolicy(3,()=>now,n=>ratios.push(n));
+  for(let i=0;i<9;i++)policy.rotating(40);
+  assert.deepEqual(ratios,[]);policy.rotating(40);assert.deepEqual(ratios,[1.5]);
+  policy.idle();now=1999;policy.poll();assert.deepEqual(ratios,[1.5]);
+  now=2000;policy.poll();policy.poll();assert.deepEqual(ratios,[1.5,3]);
+});

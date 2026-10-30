@@ -12,6 +12,8 @@ function cache() {
   runInNewContext(source, {window, document, DOMException, module});
   assert.equal('parseByDigest' in window.Review3D, false, 'cache helper stays out of the browser API');
   assert.equal(module.exports, window.Review3D.testSeam);
+  assert.equal(Object.hasOwn(window.Review3D, 'state'), true);
+  assert.equal(window.Review3D.state, null);
   const owner = {parses:new Map(), decodedScenes:[], dead:false, state:{parseCount:0}};
   return {owner, parseByDigest:(digest, bytes, parser) => module.exports.parseByDigest(owner, digest, bytes, parser)};
 }
@@ -247,4 +249,14 @@ test('BR02 hover raycasts coalesce to the latest event and cancel on teardown', 
   assert.equal(frames.size,0,'queued hover must not erase a subsequent click tooltip');
   listeners.pointermove({clientX:31,buttons:0});controller.abort();owner.dead=true;
   assert.equal(frames.size,0);assert.equal(window.hovers.length,1);
+});
+
+
+test('BR02 single renderer rejects a comparison fixture instead of skipping',async()=>{
+  const {CHECKS}=await import('./checks.mjs');
+  const expr=CHECKS.find(c=>c[0]==='BR02 single renderer head only')[2];
+  const result=await runInNewContext(`(async()=>{${expr}})()`,{
+    proj:()=>({board:{parts3d:{}}}),Review3D:{state:{}},REVIEW_DATA:{mode:'comparison'}
+  });
+  assert.equal(result,'fixture is not single mode');
 });

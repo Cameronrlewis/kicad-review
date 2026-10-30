@@ -4648,7 +4648,7 @@ CHECKS.push(
   ['BR02 single renderer head only', 'v=3d&m=side', `
     if(!proj().board.parts3d)return 'skip';
     const st=Review3D.state;
-    if(REVIEW_DATA.mode!=='single')return 'skip';
+    if(REVIEW_DATA.mode!=='single')return 'fixture is not single mode';
     if(proj().board.model3d?.base||proj().board.poster3d?.base)return 'base blob present in fixture';
     if(!st?.firstFrame)return 'head model has no first frame';
     if(st.renderers.length!==1||st.roots.length!==1)return 'single renderer or single root';

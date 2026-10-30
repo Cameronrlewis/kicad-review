@@ -1,4 +1,4 @@
-// parked for Task 9A: the authenticated wrapper will install this broker.
+// parked for Task 9A: wrapper installs the broker; route serves stored .gz with Content-Encoding: gzip.
 // Model requests cross the sandbox only through the authenticated report wrapper.
 export function threeClient({ endpoint }) {
   if (typeof endpoint !== 'string' || !/^\/r\/[^/]+\/[^/]+\/a\/\d+\/3d\/$/.test(endpoint)) throw Error('invalid model endpoint');
@@ -26,6 +26,7 @@ export function threeClient({ endpoint }) {
           const response = await fetch(endpoint + key, { credentials: 'same-origin', redirect: 'error' });
           if (response.status === 401 || response.status === 403) throw Error('Model access denied. Refresh the review link or sign in, then retry.');
           if (!response.ok) throw Error('Model unavailable. Retry.');
+          // fetch auto-decodes Content-Encoding: gzip; digest and gzip:false describe uncompressed bytes.
           const bytes = await response.arrayBuffer();
           const hash = await crypto.subtle.digest('SHA-256', bytes);
           const digest = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');

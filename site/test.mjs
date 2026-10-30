@@ -1,4 +1,6 @@
 import test from 'node:test';
+import {createServer} from 'node:http';
+import {gzipSync} from 'node:zlib';
 import { createHash, webcrypto } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
@@ -3487,4 +3489,26 @@ test('BR02 broker verifies SHA-256 before transferring models and allows retry',
   assert.equal(sent[0].bytes,undefined);
   corrupt=false;await listener({source:child,data:{...data,id:2}});
   assert.deepEqual([...new Uint8Array(sent[1].bytes)],[...bytes]);
+});
+
+
+for(const encoded of [true,false])test('BR02 broker gzip transport '+(encoded?'fetch-decodes before hashing':'without Content-Encoding fails closed'),async()=>{
+  const raw=Buffer.from('glTF model payload'),packed=gzipSync(raw);
+  const server=createServer((req,res)=>{
+    res.writeHead(200,{'Content-Type':'model/gltf-binary',...(encoded?{'Content-Encoding':'gzip'}:{})});
+    res.end(packed);
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try {
+    let listener;const sent=[],child={postMessage:m=>sent.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+      fetch:(url,options)=>fetch(`http://127.0.0.1:${server.address().port}${url}`,options)
+    });
+    await listener({source:child,data:{kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,
+      digest:createHash('sha256').update(raw).digest('hex'),kind:'board.glb'}});
+    if(encoded){assert.deepEqual(Buffer.from(sent[0].bytes),raw);assert.equal(sent[0].gzip,false);}
+    else {assert.equal(sent[0].error,'Model digest mismatch. Retry.');assert.equal(sent[0].bytes,undefined);}
+  } finally {await new Promise(resolve=>server.close(resolve));}
 });

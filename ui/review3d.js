@@ -51,7 +51,7 @@ window.Review3D = (() => {
       return [];
     }
   }
-  // parked for Task 9A: bytes/gzip sources also decode authorized broker responses.
+  // parked for Task 9A: bytes/gzip sources also decode authorized broker responses; HTTP gzip is fetch-decoded.
   function decode3d(source, s) {
     if (s.dead) return Promise.reject(new DOMException('Viewer closed', 'AbortError'));
     try {
@@ -985,5 +985,5 @@ window.Review3D = (() => {
   // Node and headless browser contracts share one explicit test seam.
   const testSeam = {sampleFrame, session:()=>active, poster3d, parseByDigest, releaseGpu};
   if (typeof module !== 'undefined') module.exports = testSeam;
-  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,testSeam};
+  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,state:null,testSeam};
 })();

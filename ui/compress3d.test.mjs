@@ -698,6 +698,15 @@ test('BR02 restored raw pair A B A and corrupt cache cannot cross indexes',integ
     assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true);
     assert.equal(existsSync(stale),false);assert.equal(existsSync(live),true);
     assert.equal(existsSync(expired),false);assert.equal(existsSync(recent),true);
+    const vanished=pathJoin(cache,'d'.repeat(64)),fs=require('node:fs/promises'),stat=fs.stat;
+    mkdirSync(vanished);
+    fs.stat=async function(file,...args){
+      if(file===vanished)await fs.rm(vanished,{recursive:true,force:true});
+      return stat.call(this,file,...args);
+    };
+    try {assert.equal(await P.cachedCompress(input,output,{...metadata,keep:['R12']},parts,stats,cache),true,
+      'a completed entry disappearing during pruning must not invalidate the active cache');}
+    finally {fs.stat=stat;}
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 

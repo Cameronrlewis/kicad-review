@@ -365,19 +365,13 @@ def normalize_poster(path):
 
     KiCad 10 on macOS can return a smaller drawable area than the requested size.
     Keep the prescribed argv and pixels; transparent padding avoids distortion.
-    Normal-sized PNGs use a cheap header/end check; only smaller local exports need decoding.
+    Normal-sized PNGs validate chunks and inflate only; smaller local exports need unfiltering.
     KiCad emits non-interlaced 8-bit RGB(A). Reject other/corrupt output rather
     than advertising a nonconforming successful still. No image dependency.
     """
     png = path.read_bytes()
     if png[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError('not a PNG')
-    if (len(png) >= 45 and png[-12:] == b'\x00\x00\x00\x00IEND\xaeB`\x82'
-            and png[8:16] == b'\x00\x00\x00\x0dIHDR'
-            and struct.unpack('>IIBBBBB', png[16:29]) in
-            ((1600, 1000, 8, 2, 0, 0, 0), (1600, 1000, 8, 6, 0, 0, 0))
-            and zlib.crc32(png[12:29]) == struct.unpack('>I', png[29:33])[0]):
-        return
     offset, chunks, compressed = 8, [], bytearray()
     while offset < len(png):
         if offset + 12 > len(png):
@@ -406,6 +400,7 @@ def normalize_poster(path):
     raw = decoder.decompress(compressed, (stride+1)*height+1)
     if len(raw) != (stride+1)*height or not decoder.eof or decoder.unused_data:
         raise ValueError('invalid PNG image data')
+    # Fast path: validated normal exports need no row unfiltering or pixel rewriting.
     if (width, height) == (1600, 1000):
         return
     previous = bytearray(stride)

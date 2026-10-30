@@ -1134,6 +1134,9 @@ for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'n
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
+for suffix in ('', ' --dark'):
+    assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
+assert "data['mode'] = 'single'" in test_wf and 'review-data-3d-processed.js' in test_wf
 print("ok TS-S1 CI browser matrix")
 print("ok")
 
@@ -4061,10 +4064,18 @@ def br02_poster_dimensions():
         # Already conforming stills are left byte-identical.
         exact = br02_png()
         dest.write_bytes(exact)
-        with patch.object(kr.zlib, 'decompressobj', side_effect=AssertionError('normal PNG must not decompress')):
+        with patch.object(kr.zlib, 'decompressobj', wraps=kr.zlib.decompressobj) as inflate:
             kr.normalize_poster(dest)
+            assert inflate.call_count == 1, 'normal PNG validates IDAT without unfiltering'
         assert dest.read_bytes() == exact
-        for bad in (b'not PNG', br02_png()[:-10], br02_png(1601, 1)):
+        idat = exact.index(b'IDAT')
+        size = struct.unpack('>I', exact[idat-4:idat])[0]
+        payload = bytearray(exact[idat+4:idat+4+size]); payload[-1] ^= 1
+        def idat_png(data):
+            chunk = b'IDAT' + data
+            return exact[:idat-4] + struct.pack('>I', len(data)) + chunk + struct.pack('>I', zlib.crc32(chunk)) + exact[idat+8+size:]
+        for bad in (b'not PNG', br02_png()[:-10], br02_png(1601, 1),
+                    idat_png(bytes(payload)), idat_png(zlib.compress(b'\0'))):
             def cli(args, **kw):
                 pathlib.Path(args[args.index('-o')+1]).write_bytes(bad)
                 return subprocess.CompletedProcess(args, 0, 'render stdout\n', '')
