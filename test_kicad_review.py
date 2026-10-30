@@ -5546,10 +5546,12 @@ with TemporaryDirectory() as d, patch.object(kr,'inline_page',side_effect=lambda
     assert legacy['assets']=={} and legacy['blobs']=={}
 
 
-def missing_side_projects():
-    order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').resolve().read_text()
+def missing_side_projects(change_offset=0):
+    # Cumulative change_offset mirrors production, so scene changeIds resolve to unique rows.
+    order_board = pathlib.Path(__file__).resolve().parent.joinpath('ui/fixtures/vf-order-4.kicad_pcb').read_text()
     old = os.getcwd()
     blobs, projects = {}, []
+    offset = change_offset
     with TemporaryDirectory() as directory:
         try:
             os.chdir(directory)
@@ -5570,7 +5572,8 @@ def missing_side_projects():
                     files[f'{out}/erc.json'] = json.dumps({'violations':[]})
                     files[f'{out}/drc.json'] = json.dumps({'violations':[], 'unconnected_items':[]})
                     write('.', files)
-                    project = kr.build_project(desc, blobs, settings)
+                    project = kr.build_project(desc, blobs, settings, change_offset=offset)
+                    offset += len(project['changes'])
                     absent = 'base' if present == 'head' else 'head'
                     rows = project['sheets'] if kind == 'sheet' else project['board']['layers']
                     assert rows, (kind, present)
@@ -5592,8 +5595,6 @@ def missing_side_projects():
         finally:
             os.chdir(old)
     return projects, blobs
-missing_projects, missing_blobs = missing_side_projects()
-assert len(missing_projects) == 4
 
 
 # Runnable image fixture generator: real KiCad 10.0.0 exports, no CLI needed to regenerate.
@@ -5648,7 +5649,7 @@ def build_augmented_image_project(desc, blobs, settings, committed_svg):
     return kr.build_project(desc,blobs,settings)
 
 
-def generate_image_fixture(missing_projects, missing_blobs, destination, committed_svg):
+def generate_image_fixture(destination, committed_svg):
     """Generate browser data into caller-owned paths through the real producer."""
     order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text()
     settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
@@ -5656,7 +5657,7 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
         settings[name]['enabled'] = False
     settings['checks'] = {k: 'off' for k in settings['checks']}
     old = os.getcwd()
-    image_blobs = dict(missing_blobs)
+    image_blobs = {}
     try:
         with TemporaryDirectory() as directory:
             os.chdir(directory)
@@ -5714,6 +5715,10 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
                                 '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297.0022 210.0072"><g/></svg>'})
             with patch.object(kr, 'sheet_pages', wraps=kr.sheet_pages) as parsed_pages:
                 image_project = build_augmented_image_project(desc, image_blobs, settings, committed_svg)
+            # Side-only projects continue the image project's change IDs, as production does.
+            missing_projects, missing_blobs = missing_side_projects(len(image_project['changes']))
+            assert len(missing_projects) == 4
+            image_blobs.update(missing_blobs)
             # Per revision: producer page cache, hotspot parser, and object parser.
             # The three manifest views must not each trigger another hierarchy parse.
             assert parsed_pages.call_count == 6, parsed_pages.call_args_list
@@ -5760,6 +5765,22 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
             'links': {}, 'run_url': '', 'reason': 'synthetic image regression', 'settings': settings,
             'projects': [image_project, *missing_projects], 'blobs': image_blobs}
     kr.assign_ids(data['projects'])
+    # Every scene object's changeIds must resolve to a row owned by its UUID on that side.
+    by_id = {r['id']: r for project in data['projects'] for r in project['changes']}
+    assert len(by_id) == sum(len(project['changes']) for project in data['projects']), 'duplicate change IDs'
+    resolved = 0
+    for project in data['projects']:
+        for side in ('base', 'head'):
+            key = (project['board'].get('geometry') or {}).get(side)
+            if not key:
+                continue
+            for obj in json.loads(gzip.decompress(base64.b64decode(image_blobs[key])))['objects']:
+                for change_id in obj['changeIds']:
+                    row = by_id[change_id]
+                    owner = row.get('uuid_before', row.get('uuid')) if side == 'base' else row.get('uuid')
+                    assert obj['changeUuid'] == owner, (side, change_id, obj['changeUuid'], owner)
+                    resolved += 1
+    assert resolved, 'fixture geometry carries no resolvable change IDs'
     with TemporaryDirectory() as directory:
         html = kr.finalize_report(data, directory)
         assert not re.search(r'<(?:script[^>]+src|link[^>]+href)=', html)
@@ -5820,7 +5841,7 @@ image_fixture_comparison_regressions()
 with TemporaryDirectory() as directory:
     generated_data = pathlib.Path(directory, 'review-data-images.js')
     generated_svg = pathlib.Path(directory, 'image-layer-overlap.svg')
-    image_project, image_blobs = generate_image_fixture(missing_projects, missing_blobs, generated_data, generated_svg)
+    image_project, image_blobs = generate_image_fixture(generated_data, generated_svg)
     for generated, committed in ((generated_data, pathlib.Path('ui/sample/review-data-images.js')),
                                  (generated_svg, pathlib.Path('ui/fixtures/image-layer-overlap.svg'))):
         # Updating fixtures is explicit; ordinary test runs only compare bytes
