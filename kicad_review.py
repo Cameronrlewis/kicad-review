@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
 KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
+FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
 
 
 def git(*args, check=True):
@@ -219,6 +220,158 @@ def board_path(p, side):
     return posixpath.join(side, p["dir"], f"{p['name']}.kicad_pcb")
 
 
+def fab_enabled(settings):
+    enabled = settings["fabrication"].get("check_limits", False) and settings["checks"].get("fab_limits") != "off"
+    if enabled and settings["checks"].get("drc", "off") == "off":
+        raise ValueError("fabrication.check_limits requires checks.drc != \"off\": board findings are the subtraction baseline")
+    return enabled
+
+
+def fab_drc(pcb, out):
+    out.unlink(missing_ok=True)
+    r = subprocess.run(["kicad-cli","pcb","drc","--format","json","--severity-error",
+                        "--exit-code-violations","-o",str(out),str(pcb)],
+                       capture_output=True, text=True)
+    if r.returncode not in (0, 5):
+        raise RuntimeError(f"fab DRC failed ({r.returncode}): {r.stdout}\n{r.stderr}")
+    data = json.loads(out.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("coordinate_units") != "mm" or not isinstance(data.get("violations"), list):
+        raise RuntimeError("fab DRC wrote invalid JSON or non-mm coordinates")
+    for row in data["violations"]:
+        if (not isinstance(row, dict) or not isinstance(row.get("type"), str) or not row["type"]
+                or row.get("severity") != "error" or not isinstance(row.get("description"), str)
+                or not isinstance(row.get("items"), list)):
+            raise RuntimeError("fab DRC wrote malformed violation")
+        for item in row["items"]:
+            if (not isinstance(item, dict) or not isinstance(item.get("description"), str)
+                    or ("uuid" in item and not isinstance(item["uuid"], str))):
+                raise RuntimeError("fab DRC wrote malformed item")
+            if "pos" in item:
+                pos = item["pos"]
+                if (not isinstance(pos, dict) or any(type(pos.get(k)) not in (int, float)
+                        or not math.isfinite(pos[k]) for k in ("x", "y"))):
+                    raise RuntimeError("fab DRC wrote invalid position")
+    return data
+
+
+def fab_regular_input(path):
+    # ponytail: checkout is immutable during render; this is not a concurrent-write sandbox.
+    # All ancestors are deliberate; resolving here would hide checkout symlinks.
+    absolute = path.absolute()
+    for part in reversed((absolute, *absolute.parents)):
+        if part.is_symlink():
+            raise RuntimeError(f"fab input must not be a symlink: {part}; "
+                               "use a physical checkout path with no symlink ancestors "
+                               "(on macOS, /private/tmp rather than /tmp and /private/var rather than /var)")
+    if path.exists() and not path.is_file():
+        raise RuntimeError(f"fab input must be a regular file: {path}")
+
+
+def fab_lint_rules(text):
+    """Reject lexical errors KiCad can silently ignore along with appended rules.
+
+    This is a conservative syntax guard, not a replacement for KiCad's rule engine.
+    Units, constraint names and condition semantics are not validated here. KiCad
+    may silently discard appended rules for those errors; render_fab exposes this
+    residual risk in coverageWarnings whenever an authored rule file is present.
+    Never rewrite authored rules to guess what the author intended.
+    """
+    depth = 0
+    for match in re.finditer(r"#[^\n]*|\"(?:\\.|[^\"\\])*\"|\s+|[()]|[^()\s\"#]+|.", text):
+        token = match.group()
+        if token.startswith(("#", "\"")) and token != "\"":
+            continue
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        elif token == "\"" or re.match(r"[+-]?\.\d", token):
+            raise RuntimeError("fab rules contain an unterminated string or leading-dot numeric literal; use 0.3mm, not .3mm")
+        if depth < 0:
+            raise RuntimeError("fab rules contain unbalanced parentheses")
+    if depth:
+        raise RuntimeError("fab rules contain unbalanced parentheses")
+
+
+def fab_run_drc(source, target, board_bytes, project_bytes, rules_bytes, vendor=None):
+    """One isolated DRC pass. vendor is None for the board-only pass, or (owned_rules_text, covered_types)."""
+    target.mkdir(parents=True)
+    pcb = target / source.name
+    pcb.write_bytes(board_bytes)
+    original = rules_bytes.decode("utf-8") if rules_bytes else "(version 1)\n"
+    if vendor is None:
+        if project_bytes:
+            pcb.with_suffix(".kicad_pro").write_bytes(project_bytes)
+        pcb.with_suffix(".kicad_dru").write_text(original, encoding="utf-8")
+    else:
+        owned_rules, covered = vendor
+        combined = fab_owned_rules(original, owned_rules)
+        fab_lint_rules(combined)
+        pcb.with_suffix(".kicad_dru").write_text(combined, encoding="utf-8")
+        project = json.loads(project_bytes.decode("utf-8")) if project_bytes else {}
+        if not isinstance(project, dict):
+            raise RuntimeError("fab project must be a JSON object")
+        board = project.setdefault("board", {})
+        if not isinstance(board, dict):
+            raise RuntimeError("fab project board must be a JSON object")
+        design = board.setdefault("design_settings", {})
+        if not isinstance(design, dict):
+            raise RuntimeError("fab project board.design_settings must be a JSON object")
+        severities = design.setdefault("rule_severities", {})
+        if not isinstance(severities, dict):
+            raise RuntimeError("fab project board.design_settings.rule_severities must be a JSON object")
+        design["drc_exclusions"] = []
+        for name in covered | {"invalid_outline"}:
+            severities[name] = "error"
+        pcb.with_suffix(".kicad_pro").write_text(json.dumps(project), encoding="utf-8")
+    return fab_drc(pcb, target / "drc.json")["violations"]
+
+
+def render_fab(p, side, out, settings):
+    source = pathlib.Path(board_path(p, side))
+    for path in (source, source.with_suffix(".kicad_pro"), source.with_suffix(".kicad_dru")):
+        fab_regular_input(path)
+    pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+    if not source.is_file():
+        pathlib.Path(out, "fab-limits.json").write_text(
+            json.dumps({"sections": [], "reason": f"no {side} board"}), encoding="utf-8")
+        return
+    board_bytes = source.read_bytes()
+    project_bytes = source.with_suffix(".kicad_pro").read_bytes() if source.with_suffix(".kicad_pro").is_file() else b""
+    rules_bytes = source.with_suffix(".kicad_dru").read_bytes() if source.with_suffix(".kicad_dru").is_file() else b""
+    input_hash = hashlib.sha256(b"\0".join([board_bytes, FAB_TABLE.read_bytes(), project_bytes, rules_bytes])).hexdigest()
+    sections = fab_context(source)
+    for s in sections:
+        s.update(checked=[], violations=[], inputHash=input_hash)
+        if rules_bytes.strip():
+            s["coverageWarnings"].append(
+                "Authored rule file present: rule loading is not independently verified; "
+                "lexical lint does not validate units, constraint names or conditions, "
+                "and KiCad may silently ignore appended vendor rules")
+    supported = [s for s in sections if not s["unsupported"]]
+    if supported:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            # Exact saved fills in every pass, matching ordinary render_side (no --refill-zones).
+            board_rows = fab_run_drc(source, root / "board", board_bytes, project_bytes, rules_bytes)
+            for s in supported:
+                vendor_rules, covered = fab_vendor_rules(s)
+                _, unchecked = fab_rule_section(s)
+                s["unchecked"] = list(unchecked)
+                vendor_rows = fab_run_drc(source, root / s["vendor"], board_bytes, project_bytes,
+                                          rules_bytes, (vendor_rules, covered))
+                s["violations"] = [v for v in fab_subtract(vendor_rows, board_rows) if v["type"] in covered]
+                if any(v["type"] == "invalid_outline" for v in vendor_rows):
+                    if "edgeClearanceMm" not in s["unchecked"]:
+                        s["unchecked"].append("edgeClearanceMm")
+                    warning = "Edge clearance not checked: no valid closed board outline"
+                    if warning not in s["coverageWarnings"]:
+                        s["coverageWarnings"].append(warning)
+                s["checked"] = [k for k in s["values"] if k not in s["unchecked"]
+                                and not (s["layers"] <= 2 and "Inner" in k)]
+    pathlib.Path(out, "fab-limits.json").write_text(json.dumps({"sections": sections}, sort_keys=True), encoding="utf-8")
+
+
 def board_changed(p):
     """Whether the project's board bytes differ between the two checked-out revisions."""
     paths = [board_path(p, side) for side in ("base", "head")]
@@ -259,6 +412,8 @@ def render_cache(p, side, det, settings):
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
+    if fab_enabled(settings):
+        identity += FAB_TABLE.read_bytes() + (b"fab-head" if side == "head" else b"fab-base")
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -309,6 +464,11 @@ def cmd_render(args):
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
+            if fab_enabled(settings):
+                try:
+                    render_fab(p, side, out, settings)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
             if export_3d:
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
@@ -1460,12 +1620,12 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
 # ---- Checks: ERC, DRC, schematic parity, BOM fields. Violations new since base are called out. ----
 
 DEFAULT_SETTINGS = {
-    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off"},
+    "checks": {"erc": "required", "drc": "required", "parity": "required", "bom": "informational", "release": "off", "interfaces": "off", "fab_limits": "informational"},
     "interfaces": {},  # pattern overrides for the interfaces check
     "fail_on": "new",  # "new": only errors this change introduced fail a required check; "all": any error does
     "bom": {"required_fields": ["Value", "Footprint"], "critical_prefixes": ["U", "J", "Q", "D", "Y", "X", "K", "F"],
             "order_ready_fields": []},  # empty: the fabrication preset's fields
-    "fabrication": {"preset": "jlcpcb", "part_field": None},  # part_field defaults to the preset's (LCSC / MPN)
+    "fabrication": {"preset": "jlcpcb", "part_field": None, "check_limits": False},  # part_field defaults to the preset's (LCSC / MPN)
     "3d": {"enabled": False},
     "parts": {"enabled": False},
     "release": {"review": False},
@@ -1479,7 +1639,35 @@ DEFAULT_SETTINGS = {
     "inventory": {"enabled": False},
     "libraries": {"enabled": False},
 }
-CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package"}
+CHECK_NAMES = {"erc": "ERC", "drc": "DRC", "parity": "Schematic/board parity", "bom": "BOM fields", "interfaces": "Interfaces", "release": "Release package", "fab_limits": "Fab limits"}
+
+
+def fab_profiles():
+    return json.loads(FAB_TABLE.read_text(encoding="utf-8"))
+
+
+def fab_context(pcb):
+    tree = parse_sexpr(pcb.read_text(encoding="utf-8"))
+    layers = [x[1] for x in (find(tree, "layers") or [])[1:]
+              if len(x) > 2 and x[1].endswith(".Cu")]
+    n = len(layers)
+    coverage_warnings = []
+    stack = find(find(tree, "setup") or [], "stackup") or []
+    thickness = {x[1]: find(x, "thickness") for x in findall(stack, "layer") if x[1] in layers}
+    for layer in layers:
+        t = thickness.get(layer)
+        if not t:
+            coverage_warnings.append(f"{layer}: copper thickness unknown; limits assume 0.035 mm (1 oz)")
+        elif abs(float(t[1]) - .035) > .000001:
+            coverage_warnings.append(f"{layer}: copper thickness {t[1]} mm; limits assume 0.035 mm (1 oz)")
+    sections = []
+    for vendor, key in (("jlcpcb", "jlcpcb-2l" if n == 2 else "jlcpcb-multilayer"), ("pcbway", "pcbway-std")):
+        profile = fab_profiles()[key]
+        sections.append({"vendor": vendor, "profile": key, "layers": n, "checkedOn": profile["checkedOn"],
+            "assumedCopperOz": 1, "unsupported": None if n in profile["layers"] else
+            f"not checked: profile covers {', '.join(map(str, profile['layers']))} layers; board has {n}",
+            "coverageWarnings": list(coverage_warnings), "unchecked": [], "values": profile["values"]})
+    return sections
 
 
 INTERFACE_PATTERNS = {
@@ -1523,6 +1711,10 @@ def load_settings(roots=("base", "head")):
             sys.exit(f"{SETTINGS_FILE}: interfaces.{k} must be one of {', '.join(INTERFACE_PATTERNS)} with a list of names")
     if settings["fabrication"]["preset"] not in PRESETS:
         sys.exit(f"{SETTINGS_FILE}: fabrication.preset must be one of {', '.join(PRESETS)}")
+    if type(settings["fabrication"]["check_limits"]) is not bool:
+        sys.exit(f"{SETTINGS_FILE}: fabrication.check_limits must be true or false")
+    if settings["fabrication"]["check_limits"] and settings["checks"]["fab_limits"] != "off" and settings["checks"]["drc"] == "off":
+        sys.exit(f'{SETTINGS_FILE}: fabrication.check_limits requires checks.drc != "off"')
     if settings["fail_on"] not in ("new", "all"):
         sys.exit(f"{SETTINGS_FILE}: fail_on must be \"new\" or \"all\"")
     if not isinstance(settings["3d"]["enabled"], bool):
@@ -1743,6 +1935,104 @@ def cmd_release(args):
         with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
             fh.write("\n".join(sums) + "\n")
         print("release/SHA256SUMS")
+
+
+FAB_START = "# kicad-review fab limits - start"
+FAB_END = "# kicad-review fab limits - end"
+
+
+def fab_owned_rules(text, section):
+    """Replace only our disposable rule section, preserving authored bytes."""
+    starts, ends = text.count(FAB_START), text.count(FAB_END)
+    if starts != ends or starts > 1:
+        raise ValueError("malformed fabrication rule markers")
+    owned = FAB_START + "\n" + section + "\n" + FAB_END
+    if starts:
+        a, end_start = text.index(FAB_START), text.index(FAB_END)
+        if end_start < a:
+            raise ValueError("reversed fabrication rule markers")
+        return text[:a] + owned + text[end_start + len(FAB_END):]
+    return text + ("" if text.endswith("\n") else "\n") + owned + "\n"
+
+
+def fab_identity(v):
+    """Raw DRC identity, independent of rule-limit prose when UUIDs suffice."""
+    items = v.get("items", [])
+    # UUID identity where complete; description fallback can go stale after movement.
+    complete = bool(items) and all(i.get("uuid") for i in items)
+    identity = tuple(sorted(i["uuid"] for i in items)) if complete else tuple(sorted(
+        json.dumps({"uuid": i.get("uuid"), "description": i.get("description", ""),
+                    "pos": i.get("pos")}, sort_keys=True) for i in items))
+    if not items:
+        identity = (v.get("description", ""),)
+    return (v["type"], "uuid" if complete else "fallback", identity)
+
+
+def fab_subtract(after, before):
+    """Subtract one matching occurrence at a time, retaining raw rows in order."""
+    counts = Counter(fab_identity(v) for v in before)
+    out = []
+    for v in after:
+        key = fab_identity(v)
+        if counts[key]:
+            counts[key] -= 1
+        else:
+            out.append(v)
+    return out
+
+
+def fab_rule_section(context):
+    """Generate fixed vendor geometry bounds and an explicit unchecked ledger."""
+    values, n = context["values"], context["layers"]
+    rules, unchecked = [], []
+    plated = "A.Type == 'Via' || (A.Type == 'Pad' && A.Pad_Type != 'NPTH, mechanical')"
+    npth = "A.Type == 'Pad' && A.Pad_Type == 'NPTH, mechanical'"
+    # Fixed vendor geometry only; no generated net-class conditions or escaping surface.
+    mapping = [
+        ("trackWidthOuterMm", "track_width", "outer", "", "min"),
+        ("trackWidthInnerMm", "track_width", "inner", "", "min"),
+        ("clearanceOuterMm", "clearance", "outer", "", "min"),
+        ("clearanceInnerMm", "clearance", "inner", "", "min"),
+        ("drillPlatedMinMm", "hole_size", "", plated, "min"),
+        ("drillPlatedMaxMm", "hole_size", "", plated, "max"),
+        ("drillNpthMinMm", "hole_size", "", npth, "min"),
+        ("annularMinMm", "annular_width", "", plated, "min"),
+        ("edgeClearanceMm", "edge_clearance", "", "", "min"),
+        ("holeToHoleMm", "hole_to_hole", "", "A.Type == 'Pad' && B.Type == 'Pad'", "min"),
+        ("holeToHoleViaMm", "hole_to_hole", "", "A.Type == 'Via' && B.Type == 'Via'", "min"),
+        ("viaDiameterMinMm", "via_diameter", "", "A.Type == 'Via'", "min")]
+    grouped = {}
+    for key, constraint, layer, condition, bound in mapping:
+        if layer == "inner" and n <= 2:
+            continue
+        if key not in values:
+            unchecked.append(key)
+            continue
+        grouped.setdefault((constraint, layer, condition), []).append((bound, values[key]))
+    for (constraint, layer, condition), bounds in grouped.items():
+        suffix = f' (layer {layer})' if layer else ''
+        suffix += f' (condition {json.dumps(condition)})' if condition else ''
+        limits = ' '.join(f'({bound} {value:g}mm)' for bound, value in bounds)
+        rules.append(f'(rule "fab {constraint} {layer}"{suffix} (constraint {constraint} {limits}))')
+    return "\n".join(rules), unchecked + ["holeToHoleMixedMm"]
+
+
+def fab_vendor_rules(context):
+    """Neutralize house bounds only in the disposable vendor attribution pass."""
+    rules, _ = fab_rule_section(context)
+    categories = {
+        'track_width': 'track_width', 'clearance': 'clearance',
+        'hole_size': 'drill_out_of_range', 'annular_width': 'annular_width',
+        'edge_clearance': 'copper_edge_clearance', 'hole_to_hole': 'hole_to_hole',
+        'via_diameter': 'via_diameter'}
+    covered = {diagnostic for constraint, diagnostic in categories.items()
+               if '(constraint ' + constraint + ' ' in rules}
+    # Fixed geometry bounds only; 1 km maximum is not a manufacturer limit.
+    neutral = '\n'.join(
+        f'(rule "fab neutral {constraint}" (constraint {constraint} (min 0mm)'
+        + (' (max 1000000mm)' if constraint in ('track_width', 'hole_size', 'via_diameter') else '') + '))'
+        for constraint in categories)
+    return neutral + '\n' + rules, covered
 
 
 def violation(v, scale, where):
@@ -2147,7 +2437,7 @@ def waiver_key(v):
 
 
 WAIVERS_FILE = "kicad-review-waivers.toml"
-WAIVABLE = ("erc", "drc", "parity")
+WAIVABLE = ("erc", "drc", "parity", "fab_limits")
 
 
 def parse_waivers(text, source):
@@ -2257,6 +2547,80 @@ def run_check(name, settings, head, base, waivers=None):
     return result
 
 
+FAB_EVIDENCE_SOURCE = ('kicad-cli pcb drc; isolated board-only and vendor DRC passes per revision; '
+                       'vendor-only findings paired between head and base by multiset identity; '
+                       'fab_limits.json dated profile; coverage limited to checked limits '
+                       '(see unchecked, unsupported and coverageWarnings)')
+FAB_VENDORS = ('jlcpcb', 'pcbway')
+FAB_VENDOR_LABELS = {'jlcpcb': 'JLCPCB', 'pcbway': 'PCBWay'}
+
+
+def fab_read_audit(out_dir, side, p, vendor):
+    path = pathlib.Path(out_dir, side, 'fab-limits.json')
+    if not path.is_file():
+        sys.exit(f'Fab limits output missing for {p["name"]} ({side})')
+    sections = [s for s in json.loads(path.read_text(encoding='utf-8'))['sections'] if s['vendor'] == vendor]
+    if len(sections) != 1:
+        sys.exit(f'Fab limits output for {p["name"]} ({side}) has no single {vendor} section')
+    return sections[0]
+
+
+def fab_check(p, settings, out_dir, waivers, vendor):
+    if not fab_enabled(settings):
+        return None
+    level = settings['checks']['fab_limits']
+    # Owner decision 2026-10-26: no default comparison values. not_run has no head audit, so it has no base
+    # comparison and carries no baselineAvailable or fixed key. Every other result takes both from the base audit below.
+    empty = {'name':'fab_limits','title':'Fab limits','vendor':vendor,'level':level,
+             'errors':0,'new_errors':0,'warnings':0,'new_warnings':0,'violations':[],
+             'checked':[],'unchecked':[],'coverageWarnings':[],
+             'confidence':'deterministic','evidence_source':FAB_EVIDENCE_SOURCE}
+    head_board = board_path(p, 'head')
+    fab_regular_input(pathlib.Path(head_board))
+    if not os.path.isfile(head_board):
+        result = {**empty,'status':'not_run','reason':'no head board','unsupported':'no head board'}
+        if waivers is not None:
+            result['waived'] = 0
+        return result
+    head_meta = fab_read_audit(out_dir, 'head', p, vendor)
+    base_board = board_path(p, 'base')
+    fab_regular_input(pathlib.Path(base_board))
+    base_meta = fab_read_audit(out_dir, 'base', p, vendor) if os.path.isfile(base_board) else None
+    # A base comparison needs both audits to be supported; an unsupported side is never compared.
+    baseline = base_meta is not None and not base_meta['unsupported'] and not head_meta['unsupported']
+    head_raw = head_meta['violations']
+    base_raw = base_meta['violations'] if baseline else []
+    new_ids = {id(v) for v in fab_subtract(head_raw, base_raw)} if baseline else {id(v) for v in head_raw}
+    head = []
+    for raw in head_raw:
+        row = {**violation(raw, 1, {'board':True}), 'confidence':'deterministic',
+               'evidence_source':FAB_EVIDENCE_SOURCE}
+        row['_new'] = id(raw) in new_ids
+        head.append(row)
+    # run_check supplies waivers and ordering; its set-based new flags are replaced by the multiset pairing.
+    result = run_check('fab_limits', settings, head, None, waivers)
+    for v in result['violations']:
+        v['new'] = v.pop('_new')
+    result['violations'].sort(key=lambda v: (not v['new'], v['severity'] != 'error', v['type']))
+    live = [v for v in result['violations'] if not v.get('waived')]
+    count = lambda sev, new=False: sum(1 for v in live if v['severity'] == sev and (v['new'] or not new))
+    failing = count('error', new=settings['fail_on'] == 'new') > 0
+    result.update(status='pass' if not failing else 'fail' if level == 'required' else 'warn',
+                  errors=count('error'), warnings=count('warning'),
+                  new_errors=count('error', True), new_warnings=count('warning', True),
+                  fixed=len(fab_subtract(base_raw, head_raw)) if baseline else 0,
+                  baselineAvailable=baseline, confidence='deterministic', evidence_source=FAB_EVIDENCE_SOURCE)
+    for key in ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported','coverageWarnings'):
+        result[key] = head_meta[key]
+    if head_meta['unsupported']:
+        result.update(status='fail' if level == 'required' else 'warn', reason=head_meta['unsupported'])
+    return result
+
+
+def fab_checks(p, settings, out_dir, waivers=None):
+    return [c for c in (fab_check(p, settings, out_dir, waivers, vendor) for vendor in FAB_VENDORS) if c]
+
+
 def project_checks(p, settings, objs, waivers=None):
     out_dir = f"review/{project_id(p['dir'])}"
     sch = lambda s: os.path.exists(posixpath.join(s, p["dir"], f"{p['name']}.kicad_sch"))
@@ -2290,6 +2654,7 @@ def project_checks(p, settings, objs, waivers=None):
             c = run_check("release", settings, side("head"), side("base"))
             c["package"] = package_summary(f"{out_dir}/head/fab")
             out.append(c)
+    out.extend(fab_checks(p, settings, out_dir, waivers))
     ic = interface_check(p, settings, objs, f"review/{project_id(p['dir'])}")
     return out + ([ic] if ic else [])
 
@@ -2748,6 +3113,9 @@ def cmd_report(args):
         report_settings.pop("interfaces", None)
     if settings["checks"].get("release") == "off":  # opted-out reports stay byte-identical
         report_settings["checks"] = {k: v for k, v in report_settings["checks"].items() if k != "release"}
+    if not fab_enabled(settings):
+        report_settings['checks'] = {k: v for k, v in report_settings['checks'].items() if k != 'fab_limits'}
+        report_settings['fabrication'] = {k: v for k, v in report_settings['fabrication'].items() if k != 'check_limits'}
     data = {
         "version": 1,
         "repo": env.get("GITHUB_REPOSITORY", ""),
@@ -3178,8 +3546,22 @@ def checks_markdown(data):
     lines = ["", "### Checks", "", "| Project | Check | Result | Errors (new) | Warnings (new) | Fixed |", "|---|---|---|---|---|---|"]
     for p in data["projects"]:
         for c in p["checks"]:
-            lines.append(f"| {md(p['name'])} | {c['title']} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
-                         f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c['fixed']} |")
+            vendor = FAB_VENDOR_LABELS.get(c.get('vendor'), c.get('vendor'))
+            title = f"{c['title']} · {vendor}" if vendor else c['title']
+            lines.append(f"| {md(p['name'])} | {md(title)} ({c['level']}) | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')}{': ' + md(c['reason']) if c.get('reason') else ''} | "
+                         f"{c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) | {c.get('fixed', '—')} |")
+    for p in data['projects']:
+        for c in p['checks']:
+            if c['name'] != 'fab_limits':
+                continue
+            vendor = FAB_VENDOR_LABELS.get(c.get('vendor'))
+            label = f'Fab limits ({vendor})' if vendor else 'Fab limits'
+            prefix = f"**{md(p['name'])}**: " if len(data['projects']) > 1 else ''
+            if c.get('unsupported') or c['status'] == 'not_run':
+                text = f"{label}: not checked — {md(c.get('unsupported') or c.get('reason', 'unavailable'))}."
+            else:
+                text = f"{label}: {c['errors'] + c['warnings']} violations" + (f" ({c['waived']} waived)" if c.get('waived') else '') + '. Eligible limits only; see coverage in Checks.'
+            lines += ['', prefix + text]
     news = [(p["name"], c["title"], v) for p in data["projects"] for c in p["checks"] for v in c["violations"]
             if v["new"] and v["severity"] == "error" and not v.get("waived")]
     if news:
@@ -3361,7 +3743,8 @@ def check_runs(data):
                 raise KeyError(c["status"])
             r["conclusions"].append(rank)
             r["new"] += c["new_errors"]
-            r["rows"].append(f"| {md(p['name'])} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
+            project_label = md(p['name']) + (f" ({FAB_VENDOR_LABELS[c['vendor']]})" if c.get('vendor') in FAB_VENDOR_LABELS else '')
+            r["rows"].append(f"| {project_label} | {STATUS_ICON[c['status']]} {c['status'].replace('_', ' ')} | {c['errors']} ({c['new_errors']}) | {c['warnings']} ({c['new_warnings']}) |")
     out = []
     for r in runs.values():
         _, conclusion, title = CHECK_RESULTS[min(r["conclusions"])]

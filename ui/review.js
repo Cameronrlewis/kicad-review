@@ -1271,36 +1271,65 @@ function waiverSnippet(v, check) {
   const quote = x => '"' + String(x).replace(/["\\\u0000-\u001f\u007f]/g, c => c === '"' || c === "\\" ? "\\" + c : "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")) + '"';
   return `[[waiver]]\ncheck = ${quote(check)}\nmatch = ${quote(v.waiver_key)}\n# ${String(v.description).replace(/[\u0000-\u001f\u007f]/g, " ")}\nreason = ""          # why this is acceptable\nby = ""              # your GitHub login\ndate = ${today.toISOString().slice(0, 10)}\nuntil = ${until}    # or replace with: permanent = true`;
 }
+function fabLedger(c) {
+  const label = c.profile === 'jlcpcb-2l' ? 'JLCPCB 2-layer'
+    : c.profile === 'jlcpcb-multilayer' ? 'JLCPCB multilayer' : c.profile === 'pcbway-std' ? 'PCBWay standard' : c.profile;
+  return `<section class="check-coverage" aria-label="Fabrication limit coverage">
+    <strong>Fab limits (${esc(label || 'unavailable')})</strong>
+    <p>Profile checked on ${esc(c.checkedOn || 'unknown')} · assumes ${esc(c.assumedCopperOz ?? 1)} oz copper.</p>
+    <p>Checked: ${esc((c.checked || []).join(', ') || 'none')}.</p>
+    <p>Not checked: ${esc((c.unchecked || []).join(', ') || 'none listed')}.</p>
+    ${c.unsupported ? `<p>${esc(c.unsupported)}</p>` : ''}
+    ${(c.coverageWarnings || []).map(w => `<p>${esc(w)}</p>`).join('')}
+    ${c.status === 'not_run' ? '<p>Not run: no head board, so no fab comparison was made.</p>'
+      : D.mode === 'single' ? '<p>Current-design audit: no base fab comparison was run.</p>'
+      : c.baselineAvailable === false ? '<p>No base audit: findings are newly audited.</p>'
+      : `<p>Compared with base: ${esc(c.new_errors ?? 0)} new, ${esc(c.fixed ?? 0)} fixed.</p>`}
+  </section>`;
+}
+function checkKey(check) {
+  return check.vendor ? `${check.name}\u0000${check.vendor}` : check.name;
+}
+function checkTitle(check) {
+  const vendor = { jlcpcb: "JLCPCB", pcbway: "PCBWay" }[check.vendor] || check.vendor;
+  return vendor ? `${check.title} · ${vendor}` : check.title;
+}
 function renderChecks() {
   const p = proj(), state = S.checks;
   if (!p.checks.length) return '<p class="muted">No checks ran for this project.</p>';
   const order = ["erc", "drc", "parity", "bom"];  // release is listed only when it ran: older reports never had it
-  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields", interfaces: "Interfaces", release: "Release package" };
-  const byName = new Map(p.checks.map(c => [c.name, c]));
-  const names = [...order, ...p.checks.map(c => c.name).filter(n => !order.includes(n))];
-  const configured = names.map(name => ({ name, check: byName.get(name), setting: D.settings?.checks?.[name] }));
+  const titles = { erc: "ERC", drc: "DRC", parity: "Schematic/board parity", bom: "BOM fields", interfaces: "Interfaces", release: "Release package", fab_limits: "Fab limits" };
+  const byKey = new Map(p.checks.map(c => [checkKey(c), c]));
+  const names = [...new Set([...order, ...p.checks.map(c => c.name)])];
+  // Both fab vendors share one check name; retain each section instead of Map's last value.
+  const configured = names.flatMap(name => {
+    const checks = p.checks.filter(c => c.name === name);
+    return (checks.length ? checks : [undefined]).map(check => ({ name, check, setting: D.settings?.checks?.[name] }));
+  });
   const ran = configured.filter(r => r.check && r.setting !== "off").map(r => r.check);
   const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
   const totalNew = all.filter(v => v.new && !v.waived).length;
   const scope = state.scope ?? (totalNew ? "new" : "all");
-  const checked = state.check && byName.has(state.check) ? state.check : "";
+  const checked = state.check && byKey.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
-    if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
-      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span></span>
+    const key = check ? checkKey(check) : name;
+    if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="false">
+      <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(check ? checkTitle(check) : titles[name] || name)}</span></span>
       <span class="check-reason">${esc(check?.reason || "turned off in kicad-review.toml")}</span></button>`;
     const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
     const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
     const newer = check.new_errors + check.new_warnings;
-    return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
-      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
+    return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(encodeURIComponent(key))}" aria-pressed="${checked === key}">
+      <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(checkTitle(check))} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
       <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
-  let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
+  let shown = all.filter(v => (!checked || checkKey(v.check) === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
   const totalShown = shown.length;
   const groups = new Map();
   for (const v of shown) {
-    const key = state.group === "severity" ? v.severity : state.group === "check" ? v.check.name : `${v.check.name}\u0000${v.type}`;
-    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? v.check.title : v.type, violations: [] });
+    const identity = checkKey(v.check);
+    const key = state.group === "severity" ? v.severity : state.group === "check" ? identity : `${identity}\u0000${v.type}`;
+    if (!groups.has(key)) groups.set(key, { check: v.check, type: state.group === "severity" ? v.severity : state.group === "check" ? checkTitle(v.check) : v.type, violations: [] });
     groups.get(key).violations.push(v);
   }
   const groupHtml = [...groups.values()].sort((a, b) => {
@@ -1313,10 +1342,10 @@ function renderChecks() {
     return `<details class="check-group" ${newCount || vs.some(v => v.id === S.waiveOpen) ? "open" : ""}><summary><span class="rule">${esc(g.type)}</span><span class="group-description">${esc(vs[0].description)}</span><span class="group-count">${vs.length}</span>${newCount ? `<b class="new-tag">NEW ${newCount}</b>` : ""}<span class="sev">${errors ? "✕ error" : "! warning"}</span></summary>${vs.slice(0, 200).map(v => {
       const at = v.pos && currentView(viewOf(v)), issueAnchor = ISSUES_ON && findingAnchor(v);
       return `<button class="viol ${esc(v.severity)}" data-id="${esc(v.id)}" data-new="${!!v.new}" ${at ? "" : 'aria-disabled="true"'} aria-selected="${S.s === v.id}">
-        ${v.new ? '<span class="new-tag">NEW</span>' : ""}${v.waived ? '<span class="waived-tag">WAIVED</span><span class="waived-reason"></span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${v.waiver_key && !v.waived && ["erc", "drc", "parity"].includes(v.check.name) ? `<button class="waive" data-waive="${esc(v.id)}" aria-label="Waive ${esc(v.items.join(" · ") || v.description)}" aria-controls="waiver-${esc(v.id)}" aria-expanded="${S.waiveOpen === v.id}">Waive…</button>${S.waiveOpen === v.id ? `<pre class="waiver-snippet" id="waiver-${esc(v.id)}" data-waiver-snippet="${esc(v.id)}"></pre><p class="muted waiver-help">Add this to kicad-review-waivers.toml on the pull request's target branch through a pull request, fill in reason and by, then re-run this review.</p>` : ""}` : ""}${issueAnchor && !issueForAnchor(issueAnchor) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
+        ${v.new ? '<span class="new-tag">NEW</span>' : ""}${v.waived ? '<span class="waived-tag">WAIVED</span><span class="waived-reason"></span>' : ""}<span class="viol-location">${esc(v.items.join(" · ") || v.description)}</span><span class="show-hint">${at ? "Show ›" : "no location"}</span></button>${v.waiver_key && !v.waived && ["erc", "drc", "parity", "fab_limits"].includes(v.check.name) ? `<button class="waive" data-waive="${esc(v.id)}" aria-label="Waive ${esc(v.items.join(" · ") || v.description)}" aria-controls="waiver-${esc(v.id)}" aria-expanded="${S.waiveOpen === v.id}">Waive…</button>${S.waiveOpen === v.id ? `<pre class="waiver-snippet" id="waiver-${esc(v.id)}" data-waiver-snippet="${esc(v.id)}"></pre><p class="muted waiver-help">Add this to kicad-review-waivers.toml on the pull request's target branch through a pull request, fill in reason and by, then re-run this review.</p>` : ""}` : ""}${issueAnchor && !issueForAnchor(issueAnchor) ? `<button class="track-issue" data-issue-for="${esc(v.id)}">Track as issue</button>` : ""}`;
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
-  return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div><div class="filters checks-filters">
+  return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div>${ran.filter(c => c.name === 'fab_limits').map(fabLedger).join('')}<div class="filters checks-filters">
     <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
@@ -1500,7 +1529,7 @@ function renderPanel() {
   }
   for (const b of document.querySelectorAll("#panel [data-parts-filter]")) b.onclick = () => { const k = b.dataset.partsFilter; S.partsFilter[k] = !S.partsFilter[k]; renderPanel(); };
   for (const b of document.querySelectorAll("#panel .chip-filter[data-action]")) b.onclick = () => { f[b.dataset.action] = !f[b.dataset.action]; renderPanel(); };
-  for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = b.dataset.checkSummary; if (!proj().checks.some(c => c.name === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
+  for (const b of document.querySelectorAll("#panel [data-check-summary]")) b.onclick = () => { const n = decodeURIComponent(b.dataset.checkSummary); if (!proj().checks.some(c => checkKey(c) === n)) return; S.checks.check = S.checks.check === n ? "" : n; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-scope]")) b.onclick = () => { S.checks.scope = b.dataset.checkScope; renderPanel(); };
   for (const b of document.querySelectorAll("#panel [data-check-severity]")) b.onclick = () => { S.checks[b.dataset.checkSeverity] = !S.checks[b.dataset.checkSeverity]; renderPanel(); };
   $("#panel .show-all")?.addEventListener("click", () => { Object.assign(S.checks, { check: "", scope: "all", error: true, warning: true, waived: true }); renderPanel(); });

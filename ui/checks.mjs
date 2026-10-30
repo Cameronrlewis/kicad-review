@@ -44,6 +44,165 @@ const MARK_STYLE_FIXTURE = `
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
 export const CHECKS = [
+  ["Fab limits vendor isolation and desktop coverage", "v=board&t=checks", `
+    const p=proj(), previous=p.checks, old=S.checks;
+    const original=previous.flatMap(c=>c.violations).find(v=>v.where?.board && v.pos);
+    if(!original) return 'vendor isolation requires a located board violation';
+    try {
+      S.checks={...old,check:'',scope:'all',error:true,warning:true,q:'',group:'check'};
+      p.checks=['jlcpcb','pcbway'].map((vendor,i)=>({name:'fab_limits',title:'Fab limits',
+        vendor,profile:i?'pcbway-std':'jlcpcb-2l',level:'required',status:'fail',
+        errors:1,warnings:0,new_errors:1,new_warnings:0,fixed:0,baselineAvailable:true,
+        checked:['trackWidthOuterMm'],unchecked:['holeToHoleMixedMm'],
+        checkedOn:'2026-10-24',assumedCopperOz:1,coverageWarnings:['F.Cu: copper thickness unknown'],
+        violations:[{...structuredClone(original),id:'v-fab-'+vendor,new:true}]}));
+      renderPanel();
+      const panel=document.querySelector('#panel');
+      for(const c of p.checks) {
+        if(panel.querySelectorAll('.viol[data-id="'+c.violations[0].id+'"]').length!==1)
+          return 'vendor finding duplicated or lost: '+c.vendor;
+      }
+      for(const c of p.checks) {
+        const label='Fab limits · '+({jlcpcb:'JLCPCB',pcbway:'PCBWay'}[c.vendor]);
+        const key=encodeURIComponent(c.name+'\u0000'+c.vendor);
+        let button=panel.querySelector('[data-check-summary="'+key+'"]');
+        if(!button?.textContent.includes(label)) return 'vendor summary label missing: '+c.vendor;
+        button.click();
+        button=panel.querySelector('[data-check-summary="'+key+'"]');
+        const findings=[...panel.querySelectorAll('.viol')];
+        if(button.getAttribute('aria-pressed')!=='true' || findings.length!==1 ||
+            findings[0].dataset.id!==c.violations[0].id) return 'vendor summary mixes findings: '+c.vendor;
+        if(panel.querySelector('.check-group .rule')?.textContent!==label) return 'vendor group label missing';
+        if(valid(decodeState('#'+encodeState())).t!=='checks') return 'vendor filter broke URL tab state';
+        button.click();
+        if(panel.querySelector('[data-check-summary="'+key+'"]').getAttribute('aria-pressed')!=='false' ||
+            panel.querySelectorAll('.viol').length!==2) return 'vendor summary toggle did not reset';
+      }
+      const ledgers=[...panel.querySelectorAll('[aria-label="Fabrication limit coverage"]')];
+      if(ledgers.length!==2 || !ledgers[0].textContent.includes('JLCPCB 2-layer') ||
+          !ledgers[1].textContent.includes('PCBWay standard')) return 'separate vendor ledgers missing';
+      for(const ledger of ledgers) {
+        if(ledger.scrollWidth>ledger.clientWidth+1) return 'fab coverage overflows its block';
+        const box=ledger.getBoundingClientRect();
+        if(box.left<0 || box.right>innerWidth+1) return 'fab coverage outside viewport';
+      }
+      const c=p.checks[0];
+      c.status='not_run'; c.unsupported='no head board'; delete c.baselineAvailable; delete c.fixed;
+      const host=document.createElement('div');host.innerHTML=renderChecks();
+      const text=host.querySelector('[aria-label="Fabrication limit coverage"]').textContent;
+      if(!text.includes('Not run: no head board, so no fab comparison was made.') ||
+          text.includes('Compared with base')) return 'not-run optional comparison metadata misrepresented';
+      return true;
+    } finally {p.checks=previous;S.checks=old;renderPanel();}
+  `],
+["Fab limits ledger", "", `
+  const p = proj(), previous = p.checks, previousMode = D.mode;
+  const c = {name:'fab_limits', title:'Fab limits',vendor:'jlcpcb',level:'informational',status:'warn',
+    errors:0,warnings:0,new_errors:0,new_warnings:0,fixed:0,violations:[],
+    profile:'jlcpcb-2l',checkedOn:'2026-10-24',assumedCopperOz:1,
+    checked:['trackWidthOuterMm'],unchecked:['holeToHoleMixedMm'],
+    unsupported:null,coverageWarnings:['F.Cu: copper thickness unknown'],baselineAvailable:false};
+  try {
+    p.checks = [...previous,c];
+    const host = document.createElement('div'); host.innerHTML = renderChecks();
+    const text = host.textContent;
+    if (!text.includes('JLCPCB 2-layer') || !text.includes('Not checked') ||
+        !text.includes('holeToHoleMixedMm') || !text.includes('newly audited'))
+      return 'fab profile, coverage or baseline explanation missing';
+    if (!text.includes('copper thickness unknown')) return 'copper warning hidden';
+    c.baselineAvailable = true; c.fixed = 1; c.new_errors = 0;
+    host.innerHTML = renderChecks();
+    if (!host.textContent.includes('Compared with base: 0 new, 1 fixed.')) return 'base comparison text missing';
+    c.baselineAvailable = false; c.fixed = 0;
+    if (typeof c.warnings !== 'number' || !text.includes('0 warnings')) return 'numeric warnings contract lost';
+    c.unsupported = 'not checked: profile covers 2 layers';
+    if (!renderChecks().includes('profile covers 2 layers')) return 'unsupported hidden';
+    c.coverageWarnings = ['<img src=x onerror=alert(1)>'];
+    host.innerHTML = renderChecks();
+    if (host.querySelector('img')) return 'unescaped fab metadata';
+    D.mode = 'single';
+    c.coverageWarnings = ['F.Cu: copper thickness unknown'];
+    host.innerHTML = renderChecks();
+    const ledger = host.querySelector('[aria-label="Fabrication limit coverage"]');
+    if (!ledger || !ledger.textContent.includes('Current-design audit: no base fab comparison was run.') ||
+        ledger.textContent.includes('newly audited') || !ledger.textContent.includes('holeToHoleMixedMm') ||
+        !ledger.textContent.includes('copper thickness unknown')) return 'single-mode fab coverage/provenance lost';
+    // 06 owns the surrounding single-mode presentation; run its integration assertions only when merged.
+    if (typeof single === 'function') {
+      p.checks = [c];
+      for (const [status, unsupported] of [['fail', null], ['fail', 'not checked: unsupported layers'], ['not_run', 'no head board']]) {
+        Object.assign(c, {level:'required',status,unsupported,reason:unsupported,errors:unsupported ? 0 : 1,
+                          new_errors:0,new_warnings:0,fixed:0,violations:[]});
+        host.innerHTML = renderChecks();
+        if (!host.querySelector('.check-' + status.replace('_','-'))) return 'single-mode fab status changed';
+        if (host.querySelector('[data-check-scope="new"], .check-new, .check-fixed') ||
+            host.textContent.includes('no new errors')) return 'single-mode comparison-only fab labels remain';
+        if (!host.querySelector('[aria-label="Fabrication limit coverage"]')) return 'single-mode fab ledger hidden';
+      }
+    }
+    return true;
+  } finally { p.checks = previous; if (previousMode === undefined) delete D.mode; else D.mode = previousMode; }
+`],
+["Fab limits selection and waiver", "v=board&t=checks", `
+  const old = {p:S.p,v:S.v,s:S.s,x:S.x,y:S.y,z:S.z,t:S.t,checks:S.checks,waiveOpen:S.waiveOpen};
+  const index = D.projects.findIndex(p => p.board?.layers?.length && p.checks.some(c =>
+    c.violations.some(v => v.where?.board && v.pos)));
+  if (index < 0) return 'fab selection fixture requires a located board violation';
+  S.p = index;
+  const p = proj(), previous = p.checks;
+  const original = p.checks.flatMap(c=>c.violations).find(v=>v.where?.board && v.pos);
+  const max = Math.max(0,...D.projects.flatMap(p=>p.checks.flatMap(c=>c.violations.map(v=>Number(v.id?.slice(1))||0))));
+  const v = {...structuredClone(original),id:'v'+(max+1),new:true,waiver_key:'w-0123456789ab'};
+  delete v.waived;
+  const c = {name:'fab_limits',title:'Fab limits',level:'required',status:'fail',
+    errors:1,warnings:0,new_errors:1,new_warnings:0,fixed:0,violations:[v],
+    vendor:'jlcpcb',profile:'jlcpcb-2l',coverageWarnings:['copper thickness unknown'],baselineAvailable:false};
+  try {
+    p.checks = [...previous,c];
+    S.v='board'; S.t='checks'; S.checks={...S.checks,check:'fab_limits',scope:'all',error:true,warning:true,q:''};
+    renderNav(); renderPanel(); await draw();
+    const row=document.querySelector('#panel .viol[data-id="'+v.id+'"]');
+    if (!row || row.getAttribute('aria-disabled')==='true') return 'fab row not selectable';
+    row.click();
+    for(let n=0;n<120 && (S.s!==v.id || S.x==null);n++) await new Promise(r=>requestAnimationFrame(r));
+    // draw may resolve after selection is set: wait for final camera centre too.
+    const box=v.box || [v.pos[0]-3,v.pos[1]-3,v.pos[0]+3,v.pos[1]+3];
+    const cx=(box[0]+box[2])/2,cy=(box[1]+box[3])/2;
+    for(let n=0;n<120 && (Math.abs(S.x-cx)>.001 || Math.abs(S.y-cy)>.001);n++) await new Promise(r=>requestAnimationFrame(r));
+    if(S.v!=='board' || S.s!==v.id || Math.abs(S.x-cx)>.001 || Math.abs(S.y-cy)>.001)
+      return JSON.stringify({view:S.v,id:S.s,x:S.x,y:S.y,expected:[cx,cy]});
+    const waive=document.querySelector('#panel [data-waive="'+v.id+'"]');
+    if(!waive) return 'fab waiver control missing';
+    waive.click();
+    const text=document.querySelector('#panel [data-waiver-snippet="'+v.id+'"]')?.textContent || '';
+    if(!text.includes('check = "fab_limits"') || !text.includes('match = "w-0123456789ab"')) return 'fab waiver snippet wrong check/key';
+    p.checks=previous.filter(c=>c.name!=='fab_limits');
+    const legacy=document.createElement('div'); legacy.innerHTML=renderChecks();
+    if(legacy.querySelector('[aria-label="Fabrication limit coverage"]') || legacy.textContent.includes('Fab limits')) return 'old report acquired fab UI';
+    return true;
+  } finally {
+    p.checks=previous; Object.assign(S,old); renderNav(); renderPanel(); await draw(); saveHash();
+  }
+`],
+["Fabrication producer contract", "v=board&t=checks", `
+  if(D.fabProducerFixture !== true) return "skip";
+  const old=S.p;
+  try {
+    const index=D.projects.findIndex(p=>p.checks.some(c=>c.name==='fab_limits'));
+    if(index<0) return 'producer page missing fab check';
+    S.p=index;
+    const c=proj().checks.find(c=>c.name==='fab_limits' && c.vendor==='jlcpcb');
+    if(typeof c.warnings!=='number' || c.warnings!==0 || c.errors!==1) return 'producer numeric counts changed';
+    if(!Array.isArray(c.coverageWarnings) || !c.coverageWarnings.length) return 'producer coverage missing';
+    const host=document.createElement('div'); host.innerHTML=renderChecks();
+    const ledger=host.querySelector('[aria-label="Fabrication limit coverage"]');
+    if(!ledger || !c.coverageWarnings.every(w=>ledger.textContent.includes(w))) return 'coverage not rendered separately';
+    if(!host.textContent.includes('0 warnings')) return 'numeric warning count not rendered';
+    if(!host.querySelector('.viol[data-id="'+c.violations[0].id+'"]')) return 'producer finding missing';
+    return true;
+  } finally {S.p=old;}
+`],
+
   ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
     const id = '__sch6_palette_probe__';
     const source = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
