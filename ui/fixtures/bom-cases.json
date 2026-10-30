@@ -74,7 +74,7 @@
           ],
           "quantity": 1,
           "mpn": null,
-          "key": "[\"10k\",\"R_0805\",\"\",\"\"]"
+          "key": "[\"10k\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
         }
       ]
     }
@@ -125,7 +125,7 @@
           ],
           "quantity": 1,
           "mpn": null,
-          "key": "[\"TL072\",\"R_0805\",\"\",\"\"]"
+          "key": "[\"TL072\",\"R_0805\",\"\",\"\",\"ICs & Modules\",null,null]"
         }
       ]
     }
@@ -168,7 +168,7 @@
           ],
           "quantity": 1,
           "mpn": "A",
-          "key": "[\"TL072\",\"R_0805\",\"\",\"A\"]",
+          "key": "[\"TL072\",\"R_0805\",\"\",\"A\",\"ICs & Modules\",null,null]",
           "problems": [
             "missing_lcsc",
             "unit_identity_conflict"
@@ -214,7 +214,7 @@
           ],
           "quantity": 1,
           "mpn": "A",
-          "key": "[\"10k\",\"R_0805\",\"\",\"A\"]"
+          "key": "[\"10k\",\"R_0805\",\"\",\"A\",\"Resistors\",null,null]"
         },
         {
           "refs": [
@@ -222,7 +222,7 @@
           ],
           "quantity": 1,
           "mpn": null,
-          "key": "[\"10k\",\"R_0805\",\"\",\"\"]"
+          "key": "[\"10k\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
         }
       ]
     }
@@ -263,7 +263,7 @@
           ],
           "quantity": 1,
           "mpn": null,
-          "key": "[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxA\",\"R_0805\",\"\",\"\"]"
+          "key": "[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxA\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
         },
         {
           "refs": [
@@ -271,7 +271,7 @@
           ],
           "quantity": 1,
           "mpn": null,
-          "key": "[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxB\",\"R_0805\",\"\",\"\"]"
+          "key": "[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxB\",\"R_0805\",\"\",\"\",\"Resistors\",null,null]"
         }
       ]
     }
@@ -312,7 +312,7 @@
           ],
           "quantity": 1,
           "mpn": null,
-          "key": "[\"a|b\",\"c\",\"\",\"\"]"
+          "key": "[\"a|b\",\"c\",\"\",\"\",\"Resistors\",null,null]"
         },
         {
           "refs": [
@@ -320,7 +320,7 @@
           ],
           "quantity": 1,
           "mpn": null,
-          "key": "[\"a\",\"b|c\",\"\",\"\"]"
+          "key": "[\"a\",\"b|c\",\"\",\"\",\"Resistors\",null,null]"
         }
       ]
     }
@@ -364,7 +364,7 @@
           ],
           "quantity": 2,
           "mpn": null,
-          "key": "[\"10k\",\"R_0805\",\"C123\",\"\"]"
+          "key": "[\"10k\",\"R_0805\",\"C123\",\"\",\"Resistors\",null,null]"
         }
       ]
     }

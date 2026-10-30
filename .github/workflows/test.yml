@@ -26,18 +26,8 @@ jobs:
           echo "CHROME=google-chrome" >> "$GITHUB_ENV"
           export PAGES=$(mktemp -d)
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
-          python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js")]]'
-          python3 -c 'import json, os, pathlib, kicad_review as k
-          fx = json.loads(pathlib.Path("ui/fixtures/bom-multiboard.json").read_text(encoding="utf-8"))
-          boards, projects = [], []
-          for b in fx["boards"]:
-              lines = k.parts_lines(b["objects"])
-              boards.append({"name": b["name"], "lines": lines, "objects": b["objects"]})
-              projects.append({"name": b["name"], "dir": "", "status": "modified", "sheets": [], "changes": [], "checks": [], "board": {"changed": False, "layers": []},
-                               "parts": {"supplier": None, "summary": k.bom_summary(lines), "exports": k.bom_exports(lines, "jlcpcb", None, b["objects"]), "lines": lines, "changes": []}})
-          data = {"version": 1, "repo": "example/multi", "base": "base", "head": "head", "reason": "Multi-board fixture", "links": {}, "blobs": {}, "projects": projects, "bom": k.bom_repository(boards, "jlcpcb")}
-          payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
-          pathlib.Path(os.environ["PAGES"], "multiboard.html").write_text(k.inline_page(f"window.REVIEW_DATA = {payload};"), encoding="utf-8")'
+          python3 ui/build-fixtures.py "$PAGES"
+      - run: node --import ./site/css-loader.mjs --test ui/*.test.mjs
       - run: node ui/check.mjs
       - run: node ui/check.mjs --dark
       - run: node ui/check.mjs --no-skip "Waivers"

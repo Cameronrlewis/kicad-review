@@ -1431,7 +1431,7 @@ def library_report(changes, objects, out_dir, blobs, *, local_items=None):
             nickname, _, item = identity.rpartition(":")
             if identity == key or ((c["kind"], nickname) not in libraries and item == c["item"]
                                    and by_item.get((c["kind"], item)) == {c["lib"]}):
-                users.add(o["ref"].split(" unit ")[0])
+                users.add(base_ref(o["ref"]))
         users = sorted(users, key=natural)
         svg, sizes = {}, {}
         for side in ("base", "head"):
@@ -1824,11 +1824,11 @@ def bom_violations(objs, fields):
         if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
             continue
         missing = [f for f in fields if (p.get(f) or "").strip() in ("", "~")]
-        if missing and not o["ref"].split(" unit ")[0] in {v["ref"] for v in out}:
-            out.append({"type": "missing_fields", "severity": "error", "ref": o["ref"].split(" unit ")[0],
-                        "description": f"{o['ref'].split(' unit ')[0]} has no {', '.join(missing)}",
+        if missing and not base_ref(o["ref"]) in {v["ref"] for v in out}:
+            out.append({"type": "missing_fields", "severity": "error", "ref": base_ref(o["ref"]),
+                        "description": f"{base_ref(o['ref'])} has no {', '.join(missing)}",
                         "items": [], "uuids": [], "pos": o["pos"], "box": None, "where": o["where"],
-                        "key": ("bom", o["ref"].split(" unit ")[0], tuple(missing))})
+                        "key": ("bom", base_ref(o["ref"]), tuple(missing))})
     return out
 
 
@@ -2014,6 +2014,11 @@ COVERAGE_FIELDS = {
 }
 
 
+def base_ref(ref):
+    """Strip the parser's symbol-unit suffix from a reference."""
+    return (ref or "").split(" unit ")[0]
+
+
 def bom_parts(objs):
     """BOM symbols, one entry per reference (units of one part count once); DNP, excluded and unannotated parts left out."""
     out = {}
@@ -2021,7 +2026,7 @@ def bom_parts(objs):
         p = o["props"]
         if o["kind"] != "symbol" or p.get("in_bom") == "no" or p.get("dnp") == "yes" or o["ref"].endswith("?"):
             continue
-        out.setdefault(o["ref"].split(" unit ")[0], p)
+        out.setdefault(base_ref(o["ref"]), p)
     return out
 
 
@@ -2041,22 +2046,24 @@ def bom_coverage(objs, settings):
 def bom_identity(obj):
     """Canonical BOM contract for one schematic object (spec 08). Fields are unclipped; display clipping belongs to 09."""
     p = obj.get("props") or {}
-    ref = (obj.get("ref") or "").split(" unit ")[0]  # units of one part share their base reference
+    ref = base_ref(obj.get("ref"))  # units of one part share their base reference
     reason = ("not_symbol" if obj.get("kind") != "symbol" else "dnp" if p.get("dnp") == "yes" else
               "excluded" if p.get("in_bom") == "no" else "unannotated" if ref.endswith("?") else None)
     value, footprint = p.get("Value", ""), p.get("Footprint", "")
     lcsc, mpn = (field(p, LCSC_FIELDS) or "").upper() or None, field(p, MPN_FIELDS)
     ds = field(p, ("datasheet",))
+    datasheet = ds if ds and ds.lower().startswith(("http://", "https://")) else None
+    manufacturer, category = field(p, MANUFACTURER_FIELDS), bom_category(ref, p.get("symbol"))
     return {"included": reason is None, "excludedReason": reason, "ref": ref, "value": value, "footprint": footprint,
-            "lcsc": lcsc, "mpn": mpn, "manufacturer": field(p, MANUFACTURER_FIELDS),
-            "datasheet": ds if ds and ds.lower().startswith(("http://", "https://")) else None,
-            "category": bom_category(ref, p.get("symbol")),
+            "lcsc": lcsc, "mpn": mpn, "manufacturer": manufacturer,
+            "datasheet": datasheet, "category": category,
             # ensure_ascii=False, compact separators. 10 uses this key as received from 09 and never recomputes it.
-            "key": json.dumps([value, footprint, lcsc or "", mpn or ""], ensure_ascii=False, separators=(",", ":"))}
+            "key": json.dumps([value, footprint, lcsc or "", mpn or "", category, manufacturer, datasheet], ensure_ascii=False, separators=(",", ":"))}
 
 
 def parts_lines(objs):
-    """One line per distinct part on the schematic (Value + Footprint + LCSC + MPN), with what blocks a supplier lookup."""
+    """One line per distinct part on the schematic (Value + Footprint + LCSC + MPN + category + manufacturer + datasheet),
+    with what blocks a supplier lookup."""
     lines, first_key, conflicts = {}, {}, set()
     for o in objs.values():
         b = bom_identity(o)
@@ -2178,10 +2185,13 @@ _VENDOR_SPEC.loader.exec_module(vendor_bom_csv)
 
 # ---- BOM files for the report (spec 08): the generic CSV, the JLCPCB file through the vendored planner, and PCBWay. ----
 # ponytail: ceiling: these writers serve the report only; the release (07) keeps KiCad's own export (Owner decision 2026-10-26:
-# option A). Ceiling of the JLCPCB file: the planner splits by the bytes-less-CRLF rule, so a split that is 2,049-2,050 bytes with its
-# CRLF refuses the whole file (fail closed) rather than re-splitting under the stricter rule.
+# option A). Ceiling of the JLCPCB file: the planner splits by the bytes-less-CRLF rule, so its configured budget reserves two
+# bytes for the CRLF before planning. A split therefore fits the stricter written-record limit instead of refusing an otherwise
+# splittable group; a reference that cannot fit still refuses the whole file (fail closed).
 
 BOM_LINE_MAX_BYTES = vendor_bom_csv.BOM_LINE_MAX_BYTES  # 2048, the vendored rule; JLCPCB rejects longer designator cells
+# Configure this private, path-loaded planner once; the vendored source and logic stay unchanged.
+vendor_bom_csv.BOM_LINE_MAX_BYTES = BOM_LINE_MAX_BYTES - 2
 BOM_JLCPCB_HEADER = ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
 BOM_PCBWAY_HEADER = ("Designator", "Qty", "Manufacturer", "Mfg Part #", "Description/Value", "Package/Footprint")
 BOM_HEADER = ("Category", "Quantity", "Value", "Footprint", "References", "MPN", "LCSC", "Datasheet")
@@ -2247,7 +2257,7 @@ def bom_jlcpcb_csv(lines):
                                       neutral(l.get("orderingPart", l["lcsc"]))) for l in bom_order(lines)]
     plan = vendor_bom_csv.plan_bom(groups, None)
     if plan.warnings:
-        raise ValueError(f"JLCPCB export unavailable: {plan.warnings[0]}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
+        raise ValueError(f"JLCPCB export unavailable ({BOM_LINE_MAX_BYTES} UTF-8 bytes including CRLF): {plan.warnings[0]}. Shorten Value, Footprint or the ordering field, or use the generic CSV.")
     out = [csv_line(BOM_JLCPCB_HEADER)]
     for row in plan.lines:
         text = csv_line(row)
@@ -2341,7 +2351,7 @@ def mark_new_problems(base_lines, head_lines):
 
 def dnp_mismatches(objs):
     """References fitted on one of schematic and board and DNP on the other."""
-    sym = {o["ref"].split(" unit ")[0]: o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
+    sym = {base_ref(o["ref"]): o["props"].get("dnp") == "yes" for o in objs.values() if o["kind"] == "symbol"}
     fp = {o["ref"]: "dnp" in (o["props"].get("attributes") or "").split() for o in objs.values() if o["kind"] == "footprint"}
     return sorted((r for r in sym.keys() & fp.keys() if sym[r] != fp[r]), key=natural)
 
@@ -2557,7 +2567,7 @@ def interface_check(p, settings, objs, out_dir):
         path = f"{out_dir}/{s}/netlist.net"
         if not os.path.exists(path):
             return None, None
-        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
+        syms = {base_ref(o["ref"]): o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
         where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
         with open(path, encoding="utf-8") as fh:
             return interface_findings(*parse_netlist(fh.read()), patterns, where_of)

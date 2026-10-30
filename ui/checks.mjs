@@ -1194,6 +1194,27 @@ export const CHECKS = [
   delete REVIEW_DATA.projects[0].parts; renderPanel();
   return document.querySelector('[data-tab=parts]').disabled && S.t === 'changes';
 `],
+  ["Parts fixture BOM search values only and category heading padding", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    document.querySelector('[data-tab=parts]').click();
+    for (const view of ['bom', 'problems']) {
+      S.partsView = view;
+      for (const q of ['footprint', 'refs', 'category', 'datasheet']) {
+        S.partsFilter.q = q; renderPanel();
+        if (document.querySelectorAll(view === 'bom' ? '.bom-row' : '.parts-row').length) return view + ' matched key ' + q;
+      }
+      for (const q of ['Resistors', 'R1', 'RC0603', 'ESP32']) {
+        S.partsFilter.q = q; renderPanel();
+        if (!document.querySelectorAll(view === 'bom' ? '.bom-row' : '.parts-row').length) return view + ' missing value ' + q;
+      }
+    }
+    S.partsFilter.q = ''; S.partsView = 'bom'; renderPanel();
+    const heading = document.querySelector('.bom-cat th'), style = getComputedStyle(heading);
+    const expected = getComputedStyle(document.documentElement).getPropertyValue('--sp-2').trim();
+    const probe = document.createElement('div'); probe.style.padding = expected; document.body.append(probe);
+    const padding = getComputedStyle(probe).paddingLeft; probe.remove();
+    return style.paddingLeft === padding && style.paddingRight === padding || 'category heading padding ' + style.padding;
+  `],
   ["Parts fixture BOM view groups, counts, sorts and escapes", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
   document.querySelector('[data-tab=parts]').click();
@@ -1330,10 +1351,11 @@ export const CHECKS = [
     document.querySelector('[data-bom-download=csv]').click();
     document.querySelector('[data-bom-board="all"]').click();
     if (!document.querySelector('.bom-summary')?.textContent.startsWith('7 components')) return 'All boards summary';
+    if (document.querySelector('[data-bom-download=fab]').textContent.trim() !== 'JLCPCB review file ↓') return 'combined file must not imply upload readiness';
     document.querySelector('[data-bom-download=csv]').click();
     document.querySelector('[data-bom-download=fab]').click();
     if (names[0] !== 'Beta-bom.csv' || names[1] !== 'all-boards-bom.csv' || names[2] !== 'all-boards-bom-jlcpcb.csv') return 'download names ' + names;
-    if (await saved[1].text() !== REVIEW_DATA.bom.exports.csv) return 'combined CSV bytes differ from the embedded export';
+    if (new TextDecoder('utf-8', {ignoreBOM:true}).decode(await saved[1].arrayBuffer()) !== '\uFEFF' + REVIEW_DATA.bom.exports.csv) return 'combined CSV bytes differ from the embedded export';
     return await saved[2].text() === REVIEW_DATA.bom.exports.fab || 'combined fab bytes differ from the embedded export';
   } finally { HTMLAnchorElement.prototype.click = clickAnchor; URL.createObjectURL = createUrl; S.p = originalP; S.bomBoard = originalBoard; S.partsView = originalView; renderPanel(); }
 `],
@@ -1370,7 +1392,7 @@ export const CHECKS = [
       document.querySelector('[data-bom-download=fab]').click();
       document.querySelector('[data-bom-download=csv]').click();
       if (saved.length !== 2 || saved[0].name !== 'Parts-bom-jlcpcb.csv' || saved[1].name !== 'Parts-bom.csv') return 'names ' + JSON.stringify(saved.map(s => s.name));
-      if (await saved[0].blob.text() !== parts.exports.fab || await saved[1].blob.text() !== parts.exports.csv) return 'bytes differ from the embedded export';
+      if (await saved[0].blob.text() !== parts.exports.fab || new TextDecoder('utf-8', {ignoreBOM:true}).decode(await saved[1].blob.arrayBuffer()) !== '\uFEFF' + parts.exports.csv) return 'bytes differ from the embedded export';
       if (!saved.every(s => s.blob.type.startsWith('text/csv') && s.href.startsWith('blob:fixture/'))) return 'CSV blob type or URL';
       const csv = document.querySelector('[data-bom-download=csv]'); csv.focus(); renderPanel();
       if (document.activeElement?.dataset.bomDownload !== 'csv') return 'download focus';

@@ -1365,14 +1365,17 @@ S.bomBoard = "all";   // "all": the repository BOM (REVIEW_DATA.bom) when presen
 const BOM_SORTS = { qty: l => l.refs.length, part: l => l.value, refs: l => l.refs[0], mpn: l => l.mpn || "", lcsc: l => l.lcsc || "", datasheet: l => l.datasheet || "" };
 const bomCategory = l => l.category || "Other";
 const BOM_FAB_LABEL = { jlcpcb: "JLCPCB", pcbway: "PCBWay" };
+function partsSearchText(line) {
+  return [line.value, line.footprint, ...(line.refs || []), line.mpn, line.lcsc, bomCategory(line)].filter(Boolean).join(" ").toLowerCase();
+}
 function bomDownloadsHtml(parts) {
   const x = parts.exports; if (!x) return "";
-  return `<span class="bom-downloads">${typeof x.fab === "string" ? `<button type="button" data-bom-download="fab">${esc(BOM_FAB_LABEL[x.preset] || x.preset)} ↓</button>` : ""}<button type="button" data-bom-download="csv">CSV ↓</button></span>${x.fabError ? `<p class="bom-export-error" role="status">${esc(x.fabError)}</p>` : ""}`;
+  return `<span class="bom-downloads">${typeof x.fab === "string" ? `<button type="button" data-bom-download="fab">${esc(BOM_FAB_LABEL[x.preset] || x.preset)}${parts.combined ? " review file" : ""} ↓</button>` : ""}<button type="button" data-bom-download="csv">CSV ↓</button></span>${x.fabError ? `<p class="bom-export-error" role="status">${esc(x.fabError)}</p>` : ""}`;
 }
 function downloadBom(kind) {
   const src = bomSource(), x = src.exports; if (!x || typeof x[kind] !== "string") return;
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([kind === "csv" ? x.csv : x.fab], { type: "text/csv;charset=utf-8" }));
+  a.href = URL.createObjectURL(new Blob([kind === "csv" ? "\uFEFF" + x.csv : x.fab], { type: "text/csv;charset=utf-8" }));
   const name = src.name.replace(/[^\w.-]+/g, "_");
   const stem = /[a-z0-9]/i.test(name) ? name : "bom";
   a.download = `${stem}-${kind === "csv" ? "bom.csv" : `bom-${x.preset}.csv`}`;
@@ -1381,7 +1384,7 @@ function downloadBom(kind) {
 }
 function bomRows(parts) {
   const f = S.bomFilter, q = (S.partsFilter.q || "").toLowerCase(), key = BOM_SORTS[f.sort] || BOM_SORTS.refs;
-  return parts.lines.filter(l => (!f.category || bomCategory(l) === f.category) && (!q || JSON.stringify(l).toLowerCase().includes(q)))
+  return parts.lines.filter(l => (!f.category || bomCategory(l) === f.category) && (!q || partsSearchText(l).includes(q)))
     .sort((a, b) => f.dir * (f.sort === "qty" ? key(a) - key(b) : String(key(a)).localeCompare(String(key(b)), undefined, { numeric: true })));
 }
 function bomRow(l, cs) {
@@ -1408,7 +1411,7 @@ function bomSource() {
   const repo = D.bom;
   if (repo && !repo.error && S.bomBoard === "all") {   // changes carry board-qualified refs, so badges match combined lines
     const changes = D.projects.flatMap(p => (p.parts?.changes || []).map(c => ({ ...c, refs: c.refs.map(r => `${p.name}:${r}`) })));
-    return { name: "all-boards", summary: repo.summary, lines: repo.lines, exports: repo.exports, changes };
+    return { name: "all-boards", combined: true, summary: repo.summary, lines: repo.lines, exports: repo.exports, changes };
   }
   const project = proj(), parts = project.parts;
   return { name: project.name, summary: parts.summary, lines: parts.lines, exports: parts.exports, changes: parts.changes };
@@ -1431,7 +1434,7 @@ function renderPartsProblems(parts) {
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
   for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
-  const shown = rows.filter(r => (!f.q || JSON.stringify(r.line).toLowerCase().includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
+  const shown = rows.filter(r => (!f.q || partsSearchText(r.line).includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => f.sort === "reference" ? a.line.refs[0].localeCompare(b.line.refs[0], undefined, {numeric:true}) : Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
   const notLookedUp = [["no_mpn", "no MPN"], ["invalid_mpn", "invalid MPN"], ["run_limit", "run limit"]]

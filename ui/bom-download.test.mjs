@@ -1,16 +1,36 @@
+// Run with node --import ./site/css-loader.mjs --test ui/bom-download.test.mjs.
+// Uses headless Chrome from CHROME/CHROME_PATH or the platform PATH; skips if unavailable.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, constants, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { reportCsp, frameCsp } from '../site/csp.js';
-import { reviewPage, sharedPage } from '../site/pages.js';
 
-test('BOM downloads save through real report sandbox and CSP', { timeout: 60000 }, async () => {
-  assert.ok(process.env.SCRATCH, 'SCRATCH must name a scratch directory');
-  const root = mkdtempSync(join(process.env.SCRATCH, 'bom-download-'));
+function findChrome() {
+  const configured = process.env.CHROME || process.env.CHROME_PATH;
+  const names = configured ? [configured] : ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    join(process.env.PROGRAMFILES || '', 'Google/Chrome/Application/chrome.exe')];
+  for (const name of names) {
+    const paths = isAbsolute(name) ? [name] : (process.env.PATH || '').split(delimiter).map(dir => join(dir, name));
+    for (const path of paths) {
+      try { accessSync(path, constants.X_OK); return path; } catch {}
+    }
+  }
+  return null;
+}
+
+test('BOM downloads save through real report sandbox and CSP', { timeout: 60000 }, async t => {
+  const executable = findChrome();
+  if (!executable) { t.skip('Chrome unavailable; set CHROME or CHROME_PATH'); return; }
+  // Register before importing Worker pages; plain node --test ui/*.test.mjs also works.
+  await import('../site/css-loader.mjs');
+  const { reviewPage, sharedPage } = await import('../site/pages.js');
+  const root = mkdtempSync(join(tmpdir(), 'bom-download-'));
   const cwd = fileURLToPath(new URL('../', import.meta.url));
   const html = execFileSync('python3', ['-c', 'import pathlib,kicad_review as k;print(k.inline_page(pathlib.Path("ui/sample/review-data-parts.js").read_text()))'], { cwd, encoding: 'utf8' });
   const wrapper = kind => kind === 'shared'
@@ -23,7 +43,7 @@ test('BOM downloads save through real report sandbox and CSP', { timeout: 60000 
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const origin = 'http://127.0.0.1:' + server.address().port;
-  const chrome = spawn(process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', [
+  const chrome = spawn(executable, [
     '--headless=new', '--no-sandbox', '--enable-automation', '--remote-debugging-port=0',
     '--user-data-dir=' + join(root, 'profile'), 'about:blank'
   ], { stdio: 'ignore' });
@@ -99,6 +119,8 @@ test('BOM downloads save through real report sandbox and CSP', { timeout: 60000 
       const ready = await evaluate(`document.querySelector('[data-tab=parts]').click(); S.partsView='bom'; renderPanel(); !!document.querySelector('[data-bom-download=fab]') && !!document.querySelector('[data-bom-download=csv]')`);
       assert.equal(ready.exceptionDetails, undefined);
       assert.equal(ready.result.value, true, 'both BOM buttons must render before testing permissions');
+      const unicode = await evaluate(`proj().parts.exports.csv += '\\r\\n10kΩ,µF';`);
+      assert.equal(unicode.exceptionDetails, undefined, 'Unicode fixture update must succeed');
       for (const [field, name] of [['fab', 'Parts-bom-jlcpcb.csv'], ['csv', 'Parts-bom.csv']]) {
         const before = started.length;
         const result = await evaluate(`document.querySelector('[data-bom-download=${field}]').click(); proj().parts.exports.${field}`);
@@ -107,7 +129,11 @@ test('BOM downloads save through real report sandbox and CSP', { timeout: 60000 
         assert.equal(download.suggestedFilename, name, kind + ' ' + field + ' suggested filename');
         await until(() => completed.has(download.guid));
         assert.equal(started.length, before + 1, 'one download for this click');
-        assert.equal(readFileSync(join(downloadDir, name), 'utf8'), result.result.value, kind + ' ' + field + ' newly saved bytes');
+        const bytes = readFileSync(join(downloadDir, name));
+        if (field === 'csv') assert.ok(bytes.toString('utf8').includes('10kΩ,µF'), 'Unicode cells survive download');
+        if (field === 'fab') assert.ok(bytes.toString('utf8').startsWith('Comment,Designator,Footprint,LCSC,Quantity\r\n'), 'JLCPCB first line remains exact');
+        assert.equal(bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), field === 'csv', 'UTF-8 BOM only on generic CSV');
+        assert.equal(readFileSync(join(downloadDir, name), 'utf8'), (field === 'csv' ? '\uFEFF' : '') + result.result.value, kind + ' ' + field + ' newly saved bytes');
       }
     }
   } finally {

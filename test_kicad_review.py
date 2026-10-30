@@ -1041,7 +1041,14 @@ print("ok TS-S2 release zip and CSV contents")
 # TS-S1: CI exercises default, real 3D and unchanged two-project pages without extra installs.
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
-assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
+assert "google-chrome" in test_wf and "CHROME" in test_wf and 'python3 ui/build-fixtures.py "$PAGES"' in test_wf, "TS-S1 CI browser setup"
+assert "node --import ./site/css-loader.mjs --test ui/*.test.mjs" in test_wf, "CI must run sandbox downloads"
+with tempfile.TemporaryDirectory() as output:
+    subprocess.run([sys.executable, "ui/build-fixtures.py", output], check=True)
+    assert {p.name for p in pathlib.Path(output).iterdir()} == {"3d.html", "two.html", "parts.html", "multiboard.html"}
+    text = pathlib.Path(output, "multiboard.html").read_text(encoding="utf-8")
+    data = json.loads(text.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
+    assert data["bom"]["summary"]["components"] == 7 and data["bom"]["boards"] == ["Alpha", "Beta"]
 for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert "    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n" in test_wf and test_wf.count("timeout-minutes:") == 1, "TS-S1 CI job timeout missing or duplicated"
@@ -1146,7 +1153,8 @@ assert bom_summary([]) == {"components": 0, "unique": 0, "withMpn": 0, "byCatego
 print("ok bom helpers")
 
 # BOM lines: the MPN splits a part, units count once, every line carries category and ranges.
-from kicad_review import bom_identity
+from kicad_review import base_ref, bom_identity
+assert base_ref("U1 unit 2") == "U1" and base_ref("R1") == "R1" and base_ref(None) == ""
 from pathlib import Path
 sym2 = lambda ref, v, mpn=None, lib="Device:R_Small", mf=None: {"kind": "symbol", "ref": ref, "props": {
     "Value": v, "Footprint": "R_0805", "Datasheet": "~", "symbol": lib, **({"MPN": mpn} if mpn else {}), **({"Manufacturer": mf} if mf else {})}}
@@ -1182,6 +1190,25 @@ assert raw_lines[0]['category'] == bom_category('R1', raw_props['Value']) == 'Re
 assert raw_lines[0]['refsCompressed'] == ref_ranges(raw_lines[0]['refs']) == 'R1-R2'
 assert json.loads(json.dumps(raw_lines))[0]['value'] == '10k'
 assert json.loads(json.dumps(raw_lines))[0]['footprint'] == 'R_0805'
+# Category and ordering metadata must not disappear into the first grouped reference.
+metadata_objects = {"tp": sym2("TP1", "", lib=""), "h": sym2("H1", "", lib="")}
+for obj in metadata_objects.values():
+    obj["props"]["Footprint"] = ""
+assert len(parts_lines(metadata_objects)) == 2, "test points and mechanical parts must not merge"
+from kicad_review import bom_repository
+category_combined = bom_repository([{"name": name, "objects": metadata_objects, "lines": parts_lines(metadata_objects)}
+                                    for name in ("Alpha", "Beta")], "jlcpcb")
+assert len(category_combined["lines"]) == 2 and all(len(l["refs"]) == 2 for l in category_combined["lines"])
+for prop, values in (("Manufacturer", ("Yageo", "Vishay")), ("Datasheet", ("https://a.test", "https://b.test"))):
+    objects = {str(i): sym2(f"R{i}", "10k", "RC") for i in (1, 2)}
+    for obj, value in zip(objects.values(), values):
+        obj["props"][prop] = value
+    lines = parts_lines(objects)
+    assert len(lines) == 2 and len({l["key"] for l in lines}) == 2, (prop, lines)
+    combined = bom_repository([{"name": "Alpha", "objects": objects, "lines": lines},
+                               {"name": "Beta", "objects": objects, "lines": lines}], "pcbway")
+    assert len(combined["lines"]) == 2 and all(len(l["refs"]) == 2 for l in combined["lines"]), (prop, combined)
+    assert {l[prop.lower()] for l in combined["lines"]} == set(values)
 print("ok bom lines")
 
 # Vendored planner (Task 4A): the body is the pinned upstream bom_csv.py, and the licence header sits above it.
@@ -1193,7 +1220,7 @@ assert _vh.sha256(_data[_start:]).hexdigest() == "3deebff2f36376a561b4014dbbf6ea
 for marker in (b"MIT License", b"Copyright (c) 2022 bouni", b"9209edcdd682fc4df51e3a0325f967b78ef254ee"):
     assert marker in _data[:_start], marker
 import kicad_review as _kr
-assert _kr.vendor_bom_csv.BOM_LINE_MAX_BYTES == 2048 and _kr.vendor_bom_csv.BOM_HEADER == ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
+assert _kr.vendor_bom_csv.BOM_LINE_MAX_BYTES == 2046 and _kr.vendor_bom_csv.BOM_HEADER == ("Comment", "Designator", "Footprint", "LCSC", "Quantity")
 print("ok vendored bom_csv")
 
 # BOM files: generic CSV, JLCPCB through the vendored planner with the 2,048-byte limit, PCBWay, and spreadsheet-formula neutering.
@@ -1302,14 +1329,16 @@ import kicad_review as kr
 groups = [kr.vendor_bom_csv.BomGroup("10kΩ", tuple(f"R{n}" for n in range(1, 801)), "R_0805", "C1")]
 planned = [[str(c) for c in row] for row in kr.vendor_bom_csv.plan_bom(groups, None).lines]
 shared = [{"category": "Resistors", "refs": [f"R{n}" for n in range(1, 801)], "value": "10kΩ", "footprint": "R_0805", "lcsc": "C1", "mpn": None, "manufacturer": None, "datasheet": None}]
-# The planner's rule is UTF-8 bytes less the CRLF; ours (owner decision 2026-10-26) counts the CRLF. With LCSC "C1" its 800-reference
-# split has a row of 2,050 bytes with the CRLF, so the adapter refuses the file (fail closed) instead of writing it.
-try:
-    kr.bom_jlcpcb_csv(shared)
-except ValueError as exc:
-    assert "R1" in str(exc) and "2048" in str(exc), exc
-else:
-    raise AssertionError("an 800-reference group whose planner row is 2,050 bytes with its CRLF must be refused")
+# LCSC C1 must split successfully under the stricter written-record limit.
+assert read(kr.bom_jlcpcb_csv(shared))[1:] == planned
+for count in range(300, 701):
+    refs = [f"R{n}" for n in range(1, count + 1)]
+    exported = kr.bom_exports([{**shared[0], "refs": refs}], "jlcpcb")
+    assert exported["fabError"] is None, (count, exported["fabError"])
+    assert max(len(row.encode("utf-8")) for row in exported["fab"].splitlines(keepends=True)) <= 2048, count
+    rows = read(exported["fab"])[1:]
+    assert [ref for row in rows for ref in row[1].split(",")] == refs, count
+    assert sum(int(row[4]) for row in rows) == count, count
 # The same 800 references with LCSC "C123" plan within the stricter rule, so the adapter writes exactly the planner's rows.
 groups = [kr.vendor_bom_csv.BomGroup("10kΩ", tuple(f"R{n}" for n in range(1, 801)), "R_0805", "C123")]
 planned = [[str(c) for c in row] for row in kr.vendor_bom_csv.plan_bom(groups, None).lines]
@@ -1323,7 +1352,7 @@ try:
 except ValueError as exc:
     assert "X1" in str(exc) and "2048" in str(exc), exc
 else:
-    raise AssertionError("a 2,049-byte record with its CRLF must be refused, although the planner writes it")
+    raise AssertionError("a 2,049-byte record with its CRLF must be refused, including the reserved CRLF bytes")
 print("ok bom files")
 
 # Repository BOM (Owner decision 2026-10-26: combined BOM): board-qualified references; lines join only on identical identity.
@@ -1402,7 +1431,7 @@ for case in bom_cases:
     for i, b in identities.items():
         p = case["objects"][i]["props"]
         assert b["value"] == p.get("Value", "") and b["footprint"] == p.get("Footprint", ""), case["name"]
-        assert b["key"] == json.dumps([b["value"], b["footprint"], b["lcsc"] or "", b["mpn"] or ""], ensure_ascii=False, separators=(",", ":")), case["name"]
+        assert b["key"] == json.dumps([b["value"], b["footprint"], b["lcsc"] or "", b["mpn"] or "", b["category"], b["manufacturer"], b["datasheet"]], ensure_ascii=False, separators=(",", ":")), case["name"]
     actual = parts_lines(case["objects"])
     assert len(actual) == len(expected["lines"]), (case["name"], actual)
     for got, want in zip(actual, expected["lines"]):
@@ -1415,7 +1444,7 @@ contract_obj = {"kind": "symbol", "ref": "R1 unit 2", "props": {
 assert bom_identity(contract_obj) == {
     "included": True, "excludedReason": None, "ref": "R1", "value": "10kΩ", "footprint": "R_0805",
     "lcsc": "C123", "mpn": "RC", "manufacturer": "Yageo", "datasheet": "HTTPS://example.test/rc.pdf",
-    "category": "Resistors", "key": '["10kΩ","R_0805","C123","RC"]'}
+    "category": "Resistors", "key": '["10kΩ","R_0805","C123","RC","Resistors","Yageo","HTTPS://example.test/rc.pdf"]'}
 contract_obj["props"]["Datasheet"] = "javascript:alert(1)"
 assert bom_identity(contract_obj)["datasheet"] is None
 print("ok bom shared cases")

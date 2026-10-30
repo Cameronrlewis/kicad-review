@@ -742,11 +742,11 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 .bom-table thead th[aria-sort=ascending], .bom-table thead th[aria-sort=descending] { color:var(--tx); }
 .bom-table thead th[aria-sort=ascending] button::after { content:" ↑"; }
 .bom-table thead th[aria-sort=descending] button::after { content:" ↓"; }
-.bom-table th:nth-child(1), .bom-table td:nth-child(1) { width:18px; padding-left:var(--sp-1); padding-right:0; }
-.bom-table th:nth-child(2), .bom-table td:nth-child(2) { width:52px; }
+.bom-table thead th:nth-child(1), .bom-table td:nth-child(1) { width:18px; padding-left:var(--sp-1); padding-right:0; }
+.bom-table thead th:nth-child(2), .bom-table td:nth-child(2) { width:52px; }
 .bom-table thead th:nth-child(3) { width:40%; }
 .bom-table thead th:nth-child(4) { width:25%; }
-.bom-table th:nth-child(n+5), .bom-table td:nth-child(n+5) { display:none; }
+.bom-table thead th:nth-child(n+5), .bom-table td:nth-child(n+5) { display:none; }
 .bom-cat th { padding:var(--sp-2); font:var(--fw-semibold) var(--fs-cap) var(--font-cap); letter-spacing:var(--cap-track); text-transform:uppercase; color:var(--tx2); background:var(--panel); }
 .bom-qty { font-variant-numeric:tabular-nums; }
 .bom-part b { display:block; font-weight:var(--fw-semibold); }
@@ -757,10 +757,10 @@ body.report-framed,body.shot { grid-template-rows:var(--bar-h) 1fr auto; }
 .bom-row.changed .bom-delta { color:var(--mod); box-shadow:inset 3px 0 var(--mod); }
 #panel:has(.bom-table) .parts-scroll { overflow-x:auto; max-width:100%; }
 #app.right-table .bom-table { min-width:800px; }
-#app.right-table .bom-table th:nth-child(n+5), #app.right-table .bom-table td:nth-child(n+5) { display:table-cell; }
+#app.right-table .bom-table thead th:nth-child(n+5), #app.right-table .bom-table td:nth-child(n+5) { display:table-cell; }
 #app.right-table .bom-mpn-inline { display:none !important; }
 @container (min-width:600px) {
-  .bom-table th:nth-child(n+5), .bom-table td:nth-child(n+5) { display:table-cell; }
+  .bom-table thead th:nth-child(n+5), .bom-table td:nth-child(n+5) { display:table-cell; }
   .bom-table thead th:nth-child(3) { width:26%; } .bom-table thead th:nth-child(4) { width:24%; }
   .bom-mpn-inline { display:none !important; }
 }
