@@ -1,4 +1,4 @@
-import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
+import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
 import { currentBody, currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
@@ -349,7 +349,7 @@ async function readArtifactHtml(owner, repo, id, active, repository) {
     if (!artifact || artifact.expired) return assetError();
     // ponytail: read the existing HTML envelope per asset; add range/indexed companion delivery only if Worker CPU or GitHub download traces require it.
     // Measured Worker CPU now requires caching that envelope and its processed forms.
-    return await cachedReport(artifact, active);
+    return { ...await cachedReport(artifact, active), metadata: artifact.metadata };
   } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(); }
 }
 
@@ -362,6 +362,49 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
     const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
     if (stored instanceof Response) return stored;
     return assetFromData(stored.data, digest, kind) || assetError();
+  });
+  return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
+    encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
+}
+
+const comparisonReport = /^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/;
+// 3D assets come only from the validated report's own run, named by a descriptor in its stored data.
+async function artifact3d(request, env, owner, repo, id, digest, kind) {
+  let active;
+  const asset = await privateAsset(request, digest, kind, async () => {
+    const allowed = await access(request, env, owner, repo);
+    if (allowed instanceof Response) return allowed;
+    active = allowed.s;
+    if (!/^[0-9a-f]{64}$/.test(digest) || !['board.glb', 'board-parts.json'].includes(kind)) return assetError();
+    try {
+      const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
+      if (stored instanceof Response) return stored;
+      const { metadata, data } = stored, run = String(metadata.workflow_run?.id);
+      // ponytail: design snapshots fail closed until 06's verifyReportFamily (site/report-kind.js) merges and binds name to data.report.head.
+      if (data?.report?.kind != null || !comparisonReport.test(metadata.name) || !/^\d{1,20}$/.test(run)) return assetError();
+      const key = kind === 'board.glb' ? 'model' : 'parts', name = `kicad-3d-${digest}-${kind}.gz`;
+      const descriptor = (Array.isArray(data.projects) ? data.projects : []).flatMap((p) => ['base', 'head'].map((side) => p?.board?.assets3d?.[side]?.[key]))
+        .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0);
+      if (!descriptor) return assetError();
+      const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`, matches = [];
+      for (let page = 1; ; page++) {
+        const list = await gh(`${root}/runs/${run}/artifacts?per_page=100&page=${page}`, active.token);
+        const artifacts = list.ok ? (await list.json()).artifacts : null;
+        if (!Array.isArray(artifacts)) return assetError();
+        matches.push(...artifacts.filter((a) => a?.name === name));
+        if (artifacts.length < 100) break;
+      }
+      const [match] = matches;
+      if (matches.length !== 1 || match.expired || String(match.workflow_run?.id) !== run || !/^\d{1,20}$/.test(String(match.id))) return assetError();
+      const archive = await gh(`${root}/artifacts/${match.id}/zip`, active.token, { redirect: 'manual' });
+      const location = archive.status === 302 ? downloadUrl(archive.headers.get('Location')) : null;
+      if (!location) return assetError();
+      // Share downloader's host policy; never forward GitHub authorization or follow further redirects.
+      const body = await fetch(location, { redirect: 'error' });
+      if (!body.ok) return assetError();
+      const bytes = new Uint8Array(await body.arrayBuffer());
+      return bytes.length === descriptor.bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
+    } catch { return assetError(); }
   });
   return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
     encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
@@ -803,6 +846,11 @@ const routes = {
       if (request.method === 'GET' && assetRoute) {
         const [, owner, repo, id, digest, kind] = assetRoute;
         return digestAsset(request, env, owner, repo, id, digest, kind);
+      }
+      const modelRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/3d\/([^/]+)\/([^/]+)$/);
+      if (request.method === 'GET' && modelRoute) {
+        const [, owner, repo, id, digest, kind] = modelRoute;
+        return artifact3d(request, env, owner, repo, id, digest, kind);
       }
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {

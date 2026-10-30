@@ -4654,3 +4654,117 @@ test('legacy metadata shares in-flight builds but is never cached', async () => 
     assert.equal(h.downloads, 2);
   } finally { h.done(); }
 });
+
+// 06's verifyReportFamily (site/report-kind.js) merges after 02 (ORDER.md), so design
+// reports fail closed here; 06 Task 4A flips the 'design' row to a 200 control.
+for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
+  'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',
+  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'bad-host']) {
+  test('BR02 asset route ' + scenario, async () => {
+    const digest = 'c'.repeat(64), kind = scenario === 'valid-parts' ? 'board-parts.json' : 'board.glb';
+    const key = kind === 'board.glb' ? 'model' : 'parts', bytes = gzipSync(kind === 'board.glb' ? 'glTF' : '[]');
+    let downloads = 0, accessChecks = 0, metadataChecks = 0;
+    let revoked = scenario === 'no-pull', expired = scenario === 'expired-html', siblingExpired = scenario === 'expired-sibling';
+    const sealed = await signedIn();
+    const asset = () => ({ id: 91, name: `kicad-3d-${digest}-${kind}.gz`, expired: siblingExpired, workflow_run: { id: 9 } });
+    const descriptor = { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes: bytes.length };
+    if (scenario === 'malformed-descriptor') descriptor.bytes = 'big';
+    if (scenario === 'unlisted') descriptor.digest = 'e'.repeat(64);
+    if (scenario === 'size-mismatch') descriptor.bytes = bytes.length + 1;
+    if (scenario === 'not-gzip') descriptor.bytes = 'not gzip'.length;
+    const data = { version: 1, blobs: { model: 'embedded-model' }, projects: [{ board: { model3d: { head: 'model' },
+      ...(scenario === 'no-descriptor' ? {} : { assets3d: { base: null, head: { [key]: descriptor } } }) } }] };
+    if (scenario.startsWith('design')) data.report = { kind: 'design', head: (scenario === 'design-head-mismatch' ? 'd' : 'b').repeat(40) };
+    const reportName = scenario.startsWith('design') && scenario !== 'design-comparison-name' ? 'kicad-design-bbbbbbb.html'
+      : scenario === 'bad-name' ? 'other.html' : 'kicad-review-aaaaaaa-bbbbbbb-pass.html';
+    const stored = '<script>window.REVIEW_DATA = ' + JSON.stringify(data) + ';</script>';
+    const restore = mockFetch(async (url) => {
+      url = String(url);
+      if (url.endsWith('/repos/Cameronrlewis/repo')) {
+        accessChecks++;
+        return revoked ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: false } }))
+          : new Response(JSON.stringify({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
+      }
+      if (url.endsWith('/artifacts/12')) {
+        metadataChecks++;
+        return new Response(JSON.stringify({ name: reportName, expired,
+          workflow_run: { id: 9, repository_id: scenario === 'foreign-repo' ? 6 : 5 } }));
+      }
+      if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302,
+        headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
+      if (url === 'https://artifact.actions.githubusercontent.com/report') return new Response(stored);
+      if (url.includes('/runs/9/artifacts?')) {
+        const page = Number(new URL(url).searchParams.get('page') || 1);
+        const artifacts = scenario === 'missing' ? [] : scenario === 'second-page' && page === 1
+          ? Array.from({ length: 100 }, (_, i) => ({ id: 100 + i, name: 'other-' + i }))
+          : scenario === 'wrong-run' ? [{ ...asset(), workflow_run: { id: 10 } }]
+            : scenario === 'ambiguous' ? [asset(), { ...asset(), id: 92 }] : [asset()];
+        return new Response(JSON.stringify({ artifacts }));
+      }
+      if (url.endsWith('/artifacts/91/zip')) return new Response(null, { status: 302,
+        headers: { Location: scenario === 'bad-host' ? 'https://evil.example/model' : 'https://artifact.actions.githubusercontent.com/file' } });
+      if (url === 'https://artifact.actions.githubusercontent.com/file') {
+        downloads++; return new Response(['corrupt', 'not-gzip'].includes(scenario) ? 'not gzip' : bytes);
+      }
+      throw Error('unexpected URL ' + url);
+    });
+    try {
+      const suffix = scenario === 'invalid-kind' ? digest + '/other' : scenario === 'invalid-digest' ? 'ABC/board.glb'
+        : scenario === 'short-digest' ? digest.slice(0, 12) + '/board.glb' : digest + '/' + kind;
+      const endpoint = '/r/Cameronrlewis/repo/a/12/3d/' + suffix;
+      const response = await call(endpoint, { headers: scenario === 'no-session' ? {} : { Cookie: `s=${sealed}` } });
+      if (['valid', 'valid-parts', 'second-page'].includes(scenario)) {
+        assert.equal(response.status, 200); assert.equal(downloads, 1);
+        assert.equal(response.headers.get('Content-Encoding'), 'gzip');
+        assert.equal(response.headers.get('Content-Type'), kind === 'board.glb' ? 'model/gltf-binary' : 'application/json');
+        assert.equal(response.headers.get('Cache-Control'), 'private,no-cache');
+        assert.equal(response.headers.get('ETag'), '"' + digest + '"');
+        assert.equal(response.headers.get('Vary'), 'Cookie');
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+        if (scenario !== 'second-page') {
+          const conditional = { headers: { Cookie: `s=${sealed}`, 'If-None-Match': response.headers.get('ETag') } };
+          const denied = async (label) => {
+            const before = { accessChecks, metadataChecks, downloads };
+            const result = await call(endpoint, conditional);
+            assert.equal(result.status, 404, label); assert.match(result.headers.get('Cache-Control'), /no-store/, label);
+            assert.equal(result.headers.get('ETag'), null, label);
+            assert.ok(accessChecks > before.accessChecks, label);
+            assert.equal(downloads, before.downloads, label);
+            return before;
+          };
+          const before = { accessChecks, metadataChecks };
+          const reused = await call(endpoint, conditional);
+          assert.equal(reused.status, 304);
+          assert.equal(reused.headers.get('Cache-Control'), 'private,no-cache');
+          assert.equal(reused.headers.get('ETag'), '"' + digest + '"');
+          assert.equal(reused.headers.get('Vary'), 'Cookie');
+          assert.equal((await reused.arrayBuffer()).byteLength, 0);
+          assert.ok(accessChecks > before.accessChecks); assert.ok(metadataChecks > before.metadataChecks);
+          revoked = true; await denied('revoked');
+          revoked = false; expired = true;
+          const stale = await denied('expired html');
+          assert.ok(metadataChecks > stale.metadataChecks);
+          expired = false; siblingExpired = true;
+          const sibling = await denied('expired model artifact');
+          assert.ok(metadataChecks > sibling.metadataChecks);
+        }
+      } else {
+        assert.equal(response.status, 404, scenario);
+        assert.match(response.headers.get('Cache-Control') || '', /no-store/, scenario);
+        assert.equal(response.headers.get('ETag'), null, scenario);
+        if (!['corrupt', 'not-gzip', 'size-mismatch'].includes(scenario)) assert.equal(downloads, 0, scenario);
+      }
+    } finally { restore(); }
+  });
+}
+
+test('BR02 image route rejects a 3D model digest and the 3D route a twelve-character image digest', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => { throw Error('unexpected URL ' + url); });
+  try {
+    for (const path of [`/r/Cameronrlewis/repo/a/12/assets/${'c'.repeat(64)}.json`, `/r/Cameronrlewis/repo/a/12/assets/${'c'.repeat(64)}.svg`]) {
+      const result = await call(path, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(result.status, 404, path); assert.equal(result.headers.get('ETag'), null);
+    }
+  } finally { restore(); }
+});
