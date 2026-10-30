@@ -175,6 +175,25 @@ const gestureLifecycleCheck=['images gesture lifecycle','',`
   return true;
 `];
 
+// Ask about this design: a two-revision object/net fixture, then the wrapper handshake and the enabled tab click.
+const askOpen = `
+  const p = proj();
+  p.objects = [{ref:'R16',kind:'symbol',sheet:'/',pos:[10,10,0],uuid:'u16'},{ref:'U1',kind:'symbol',sheet:'/',pos:[30,30,0],uuid:'u1'}];
+  p.ask = { nets: {head:{'/SW_DOWN':{fallback_ref:'R16'},'12':{fallback_ref:'U1'}},base:{REMOVED:{fallback_ref:'R16'}}} };
+  ASK.on = true; ASK.ready = false; ASK.log = []; ASK.insight = null; ASK.project = null; ASK.asked = null; ASK.busy = false;
+  S.t = 'ask'; renderPanel();
+  if (S.t !== 'changes' || !document.querySelector('#panel-tabs [data-tab=ask]')?.disabled) return 'unready Ask must fall back to Changes with a disabled tab';
+  const wrapper = (id, event, data) => window.postMessage({ kicadReviewAskEvent: { id, event, data } }, '*');
+  const settle = () => new Promise(r => setTimeout(r, 60));
+  if (!handleParentMessage({source:parent,data:{kicadReviewAskReady:true}}, false, false, true)) return 'ready message not accepted';
+  await settle();
+  if (S.t !== 'changes' || document.querySelector('#panel-tabs [data-tab=ask]')?.disabled) return 'ready handshake must enable Ask without selecting it';
+  document.querySelector('#panel-tabs [data-tab=ask]').click();
+  if (S.t !== 'ask' || !document.querySelector('#ask-input')) return 'enabled Ask tab click did not render the input';
+  if (!document.querySelector('#panel').classList.contains('dock-open') && innerWidth < 900) document.querySelector('[data-dock=panel]').click();
+  const visibleAsk = document.querySelector('#ask-root')?.getBoundingClientRect();
+  if (!visibleAsk || visibleAsk.width <= 0 || visibleAsk.height <= 0) return 'Ask is not visibly open';`;
+
 export const CHECKS = [
   ['images search pointer activation without button focus','',`
     if(D.repo!=='fixture/images')return 'skip';
@@ -5183,6 +5202,80 @@ return true;
     if(JSON.stringify(actual)!==JSON.stringify(expected))throw Error('reload lost per-viewer opacity/colour'+(()=>{try{const s=localStorage.getItem('kr.appearance.v1');return ' storage '+(s?s.length:'none')+' viewers '+(s?Object.keys(JSON.parse(s).viewers||{}).join('|').slice(0,300):'')+' total '+Object.keys(localStorage).reduce((n,k)=>n+(localStorage.getItem(k)||'').length,0)+' path '+location.pathname}catch(e){return ' storage error '+e.message}})());
     console.log('BOARD_PROOF '+JSON.stringify({task:'vf-opacity',reload:true,opacity:actual.layerOpacity['In2.Cu'],color:actual.layers['In2.Cu'].color}));return true;
   `}],
+  // Ask about this design (09). Every name starts with "Ask" so the CI filter "Ask" selects them.
+  ["Ask tab is absent offline and disabled until connected", "", `
+    ASK.on = true; ASK.ready = false; S.t = 'changes'; renderPanel();
+    const tab = document.querySelector('#panel-tabs [data-tab="ask"]');
+    if (!tab) return 'no Ask tab';
+    if (!tab.disabled || !/connected review site/.test(tab.title)) return 'tab must be disabled with an explanation, got ' + tab.disabled + ' ' + tab.title;
+    ASK.on = false; renderPanel();
+    return !document.querySelector('#panel-tabs [data-tab="ask"]') || 'an offline report must not show an Ask tab';`],
+  ["Ask tab streams, links and greys out", "", askOpen + `
+    window.postMessage({ kicadReviewAskReady: true }, '*'); await settle();
+    const input = () => document.querySelector('#ask-input');
+    if (!input()) return 'panel not rendered';
+    wrapper(ASK.insightId, 'insight', { summary: 'A camera board.', questions: ['What powers it?', 'Which pin is SW_DOWN?', 'What changed?'], cached: false }); await settle();
+    const chips = [...document.querySelectorAll('#ask-top [data-ask-q]')];
+    if (chips.length !== 3 || !document.querySelector('[data-ask-more]')) return 'summary or questions missing';
+    chips[0].click(); await settle();
+    if (!ASK.busy || ASK.log.length !== 2 || !/What powers it/.test(ASK.log[0].text)) return 'chip did not send';
+    const id = ASK.current;
+    input().value = 'draft kept'; input().dispatchEvent(new Event('input')); input().focus(); input().setSelectionRange(3, 7);
+    wrapper(id, 'start', { remaining: 41, cached: true }); wrapper(id, 'answer_delta', { text: 'USB-C feeds [R16], not [R99] or [net:12] or [net:nope] ' });
+    await settle();
+    wrapper(id, 'answer_delta', { text: '<img src=x onerror=alert(1)> and **bold**.' }); wrapper(id, 'answer', { text: 'USB-C feeds [R16], not [R99] or [net:12] or [net:nope] <img src=x onerror=alert(1)> and **bold**.' });
+    wrapper(id, 'followups', { questions: ['Why?'] }); wrapper(id, 'done', {}); await settle();
+    const log = document.querySelector('#ask-log');
+    if (log.querySelector('img')) return 'HTML from the model was rendered';
+    if (!log.querySelector('button[data-ask-ref="R16"]') || !log.querySelector('button[data-ask-net="12"]')) return 'live links missing';
+    if (log.querySelectorAll('span.ask-link.missing').length !== 2) return 'unknown names must be greyed out: ' + log.innerHTML;
+    if (ASK.busy || !/41 questions left/.test(document.querySelector('#ask-meta').textContent)) return 'busy or remaining wrong';
+    if (input().value !== 'draft kept' || document.activeElement !== input() || input().selectionStart !== 3 || input().selectionEnd !== 7) return 'streaming must not touch draft, focus or selection';
+    if (!handleParentMessage({source:parent,data:{kicadReviewAskEvent:{id:ASK.current,event:'done',data:{}}}}, false, false, true)) return 'event message not accepted';
+    askSend('partial stream'); const droppedId=ASK.current;
+    wrapper(droppedId,'answer_delta',{text:'unfinished'}); wrapper(droppedId,'error',{message:'The answer ended before completion.'}); wrapper(droppedId,'done',{}); await settle();
+    return !ASK.busy && ASK.log.at(-1).error && !ASK.log.at(-1).complete || 'partial EOF left busy or looked complete';`],
+  ["Ask stays live beside the real left Appearance tab", "v=board", askOpen + `
+    document.querySelector('#left-tab-appearance').click(); await settle();
+    if (S.t !== 'appearance' || rightTab !== 'ask' || !document.querySelector('#ask-root')) return 'real Appearance tab did not retain Ask';
+    wrapper(ASK.insightId,'insight',{summary:'Appearance-side summary.',questions:['A?','B?','C?']}); await settle();
+    if (!document.querySelector('#ask-top').textContent.includes('Appearance-side summary.')) return 'summary stopped updating beside Appearance';
+    askSend('Answer beside Appearance'); await settle();
+    const id=ASK.current, send=()=>document.querySelector('#ask-form .ask-send');
+    if (!ASK.busy || !send().disabled || send().textContent !== 'Answering…') return 'send state stopped updating beside Appearance';
+    wrapper(id,'answer_delta',{text:'Live beside Appearance.'}); await settle();
+    if (!document.querySelector('#ask-log').textContent.includes('Live beside Appearance.')) return 'stream stopped updating beside Appearance';
+    wrapper(id,'answer',{text:'Completed beside Appearance.'}); wrapper(id,'done',{}); await settle();
+    if (ASK.busy || send().disabled || !document.querySelector('#ask-log').textContent.includes('Completed beside Appearance.')) return 'completed answer or busy state stale beside Appearance';
+    askSend('Error beside Appearance');
+    wrapper(ASK.current,'error',{message:'Visible Appearance-side error.'}); await settle();
+    const log=document.querySelector('#ask-log').getBoundingClientRect();
+    return S.t==='appearance' && rightTab==='ask' && log.width>0 && log.height>0 && !ASK.busy && !send().disabled && document.querySelector('#ask-log .ask-error')?.textContent==='Visible Appearance-side error.' || 'error or visible busy state stale beside Appearance';`],
+  ["Ask sends only the last 20 messages including the current question", "", askOpen + `
+    ASK.log=Array.from({length:28},(_,i)=>({role:i%2?'assistant':'user',text:'history '+i,complete:i%2===1}));
+    const sent=[], capture=e=>{if(e.source===parent && e.data?.kicadReviewAskQuestion) sent.push(e.data.kicadReviewAskQuestion);};
+    addEventListener('message',capture);
+    try {
+      askSend('Current question retained'); await settle();
+      const q=sent[0];
+      if (sent.length!==1 || q.project!==proj().dir || q.messages.length!==20) return 'client must transmit exactly the last 20 available messages';
+      return q.messages[0].text==='history 9' && q.messages.at(-1).role==='user' && q.messages.at(-1).text==='Current question retained' || 'transport lost the latest history window or current question';
+    } finally { removeEventListener('message',capture); }`],
+  ["Ask bounds streamed and completed history before the next question", "", askOpen + `
+    askSend('A long answer'); const first=ASK.current;
+    wrapper(first,'answer_delta',{text:'a'.repeat(9000)}); wrapper(first,'answer_delta',{text:'b'.repeat(9000)}); await settle();
+    if (ASK.log.at(-1).text.length!==16000) return 'cumulative streaming answer must stop at LIMITS.message=16000';
+    wrapper(first,'answer',{text:'c'.repeat(20000)}); wrapper(first,'done',{}); await settle();
+    if (ASK.log.at(-1).text.length!==16000 || ASK.busy) return 'completed answer must fit the next request history';
+    const sent=[], capture=e=>{if(e.source===parent && e.data?.kicadReviewAskQuestion) sent.push(e.data.kicadReviewAskQuestion);};
+    addEventListener('message',capture);
+    try {
+      askSend('A question after the long answer'); await settle();
+      const q=sent[0], history=q?.messages.find(m=>m.role==='assistant');
+      if (!q || !history || history.text!=='c'.repeat(16000) || q.messages.some(m=>m.text.length>16000) || q.messages.at(-1).text!=='A question after the long answer') return 'oversized answer poisoned outgoing history';
+      wrapper(q.id,'answer',{text:'Next question succeeded.'}); wrapper(q.id,'done',{}); await settle();
+      return !ASK.busy && !ASK.log.at(-1).error && document.querySelector('#ask-log').textContent.includes('Next question succeeded.') || 'next question did not complete';
+    } finally { removeEventListener('message',capture); }`],
 
 ];
 

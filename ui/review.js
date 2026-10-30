@@ -8,9 +8,12 @@ const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "ch
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
+// Ask about this design. The report cannot connect anywhere; the wrapper page relays (site/ask-client.js).
+const ASK = { on: parent !== window && !!D.settings?.ask?.enabled, ready: false, project: null, insight: null, insightError: "", log: [], busy: false, current: null, status: "", remaining: null, draft: "", insightId: null, asked: false };
+let askSeq = 0;
 S.issues = null;
 S.units = "mm"; S.grid = true; S.imageSelection = null;
-const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
+const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge, ask: ASK.on });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
@@ -48,9 +51,11 @@ function findingAnchor(v) {
   return { v: 1, project: P.dir, file, sheet: view === "board" ? null : view.slice(6), layer: null, target: "point",
     uuid: null, kind: null, ref: null, x: round3(v.pos[0]), y: round3(v.pos[1]), side: "head", commit: D.head, severity: "comment" };
 }
-function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON) {
+function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON, askOn = ASK.on) {
   if (e.source !== parent) return false;
   let accepted = false;
+  if (askOn && e.data?.kicadReviewAskReady === true) { ASK.ready = true; if (S.v) renderPanel(); accepted = true; }
+  if (askOn && e.data?.kicadReviewAskEvent && e.data.kicadReviewAskEvent === Object(e.data.kicadReviewAskEvent)) { askEvent(e.data.kicadReviewAskEvent); accepted = true; }
   if (on && Array.isArray(e.data?.kicadReviewThreads)) { acceptThreads(e.data.kicadReviewThreads); accepted = true; }
   if (issuesOn && Array.isArray(e.data?.kicadReviewIssues)) { acceptIssues(e.data.kicadReviewIssues); accepted = true; }
   return accepted;
@@ -246,7 +251,7 @@ function valid(st) {   // drop anything that does not exist in this report
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
+  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance" || st.t === "ask" && ASK.on) out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -2118,6 +2123,129 @@ function renderThreads() {
     ${detached.length ? `<details class="threads-detached" open><summary>Detached (${detached.length})</summary>${detached.map(t => cardFor(t) + `<span class="thread-note">${esc(resolveAnchor(t.anchor).detached)}</span>`).join("")}</details>` : ""}`;
   return (S.threads ? discussions : "") + (issues.length ? `<details class="issues-group" open><summary>Issues (${issues.length})</summary>${issues.map(i => `<a class="thread-card" data-issue="${i.number}" href="${esc(i.url)}" target="_blank" rel="noopener">#${i.number} ${esc(i.title)} <span class="muted">${esc(i.anchor.ref || "point")}</span></a>`).join("")}</details>` : "");
 }
+function askKnown() {
+  const p = proj(), objects = p.objects || [], nets = p.ask?.nets || {};
+  return {ref: n => objects.some(o => o.ref === n || o.ref.startsWith(n + " unit ")),
+    net: n => ["base", "head"].some(side => Object.hasOwn(nets[side] || {}, n))};
+}
+async function askGo(kind, name, preferredSide = "head") {
+  const p = proj(), objects = p.objects || [];
+  if (kind === "net") {
+    // ponytail: unqualified citations prefer head; callers discussing base may pass preferredSide="base".
+    const order = [preferredSide, preferredSide === "head" ? "base" : "head"];
+    const side = order.find(side => Object.hasOwn(p.ask?.nets?.[side] || {}, name));
+    if (!side) return;
+    const geometry = p.board?.geometry?.[side];
+    let scene = null;
+    try { if (geometry) scene = await loadBoardScene(geometry); } catch { /* documented fallback below */ }
+    if (p !== proj()) return;
+    const net = scene?.nets.find(n => n.name === name);
+    const boxes = net ? scene.objects.filter(o => o.net === net.id).map(BoardDiff.objectBounds).filter(Boolean) : [];
+    if (boxes.length) {
+      S.s = null; S.io = null; S.v = "board"; S.m = "side"; S.layers = null;
+      S.revision = side; renderNav(); renderPanel(); await draw(); saveHash();
+      if (p !== proj()) return;
+      changeBoardAppearance({selectedNet: name, activeLayer: null, layers: Object.fromEntries(scene.layers.filter(l=>l.enabled).map(l=>[l.name,{visible:true}]))});
+      zoomTo([Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))]);
+      ASK.status = "Net " + name + " highlighted on " + side; askRefresh(); saveHash(); return;
+    }
+    ASK.status = "Board geometry unavailable for " + name + " (" + side + "); showing a connected part instead, not a net highlight.";
+    const ref = p.ask.nets[side][name].fallback_ref;
+    const i = objects.findIndex(o => (o.ref === ref || o.ref.startsWith(ref + " unit ")) && (!o.side || o.side === side));
+    if (i >= 0) await goToObject(i); else { S.revision = side; await draw(); saveHash(); }
+    askRefresh(); return;
+  }
+  const match = o => o.ref === name || o.ref.startsWith(name + " unit ");
+  const symbol = objects.findIndex(o => match(o) && o.kind === "symbol");
+  const i = symbol >= 0 ? symbol : objects.findIndex(match);
+  if (i >= 0) await goToObject(i); // Desktop object navigation preserves the object's revision before drawing.
+}
+// A comparison report falls back to Changes; a single-design page (06's body.design-single) has no Changes tab, so it falls back to Checks.
+const fallbackTab = () => document.body.classList.contains("design-single") ? "checks" : "changes";
+// Shared focus: askGo keeps its own entry point for Ask links, and 10's focusIdentity (spec 10, Task 13) implements the same whole-net highlight from project.identity. Whichever of 09 or 10 merges second consumes the other's function; the symbol fallback above is never presented as a whole-net highlight.
+
+function askReset() { if (ASK.project !== proj().dir) Object.assign(ASK, { project: proj().dir, insight: null, insightId: null, asked: false, insightError: "", log: [], busy: false, current: null, status: "", draft: "", remaining: null }); }
+function renderAsk() {
+  askReset();
+  if (!ASK.insight && !ASK.insightError && ASK.ready && !ASK.asked) { ASK.asked = true; ASK.insightId = "insight:" + encodeURIComponent(ASK.project) + ":" + (++askSeq); parent.postMessage({ kicadReviewAskInsight: { id: ASK.insightId, project: ASK.project } }, "*"); }
+  return `<div class="ask" id="ask-root">
+    <p class="ask-notice" role="note">Your questions and this design's contents (parts, nets, check results and changes) are sent to Anthropic's Claude API to answer. The repository owner turned this on.</p>
+    <div id="ask-top">${askTop()}</div>
+    <ol id="ask-log" class="ask-log" aria-live="polite" aria-label="Conversation">${askLog()}</ol>
+    <form class="ask-form" id="ask-form"><label class="ask-label" for="ask-input">Ask about this board</label>
+      <textarea id="ask-input" rows="2" maxlength="4000" enterkeyhint="send" placeholder="Which GPIO drives the LED?">${esc(ASK.draft)}</textarea>
+      <div class="ask-row"><span class="muted" id="ask-meta">${askMeta()}</span><button type="submit" class="ask-send" ${ASK.busy ? "disabled" : ""}>${ASK.busy ? "Answering…" : "Ask"}</button></div></form></div>`;
+}
+const askMeta = () => esc(ASK.status || (ASK.remaining == null ? "Enter sends, Shift+Enter adds a line." : `${ASK.remaining} question${ASK.remaining === 1 ? "" : "s"} left today`));
+function askTop() {
+  if (ASK.insightError) return `<p class="ask-error" role="alert">${esc(ASK.insightError)}</p>`;
+  if (!ASK.insight) return '<p class="muted ask-summary">Reading the design…</p>';
+  const q = ASK.insight.questions.map(t => `<button type="button" class="ask-chip" data-ask-q="${esc(t)}">${esc(t)}</button>`).join("");
+  return `<section class="ask-summary"><p>${esc(ASK.insight.summary)}</p><button type="button" class="ask-chip" data-ask-more>Tell me more</button></section>${q ? `<p class="ask-h">Try asking</p><div class="ask-try">${q}</div>` : ""}`;
+}
+function askLog() {
+  const known = askKnown();
+  return ASK.log.map((m, i) => m.role === "user" ? `<li class="ask-msg user"><span class="ask-who">You</span>${esc(m.text)}</li>`
+    : `<li class="ask-msg assistant"><span class="ask-who">Claude</span>${m.error ? `<p class="ask-error" role="alert">${esc(m.error)}</p>` : KrAsk.render(m.text, known) || `<p class="muted">${esc(ASK.status || "Thinking…")}</p>`}
+    ${m.followups?.length && i === ASK.log.length - 1 && !ASK.busy ? `<div class="ask-try">${m.followups.map(t => `<button type="button" class="ask-chip" data-ask-q="${esc(t)}">${esc(t)}</button>`).join("")}</div>` : ""}</li>`).join("");
+}
+function askRefresh() {
+  if (rightTab !== "ask" || ASK.project !== proj().dir) return;
+  const top = $("#ask-top"), log = $("#ask-log"), meta = $("#ask-meta"), send = $("#ask-form .ask-send");
+  if (!top || !log) return renderPanel();
+  const scroller = $("#panel-body");
+  const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+  top.innerHTML = askTop(); log.innerHTML = askLog(); meta.innerHTML = askMeta(); send.disabled = ASK.busy; send.textContent = ASK.busy ? "Answering…" : "Ask";
+  if (atEnd) scroller.scrollTop = scroller.scrollHeight;
+}
+// Suggestion clicks intentionally replace/clear any existing draft, exactly like submitting the form.
+function askSend(text) {
+  askReset();
+  text = String(text || "").trim().slice(0, 4000);
+  if (!text || ASK.busy || !ASK.ready) return;
+  const messages = [];
+  for (let i = 0; i + 1 < ASK.log.length; i += 2) if (ASK.log[i + 1].text && !ASK.log[i + 1].error) messages.push({ role: "user", text: ASK.log[i].text }, { role: "assistant", text: ASK.log[i + 1].text });
+  messages.push({ role: "user", text });
+  ASK.log.push({ role: "user", text }, { role: "assistant", text: "" });
+  ASK.busy = true; ASK.status = ""; ASK.current = "q" + (++askSeq); ASK.draft = "";
+  parent.postMessage({ kicadReviewAskQuestion: { id: ASK.current, project: proj().dir, messages: messages.slice(-20) } }, "*");
+  const input = $("#ask-input"); if (input) input.value = "";
+  askRefresh();
+}
+function askEvent({ id, event, data }) {
+  // String(q) === q: primitive strings only.
+  const text = q => String(q) === q && !!q.trim();
+  const str = (v, n) => String(v ?? "").slice(0, n), list = v => (Array.isArray(v) ? v : []).filter(text).slice(0, 3).map(q => q.slice(0, 200));
+  if (ASK.project !== proj().dir) return;
+  if (id === ASK.insightId) {
+    if (event === "insight" && text(data?.summary) && Array.isArray(data.questions) && data.questions.filter(text).length === 3) ASK.insight = { summary: str(data.summary.trim(), 1500), questions: data.questions.filter(text).map(q => str(q.trim(), 200)).slice(0, 3) };
+    else if (event === "insight" || event === "error") ASK.insightError = str(data?.message, 300) || "The summary or its three suggested questions could not be loaded.";
+  } else if (id === ASK.current) {
+    const m = ASK.log.at(-1);
+    if (event === "start") ASK.remaining = Number.isFinite(data?.remaining) ? data.remaining : null;
+    else if (event === "status") ASK.status = str(data?.text, 100);
+    // Match site/ask.js LIMITS.message: cap the whole accumulated answer, not just each delta.
+    // ponytail: retain only the first 16,000 characters for display/history; longer provider output is truncated.
+    else if (event === "answer_delta") m.text = (m.text + str(data?.text, 16000)).slice(0, 16000);
+    else if (event === "answer") { m.text = str(data?.text, 16000); m.complete = true; }
+    else if (event === "followups") m.followups = list(data?.questions);
+    else if (event === "error") { m.complete = false; m.error = str(data?.message, 300) || "Ask failed."; ASK.busy = false; }
+    else if (event === "done") { ASK.busy = false; ASK.status = ""; }
+  }
+  askRefresh();
+}
+function askBind() {
+  const root = $("#ask-root"), input = $("#ask-input");
+  root.onclick = e => {
+    const link = e.target.closest("[data-ask-ref], [data-ask-net]"), chip = e.target.closest("[data-ask-q]");
+    if (link) askGo(link.hasAttribute("data-ask-net") ? "net" : "ref", link.dataset.askNet ?? link.dataset.askRef);
+    else if (chip) askSend(chip.dataset.askQ);
+    else if (e.target.closest("[data-ask-more]") && ASK.insight) askSend(`Tell me more about this, from the summary shown above:\n\n"${ASK.insight.summary}"`);
+  };
+  input.oninput = () => { ASK.draft = input.value; };
+  input.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); askSend(input.value); } };
+  $("#ask-form").onsubmit = e => { e.preventDefault(); askSend(input.value); };
+}
 function libInfoHtml(c) {
   return `<div class="lib-info"><p><b>${esc(c.lib)}:${esc(c.item)}</b> · ${esc(c.kind)} · ${esc(c.status)}${c.note ? ` · ${esc(c.note)}` : ""}</p>
     ${c.warnings.map(w => `<p class="lib-warn">${esc(w)}</p>`).join("")}
@@ -2149,16 +2277,18 @@ function renderPanel() {
   if (S.t === "parts" && !p.parts) S.t = "changes";
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
   if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
+  if (S.t === "ask" && !(ASK.on && ASK.ready)) S.t = fallbackTab();
   if (S.t !== "appearance") rightTab = S.t;
   if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = "changes";
+  if (rightTab === "ask" && !(ASK.on && ASK.ready)) rightTab = fallbackTab();
   const panelTab = rightTab;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
-  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
+  const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "ask" ? "Ask needs the connected review site and [ask] enabled in kicad-review.toml" : name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
-    (panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
+  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}${ASK.on ? tab("ask", "Ask", ASK.ready) : ""}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
+    (panelTab === "ask" ? renderAsk() : panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     ${dockListTools("changes", f)}
     ${p.objects ? `<div class="filters inv-toggle"><button class="check-chip" data-inv="0" aria-pressed="${!f.all}">Changes</button><button class="check-chip" data-inv="1" aria-pressed="${f.all}">All parts ${p.objects.length}</button></div>` : ""}
@@ -2167,6 +2297,7 @@ function renderPanel() {
       <select class="kind"><option value="">All kinds</option>${kinds.map(k => `<option ${k === f.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>`}
     <div class="cards">${f.all ? inventoryHtml() : cardsHtml()}</div>${S.v === "3d" && p.board.no_model?.length ? `<details class="no-models" open><summary>Parts without a 3D model (${p.board.no_model.length})</summary>${p.board.no_model.map(x => `<button data-no-model="${esc(x.ref)}"><b>${esc(x.ref)}</b> <span class="muted">${esc(x.reason)}</span></button>`).join("")}</details>` : ""}</div>`);
   bindRightDock();
+  if (panelTab === "ask") askBind();
   for (const input of document.querySelectorAll("#panel [data-list-search], #panel [data-list-sort], #panel [data-list-group]")) {
     const attribute = input.hasAttribute("data-list-search") ? "search" : input.hasAttribute("data-list-sort") ? "sort" : "group";
     const name = input.getAttribute(`data-list-${attribute}`), state = name === "checks" ? S.checks : name === "parts" ? S.partsFilter : S.filter;
