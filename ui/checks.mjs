@@ -1247,6 +1247,19 @@ export const CHECKS = [
   const row = [...document.querySelectorAll('.parts-row')].find(r => r.querySelector('.parts-refs')?.textContent === 'R1');
   return document.querySelectorAll('.parts-row').length === 5 && !document.querySelector('.bom-table') && row?.textContent.includes('~') && row.textContent.includes('OLD-MPN → RC0603') || 'MPN-only change must show badge and old/new MPN in Problems';
 `],
+  ["Parts fixture BOM renders the same from old lines with key and nulls and from compact lines", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, original = parts.lines;
+  const bomRows = () => { setDock('panel', true); S.t = 'parts'; S.partsView = 'bom'; renderPanel(); return [...document.querySelectorAll('.bom-row')].map(r => r.textContent).join('|'); };
+  try {
+    if (!original.some(l => 'key' in l) || !original.some(l => l.mpn === null)) return 'fixture must keep the old line shape (key and null fields)';
+    const old = bomRows();
+    if (!old) return 'old-shape BOM rendered no rows';
+    parts.lines = original.map(l => Object.fromEntries(Object.entries(l).filter(([k, v]) => k !== 'key' && v !== null)));
+    if (parts.lines.some(l => 'key' in l)) return 'compaction failed';
+    return bomRows() === old || 'compact lines render differently';
+  } finally { parts.lines = original; S.partsView = 'problems'; renderPanel(); }
+`],
   ["Parts fixture BOM MPN removal keeps the previous number and change badge", "", `
   if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
   const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalChanges = parts.changes;

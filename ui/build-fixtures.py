@@ -28,7 +28,7 @@ def build_pages(output):
         })
     data = {"version": 1, "repo": "example/multi", "base": "base", "head": "head", "reason": "Multi-board fixture",
             "links": {}, "blobs": {}, "projects": projects, "bom": k.bom_repository(boards, "jlcpcb")}
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    payload = json.dumps(k.compact_bom_lines(data), ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
     (output / "multiboard.html").write_text(k.inline_page(f"window.REVIEW_DATA = {payload};"), encoding="utf-8")
 
 

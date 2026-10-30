@@ -26,6 +26,7 @@ assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]
 import json
 import pickle
 from kicad_review import Quoted, is_net_number
+from kicad_review import compact_bom_lines
 numeric_tokens = parse_sexpr('(net "12" 12)')
 assert numeric_tokens == ['net', '12', '12']
 assert isinstance(numeric_tokens[1], Quoted) and not is_net_number(numeric_tokens[1])
@@ -1498,7 +1499,9 @@ try:
                 embedded = json.loads(payload)
                 assert embedded == opted_out_embedded
                 del embedded["blobs"]
-                assert embedded == data
+                assert embedded == compact_bom_lines(data)
+                assert all("key" not in l and None not in l.values() for q in embedded["projects"] if "parts" in q for l in q["parts"]["lines"]), "embedded lines drop key and null fields"
+                assert all("key" in l for q in data["projects"] if "parts" in q for l in q["parts"]["lines"]), "data.json keeps them"
                 assert "bom" not in data, "single-project reports keep their existing payload shape"
         # Report-level BOM appears in both offline HTML and JSON only with multiple opted-in projects.
         multi_projects = [{"dir": b["name"], "name": b["name"], "status": "modified"} for b in boards]
@@ -1512,7 +1515,7 @@ try:
             multi_data = json.loads(pathlib.Path("review/data.json").read_text())
             embedded = json.loads(pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
             del embedded["blobs"]
-            assert embedded == multi_data
+            assert embedded == compact_bom_lines(multi_data)
             assert ("bom" in multi_data) == enabled
             if enabled:
                 assert multi_data["bom"] == combined

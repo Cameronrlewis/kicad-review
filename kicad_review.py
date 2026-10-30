@@ -2313,6 +2313,18 @@ def bom_repository(boards, preset, part_field=None):
             "exports": bom_exports(lines, preset, part_field, objects)}
 
 
+def compact_bom_lines(data):
+    """Copy of the report data with each BOM line's derived `key` and null optional fields left out, for the embedded page only.
+    Python keeps both in memory and in review/data.json; the page never reads `key` and treats a missing optional field as null."""
+    slim = lambda l: l and {k: v for k, v in l.items() if k != "key" and not (v is None and k in ("lcsc", "mpn", "manufacturer", "datasheet"))}
+    out = {**data, "projects": [{**p, "parts": {**p["parts"], "lines": [slim(l) for l in p["parts"]["lines"]],
+                                                 "changes": [{**r, "before": slim(r["before"]), "after": slim(r["after"])} for r in p["parts"]["changes"]]}}
+                                if p.get("parts") else p for p in data["projects"]]}
+    if data.get("bom"):
+        out["bom"] = {**data["bom"], "lines": [slim(l) for l in data["bom"]["lines"]]}
+    return out
+
+
 def diff_parts(base, head):
     """What a change did to the parts list, per reference designator, grouped back into lines."""
     at = lambda lines: {r: l for l in lines for r in l["refs"]}
@@ -3013,7 +3025,7 @@ def cmd_report(args):
         data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
                            "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
-    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
+    payload = json.dumps(compact_bom_lines(data), separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
     html = inline_page(f"window.REVIEW_DATA = {payload};")
     with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
