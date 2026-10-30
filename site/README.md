@@ -46,8 +46,10 @@ npx wrangler login
 npx wrangler secret put GITHUB_CLIENT_ID
 npx wrangler secret put GITHUB_CLIENT_SECRET
 npx wrangler secret put SESSION_KEY
-npx wrangler deploy
+npx --yes wrangler@4.148.0 deploy --var DEPLOY_SHA:$(git rev-parse HEAD)
 ```
+
+Run the deploy command from `site/` in the approved checkout. It records the full serving commit in the page footer, `<meta name="deploy-sha">`, and the `X-Deploy-Sha` response header. The deployment workflow passes `${{ github.sha }}` through the same `DEPLOY_SHA` variable. An unset or invalid variable displays `unknown`, never a guessed commit. Verify this value against the intended tools SHA before hosted checks; the report's base/head commits identify the design, not the deployed interface.
 
 Keep `keep_names = false` in `site/wrangler.toml`. The thread client (`threadsClient`) is shipped to the browser via `.toString()`; name-preserving build helpers would not exist there.
 
@@ -89,3 +91,23 @@ Cloudflare Workers' free plan has 100,000 requests a day and costs $0. Reports a
 - A review whose artifact expired shows “expired — rerun”.
 - The report page's Copy link may be limited inside the sandbox.
 - Sign-in tokens last 8 hours and are refreshed for up to 6 months.
+
+### Optional private-asset browser checks
+
+`site/asset-cache.test.mjs` uses Node 22's built-in fetch and WebSocket with
+`site/test-cdp.mjs`; no study checkout or npm package is required. It skips with
+an explanation when no dedicated Chrome debug endpoint is reachable. These
+checks are not CI gates because they require an already-running Chrome.
+
+Start a separate **headless** Chrome with a fresh temporary profile and a debug
+port such as 9223, then run from the repository root:
+
+```sh
+CDP_PORT=9223 node --import ./site/css-loader.mjs --test site/asset-cache.test.mjs
+node --test site/test-cdp.test.mjs
+```
+
+Never use the study browser on port 9222. The helper creates and closes only its
+own test tabs; it does not activate windows or stop Chrome. Stop your dedicated
+headless Chrome and remove its temporary profile afterward. `FRAME_CDP` may
+point to an alternate module exporting the same `FrameCDP` API.

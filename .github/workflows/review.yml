@@ -216,6 +216,16 @@ jobs:
           path: review/${{ steps.report.outputs.name }}
           retention-days: 90
 
+      - name: Upload image assets
+        if: steps.detect.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kicad-review-image-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          archive: true
+          path: review/assets/
+          retention-days: 90
+          if-no-files-found: ignore
+
       - name: Screenshots of changed drawings
         if: steps.detect.outputs.changed == 'true'
         continue-on-error: true

@@ -251,7 +251,10 @@ Ctrl+U toggles schematic coordinates between mm and mil without moving the view.
 PageUp/PageDown visit the previous/next sheet by page number; Alt+Up visits the
 parent. The hierarchy shows Name (page n), with the active sheet in bold.
 
-Schematic colours use an exact-value map from KiCad's default SVG palette.
+Schematic artwork is decoded SVG **images**, not thousands of live SVG paths.
+Light and dark exports retain KiCad colours. Custom paints rewrite exact palette
+values once per appearance change, never per camera frame.
+Schematic colours use an exact-value map from KiCad's exported SVG palette.
 Roles with the same exported RGB value stay linked. Unknown/custom export
 colours are preserved. Schematic diff outlines and recolour/hatch marks use
 changed bounding regions because CLI SVG paths do not carry object UUIDs.
@@ -314,7 +317,9 @@ A current browser needs WebGL2 with stencil support plus the native gzip
 `DecompressionStream` API for geometry. Unsupported drawable types make that revision
 incomplete: the **authoritative KiCad-exported SVG** is retained, not a partially drawn
 WebGL board. Old reports, invalid scenes, unavailable WebGL2 and context loss also use
-SVG with a diagnostic and reduced Appearance controls. Existing SVG Side, Overlay,
+stacked SVG images with a diagnostic and reduced Appearance controls. Each layer
+receives opacity once, preserving overlap, all four copper layers and physical
+order (reversed when flipped). Existing SVG Side, Overlay,
 Wipe, Blend and Semantic comparisons remain available. Stage 4 supplies geometry and
 Appearance; Stage 5 enables the new WebGL diff compositor (already integrated in this
 branch). This does not claim the later change-mark styling is complete.
@@ -360,6 +365,28 @@ To refresh the sample, take the data out of any generated report (a CI artifact 
 python3 -c "import re; h = open('kicad-review.html', encoding='utf-8').read(); open('ui/sample/review-data.js', 'w', encoding='utf-8').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
 ```
 
+### Image regression checks
+
+Images require **no new TOML setting** and no opt-in. The single downloaded HTML
+still embeds compressed artwork and data and works offline without external
+requests. Component/net search and identity-based inspection use sheet hotspots
+and board inspection graphs; older reports remain viewable but inspection may be
+unavailable when these optional manifests are absent.
+
+CI generates `images.html` from `ui/sample/review-data-images.js` through
+`inline_page`, alongside the legacy, 3D, Parts and unchanged-project fixtures.
+Run `node ui/check.mjs --no-skip "images screen and legacy appearance" --page
+/path/to/images.html --width 1440 --height 900 --dpr 2` for the desktop profile;
+repeat with `--dark`. Checks run sequentially.
+Use `--offline` against the inline page to block and detect external requests.
+
+The mandatory image matrix also covers comparisons, four copper layers, gesture
+pixels/lifecycle, fallback appearance, manifests/Home, added/removed revisions,
+inspection/search/anchors, and persisted themes in GL and fallback modes.
+Keep complete-screen captures for comparisons and inspection in both desktop themes. Review navigation, toolbar, stage, inspector, status, keyboard focus and
+search wrapping together; compare the whole four-layer board with KiCad 10, not
+just colour swatches.
+
 ### Data format
 
 The workflow and the page share one contract, `window.REVIEW_DATA` (`version: 1`): `repo`; `links`
@@ -372,6 +399,25 @@ and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `
 on every review, `board.model3d` has base/head GLB blob ids (or `null`), `enabled`, `changed`, and
 an `errors` map for unavailable exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
 footprint`). Positions and boxes are drawing millimetres.
+
+Image fields grow format v1 **additively**: sheets may add `svgThemes` and
+`hotspots` with base/head blob ids; board layers may add `svgThemes`, and the board
+may add `inspect` with base/head JSON blob ids. Existing `svg` fields remain the
+compatibility/default image. Missing revisions remain absent, not fabricated.
+Top-level `assets` declares digest-addressed SVG/JSON companions. Rendering writes
+these deterministic gzip sidecars alongside the offline HTML; CI uploads them in
+a separate archived `kicad-review-image-assets-<run_id>-<run_attempt>` artifact
+with 90-day retention, leaving the HTML artifact unchanged. Hosted delivery
+lazily requests only declared assets through the authenticated parent bridge.
+The sandbox remains network-isolated. Each asset reuse revalidates repository
+access and artifact expiry before a conditional 304 (`private,no-cache`, quoted
+ETag, `Vary: Cookie`).
+
+The current Worker reads the **entire stored HTML envelope for each asset**,
+then parses its data; it does not yet use indexed/range sidecar reads. There is
+no explicit envelope byte ceiling in this reader: available Worker memory/CPU
+bounds it, so lazy delivery does not promise unbounded report size or bounded
+server memory. The bridge separately caps decoded SVG at 8 MiB and JSON at 4 MiB.
 
 Unchanged sheets, board layers (including blank layers), board geometry, and enabled 3D views remain
 available at both revisions. The viewer labels these views “No layout changes”, “No schematic changes

@@ -1,3 +1,82 @@
+// These dependency-free browser functions are shared by CDP and Safari WebDriver
+// calibration. Compare actual composited screenshots, not a second SVG renderer.
+export async function softnessProbe(phase, scale) {
+  if (D.repo !== 'fixture/images') throw Error('image fixture required');
+  if (phase === 'full') {
+    await applyState({...S,v:'sheet:/left/',m:'side'});fit();
+    setT({x:140,y:109.8,z:S.z*scale});
+  } else {
+    const c=imageOwners()[0],vp=c.node.closest('.vp'),w=vp.clientWidth,h=vp.clientHeight;
+    c.endGesture(ImageView.cropRegion([S.x-w/(2*S.z),S.y-h/(2*S.z),w/S.z,h/S.z],[0,0,...currentView().size],c.viewBox));
+    for(let i=0;i<200&&!c.cropNode;i++)await new Promise(r=>setTimeout(r,10));
+    if(!c.cropNode?.complete)throw Error('vector crop not decoded');
+  }
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect();
+  return {left:r.left+vp.clientWidth/2+(138.5-S.x)*S.z,top:r.top+vp.clientHeight/2+(109.35-S.y)*S.z,
+    width:3*S.z,height:.85*S.z,zoom:S.z,viewport:[innerWidth,innerHeight],dpr:devicePixelRatio,userAgent:navigator.userAgent};
+}
+
+export async function softnessCompare(raw, rect) {
+  const images=await Promise.all(raw.map(async data=>{
+    const i=new Image();i.src='data:image/png;base64,'+data;await i.decode();
+    const c=document.createElement('canvas');c.width=i.width;c.height=i.height;
+    const x=c.getContext('2d');x.drawImage(i,0,0);
+    return {data:x.getImageData(0,0,c.width,c.height).data,w:c.width,h:c.height};
+  }));
+  const [a,b]=images,d=a.w/(visualViewport?.width||innerWidth);
+  if(a.w!==b.w||a.h!==b.h)throw Error('calibration screenshot dimensions changed');
+  let samples=0,changed=0,absoluteError=0,inkUnion=0,inkDisagreement=0,maxChannelError=0;
+  const counts=[0,0],bounds=[[Infinity,Infinity,-Infinity,-Infinity],[Infinity,Infinity,-Infinity,-Infinity]];
+  const masks=[new Set(),new Set()];
+  for(let y=Math.max(0,Math.floor(rect.top*d)-2);y<Math.min(a.h,Math.ceil((rect.top+rect.height)*d)+2);y++)
+    for(let x=Math.max(0,Math.floor(rect.left*d)-2);x<Math.min(a.w,Math.ceil((rect.left+rect.width)*d)+2);x++){
+      const k=(y*a.w+x)*4,ink=images.map(i=>i.data[k+1]>i.data[k]+30&&i.data[k+1]>i.data[k+2]+30);
+      samples++;
+      if(ink[0]||ink[1])inkUnion++;
+      if(ink[0]!==ink[1])inkDisagreement++;
+      let delta=0;
+      for(let j=0;j<3;j++){const error=Math.abs(a.data[k+j]-b.data[k+j]);absoluteError+=error;delta=Math.max(delta,error);}
+      if(delta>12)changed++;
+      maxChannelError=Math.max(maxChannelError,delta);
+      ink.forEach((present,i)=>{if(present){masks[i].add(y*a.w+x);counts[i]++;bounds[i][0]=Math.min(bounds[i][0],x);bounds[i][1]=Math.min(bounds[i][1],y);bounds[i][2]=Math.max(bounds[i][2],x);bounds[i][3]=Math.max(bounds[i][3],y);}});
+    }
+  if(!samples)throw Error('tiny-text region outside screenshot');
+  // Lost counters or merged/split strokes expose glyph-detail loss even when
+  // aggregate ink area and bounds happen to match. Low-scale subpixel glyphs
+  // are retained as observations, not mistaken for a raster-cap crossover.
+  const topology=masks.map((mask,i)=>{
+    if(!mask.size)return {components:0,holes:0};
+    const [x0,y0,x1,y1]=bounds[i],visited=new Set();let components=0,holes=0;
+    for(let y=y0-1;y<=y1+1;y++)for(let x=x0-1;x<=x1+1;x++){
+      const key=y*a.w+x;if(visited.has(key))continue;
+      const foreground=mask.has(key),todo=[[x,y]];let outside=false;visited.add(key);
+      while(todo.length){const [px,py]=todo.pop();
+        if(px===x0-1||px===x1+1||py===y0-1||py===y1+1)outside=true;
+        for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1],...(foreground?[[-1,-1],[-1,1],[1,-1],[1,1]]:[])]){
+          const nx=px+dx,ny=py+dy,n=ny*a.w+nx;
+          if(nx<x0-1||nx>x1+1||ny<y0-1||ny>y1+1||visited.has(n)||mask.has(n)!==foreground)continue;
+          visited.add(n);todo.push([nx,ny]);
+        }
+      }
+      if(foreground)components++;else if(!outside)holes++;
+    }
+    return {components,holes};
+  });
+  const regions=images.map(image=>{
+    const c=document.createElement('canvas'),x0=Math.max(0,Math.floor(rect.left*d)-2),y0=Math.max(0,Math.floor(rect.top*d)-2);
+    c.width=Math.min(image.w-x0,Math.ceil(rect.width*d)+4);c.height=Math.min(image.h-y0,Math.ceil(rect.height*d)+4);
+    const source=document.createElement('canvas');source.width=image.w;source.height=image.h;
+    source.getContext('2d').putImageData(new ImageData(image.data,image.w,image.h),0,0);
+    c.getContext('2d').drawImage(source,x0,y0,c.width,c.height,0,0,c.width,c.height);
+    return c.toDataURL('image/png').split(',')[1];
+  });
+  return {samples,changed,changedFraction:changed/samples,meanChannelError:absoluteError/(samples*3),maxChannelError,
+    inkUnion,inkDisagreement,inkDisagreementFraction:inkUnion?inkDisagreement/inkUnion:0,counts,bounds,topology,regions,
+    // This is a pixel-difference observation, not a universal softness trigger.
+    pixelIdentical:maxChannelError===0};
+}
+
 const BOARD_POINT_PROBE = `
     const occupied=({id,layer}={})=>{
       for(const pane of boardDiff.panes) for(const [side,scene] of Object.entries(pane.scenes)) {
@@ -43,59 +122,1158 @@ const MARK_STYLE_FIXTURE = `
     syncMarkStyles();
 `;
 // [name, url hash, body of an async function that returns true when the check passes]
+const gestureLifecycleCheck=['images gesture lifecycle','',`
+  if(D.repo!=='fixture/images')return 'skip';
+  const sheet=proj().sheets.find(s=>s.path==='/left/');
+  await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
+  const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+  const event=(type,id,dx=0,dy=0)=>vp.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerType:'mouse',pointerId:id,button:0,clientX:x+dx,clientY:y+dy}));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const z=S.z,owners=imageOwners(),cropMethods=owners.map(o=>o.crop);
+  let cropAttempts=0;
+  try {
+    owners.forEach(o=>{const crop=o.crop;o.crop=function(...args){cropAttempts++;return crop.apply(this,args);};});
+    vp.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-1,deltaMode:2,clientX:x,clientY:y}));
+    const snapshots=[...document.querySelectorAll('.gesture-snapshot')];
+    if(!snapshots.length)return 'active gesture did not allocate snapshot';
+    if(snapshots.some(c=>c.width*c.height>6000000))return 'snapshot exceeds 6 MP';
+    if(Math.abs(S.z/z-ImageView.wheelFactor(-1,2))>1e-8)return 'sheet wheel did not normalize page mode';
+    if(snapshots.some(c=>!c.closest('.layer')||!c.closest('.stack')))return 'snapshot outside revision/layer';
+    // Observe crop requests before decode, and wait for actual settlement rather than a fixed delay.
+    const deadline=performance.now()+2000;
+    while(!cropAttempts&&snapshots.some(c=>c.isConnected)&&performance.now()<deadline)await wait(10);
+    if(cropAttempts||owners.some(o=>o.cropNode))return 'uncalibrated environment enabled automatic cropping';
+    if(snapshots.some(c=>c.isConnected)||owners.some(o=>o.node.hidden))return 'gesture did not restore source artwork';
+  } finally {owners.forEach((o,i)=>{o.crop=cropMethods[i];});}
+  let picks=0;const pick=pickAt;pickAt=()=>picks++;
+  try {
+    const before=S.z;
+    event('pointerdown',101);event('pointermove',101,90,10);
+    if(S.z!==before||!document.querySelector('.gesture-snapshot'))return 'mouse pan changed zoom or missed snapshot';
+    event('pointerup',101,90,10);
+    if(picks)return 'pan synthesized click';
+    event('pointerdown',201);event('pointercancel',201);event('pointerup',201);
+    if(picks)return 'pointercancel synthesized click';
+    await wait(250);
+    if(document.querySelector('.gesture-snapshot'))return 'cancel left snapshot';
+    // A fresh mouse click still works after the canceled pointer map is cleared.
+    event('pointerdown',301);event('pointerup',301);
+    if(picks!==1)return 'pointercancel did not clear pointer map';
+  } finally {pickAt=pick;}
+  const create=URL.createObjectURL,revoke=URL.revokeObjectURL,urls=new Set();
+  try {
+    URL.createObjectURL=function(...args){const url=create.apply(this,args);urls.add(url);return url;};
+    URL.revokeObjectURL=function(url){urls.delete(url);return revoke.call(this,url);};
+    await draw();
+    const current=document.querySelector('#stage .vp'),rect=current.getBoundingClientRect();
+    current.dispatchEvent(new WheelEvent('wheel',{deltaY:-10,cancelable:true,clientX:rect.left+20,clientY:rect.top+20}));
+    const beforeView=S.v,oldURLs=[...urls];
+    await applyState({...S,v:'board'});await wait(200);
+    if(document.querySelector('.gesture-snapshot')||document.querySelector('[data-crop-view="'+beforeView+'"]'))return 'old gesture resurrected';
+    if(oldURLs.some(url=>urls.has(url)))return 'navigation retained image-owner URL';
+  } finally {URL.createObjectURL=create;URL.revokeObjectURL=revoke;}
+  return true;
+`];
+
 export const CHECKS = [
-  ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
-    const id = '__sch6_palette_probe__';
-    const source = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
-    cache[id] = source;
-    const view = {kind:'sheet', size:[10,10], layers:[{name:'probe', svg:{base:id,head:id}}]};
+  ['images search pointer activation without button focus','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const input=document.querySelector('#image-query');
+    for(const pointerType of ['mouse','mousedown']) {
+      input.focus();input.value='U2';input.dispatchEvent(new Event('input'));
+      const button=document.querySelector('#image-results button');
+      const down=pointerType==='mousedown'?new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}):
+        new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,pointerType});
+      button.dispatchEvent(down);
+      // Safari leaves buttons unfocused: an uncancelled press blurs to body before click.
+      if(!down.defaultPrevented){input.blur();input.dispatchEvent(new FocusEvent('focusout',{bubbles:true,relatedTarget:null}));}
+      await new Promise(resolve=>setTimeout(resolve,0));
+      button.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0,pointerType}));
+      if(!button.isConnected)return pointerType+' result removed before click';
+      button.click();
+      if(S.imageSelection?.ref!=='U2'||!document.querySelector('#image-results').hidden)return pointerType+' selection failed';
+    }
+    input.focus();document.querySelector('#stage .vp').focus();
+    input.dispatchEvent(new FocusEvent('focusout',{bubbles:true,relatedTarget:document.querySelector('#stage .vp')}));
+    await new Promise(resolve=>setTimeout(resolve,0));
+    if(!document.querySelector('#image-results').hidden)return 'keyboard departure kept results open';
+    return true;
+  `],
+  ['images search redraw preserves keyboard focus','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const input=document.querySelector('#image-query');
+    input.focus();input.value='U2';input.dispatchEvent(new Event('input'));
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+    const button=document.activeElement;
+    renderImageSearch();await Promise.resolve();
+    if(document.activeElement!==button||!button.isConnected)return 'unchanged search dropped keyboard focus';
+    await draw();await Promise.resolve();
+    if(document.activeElement!==button||document.querySelector('#image-results').hidden)return 'draw dropped keyboard focus';
+    button.click();
+    if(S.imageSelection?.ref!=='U2')return 'retained result activation failed';
+    return true;
+  `],
+  ['images numeric pick synchronizes change card','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    rightTab='changes';renderPanel();
+    const record=sheetImageElements('head')[0],change=proj().changes.find(c=>onView(c,S.v));
+    if(!record||!change)return 'fixture change missing';
+    const original=record.changeUuid;
+    record.changeUuid=change.uuid;
+    let scrolled=false;
+    const scroll=Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView=function(...args){if(this.dataset.id===change.id)scrolled=true;return scroll.apply(this,args);};
     try {
-      const sheet = await stack('head', view);
-      const svg = sheet.querySelector('svg'), path = svg.querySelector('path');
-      if (svg.style.stroke !== 'var(--sch-ink-a90000, #a90000)'
-        || path.style.getPropertyPriority('fill') !== 'important'
-        || !path.getAttribute('style').includes('var(--sch-ink-009600')) return false;
-      const themed = svg.outerHTML; themeSchematic(svg);
-      if (svg.outerHTML !== themed) return false;
-      document.documentElement.style.setProperty('--sch-ink-009600', '#135724');
-      for (const kind of ['board','lib']) {
-        const other = await stack('head', {...view, kind});
-        if (other.querySelector('svg').outerHTML.includes('--sch-ink-')) return false;
+      S.s=null;markSelected();
+      chooseImage(record,'head','symbol',[(record.bbox[0]+record.bbox[2])/2,(record.bbox[1]+record.bbox[3])/2]);
+      if(!S.imageSelection||S.s!==change.id)return 'numeric semantic selection missing';
+      const card=[...document.querySelectorAll('#panel [data-id]')].find(e=>e.dataset.id===change.id);
+      if(card?.getAttribute('aria-selected')!=='true')return 'matching change card not highlighted';
+      if(!scrolled)return 'matching change card not scrolled into view';
+    } finally {record.changeUuid=original;Element.prototype.scrollIntoView=scroll;}
+    return true;
+  `],
+  ['images bounded search and board facts','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const input=document.querySelector('#image-query');
+    if(!input)return 'component search missing';
+    if(!document.querySelector('#image-search-label').textContent.includes('1 component'))return 'sheet count missing';
+    input.focus();input.value='U2';input.dispatchEvent(new Event('input',{bubbles:true}));
+    if(document.querySelectorAll('#image-results button').length!==1)return 'search result';
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+    if(document.activeElement!==document.querySelector('#image-results button'))return 'keyboard search focus';
+    document.activeElement.click();
+    if(S.imageSelection?.ref!=='U2'||S.imageSelection.sheet!=='/right/')return 'search identity';
+    if(!document.querySelector('#image-results').hidden)return 'result disclosure stayed open';
+    const elements=sheetImageElements('head'),originalElements=elements.slice();
+    try {
+      for(let i=0;i<45;i++)elements.push({...elements[0],ref:'R'+(45-i),uuid:'search-stress-'+i});
+      input.value='R';input.dispatchEvent(new Event('input'));
+      const results=[...document.querySelectorAll('#image-results button')];
+      if(results.length!==20||!results[0].textContent.startsWith('R1 ·'))return 'unbounded or unnaturally ordered result DOM';
+    } finally {elements.splice(0,elements.length,...originalElements);}
+    input.focus();input.value='not-present';input.dispatchEvent(new Event('input'));
+    if(!document.querySelector('#image-results').textContent.includes('Try'))return 'empty search guidance';
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    await applyState({...S,v:'board',m:'side'});
+    if(!document.querySelector('#image-board-facts').textContent.includes('4 copper layers'))return 'Board facts missing';
+    if(!document.querySelector('#image-board-facts').textContent.includes('Size unavailable'))return 'null outline fabricated';
+    const graph=currentImageGraph('head'),originalNets=graph.nets,track=graph.tracks[0],originalNet=track.net;
+    const facts=document.querySelector('#image-board-facts').textContent;
+    if(!facts.includes(graph.stats.countsSource)||!facts.includes(graph.warnings.length+' warnings')||!facts.includes('truncated: '+Object.values(graph.truncated).some(Boolean)))return 'Board facts provenance missing';
+    try {
+      graph.nets=[{name:'AGND'},{name:'GND2'},{name:'GND'},{name:'12'},{name:'unconnected-U1-Pad2'}];
+      track.net='12';
+      input.value='gnd';input.dispatchEvent(new Event('input'));
+      if([...document.querySelectorAll('#image-results button')].map(b=>b.textContent).join(',')!=='GND,GND2,AGND')return 'net UI ranking';
+      input.value='';input.dispatchEvent(new Event('input'));
+      if(document.querySelector('#image-results').textContent.includes('unconnected-'))return 'unconnected net exposed';
+      input.value='12';input.dispatchEvent(new Event('input'));document.querySelector('#image-results button').click();
+      await draw();
+      if(S.imageSelection?.net!=='12'||!document.querySelector('#inspector').textContent.includes('12'))return 'numeric net search inspector';
+      document.querySelector('#image-search-clear').click();await draw();
+      if(S.imageSelection||document.querySelector('.image-selection'))return 'clear selection action';
+    } finally {clearImageSelection();graph.nets=originalNets;track.net=originalNet;}
+    return true;
+  `],
+  ['images inspect search and anchors','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    await applyState({...S,v:'sheet:/right/',m:'side'});
+    const vp=document.querySelector('#stage .stack.head').closest('.vp');
+    const world=vp.querySelector('.world'),origin=world.parentElement.getBoundingClientRect();
+    const p=new DOMPoint(102.54*PX,55*PX).matrixTransform(new DOMMatrix(getComputedStyle(world).transform));
+    pickImageAt(vp,new MouseEvent('click',{clientX:origin.left+p.x,clientY:origin.top+p.y}));
+    if(S.imageSelection?.kind!=='pin'||S.imageSelection.ref!=='U2'||S.imageSelection.sheet!=='/right/')return 'numeric pin selection missing';
+    if(!document.querySelector('#inspector').textContent.includes('U2'))return 'image inspector missing';
+    const search=document.querySelector('#image-search input');if(!search)return 'search host missing';
+    search.value='U2';search.dispatchEvent(new Event('input',{bubbles:true}));
+    const results=[...document.querySelectorAll('#image-search-results button')];
+    if(!results.length||!results[0].textContent.includes('U2')||results.length>20)return 'bounded search results';
+    search.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+    if(document.activeElement!==results[0])return 'search keyboard focus';
+    results[0].click();if(S.imageSelection?.ref!=='U2')return 'search selection not inspected';
+    search.value='absent-reference';search.dispatchEvent(new Event('input',{bubbles:true}));
+    if(document.querySelectorAll('#image-search-results button').length)return 'stale empty results';
+    const count=document.querySelector('#image-search-count');
+    if(count?.getAttribute('aria-live')!=='polite'||!count.textContent.includes('0 components found'))return 'live empty result count';
+    search.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    if(search.value||S.imageSelection||document.activeElement!==search)return 'Escape did not reset search selection';
+    {
+      const P=proj(), oldObjects=P.objects, oldMaps=P.sheets.map(s=>s.hotspots);
+      try {
+        P.sheets.forEach(s=>delete s.hotspots);
+        P.objects=[{kind:'symbol',uuid:'legacy-moved',ref:'U99',sheet:'/right/',
+          side:'head',pos:[110,65,0],pos_before:[100,55,0]}];
+        const a={target:'object',kind:'symbol',uuid:'legacy-moved',ref:'U99',project:P.dir,
+          sheet:'/right/',side:'base',commit:D.base,x:100,y:55};
+        const r=resolveAnchor(a);
+        if(r.side!=='head'||r.pos[0]!==110||r.pos[1]!==65)return 'legacy moved symbol frozen';
+        if(ImageView.pinPosition(a,[],[])!==null)return 'missing source misclassified as pin';
+      } finally {P.objects=oldObjects;P.sheets.forEach((s,i)=>{if(oldMaps[i])s.hotspots=oldMaps[i];});}
+    }
+    {
+      const saved={...S}, oldPost=parent.postMessage;
+      try {
+        await applyState({...S,v:'sheet:/right/',m:'side',x:100,y:55,z:8});
+        const vp=document.querySelector('#stage .stack.base')?.closest('.vp');
+        if(!vp)return 'base schematic viewport missing';
+        const posted=[];
+        const world=vp.querySelector('.world');
+        const point=new DOMPoint(100*PX,55*PX).matrixTransform(new DOMMatrix(getComputedStyle(world).transform));
+        const origin=world.parentElement.getBoundingClientRect();
+        try {
+          parent.postMessage=(message)=>posted.push(message);
+          if(typeof window.__checkMouseClick!=='function')return 'trusted mouse input unavailable';
+          const click=(x,y,button='left')=>new Promise(resolve=>{
+            window.__checkMouseDone=resolve;window.__checkMouseClick(JSON.stringify({x,y,button}));
+          });
+          const x=origin.left+point.x+3,y=origin.top+point.y+2;
+          let trusted=false;vp.addEventListener('click',e=>{trusted=e.isTrusted;},{once:true});
+          await click(x,y);
+          if(!trusted||S.imageSelection?.kind!=='pin'||S.imageSelection.side!=='base')return 'trusted pin inspection missing';
+          S.placing=true;
+          await click(x,y);
+          if(S.placing)return 'trusted placement click missed viewport';
+          // The context action uses the same raw pointer, not the selected world point.
+          const oldThreads=THREADS_ON;
+          try {
+            THREADS_ON=true;await click(x,y,'right');
+            const comment=[...document.querySelectorAll('.bench-context button')].find(b=>b.textContent==='Comment here');
+            if(!comment)return 'pin context comment missing';
+            const r=comment.getBoundingClientRect();await click(r.left+r.width/2,r.top+r.height/2);
+          } finally {THREADS_ON=oldThreads;closeBenchMenu(false);}
+          if(posted.filter(m=>m.kicadReviewPin).length!==2)return 'both pin posting entry points required';
+          if(posted.filter(m=>m.kicadReviewPin).some(m=>m.kicadReviewPin.x!==100||m.kicadReviewPin.y!==55||m.kicadReviewPin.uuid!=='placed'))return 'context pin endpoint misplaced';
+        } finally {parent.postMessage=oldPost;}
+        if(anchorAt(100+9/S.z,55,'base').target!=='point')return 'mouse reach exceeded';
+        const element=sheetImageElements('base').find(e=>e.uuid==='placed'), oldPins=element.pins;
+        try {
+          element.pins=[...oldPins,{number:'other',name:'other',x:100.5,y:55}];
+          if(anchorAt(100.45,55,'base').target!=='point')return 'selected pin stole nearer endpoint';
+        } finally {element.pins=oldPins;}
+        const anchor=posted.find(m=>m.kicadReviewPin)?.kicadReviewPin;
+        if(!anchor||anchor.uuid!=='placed'||anchor.sheet!=='/right/'||anchor.x!==100||anchor.y!==55)return 'posted pin moved to symbol origin';
+        const P=proj(), oldMaps=P.sheets.map(s=>s.hotspots);
+        try {
+          P.sheets.forEach(s=>{s.hotspots={...s.hotspots};delete s.hotspots.base;});
+          const headOnly=resolveAnchor({...anchor,commit:D.head,side:'head',x:102.54});
+          if(headOnly.pos_before!==undefined||!headOnly.added)return 'unavailable base fabricated before pin';
+          acceptThreads([{id:'image-pin-head-only',anchor:{...anchor,commit:D.head,side:'head',x:102.54},resolved:false,comments:[]}]);
+          drawPins();
+          if(vp.querySelector('.pin[data-thread="image-pin-head-only"]'))return 'unavailable base pin marker drawn';
+          if(!document.querySelector('#stage .stack.head').closest('.vp').querySelector('.pin[data-thread="image-pin-head-only"]'))return 'head-only pin marker missing';
+        } finally {P.sheets.forEach((s,i)=>{s.hotspots=oldMaps[i];});}
+        acceptThreads([{id:'image-pin-reopen',anchor,resolved:false,comments:[]}]);
+        await openThread('image-pin-reopen');drawPins();
+        const resolved=resolveAnchor(anchor);
+        if(!resolved.notes.some(n=>n.startsWith('moved since')))return 'moved pin note missing';
+        const background=anchorAt(99,49,'base');
+        if(background.target!=='point'||background.uuid!==null)return 'stale selected pin captured background placement';
+        if(resolved.pos[0]!==102.54||resolved.pos[1]!==55||resolved.view!=='sheet:/right/')return 'reopened pin misplaced';
+        // Existing drawPins uses millimetres through PX on .pin buttons; compare the bottom-center tip screen position
+        // to the reopened resolver position via its world transform, not to symbol placement.
+        const headViewport=document.querySelector('#stage .stack.head')?.closest('.vp');
+        const button=headViewport?.querySelector('.world .pin[data-thread="image-pin-reopen"]');
+        if(!button)return 'reopened pin not drawn';
+        const b=button.getBoundingClientRect(), pinWorld=button.closest('.world');
+        const expected=new DOMPoint(resolved.pos[0]*PX,resolved.pos[1]*PX).matrixTransform(new DOMMatrix(getComputedStyle(pinWorld).transform));
+        const pinRect=pinWorld.parentElement.getBoundingClientRect();
+        if(Math.hypot((b.left+b.right)/2-pinRect.left-expected.x,b.bottom-pinRect.top-expected.y)>2)return 'rendered thread pin not at endpoint';
+        const selected=hotspotViews(proj(),'head').find(v=>v.sheet==='/right/').elements.find(e=>e.uuid==='placed');
+        chooseImage(selected,'head','pin',resolved.pos,selected.pins.find(p=>p.number==='3'));
+        if(!document.querySelector('#inspector').textContent.includes('U2'))return 'reopened pin inspector missing';
+      } finally {
+        parent.postMessage=oldPost;delete window.__checkMouseDone;
+        document.body.classList.toggle('placing',!!saved.placing);
+        for(const key of Object.keys(S))if(!Object.hasOwn(saved,key))delete S[key];
+        Object.assign(S,saved);
+        await applyState(saved);Object.assign(S,saved);
+        renderPanel();renderInspector();drawImageSelection();drawPins();saveHash();
       }
-      const pixels = await raster('head', view, 10, 10);
-      return await svgText(id) === source && pixels[0] === 0 && pixels[1] === 150
-        && pixels[2] === 0 && pixels[3] === 255
-        && schematicPaint('#A90000') === schematicPaint('#a90000')
-        && schematicPaint('#F5F4EF') === '#F5F4EF';
+    }
+    return true;
+  `],
+  gestureLifecycleCheck,
+  ['images numeric revision routing and selection lifecycle','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    const click=(vp,point)=>{
+      const r=vp.getBoundingClientRect();
+      const screen=BoardGL.worldToScreen(point,{x:S.x,y:S.y,z:S.z,width:r.width,height:r.height,flip:flipOn()});
+      return pickImageAt(vp,{clientX:r.left+screen[0],clientY:r.top+screen[1],pointerType:'mouse'});
+    };
+    for(const mode of ['side','wipe','blend','overlay','semantic']) {
+      S.wipe=.5;S.blend=1;
+      await applyState({...S,v:'sheet:/right/',m:mode,x:105,y:55,z:15});
+      const vp=[...document.querySelectorAll('#stage .vp')].at(-1);
+      if(!click(vp,[mode==='wipe'?100:102.54,55])||S.imageSelection.ref!=='U2'||S.imageSelection.pin!=='3')return 'right instance '+mode;
+      if(S.imageSelection.side!==(mode==='wipe'?'base':'head'))return 'wrong revision '+mode;
+      if(!document.querySelector('#stage .image-selection'))return 'selection overlay '+mode;
+      if(mode==='blend') {
+        S.blend=0;await draw();click(document.querySelector('#stage .vp'),[100,55]);
+        if(S.imageSelection.side!=='base')return 'blend base endpoint';
+      }
+    }
+    await applyState({...S,v:'sheet:/left/',m:'side'});
+    if(S.imageSelection)return 'navigation retained selection';
+    click([...document.querySelectorAll('#stage .vp')].at(-1),[102.54,55]);
+    if(S.imageSelection.ref!=='U1'||S.imageSelection.sheet!=='/left/')return 'left instance identity';
+    const selection=JSON.stringify(S.imageSelection);await draw();
+    if(JSON.stringify(S.imageSelection)!==selection||!document.querySelector('.image-selection'))return 'redraw lost selection';
+    markSelected();if(S.imageSelection||document.querySelector('.image-selection'))return 'ordinary selection did not clear';
+    const inspect=proj().board.inspect,look=Appearance.get();
+    const original={...inspect};
+    try {
+      for(const side of ['base','head']) {
+        const graph=structuredClone(decodedBoardInspect.get(original[side]));
+        graph.tracks.forEach(t=>{t.net='12';t.uuid=side+'-'+t.uuid;});
+        graph.nets=[{name:'12',netClass:null}];
+        graph.pads=[{uuid:'pad-'+side,ref:'U7',pin:'2',net:'12',layers:['In1.Cu'],hidden:false,x:5,y:8,width:1,height:1,
+          geometry:{primitive:{shape:'rect',size:[1000,1000],center:[5000,8000],angle:0}}}];
+        inspect[side]='numeric-'+side;decodedBoardInspect.set(inspect[side],graph);
+      }
+      for(const flip of [false,true]) {
+        Appearance.patch({flip,layers:Object.fromEntries(['F.Cu','In1.Cu','In2.Cu','B.Cu'].map(l=>[l,{visible:l==='In1.Cu',opacity:1}]))});
+        await applyState({...S,v:'board',m:'side',layers:null,x:10,y:5,z:15});
+        const vp=[...document.querySelectorAll('#stage .vp')].at(-1);
+        if(!click(vp,[10,5])||S.imageSelection.kind!=='track'||S.imageSelection.net!=='12'||imageRecord(S.imageSelection).layer!=='In1.Cu')return 'copper numeric/hidden/flip '+JSON.stringify({flip,selection:S.imageSelection,layer:imageRecord(S.imageSelection)?.layer});
+        if(Appearance.get().netColors['12']?.[0]!==1)return 'net highlight missing';
+        clearImageSelection();await draw();
+        if(JSON.stringify(Appearance.get().netColors)!==JSON.stringify(look.netColors))return 'net colour not restored';
+        if(!click([...document.querySelectorAll('#stage .vp')].at(-1),[5,8])||S.imageSelection.kind!=='pad'||S.imageSelection.pin!=='2'||inspectorProperties().head.pin!=='2')return 'pad number missing from inspection';
+        await draw();
+        if(!boardDiff&&!document.querySelector('#stage .image-selection g rect'))return 'exact fallback pad geometry overlay missing';
+        Appearance.patch({netColors:{GND:[0,.2,.3,1]}});clearImageSelection();await draw();
+        if(Appearance.get().netColors.GND?.[1]!==.2)return 'selection restore overwrote intervening net edit';
+        Appearance.set({...Appearance.get(),netColors:look.netColors});await draw();
+        Appearance.patch({layers:{'In1.Cu':{opacity:0}}});await draw();
+        if(click([...document.querySelectorAll('#stage .vp')].at(-1),[10,5]))return 'zero opacity layer picked';
+      }
+    } finally {clearImageSelection();Object.assign(inspect,original);Appearance.set(look);}
+    return true;
+  `],
+  ['images active gesture pixels','', 'return true;'],
+  ['images deep vector crop pixels','', 'return true;'],
+  ['images vector crop ownership','', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const sheet=proj().sheets.find(s=>s.path==='/left/');
+    S.wipe=.3;await applyState({...S,v:'sheet:'+sheet.path,m:'wipe'});
+    const text=await svgText(sheet.svg.base),probe=await ImageView.mount(text,sheet.size,{side:'base',layer:'cache probe'});
+    const Parser=DOMParser;let parses=0;
+    try {
+      globalThis.DOMParser=class extends Parser {parseFromString(...args){parses++;return super.parseFromString(...args);}};
+      const first=await probe.crop([10,20,40,30]),second=await probe.crop([20,30,40,30]);
+      first.dispose();second.dispose();
+      if(parses!==1||probe.viewBox.join()!=='10,20,297,210')return 'vector source was reparsed or mutated';
+      await probe.setAppearance(new Map([['#009600','#135724']]));
+      const colored=await probe.crop([10,20,40,30]);
+      try {if(parses!==2||!colored.source.includes('#135724'))return 'crop reused stale appearance parse';}
+      finally {colored.dispose();}
+      for(const box of [[0,0,0,1],[0,0,1,-1],[0,0,NaN,1]]){
+        let failed=false;try{ImageView.vectorCrop(text,box,{});}catch{failed=true;}
+        if(!failed)return 'invalid vector crop accepted';
+      }
+    } finally {globalThis.DOMParser=Parser;probe.dispose();}
+    const owner=imageOwners()[0],vp=owner.node.closest('.vp');
+    const drawImage=CanvasRenderingContext2D.prototype.drawImage;
+    try {
+      CanvasRenderingContext2D.prototype.drawImage=()=>{throw Error('intentional snapshot failure');};
+      if(captureImageViewport(owner,vp,{x:S.x,y:S.y,z:S.z},[0,0,...currentView().size])!==null||owner.node.hidden)return 'failed snapshot hid source artwork';
+    } finally {CanvasRenderingContext2D.prototype.drawImage=drawImage;}
+    const region=ImageView.cropRegion([80,40,60,50],[0,0,...currentView().size],owner.viewBox);
+    owner.beginGesture();owner.endGesture(region);
+    for(let i=0;i<200&&!owner.cropNode;i++)await new Promise(r=>setTimeout(r,10));
+    if(!owner.cropNode?.complete||!owner.node.hidden||vp.querySelector('.gesture-snapshot'))return 'decoded crop did not replace snapshot';
+    const parsed=new DOMParser().parseFromString(await (await fetch(owner.cropNode.src)).text(),'image/svg+xml');
+    if(parsed.documentElement.getAttribute('viewBox')!==region.source.join(' '))return 'crop lost nonzero source origin';
+    if(owner.cropNode.parentElement!==owner.node.parentElement||!owner.cropNode.closest('.stack.base'))return 'crop escaped revision/layer clipping';
+    const transform=new DOMMatrix(owner.cropNode.style.transform);
+    if(Math.abs(transform.m41-region.world[0]*PX)>1e-4||Math.abs(transform.m42-region.world[1]*PX)>1e-4||
+      Math.abs(transform.m11-PX/S.z)>1e-5||Math.abs(transform.m22-PX/S.z)>1e-5)return 'crop lost world position';
+    owner.invalidateGesture();
+    if(owner.node.hidden||vp.querySelector('[data-crop-view]'))return 'crop invalidation left stale artwork';
+    setT({x:100,y:55,z:15});
+    const visible=[S.x-vp.clientWidth/(2*S.z),S.y-vp.clientHeight/(2*S.z),vp.clientWidth/S.z,vp.clientHeight/S.z];
+    owner.endGesture(ImageView.cropRegion(visible,[0,0,...currentView().size],owner.viewBox));
+    for(let i=0;i<200&&!owner.cropNode;i++)await new Promise(r=>setTimeout(r,10));
+    const retained=owner.cropNode?.src;if(!retained)return 'manual crop not decoded '+JSON.stringify({connected:owner.node?.isConnected,view:S.v});
+    gesture();setT({x:S.x+visible[2]*.01});await new Promise(r=>setTimeout(r,250));
+    if(owner.cropNode?.src!==retained)return 'pan within margin recreated vector crop';
+    gesture();setT({x:S.x+visible[2]*.3});
+    for(let i=0;i<200&&(!owner.cropNode||owner.cropNode.src===retained);i++)await new Promise(r=>setTimeout(r,10));
+    if(!owner.cropNode?.complete||owner.cropNode.src===retained)return 'pan outside margin did not replace crop';
+    owner.invalidateGesture();
+
+    const decode=HTMLImageElement.prototype.decode,create=URL.createObjectURL,revoke=URL.revokeObjectURL;
+    let release,started;const pending=new Promise(r=>started=r),urls=new Set();
+    try {
+      URL.createObjectURL=function(...args){const url=create.apply(this,args);urls.add(url);return url;};
+      URL.revokeObjectURL=function(url){urls.delete(url);return revoke.call(this,url);};
+      HTMLImageElement.prototype.decode=async function(){started();await new Promise(r=>release=r);return decode.call(this);};
+      owner.beginGesture();owner.endGesture(region);await pending;
+      // A new appearance invalidates the in-flight crop before its decode completes.
+      HTMLImageElement.prototype.decode=decode;
+      await owner.setAppearance(new Map());release();await new Promise(r=>setTimeout(r,30));
+      if(owner.cropNode||owner.node.hidden||vp.querySelector('.gesture-snapshot'))return 'late crop survived appearance';
+      await applyState({...S,v:'board'});
+      if(urls.size)return 'old image-owner URLs retained after navigation '+urls.size;
+      if(document.querySelector('[data-crop-view]')||document.querySelector('.gesture-snapshot'))return 'crop resurrected after navigation';
+    } finally {HTMLImageElement.prototype.decode=decode;URL.createObjectURL=create;URL.revokeObjectURL=revoke;}
+    return true;
+  `],
+  ['images compare and four copper layers readiness navigation and failures', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const oldCreate=BoardGL.create,oldDecode=HTMLImageElement.prototype.decode,state={...S},failed=boardView.failed;
+    let release;
+    const ready=()=>{const s=document.querySelector('#stage');return s.dataset.view==='board'&&s.dataset.boardReady===s.dataset.generation;};
+    const waitFor=async test=>{for(let i=0;i<200;i++){if(test())return;await new Promise(r=>setTimeout(r,10));}throw Error('navigation readiness timeout');};
+    try {
+      boardView.failed=null;
+      await applyState({...S,p:0,v:'board',m:'side'});
+      if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='gl')return 'initial GL readiness';
+      const renderers=boardView.renderers.map(renderer=>({renderer,draw:renderer.draw}));
+      try {
+        for(const {renderer} of renderers)renderer.draw=()=>false;
+        await draw();
+        if(document.querySelector('#stage').dataset.boardReady!==undefined)return 'old cumulative GL draws reported ready after failed draw';
+      } finally {for(const {renderer,draw} of renderers)renderer.draw=draw;await draw();}
+      for(const mode of ['overlay','wipe','blend','semantic','side']) {
+        await applyState({...S,m:mode});
+        if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='gl')return 'GL composition not ready '+mode;
+      }
+      const geometry=proj().board.geometry;
+      try {
+        for(const absent of ['base','head']) {
+          proj().board.geometry={...geometry,[absent]:null};await draw();
+          if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='gl')return 'present GL side not ready with absent '+absent;
+        }
+      } finally {proj().board.geometry=geometry;await draw();}
+      const staleGate=activeBoardGate,staleRenderer=boardView.renderers[0];
+      document.querySelector('#nav [data-view="sheet:/left/"]').click();
+      if(document.querySelector('#stage').dataset.boardReady!==undefined)return 'old board ready during click navigation';
+      await waitFor(()=>document.querySelector('#stage').dataset.view==='sheet:/left/'&&document.querySelector('#stage').dataset.imageReady==='true');
+      staleGate.record(staleRenderer,true);staleGate.finish(1);
+      if(document.querySelector('#stage').dataset.boardReady!==undefined)return 'delayed old draw published readiness';
+      document.querySelector('#nav [data-view="board"]').click();
+      await waitFor(ready);
+      if(document.querySelector('#stage').dataset.boardBackend!=='gl')return 'click back did not draw GL';
+      BoardGL.create=()=>null;boardView.failed=0;
+      let calls=0,decoded=0;
+      HTMLImageElement.prototype.decode=async function(){
+        if(++calls===2)throw Error('intentional board layer decode failure');
+        await oldDecode.call(this);decoded++;
+      };
+      await draw();
+      const broken=document.querySelector('#stage');
+      if(!decoded||!broken.querySelector('.image-error')||broken.dataset.boardReady!==undefined)return 'partial layer failure reported ready';
+      HTMLImageElement.prototype.decode=oldDecode;
+      await draw();
+      if(!ready()||document.querySelector('#stage').dataset.boardBackend!=='images')return 'fallback decode recovery';
+      let entered;
+      const waiting=new Promise(r=>{entered=r;}),blocked=new Promise(r=>{release=r;});
+      let delayed=false;
+      HTMLImageElement.prototype.decode=async function(){
+        await oldDecode.call(this);
+        if(!delayed){delayed=true;entered();await blocked;}
+      };
+      const pending=draw();await waiting;
+      await applyState({...S,v:'sheet:/left/'});
+      release();await pending;
+      const sheet=document.querySelector('#stage');
+      return sheet.dataset.view==='sheet:/left/'&&sheet.dataset.boardReady===undefined&&sheet.dataset.boardBackend===undefined||'delayed fallback mounted after navigation';
     } finally {
-      delete cache[id]; document.documentElement.style.removeProperty('--sch-ink-009600');
+      release?.();HTMLImageElement.prototype.decode=oldDecode;BoardGL.create=oldCreate;
+      boardView.failed=failed;await applyState(state);
     }
   `],
-["SCH6 exact paints preserve opacity unknown colours and geometry", "", `
-  const host = document.createElement('div');
-  host.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><g style="stroke:#009600;fill:none;stroke-opacity:.4"><path d="M1 1L9 9" fill="#FFFFC2"/><text opacity="0" stroke-opacity="0">Hidden</text></g><path fill="#123456" stroke="none"/><path style="fill:rgb(0,150,0);stroke:#009601"/></svg>';
-  const svg = host.firstChild, before = svg.querySelector('path').getAttribute('d');
-  document.body.append(host);
+  ['images compare and four copper layers', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const p=D.projects.findIndex(p=>p.board.layers.filter(l=>/^(F|In1|In2|B)[_.]Cu$/.test(l.name)).length===4);
+    if(p<0)return 'skip';
+    const old=BoardGL.create,look=Appearance.get(),state={...S},failed=boardView.failed;
+    const close=(a,b,t=2)=>a.every((v,i)=>Math.abs(v-b[i])<=t);
+    const pixel=(image,x,y,alpha=1)=>{const c=new OffscreenCanvas(400,200),ctx=c.getContext('2d');ctx.globalAlpha=alpha;ctx.drawImage(image,0,0,400,200);return [...ctx.getImageData(x,y,1,1).data];};
+    try {
+      boardView.failed=null;
+      await applyState({...S,p,v:'board',m:'side'});
+      let stage=document.querySelector('#stage');
+      if(stage.dataset.view!=='board'||stage.dataset.boardReady!==stage.dataset.generation||stage.dataset.boardBackend!=='gl')return 'GL generation not ready';
+      const prior=stage,priorGeneration=stage.dataset.generation;
+      await draw();stage=document.querySelector('#stage');
+      if(stage!==prior||stage.dataset.generation===priorGeneration||stage.dataset.boardReady!==stage.dataset.generation||stage.dataset.boardBackend!=='gl')return 'reused connected GL generation not ready';
+      BoardGL.create=()=>null;
+      boardView.failed=p;
+      const orders=[];
+      for(const flip of [false,true])for(const mode of ['side','overlay','blend','wipe','semantic']) {
+        Appearance.patch({flip});
+        await applyState({...S,p,v:'board',m:mode,layers:D.projects[p].board.layers.map(l=>l.name),x:10,y:5,z:20});
+        const stage=document.querySelector('#stage');
+        if(stage.dataset.view!=='board'||stage.dataset.boardReady!==stage.dataset.generation||stage.dataset.boardBackend!=='images')return 'fallback generation not ready '+mode;
+        const stacks=[...document.querySelectorAll('#stage .stack')],names=stacks[0];
+        if(mode==='side'&&stacks.some(st=>st.querySelectorAll('.layer[data-layer$="_Cu"] img').length!==4))return 'four decoded copper images per side required';
+        const copper=[...names.querySelectorAll('.layer')].map(e=>canon(e.dataset.layer)).filter(n=>n.endsWith('.Cu'));
+        if(new Set(copper).size!==4)return 'missing physical copper '+copper;
+        const order=KicadColors.boardPriority(boardView.scenes?.find(Boolean)||{layers:copper.map(name=>({name}))},flipOn()).filter(n=>copper.includes(n)).reverse();
+        if(copper.join()!==order.join())return 'wrong physical order '+copper;
+        if(mode==='side')orders.push(copper);
+        if(![...document.querySelectorAll('#stage img[data-image-artwork]')].every(i=>i.complete&&i.naturalWidth))return 'undecoded comparison';
+        if(document.querySelector('#stage .layer svg')||document.querySelector('#stage .layer[style*=filter]'))return 'live artwork/filter';
+        for(const st of stacks)for(const layer of st.querySelectorAll('.layer')) {
+          const side=st.classList.contains('base')?'base':'head',name=canon(layer.dataset.layer),adapter=st.imageOwners.find(a=>a.layer===name);
+          if(mode==='overlay') {
+            if(adapter.controller.source!==await svgText(D.projects[p].board.layers.find(l=>l.name===layer.dataset.layer).svgCompare[side]))return 'wrong comparison source';
+          } else if(name.endsWith('.Cu')&&!adapter.controller.appliedSource.includes(ImageView.rgbHex(KicadColors.layers[name])))return 'KiCad swatch '+name;
+        }
+        if(D.repo==='fixture/images') {
+          const blank=names.querySelector('[data-layer="Dwgs_User"] img');
+          if(!blank||pixel(blank,60,100)[3]!==0)return 'blank layer unavailable '+mode;
+          if(!document.querySelector('.no-change-notice'))return 'unchanged board unavailable';
+        }
+        if(document.querySelectorAll('#modes [data-mode]').length!==5||!document.querySelector('.diff-mark-legend'))return 'comparison controls/legend';
+      }
+      if(orders[0].join()!==[...orders[1]].reverse().join())return 'flip did not reverse copper';
+      // A two-layer Base must not impose its stack on a four-layer Head.
+      const scenes=boardView.scenes;
+      try {
+        boardView.scenes=[{...scenes[0],copperStack:['F.Cu','B.Cu']},scenes[1]];
+        const st=await stack('head',currentView());
+        try {
+          const copper=[...st.querySelectorAll('.layer')].map(l=>canon(l.dataset.layer)).filter(n=>n.endsWith('.Cu'));
+          if(copper.join()!=='F.Cu,In1.Cu,In2.Cu,B.Cu')return 'revision-specific physical order '+copper;
+        } finally {for(const owner of st.imageOwners)owner.dispose();}
+      } finally {boardView.scenes=scenes;}
+      // Same-layer overlap gets alpha once, not once per source path.
+      Appearance.patch({flip:false});
+      await applyState({...S,p,v:'board',m:'side'});
+      const front=[...appearanceBoardImages].find(a=>a.layer==='F.Cu');
+      const color=KicadColors.layers['F.Cu'];
+      await front.setAppearance({color,opacity:.5,visible:true});
+      const image=front.controller.node,alpha=+image.parentElement.style.opacity;
+      if(alpha!==.5*color[3])return 'layer wrapper alpha';
+      const single=pixel(image,60,100,alpha),overlap=pixel(image,120,100,alpha);
+      if(!close(single,overlap)||!close(single,[...color.slice(0,3),128]))return 'per-path opacity '+single+' / '+overlap;
+      // Producer resources: opaque board tint and untouched transparent background.
+      await applyState({...S,p,v:'board',m:'overlay'});
+      for(const side of ['base','head']) {
+        const img=document.querySelector('#stage .stack.'+side+' [data-layer="F_Cu"] img');
+        const expected=side==='base'?[217,26,38,255]:[26,153,51,255];
+        if(!close(pixel(img,60,100),expected)||pixel(img,399,199)[3]!==0)return 'board tint pixels '+side+' '+pixel(img,60,100);
+        // These producer layers contain only a horizontal stroke (zero-height bbox).
+        for(const name of ['In1_Cu','In2_Cu','B_Cu']) {
+          const line=document.querySelector('#stage .stack.'+side+' [data-layer="'+name+'"] img');
+          if(!close(pixel(line,10,4),expected))return 'producer collinear comparison clipped '+side+' '+name;
+        }
+      }
+      const composite=new OffscreenCanvas(400,200),ctx=composite.getContext('2d');
+      for(const side of ['base','head']) {
+        ctx.globalCompositeOperation=side==='base'?'source-over':'multiply';
+        ctx.drawImage(document.querySelector('#stage .stack.'+side+' [data-layer="F_Cu"] img'),0,0,400,200);
+      }
+      if(!close([...ctx.getImageData(60,100,1,1).data],[22,16,8,255]))return 'unchanged multiply pixel';
+      if(getComputedStyle(document.querySelector('#stage .stack.head')).mixBlendMode!=='multiply'||getComputedStyle(document.querySelector('#stage .world')).isolation!=='isolate')return 'missing multiply isolation';
+      return true;
+    } finally {BoardGL.create=old;Appearance.set(look);boardView.failed=failed;await applyState(state);}
+  `],
+  ['images comparison pixels legacy and bounded marks', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const state={...S},look=Appearance.get(),p=0,sheet=D.projects[p].sheets.find(s=>s.path==='/left/');
+    const compare=sheet.svgCompare,original=ImageView.comparisonSource;
+    const sample=(image,x,y)=>{const c=new OffscreenCanvas(1188,840),ctx=c.getContext('2d');ctx.drawImage(image,0,0,1188,840);return [...ctx.getImageData(x,y,1,1).data];};
+    const close=(a,b)=>a.every((v,i)=>Math.abs(v-b[i])<=2);
+    try {
+      // Legacy filters cover the viewBox, including zero-area artwork bboxes and wide strokes.
+      for(const viewBox of ['-20 -30 300 200','-20, -30, 300, 200','-20\\t-30\\n300 200']) {
+        for(const [path,points] of [['M10 60H250',[[100,90],[100,83]]],['M100 -10V150',[[120,80],[113,80]]]]) {
+          const source='<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" viewBox="'+viewBox+'"><path d="'+path+'" stroke="black" stroke-width="20" fill="none"/><text data-note="ns0:attribute">ns0:text</text></svg>';
+          for(const side of ['base','head']) {
+            const text=original(source,side,false),root=new DOMParser().parseFromString(text,'image/svg+xml'),filter=root.querySelector('filter');
+            if(filter.getAttribute('filterUnits')!=='userSpaceOnUse'||['x','y','width','height'].map(k=>+filter.getAttribute(k)).join()!=='-20,-30,300,200')return 'legacy comparison viewBox bounds '+viewBox;
+            if(root.querySelector('text').textContent!=='ns0:text'||root.querySelector('text').getAttribute('data-note')!=='ns0:attribute')return 'legacy comparison altered namespace-like content';
+            const url=URL.createObjectURL(new Blob([text],{type:'image/svg+xml'})),image=new Image();
+            try {
+              image.src=url;await image.decode();
+              const canvas=new OffscreenCanvas(300,200),ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);
+              const expected=side==='base'?[217,26,38,255]:[26,153,51,255];
+              for(const [x,y] of points)if(!close([...ctx.getImageData(x,y,1,1).data],expected))return 'collinear comparison stroke clipped '+side+' '+path;
+              if(ctx.getImageData(299,199,1,1).data[3]!==0)return 'comparison background not transparent';
+            } finally {URL.revokeObjectURL(url);}
+          }
+        }
+      }
+      Appearance.patch({flip:false});
+      await applyState({...S,p,v:'sheet:'+sheet.path,m:'overlay',x:105,y:55,z:15});
+      const prepared={};
+      for(const side of ['base','head']) {
+        const image=document.querySelector('#stage .stack.'+side+' img'),x=side==='base'?362:372;
+        const color=side==='base'?[217,26,38]:[26,153,51],alpha=Math.round(255-.59*150);
+        prepared[side]=sample(image,x,140);
+        if(!close(prepared[side],[...color,alpha])||sample(image,1180,830)[3]!==0)return 'schematic darkness alpha '+side+' '+prepared[side];
+      }
+      const controllers=[...appearanceSchematics];
+      Appearance.import(JSON.stringify({meta:{version:5},schematic:{wire:'#135724'}}));await applyAppearance(Appearance.get());
+      if(!controllers.every(c=>c.appliedSource===c.source))return 'appearance retinted Overlay';
+      if([...document.querySelectorAll('#stage .layer')].some(l=>getComputedStyle(l).filter!=='none'))return 'live comparison filter';
+      if(![...document.querySelectorAll('#stage .marker,.pin')].every(n=>!n.closest('.stack')))return 'marks inherit artwork opacity';
+      const marks=document.querySelector('#stage .marks'),rects=[...marks.children];
+      if(!rects.length||rects.length>400)return 'missing or unbounded hotspot targets';
+      const areas=rects.map(r=>+r.getAttribute('width')*+r.getAttribute('height'));
+      if(areas.some((a,i)=>i&&a>areas[i-1]))return 'targets not smallest frontmost';
+      const before=rects.length;S.x=10000;apply();
+      if(document.querySelector('#stage .marks').children.length)return 'offscreen targets retained';
+      S.x=105;apply();if(document.querySelector('#stage .marks').children.length!==before)return 'camera did not refresh targets';
+      const views=['base','head'].map(side=>decodedSheetHotspots.get(sheet.hotspots[side]).views.find(v=>v.sheet===sheet.path));
+      const originals=views.map(v=>v.elements);
+      try {
+        for(const v of views)v.elements=Array.from({length:600},(_,i)=>({uuid:'dense-'+i,bbox:[100,54,101+i/1000,55]}));
+        apply();
+        if(document.querySelector('#stage .marks').children.length!==400||document.querySelectorAll('*').length>=2000)return 'combined pane hotspot DOM budget';
+      } finally {views.forEach((v,i)=>v.elements=originals[i]);apply();}
+      // Legacy data has no pre-tinted resources. Rewrite detached source once per source/side.
+      sheet.svgCompare=undefined;comparisonSources.clear();let calls=0;
+      ImageView.comparisonSource=(...args)=>{calls++;return original(...args);};
+      for(let n=0;n<2;n++) {
+        await draw();
+        for(const side of ['base','head']) {
+          const image=document.querySelector('#stage .stack.'+side+' img'),x=side==='base'?362:372;
+          if(!close(sample(image,x,140),prepared[side]))return 'legacy/prepared pixels differ '+side;
+        }
+      }
+      if(calls!==2)return 'legacy tint not memoized '+calls;
+      // A foreign-side transparent target still routes the click to the visible revision.
+      // Each target keeps its revision; visible targets use image picking, foreign-side
+      // targets use fallback picking, independent of the global board-flip preference.
+      await applyState({...S,m:'wipe'});
+      // Numeric integration routes both paths through retained pickAt first.
+      // Assert the selected revision, not the removed temporary wrapper's call shape.
+      for(const flip of [false,true])for(const wipe of [0,1]) {
+        Appearance.patch({flip});S.wipe=wipe;apply();
+        const vp=document.querySelector('#stage .vp'),rects=[...vp.querySelectorAll('.marks:not(.image-selection) rect')];
+        if(!rects.length||rects.some(r=>!['base','head'].includes(r.dataset.side)))return 'hotspot lost revision side';
+        const expected=wipe===1?'base':'head',pin=views[expected==='base'?0:1].elements[0].pins[0];
+        const bounds=vp.getBoundingClientRect(),point=BoardGL.worldToScreen([pin.x,pin.y],{x:S.x,y:S.y,z:S.z,width:bounds.width,height:bounds.height,flip:false});
+        for(const side of ['base','head']) {
+          const rect=rects.find(r=>r.dataset.side===side);
+          if(!rect)return 'missing hotspot revision '+side;
+          rect.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:bounds.left+point[0],clientY:bounds.top+point[1]}));
+          if(S.imageSelection?.side!==expected||S.imageSelection.kind!=='pin')return 'Wipe numeric target route '+side+' '+wipe+' '+flip;
+        }
+      }
+      return true;
+    } finally {sheet.svgCompare=compare;ImageView.comparisonSource=original;Appearance.set(look);await applyState(state);}
+  `],
+  ['images comparison endpoints and missing sides', '', `
+    if(D.repo!=='fixture/images')return 'skip';
+    const state={...S},look=Appearance.get();
+    try {
+      for(let p=0;p<D.projects.length;p++)for(const sheet of D.projects[p].sheets) {
+        await applyState({...S,p,v:'sheet:'+sheet.path,m:'semantic',x:105,y:55,z:5});
+        const vp=document.querySelector('#stage .vp'),expected=sheet.svg.head?'head':'base';
+        const visible=[...vp.querySelectorAll('.stack')].filter(st=>getComputedStyle(st).display!=='none'&&st.querySelector('[data-image-artwork]'));
+        if(visible.length!==1||!visible[0].classList.contains(expected)||getComputedStyle(visible[0]).opacity!=='0.8')return 'missing-side Semantic '+p;
+        if(!visible[0].querySelector('img').naturalWidth)return 'Semantic decode';
+      }
+      const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg.base&&s.svg.head));
+      if(p<0)return 'fixture needs two revisions';
+      const sheet=D.projects[p].sheets.find(s=>s.svg.base&&s.svg.head);
+      for(const flip of [false,true])for(const mode of ['wipe','blend']) {
+        Appearance.patch({flip});
+        await applyState({...S,p,v:'sheet:'+sheet.path,m:mode,x:105,y:55,z:5});
+        const vp=document.querySelector('#stage .vp'),r=vp.getBoundingClientRect(),point=[S.x,S.y];
+        for(const endpoint of [0,1]) {
+          if(mode==='wipe'){S.wipe=endpoint;apply();}
+          else {S.blend=endpoint;renderModes();const input=document.querySelector('#modes input');input.value=endpoint*100;input.dispatchEvent(new Event('input'));}
+          const expected=endpoint===0?(mode==='wipe'?'head':'base'):(mode==='wipe'?'base':'head');
+          if(imageSides(vp,point).join()!==expected)return mode+' endpoint routing '+flip+' '+endpoint;
+          if(mode==='blend'&&+vp.querySelector('.head').style.opacity!==endpoint)return 'Blend opacity';
+          if(mode==='wipe') {
+            const d=vp.querySelector('.divider');
+            if(+d.getAttribute('aria-valuenow')!==endpoint*100||Math.abs(parseFloat(d.style.left)-r.width*endpoint)>1)return 'Wipe divider';
+            if(!vp.querySelector('.base').style.clipPath||!vp.querySelector('.head').style.clipPath)return 'Wipe clipping';
+          }
+        }
+      }
+      return true;
+    } finally {Appearance.set(look);await applyState(state);}
+  `],
+  ["images every sheet whole-page DOM budget", "", `
+    Object.assign(S.filter,{added:true,removed:true,modified:true,kind:'',q:'',all:false,sort:'',group:''});
+    let count=0;
+    for(const [p,project] of D.projects.entries())for(const sheet of project.sheets) {
+      if(!sheet.svg?.base&&!sheet.svg?.head)continue;
+      await applyState({...S,p,v:'sheet:'+sheet.path,m:'side',t:'changes',s:null});
+      const total=document.querySelectorAll('*').length;count++;
+      if(total>=2000)return 'DOM budget '+total+' project '+project.dir+' sheet '+sheet.path;
+      for(const mark of document.querySelectorAll('#stage .vp.sheet .marker')) {
+        if(mark.childElementCount)return 'redundant marker label nodes';
+        if(getComputedStyle(mark,'::before').content!==JSON.stringify(mark.getAttribute('aria-label')))return 'missing marker label';
+      }
+      if(document.querySelector('#stage .layer svg'))return 'live artwork';
+      if(document.querySelector('#stage').dataset.imageReady!=='true')return 'sheet not ready';
+    }
+    return count>0||'no sheets checked';
+  `],
+  ["images large Changes dock pages retain every row and selection", "", `
+    const p=D.projects.findIndex(p=>p.changes.length>100);
+    if(p<0)return true;
+    await applyState({...S,p,t:'changes',s:null});
+    Object.assign(S.filter,{added:true,removed:true,modified:true,kind:'',q:'',all:false,sort:'reference',group:'kind'});renderPanel();setDock('panel',true);
+    const seen=new Set();let pages=0;
+    for(;;) {
+      const cards=[...document.querySelectorAll('#panel .card[data-id]')];
+      if(cards.length>50)return 'unbounded Changes page '+cards.length;
+      for(const card of cards){if(seen.has(card.dataset.id))return 'duplicate page row';seen.add(card.dataset.id);}
+      const next=document.querySelector('[data-change-page="next"]');
+      if(!next)return 'missing Changes pagination';
+      if(next.disabled)break;
+      next.click();if(++pages>100)return 'pagination loop';
+    }
+    if(seen.size!==proj().changes.length)return 'lost changes '+seen.size+'/'+proj().changes.length;
+    const ordered=filteredChangeRows();await goTo(ordered[49].id);await step(1);
+    if(S.s!==ordered[50].id||!document.querySelector('#panel .card[data-id="'+CSS.escape(S.s)+'"][aria-selected="true"]'))return 'keyboard navigation did not cross page boundary';
+    if(document.querySelector('[data-change]').textContent!=='51/'+ordered.length)return 'status counter truncated';
+    const first=proj().changes.find(r=>!document.querySelector('#panel .card[data-id="'+CSS.escape(r.id)+'"]'));
+    if(!first)return 'fixture has no off-page change';
+    await goTo(first.id);
+    if(!document.querySelector('#panel .card[aria-selected="true"]')||!document.querySelector('#panel .card[data-id="'+CSS.escape(first.id)+'"]'))return 'off-page selection not revealed';
+    const search=document.querySelector('#panel .q');search.value=first.ref||first.kind;search.dispatchEvent(new Event('input'));
+    if(!document.querySelector('#panel .card[data-id="'+CSS.escape(first.id)+'"]'))return 'search lost matching row';
+    Object.assign(S.filter,{q:'',sort:'',group:''});renderPanel();
+    document.querySelector('[data-change-page]')?.scrollIntoView({block:'nearest'});return true;
+  `],
+  ["images fallback skips hidden layers and tolerates missing appearance", "", `
+    const layer=proj().board.layers.find(l=>l.svg?.head);
+    if(!layer)return 'fixture has no board artwork';
+    const name=canon(layer.name),snapshot=Appearance.get(),get=Appearance.get,resolve=KrAppearance.resolve;
+    const hidden=structuredClone(snapshot);hidden.layers[name]={...hidden.layers[name],visible:false};
+    const view={kind:'board',size:proj().board.size,layers:[layer]},stages=[];
+    try {
+      Appearance.get=()=>hidden;
+      const absent=await stack('head',view);stages.push(absent);
+      if(absent.imageOwners.length||absent.querySelector('img'))return 'hidden layer allocated artwork';
+      Appearance.get=()=>{const s=structuredClone(snapshot);delete s.layers[name];return s;};
+      const fallback=await stack('head',view);stages.push(fallback);
+      const adapter=fallback.imageOwners[0];
+      if(fallback.querySelector('.image-error')||!adapter?.controller.node?.naturalWidth)return 'missing appearance broke stack';
+      appearanceBoardImages.add(adapter);
+      KrAppearance.resolve=s=>{const r=resolve(s);delete r.layers[name];return r;};
+      await applyAppearance(snapshot);
+      if(!adapter.controller.node?.naturalWidth)return 'missing resolved appearance broke update';
+      return true;
+    } finally {
+      Appearance.get=get;KrAppearance.resolve=resolve;
+      for(const stage of stages)for(const owner of stage.imageOwners)owner.dispose();
+      await applyAppearance(snapshot);
+    }
+  `],
+  ["images fallback appearance", "", `
+const oldCreate=BoardGL.create;
+BoardGL.create=()=>null;
+try {
+  boardView.failed=S.p; // Do not reuse a previously mounted GL comparison.
+  await applyState({...S,v:'board',m:'side'});
+  // Only the generated images fixture carries the unknown object paint.
+  if(![...appearanceBoardImages].some(a=>a.layer==='F.Cu'&&a.controller.source.toLowerCase().includes('#abcdef')))return 'skip';
+  changeBoardAppearance({layers:{'F.Cu':{color:[18,52,86,.5],opacity:.5}}});
+  await Promise.all([...appearanceBoardImages].map(a=>a.setAppearance(Appearance.get().layers[a.layer])));
+  const front=[...appearanceBoardImages].find(a=>a.layer==='F.Cu');
+  if(!front?.controller.appliedSource.includes('#123456'))return 'fallback custom RGB';
+  if(!front.controller.appliedSource.includes('#abcdef'))return 'unknown paint lost';
+  const wrapper=front.controller.node.parentElement;
+  if(Number(wrapper.style.opacity)!==.25)return 'alpha applied twice';
+  const n=front.controller.node, c=document.createElement('canvas');c.width=400;c.height=200;
+  const x=c.getContext('2d');x.drawImage(n,0,0,c.width,c.height);
+  const svg=new DOMParser().parseFromString(front.controller.appliedSource,'image/svg+xml').documentElement;
+  const [vx,vy,vw,vh]=svg.getAttribute('viewBox').trim().split(/[ ,]+/).map(Number);
+  const sample=(sx,sy)=>x.getImageData(Math.floor((sx-vx)/vw*c.width),Math.floor((sy-vy)/vh*c.height),1,1).data;
+  const a=sample(vx+.15*vw,vy+.5*vh),b=sample(vx+.3*vw,vy+.5*vh);
+  if(a[3]!==255||b[3]!==255)return 'missing opaque fixture coverage';
+  if([a,b].some(p=>p[0]!==18||p[1]!==52||p[2]!==86))return 'wrong covered layer RGB';
+  if(a[3]!==b[3])return 'per-shape opacity';
+Appearance.import(JSON.stringify({meta:{version:5,name:'Image fallback regression'},
+  board:{copper:{f:'rgb(65, 43, 21)'}}}));
+await Promise.all([...appearanceBoardImages].map(a=>a.setAppearance(Appearance.get().layers[a.layer])));
+const imported=[...appearanceBoardImages].find(a=>a.layer==='F.Cu');
+if(!imported?.controller.appliedSource.includes('#412b15'))return 'imported fallback layer RGB';
+if(!imported.controller.appliedSource.includes('#abcdef'))return 'import changed custom object paint';
+const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+if(fronts.length!==2)return 'import missing revision';
+for(const adapter of fronts) {
+  if(!adapter.controller.appliedSource.includes('#412b15')||!adapter.controller.appliedSource.includes('#abcdef'))return 'import revision paint';
+  x.clearRect(0,0,c.width,c.height);x.drawImage(adapter.controller.node,0,0,c.width,c.height);
+  const pixel=sample(vx+.3*vw,vy+.5*vh);
+  if(pixel[0]!==65||pixel[1]!==43||pixel[2]!==21||pixel[3]!==255)return 'import revision pixel';
+}
+
+} finally {BoardGL.create=oldCreate;}
+
+return true;
+  `],
+  ["images fallback selected export palettes", "", `
+    const originalText=svgText,theme=KRTheme.get(),stacks=[];
+    // The 100x50 synthetic full-bleed fixture makes (20,20) a stable RGB sample.
+    // Missing dark head intentionally selects the light export and its light source RGB.
+    const sources={
+      'palette-light':'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><path fill="#123456" d="M0 0H100V50H0Z"/><path fill="#abcdef" d="M80 0H100V10H80Z"/></svg>',
+      'palette-dark':'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><path fill="rgb(101, 67, 33)" d="M0 0H100V50H0Z"/><path fill="#abcdef" d="M80 0H100V10H80Z"/></svg>'
+    };
+    const layer={name:'In1_Cu',svg:{base:'palette-light',head:'palette-light'},
+      svgThemes:{light:{base:'palette-light',head:'palette-light'},dark:{base:'palette-dark',head:null}},
+      sourceRGBThemes:{light:[18,52,86],dark:[101,67,33]}};
+    try {
+      svgText=async id=>sources[id]||originalText(id);
+      for(const selected of ['light','dark','light']) {
+        KRTheme.set(selected);await themeDraw;
+        for(const side of ['base','head']) {
+          const stackNode=await stack(side,{kind:'board',size:[100,50],layers:[layer]});stacks.push(stackNode);
+          const adapter=stackNode.imageOwners[0],darkSource=selected==='dark'&&side==='base';
+          if(!adapter||stackNode.querySelector('.image-error'))return 'selected export did not decode';
+          const source=adapter.controller.source;
+          if(!source.includes(darkSource?'#654321':'#123456'))return 'wrong selected export RGB '+selected+' '+side;
+          await adapter.setAppearance({color:[65,43,21,.5],opacity:.5});
+          if(!adapter.controller.appliedSource.includes('#412b15')||!adapter.controller.appliedSource.includes('#abcdef'))return 'selected export recolour '+selected+' '+side;
+          if(adapter.controller.source!==source||Number(adapter.controller.node.parentElement.style.opacity)!==.25)return 'source or wrapper alpha changed';
+          const canvas=document.createElement('canvas');canvas.width=100;canvas.height=50;
+          const context=canvas.getContext('2d');context.drawImage(adapter.controller.node,0,0,100,50);
+          if(context.getImageData(20,20,1,1).data.join()!=='65,43,21,255')return 'selected export pixel '+selected+' '+side;
+        }
+      }
+      return true;
+    } finally {
+      for(const node of stacks)for(const owner of node.imageOwners)owner.dispose();
+      svgText=originalText;KRTheme.set(theme);await themeDraw;
+    }
+  `],
+  ["images fallback honors supplied appearance snapshot", "", `
+    const original=BoardGL.create;BoardGL.create=()=>null;
+    try {
+      boardView.failed=S.p;await applyState({...S,v:'board',m:'side'});
+      const snapshot=Appearance.get(),saved=JSON.stringify(snapshot);
+      snapshot.colors['board.copper.f']=[18/255,52/255,86/255,.5];
+      snapshot.layerOpacity['F.Cu']=.5;
+      await applyAppearance(snapshot);
+      const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+      // Empty base-layer exports decode too, but contain no source paint to replace.
+      const painted=fronts.filter(a=>a.controller.source.toLowerCase().includes(ImageView.rgbHex(KicadColors.layers['F.Cu'])));
+      if(!painted.length||!painted.every(a=>a.controller.appliedSource.includes('#123456'))||!fronts.every(a=>a.controller.node.complete&&Number(a.controller.node.parentElement.style.opacity)===.25))return 'fallback ignored supplied snapshot';
+      return JSON.stringify(Appearance.get())===saved||'appearance application mutated store';
+    } finally {BoardGL.create=original;await applyAppearance(Appearance.get());}
+  `],
+  ["images legacy fallback appearance", "", `
+    const p=D.projects.findIndex(p=>p.board.layers.some(l=>l.svg?.base&&l.svg?.head));
+    if(p<0)return 'fixture needs two-sided legacy board';
+    const original=BoardGL.create;BoardGL.create=()=>null;
+    try {
+      boardView.failed=p;
+      await applyState({...S,p,v:'board',m:'side'});
+      if(appearanceBoards.size||!appearanceBoardImages.size)return 'not image fallback';
+      if(document.querySelector('#stage .layer svg'))return 'live board artwork';
+      Appearance.import(JSON.stringify({meta:{version:5},board:{copper:{f:'rgb(65, 43, 21)'}}}));
+      await applyAppearance(Appearance.get());
+      const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+      const painted=fronts.filter(a=>a.controller.source.toLowerCase().includes(ImageView.rgbHex(KicadColors.layers['F.Cu'])));
+      if(fronts.length!==2||!painted.length||!painted.every(a=>a.controller.appliedSource.includes('#412b15'))||!fronts.every(a=>a.controller.node.complete))return 'legacy RGB import';
+      for(const a of appearanceBoardImages)if(!a.controller.node.complete||!a.controller.node.naturalWidth)return 'legacy decode';
+      const old=[...appearanceBoardImages];
+      await applyState({...S,v:'sheet:'+proj().sheets[0].path});
+      if(appearanceBoardImages.size||old.some(a=>a.controller.node))return 'board adapters leaked';
+      // Leave the whole-screen proof on the fallback board.
+      await applyState({...S,v:'board'});
+      return true;
+    } finally {BoardGL.create=original;}
+  `],
+  ['images manifests and home','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    const sheet=proj().sheets.find(s=>s.hotspots?.head);if(!sheet)return 'fixture lacks manifest';
+    await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
+    if(!decodedSheetHotspots.has(sheet.hotspots.head))return 'manifest not decoded before readiness';
+    const b=contentBox();if(!b||b.some(n=>!Number.isFinite(n)))return 'image bounds unavailable';
+    fit();if(S.x!==currentView().size[0]/2||S.y!==currentView().size[1]/2)return 'Home lost worksheet';
+    await new Promise(requestAnimationFrame);
+    for(const image of document.querySelectorAll('#stage img[data-image-artwork]')) {
+      const r=image.getBoundingClientRect(),pane=image.closest('.vp').getBoundingClientRect();
+      if(r.left<pane.left-1||r.right>pane.right+1||r.top<pane.top-1||r.bottom>pane.bottom+1)return 'Home clipped page/title block';
+    }
+    return document.querySelector('#stage').dataset.imageReady==='true'||'manifest readiness missing';
+  `],
+  ['images malformed manifests preserve artwork','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    const P=proj(),sheet=P.sheets.find(s=>s.hotspots?.head&&s.svg?.base&&s.svg?.head);
+    if(!sheet||!P.board.inspect?.head)return 'fixture lacks manifests';
+    const oldSheet=sheet.hotspots,oldInspect=P.board.inspect,oldGeometry=P.board.geometry;
+    const sheetSource=await jsonAsset(oldSheet.head),boardSource=await jsonAsset(oldInspect.head);
+    const fixtures=[
+      ['sheet',m=>{m.views[0].viewBox=[0,0,null,1];}],
+      ['sheet',m=>{const view=m.views.find(v=>v.elements?.length);if(!view)throw Error('fixture lacks hotspot elements');view.elements[0].pins[0].x=null;}],
+      ['sheet',m=>{m.views[0].labels=[{uuid:'bad',text:'X',kind:'label',x:null,y:0}];}],
+      ['board',m=>{m.pads=[{uuid:'bad',ref:'U1',net:'',layers:['F.Cu'],hidden:false}];}],
+      ['board',m=>{m.tracks[0].x1=null;}],
+      ['board',m=>{m.tracks[0].geometry.segments[0][0]=null;}],
+      ['board',m=>{m.tracks[0].layers=['not-a-layer'];}],
+      ['board',m=>{delete m.stats;}],
+    ];
+    const ids=[];
+    try {
+      P.board.geometry=null; // Exercise image fallback independently of WebGL availability.
+      for(const [i,[kind,mutate]] of fixtures.entries()) {
+        const id='malformed_manifest_'+i,source=structuredClone(kind==='sheet'?sheetSource:boardSource);mutate(source);ids.push(id);
+        const bytes=new Uint8Array(await new Response(new Blob([JSON.stringify(source)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+        D.blobs[id]=btoa(String.fromCharCode(...bytes));
+        sheet.hotspots=kind==='sheet'?{...oldSheet,head:id}:oldSheet;
+        P.board.inspect=kind==='board'?{...oldInspect,head:id}:oldInspect;
+        await applyState({...S,v:kind==='sheet'?'sheet:'+sheet.path:'board',m:'side'});
+        const stage=document.querySelector('#stage'),images=[...stage.querySelectorAll('img[data-image-artwork]')];
+        if(stage.dataset.imageReady!=='true')return 'malformed '+i+' blocked readiness';
+        const notice=stage.querySelector('.inspection-unavailable[role="status"]');
+        if(!notice)return 'malformed '+i+' lacks unavailable notice';
+        const bounds=notice.getBoundingClientRect(),frame=stage.getBoundingClientRect();
+        const gap=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--space-2'));
+        if(Math.abs(frame.bottom-bounds.bottom-gap)>1)return 'inspection notice not anchored to stage bottom spacing';
+        if(bounds.left<frame.left||bounds.right>frame.right||bounds.top<frame.top)return 'inspection notice outside stage';
+        if(notice.hasAttribute('style'))return 'inspection notice has inline styling';
+        for(const tag of stage.querySelectorAll('.tag')){
+          const label=tag.getBoundingClientRect();
+          if(bounds.left<label.right&&bounds.right>label.left&&bounds.top<label.bottom&&bounds.bottom>label.top)return 'inspection notice overlaps revision label';
+        }
+        if((kind==='sheet'?decodedSheetHotspots:decodedBoardInspect).has(id))return 'malformed '+i+' cached';
+        if(!['base','head'].every(side=>images.some(img=>img.dataset.side===side&&img.complete&&img.naturalWidth>0)))return 'malformed '+i+' lost revision artwork';
+        if(stage.querySelector('.image-error'))return 'manifest failure became image failure';
+      }
+      return true;
+    } finally {
+      sheet.hotspots=oldSheet;P.board.inspect=oldInspect;P.board.geometry=oldGeometry;
+      for(const id of ids){delete D.blobs[id];delete cache[id];}
+      await applyState({...S,v:'sheet:'+sheet.path,m:'side'});
+    }
+  `],
+  ['images manifest decode navigation generation','',`
+    if(D.repo!=='fixture/images')return 'skip';
+    const P=proj(),sheet=P.sheets.find(s=>s.hotspots?.head),other=P.sheets.find(s=>s!==sheet&&s.svg?.head);
+    if(!sheet||!other)return 'fixture lacks sheets';
+    const original=jsonAsset,old=sheet.hotspots,id='delayed_manifest';
+    let release,started;const gate=new Promise(r=>release=r),entered=new Promise(r=>started=r);
+    jsonAsset=async key=>{if(key===id){started();await gate;return original(old.head);}return original(key);};
+    let pending;
+    try {
+      sheet.hotspots={...old,head:id};
+      pending=applyState({...S,v:'sheet:'+sheet.path,m:'side'});await entered;
+      if(document.querySelector('#stage').dataset.imageReady!=='false')return 'ready before manifest decode';
+      sheet.hotspots=old;
+      await applyState({...S,v:'sheet:'+other.path,m:'side'});
+      const stage=document.querySelector('#stage');
+      release();await pending;
+      if(document.querySelector('#stage')!==stage||stage.dataset.view!=='sheet:'+other.path||stage.dataset.imageReady!=='true')return 'stale manifest draw mounted';
+      return true;
+    } finally {sheet.hotspots=old;release();if(pending)await pending;jsonAsset=original;decodedSheetHotspots.delete(id);}
+  `],
+  ["images screen and legacy appearance", "", `
+    const profile=window.__checkDeviceProfile;
+    if(!profile)return 'screen check missing runner device profile';
+    const width=innerWidth,height=innerHeight;
+    if(width!==profile.width||height!==profile.height||devicePixelRatio!==profile.dpr)
+      return 'screen metrics mismatch '+JSON.stringify({width,height,dpr:devicePixelRatio,expected:profile});
+    // Use the first two-sided project when present. The legacy added-project's
+    // unfiltered Changes dock alone previously exceeded the artwork DOM budget.
+    // The every-sheet check also covers that large project with paginated Changes.
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg?.base&&s.svg?.head));
+    const project=D.projects[p<0?S.p:p],sheet=project.sheets.find(s=>s.svg?.base||s.svg?.head);
+    if(!sheet)return 'fixture has no sheet';
+    await applyState({...S,p:p<0?S.p:p,v:'sheet:'+sheet.path,m:'side'});
+    const images=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')];
+    const expected=['base','head'].filter(side=>sheet.svg[side]).length;
+    if(images.length!==expected)return 'artwork images '+images.length+' expected '+expected;
+    if(document.querySelector('#stage .layer svg'))return 'live artwork SVG';
+    if(!images.every(i=>i.complete&&i.naturalWidth>0))return 'image not decoded';
+    if(document.querySelectorAll('*').length>=2000)return 'DOM budget '+document.querySelectorAll('*').length;
+    if(document.querySelector('#stage').dataset.view!==S.v)return 'stale view generation';
+    const pane=document.querySelector('#stage .vp'), r=pane.getBoundingClientRect();
+    if(r.width<=0||r.height<=0||r.left<0||r.right>innerWidth+1)return 'drawing outside whole screen';
+    const paper=getComputedStyle(pane).backgroundColor;
+    if(!paper||paper==='rgba(0, 0, 0, 0)')return 'missing paper';
+    const camera=[S.x,S.y,S.z],theme=KRTheme.get();
+    const pixels=async image=>{const c=new OffscreenCanvas(400,300),x=c.getContext('2d');x.drawImage(image,0,0,400,300);return x.getImageData(0,0,400,300).data;};
+    // Rasterizing the multi-megabyte legacy sheet takes seconds; compare pixels only on small artwork.
+    const sources=images.map(i=>i.imageOwner.source),cheap=sources[0].length<2e5,before=cheap&&await pixels(images[0]);
+    for(const t of ['light','dark',theme]) {
+      KRTheme.set(t);await themeDraw;await applyAppearance(Appearance.get());
+      if(![...appearanceSchematics].every(c=>c.node.complete&&c.node.naturalWidth>0))return 'theme decode';
+      for(const c of appearanceSchematics) {
+        const side=c.node.dataset.side;
+        if(c.source!==await svgText(sheet.svgThemes?.[t]?.[side]||sheet.svg[side]))return 'wrong '+t+' theme source';
+      }
+    }
+    sessionStorage.setItem('image-screen-appearance',JSON.stringify(Appearance.get()));
+    Appearance.import(JSON.stringify({meta:{version:5},schematic:{wire:'#135724'}}));
+    await applyAppearance(Appearance.get());
+    const current=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')];
+    if(!current.every((i,n)=>i.imageOwner.source===sources[n]&&i.imageOwner.appliedSource.includes('rgba(19,87,36,1)')))return 'custom source palette';
+    const after=cheap&&await pixels(current[0]);if(cheap&&before.every((v,i)=>v===after[i]))return 'custom palette did not change pixels';
+    if(JSON.stringify(camera)!==JSON.stringify([S.x,S.y,S.z]))return 'appearance moved camera';
+    if(document.querySelector('#stage').dataset.imageReady!=='true')return 'image not ready';
+    sessionStorage.setItem('image-screen-camera',JSON.stringify(camera.map(n=>+n.toFixed(3))));history.replaceState(null,'','#'+encodeState()); // saveHash is debounced; reload follows at once
+    return true;
+  `, {afterReload:`
+    // reviewReady can precede the first image draw of a large sheet.
+    for(const end=performance.now()+12000;document.querySelector('#stage').dataset.imageReady!=='true'&&performance.now()<end;)await new Promise(r=>setTimeout(r,50));
+    await document.querySelector('#stage').appearancePending;
+    if(document.querySelector('#stage').dataset.view!==S.v||document.querySelector('#stage').dataset.imageReady!=='true')return 'reload readiness';
+    if(![...appearanceSchematics].every(c=>c.node.complete&&c.node.naturalWidth>0&&c.appliedSource.includes('rgba(19,87,36,1)')))return 'reload palette';
+    const now=JSON.stringify([S.x,S.y,S.z].map(n=>+n.toFixed(3)));
+    const result=sessionStorage.getItem('image-screen-camera')===now||'reload camera '+sessionStorage.getItem('image-screen-camera')+' vs '+now;
+    // Keep this persistence check from seeding later palette regressions.
+    const original=JSON.parse(sessionStorage.getItem('image-screen-appearance'));
+    Appearance.set(original);await applyAppearance(original);
+    return result;
+  `}],
+  ["images loading notice ends on 3D navigation", "", `
+    const original=window.Review3D,state={...S};
+    window.Review3D={dispose(){},async show(stage){stage.textContent='3D lifecycle probe';}};
+    try {
+      S.v='3d';await draw();
+      const stage=document.querySelector('#stage');
+      if(stage.dataset.imageReady!=='false')return 'image readiness used for 3D';
+      return document.querySelector('#statusbar .status-message').textContent!=='Loading drawing…'||'image loading notice leaked into 3D';
+    } finally {window.Review3D=original;await applyState(state);}
+  `],
+  ["images detached stacks keep private owners", "", `
+    const view=currentView('board');
+    if(!view)return 'fixture has no board';
+    const owners=new Set(appearanceBoardImages),st=await stack('head',view);
+    try {
+      if(!st.imageOwners.length)return 'fixture has no board artwork';
+      return appearanceBoardImages.size===owners.size&&[...appearanceBoardImages].every(a=>owners.has(a))||'detached board owners registered globally';
+    } finally {for(const owner of st.imageOwners)owner.dispose();}
+  `],
+  ["images readiness publishes current navigation", "", `
+    const sheet=proj().sheets.find(s=>s.svg?.base||s.svg?.head);
+    if(!sheet)return 'fixture has no sheet';
+    await applyState({...S,v:'sheet:'+sheet.path,m:'side',x:100,y:70,z:2});
+    clearTimeout(hashTimer);
+    history.replaceState(null,'','#v=board');
+    await draw();
+    const stage=document.querySelector('#stage');
+    if(stage.dataset.imageReady!=='true')return 'image not ready';
+    return new URLSearchParams(location.hash.slice(1)).get('v')===stage.dataset.view||'ready before navigation published';
+  `],
+  ["images appearance readiness waits for latest decode", "", `
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg?.base&&s.svg?.head));
+    if(p<0)return 'fixture needs two-sided sheet';
+    await applyState({...S,p,v:'sheet:'+D.projects[p].sheets[0].path,m:'side'});
+    const stage=document.querySelector('#stage'),before=Appearance.get(),decode=HTMLImageElement.prototype.decode;
+    const jobs=[];HTMLImageElement.prototype.decode=async function(){await new Promise(resolve=>jobs.push(resolve));return decode.call(this);};
+    let older,latest,last=[],returned=false;
+    try {
+      Appearance.patch({colors:{'schematic.wire':[1,0,0,1]}});
+      older=applyAppearance(Appearance.get()).then(()=>returned=true);
+      Appearance.patch({colors:{'schematic.wire':[0,0,1,1]}});
+      latest=applyAppearance(Appearance.get());
+      if(stage.dataset.imageReady!=='false')return 'ready during appearance decode';
+      // Finish older decodes only. Their awaiter must follow the latest jobs.
+      last=jobs.splice(jobs.length-appearanceSchematics.size);
+      for(const resume of jobs.splice(0))resume();
+      await new Promise(r=>setTimeout(r,30));
+      if(returned||stage.dataset.imageReady!=='false')return 'older decode claimed readiness';
+      for(const resume of last)resume();await Promise.all([older,latest]);
+      return stage.dataset.imageReady==='true'&&[...appearanceSchematics].every(c=>c.appliedSource.includes('rgba(0,0,255,1)')&&c.node.complete)||'latest appearance not ready';
+    } finally {
+      for(const resume of [...jobs,...last])resume();
+      HTMLImageElement.prototype.decode=decode;
+      Appearance.set(before);await applyAppearance(before);
+      await Promise.allSettled([older,latest].filter(Boolean));
+    }
+  `],
+  ["images delayed decode navigation releases only owned URLs", "", `
+    const p=D.projects.findIndex(p=>p.sheets.some(s=>s.svg?.base&&s.svg?.head));
+    const index=p<0?S.p:p,P=D.projects[index],sheet=P.sheets.find(s=>s.svg?.base||s.svg?.head);
+    if(!sheet)return 'fixture has no sheet';
+    await applyState({...S,p:index,v:'sheet:'+sheet.path,m:'side'});
+    const other={...sheet,path:'/__image_race__/'};P.sheets.push(other);
+    const decode=HTMLImageElement.prototype.decode,create=URL.createObjectURL,revoke=URL.revokeObjectURL;
+    const made=new Set(),released=new Set();let resume,started,hold=true;
+    const entered=new Promise(r=>started=r),gate=new Promise(r=>resume=r),pending=[];
+    const theme=KRTheme.get();
+    URL.createObjectURL=function(...args){const url=create.apply(this,args);made.add(url);return url;};
+    URL.revokeObjectURL=function(url){if(made.has(url)){if(released.has(url))throw Error('URL released twice');released.add(url);}return revoke.call(this,url);};
+    HTMLImageElement.prototype.decode=async function(){if(hold){hold=false;started();await gate;}return decode.call(this);};
+    try {
+      pending.push(draw());await entered;
+      for(const [i,t] of ['dark','light','dark'].entries()) {
+        KRTheme.set(t);pending.push(themeDraw);
+        S.v=i===2?'sheet:'+other.path:'sheet:'+sheet.path;pending.push(draw());
+      }
+      await pending.at(-1);
+      const final=document.querySelector('#stage');
+      if(final.dataset.view!=='sheet:'+other.path||final.dataset.imageReady!=='true')return 'final view not ready';
+      resume();await Promise.all(pending);
+      if(document.querySelector('#stage')!==final||[...final.querySelectorAll('img[data-image-artwork]')].some(i=>!i.complete||!i.naturalWidth||released.has(i.src)))return 'stale draw replaced/disposed current artwork';
+      S.v='sheet:/__image_absent__/';await draw();
+      return made.size>0&&made.size===released.size||'URL ownership '+made.size+'/'+released.size;
+    } finally {
+      resume();await Promise.allSettled(pending);
+      HTMLImageElement.prototype.decode=decode;URL.createObjectURL=create;URL.revokeObjectURL=revoke;
+      P.sheets.pop();KRTheme.set(theme);await themeDraw;
+    }
+  `],
+  ...['added-sheet','removed-sheet','added-board','removed-board'].map(name=>[
+  'images missing '+name, '', `
+  const index=D.projects.findIndex(p=>p.dir===${JSON.stringify(name)});
+  if(index<0)return 'skip';
+  const P=D.projects[index], side=${JSON.stringify(name.startsWith('added')?'head':'base')};
+  const sheet=P.sheets[0], board=P.board, saved=board.inspect, geometry=board.geometry;
+  const maps=P.sheets.map(s=>s.hotspots);P.sheets.forEach(s=>delete s.hotspots);delete board.inspect;delete board.geometry;
   try {
-    themeSchematic(svg);
-    const g = svg.querySelector('g'), unknown = svg.querySelectorAll('path')[1];
-    document.documentElement.style.setProperty('--sch-ink-009600', '#135724');
-    const first = getComputedStyle(svg.querySelector('path')).stroke;
-    document.documentElement.style.setProperty('--sch-ink-009600', '#246813');
-    const second = getComputedStyle(svg.querySelector('path')).stroke;
-    return first === 'rgb(19, 87, 36)' && second === 'rgb(36, 104, 19)'
-      && g.style.fill === 'none' && g.style.strokeOpacity === '0.4'
-      && svg.querySelector('text').getAttribute('opacity') === '0'
-      && unknown.getAttribute('fill') === '#123456'
-      && unknown.getAttribute('stroke') === 'none'
-      && svg.querySelector('path').getAttribute('d') === before
-      && schematicPaint('rgb(0,150,0)') === 'rgb(0,150,0)'
-      && schematicPaint('#009601') === '#009601'
-      && schematicPaint('#009600') === schematicPaint('#009600'.toLowerCase());
-  } finally {
-    document.documentElement.style.removeProperty('--sch-ink-009600'); host.remove();
-  }
-`],
+    await applyState({...S,p:index,v:${JSON.stringify(name.endsWith('board')?'board':null)}||'sheet:'+sheet.path,m:'side'});
+    const images=[...document.querySelectorAll('#stage img[data-image-artwork]')];
+    if(!images.length||images.some(i=>i.dataset.side!==side||!i.complete||i.naturalWidth===0))return 'present revision did not decode';
+    if(images.some(i=>i.dataset.side!==side))return 'fabricated absent image';
+    const row=P.changes.find(r=>onView(r,S.v));if(!row)return 'no real legacy change';
+    const vp=images[0].closest('.vp'),box=rowBox(row,side),point=box?[(box[0]+box[2])/2,(box[1]+box[3])/2]:(side==='base'?row.pos_before||row.pos:row.pos);
+    if(!point||!hitTest([row],point[0],point[1],null,side))return 'present side not pickable';
+    if(S.imageSelection)return 'fabricated inspection selection';
+    return true;
+  } finally {P.sheets.forEach((s,i)=>{if(maps[i])s.hotspots=maps[i];});if(saved)board.inspect=saved;if(geometry)board.geometry=geometry;}
+`])
+,
+  ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
+    const id='__sch6_palette_probe__';
+    const source='<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
+    cache[id]=Promise.resolve({text:source});
+    const view={kind:'sheet',size:[10,10],layers:[{name:'F.Cu',svg:{base:id,head:id}}]}, owners=[];
+    try {
+      const sheet=await stack('head',view);owners.push(...sheet.imageOwners);
+      const image=sheet.querySelector('img'),c=image?.imageOwner;
+      if(!image?.complete||!image.naturalWidth||sheet.querySelector('svg'))return 'not decoded image';
+      if(!c.appliedSource.includes('fill:rgba(0,150,0,1)!important;stroke:none'))return 'exact paints/important';
+      await c.setAppearance(new Map([['#009600','#135724']]));
+      if(!c.appliedSource.includes('fill:#135724!important;stroke:none')||c.source!==source)return 'original source lost';
+      for(const kind of ['board','lib']) {
+        const other=await stack('head',{...view,kind});owners.push(...other.imageOwners);
+        if(kind==='board' ? other.imageOwners[0].controller.appliedSource!==source : other.querySelector('svg').outerHTML.includes('rgba('))return kind+' palette leaked';
+      }
+      const pixels=await raster('head',view,10,10);
+      return await svgText(id)===source&&pixels[0]===0&&pixels[1]===150&&pixels[2]===0&&pixels[3]===255;
+    } finally {delete cache[id];for(const c of owners)c.dispose();}
+  `],
+  ["SCH6 exact paints preserve opacity unknown colours and geometry", "", `
+    const source='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><g style="stroke:#009600;fill:none;stroke-opacity:.4"><path d="M1 1L9 9" fill="#FFFFC2"/><text opacity="0" stroke-opacity="0">Hidden</text></g><path fill="#123456" stroke="none"/><path style="fill:rgb(0,150,0);stroke:#009601"/></svg>';
+    const c=await ImageView.mount(source,[10,10],{side:'head',layer:'probe'});
+    try {
+      await c.setAppearance(new Map([['#009600','#135724'],['#ffffc2','rgba(1,2,3,.5)']]));
+      if(!c.appliedSource.includes('stroke:#135724'))return 'first paint';
+      await c.setAppearance(new Map([['#009600','#246813'],['#ffffc2','rgba(1,2,3,.5)']]));
+      const svg=new DOMParser().parseFromString(c.appliedSource,'image/svg+xml').documentElement;
+      const g=svg.querySelector('g'),unknown=svg.querySelectorAll('path')[1];
+      return c.node.complete&&c.node.naturalWidth>0&&c.source===source
+        &&g.style.stroke==='rgb(36, 104, 19)'&&g.style.fill==='none'&&g.style.strokeOpacity==='0.4'
+        &&svg.querySelector('path').getAttribute('fill')==='rgba(1,2,3,.5)'
+        &&svg.querySelector('text').getAttribute('opacity')==='0'&&svg.querySelector('text').getAttribute('stroke-opacity')==='0'
+        &&unknown.getAttribute('fill')==='#123456'&&unknown.getAttribute('stroke')==='none'
+        &&svg.querySelector('path').getAttribute('d')==='M1 1L9 9'
+        &&svg.querySelectorAll('path')[2].getAttribute('style')==='fill:rgb(0,150,0);stroke:#009601';
+    } finally {c.dispose();}
+  `],
 
   ["Stage 1 dock tabs remain readable and reachable at 1600", "", `
     const P=proj();
@@ -124,6 +1302,9 @@ export const CHECKS = [
       if(document.querySelector('[data-coordinate=x]').textContent!=='-10.875' ||
          document.querySelector('[data-coordinate=y]').textContent!=='33.625') return 'mapping';
     }
+    // Publish the camera before checking that leaving the drawing preserves it.
+    // Image draws publish readiness and the hash together, before the debounce.
+    saveHash(true);
     const hash=location.hash; resetCoordinates();
     // Bench: leaving the drawing keeps the last reading, greyed as off canvas.
     if(!document.querySelector('.status-coordinates.off-canvas')) return 'stale';
@@ -472,7 +1653,7 @@ export const CHECKS = [
     return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x);`],
   ["sheet draws base and head, side by side", "p=1", `
     await new Promise(r => setTimeout(r, 800));
-    return document.querySelectorAll("#stage .vp").length === 2 && document.querySelectorAll("#stage svg").length >= 2;`],
+    return document.querySelectorAll("#stage .vp").length === 2 && document.querySelectorAll("#stage img[data-image-artwork]").length >= 2;`],
   ["wheel zoom keeps both panes in step", "", `
     await new Promise(r => setTimeout(r, 800));
     const vp = document.querySelector("#stage .vp"), before = S.z;
@@ -507,9 +1688,9 @@ export const CHECKS = [
     for (const vp of document.querySelectorAll("#stage .vp")) {
       const R = vp.getBoundingClientRect();
       for (const l of vp.querySelectorAll(".layer")) {
-        let u = null;
-        for (const g of l.querySelectorAll("svg > g")) { const r = g.getBoundingClientRect(); if (!r.width && !r.height) continue;
-          u = u ? [Math.min(u[0], r.left), Math.min(u[1], r.top), Math.max(u[2], r.right), Math.max(u[3], r.bottom)] : [r.left, r.top, r.right, r.bottom]; }
+        const image=l.querySelector('img[data-image-artwork]'), r=image?.getBoundingClientRect();
+        if(!image?.complete||!image.naturalWidth||!r.width||!r.height)return 'missing decoded '+l.dataset.layer;
+        const u=[r.left,r.top,r.right,r.bottom];
         if (u && (u[0] < R.left - 1 || u[1] < R.top - 1 || u[2] > R.right + 1 || u[3] > R.bottom + 1)) bad.push(l.dataset.layer + " " + u.map(Math.round) + " in " + [R.left, R.top, R.right, R.bottom].map(Math.round));
       }
     }
@@ -519,7 +1700,7 @@ export const CHECKS = [
     return S.m === "${m}" && document.querySelector("#stage").classList.contains("mode-${m}")
       && document.querySelector('#modes [aria-pressed="true"]').dataset.mode === "${m}"
       && (typeof boardDiff!=='undefined' && boardDiff ? boardDiff.panes.every((p,i)=>p.canvas.width>0&&p.canvas.height>0&&p.renderer.stats.draws>0&&boardDiff.readPixel(i,10,10).length===4)
-        : [...document.querySelectorAll('#stage svg path, #stage svg line, #stage svg rect, #stage svg circle, #stage svg polyline, #stage svg polygon, #stage svg text')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; }));`]),
+        : [...document.querySelectorAll('#stage img[data-image-artwork]')].some(e => { const r = e.getBoundingClientRect(); return (r.width > 0 || r.height > 0) && getComputedStyle(e).visibility === 'visible'; }));`]),
   ["wipe divider exposes its current keyboard position", "m=wipe", `
     await new Promise(r => setTimeout(r, 800));
     const d = document.querySelector('#stage .divider[role="slider"]'), before = S.wipe;
@@ -614,19 +1795,29 @@ export const CHECKS = [
     }
     return getComputedStyle(document.querySelector("#stage .stack.head")).opacity === "0.2";`],
   ["added project draws its one side in every mode", "p=0&m=overlay", `
-    await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head svg").length > 0;`],
+    await new Promise(r => setTimeout(r, 800)); return document.querySelectorAll("#stage .stack.head img[data-image-artwork]").length > 0;`],
   ["layer list grouped, changed layers marked", "p=1&v=board&t=appearance", `
     await new Promise(r => setTimeout(r, 800));
     const L = document.querySelector("#appearance-root");
     const want = REVIEW_DATA.projects[1].board.layers, n = L?.querySelectorAll("[data-layer]").length, m = L?.querySelectorAll("[data-layer] .mark").length;
     return !!L && n >= want.length && m === want.filter(l => l.changed).length && document.querySelector("#layers").children.length === 0 || JSON.stringify([!!L, n, want.length, m, want.filter(l => l.changed).length, S.t, S.v]);`],
   ["toggling a layer removes it from the drawing", "p=1&v=board&t=appearance", `
-    await new Promise(r => setTimeout(r, 800));
+    // The eye toggles persisted appearance, so establish a visible layer first.
+    await applyState({...S,layers:proj().board.layers.map(l=>l.name)});
     ${BOARD_POINT_PROBE}
     const point=boardDiff?occupied({layer:'F.Cu'}):null;
     if(boardDiff && !point) return 'no visible F.Cu geometry to test';
     const cb = document.querySelector('#appearance-root [data-layer="F.Cu"] .eye-btn'); cb.click();
-    await new Promise(r => setTimeout(r, 800));
+    // Palette decoding can settle on the old stage while the fallback redraw is
+    // still mounting its replacement. Only the connected composition's draw gate
+    // certifies that every layer and the final camera have finished rendering.
+    const deadline=performance.now()+15000;
+    const rendered=()=>{
+      const stage=document.querySelector('#stage');
+      return stage?.isConnected&&stage.dataset.boardReady!==undefined&&stage.dataset.boardReady===stage.dataset.generation;
+    };
+    while(!rendered()&&performance.now()<deadline)await new Promise(r=>requestAnimationFrame(r));
+    if(!rendered())return 'layer visibility redraw did not settle';
     if(point) {
       const {pane,object,screen}=point;
       if(pane.renderer.hitTest(screen).some(o=>o===object)) return 'hidden layer remains hittable';
@@ -793,7 +1984,7 @@ export const CHECKS = [
     return S.p === 1 && S.v === "board" && S.m === "overlay" && S.x === 158.8 && S.z === 12;`],
   ["stale or malformed address falls back to first change", "p=9&v=sheet:/nope/&x=abc&s=c99999", `
     await new Promise(r => setTimeout(r, 1200));
-    return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x) && document.querySelectorAll("#stage svg").length > 0;`],
+    return S.p === 0 && S.v !== "sheet:/nope/" && Number.isFinite(S.x) && document.querySelectorAll("#stage img[data-image-artwork]").length > 0;`],
   ["j and k step through changes in list order", "p=1", `
     const ids = [...document.querySelectorAll("#panel .card")].map(c => c.dataset.id);
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "j" })); await new Promise(r => setTimeout(r, 900));
@@ -880,7 +2071,14 @@ export const CHECKS = [
   ["added footprint card shows its footprint and layer", "p=0", `
     const r = REVIEW_DATA.projects[0].changes.find(r => r.kind === "footprint" && r.action === "added" && r.props.layer);
     // Bench: property dumps moved from the card to the bottom inspector.
-    document.querySelector('#panel .card[data-id="' + r.id + '"]').click(); await new Promise(res => setTimeout(res, 1500));
+    // Find the card through the public page controls, not only the first page.
+    let card;
+    while (!(card=document.querySelector('#panel .card[data-id="' + r.id + '"]'))) {
+      const next=document.querySelector('#panel [data-change-page="next"]:not(:disabled)');
+      if(!next)return 'added footprint card missing from Changes pages';
+      next.click();
+    }
+    card.click(); await new Promise(res => setTimeout(res, 1500));
     const t = document.querySelector('#inspector').textContent;
     return t.includes(r.props.footprint) && t.includes(r.props.layer);`],
   ["address with selection and position keeps the position", "p=1&v=board&x=150&y=100&z=8&s=c600", `
@@ -910,7 +2108,7 @@ export const CHECKS = [
     const bad = [];
     for (const v of [P.sheets[0] && "sheet:" + P.sheets[0].path, "board"]) for (const m of Object.keys(MODE_NAMES)) {
       S.m = m; S.v = v; S.x = S.y = S.z = null; await draw();
-      const vis = [...document.querySelectorAll("#stage .stack.base svg")].some(e => e.getBoundingClientRect().width > 0);
+      const vis = [...document.querySelectorAll("#stage .stack.base img[data-image-artwork]")].some(e => e.getBoundingClientRect().width > 0);
       if (!vis) bad.push(v + " " + m);
     }
     return bad.length ? bad.join(", ") : true;`],
@@ -962,11 +2160,27 @@ export const CHECKS = [
     d.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 1 }));
     d.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: r.left + r.width * 0.1 }));
     return Math.abs(S.wipe - 0.5) < 0.02 || S.wipe;`],
-  ["a capped change list says so", "p=1", `
-    const p = REVIEW_DATA.projects[1], keep = p.changes;
-    p.changes = Array.from({ length: 1600 }, (_, i) => ({ ...keep[0], id: "x" + i }));
-    renderPanel(); const t = document.querySelector("#panel .cards").textContent; p.changes = keep; renderPanel();
-    return t.includes("showing 1500 of 1600") || t.slice(-80);`],
+  ["Changes pagination retains all 1600 rows", "p=1", `
+    const p=proj(),keep=p.changes,filter={...S.filter},selection=S.s;
+    try {
+      p.changes=Array.from({length:1600},(_,i)=>({...keep[0],id:'x'+i}));
+      Object.assign(S.filter,{added:true,removed:true,modified:true,all:false,q:'',kind:'',sort:'',group:''});
+      S.s=null;renderPanel();setDock('panel',true);const seen=new Set();
+      if(stepIds().length!==1600)return 'keyboard navigation truncated '+stepIds().length;
+      for(let page=0;page<32;page++) {
+        const rows=[...document.querySelectorAll('#panel .card')];
+        if(rows.length!==50)return 'wrong page size '+rows.length;
+        for(const r of rows)seen.add(r.dataset.id);
+        const next=document.querySelector('[data-change-page="next"]');
+        if(!next||next.disabled!==(page===31))return 'wrong next page state';
+        if(!next.disabled){next.click();if(!document.activeElement?.matches('[data-change-page]:not(:disabled)'))return 'pagination lost focus';}
+      }
+      if(seen.size!==1600)return 'rows truncated '+seen.size;
+      S.s='x0';renderPanel();
+      if(!document.querySelector('.card[data-id="x0"][aria-selected="true"]'))return 'saved selection not revealed';
+      return document.querySelector('.cards [role="status"]').textContent==='1–50 of 1600'||'wrong page range';
+    } finally {p.changes=keep;S.filter=filter;S.s=selection;renderPanel();}
+  `],
   ["generated ids and enums are escaped in markup", "p=1", `
     const p = REVIEW_DATA.projects[1], r = p.changes[0], old = r.id; r.id = 'c"><b id=inj>';
     renderPanel(); const bad = !!document.querySelector("#inj"); r.id = old; renderPanel();
@@ -1670,14 +2884,18 @@ export const CHECKS = [
     const scene = c => ({version:1,units:"um",complete:c,warnings:[],bounds:[0,0,8000,5000],layers:[{id:0,name:"F.Cu",type:"signal",enabled:true}],nets:[{id:0,name:""}],objects:[]});
     D.blobs.glOk = await gz(JSON.stringify(scene(true))); D.blobs.glPart = await gz(JSON.stringify(scene(false))); D.blobs.glBad = await gz("{nope");
     const saved = p.board.geometry, create = BoardGL.create, status = () => document.querySelector("#statusbar .status-message").textContent;
-    const svgOk = () => !!document.querySelector(".stack .layer") && !document.querySelector(".board-gl");
+    const svgOk = () => {
+      const stage=document.querySelector('#stage'),images=[...stage.querySelectorAll('img[data-image-artwork]')];
+      return images.length>0 && images.every(i=>i.complete&&i.naturalWidth>0) && !stage.querySelector('.board-gl')
+        && stage.dataset.boardBackend==='images' && stage.dataset.boardReady===stage.dataset.generation;
+    };
     try {
       S.v = "board"; S.m = "side";
       delete p.board.geometry;
       for (const m of ["side","overlay","wipe","blend","semantic"]) { S.m = m; await draw(); if (!svgOk()) return "no geometry " + m; }
       S.m = "side"; p.board.geometry = {base:"glOk", head:"glOk"};
       BoardGL.create = () => null; boardView.failed = null; await draw();
-      if (!svgOk() || !status().includes("WebGL unavailable")) return "missing WebGL2 " + status();
+      if (!svgOk() || !status().includes("WebGL unavailable")) return "missing WebGL2 " + status() + ' ' + JSON.stringify({expected:boardMountState.expected,failed:boardMountState.failed,images:document.querySelectorAll('#stage img[data-image-artwork]').length,note:boardView.note});
       BoardGL.create = create; boardView.failed = null;
       for (const [key, g] of [["corrupt", {base:"glBad", head:"glOk"}], ["incomplete", {base:"glOk", head:"glPart"}]]) {
         p.board.geometry = g; await draw();
@@ -1690,6 +2908,36 @@ export const CHECKS = [
       for (const m of ["overlay","wipe","blend","semantic"]) { p.board.geometry = {base:"glOk", head:"glOk"}; S.m = m; await draw(); if (svgOk() || boardView.renderers.length !== 1 || !boardDiff) return "mode " + m; }
       return true;
     } finally { BoardGL.create = create; p.board.geometry = saved; boardView.failed = null; boardView.note = null; S.m = "side"; }`],
+  ["board fallback initializes live state before palette decode", "v=board&x=10&y=20&z=5", `
+    const p=proj(); if(!p.board?.changed) return 'skip';
+    const geometry=p.board.geometry, appearance=Appearance.get(), original=applyAppearance;
+    let release, entered, drawing;
+    const blocked=new Promise(r=>release=r), started=new Promise(r=>entered=r);
+    try {
+      delete p.board.geometry; await draw();
+      Appearance.patch({flip:true});
+      const immediate=document.querySelector('#stage .world').style.transform.includes('scale(-');
+      await draw();
+      if(!immediate) return 'connected camera waits for fallback redraw';
+      boardView.failed=S.p; boardView.note='WebGL unavailable — showing SVG';
+      applyAppearance=snapshot=>{
+        const pending=original(snapshot);
+        entered();
+        return pending.then(()=>blocked);
+      };
+      drawing=draw(); await started;
+      const vp=document.querySelector('#stage .vp'), world=vp?.querySelector('.world');
+      if(!world?.style.transform.includes('scale(-') || !vp.classList.contains('flip')) return 'live camera waits for palette decode';
+      if(!/WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent)) return 'live fallback notice waits for palette decode';
+      if(S.x!==10 || S.y!==20 || S.z!==5) return 'live camera changed';
+      if(document.querySelector('#stage').dataset.imageReady==='true') return 'palette decode reported ready early';
+      return true;
+    } finally {
+      release(); if(drawing) await drawing;
+      applyAppearance=original; p.board.geometry=geometry;
+      boardView.failed=null; boardView.note=null; Appearance.patch({flip:appearance.flip}); await draw();
+    }
+  `],
   ["board flip adapters mirror camera, overlays and pointer", "v=board&x=10&y=20&z=5", `
     const p = proj(); if (!p.board?.changed) return "skip";
     const geometry=p.board.geometry; delete p.board.geometry;
@@ -1730,11 +2978,10 @@ export const CHECKS = [
       return JSON.stringify(A.get()) === before && A.defaults(["F.Cu"]).objects.zones.opacity === .6 && A.normalize(null).contrast === "normal" && calls === 4 || "reset " + calls;
     } finally { off(); A.reset(); }`],
   ["board layer paint preserves custom colours and store snapshots", "v=board", `
-    const d=document.createElement('div'); d.innerHTML='<svg><path fill="none" stroke="rgb(200,52,52)" style="opacity:.3"/><path fill="#123456" stroke="#c83434"/></svg>';
-    recolorLayer(d,{color:[1,2,3,1],opacity:.5},KicadColors.layers['F.Cu']);
-    const [a,b]=d.querySelectorAll('path');
-    if(a.getAttribute('fill')!=='none' || a.getAttribute('stroke')!=='#010203' || a.style.opacity!=='.3' && a.style.opacity!=='0.3') return 'layer paint';
-    if(b.getAttribute('fill')!=='#123456' || b.getAttribute('stroke')!=='#010203') return 'custom paint overwritten';
+    const src='<svg><path fill="none" stroke="rgb(200,52,52)" style="opacity:.3"/><path fill="#123456" stroke="#c83434"/></svg>';
+    const out=ImageView.layerPaints(src,KicadColors.layers['F.Cu'].slice(0,3),[1,2,3]);
+    if(!out.includes('fill="none" stroke="#010203" style="opacity:.3"')) return 'layer paint';
+    if(!out.includes('fill="#123456" stroke="#010203"')) return 'custom paint overwritten';
     const look=Appearance.get(), old=look.flip; look.flip=!old;
     if(Appearance.get().flip!==old) { Appearance.patch({flip:old}); return 'mutable snapshot'; }
     return true;`],
@@ -1749,7 +2996,7 @@ export const CHECKS = [
         const layer=document.querySelector('.stack .layer'); if(!layer) return 'no SVG '+m;
         const name=canon(layer.dataset.layer);
         Appearance.patch({layers:{[name]:{visible:false}}}); await draw();
-        if([...document.querySelectorAll('.stack .layer')].some(l=>canon(l.dataset.layer)===name)) return 'eye ignored '+m;
+        if([...document.querySelectorAll('.stack .layer')].some(l=>canon(l.dataset.layer)===name&&getComputedStyle(l).display!=='none')) return 'eye ignored '+m;
         Appearance.patch({layers:{[name]:before.layers[name]}});
       }
       return true;
@@ -1781,9 +3028,10 @@ export const CHECKS = [
       const sheet=proj().sheets.find(s=>s.svg); if(!sheet) return 'fixture needs schematic';
       S.v='sheet:'+sheet.path; await draw();
       if(!appearanceSchematics.size||appearanceBoards.size) return 'stale lifecycle';
-      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('18,52,86')) return 'wire stale';
+      for(const c of appearanceSchematics) if(!c.appliedSource.includes('rgba(18,52,86,1)')||!c.node.complete) return 'wire stale';
       store.patch({colors:{'schematic.wire':[1,0,0,1]}});
-      for(const svg of appearanceSchematics) if(!svg.style.getPropertyValue('--sch-ink-009600').includes('255,0,0')) return 'mounted wire stale';
+      await applyAppearance(store.get());
+      for(const c of appearanceSchematics) if(!c.appliedSource.includes('rgba(255,0,0,1)')||!c.node.complete) return 'mounted wire stale';
       S.v='board'; await draw();
       if(appearanceSchematics.size || !appearanceBoards.size) return 'stale schematic after board mount';
       return location.hash===hash || 'appearance changed deep link';
@@ -2442,7 +3690,7 @@ export const CHECKS = [
   ["board side camera retains textures and buffers", "v=board&m=side", `
     const P=proj(), saved=P.board.geometry;
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,1000,1000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[]};
-    const key='__retained_side_proof__';cache[key]=JSON.stringify(scene);P.board.geometry={base:key,head:key};
+    const key='__retained_side_proof__';cache[key]=Promise.resolve({json:scene});P.board.geometry={base:key,head:key};
     try {
       S.v='board';S.m='side';await draw();fit();
       if(boardView.renderers.length!==2) return 'two retained renderers required';
@@ -2454,10 +3702,10 @@ export const CHECKS = [
   ["board comparison cameras retain revision net textures", "v=board&m=side", `
     const P=proj(), saved=P.board.geometry, keys=['__camera_base__','__camera_head__'];
     if(!saved) {
-      for(const [i,key] of keys.entries()) cache[key]=JSON.stringify({version:1,units:'um',complete:true,warnings:[],bounds:[0,0,4000,4000],
+      for(const [i,key] of keys.entries()) cache[key]=Promise.resolve({json:{version:1,units:'um',complete:true,warnings:[],bounds:[0,0,4000,4000],
         layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''},{id:1,name:i?'VCC':'GND'}],
         objects:[{kind:'track',uuid:key,changeUuid:key,ref:'',layers:['F.Cu'],net:1,category:'tracks',side:null,hidden:false,
-          box:[0,0,4000,1000],geometry:{segments:[[500,500,3500,500,500]]}}]});
+          box:[0,0,4000,1000],geometry:{segments:[[500,500,3500,500,500]]}}]}});
       P.board.geometry={base:keys[0],head:keys[1]};
     }
     try { for(const mode of ['side','overlay','wipe','blend','semantic']) {
@@ -2488,7 +3736,7 @@ export const CHECKS = [
     const create=BoardGL.create;
     try {
       disposeBoardRenderers();BoardGL.create=()=>null;boardView.failed=null;await draw();
-      if(boardView.useGL || !document.querySelector('#stage .world svg') || !boardView.note) return 'authoritative SVG fallback missing offline';
+      if(boardView.useGL || !document.querySelector('#stage .world img[data-image-artwork]') || !boardView.note) return 'authoritative SVG fallback missing offline';
       console.log('BOARD_PROOF '+JSON.stringify({offline:true,selection:row.id,fallback:true}));
       return true;
     } finally {BoardGL.create=create;boardView.failed=null;}
@@ -2742,10 +3990,10 @@ export const CHECKS = [
     if(t('dx')==='0.000') return 'pan dropped origin';
     S.v='sheet:/not-in-report'; await draw(); await raf();
     return t('x')==='off canvas' && t('dx')==='0.000' && !/NaN|Infinity/.test(document.querySelector('#statusbar').textContent);`],
-  ["status change counter matches visible change rows", "", `
+  ["status change counter includes off-page filtered change rows", "", `
     const row=proj().changes.find(r=>viewOf(r)&&currentView(viewOf(r))); if(!row) return 'skip';
     await goTo(row.id); await new Promise(r=>requestAnimationFrame(r));
-    const rows=[...document.querySelectorAll('#panel .card[data-id]')], i=rows.findIndex(e=>e.dataset.id===S.s);
+    const rows=filteredChangeRows(), i=rows.findIndex(r=>r.id===S.s);
     return document.querySelector('[data-change]').textContent===(i+1)+'/'+rows.length;`],
   ["shortcut sheet button and question mark open, Escape closes keeping selection and focus", "", `
     const before=S.s, opener=document.querySelector('#shortcuts-open'); opener.focus();
@@ -2938,7 +4186,7 @@ export const CHECKS = [
     if(!row) return 'sample needs schematic change';
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; S.s=row.id; await draw(); fit();
-      if(!document.querySelector('#stage .vp.sheet .layer svg')) return mode+' SVG';
+      if(!document.querySelector('#stage .vp.sheet .layer img[data-image-artwork]')) return mode+' SVG';
       if(!document.querySelector('#stage .marker.sel')) return mode+' selection';
       if(getComputedStyle(document.querySelector('#stage .vp.sheet')).backgroundColor!=='rgb(245, 244, 239)') return mode+' paper';
       if(!document.querySelector('#stage .sch-grid')) return mode+' grid';
@@ -2952,7 +4200,7 @@ export const CHECKS = [
       for(const mode of ['side','overlay','wipe','blend','semantic']) {
         S.m=mode; await draw();
         const stack=document.querySelector('#stage .stack.'+(missing==='base'?'head':'base'));
-        if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' '+missing+' hid survivor';
+        if(!stack?.querySelector('img[data-image-artwork]')||getComputedStyle(stack).display==='none') return mode+' '+missing+' hid survivor';
         if(!document.querySelector('#stage .marker.sel')||!document.querySelector('#stage .sch-grid')) return mode+' '+missing+' lost selection/grid';
       }
     }} finally {sheet.svg=svg;}
@@ -2974,7 +4222,7 @@ export const CHECKS = [
       for(const [action,glyph,line] of [['added','+','solid'],['removed','−','dashed'],['modified','~','dotted']]) {
         const m=document.querySelector('#stage .marker.'+action), css=m&&getComputedStyle(m);
         if(!m||m.dataset.glyph!==glyph||!m.getAttribute('aria-label')?.includes(BoardMarks.styles[action].word)||m.dataset.dash!==BoardMarks.styles[action].dash||css.borderTopStyle!==line) return style+' '+action+' cues';
-        if(m.dataset.markStyle!==style||!m.querySelector('.sch-mark-label')?.textContent.includes(BoardMarks.styles[action].word)) return style+' '+action+' word/style';
+        if(m.dataset.markStyle!==style||getComputedStyle(m,'::before').content!==JSON.stringify(m.getAttribute('aria-label'))) return style+' '+action+' word/style';
         if(css.pointerEvents!=='none') return 'marker intercepts pins';
         if(style==='recolour'&&css.backgroundColor==='rgba(0, 0, 0, 0)'&&css.backgroundImage==='none') return action+' no tint';
       }
@@ -2995,7 +4243,8 @@ export const CHECKS = [
     S.threads=[{id:'sch6-pin',resolved:false,anchor,comments:[]}];
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; await draw();
-      const pin=document.querySelector('#stage .pin[data-thread="sch6-pin"]');
+      // Head points can also appear in Base, where moved geometry has different coordinates.
+      const pin=[...document.querySelectorAll('#stage .pin[data-thread="sch6-pin"]')].find(p=>p.closest('.vp').querySelector('.stack.head'));
       if(!pin||getComputedStyle(pin).pointerEvents==='none'||resolveAnchor(anchor).view!==v) return mode+' pin';
       const vp=pin.closest('.vp'), r=vp.getBoundingClientRect();
       const cx=r.left+r.width/2+(x-S.x)*S.z, cy=r.top+r.height/2+(y-S.y)*S.z;
@@ -3017,7 +4266,7 @@ export const CHECKS = [
     if(!sheet) return 'Thermal real schematic change required';
     S.v='sheet:'+sheet.path; S.m='${mode}'; S.s=proj().changes.find(r=>r.where?.sheet===sheet.path&&rowBox(r,'head')).id;
     S.grid=true; Appearance.patch({markStyle:'recolour'}); renderNav(); renderModes(); renderPanel(); await draw(); fit();
-    return !!document.querySelector('#stage .vp.sheet svg')&&!!document.querySelector('#stage .marker.sel');
+    return !!document.querySelector('#stage .vp.sheet img[data-image-artwork]')&&!!document.querySelector('#stage .marker.sel');
   `]),
   ["SCH6 removed-only schematic fixture preserves region cues in every mode", "", `
     const p=proj(), sheet=p.sheets.find(s=>s.svg?.base||s.svg?.head);
@@ -3031,10 +4280,11 @@ export const CHECKS = [
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; renderNav(); renderModes(); renderPanel(); await draw(); fit();
       const stack=document.querySelector('#stage .stack.base'), mark=document.querySelector('#stage .marker.sel.removed');
-      if(!stack?.querySelector('svg')||getComputedStyle(stack).display==='none') return mode+' survivor';
+      if(!stack?.querySelector('img[data-image-artwork]')||getComputedStyle(stack).display==='none') return mode+' survivor';
       const semantic=BoardMarks.styles.removed;
       if(!mark||mark.dataset.glyph!==semantic.glyph||getComputedStyle(mark).borderTopStyle!==semantic.dash
-        ||!mark.querySelector('.sch-mark-label')?.textContent.includes(semantic.word)
+        ||!mark.getAttribute('aria-label')?.includes(semantic.word)
+        ||getComputedStyle(mark,'::before').content!==JSON.stringify(mark.getAttribute('aria-label'))
         ||mark.dataset.label!==semantic.glyph+' '+semantic.word
         ||getComputedStyle(mark,'::after').content!==JSON.stringify(mark.dataset.label)) return mode+' removed cues';
     }
@@ -3056,7 +4306,7 @@ export const CHECKS = [
       }
       await Promise.all(pending);
       const stage=document.querySelector('#stage'), m=stage.querySelector('.marker.sel.violation');
-      return stage.classList.contains('mode-semantic')&&!!stage.querySelector('.stack.head svg')
+      return stage.classList.contains('mode-semantic')&&!!stage.querySelector('.stack.head img[data-image-artwork]')
         &&!!m&&m.dataset.glyph==='!'&&m.getAttribute('aria-label')==='finding U1'
         &&getComputedStyle(stage.querySelector('.vp.sheet')).backgroundColor==='rgb(245, 244, 239)';
     } finally {sheet.svg=svg; p.sheets.pop(); p.checks.pop(); KRTheme.set(theme);}
@@ -3076,11 +4326,12 @@ export const CHECKS = [
     && /^(\u2013|\\d+) \\/ \\d+$/.test(document.querySelector('#change-count').textContent)
     && !!document.querySelector('[data-mark-style]');`],
   ["chrome toolbar change counter follows step", "", `
-  const n = document.querySelectorAll('#panel .card[data-id]').length;
+  const n = filteredChangeRows().length;
   if (!n) return 'no cards';
   if (document.querySelector('#change-count').textContent.split(' / ')[1] !== String(n)) return 'total ' + document.querySelector('#change-count').textContent;
   document.querySelector('#change-nav [data-step="1"]').click();
-  await new Promise(r => setTimeout(r, 50));
+  // Selecting a change redraws the view; image decoding can delay the panel update.
+  for (const end = performance.now() + 5000; !/^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) && performance.now() < end;) await new Promise(r => setTimeout(r, 50));
   return /^\\d+ \\/ /.test(document.querySelector('#change-count').textContent) || document.querySelector('#change-count').textContent;`],
   ["board context loss retains state and requires explicit retry", "v=board", `
     const realGeometry=!!proj().board.geometry;
@@ -3094,8 +4345,8 @@ export const CHECKS = [
     const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
     if(!ext) throw Error('WebGL context-loss extension unavailable');
     ext.loseContext();
-    for(let n=0;n<100 && !document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
-    if(boardDiff || !document.querySelector('#stage .stack svg') || !old.panes.every(p=>p.renderer.stats.disposed)) return 'context loss did not dispose and fall back';
+    for(let n=0;n<100 && !document.querySelector('#stage .stack img[data-image-artwork]');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack img[data-image-artwork]') || !old.panes.every(p=>p.renderer.stats.disposed)) return 'context loss did not dispose and fall back';
     if(JSON.stringify([S.x,S.y,S.z,S.s,S.m,S.layers])!==before) return 'state lost';
     if(!/WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent)) return 'missing fallback notice';
     for(let n=0;n<3;n++) await draw();
@@ -3121,7 +4372,7 @@ export const CHECKS = [
     ${BOARD_LIFECYCLE_FIXTURE}
     for(const mode of ['side','overlay','wipe','blend','semantic']) {
       S.m=mode; await draw();
-      if(boardDiff || !document.querySelector('#stage .stack svg')) return 'no SVG '+mode;
+      if(boardDiff || !document.querySelector('#stage .stack img[data-image-artwork]')) return 'no SVG '+mode;
       if(S.x!==5 || S.y!==5 || S.z!==20) return 'camera lost '+mode;
     }
     return window.__webglAcquisitions>0 && /WebGL.*SVG/.test(document.querySelector('#statusbar .status-message').textContent);
@@ -3200,8 +4451,8 @@ export const CHECKS = [
     const ext=old.panes[0].renderer.gl.getExtension('WEBGL_lose_context');
     if(!ext) throw Error('WebGL context-loss extension unavailable');
     ext.loseContext();
-    for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
-    if(boardDiff || !document.querySelector('#stage .stack svg')) return 'did not fall back';
+    for(let n=0;n<100&&!document.querySelector('#stage .stack img[data-image-artwork]');n++) await new Promise(r=>setTimeout(r,25));
+    if(boardDiff || !document.querySelector('#stage .stack img[data-image-artwork]')) return 'did not fall back';
     const next=structuredClone(proj()); next.dir+='-restored'; next.name+=' restored'; D.projects.push(next);
     S.p=D.projects.length-1; await draw();
     return !!boardDiff && boardDiff!==old && boardView.failed===null && old.panes.every(p=>p.renderer.stats.disposed)
@@ -3214,8 +4465,8 @@ export const CHECKS = [
     const before=JSON.stringify([S.x,S.y,S.z,S.s,S.m]);
     try {
       pane.targets[0].width=-1; gl.createTexture=()=>null; old.render();
-      for(let n=0;n<100&&!document.querySelector('#stage .stack svg');n++) await new Promise(r=>setTimeout(r,25));
-      return !boardDiff && !!document.querySelector('#stage .stack svg') && boardView.failed===S.p
+      for(let n=0;n<100&&!document.querySelector('#stage .stack img[data-image-artwork]');n++) await new Promise(r=>setTimeout(r,25));
+      return !boardDiff && !!document.querySelector('#stage .stack img[data-image-artwork]') && boardView.failed===S.p
         && old.panes.every(p=>p.renderer.stats.disposed) && JSON.stringify([S.x,S.y,S.z,S.s,S.m])===before
         || 'allocation failure did not preserve SVG state';
     } finally {gl.createTexture=create;}
@@ -3223,26 +4474,21 @@ export const CHECKS = [
   ["SCH6 proof framed page", "v=sheet:/&m=side", `
     await draw(); fit();
     await new Promise(resolve => requestAnimationFrame(resolve));
-    const svg=document.querySelector('#stage .vp.sheet .layer svg');
-    return !!svg && svg.querySelectorAll('path').length>100 && currentView().kind==='sheet'
-      && svg.getBoundingClientRect().width>0;
+    const image=document.querySelector('#stage .vp.sheet .layer img[data-image-artwork]');
+    return image?.complete&&image.naturalWidth>0&&image.imageOwner.source.includes('<path')&&currentView().kind==='sheet'
+      && image.getBoundingClientRect().width>0;
   `],
   ["SCH6 proof live palette status and comparison controls", "v=sheet:/&m=side", `
     await draw(); fit();
-    const svg=document.querySelector('#stage .vp.sheet .layer svg');
-    const wire=[...svg.querySelectorAll('[style]')].find(e=>e.style.stroke.includes('--sch-ink-009600'));
-    const frame=[...svg.querySelectorAll('[style]')].find(e=>e.style.stroke.includes('--sch-ink-840000'));
-    if(!wire||!frame) return 'KiCad wire/frame paints required';
-    const root=svg, original=root.style.getPropertyValue('--sch-ink-009600');
-    const frameColour=getComputedStyle(frame).stroke;
+    const image=document.querySelector('#stage .vp.sheet .layer img[data-image-artwork]'), c=image.imageOwner;
+    const original=Appearance.get(), source=c.source;
+    if(!source.toLowerCase().includes('#009600')||!source.toLowerCase().includes('#840000'))return 'KiCad wire/frame paints required';
     try {
-      root.style.setProperty('--sch-ink-009600','#135724');
-      if(getComputedStyle(wire).stroke!=='rgb(19, 87, 36)'||getComputedStyle(frame).stroke!==frameColour)
-        return 'loaded SVG palette';
-    } finally {
-      if(original) root.style.setProperty('--sch-ink-009600',original);
-      else root.style.removeProperty('--sch-ink-009600');
-    }
+      Appearance.patch({colors:{'schematic.wire':[19/255,87/255,36/255,1]}});
+      await applyAppearance(Appearance.get());
+      const expected=ImageView.replacePaints(source,schematicPaints(KrAppearance.resolve(Appearance.get())));
+      if(!c.node.complete||c.appliedSource!==expected||c.source!==source)return 'decoded image palette';
+    } finally {Appearance.set(original);await applyAppearance(original);}
     for(const vp of document.querySelectorAll('#stage .vp.sheet')) {
       const r=vp.getBoundingClientRect();
       updateCoordinates(vp,{clientX:r.left+r.width/2,clientY:r.top+r.height/2});
@@ -3347,7 +4593,7 @@ export const CHECKS = [
             if(m.dataset.glyph!==semantic.glyph||m.dataset.dash!==semantic.dash
               ||m.dataset.label!==semantic.glyph+' '+semantic.word
               ||getComputedStyle(m,'::after').content!==JSON.stringify(m.dataset.label)) return mode+' action cues';
-            if(m.getAttribute('aria-label')!=='Modified R7'||m.querySelector('.sch-mark-label')?.textContent!=='Modified R7') return mode+' semantic word';
+            if(m.getAttribute('aria-label')!=='Modified R7'||getComputedStyle(m,'::before').content!==JSON.stringify('Modified R7')) return mode+' semantic word';
             const color=KrAppearance.resolve(Appearance.get()).marks.schematic.modified.color;
             const rgb=getComputedStyle(m).borderTopColor.match(/[0-9.]+/g).slice(0,3).map(Number);
             if(!rgb.every((v,i)=>Math.abs(v-color[i]*255)<1)) return mode+' live palette';
@@ -3368,11 +4614,11 @@ export const CHECKS = [
   return !!document.querySelector('#toolbar #zoombar') && !!document.querySelector('#panel-tabs')
     && ['x','y'].every(axis=> /^-?\\d+\\.\\d+$/.test(document.querySelector('#statusbar [data-coordinate='+axis+']').textContent))
     && (boardView.useGL ? boardDiff?.panes.length===2 && document.querySelectorAll('#stage canvas').length===2
-      : !document.querySelector('#stage canvas') && !!document.querySelector('#stage svg'));`],
+      : !document.querySelector('#stage canvas') && !!document.querySelector('#stage img[data-image-artwork]'));`],
   ["chrome offline controls preserve SVG modes links theme and modal", "p=1&v=board", `
   for (const mode of ['side','overlay','wipe','blend','semantic']) {
     await applyState({p:1,v:'board',m:mode}); fit();
-    if (S.m!==mode || !document.querySelector('#stage svg')) return 'mode '+mode;
+    if (S.m!==mode || !document.querySelector('#stage img[data-image-artwork]')) return 'mode '+mode;
   }
   const theme=KRTheme.get(); document.querySelector('[data-theme-set='+(theme==='dark'?'light':'dark')+']').click();
   if (KRTheme.get()===theme) return 'theme switch'; KRTheme.set(theme);
@@ -3882,7 +5128,7 @@ export const CHECKS = [
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,20000,10000],copperStack:names,
       layers:names.map((name,id)=>({id,name,type:'signal',enabled:true})),nets:[{id:0,name:''}],
       objects:[track('back','B.Cu',1000,19000,4000),track('inner','In1.Cu',1000,19000,4000),track('single','In2.Cu',2000,14000),track('overlap','In2.Cu',10000,18000)]};
-    cache.vfopacity=JSON.stringify(scene);proj().board.geometry={base:'vfopacity',head:'vfopacity'};
+    cache.vfopacity=Promise.resolve({json:scene});proj().board.geometry={base:'vfopacity',head:'vfopacity'};
     boardView.failed=null;Appearance.reset();Object.assign(S,{v:'board',m:'side',t:'appearance',x:10,y:5,z:40});renderPanel();await draw();
     Appearance.patch({activeLayer:'In2.Cu'});
     const row=document.querySelector('#appearance-root [data-layer="In2.Cu"]');if(!row)throw Error('missing In2.Cu row');
@@ -3963,7 +5209,7 @@ CHECKS.push(['vf-avail unchanged board full design and Appearance hash', 'v=boar
   if(!document.querySelector('#appearance-root'))throw Error('Appearance unavailable');
   if(!document.querySelector('#stage').textContent.includes('No layout changes'))throw Error('missing no-change notice');
   for(const layer of proj().board.layers){if(!document.querySelector('#appearance-root [data-layer="'+canon(layer.name)+'"]'))throw Error('missing layer '+layer.name);}
-  if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('no board drawing');
+  if(!boardView.renderers.length&&!document.querySelector('#stage img[data-image-artwork]'))throw Error('no board drawing');
   console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',layers:proj().board.layers.length,renderers:boardView.renderers.length,theme:KRTheme.get()}));return true;
 `]);
 
@@ -3972,7 +5218,7 @@ CHECKS.push(['vf-avail unchanged board modes checks threads and full hash', 'v=b
   for(const mode of ['side','overlay','wipe','blend','semantic']) {
     S.m=mode;await draw();
     if(!document.querySelector('#stage .no-change-notice')||!currentView())throw Error('unchanged board unavailable in '+mode);
-    if(!boardView.renderers.length&&!document.querySelector('#stage svg'))throw Error('full board missing in '+mode);
+    if(!boardView.renderers.length&&!document.querySelector('#stage img[data-image-artwork]'))throw Error('full board missing in '+mode);
   }
   const violation=allViolations().find(v=>v.where?.board&&v.pos);
   if(!violation)throw Error('real board finding required');
@@ -4001,7 +5247,7 @@ CHECKS.push(['vf-avail unchanged schematic sheet full design', '', `
   const sheet=D.projects[p].sheets.find(s=>s.svg.base&&s.svg.head);
   sheet.status='unchanged';sheet.svg.head=sheet.svg.base;
   await applyState({p,v:'sheet:'+sheet.path,m:'side'});
-  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
+  if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2||!document.querySelector('#stage').textContent.includes('No schematic changes on this sheet'))throw Error('unchanged sheet must draw both revisions and explain');return true;
 `]);
 
 CHECKS.push(['vf-avail several projects retained in full', '', `
@@ -4011,7 +5257,7 @@ CHECKS.push(['vf-avail several projects retained in full', '', `
   for(let p=0;p<D.projects.length;p++){
     await applyState({p,v:'board',m:'side',t:'appearance'});
     if(!currentView()||!document.querySelector('#appearance-root'))throw Error('project board unavailable '+p);
-    for(const sheet of proj().sheets){await applyState({p,v:'sheet:'+sheet.path,m:'side'});if(document.querySelectorAll('#stage svg').length!==2)throw Error('sheet revision unavailable '+sheet.path);}
+    for(const sheet of proj().sheets){await applyState({p,v:'sheet:'+sheet.path,m:'side'});if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2)throw Error('sheet revision unavailable '+sheet.path);}
     if(modelAvailable()){await applyState({p,v:'3d',m:'side'});if(window.Review3D.state.roots.filter(Boolean).length!==2)throw Error('project 3D unavailable '+p);}
   }
   await applyState({p:unchanged,v:'board',m:'side',t:'appearance'});
@@ -4020,12 +5266,12 @@ CHECKS.push(['vf-avail several projects retained in full', '', `
 CHECKS.push(['vf-avail board-only unchanged schematic proof', '', `
   const p=D.projects.findIndex(p=>p.board.changed&&p.sheets.every(s=>s.status==='unchanged'));if(p<0)return 'skip';
   await applyState({p,v:'sheet:'+D.projects[p].sheets[0].path,m:'side'});
-  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('board-only edit hid unchanged schematic');return true;
+  if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('board-only edit hid unchanged schematic');return true;
 `]);
 CHECKS.push(['vf-avail one-sheet change retains unchanged sibling proof', '', `
   const p=D.projects.findIndex(p=>p.sheets.some(s=>s.status!=='unchanged')&&p.sheets.some(s=>s.status==='unchanged'));if(p<0)return 'skip';
   await applyState({p,v:'sheet:'+D.projects[p].sheets.find(s=>s.status==='unchanged').path,m:'side'});
-  if(document.querySelectorAll('#stage svg').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
+  if(document.querySelectorAll('#stage img[data-image-artwork]').length!==2||!document.querySelector('#stage .no-change-notice'))throw Error('sibling sheet unavailable');return true;
 `]);
 CHECKS.push(['bench polish Fit stays centred after dock resize and Widen has a label', 'v=board', `
   const w=ms=>new Promise(r=>setTimeout(r,ms));
@@ -4140,10 +5386,12 @@ CHECKS.push(['zoom-burst deep zoom no long frame', 'p=1&v=sheet:/', `${ZB_WHEEL}
 `]);
 // simplifySchematic: < 3,000 painted elements; joined strokes lighten thin text at fit, limits ~1.5x measured (fit mean 1.66, 18% moved; 28x 0.12, 2%).
 CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=sheet:/', `
-  const svgs = [...document.querySelectorAll('#stage svg[data-appearance-schematic]')];
-  const painted = svgs.map(s => s.querySelectorAll('path,line,polyline,polygon,rect,circle,ellipse').length);
-  if (!svgs.length || painted.some(n => n >= 3000)) return 'painted ' + painted;
-  const raw = await svgText(currentView().layers[0].svg.head), size = currentView().size;
+  const images=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')];
+  if(!images.length||images.some(i=>!i.complete||!i.naturalWidth)||document.querySelector('#stage .layer svg'))return 'decoded images required';
+  const {raw,simplified}=window.__sheetSimplification,size=currentView().size;
+  const parsed=new DOMParser().parseFromString(simplified,'image/svg+xml');
+  const painted=[parsed.querySelectorAll('path,line,polyline,polygon,rect,circle,ellipse').length];
+  if(painted.some(n=>n>=3000))return 'producer painted '+painted;
   const render = async (markup, vb, W, H) => {
     const d = new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement;
     d.setAttribute('viewBox', vb.join(' ')); d.setAttribute('width', W); d.setAttribute('height', H);
@@ -4152,11 +5400,123 @@ CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=she
   const out = {painted};
   // [name, viewBox mm, px, mean limit, share of ink pixels allowed to move > 32/255]
   for (const [name, vb, W, H, meanMax, moveMax] of [['fit', [0, 0, size[0], size[1]], 1600, Math.round(1600 * size[1] / size[0]), 2.5, 0.25], ['28x', [60, 125, 1600 / 28 / 3.78, 900 / 28 / 3.78], 1600, 900, 0.25, 0.03]]) {
-    const a = await render(raw.slice(raw.indexOf('<svg')), vb, W, H), b = await render(simpleSheet(raw), vb, W, H);
+    const a = await render(raw.slice(raw.indexOf('<svg')), vb, W, H), b = await render(simplified, vb, W, H);
     let sum = 0, moved = 0, ink = 0;
     for (let i = 0; i < a.length; i += 4) { const m = Math.max(Math.abs(a[i]-b[i]), Math.abs(a[i+1]-b[i+1]), Math.abs(a[i+2]-b[i+2])); sum += m; if (m > 32) moved++; if (Math.min(a[i], a[i+1], a[i+2]) < 200) ink++; }
     out[name] = {mean: +(sum / (a.length / 4)).toFixed(2), moved: +(moved / ink).toFixed(3)};
     if (out[name].mean > meanMax || out[name].moved > moveMax) return JSON.stringify(out);
   }
   return true;
+`]);
+
+CHECKS.push(['digest assets offline embedded closure', '', `
+  const entries=Object.entries(D.assets||{});
+  if(!entries.length)return 'skip';
+  if(Object.keys(D.assetDescriptors||{}).length)return 'offline report has hosted descriptors';
+  for(const [id,meta] of entries) {
+    if(!['svg','json'].includes(meta.kind)||typeof D.blobs?.[id]!=='string')return 'missing embedded asset '+id;
+    if(!await svgText(id))return 'empty embedded asset '+id;
+  }
+  const sheets=proj().sheets.filter(sheet=>sheet.svg&&(sheet.svg.base||sheet.svg.head));
+  if(!sheets.length)return 'fixture needs a schematic';
+  for(const sheet of sheets)for(const mode of ['side','overlay','wipe','blend','semantic']) {
+    await applyState({...S,v:'sheet:'+sheet.path,m:mode});
+    if(document.querySelector('#stage .image-error'))return 'unavailable sheet '+sheet.path+' '+mode;
+  }
+  await applyState({...S,v:'sheet:'+sheets[0].path,m:'side'});
+  if(window.__offlineAssetFetches.length)return 'offline fetch: '+window.__offlineAssetFetches.join(', ');
+  console.log('BOARD_PROOF '+JSON.stringify({task:'digest assets offline embedded closure',assets:entries.length,sheets:sheets.length,modes:5,fetches:0,protocol:location.protocol}));
+  return true;
+`, {beforeStartup:`
+  window.__offlineAssetFetches=[];
+  const originalFetch=window.fetch;
+  window.fetch=function(...args){window.__offlineAssetFetches.push(String(args[0]));return originalFetch.apply(this,args);};
+`}]);
+
+// Disposable proof pages deliberately retain the selected view for --shot.
+for(const [kind,mode,flip] of [['sheet','overlay',false],['board','side',false],['board','side',true]]) {
+  CHECKS.push(['images complete-screen '+kind+(kind==='board'?(flip?' flipped':' normal'):''),'',`
+    if(D.repo!=='fixture/images')return 'skip';
+    const original=BoardGL.create;
+    try {
+      if(${JSON.stringify(kind)}==='board'){BoardGL.create=()=>null;boardView.failed=0;}
+      Appearance.patch({flip:${flip}});
+      await applyState({...S,p:0,v:${JSON.stringify(kind==='sheet'?'sheet:/left/':'board')},m:${JSON.stringify(mode)},t:${JSON.stringify(kind==='sheet'?'changes':'appearance')},x:${kind==='sheet'?105:10},y:${kind==='sheet'?55:5},z:${kind==='sheet'?15:20}});
+      const stage=document.querySelector('#stage'),pane=stage.querySelector('.vp'),box=pane.getBoundingClientRect();
+      if(stage.dataset.imageReady!=='true'||stage.querySelector('.image-error'))return 'proof image unavailable';
+      if(![...stage.querySelectorAll('img')].every(i=>i.complete&&i.naturalWidth))return 'proof decode';
+      if(box.width<=0||box.height<=0||box.left<0||box.right>innerWidth+1)return 'proof outside screen';
+      if(!stage.querySelector('.diff-mark-legend')||document.querySelectorAll('*').length>=2000)return 'proof legend/DOM budget';
+      return true;
+    } finally {BoardGL.create=original;}
+  `]);
+}
+
+CHECKS.push(['images inspection complete-screen','',`
+  if(D.repo!=='fixture/images')return 'skip';
+  await applyState({...S,v:'sheet:/right/',m:'side',x:105,y:55,z:15});
+  const record=sheetImageElements('head')[0],pin=record.pins[0];
+  chooseImage(record,'head','pin',[pin.x,pin.y],pin);
+  const input=document.querySelector('#image-query');input.focus();input.value='U2';input.dispatchEvent(new Event('input'));
+  const host=document.querySelector('#image-search'),box=host.getBoundingClientRect(),stage=document.querySelector('#stage').getBoundingClientRect();
+  if(box.left<0||box.right>innerWidth+1||stage.height<=0||host.scrollWidth>host.clientWidth+1)return 'search screen overflow';
+  const result=document.querySelector('#image-results button');
+  if(result.getBoundingClientRect().height<44)return 'search target size';
+  const reachableTabs=[];
+  for(const tab of ['changes','checks','parts','threads']) {
+    const button=document.querySelector('#panel [data-tab="'+tab+'"]');
+    if(!button)return 'review tab missing '+tab;
+    if(button.disabled) { if(!button.title)return 'review tab unavailable without explanation '+tab; continue; }
+    button.click();
+    if(document.querySelector('#panel [data-tab="'+tab+'"]')?.getAttribute('aria-selected')!=='true')return 'review tab unreachable '+tab;
+    reachableTabs.push(tab);
+  }
+  if(!reachableTabs.includes('changes')||!reachableTabs.includes('checks'))return 'core review tabs not reachable';
+  if(!document.querySelector('#inspector').textContent.includes('U2')||!document.querySelector('.image-selection'))return 'proof selection';
+  if(document.querySelectorAll('*').length>=2000)return 'proof DOM budget';
+  return true;
+`]);
+
+// Presentation and trusted-pointer regression, not hosted transport acceptance.
+// site/test.mjs exercises production lazy consumers/client/parent together; Task 11.1
+// must cover the real sandbox frame, wrapper and authenticated raw delivery in Chrome.
+CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
+  if(D.repo!=='fixture/images')return 'skip';
+  await applyState({...S,p:0,v:'sheet:/left/',m:'side'});
+  const layer=currentView().layers[0],theme=document.documentElement.dataset.theme==='dark'?'dark':'light';
+  const id=layer.svgThemes?.[theme]?.base||layer.svg.base,original=assetText;
+  const nativeTimeout=window.setTimeout,scope=new EventTarget(),host={postMessage(){}};
+  window.setTimeout=(fn,ms,...args)=>nativeTimeout(fn,ms===15000?0:ms,...args);
+  const client=ImageView.assetClient(host,{[id]:{kind:'svg'}},scope);
+  const fail=async key=>{
+    if(key!==id)return original(key);
+    try{return await client.get(id,'svg');}catch(error){throw new AssetUnavailableError(error.message);}
+  };
+  try {
+    delete cache[id];assetText=fail;await draw();
+    const stage=document.querySelector('#stage'),error=stage.querySelector('.image-error'),button=error?.querySelector('button');
+    if(!error?.textContent.includes('Asset timeout; retry available')||error.getAttribute('role')!=='status')return 'timeout status missing';
+    if(!button||button.textContent!=='Try again')return 'retry missing';
+    if(stage.querySelectorAll('img[data-image-artwork]').length!==1)return 'other revision was lost';
+    const box=button.getBoundingClientRect();
+    if(box.height<44||box.width<44||error.closest('.world'))return 'retry scales with drawing or misses target size';
+    if(box.left<0||box.right>innerWidth||box.top<0||box.bottom>innerHeight)return 'retry outside screen';
+    if(typeof window.__checkMouseClick!=='function')return 'trusted retry input unavailable';
+    const vp=button.closest('.vp'),camera=[S.x,S.y,S.z];let trusted=false,captured=false;
+    button.addEventListener('click',e=>{trusted=e.isTrusted;},{once:true});
+    vp.addEventListener('gotpointercapture',()=>{captured=true;},{once:true});
+    assetText=original;
+    await new Promise(resolve=>{
+      window.__checkMouseDone=resolve;
+      window.__checkMouseClick(JSON.stringify({x:box.left+box.width/2,y:box.top+box.height/2}));
+    });
+    delete window.__checkMouseDone;
+    if(!trusted||captured)return 'trusted retry click captured by drawing viewport';
+    if(camera.some((value,i)=>value!==[S.x,S.y,S.z][i]))return 'retry changed drawing camera';
+    for(let i=0;i<200&&document.querySelector('#stage').dataset.imageReady!=='true';i++)await new Promise(r=>nativeTimeout(r,10));
+    if(document.querySelector('#stage .image-error')||document.querySelectorAll('#stage img[data-image-artwork]').length!==2)return 'retry failed';
+    // Leave the unavailable state on screen for the complete-screen evidence capture.
+    delete cache[id];assetText=fail;await draw();
+    return true;
+  } finally {assetText=original;window.setTimeout=nativeTimeout;client.dispose();}
 `]);

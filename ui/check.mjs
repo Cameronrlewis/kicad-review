@@ -1,13 +1,15 @@
 // Development-only checks for the review page: headless Chrome over the DevTools protocol, no npm.
 // Usage: node ui/check.mjs [name-filter] [--shot out.png] [--page path/to/kicad-review.html] [--dark|--theme dark|light] [--width N] [--dpr N] [--offline]
+// --softness-dir DIR retains the 1×–64× full/crop screenshots and glyph metrics.
 // --gpu uses Metal; --mode side|overlay|wipe|blend|semantic selects board proof mode.
 // Theme proof: --persist-check --vision none|deuteranopia|protanopia|tritanopia --appearance-fixture theme.json --mark-style outline|recolour
-import { spawn } from "node:child_process";
-import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { spawn, execFileSync } from "node:child_process";
+import { writeFileSync, mkdtempSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname, basename, extname } from "node:path";
 import { createServer } from "node:http";
-import { CHECKS } from "./checks.mjs";
+import { CHECKS, softnessProbe, softnessCompare } from "./checks.mjs";
+import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
 const opt = k => { const i = args.indexOf(k); if (i < 0) return null; if (!args[i + 1] || args[i + 1].startsWith('--')) throw Error('Missing value for ' + k); return args.splice(i, 2)[1]; };
@@ -17,6 +19,7 @@ if (!["dark", "light"].includes(theme)) throw new Error("Invalid theme");
 const dark = theme === "dark";
 const vision = opt("--vision") || "none";
 if (!["none", "deuteranopia", "protanopia", "tritanopia"].includes(vision)) throw new Error("Invalid vision type");
+const forceImageFallback=args.includes("--image-fallback"); if(forceImageFallback)args.splice(args.indexOf("--image-fallback"),1);
 const persistCheck = args.includes("--persist-check"); if (persistCheck) args.splice(args.indexOf("--persist-check"), 1);
 const fixturePath = opt("--appearance-fixture"), markStyle = opt("--mark-style") || "outline";
 if (!["outline", "recolour"].includes(markStyle)) throw new Error("Invalid mark style");
@@ -25,12 +28,16 @@ if (fixtureText !== null && Buffer.byteLength(fixtureText, "utf8") > 1048576) th
 const mode = opt("--mode");
 if (mode && !["side", "overlay", "wipe", "blend", "semantic"].includes(mode)) throw Error("Invalid mode");
 const gpu = args.includes("--gpu"); if (gpu) args.splice(args.indexOf("--gpu"), 1);
-const width = Number(opt("--width") || 1920);
-const height = Number(opt("--height") || 1080); // bench-t7: exact viewport proofs
-const dpr = Number(opt("--dpr") || 1);
+const repoRoot=new URL('..',import.meta.url);
+const screenProfile=args.some(a=>a.includes("images screen and legacy appearance"));
+const width = Number(opt("--width") || (screenProfile?1440:1920));
+const height = Number(opt("--height") || (screenProfile?900:1080)); // bench-t7: exact viewport proofs
+const dpr = Number(opt("--dpr") || (screenProfile?2:1));
 const offline = args.includes("--offline"); if (offline) args.splice(args.indexOf("--offline"), 1);
 const perf = process.env.CHECK_PERF === "1";
 const noSkip = args.includes("--no-skip"); if (noSkip) args.splice(args.indexOf("--no-skip"), 1);
+// Calibration evidence is opt-in and stays outside the source tree.
+const softnessDir = opt('--softness-dir');
 const shot = opt("--shot"), page = resolve(opt("--page") || "ui/review.html"), filter = args[0] || "";
 if (args.length > 1 || args.some(a => a.startsWith("--"))) throw Error("Unknown arguments: " + args.join(" "));
 if (!CHECKS.some(c => c[0].includes(filter))) { console.error(`no check matches "${filter}"`); process.exit(1); }
@@ -45,7 +52,7 @@ const root = dirname(page), server = createServer((req, res) => {
   catch { res.writeHead(404).end(); }
 });
 await new Promise(r => server.listen(0, "127.0.0.1", r)); server.unref();
-const origin = `http://127.0.0.1:${server.address().port}`, pageUrl = `${origin}/${encodeURIComponent(basename(page))}`;
+const origin = `http://127.0.0.1:${server.address().port}`, pageUrl = offline ? pathToFileURL(page).href : `${origin}/${encodeURIComponent(basename(page))}`;
 const chrome = process.env.CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const proc = spawn(chrome, ["--headless=new", "--no-sandbox", `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "rv-"))}`,
   ...(gpu ? ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"] : ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]), `--window-size=${width},1080`, "about:blank"], { stdio: "ignore" });
@@ -66,24 +73,35 @@ let id = 0, navigations = 0; const pend = {}, errors = [];
 const onMessage = e => { const m = JSON.parse(e.data); if (m.id && pend[m.id]) { pend[m.id](m); delete pend[m.id]; }
   if (m.method === "Page.frameNavigated" && !m.params.frame.parentId) navigations++;
   if (m.method === "Runtime.bindingCalled" && m.params.name === "__flipTheme") { send("Emulation.setEmulatedMedia", { features: [{ name:"prefers-color-scheme", value:m.params.payload }] }).then(() => evaluate(`window.KRTheme.set(${JSON.stringify(m.params.payload)}); window.__themeFlipped()`)); }
+  if (m.method === "Runtime.bindingCalled" && m.params.name === "__checkMouseClick") {
+    const {x,y,button='left'}=JSON.parse(m.params.payload);
+    (async()=>{
+      for(const type of ['mouseMoved','mousePressed','mouseReleased']) {
+        const result=await send('Input.dispatchMouseEvent',{type,x,y,button,buttons:type==='mousePressed'?(button==='right'?2:1):0,clickCount:1});
+        if(result.error)throw Error(result.error.message);
+      }
+      await evaluate('window.__checkMouseDone()');
+    })().catch(error=>{errors.push(error.message);evaluate('window.__checkMouseDone()');});
+  }
   if (m.method === "Runtime.consoleAPICalled") {
     const text = m.params.args.map(a => a.value ?? "").join(" ");
     if (/^BOARD_(FPS|PROOF) /.test(text)) console.log(text);
   }
-  if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url) && !m.params.request.url.startsWith(origin + "/")) errors.push("external request: " + m.params.request.url);
+  if (m.method === "Network.requestWillBeSent" && /^https?:/.test(m.params.request.url) && (offline || !m.params.request.url.startsWith(origin + "/"))) errors.push("external request: " + m.params.request.url);
   if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text); };
 const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id] = r; ws.send(JSON.stringify({ id, method, params })); }), new Promise((_, reject) => setTimeout(() => reject(new Error(method + " timed out")), timeout).unref())]);
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 async function setupTab() {
 await send("Runtime.enable");
 await send("Runtime.addBinding", { name:"__flipTheme" });
-await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile: false });
+await send("Runtime.addBinding", { name:"__checkMouseClick" });
+await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile:false });
 await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }] });  // explicit: headless follows the OS otherwise
 await send("Page.enable"); await send("DOMStorage.enable");
 const visionResult = await send("Emulation.setEmulatedVisionDeficiency", { type: vision });
 if (visionResult.error) throw new Error(visionResult.error.message);
 await send("Page.addScriptToEvaluateOnNewDocument", { source:
-  `window.__appearanceFixtureText=${JSON.stringify(fixtureText)};window.__appearanceMarkStyle=${JSON.stringify(markStyle)};` });
+  `window.__checkDeviceProfile=${JSON.stringify({width,height,dpr})};window.__appearanceFixtureText=${JSON.stringify(fixtureText)};window.__appearanceMarkStyle=${JSON.stringify(markStyle)};` });
 }
 await openTab(tab); await setupTab();
 // A check that blocks storage before startup leaves its renderer unable to persist on some Chrome builds
@@ -135,7 +153,8 @@ await send("Page.addScriptToEvaluateOnNewDocument", { source: `try{localStorage.
 const iconSprite = readFileSync(new URL("./icons/sprite.svg", import.meta.url), "utf8");
 let failed = 0;
 const readyTimeout = Math.max(1000, Number(process.env.CHECK_TIMEOUT || 15000) - 1000);
-for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].includes(filter))) {
+const selectedChecks = CHECKS.filter(c => c[0].includes(filter));
+for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.entries()) {
   console.log(`RUN ${name}`);
   let timer, body, startupScript, initialAppearance;
   try {
@@ -191,6 +210,83 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
     } else if(prepare.exceptionDetails) throw Error(prepare.exceptionDetails.exception?.description);
   }
   if (name === "Themes reload seed" && persistCheck) initialAppearance = (await evaluate("localStorage.getItem('kr.appearance.v1')")).result.value;
+  if (name === 'simplify largest sheet few elements, near-same pixels') {
+    const raw=(await evaluate("svgText(currentView().layers[0].svg.head)")).result.value;
+    const simplified=execFileSync('python3',['-c','import sys,kicad_review as k;sys.stdout.write(k.simplify_sheet_svg(sys.stdin.read()))'],
+      {cwd:repoRoot,input:raw,encoding:'utf8',maxBuffer:1<<26});
+    await evaluate(`window.__sheetSimplification=${JSON.stringify({raw,simplified})}`);
+  }
+if(['images active gesture pixels','images deep vector crop pixels'].includes(name) &&
+    (await evaluate("D.repo==='fixture/images'")).result?.value!==true)return ['SKIP '+name,noSkip];
+if(name==='images active gesture pixels') {
+  const screenshotPath=shot;
+  const capture=async()=> (await send('Page.captureScreenshot',{format:'png'})).result.data;
+  for(const [mode,blend,wipe] of [['wipe',.5,0],['wipe',.5,.3],['wipe',.5,.7],['wipe',.5,1],['blend',0,.5],['blend',1,.5],['overlay',.5,.5],['semantic',.5,.5]]) {
+    const prepared=await evaluate(`(async()=>{const sheet=proj().sheets.find(s=>s.svg.base&&s.svg.head);
+      S.blend=${blend};S.wipe=${wipe};
+      await applyState({...S,v:'sheet:'+sheet.path,m:${JSON.stringify(mode)}});
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      if(S.m==='wipe'&&+document.querySelector('#stage .divider').getAttribute('aria-valuenow')!==Math.round(${wipe}*100))throw Error('Wipe boundary not applied');
+      if(S.m==='blend'&&+document.querySelector('#stage .stack.head').style.opacity!==${blend})throw Error('Blend endpoint not applied');
+      return true;})()`);
+    if(prepared.exceptionDetails)throw Error('comparison fixture preparation failed');
+    const before=await capture();
+    await evaluate(`globalThis.__activeCaptures=[...document.querySelectorAll('#stage .layer img[data-image-artwork]')]
+      .filter(i=>i.complete).map(i=>captureImageViewport(i.imageOwner,i.closest('.vp'),
+        {x:S.x,y:S.y,z:S.z,flip:flipOn()},[0,0,...currentView().size])).filter(Boolean)`);
+    const captured=await evaluate('__activeCaptures.length');
+    if(!captured.result?.value)throw Error('active gesture did not allocate snapshot');
+    const active=await capture();
+    await evaluate('__activeCaptures.forEach(c=>c.dispose());__activeCaptures=[]');
+    const settled=await capture();
+    if(screenshotPath)for(const [phase,raw] of [['before',before],['active',active],['settled',settled]])
+      writeFileSync(screenshotPath.replace(/\.png$/,'')+'-gesture-'+mode+'-'+(mode==='wipe'?wipe:blend)+'-'+phase+'.png',Buffer.from(raw,'base64'));
+    const result=await evaluate(`(async()=>{
+      const read=async raw=>{const i=new Image();i.src='data:image/png;base64,'+raw;await i.decode();
+        const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {data:x.getImageData(0,0,c.width,c.height).data,w:c.width,h:c.height};};
+      const [a,b,c]=await Promise.all(${JSON.stringify([before,active,settled])}.map(read));
+      const r=document.querySelector('#stage .vp').getBoundingClientRect(), sx=a.w/(visualViewport?.width||innerWidth),sy=a.h/(visualViewport?.height||innerHeight);
+      let differing=0,samples=0;const colors=new Set();
+      for(let y=Math.ceil((r.top+20)*sy);y<(r.bottom-20)*sy;y+=3)for(let x=Math.ceil((r.left+20)*sx);x<(r.right-20)*sx;x+=3){
+        const k=(y*a.w+x)*4;colors.add(Array.from(a.data.slice(k,k+3)).join(','));samples++;
+        if([0,1,2].some(j=>Math.abs(a.data[k+j]-b.data[k+j])>12||Math.abs(a.data[k+j]-c.data[k+j])>12))differing++;
+      }
+      return {differing,samples,coverage:colors.size};})()`);
+    const v=result.result?.value;
+    if(!v||v.coverage<3||!v.samples||v.differing/v.samples>.01)throw Error('active comparison pixels '+mode+': '+JSON.stringify(v));
+  }
+}
+  if(name==='images deep vector crop pixels') {
+    const measurements=[];
+    if(softnessDir)mkdirSync(softnessDir,{recursive:true});
+    for(const scale of [1,2,4,8,16,32,64]) {
+      const prepared=await evaluate(`(${softnessProbe.toString()})('full',${scale})`);
+      if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception.description);
+      const before=(await send('Page.captureScreenshot',{format:'png'})).result.data;
+      const cropped=await evaluate(`(${softnessProbe.toString()})('crop',${scale})`);
+      if(cropped.exceptionDetails)throw Error(cropped.exceptionDetails.exception.description);
+      const after=(await send('Page.captureScreenshot',{format:'png'})).result.data;
+      const result=await evaluate(`(${softnessCompare.toString()})(${JSON.stringify([before,after])},${JSON.stringify(prepared.result.value)})`);
+      if(result.exceptionDetails)throw Error(result.exceptionDetails.exception.description);
+      const pixels=result.result?.value;
+      if(!pixels?.samples||!pixels.counts[0]||!pixels.counts[1])throw Error('missing tiny-text ink at '+scale+'x: '+JSON.stringify(pixels));
+      const {regions,...metrics}=pixels;
+      measurements.push({scale,...prepared.result.value,pixels:metrics});
+      if(softnessDir)for(const [kind,data] of [['full',before],['crop',after],['full-glyphs',regions[0]],['crop-glyphs',regions[1]]])
+        writeFileSync(join(softnessDir,`${scale}x-${kind}.png`),Buffer.from(data,'base64'));
+      // Preserve the extreme-zoom crop registration regression independently of
+      // softness classification; sharpening must not move or drop the glyphs.
+      if(scale===64&&(Math.abs(metrics.counts[0]-metrics.counts[1])/metrics.counts[0]>.05||
+        metrics.bounds[0].some((v,i)=>Math.abs(v-metrics.bounds[1][i])>2)))
+        throw Error('extreme vector crop registration: '+JSON.stringify(metrics));
+      if(scale===64&&(metrics.topology[1].components!==6||metrics.topology[1].holes!==3))
+        throw Error('cropped SVG did not restore R16 10k glyph detail: '+JSON.stringify(metrics.topology));
+    }
+    const evidence={browser:(await send('Browser.getVersion')).result,theme,profile:'desktop',
+      width,height,dpr,gpu,automaticCrop:false,measurements};
+    if(softnessDir)writeFileSync(join(softnessDir,'measurements.json'),JSON.stringify(evidence,null,2)+'\n');
+    console.log('SOFTNESS '+JSON.stringify(evidence));
+  }
   let r = await evaluate(`(async () => { ${expr} })()`);
   if (r.result?.value === true && name === "Themes reload seed" && persistCheck) {
     const expected = (await evaluate("JSON.stringify(appearanceStore().get())")).result.value;
@@ -205,10 +301,21 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
         const a=JSON.parse(expected), b=JSON.parse(restored);
         throw new Error("Appearance did not survive " + view + " reload: " + Object.keys(a).filter(k=>JSON.stringify(a[k])!==JSON.stringify(b[k])).join(', '));
       }
+      if(view==='board' && forceImageFallback) {
+        const fallback=await evaluate(`(async()=>{
+          const original=BoardGL.create;BoardGL.create=()=>null;
+          try {
+            boardView.failed=S.p;await draw();
+            const fronts=[...appearanceBoardImages].filter(a=>a.layer==='F.Cu');
+            return fronts.length===2&&fronts.every(a=>a.controller.appliedSource.includes('#1f578f')&&a.controller.node.complete);
+          } finally {BoardGL.create=original;}
+        })()`);
+        if(fallback.result?.value!==true)throw Error('Fallback board palette did not survive reload');
+      }
       const rendered = await evaluate(`(()=>{
         if (${JSON.stringify(view)} === 'board' ? S.v !== 'board' : !S.v.startsWith('sheet:')) return false;
-        if(S.v==='board')return appearanceBoards.size===2&&[...appearanceBoards].every(b=>b.appearance.colors['board.copper.f'][0]===.12);
-        return appearanceSchematics.size===2&&[...appearanceSchematics].every(s=>s.style.getPropertyValue('--sch-ink-009600').includes('18,52,86'));
+        if(S.v==='board')return ${forceImageFallback} ? appearanceBoards.size===0&&[...appearanceBoardImages].filter(a=>a.layer==='F.Cu').length===2&&[...appearanceBoardImages].filter(a=>a.layer==='F.Cu').every(a=>a.controller.appliedSource.includes('#1f578f')&&a.controller.node.complete) : appearanceBoards.size===2&&[...appearanceBoards].every(b=>b.appearance.colors['board.copper.f'][0]===.12);
+        return appearanceSchematics.size===2&&[...appearanceSchematics].every(c=>c.node?.complete&&c.appliedSource.includes('rgba(18,52,86,1)'));
       })()`);
       if (rendered.result?.value !== true) throw new Error("Both revisions did not restore " + view + " palette");
     }
@@ -241,7 +348,7 @@ for (const [name, hash, expr, lifecycle = {}] of CHECKS.filter(c => c[0].include
   finally {
     clearTimeout(timer);
     if (initialAppearance !== undefined) await evaluate(`localStorage.${initialAppearance === null ? "removeItem('kr.appearance.v1')" : `setItem('kr.appearance.v1',${JSON.stringify(initialAppearance)})`}`);
-    if (startupScript) { await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); await freshTab(); }
+    if (startupScript) { await send("Page.removeScriptToEvaluateOnNewDocument", {identifier:startupScript}); if (checkIndex + 1 < selectedChecks.length) await freshTab(); }
   }
 }
 if (shot && !failed) { await sleep(500); writeFileSync(shot, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).result.data, "base64")); console.log("saved", shot); }
