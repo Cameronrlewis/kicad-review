@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import uuid
 import zipfile
 from collections import Counter
 from urllib.parse import urlsplit
@@ -374,6 +375,8 @@ def render_side(src_dir, name, out, netlist=False, ask=False):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist or ask:
             export_netlist(sch, out)  # 03's producer: bounded, soft, validated; one call per present schematic
+            if ask:
+                export_label_membership(src_dir, name, out)  # Task 3C: one probed netlist export, Ask-only, soft
     if os.path.exists(pcb):
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
@@ -3562,6 +3565,130 @@ def enrich_context(rev, objs, sheets):
         part["page_reason"] = None if part["page"] is not None else "sheet instance page unavailable"
     for net in rev["nets"]:
         net["pages"] = [pages[path]["page"] for path in net["sheet_paths"] if path in pages]
+
+
+# ---- Ask: label kinds per net, computed by KiCad on probed copies and verified against the real netlist (Task 3C). ----
+PROBE_PREFIX = "KRPROBE"
+LABEL_KINDS = {"label": "local_labels", "global_label": "global_labels", "hierarchical_label": "hierarchical_labels"}
+BUS_TEXT = re.compile(r"\[[^\]]*\.\.[^\]]*\]|\{")
+PROBE_FONT = "(effects (font (size 1.27 1.27)) (hide yes))"
+PROBE_LIB = ('(symbol "kicad_review_probe:P" (pin_names (offset 0)) (exclude_from_sim yes) (in_bom no) (on_board yes) '
+             f'(property "Reference" "{PROBE_PREFIX}" (at 0 0 0) {PROBE_FONT}) (property "Value" "probe" (at 0 0 0) {PROBE_FONT}) '
+             '(symbol "P_1_1" (pin passive line (at 0 0 0) (length 0) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))))')
+
+
+def label_probes(src_dir, name, work):
+    """Copy the schematics to `work` with a zero-length probe pin and a junction on every label anchor. One record per label per sheet instance. Raises ValueError for anything not supported; nothing in src_dir changes."""
+    src = pathlib.Path(src_dir).resolve()
+    pages = sheet_pages(src_dir, name)
+    if not pages:
+        raise ValueError("no schematic")
+    root_uuid = val(parse_sexpr((src / f"{name}.kicad_sch").read_text(encoding="utf-8")), "uuid")
+    by_file, probes = {}, []
+    for pg in pages:
+        by_file.setdefault(pg["file"], []).append(pg)
+    for file, instances in by_file.items():
+        path = (src / file).resolve()
+        if src not in path.parents:
+            raise ValueError(f"sheet file outside the project folder: {clip(file, 100)}")
+        text = path.read_text(encoding="utf-8")
+        if PROBE_PREFIX in text or "kicad_review_probe" in text:
+            raise ValueError(f"{clip(file, 100)} already uses the reserved probe name {PROBE_PREFIX}")
+        root = parse_sexpr(text)
+        if findall(root, "bus") or findall(root, "bus_entry"):
+            raise ValueError(f"{clip(file, 100)} has buses; bus membership is not resolved")  # ponytail: whole revision fails closed; expand bus members when a real design needs it
+        add = []
+        for node in root[1:]:
+            if not (isinstance(node, list) and node and node[0] in LABEL_KINDS):
+                continue
+            if BUS_TEXT.search(str(node[1])):
+                raise ValueError(f"bus label {clip(node[1], 60)!r}; bus membership is not resolved")
+            x, y = find(node, "at")[1:3]  # verbatim tokens: the probe sits exactly on KiCad's anchor
+            paths = []
+            for pg in instances:
+                ref = f"{PROBE_PREFIX}{len(probes) + 1}"
+                paths.append(f'(path "/{root_uuid}{pg["path"].rstrip("/")}" (reference "{ref}") (unit 1))')
+                probes.append({"ref": ref, "kind": node[0], "text": str(node[1]), "sheet": pg["path"], "uuid": val(node, "uuid")})
+            ids = [uuid.uuid5(uuid.NAMESPACE_URL, f"kicad-review:{file}:{probes[-1]['ref']}:{k}") for k in range(3)]
+            add.append(f'(symbol (lib_id "kicad_review_probe:P") (at {x} {y} 0) (unit 1) (exclude_from_sim yes) (in_bom no) (on_board yes) (dnp no) (uuid "{ids[0]}") '
+                       f'(property "Reference" "{PROBE_PREFIX}" (at {x} {y} 0) {PROBE_FONT}) (property "Value" "probe" (at {x} {y} 0) {PROBE_FONT}) '
+                       f'(pin "1" (uuid "{ids[1]}")) (instances (project "{name}" {" ".join(paths)})))')
+            add.append(f'(junction (at {x} {y}) (diameter 0) (color 0 0 0 0) (uuid "{ids[2]}"))')  # required: a pin alone does not join a wire mid-segment and takes the label off it
+        text, hits = re.subn(r"\(lib_symbols(?=[\s)])", "(lib_symbols " + PROBE_LIB, text, count=1)
+        if not hits:
+            raise ValueError(f"{clip(file, 100)} has no lib_symbols section")
+        out = pathlib.Path(work, path.relative_to(src))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text.rstrip()[:-1] + "\n" + "\n".join(add) + "\n)\n", encoding="utf-8")
+    for extra in (f"{name}.kicad_pro", "sym-lib-table"):
+        if (src / extra).is_file():
+            shutil.copy(src / extra, pathlib.Path(work, extra))
+    return probes
+
+
+def label_membership(orig_text, probed_text, probes, erc):
+    """Label kinds per net. KiCad computed the probed netlist; without the probes it must equal the real one exactly, or this raises."""
+    comps, nets = parse_netlist(orig_text)
+    probed_comps, probed_nets = parse_netlist(probed_text)
+    want = {p["ref"]: p for p in probes}
+    if set(probed_comps) - set(want) != set(comps):
+        raise ValueError("probed netlist parts differ from the KiCad netlist")
+    seen, home, stripped = Counter(), {}, {}
+    for name, nodes in probed_nets.items():
+        real = sorted((x["ref"], x["pin"]) for x in nodes if x["ref"] not in want)
+        for x in nodes:
+            if x["ref"] in want:
+                seen[x["ref"]] += 1
+                home[x["ref"]] = str(name)
+        if real:
+            stripped[str(name)] = real
+    if any(seen[ref] != 1 for ref in want):
+        raise ValueError("a label probe did not resolve to exactly one KiCad net")
+    if stripped != {str(k): sorted((x["ref"], x["pin"]) for x in v) for k, v in nets.items()}:
+        raise ValueError("probed netlist differs from the KiCad netlist; label membership not verified")
+    dangling = {i.get("uuid") for s in erc.get("sheets", []) for v in s.get("violations", [])
+                if v.get("type") == "label_dangling" for i in v.get("items", [])}
+    out, unattached = {}, 0
+    for ref, p in want.items():
+        if home[ref] not in stripped:
+            if p["uuid"] not in dangling:
+                raise ValueError(f"label {clip(p['text'], 60)!r} reaches no part pin and KiCad ERC does not report it dangling")
+            unattached += 1
+            continue
+        rec = out.setdefault(home[ref], {key: [] for key in LABEL_KINDS.values()})
+        entry = {"text": p["text"], "sheet": p["sheet"]}
+        if entry not in rec[LABEL_KINDS[p["kind"]]]:
+            rec[LABEL_KINDS[p["kind"]]].append(entry)
+    for rec in out.values():
+        for entries in rec.values():
+            entries.sort(key=lambda e: (natural(e["text"]), e["sheet"]))
+    return {"version": 1, "netlist_sha256": hashlib.sha256(orig_text.encode("utf-8")).hexdigest(),
+            "nets": out, "unattached": unattached, "probes": len(want)}
+
+
+def export_label_membership(src_dir, name, out):
+    """Ask-only and soft: <out>/labels.json, or a one-line labels.json.error. Never exits; Task 3D falls back to null label fields."""
+    out = pathlib.Path(out)
+    target, marker = out / "labels.json", out / "labels.json.error"
+    for path in (target, marker):
+        path.unlink(missing_ok=True)
+    try:
+        orig = read_netlist(out)  # 03's marker first: no netlist, no labels
+        erc = json.loads((out / "erc.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as work:
+            probes = label_probes(src_dir, name, work)
+            probed = pathlib.Path(work, "probed.net")
+            run = subprocess.run(["kicad-cli", "sch", "export", "netlist", "--format", "kicadsexpr", "-o", str(probed),
+                                  str(pathlib.Path(work, f"{name}.kicad_sch"))], capture_output=True, text=True, timeout=60)
+            if run.returncode or not probed.is_file():
+                raise ValueError(f"probed netlist export failed ({run.returncode}): {run.stderr or run.stdout}")
+            text = probed.read_text(encoding="utf-8")
+            validate_netlist(text)
+            doc = label_membership(orig, text, probes, erc)
+        target.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as exc:  # AttributeError: a non-object erc.json
+        target.unlink(missing_ok=True)
+        marker.write_text(" ".join(f"label kinds unavailable: {exc}".split())[:500], encoding="utf-8")
 
 
 CONTEXT_LIMIT = 200_000  # bytes: the spec's target for design-context.json

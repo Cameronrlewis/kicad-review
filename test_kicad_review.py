@@ -6467,3 +6467,95 @@ else:
     print("pending 06 merge: 06's Upload design snapshot context hook not in review.yml (plan-context.md:60; flip to unconditional assert once 06 merges)")
 print("ok ask context upload step")
 
+
+# Ask (spec 09, Task 3C): label kinds come from KiCad probes; any difference from the real netlist fails closed.
+import hashlib
+LBL = lambda kind, text, x, y, u: f'({kind} "{text}" (at {x} {y} 0) (effects (font (size 1.27 1.27))) (uuid "{u}"))'
+ROOT = ('(kicad_sch (version 20260306) (generator "eeschema") (uuid "r-uuid") (lib_symbols) '
+        + LBL("label", "SDA", 20, 20, "l-1") + LBL("global_label", "VBUS", 30, 30.5, "g-1")
+        + '(sheet (at 40 50) (size 20 10) (uuid "s-a") (property "Sheetname" "A" (at 40 49 0)) (property "Sheetfile" "power.kicad_sch" (at 40 61 0)) (instances (project "P" (path "/r-uuid" (page "2")))))'
+        + '(sheet (at 80 50) (size 20 10) (uuid "s-b") (property "Sheetname" "B" (at 80 49 0)) (property "Sheetfile" "power.kicad_sch" (at 80 61 0)) (instances (project "P" (path "/r-uuid" (page "3")))))'
+        + '(sheet_instances (path "/" (page "1"))))')
+CHILD = '(kicad_sch (version 20260306) (generator "eeschema") (uuid "c-uuid") (lib_symbols) ' + LBL("hierarchical_label", "EN", 10, 0, "h-1") + ')'
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": ROOT, "src/power.kicad_sch": CHILD, "src/P.kicad_pro": "{}"})
+    probes = kr.label_probes(f"{t}/src", "P", f"{t}/work")
+    assert [(p["ref"], p["kind"], p["text"], p["sheet"]) for p in probes] == [
+        ("KRPROBE1", "label", "SDA", "/"), ("KRPROBE2", "global_label", "VBUS", "/"),
+        ("KRPROBE3", "hierarchical_label", "EN", "/s-a/"), ("KRPROBE4", "hierarchical_label", "EN", "/s-b/")], probes
+    root_copy = pathlib.Path(t, "work", "P.kicad_sch").read_text(encoding="utf-8")
+    child_copy = pathlib.Path(t, "work", "power.kicad_sch").read_text(encoding="utf-8")
+    assert kr.parse_sexpr(root_copy)[0] == "kicad_sch"
+    assert '(lib_id "kicad_review_probe:P") (at 30 30.5 0)' in root_copy and "(junction (at 30 30.5)" in root_copy, "verbatim anchor, probe plus junction"
+    assert child_copy.count('(lib_id "kicad_review_probe:P")') == 1, "one probe symbol per label, one reference per instance"
+    assert '(path "/r-uuid/s-a" (reference "KRPROBE3")' in child_copy and '(path "/r-uuid/s-b" (reference "KRPROBE4")' in child_copy
+    assert pathlib.Path(t, "src", "P.kicad_sch").read_text(encoding="utf-8") == ROOT, "the source is never edited"
+    assert pathlib.Path(t, "work", "P.kicad_pro").is_file()
+    for name, files, needle in (
+        ("bus", {"src/power.kicad_sch": CHILD[:-1] + '(bus (pts (xy 0 0) (xy 0 20)) (uuid "b-1")))'}, "bus"),
+        ("bus label", {"src/power.kicad_sch": CHILD[:-1] + LBL("label", "D[0..7]", 1, 1, "l-9") + ")"}, "bus"),
+        ("reserved", {"src/power.kicad_sch": CHILD.replace('"EN"', '"KRPROBE9"')}, "reserved"),
+        ("outside", {"src/P.kicad_sch": ROOT.replace('"power.kicad_sch" (at 40', '"../x.kicad_sch" (at 40'), "x.kicad_sch": CHILD}, "outside")):
+        write(t, {"src/P.kicad_sch": ROOT, "src/power.kicad_sch": CHILD}); write(t, files)
+        try:
+            kr.label_probes(f"{t}/src", "P", f"{t}/work-{name.replace(' ', '-')}")
+            raise AssertionError(f"{name} must fail closed")
+        except ValueError as exc:
+            assert needle in str(exc), (name, exc)
+# Verification against synthetic netlists (shapes copied from the real 10.0.0 exports).
+comps = {"R1": ("1k", "R_0402", "Device:R"), "R2": ("1k", "R_0402", "Device:R")}
+probe_comps = {**comps, **{f"KRPROBE{i}": ("probe", "", "kicad_review_probe:P") for i in range(1, 6)}}
+real = {"/SDA": [("R1", "1", "", "passive"), ("R2", "1", "", "passive")], "VBUS": [("R1", "2", "", "passive")], "/A/EN": [("R2", "2", "", "passive")]}
+P = lambda i: (f"KRPROBE{i}", "1", "", "passive")
+probed = {"/SDA": real["/SDA"] + [P(1)], "VBUS": real["VBUS"] + [P(2), P(4)], "/A/EN": real["/A/EN"] + [P(3)], "/FLOAT": [P(5)]}
+probes = [{"ref": "KRPROBE1", "kind": "label", "text": "SDA", "sheet": "/", "uuid": "l-1"},
+          {"ref": "KRPROBE2", "kind": "global_label", "text": "VBUS", "sheet": "/", "uuid": "g-1"},
+          {"ref": "KRPROBE3", "kind": "hierarchical_label", "text": "EN", "sheet": "/s-a/", "uuid": "h-1"},
+          {"ref": "KRPROBE4", "kind": "label", "text": "LOC", "sheet": "/", "uuid": "l-4"},
+          {"ref": "KRPROBE5", "kind": "label", "text": "FLOAT", "sheet": "/", "uuid": "l-5"}]
+erc = {"sheets": [{"path": "/", "violations": [{"type": "label_dangling", "items": [{"uuid": "l-5"}]}]}]}
+orig = netlist(comps, real)
+doc = kr.label_membership(orig, netlist(probe_comps, probed), probes, erc)
+assert doc["netlist_sha256"] == hashlib.sha256(orig.encode()).hexdigest() and doc["unattached"] == 1 and doc["probes"] == 5
+assert doc["nets"]["VBUS"] == {"global_labels": [{"text": "VBUS", "sheet": "/"}], "local_labels": [{"text": "LOC", "sheet": "/"}], "hierarchical_labels": []}
+assert doc["nets"]["/A/EN"]["hierarchical_labels"] == [{"text": "EN", "sheet": "/s-a/"}] and "/FLOAT" not in doc["nets"]
+moved = {**probed, "/SDA": [real["/SDA"][0], P(1)], "VBUS": probed["VBUS"] + [real["/SDA"][1]]}
+renamed = {("Net-(R1-Pad1)" if k == "/SDA" else k): v for k, v in probed.items()}
+for why, nets_, comps_, erc_, needle in (
+    ("a pin moved", moved, probe_comps, erc, "differs"),
+    ("a net renamed", renamed, probe_comps, erc, "differs"),
+    ("a probe missing", {k: [n for n in v if n[0] != "KRPROBE3"] for k, v in probed.items()}, probe_comps, erc, "exactly one"),
+    ("a probe twice", {**probed, "/SDA": probed["/SDA"] + [P(3)]}, probe_comps, erc, "exactly one"),
+    ("a part added", probed, {**probe_comps, "R9": ("1k", "R", "Device:R")}, erc, "parts differ"),
+    ("dangling not in ERC", probed, probe_comps, {"sheets": []}, "dangling")):
+    try:
+        kr.label_membership(orig, netlist(comps_, nets_), probes, erc_)
+        raise AssertionError(f"{why} must fail closed")
+    except ValueError as exc:
+        assert needle in str(exc), (why, exc)
+# The soft producer: labels.json on success, a one-line marker on any failure, stale output removed, never SystemExit.
+def probed_export(cmd, **kw):
+    pathlib.Path(cmd[cmd.index("-o") + 1]).write_text(netlist(probe_comps, probed), encoding="utf-8")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"out/netlist.net": orig, "out/erc.json": json.dumps(erc), "out/labels.json.error": "stale"})
+    with patch.object(kr, "label_probes", return_value=probes), patch.object(kr.subprocess, "run", side_effect=probed_export) as run:
+        kr.export_label_membership(f"{t}/src", "P", f"{t}/out")
+    assert run.call_args.args[0][:6] == ["kicad-cli", "sch", "export", "netlist", "--format", "kicadsexpr"]
+    assert not pathlib.Path(t, "out", "labels.json.error").exists()
+    assert json.loads(pathlib.Path(t, "out", "labels.json").read_text(encoding="utf-8"))["nets"]["VBUS"]["local_labels"] == [{"text": "LOC", "sheet": "/"}]
+    with patch.object(kr, "label_probes", return_value=probes), patch.object(kr.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="boom")):
+        kr.export_label_membership(f"{t}/src", "P", f"{t}/out")
+    assert not pathlib.Path(t, "out", "labels.json").exists() and "boom" in pathlib.Path(t, "out", "labels.json.error").read_text(encoding="utf-8")
+    write(t, {"out/netlist.net.error": "kicad-cli sch export netlist failed (1): gone"})
+    with patch.object(kr, "label_probes") as never:
+        kr.export_label_membership(f"{t}/src", "P", f"{t}/out")
+    never.assert_not_called(); assert "gone" in pathlib.Path(t, "out", "labels.json.error").read_text(encoding="utf-8")
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"src/P.kicad_sch": "(kicad_sch)", "src/P.kicad_pcb": PCB_TEXT})
+    for ask_on in (True, False):
+        with patch.object(kr, "export_netlist"), patch.object(kr, "export_board_stats", return_value=None), patch.object(kr, "sheet_pages", return_value=[]), \
+             patch.object(kr, "kicad_cli"), patch.object(kr, "export_label_membership") as labels:
+            kr.render_side(f"{t}/src", "P", f"{t}/out", netlist=True, ask=ask_on)
+        assert labels.call_count == (1 if ask_on else 0), "Ask-only: Ask-off runs no extra KiCad command"
+print("ok ask label kinds are KiCad-verified or fail closed")
