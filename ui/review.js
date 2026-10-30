@@ -10,7 +10,7 @@ S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing =
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
 S.issues = null;
-S.units = "mm"; S.grid = true;
+S.units = "mm"; S.grid = true; S.imageSelection = null;
 const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
@@ -60,7 +60,9 @@ addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
   const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
   const [x, y] = p?.point || toWorld(vp, e);
-  const anchor = boardDiff ? (hit ? geometryAnchor(hit) : p?.side && pointAnchor(x,y,p.side)) : anchorAt(x, y, sideOf(vp));
+  const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp))
+    : boardDiff ? (hit ? geometryAnchor(hit) : p?.side && pointAnchor(x,y,p.side))
+    : anchorAt(x,y,sideOf(vp));
   if (anchor && anchor.file) parent.postMessage({ kicadReviewPin: anchor }, "*");
 }
 const shownThreads = () => (S.threads || []).filter(t => (S.threadFilter.status === "all" || (S.threadFilter.status === "resolved") === t.resolved)
@@ -70,7 +72,7 @@ function openThread(id) {
   const r = resolveAnchor(t.anchor), drawable = !r.detached && currentView(r.view);
   S.thread = id;
   const show = () => { if (drawable) zoomTo([r.pos[0] - 6, r.pos[1] - 6, r.pos[0] + 6, r.pos[1] + 6]); renderPanel(); parent.postMessage({ kicadReviewOpenThread: id }, "*"); };
-  if (drawable && r.view !== S.v) { stopPlacing(); const tabs = tabsChange(r.view); S.v = r.view; S.x = S.y = S.z = null; renderNav(); if (tabs) renderPanel(); return draw().then(() => { show(); saveHash(); }); }
+  if (drawable && r.view !== S.v) { clearImageSelection(); stopPlacing(); const tabs = tabsChange(r.view); S.v = r.view; S.x = S.y = S.z = null; renderNav(); if (tabs) renderPanel(); return draw().then(() => { show(); saveHash(); }); }
   show();
 }
 const proj = () => D.projects[S.p];
@@ -161,7 +163,7 @@ function syncLeftDock() {
   document.documentElement.style.setProperty("--nav-w", leftCollapsed ? "0px" : `${leftWidth}px`);
   $("#nav").classList.toggle("left-collapsed", leftCollapsed);
   const toggle = $('[data-dock="nav"]');
-  toggle?.setAttribute("aria-expanded", String(!leftCollapsed && (!matchMedia("(max-width:899px)").matches || $("#nav").classList.contains("dock-open"))));
+  toggle?.setAttribute("aria-expanded", String(!leftCollapsed));
 }
 function projectChips(c) {
   return `<span class="counts">${["added", "removed", "modified"].map((a, i) => `<span class="chip ${a}" title="${c[a]} ${a}" aria-label="${c[a]} ${a}">${["+", "−", "~"][i]} ${c[a]}</span>`).join("")}</span>`;
@@ -225,9 +227,9 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { S.part3d = null; S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function openProject(i) { clearImageSelection(); S.part3d = null; S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { clearImageSelection(); S.part3d = null; renderInspector(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
@@ -264,7 +266,8 @@ function valid(st) {   // drop anything that does not exist in this report
 }
 function applyState(st) {
   const v = valid(st);
-  if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; $("#nav").classList.add("dock-open"); }
+  if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
+  if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
                      revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
@@ -280,24 +283,232 @@ function applyState(st) {
 
 const PX = 4;                       // CSS px per mm at z = PX
 const cache = {};
-// Cache the decode promise so concurrent draws of the same blob share one gzip stream.
+// Asset failures may be shown as retryable; programming errors must still surface.
+class AssetUnavailableError extends Error {
+  constructor(message='Asset unavailable. Try again.') { super(message); this.name = 'AssetUnavailableError'; }
+}
+// The opaque hosted frame never fetches. Its view-owned parent client is lazy.
+let imageAssetClient=null;
+addEventListener('pagehide', disposeAssets);
+// Cache promises so concurrent draws share one gzip stream or parent request.
 function svgText(id) {
   if (!id) return Promise.resolve(null);
+  if (assetTextLoads.has(id)) return Promise.all([assetTextLoads.get(id), decodedAsset(id)]).then(([text]) => text);
+  if (id in cache) return cache[id].then(asset => Object.hasOwn(asset, 'text') ? asset.text : assetText(id));
+  // Share the in-flight text with validation, without retaining it in a JSON cache record.
+  return Promise.all([assetText(id), decodedAsset(id)]).then(([text]) => text);
+}
+// Optional inspection data is validated independently of artwork and inventory.
+const decodedSheetHotspots = new Map(), decodedBoardInspect = new Map();
+const imageManifestLoads = new Map();
+const boardSceneCache = new Map(), decodedBoardScenes = new Map();
+function validateImageManifest(m, kind) {
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const text = v => typeof v === 'string';
+  const finite = v => typeof v === 'number' && Number.isFinite(v);
+  const vector = (v, n) => Array.isArray(v) && v.length === n && v.every(finite);
+  const box = v => vector(v, 4) && v[2] >= v[0] && v[3] >= v[1];
+  const nonnegative = v => finite(v) && v >= 0;
+  const list = (v, test) => Array.isArray(v) && v.every(test);
+  const assertValid = ok => { if (!ok) throw Error('Invalid ' + kind + ' inspection manifest'); };
+  const warnings = v => list(v, w => object(w) && text(w.reason));
+  assertValid(object(m) && m.version === 1 && m.units === 'mm' && warnings(m.warnings));
+  if (kind === 'sheet') {
+    const paths = new Set();
+    assertValid(list(m.views, v => {
+      if (!object(v) || !text(v.sheet) || !v.sheet.startsWith('/') || paths.has(v.sheet) ||
+          !text(v.file) || !v.file || !vector(v.viewBox, 4) || v.viewBox[2] <= 0 || v.viewBox[3] <= 0) return false;
+      paths.add(v.sheet);
+      return list(v.elements, e => object(e) && text(e.uuid) && !!e.uuid && text(e.ref) &&
+        text(e.unit) && /^[1-9]\d*$/.test(e.unit) && box(e.bbox) &&
+        list(e.pins, p => object(p) && text(p.number) && text(p.name) && finite(p.x) && finite(p.y))) &&
+        list(v.labels, l => object(l) && text(l.uuid) && text(l.text) &&
+          ['label', 'global_label', 'hierarchical_label'].includes(l.kind) && finite(l.x) && finite(l.y)) &&
+        list(v.noConnects, n => object(n) && text(n.uuid) && finite(n.x) && finite(n.y)) &&
+        list(v.wires, w => object(w) && text(w.uuid) && box(w.bbox) &&
+          list(w.points, p => vector(p, 2)) && w.points.length >= 2);
+    }));
+    return m;
+  }
+  const copper = KicadColors.appearanceOrder.filter(l => l.endsWith('.Cu'));
+  assertValid(list(m.layers, l => copper.includes(l)) && m.layers.length > 0 &&
+    m.layers.every((l, i) => !i || copper.indexOf(l) > copper.indexOf(m.layers[i - 1])));
+  // The copper stack defines physical spans; pads/graphics also carry technical layers.
+  const knownLayer = l => text(l) && (m.layers.includes(l) || !l.endsWith('.Cu') && Object.hasOwn(KicadColors.layers, l));
+  const span = ls => list(ls, knownLayer) && ls.length > 0 && new Set(ls).size === ls.length;
+  const primitive = (p, drill = false) => object(p) && vector(p.center, 2) &&
+    vector(p.size, 2) && p.size.every(nonnegative) && finite(p.angle) &&
+    (drill || (['circle', 'rect', 'oval', 'roundrect', 'trapezoid', 'custom'].includes(p.shape) &&
+      nonnegative(p.radius) && vector(p.delta, 2)));
+  const geometry = g => {
+    if (!object(g)) return false;
+    // Reject nonfinite numbers anywhere, including optional per-layer overrides.
+    const numbers = v => typeof v === 'number' ? finite(v) : Array.isArray(v) ? v.every(numbers) :
+      object(v) ? Object.values(v).every(numbers) : true;
+    if (!numbers(g)) return false;
+    if (g.primitive !== undefined && !primitive(g.primitive)) return false;
+    if (g.drill != null && !primitive(g.drill, true)) return false;
+    if (g.segments !== undefined && !list(g.segments, s => vector(s, 5) && nonnegative(s[4]))) return false;
+    if (g.rings !== undefined && !list(g.rings, r => list(r, p => vector(p, 2)) && r.length >= 3)) return false;
+    if (g.layerPrimitives !== undefined && (!object(g.layerPrimitives) ||
+      !Object.entries(g.layerPrimitives).every(([l, p]) => knownLayer(l) && primitive(p)))) return false;
+    if (g.text !== undefined && (!object(g.text) || !text(g.text.value) || !vector(g.text.at, 2) ||
+      !vector(g.text.size, 2) || !g.text.size.every(nonnegative) || !finite(g.text.angle) || !nonnegative(g.text.thickness))) return false;
+    return !!g.primitive || !!g.segments?.length || !!g.rings?.length || !!g.text;
+  };
+  const record = o => object(o) && text(o.uuid) && !!o.uuid && text(o.net) && span(o.layers) &&
+    typeof o.hidden === 'boolean' && geometry(o.geometry);
+  assertValid(list(m.pads, o => record(o) && text(o.ref) && text(o.pin) &&
+    [o.x, o.y, o.angle].every(finite) && [o.width, o.height, o.radiusRatio].every(nonnegative) &&
+    text(o.shape) && !!o.geometry.primitive));
+  assertValid(list(m.tracks, o => record(o) && ['track', 'arc'].includes(o.kind) &&
+    [o.x1, o.y1, o.x2, o.y2].every(finite) && nonnegative(o.width) &&
+    o.layers.includes(o.layer) && o.layers.every(l => m.layers.includes(l)) && !!o.geometry.segments?.length));
+  assertValid(list(m.vias, o => record(o) && [o.x, o.y].every(finite) && nonnegative(o.diameter) &&
+    (o.drill === null || nonnegative(o.drill)) && !!o.geometry.primitive &&
+    o.fromLayer === o.layers[0] && o.toLayer === o.layers.at(-1) && o.layers.every(l => m.layers.includes(l)) &&
+    o.layers.every((l, i) => !i || m.layers.indexOf(l) === m.layers.indexOf(o.layers[i - 1]) + 1)));
+  assertValid(list(m.nets, n => object(n) && text(n.name) && (n.netClass === null || text(n.netClass))));
+  assertValid(object(m.stats) && ['copperLayers', 'routedLengthMm', 'padCount', 'viaCount', 'netCount'].every(k => nonnegative(m.stats[k])) &&
+    (m.stats.boardSizeMm === null || vector(m.stats.boardSizeMm, 2) && m.stats.boardSizeMm.every(nonnegative)));
+  assertValid(object(m.truncated) && ['nets', 'pads', 'tracks', 'vias', 'footprintGraphics'].every(k => typeof m.truncated[k] === 'boolean'));
+  assertValid(list(m.footprintGraphics, o => object(o) && text(o.uuid) && text(o.ref) && span(o.layers) && geometry(o.geometry)));
+  return m;
+}
+async function loadImageManifests(P) {
+  const groups = [
+    ['sheet', decodedSheetHotspots, (P.sheets || []).flatMap(s => Object.values(s.hotspots || {}))],
+    ['board', decodedBoardInspect, Object.values(P.board?.inspect || {})],
+  ];
+  await Promise.all(groups.flatMap(([kind, decoded, ids]) => [...new Set(ids.filter(Boolean))].map(async id => {
+    if (decoded.has(id)) return;
+    const key = kind + ':' + id;
+    if (!imageManifestLoads.has(key)) {
+      const load = (async () => {
+        try { decoded.set(id, validateImageManifest(await jsonAsset(id), kind)); }
+        catch (error) { console.warn('Inspection unavailable for this report', error); }
+      })();
+      imageManifestLoads.set(key, load);
+      load.finally(() => { if (imageManifestLoads.get(key) === load) imageManifestLoads.delete(key); });
+    }
+    await imageManifestLoads.get(key);
+  })));
+}
+function inspectionNotice(stage, view, P) {
+  if (!view || !['sheet', 'board'].includes(view.kind)) return;
+  const sheet = view.kind === 'sheet' ? P.sheets.find(s => 'sheet:' + s.path === stage.dataset.view) : null;
+  if (view.kind === 'sheet' && !sheet) return;
+  const ids = view.kind === 'sheet' ? sheet.hotspots : P.board?.inspect;
+  const layers = view.kind === 'board' ? P.board.layers : view.layers;
+  const sides = ['base', 'head'].filter(side => layers.some(l => l.svg?.[side]) || view.kind === 'board' && P.board.geometry?.[side]);
+  const declared = sides.some(side => !!ids?.[side]);
+  if (!declared) return;
+  const available = sides.length && sides.every(side => view.kind === 'board' ? !ids?.[side] || decodedBoardInspect.has(ids[side]) :
+    !ids?.[side] || decodedSheetHotspots.get(ids[side])?.views.some(v => v.sheet === sheet.path));
+  if (available) return;
+  const notice = document.createElement('p'); notice.className = 'inspection-unavailable'; notice.setAttribute('role', 'status');
+  notice.textContent = 'Inspection unavailable for this report. Artwork remains available.';
+  stage.append(notice);
+}
+async function jsonAsset(id) {
+  const pending = decodedAsset(id), asset = await pending;
+  if (!asset) return null;
+  // Legacy scene blobs have no declaration; parse them at this same data boundary.
+  if (!Object.hasOwn(asset, 'json')) {
+    try { asset.json = parseAssetJSON(asset.text); delete asset.text; }
+    catch (error) { if (cache[id] === pending) delete cache[id]; throw error; }
+  }
+  return asset.json;
+}
+function parseAssetJSON(text) {
+  try { return JSON.parse(text); }
+  catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new AssetUnavailableError();
+  }
+}
+// Text lives here only while transport/decompression is in flight. Explicit text access
+// after JSON parsing decodes again, preserving exact source text without double retention.
+const assetTextLoads = new Map();
+function assetText(id) {
+  if (!assetTextLoads.has(id)) {
+    const load = async () => {
+      if (typeof D.blobs?.[id] !== 'string') {
+        if (!D.assets?.[id] || parent === window) throw new AssetUnavailableError();
+        imageAssetClient ||= ImageView.assetClient(parent,D.assets);
+        try { return await imageAssetClient.get(id,D.assets[id].kind); }
+        catch (error) { throw new AssetUnavailableError(error.message); }
+      }
+      // Only the untrusted base64/gzip decode boundary turns failures into asset errors.
+      try {
+        const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
+        return await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      } catch { throw new AssetUnavailableError(); }
+    };
+    const promise = load();
+    assetTextLoads.set(id, promise);
+    const clear = () => { if (assetTextLoads.get(id) === promise) assetTextLoads.delete(id); };
+    promise.then(clear, clear);
+  }
+  return assetTextLoads.get(id);
+}
+function decodedAsset(id) {
+  if (!id) return Promise.resolve(null);
   if (!(id in cache)) {
-    const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
-    cache[id] = new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
-    cache[id].catch(() => delete cache[id]);
+    const decode = async () => {
+      const text = await assetText(id);
+      // Share the parsed JSON alone with mode consumers; corruption stays retryable.
+      return D.assets?.[id]?.kind === 'json'
+        ? { json: parseAssetJSON(text) } : { text };
+    };
+    const promise = cache[id] = decode();
+    promise.catch(() => { if (cache[id] === promise) delete cache[id]; });
   }
   return cache[id];
 }
+function disposeAssets() {
+  imageAssetClient?.dispose(); imageAssetClient=null;
+  imageManifestLoads.clear();
+  for (const key of boardSceneCache.keys()) {
+    if (!decodedBoardScenes.has(key)) boardSceneCache.delete(key);
+  }
+  for (const id of assetTextLoads.keys()) {
+    delete cache[id];
+    // Rejecting transport is synchronous; do not let the next view reuse its old promise.
+    assetTextLoads.delete(id);
+  }
+}
+function assetRetry(stage) {
+  for (const message of stage.querySelectorAll('.image-error')) {
+    // Status and retry stay screen-sized, outside the zoomed drawing world.
+    const vp=message.closest('.vp');
+    if(vp) {
+      let notices=vp.querySelector(':scope > .image-errors');
+      if(!notices) {notices=document.createElement('div');notices.className='image-errors';vp.append(notices);}
+      notices.append(message);
+    }
+    if (message.querySelector('button')) continue;
+    const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Try again';
+    retry.onclick = () => draw(); message.append(' ', retry);
+  }
+}
 let boardDiff = null;
+let activeBoardGate = null, boardMountState = null;
 const boardView = {scenes: null, renderers: [], panes: [], generation: 0, failed: null, note: null, useGL: false};
-const appearanceBoards = new Set(), appearanceSchematics = new Set();
+const appearanceBoards = new Set(), appearanceSchematics = new Set(), appearanceBoardImages = new Set();
 const appearanceStore = () => Appearance;
+function boardImageLook(snapshot, name) {
+  return snapshot.layers?.[name] || {color:KicadColors.layers[name] || KicadColors.layers['Dwgs.User'],opacity:1,visible:true};
+}
 function applyAppearance(snapshot) {
+  const stage = $("#stage"), ticket = (stage.appearanceGeneration || 0) + 1;
+  stage.appearanceGeneration = ticket;
   const resolved = KrAppearance.resolve(snapshot);
   for (const board of appearanceBoards) board.setAppearance(glAppearance(resolved));
-  for (const root of appearanceSchematics) setSchematicAppearance(root, resolved);
+  const imageJobs = [];
+  for (const adapter of appearanceBoardImages) imageJobs.push(adapter.setAppearance(boardImageLook(resolved,adapter.layer)));
+  for (const c of appearanceSchematics) imageJobs.push(c.setAppearance(c.comparison?new Map():schematicPaints(resolved)));
+  if (imageJobs.length) { stage.dataset.imageReady = "false"; stage.setAttribute("aria-busy", "true"); }
   for (const vp of document.querySelectorAll('#stage .vp.board')) vp.style.background = cssAppearance(resolved.boardBackground);
   for (const vp of document.querySelectorAll('#stage .vp.sheet')) vp.style.background = cssAppearance(resolved.schematicBackground);
   for (const vp of document.querySelectorAll('#stage .vp')) {
@@ -309,6 +520,15 @@ function applyAppearance(snapshot) {
       vp.style.setProperty('--halo-'+action,cssAppearance(mark.halo));
     }
   }
+  stage.appearancePending = Promise.all(imageJobs).then(result => {
+    // A draw waiting on a superseded decode must wait for the latest palette too.
+    if (ticket !== stage.appearanceGeneration) return stage.appearancePending;
+    if (stage.isConnected && stage.imageMounted && +stage.dataset.generation === gen && stage.dataset.view === S.v && !stage.querySelector('.image-error')) {
+      stage.dataset.imageReady = "true"; stage.setAttribute("aria-busy", "false");
+    }
+    return result;
+  });
+  return stage.appearancePending;
 }
 const boardAppearance = () => Appearance.get();
 // A layer eye keeps the l= hash list in step, so links and the Appearance dock agree.
@@ -332,6 +552,7 @@ function boardCamera(vp) {
   return {x: S.x, y: S.y, z: S.z, width: vp.clientWidth, height: vp.clientHeight, dpr: devicePixelRatio || 1, flip: flipOn()};
 }
 function disposeBoardRenderers() {
+  activeBoardGate?.cancel(); activeBoardGate = null;
   boardDiff?.dispose(); boardDiff = null;
   for (const r of new Set([...boardView.renderers, ...boardView.panes.filter(Boolean).map(p => p.renderer)])) r.dispose();
   boardView.renderers = []; boardView.panes = [];
@@ -395,7 +616,13 @@ for (const b of document.querySelectorAll('button[data-mark-style]')) {
 }
 Appearance.subscribe(snapshot => {
   syncMarkStyles();
-  applyAppearance(snapshot);
+  const stage = $("#stage");
+  applyAppearance(snapshot).catch(error => {
+    if (!stage.isConnected) return;
+    stage.dataset.imageReady = "false"; stage.setAttribute("aria-busy", "false");
+    const message = $("#statusbar .status-message");
+    if (message) message.textContent = `Image appearance unavailable: ${error.message}`;
+  });
   refreshAppearance();
   updateStatus();
   if (currentView()?.kind === "sheet") {
@@ -403,24 +630,27 @@ Appearance.subscribe(snapshot => {
     afterDraw(currentView());
   }
   if (S.v === "board") {
-    if (boardView.renderers.length) apply();
-    else {
+    // Keep the connected camera in step while fallback artwork decodes off-stage.
+    apply();
+    if (!boardView.renderers.length) {
       // Redraw from cached original SVG, never recolour a recolour.
       const cursor = boardCursor;
       draw().then(() => { const vp = $("#stage .vp"); if (cursor && vp) updateCoordinates(vp,cursor); });
     }
   }
 });
-const boardSceneCache = new Map(), decodedBoardScenes = new Map();
-// Scene blobs reuse svgText's gzip decode; the text is JSON, never given to the SVG loader.
+// Scene blobs share the validated JSON value, never given to the SVG loader.
 async function loadBoardScene(key) {
   if (!key) return null;
-  if (!boardSceneCache.has(key)) boardSceneCache.set(key, (async () => {
-    const scene = JSON.parse(await svgText(key));
-    BoardGL.validateScene(scene);
-    decodedBoardScenes.set(key,scene);
-    return scene;
-  })().catch(error => { boardSceneCache.delete(key); throw error; }));
+  if (!boardSceneCache.has(key)) {
+    const load = (async () => {
+      const scene = await jsonAsset(key);
+      BoardGL.validateScene(scene);
+      decodedBoardScenes.set(key,scene);
+      return scene;
+    })().catch(error => { if (boardSceneCache.get(key) === load) boardSceneCache.delete(key); throw error; });
+    boardSceneCache.set(key, load);
+  }
   return boardSceneCache.get(key);
 }
 const HIDE_LAYERS = /Fab|Courtyard|CrtYd|Paste|Adhes|Mask|Margin|User|Drawings|Dwgs|Comments|Cmts|Eco/i;
@@ -440,18 +670,7 @@ function currentView(v = S.v) {   // Availability is independent of change statu
     return c && (c.svg.base || c.svg.head) ? { kind: "lib", size: c.size, layers: [{ name: "item", changed: true, svg: c.svg }] } : null;
   }
   const pg = p.sheets.find(s => `sheet:${s.path}` === v);
-  return pg && pg.svg ? { kind: "sheet", size: pg.size, layers: [{ name: "sheet", changed: true, svg: pg.svg }] } : null;
-}
-// KiCad 10, builtin_color_themes.h:31–81; data provenance in NOTICE.
-const SCH_PAINTS = new Set([
-  '000000','000084','ffffc2','840000','840084','b5b5b5','c2c2c2',
-  '009600','725600','0f0f0f','484848','ff0000','0000c2','4848ff',
-  '006464','a90000','840032','e0000c'
-]);
-function schematicPaint(value) {
-  const hex = value.trim().toLowerCase();
-  return /^#[0-9a-f]{6}$/.test(hex) && SCH_PAINTS.has(hex.slice(1))
-    ? `var(--sch-ink-${hex.slice(1)}, ${hex})` : value;
+  return pg && pg.svg ? { kind: "sheet", size: pg.size, layers: [{ ...pg, name: "sheet", changed: true }] } : null;
 }
 const cssAppearance = rgba => `rgba(${rgba.slice(0,3).map(v=>Math.round(v*255)).join(',')},${rgba[3]})`;
 // Exported paths sharing a source RGB cannot be distinguished semantically.
@@ -466,88 +685,115 @@ const SCH_THEME_KEYS = {
   '4848ff':'schematic.private_note','006464':'schematic.pin_name','a90000':'schematic.pin_number',
   '840032':'schematic.op_voltages','e0000c':'schematic.op_currents'
 };
-function setSchematicAppearance(svg, appearance) {
-  for (const [hex,key] of Object.entries(SCH_THEME_KEYS))
-    svg.style.setProperty('--sch-ink-'+hex, cssAppearance(appearance.colors[key]));
-  svg.style.setProperty('--sch-background', cssAppearance(appearance.schematicBackground));
+function schematicPaints(resolved) {
+  return new Map(Object.entries(SCH_THEME_KEYS).map(([hex,key])=>['#'+hex,cssAppearance(resolved.colors[key])]));
 }
-function themeSchematic(svg) {
-  for (const el of [svg, ...svg.querySelectorAll('[style],[fill],[stroke]')]) {
-    if (el.hasAttribute('style')) {
-      el.setAttribute('style', el.getAttribute('style').replace(
-        /(^|;)\s*(fill|stroke)\s*:\s*(#[0-9a-f]{6})(\s*(?:!important)?\s*)(?=;|$)/gi,
-        (all, separator, property, value, suffix) =>
-          `${separator}${property}:${schematicPaint(value)}${suffix}`));
-    }
-    for (const property of ['fill', 'stroke']) {
-      if (el.hasAttribute(property)) {
-        el.setAttribute(property, schematicPaint(el.getAttribute(property)));
-      }
-    }
-  }
-}
-
-// kicad-cli strokes each glyph segment as its own <path d> (~25k on a dense sheet), and Chrome repaints
-// them all when a zoom settles. Join runs of sibling attribute-less paths under an unfilled group into one
-// path: same inherited style, near-identical pixels (overlapping strokes no longer double their edge), ~10x fewer elements. Nothing addresses these paths individually.
-function simplifySchematic(svg) {
-  const walk = (g, unfilled) => {
-    const m = /(?:^|;)\s*fill\s*:\s*([^;]+)/i.exec(g.getAttribute('style') || '') || (g.hasAttribute('fill') && [, g.getAttribute('fill')]);
-    if (m) unfilled = m[1].trim() === 'none';
-    let run = null, d = [];
-    const flush = () => { if (run && d.length > 1) run.setAttribute('d', d.join(' ')); run = null; d = []; };
-    for (const el of [...g.children]) {
-      if (unfilled && el.localName === 'path' && el.attributes.length === 1 && /^\s*M/.test(el.getAttribute('d') || '')) {   // absolute start: joining cannot shift it
-        d.push(el.getAttribute('d')); if (run) el.remove(); else run = el;
-      } else if (el.localName === 'desc') continue;
-      else { flush(); if (el.localName === 'g') walk(el, unfilled); }
-    }
-    flush();
+function captureImageViewport(owner,vp,camera,pageMm) {
+  const w=vp.clientWidth,h=vp.clientHeight;
+  if(!w||!h||!Number.isFinite(camera.z)||camera.z<=0||!owner?.node?.complete||!owner.node.naturalWidth)return null;
+  const scale=ImageView.snapshotScale(w,h,devicePixelRatio||1);
+  const box=[camera.x-w/(2*camera.z),camera.y-h/(2*camera.z),w/camera.z,h/camera.z];
+  const canvas=document.createElement('canvas');canvas.className='gesture-snapshot';
+  canvas.width=Math.max(1,Math.floor(w*scale));canvas.height=Math.max(1,Math.floor(h*scale));
+  // Keep the snapshot IN the same .layer and revision .stack as its original.
+  // The world owns camera/flip; stack owns Wipe/Blend/Semantic/Overlay; layer owns opacity.
+  // Fractional layout offsets snap before a large world scale; transforms do not.
+  canvas.style.cssText=`position:absolute;left:0;top:0;width:${w}px;height:${h}px;transform-origin:0 0;transform:translate(${box[0]*PX}px,${box[1]*PX}px) scale(${PX/camera.z});pointer-events:none`;
+  const x=canvas.getContext('2d');if(!x)return null;
+  x.scale(canvas.width/box[2],canvas.height/box[3]);x.translate(-box[0],-box[1]);
+  try {x.drawImage(owner.node,...pageMm);} catch {return null;}
+  if(!owner.node.parentElement)return null;
+  owner.node.parentElement.append(canvas);owner.node.hidden=true;
+  if(owner.cropNode)owner.cropNode.hidden=true;
+  return {node:canvas,
+    move(){ /* The existing world transform moves this revision-local snapshot. */ },
+    dispose(){canvas.remove();if(owner.node)owner.node.hidden=!!owner.cropNode;
+      if(owner.cropNode)owner.cropNode.hidden=false;}
   };
-  walk(svg, false);
 }
-const simpleSheets = new Map();   // raw sheet SVG text -> simplified markup; only sheets actually shown get here
-function simpleSheet(t) {
-  if (!simpleSheets.has(t)) { const d = document.createElement('div'); d.innerHTML = t.slice(t.indexOf('<svg')); simplifySchematic(d.firstElementChild); simpleSheets.set(t, d.innerHTML); }
-  return simpleSheets.get(t);
-}
-
-// SVG fallback: replace only the original layer RGB; retain custom object/diff paint and none;
-// existing inline opacity stays, the colour's alpha and the layer opacity become the layer's own opacity.
-function recolorLayer(div, look, original) {
-  const [r, g, b, a] = look.color, hex = "#" + [r, g, b].map(n => n.toString(16).padStart(2, "0")).join("");
-  const same = original && look.color.every((v, i) => v === original[i]);
-  if (!same) {
-    const source = original && "#" + original.slice(0, 3).map(n => n.toString(16).padStart(2, "0")).join("");
-    const paint = v => {
-      let rgb = v.trim().toLowerCase().replace(/\s/g, "");
-      if (/^#[0-9a-f]{3}$/.test(rgb)) rgb = "#" + [...rgb.slice(1)].map(c => c + c).join("");
-      return rgb === source || original && rgb === `rgb(${original.slice(0, 3).join(",")})` ? hex : v;
-    };
-    for (const el of [div.querySelector("svg"), ...div.querySelectorAll("[style],[fill],[stroke]")]) {
-      for (const prop of ["fill", "stroke"]) if (el.hasAttribute(prop)) el.setAttribute(prop, paint(el.getAttribute(prop)));
-      if (el.hasAttribute("style")) el.setAttribute("style", el.getAttribute("style").replace(/(^|;)\s*(fill|stroke)\s*:\s*([^;]+)/gi, (all, sep, prop, value) => `${sep}${prop}:${paint(value)}`));
+function configureImageGesture(owner,size) {
+  if(owner.gestureConfigured)return;
+  owner.gestureConfigured=true;owner.gestureFlip=flipOn();
+  const page=[0,0,...size];
+  owner.configureGesture({
+    capture:()=>{const vp=owner.node?.closest('.vp');
+      return vp?captureImageViewport(owner,vp,{x:S.x,y:S.y,z:S.z,flip:flipOn()},page):null;},
+    makeCrop:async region=>{
+      const zoom=S.z,view=S.v,crop=await owner.crop(region.source),node=crop.node;
+      crop.region=region;node.dataset.cropView=view;
+      // Size at the capture zoom and translate in the compositor to avoid paint snapping.
+      // Safari otherwise rasterizes the inverse scale before the world magnifies
+      // it again. Promote only this crop, preserving the revision/layer owners.
+      node.style.cssText=`position:absolute;left:0;top:0;width:${region.world[2]*zoom}px;height:${region.world[3]*zoom}px;transform-origin:0 0;transform:translate3d(${region.world[0]*PX}px,${region.world[1]*PX}px,0) scale(${PX/zoom})`;
+      const dispose=crop.dispose.bind(crop);
+      crop.dispose=()=>{if(owner.cropNode===node){owner.cropNode=null;if(owner.node)owner.node.hidden=false;}dispose();};
+      return crop;
+    },
+    restore:crop=>{
+      owner.cropNode=crop?.node||null;owner.cropRegion=crop?.region||null;
+      if(crop&&owner.node?.parentElement)owner.node.parentElement.append(crop.node);
+      if(owner.node)owner.node.hidden=!!crop;
     }
-  }
-  if (a * look.opacity !== 1) div.style.opacity = a * look.opacity;
+  });
 }
+function imageOwners(stage=document.querySelector('#stage')) {
+  return [...stage.querySelectorAll('.stack')].flatMap(st=>(st.imageOwners||[]).map(c=>c.controller||c));
+}
+function releaseImageStage(stage) {
+  if(stage.isConnected){clearTimeout(settle);gesturing=false;}
+  for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) c.dispose();
+}
+const comparisonSources = new Map();
 async function stack(side, view) {
-  const st = document.createElement("div");
-  st.className = `stack ${side}`;
-  st.style.width = `${view.size[0] * PX}px`; st.style.height = `${view.size[1] * PX}px`;
-  const look = view.kind === "board" ? Appearance.get().layers : {};
-  for (const l of view.layers) {
-    const t = await svgText(l.svg[side]);
-    if (!t || look[canon(l.name)]?.visible === false) continue;
-    const d = document.createElement("div");
-    d.className = "layer"; d.dataset.layer = l.name;
-    d.innerHTML = view.kind === 'sheet' ? simpleSheet(t) : t.slice(t.indexOf("<svg"));
-    if (view.kind === 'sheet') {
-      const svg = d.querySelector('svg'); themeSchematic(svg); svg.dataset.appearanceSchematic = '';
-      setSchematicAppearance(svg, KrAppearance.resolve(Appearance.get()));
+  const st=document.createElement('div'); st.className=`stack ${side}`; st.imageOwners=[];
+  const generation = gen, mounts = view.kind === "board" && boardMountState?.generation === gen ? boardMountState : null;
+  st.style.width=`${view.size[0]*PX}px`; st.style.height=`${view.size[1]*PX}px`;
+  const theme=document.documentElement.dataset.theme==='light'?'light':'dark';
+  const scene=boardView.scenes?.[side==='base'?0:1]||{layers:view.layers.map(l=>({name:canon(l.name)}))};
+  const order=KicadColors.boardPriority(scene,flipOn());
+  const layers=view.kind==='board'?[...view.layers].sort((a,b)=>order.indexOf(canon(b.name))-order.indexOf(canon(a.name))):view.layers;
+  const comparison=S.m==='overlay'&&view.kind!=='lib';
+  for (const l of layers) {
+    if (generation !== gen) break;
+    if (!l.svg?.[side] || view.kind==='board' && boardImageLook(Appearance.get(),canon(l.name)).visible===false) continue;
+    if (mounts) mounts.expected++;
+    const d=document.createElement('div'); d.className='layer'; d.dataset.layer=l.name;
+    try {
+      const sourceTheme=l.svgThemes?.[theme]?.[side]?theme:'light';
+      const sourceID=comparison&&l.svgCompare?.[side]||l.svgThemes?.[theme]?.[side]||l.svg[side];
+      let t=await svgText(sourceID); if (!t) { if (mounts) mounts.failed++; continue; }
+      if(comparison&&!l.svgCompare?.[side]) {
+        const key=JSON.stringify([sourceID,side,view.kind==='sheet']);
+        if(!comparisonSources.has(key))comparisonSources.set(key,ImageView.comparisonSource(t,side,view.kind==='sheet'));
+        t=comparisonSources.get(key);
+        comparisonSources.delete(key);comparisonSources.set(key,t);
+        if(comparisonSources.size>8)comparisonSources.delete(comparisonSources.keys().next().value);
+      }
+      if (view.kind==='lib') {d.innerHTML=t.slice(t.indexOf('<svg'));st.append(d);continue;}
+      if(view.kind==='board') {
+        const originalRGB=l.sourceRGBThemes?.[sourceTheme]||boardImageLook({layers:{}},canon(l.name)).color.slice(0,3);
+        const adapter=ImageView.boardLayer(t,originalRGB,d,{side,layer:l.name,comparison});
+        adapter.layer=canon(l.name);
+        const dispose=adapter.dispose.bind(adapter);
+        adapter.dispose=()=>{appearanceBoardImages.delete(adapter);dispose();};
+        st.imageOwners.push(adapter); // Own even if initial appearance decoding fails.
+        const change=adapter.setAppearance.bind(adapter);
+        adapter.setAppearance=async look=>{const ok=await change(look);if(ok)configureImageGesture(adapter.controller,view.size);return ok;};
+        await adapter.setAppearance(boardImageLook(Appearance.get(),adapter.layer));
+        st.append(d);continue;
+      }
+      const c=await ImageView.mount(t,view.size,{side,layer:l.name});
+      st.imageOwners.push(c); // Own before appearance decode, which can reject.
+      const change=c.setAppearance.bind(c);
+      c.setAppearance=async paints=>{const ok=await change(paints);if(ok)c.node.imageOwner=c;return ok;};
+      c.node.imageOwner=c; configureImageGesture(c,view.size); c.sheet=view.kind==='sheet'; c.layer=canon(l.name); c.comparison=comparison;
+      if (c.sheet&&!comparison) await c.setAppearance(schematicPaints(KrAppearance.resolve(Appearance.get())));
+      d.append(c.node); st.append(d);
+    } catch(error) {
+      if (mounts) mounts.failed++;
+      const message=document.createElement('p'); message.className='image-error'; message.setAttribute('role','status');
+      message.textContent=`${side} image unavailable: ${error.message}`; st.append(message);
     }
-    if (look[canon(l.name)]) recolorLayer(d, look[canon(l.name)], KicadColors.layers[canon(l.name)]);
-    st.appendChild(d);
   }
   return st;
 }
@@ -567,21 +813,49 @@ function viewport(stage, label, kind) {
 }
 let gen = 0;
 async function draw() {
+  activeBoardGate?.cancel(); activeBoardGate = null;
+  delete $("#stage").dataset.boardReady; delete $("#stage").dataset.boardBackend;
+  disposeAssets();
   // Bind before any lazy mount; the facade remains window.Appearance for every project.
   Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
   schematicResize.disconnect();
   resetCoordinates();
-  const my = ++gen, view = currentView(), stage = document.createElement("main");
+  const my = ++gen, view = currentView(), P = proj(), stage = document.createElement("main");
+  if(imageSearchState.context!==S.p+":"+S.v)$("#image-search").hidden=true;
   stage.id = "stage"; stage.className = `mode-${S.m}`;
+  stage.dataset.view = S.v; stage.dataset.imageReady = "false"; stage.dataset.generation = String(my);
+  $("#stage").dataset.generation = String(my);
+  $("#stage").dataset.imageReady = "false";
+  const mounts = boardMountState = {generation:my,expected:0,failed:0};
+  let gate = null;
+  const boardGate = target => { gate = activeBoardGate = ImageView.boardDrawGate(target,my); };
+  // All board paths finalize only after manifests and the final connected composition.
+  const finishBoard = target => {
+    if (my !== gen || !target.isConnected || S.v !== 'board') return;
+    saveHash(true);
+    if (boardView.useGL) gate?.finish(target.querySelectorAll('canvas[data-board-renderer]').length);
+    else gate?.images([...target.querySelectorAll('img[data-image-artwork]')],mounts.expected,mounts.failed);
+    target.setAttribute('aria-busy', 'false');
+    const drawingStatus = target.dataset.boardReady === String(my) ? boardView.note || 'Ready' :
+      mounts.failed || mounts.expected > 0 ? 'Drawing unavailable' :
+        view ? 'No visible board artwork' : 'This drawing is unavailable in both revisions.';
+    statusText('.status-message', target.querySelector('.image-error')?.textContent || drawingStatus);
+  };
+  $("#stage").setAttribute("aria-busy", "true");
+  statusText('.status-message', 'Loading drawing…');
   if (S.v === '3d') {
+    renderImageSearch();
     disposeBoardRenderers();
     appearanceSchematics.clear();
+    releaseImageStage($("#stage"));
     $("#stage").replaceWith(stage); // WebGL needs connected canvas dimensions.
     await window.Review3D.show(stage, proj(), S, {single:window.REVIEW_DATA.mode === "single"});
+    if (my === gen && stage.isConnected) statusText('.status-message', 'Ready');
     return;
   }
   window.Review3D?.dispose();
   if(S.part3d){S.part3d=null;renderInspector();}
+  const manifestsReady = loadImageManifests(P);
   let scenes = null;
   const geo = S.v === "board" && view && proj().board.geometry;
   if (boardView.failed !== null && boardView.failed !== S.p) boardView.failed = boardView.note = null;
@@ -589,6 +863,10 @@ async function draw() {
   if (geo) try { scenes = [await loadBoardScene(geo.base), await loadBoardScene(geo.head)]; }
     catch (error) { if (my === gen) { console.warn("Board scene unavailable; showing SVG:", error); boardView.note = "Geometry unsupported — showing SVG"; } }
   if (my !== gen) return;   // a newer draw owns the stage
+  await manifestsReady;
+  if (my !== gen) return;
+  // Search changes the viewport height; settle it before the compositor camera.
+  renderImageSearch();
   boardView.scenes = scenes; boardView.generation = my;
   if (boardView.project !== S.p) {
     boardView.project = S.p;
@@ -598,9 +876,16 @@ async function draw() {
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
   if (boardView.useGL) {
     appearanceSchematics.clear();
-    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) { noChangeNotice($("#stage")); if (!placed()) fit(); else apply(); afterDraw(view); return; }
+    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) {
+      const connected = $("#stage");
+      boardGate(connected); noChangeNotice(connected);
+      if (!placed()) fit(); else apply();
+      afterDraw(view); finishBoard(connected); return;
+    }
     disposeBoardRenderers();
+    releaseImageStage($("#stage"));
     $("#stage").replaceWith(stage);
+    boardGate(stage);
     try {
       const project = S.p;
       let mounted;
@@ -610,12 +895,15 @@ async function draw() {
       boardDiff = mounted;
       boardDiff.project = project; boardDiff.mode = S.m; boardDiff.scenes = {base:scenes[0],head:scenes[1]};
       boardView.panes = boardDiff.panes; boardView.renderers = boardDiff.panes.map(p=>p.renderer);
-      for (const {renderer, canvas} of boardDiff.panes) trackAppearanceBoard(renderer, canvas);
+      for (const {renderer, canvas, scenes:present} of boardDiff.panes)
+        trackAppearanceBoard(renderer, canvas, Object.values(present).some(Boolean));
       if (S.m === "wipe") addDivider(stage.querySelector(".vp"));
       boardDiagnostics(stage);
+      inspectionNotice(stage, view, P);
       noChangeNotice(stage);
       if (!placed()) fit(); else apply();
       afterDraw(view);
+      finishBoard(stage);
       return;
     } catch (error) {
       disposeBoardRenderers(); boardView.failed = S.p; boardView.useGL = false;
@@ -623,20 +911,52 @@ async function draw() {
     }
   }
   if (!boardView.useGL) disposeBoardRenderers();
+  if (S.v === 'board') boardGate(stage);
   if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable in both revisions.</p>`;
-  else await MODES[S.m](stage, view);
+  else try { await MODES[S.m](stage, view); }
+  catch (error) {
+    if (!(error instanceof AssetUnavailableError)) throw error;
+    if (S.v === "board") mounts.failed++;
+    const message = document.createElement('p'); message.className = 'image-error'; message.setAttribute('role', 'status');
+    message.textContent = `Image unavailable: ${error.message}`; stage.append(message);
+  }
+  assetRetry(stage);
+  inspectionNotice(stage, view, P);
   if (S.v === "board" && !boardView.useGL) boardDiagnostics(stage);
   noChangeNotice(stage);
-  if (my !== gen) return;
-  $("#stage").replaceWith(stage);
+  if (my !== gen) { releaseImageStage(stage); return; }
+  // A failed GL mount already connected this stage. Keep its new fallback images.
+  const previous = $("#stage");
+  if (previous !== stage) {
+    releaseImageStage(previous);
+    previous.replaceWith(stage);
+  }
   appearanceSchematics.clear();
-  for (const svg of stage.querySelectorAll('svg[data-appearance-schematic]')) appearanceSchematics.add(svg);
-  applyAppearance(Appearance.get());
-  const msg = $("#statusbar .status-message");
-  if (msg) msg.textContent = S.v === "board" && boardView.note ? boardView.note : "Ready";
+  for (const st of stage.querySelectorAll('.stack')) for (const c of st.imageOwners || []) {
+    if (c.sheet) appearanceSchematics.add(c);
+    else if (c.controller) appearanceBoardImages.add(c);
+  }
+  // The stage is already live. Initialize its camera, overlays and fallback notice
+  // before palette decoding yields; image readiness still waits for that decode.
   if (view && !placed()) fit(); else apply(); afterDraw(view);
+  statusText('.status-message', stage.querySelector('.image-error')?.textContent || (S.v === 'board' && boardView.note ? boardView.note : 'Ready'));
+  try { await applyAppearance(Appearance.get()); }
+  catch (error) {
+    if (my !== gen) { releaseImageStage(stage); return; }
+    if (S.v === "board") mounts.failed++;
+    const message = document.createElement("p"); message.className = "image-error";
+    message.setAttribute("role", "status"); message.textContent = `Image appearance unavailable: ${error.message}`;
+    stage.append(message);
+  }
+  if (my !== gen) { releaseImageStage(stage); return; }
+  const msg = $("#statusbar .status-message");
+  if (msg) msg.textContent = stage.querySelector(".image-error")?.textContent || (S.v === "board" && boardView.note ? boardView.note : "Ready");
   for (const vp of document.querySelectorAll("#stage .vp.sheet")) schematicResize.observe(vp);
   refreshAppearance();
+  saveHash(true); // Navigation must be reflected in the address before readiness.
+  stage.imageMounted = true; stage.setAttribute("aria-busy", "false");
+  if (view && view.kind !== "lib" && !stage.querySelector(".image-error")) stage.dataset.imageReady = "true";
+  finishBoard(stage);
 }
 function noChangeNotice(stage) {
   const text = S.v === "board" ? (!proj().board.changed && "No layout changes") :
@@ -653,7 +973,15 @@ function boardDiagnostics(stage) {   // text only: warning objects are never par
   d.className = "board-diag"; sum.textContent = `Geometry warnings (${warnings.length})`; pre.textContent = warnings.join("\n");
   d.append(sum, pre); stage.appendChild(d);
 }
-function trackAppearanceBoard(renderer, canvas) {
+function trackAppearanceBoard(renderer, canvas, present = true) {
+  // An absent revision has a blank comparison canvas, not board artwork to await.
+  if (present) canvas.dataset.boardRenderer = '';
+  const rawDraw = renderer.draw.bind(renderer);
+  renderer.draw = options => {
+    const ok = rawDraw(options);
+    if (!options?.mask && canvas.hasAttribute('data-board-renderer') && canvas.isConnected) activeBoardGate?.record(renderer, ok);
+    return ok;
+  };
   appearanceBoards.add(renderer);
   const project = S.p;
   // Stage 4 disposes a lost renderer and shows SVG. Restore by mounting fresh
@@ -716,11 +1044,17 @@ function apply() {
     w.parentElement.classList.toggle("flip", f < 0);
     if (!gesturing) w.style.setProperty("--k", k);   // a custom-property write restyles every SVG descendant: only when still
   }
+  for(const owner of imageOwners()) {
+    if(owner.gestureFlip!==flipOn()){owner.gestureFlip=flipOn();owner.invalidateGesture();}
+    owner.moveSnapshot();
+  }
   onApply();
+  if(currentView()?.kind==='sheet')for(const w of document.querySelectorAll('#stage .world'))mountImageMarks(w,currentView());
   if (boardDiff) { boardDiff.render(); drawPins(); }
   else for (const pane of boardView.panes) if (pane?.canvas.isConnected) { pane.renderer.setCamera(boardCamera(pane.canvas.parentElement)); pane.renderer.draw(); }
   setText($("#zoombar .pct"), Math.round(S.z / PX * 100) + "%");
   if (!gesturing) drawSchematicGrids();
+  drawImageSelection();
   updateSchematicStatus();
 }
 // KiCad 10: eeschema/eeschema_settings.cpp:705-706 defaults to 50 mil (index 1);
@@ -762,10 +1096,27 @@ function drawSchematicGrids() {
 }
 function updateSchematicStatus() { updateStatus(); }
 const schematicResize = new ResizeObserver(() => apply());
-window.addEventListener("kr-theme-change", () => { for (const c of document.querySelectorAll("#stage .sch-grid")) c.dataset.key = ""; drawSchematicGrids(); });
+let themeDraw = Promise.resolve();
+document.addEventListener("kr-theme-change", () => {
+  for (const c of document.querySelectorAll("#stage .sch-grid")) c.dataset.key = "";
+  drawSchematicGrids();
+  // A theme selects another immutable export and its own original RGB palette.
+  if (S.v === "board" && !boardView.useGL || currentView()?.kind === "sheet")
+    themeDraw = draw().catch(error => console.warn("Themed drawing unavailable:", error));
+});
 let settle, gesturing = false;
 function gesture() {           // composite as a bitmap while moving, re-rasterise sharp when still
   for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "transform";
+  for(const owner of imageOwners()){
+    owner.beginGesture();owner.endGesture(()=>{
+      // No automatic threshold without an observed softness crossover. A manually
+      // requested crop remains reusable until the camera leaves its ten-percent margin.
+      const region=owner.cropRegion,vp=owner.node?.closest('.vp');if(!region||!vp)return null;
+      const box=[S.x-vp.clientWidth/(2*S.z),S.y-vp.clientHeight/(2*S.z),vp.clientWidth/S.z,vp.clientHeight/S.z],r=region.world;
+      return box[0]>=r[0]&&box[1]>=r[1]&&box[0]+box[2]<=r[0]+r[2]&&box[1]+box[3]<=r[1]+r[3]?region:
+        ImageView.cropRegion(box,[0,0,...currentView().size],owner.viewBox);
+    });
+  }
   gesturing = true; clearTimeout(settle);
   settle = setTimeout(() => { gesturing = false; for (const w of document.querySelectorAll("#stage .world")) w.style.willChange = "auto"; apply(); }, 150);
 }
@@ -805,8 +1156,8 @@ function updateStatus() {
   for (const [name,value] of Object.entries({x:p?.[0],y:p?.[1],dx,dy,dist:Math.hypot(dx,dy)})) statusText(`[data-coordinate=${name}]`,fmt(value));
   const coords = $("#statusbar .status-coordinates");
   coords?.classList.toggle("off-canvas",!current); coords?.toggleAttribute("data-sch-coordinates",sheet);
-  const rows = [...document.querySelectorAll("#panel .card[data-id]")], at = rows.findIndex(e => e.dataset.id === S.s);
-  statusText("[data-change]",`${at < 0 ? 0 : at+1}/${rows.length}`);
+  const ids = changeCardIds(), at = ids.indexOf(S.s);
+  statusText("[data-change]",`${at < 0 ? 0 : at+1}/${ids.length}`);
   statusText("[data-zoom]",placed() ? `${(S.z / PX * 100).toFixed(0)}%` : "off canvas");
   statusText("[data-units]",units);
   if ($("#status-units").value !== units) $("#status-units").value = units;
@@ -816,7 +1167,7 @@ function updateStatus() {
   const color = a.layers[a.activeLayer]?.color;
   const swatch = $("[data-layer-swatch]"), swatchColor = S.v === "board" && color ? `rgb(${color.slice(0,3).join(",")})` : "transparent";
   if (swatch.dataset.color !== swatchColor) { swatch.style.background = swatchColor; swatch.dataset.color = swatchColor; }
-  const selected = proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
+  const selected = S.imageSelection || proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
   statusText("[data-selection]",selected ? selected.ref || selected.reference || selected.kind || selected.id : "Nothing selected");
   statusText("[data-view-mode]",({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
 
@@ -853,63 +1204,65 @@ function attachPanZoom(vp) {
     e.preventDefault(); gesture();
     const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? r.height : 1);
     const rate = window.KRBoardWheelProfile === "mac-rotation" ? BOARD_WHEEL_MAC_ROTATION_RATE/100 : BOARD_WHEEL_PIXEL_RATE;
-    zoomBoardAt(vp,e.clientX,e.clientY,Math.exp(Math.max(-20,Math.min(20,-pixels*rate))),{frame:true});
+    const factor=currentView()?.kind==='sheet'?ImageView.wheelFactor(e.deltaY,e.deltaMode):Math.exp(Math.max(-20,Math.min(20,-pixels*rate)));
+    zoomBoardAt(vp,e.clientX,e.clientY,factor,{frame:true});
   }, { passive:false });
-  let active = null, suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
+  const pointers=new Map();
+  let suppressContext = false, pendingContext = null, cursorFrame = 0, cursorEvent;
   vp.addEventListener("pointerdown", e => {
-    if (![0,1,2].includes(e.button) || !placed() || active) return;
-    suppressContext = false; pendingContext = null;
-    active = {id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0};
+    if (e.pointerType==='touch' || e.target.closest('.image-errors')) return;
+    if (![0,1,2].includes(e.button) || !placed() || pointers.size) return;
+    suppressContext=false;pendingContext=null;
+    pointers.set(e.pointerId,{id:e.pointerId,button:e.button,x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,moved:0});
+    gesture();
     // Synthetic browser checks have no active native pointer; real input gets capture.
     try { vp.setPointerCapture(e.pointerId); } catch {}
     if (e.button === 1) e.preventDefault();
   });
   vp.addEventListener("pointermove", e => {
-    if (active && active.id === e.pointerId) {
-      const a = active; a.moved = Math.max(a.moved, Math.hypot(e.clientX-a.x,e.clientY-a.y));
-      if (a.moved >= 4) { gesture(); setT({x:S.x-(flipOn()?-1:1)*(e.clientX-a.lx)/S.z,y:S.y-(e.clientY-a.ly)/S.z},{frame:true}); }
-      a.lx=e.clientX; a.ly=e.clientY;
+    const a=pointers.get(e.pointerId);
+    if(a) {
+      const dx=e.clientX-a.lx,dy=e.clientY-a.ly;
+      a.moved=Math.max(a.moved,Math.hypot(e.clientX-a.x,e.clientY-a.y));
+      a.lx=e.clientX;a.ly=e.clientY;
+      if(a.moved>=4){gesture();setT({x:S.x-(flipOn()?-1:1)*dx/S.z,y:S.y-dy/S.z},{frame:true});}
     }
     cursorEvent=e;
     if (!cursorFrame) cursorFrame=requestAnimationFrame(() => { cursorFrame=0; updateCoordinates(vp,cursorEvent); });
   });
   const end = e => {
-    if (!active || active.id !== e.pointerId) return;
-    const a=active; active=null; suppressContext = a.moved >= 4;
+    const a=pointers.get(e.pointerId);if(!a)return;
+    const canceled=e.type!=="pointerup",click=!canceled&&a.moved<4;
+    pointers.delete(e.pointerId);suppressContext=a.moved>=4;
+    if(canceled){
+      for(const id of pointers.keys())if(vp.hasPointerCapture(id))vp.releasePointerCapture(id);
+      pointers.clear();
+    }
     if (vp.hasPointerCapture(e.pointerId)) vp.releasePointerCapture(e.pointerId);
-    if (e.type === "pointerup" && a.moved < 4 && [0,2].includes(a.button)) {   // a click, not a pan, sets the measurement origin
+    if (click && [0,2].includes(a.button)) {   // a click, not a pan, sets the measurement origin
       anchorKey = JSON.stringify([S.p,S.v]);
       deltaAnchor = String(S.v).startsWith("sheet:") ? (p => [p.x,p.y])(schematicPoint(vp,e)) : toWorld(vp,e); updateStatus();
     }
-    if (e.type === "pointerup" && a.moved < 4 && a.button === 0) pickAt(vp,e);
-    if (e.type === "pointerup" && a.moved < 4 && a.button === 2 && pendingContext) canvasMenu(vp,pendingContext);
+    if (click && a.button === 0) pickAt(vp,e);
+    if (click && a.button === 2 && pendingContext) canvasMenu(vp,pendingContext);
     pendingContext = null;
-    if (e.type !== "pointerup") { suppressContext=false; if(cursorFrame) cancelAnimationFrame(cursorFrame); cursorFrame=0; resetCoordinates(); }
+    if(canceled){suppressContext=false;if(cursorFrame)cancelAnimationFrame(cursorFrame);cursorFrame=0;resetCoordinates();}
   };
   for (const type of ["pointerup","pointercancel","lostpointercapture"]) vp.addEventListener(type,end);
   vp.addEventListener("pointerleave", () => { resetCoordinates(); for(const pane of document.querySelectorAll("#stage .vp")) pane.classList.remove("board-cursor"); });
   vp.addEventListener("auxclick", e => { if (suppressContext || e.button===1) e.preventDefault(); });
   vp.addEventListener("contextmenu", e => {
-    if (suppressContext || active?.moved >= 4) { e.preventDefault(); return; }
+    if(e.pointerType==='touch')return;
+    if (suppressContext || [...pointers.values()].some(a=>a.moved>=4)) { e.preventDefault(); return; }
     if (!placed()) return; e.preventDefault();
-    if (active) pendingContext=e; else canvasMenu(vp,e);
+    if (pointers.size) pendingContext=e; else canvasMenu(vp,e);
   });
 }
-function contentBox() {   // drawn extent in mm, stroke included (getBBox ignores stroke); mapped via each svg's own rendered rect
-  const v = currentView();
-  let b = null;
-  for (const svg of document.querySelectorAll("#stage svg")) {
-    const R = svg.getBoundingClientRect();
-    if (!v || !R.width) continue;
-    const kx = v.size[0] / R.width, ky = v.size[1] / R.height;
-    for (const g of svg.querySelectorAll(":scope > g")) {
-      const r = g.getBoundingClientRect();
-      if (!r.width && !r.height) continue;
-      const q = [(r.left - R.left) * kx, (r.top - R.top) * ky, (r.right - R.left) * kx, (r.bottom - R.top) * ky];
-      b = b ? [Math.min(b[0], q[0]), Math.min(b[1], q[1]), Math.max(b[2], q[2]), Math.max(b[3], q[3])] : q;
-    }
-  }
-  return b;
+function contentBox() {
+  const v = currentView(); if (!v) return null;
+  if (v.kind === 'board' && sceneBox()) return sceneBox();
+  // Full page, not symbol extents, is authoritative for worksheet and legacy SVG Home fit.
+  return [0, 0, ...v.size];
 }
 function zoomTo(box, pad = 8) {
   const vp = document.querySelector("#stage .vp");
@@ -1026,13 +1379,284 @@ function markersFor(view) {
   if (view.kind === "sheet") return proj().changes.filter(r => onView(r, S.v));
   return proj().changes.filter(r => onView(r, S.v) && (S.m === "semantic" || r.action === "modified" && MARKED.has(r.kind)));
 }
+function imageSides(vp,point) {
+  const stacks=[...vp.querySelectorAll('.stack')];
+  const available=['base','head'].filter(side=>stacks.some(st=>st.classList.contains(side)&&st.querySelector('[data-image-artwork]')));
+  if(S.m==='side')return available;
+  if(S.m==='blend')return available.filter(side=>S.blend===0?side==='base':S.blend===1?side==='head':true).reverse();
+  if(S.m==='semantic')return [available.includes('head')?'head':'base'].filter(s=>available.includes(s));
+  if(S.m==='wipe') {
+    const r=vp.getBoundingClientRect(),screenX=r.width/2+(flipOn()?-1:1)*(point[0]-S.x)*S.z;
+    return available.filter(side=>side===(screenX<r.width*S.wipe?'base':'head'));
+  }
+  return available.reverse();
+}
+function currentImageGraph(side) {return decodedBoardInspect.get(proj().board?.inspect?.[side])||null;}
+function sheetImageElements(side) {
+  const pg=proj().sheets.find(s=>'sheet:'+s.path===S.v);
+  return decodedSheetHotspots.get(pg?.hotspots?.[side])?.views.find(v=>v.sheet===pg.path)?.elements||[];
+}
+function imageRecord(selection) {
+  if(!selection)return null;
+  return selection.sheet!=null?sheetImageElements(selection.side).find(e=>e.uuid===selection.uuid&&e.unit===selection.unit)
+    :['pads','vias','tracks'].flatMap(k=>currentImageGraph(selection.side)?.[k]||[]).find(e=>e.uuid===selection.uuid);
+}
+let savedImageNets=null;
+function restoreImageNet() {
+  if(!savedImageNets)return;
+  const {name,previous}=savedImageNets,look=Appearance.get(),netColors={...look.netColors};
+  // Restore only our temporary colour; preserve intervening Appearance edits.
+  if(JSON.stringify(netColors[name])===JSON.stringify([1,.8,0,1])) {
+    if(previous===undefined)delete netColors[name];else netColors[name]=previous;
+    Appearance.set({...look,netColors});
+  }
+  savedImageNets=null;
+}
+function clearImageSelection() {
+  S.imageSelection=null;restoreImageNet();renderInspector();
+  document.querySelectorAll('#stage .image-selection').forEach(n=>n.remove());
+}
+function selectImageNet(name) {
+  restoreImageNet();savedImageNets={name,previous:Appearance.get().netColors[name]};
+  Appearance.patch({netColors:{[name]:[1,.8,0,1]}});
+}
+function chooseImage(record,side,kind,point,pin=null) {
+  S.imageSelection={side,kind,uuid:record.uuid,ref:record.ref||'',sheet:S.v.startsWith('sheet:')?S.v.slice(6):null,
+    unit:record.unit,pin:pin?.number??record.pin,net:record.net,point};
+  S.io=null;S.ig=null;
+  const semantic=proj().changes.find(c=>c.uuid===(record.changeUuid||record.uuid)&&onView(c,S.v));
+  S.s=semantic?.id||null;
+  syncSelectedChangeCard();
+  if(record.net)selectImageNet(record.net);else restoreImageNet();
+  renderInspector();drawImageSelection();updateStatus();saveHash();
+}
+function visibleImageLayers(graph) {
+  const layers=glAppearance().layers;
+  return new Set(graph.layers.filter(l=>{const a=layers[canon(l)];return a&&a.visible!==false&&a.color[3]*a.opacity>0;}));
+}
+function sheetPinAt(side,point) {
+  const reach=Math.max(.15,6/S.z);
+  return sheetImageElements(side).flatMap(e=>(e.pins||[]).map(p=>({e,p,d:Math.hypot(p.x-point[0],p.y-point[1])})))
+    .filter(p=>p.d<=reach).sort((a,b)=>a.d-b.d)[0];
+}
+function pickImageAt(vp,event) {
+  const point=boardDiff?.point(vp,event)?.point||toWorld(vp,event);
+  const sides=boardDiff?boardDiff.sidesAt(vp,point):imageSides(vp,point);
+  for(const side of sides) {
+    if(S.v==='board') {
+      const g=currentImageGraph(side);if(!g)continue;
+      const record=ImageView.inspectHit(g,point,visibleImageLayers(g),S.z);
+      if(record){chooseImage(record,side,g.pads.includes(record)?'pad':g.vias.includes(record)?'via':'track',point);return true;}
+    } else if(S.v.startsWith('sheet:')) {
+      const elements=sheetImageElements(side);
+      const pin=sheetPinAt(side,point);
+      if(pin){chooseImage(pin.e,side,'pin',[pin.p.x,pin.p.y],pin.p);return true;}
+      const e=elements.filter(e=>point[0]>=e.bbox[0]&&point[0]<=e.bbox[2]&&point[1]>=e.bbox[1]&&point[1]<=e.bbox[3])
+        .sort((a,b)=>(a.bbox[2]-a.bbox[0])*(a.bbox[3]-a.bbox[1])-(b.bbox[2]-b.bbox[0])*(b.bbox[3]-b.bbox[1]))[0];
+      if(e){chooseImage(e,side,'symbol',point);return true;}
+    }
+  }
+  clearImageSelection();return false;
+}
+function drawImageSelection() {
+  document.querySelectorAll('#stage .image-selection').forEach(e=>e.remove());
+  const s=S.imageSelection,r=imageRecord(s);if(!r)return;
+  // ponytail: geometry overlay avoids SVG-to-object binding; exact KiCad text highlighting is outside this inspection feature.
+  for(const world of document.querySelectorAll('#stage .world')) {
+    const vp=world.parentElement,sides=boardDiff?boardDiff.sidesAt(vp,s.point):imageSides(vp,s.point);
+    if(!sides.includes(s.side))continue;
+    const ns='http:'+'//www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
+    svg.classList.add('marks','image-selection');svg.setAttribute('viewBox','0 0 '+currentView().size.join(' '));
+    svg.style.width=currentView().size[0]*PX+'px';svg.style.height=currentView().size[1]*PX+'px';
+    const add=(tag,attrs,parent=svg)=>{const e=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);parent.append(e);return e;};
+    if(r.bbox)add('rect',{x:r.bbox[0],y:r.bbox[1],width:r.bbox[2]-r.bbox[0],height:r.bbox[3]-r.bbox[1],fill:'none',stroke:'var(--accent)','stroke-width':.3});
+    const visible=r.geometry?visibleImageLayers(currentImageGraph(s.side)):null;
+    if(r.geometry&&!r.layers.some(l=>visible.has(l)))continue;
+    const group=add('g',{fill:'var(--accent)','fill-opacity':.35});
+    // Geometry uses micrometres and KiCad counter-clockwise angles, unlike SVG.
+    const primitive=(p,parent,fill)=>{
+      if(!p)return;
+      const [w,h]=p.size.map(n=>n/1000),[x,y]=p.center.map(n=>n/1000);
+      const g=add('g',{transform:`translate(${x} ${y}) rotate(${-(p.angle||0)/1000})`,fill},parent);
+      if(p.shape==='circle')add('circle',{r:w/2},g);
+      else if(p.shape==='trapezoid') {
+        const [tx,ty]=(p.delta||[0,0]).map(n=>n/1000);
+        add('polygon',{points:[[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx,sy])=>[sx*w/2-sx*sy*ty/2,sy*h/2+sx*sy*tx/2].join(',')).join(' ')},g);
+      } else if(['rect','oval','roundrect'].includes(p.shape))add('rect',{x:-w/2,y:-h/2,width:w,height:h,rx:p.shape==='oval'?Math.min(w,h)/2:p.shape==='roundrect'?Math.min((p.radius||0)/1000,w/2,h/2):0},g);
+    };
+    const geometry=r.geometry;
+    if(geometry) {
+      for(const layer of r.layers.filter(l=>visible.has(l)))primitive(geometry.layerPrimitives?.[layer]||geometry.primitive,group,'var(--accent)');
+      for(const seg of geometry.segments||[])add('line',{x1:seg[0]/1000,y1:seg[1]/1000,x2:seg[2]/1000,y2:seg[3]/1000,stroke:'var(--accent)','stroke-width':seg[4]/1000},group);
+      for(const ring of geometry.rings||[])add('polygon',{points:ring.map(p=>p.map(n=>n/1000).join(',')).join(' ')},group);
+      if(geometry.drill) {
+        const id='image-hole-'+s.side+'-'+[...document.querySelectorAll('#stage .image-selection')].length;
+        const mask=add('mask',{id,maskUnits:'userSpaceOnUse'},add('defs',{}));
+        add('rect',{x:0,y:0,width:currentView().size[0],height:currentView().size[1],fill:'white'},mask);
+        primitive({...geometry.drill,shape:geometry.drill.size[0]===geometry.drill.size[1]?'circle':'oval'},mask,'black');
+        group.setAttribute('mask','url(#'+id+')');
+      }
+    }
+    add('circle',{cx:s.point[0],cy:s.point[1],r:Math.max(.3,6/S.z),fill:'none',stroke:'var(--accent)','stroke-width':.3});
+    world.append(svg);
+  }
+}
+const imageSearchState={context:null,side:'head',query:'',open:false,note:''};
+function imageSearchRows() {
+  const side=imageSearchState.side;
+  return S.v==='board'?currentImageGraph(side)?.nets||[]:sheetImageElements(side);
+}
+function mountImageSearch() {
+  renderImageSearch();
+}
+function renderImageSearch() {
+  const host=$('#image-search');if(!host)return;
+  const board=S.v==='board',sheet=S.v?.startsWith('sheet:');
+  host.hidden=!board&&!sheet;if(host.hidden)return;
+  const context=S.p+':'+S.v,pg=sheet?proj().sheets.find(s=>'sheet:'+s.path===S.v):null;
+  const available=side=>board?!!currentImageGraph(side):decodedSheetHotspots.get(pg?.hotspots?.[side])?.views.some(v=>v.sheet===pg.path);
+  if(imageSearchState.context!==context)Object.assign(imageSearchState,{context,side:available('head')?'head':'base',query:'',open:false,note:''});
+  const sideSelect=$('#image-search-side');
+  for(const option of sideSelect.options)option.disabled=!available(option.value);
+  if(!available(imageSearchState.side)&&available(imageSearchState.side==='head'?'base':'head'))imageSearchState.side=imageSearchState.side==='head'?'base':'head';
+  sideSelect.value=imageSearchState.side;
+  const ok=available(imageSearchState.side),rows=imageSearchRows(),input=$('#image-query');
+  input.disabled=!ok;sideSelect.disabled=!available('head')&&!available('base');
+  input.placeholder=board?'Search nets…':'Reference, value, footprint or field…';
+  input.setAttribute('aria-label',board?'Search nets':'Search components');
+  if(input.value!==imageSearchState.query)input.value=imageSearchState.query;
+  $('#image-search-label').textContent=board?'Net search':ok?rows.length+' component'+(rows.length===1?'':'s'):'Components';
+  const graph=board?currentImageGraph(imageSearchState.side):null;
+  const partial=graph&&(Object.values(graph.truncated).some(Boolean)||Object.values(graph.unsupported||{}).some(n=>n>0));
+  const missing=['base','head'].some(side=>sideSelect.options[side==='base'?0:1].disabled);
+  $('#image-search-note').textContent=!ok?'Inspection unavailable for this report. Artwork and review lists remain available.':
+    imageSearchState.note|| (partial?'Partial inspection: some geometry is unavailable.':missing?'Inspection available for '+imageSearchState.side+' only.':'');
+  const facts=$('#image-board-facts');facts.hidden=!graph;
+  if(graph) {
+    const stats=graph.stats,size=stats.boardSizeMm;
+    facts.textContent='Board facts · '+imageSearchState.side+' · '+(size?size.join(' × ')+' mm':'Size unavailable')+
+      ' · '+stats.copperLayers+' copper layers · '+stats.netCount+' nets · '+stats.padCount+' pads · '+stats.viaCount+' vias · '+stats.routedLengthMm+' mm routed · '+stats.countsSource+' · '+graph.warnings.length+' warnings · truncated: '+Object.values(graph.truncated).some(Boolean);
+  }
+  renderImageResults();
+}
+function closeImageResults(focus=false) {
+  if(focus)$('#image-query').focus();
+  imageSearchState.open=false;renderImageResults();
+}
+let renderedImageResults=null;
+function renderImageResults() {
+  const board=S.v==='board',source=imageSearchRows();
+  const rows=board?ImageView.searchNets(source,imageSearchState.query):ImageView.searchComponents(source,imageSearchState.query);
+  $('#image-search-count').textContent=$('#image-query').disabled?'':board?rows.length+' net '+(rows.length===1?'result':'results'):rows.length+' '+(rows.length===1?'component':'components')+' found';
+  const host=$('#image-results');host.hidden=!imageSearchState.open||$('#image-query').disabled;
+  if(host.hidden){host.replaceChildren();renderedImageResults=null;return;}
+  const key=JSON.stringify([imageSearchState.context,imageSearchState.side,imageSearchState.query]);
+  // Retain focused buttons across appearance redraws and asynchronous image mounts.
+  if(renderedImageResults?.key===key&&rows.length===renderedImageResults.rows.length&&rows.every((r,i)=>r===renderedImageResults.rows[i]))return;
+  renderedImageResults={key,rows};host.replaceChildren();
+  if(rows.length) {
+    const list=document.createElement('ul');
+    rows.forEach((r,i)=>{
+      const item=document.createElement('li'),button=document.createElement('button');
+      button.type='button';button.dataset.imageResult=i;
+      button.textContent=board?r.name:r.ref+' · '+(r.value||'')+(r.unit?' · unit '+r.unit:'');
+      item.append(button);list.append(item);
+    });
+    host.append(list);
+  } else {
+    const note=document.createElement('p');
+    note.textContent='No matches. Try '+(board?'a net name or part of its name.':'a reference, value, footprint or field.');
+    host.append(note);
+  }
+  for(const button of host.querySelectorAll('button')) {
+    button.onclick=()=>{
+      const row=rows[Number(button.dataset.imageResult)],side=imageSearchState.side;
+      closeImageResults(true);imageSearchState.note='';
+      if(!board) {
+        const box=row.bbox,point=[(box[0]+box[2])/2,(box[1]+box[3])/2];
+        zoomTo(box);chooseImage(row,side,'symbol',point);
+      } else {
+        const graph=currentImageGraph(side),visible=visibleImageLayers(graph);
+        const candidates=['pads','vias','tracks'].flatMap(k=>graph[k].map(r=>({record:r,kind:k==='pads'?'pad':k==='vias'?'via':'track'})))
+          .filter(({record:r})=>r.net===row.name&&!r.hidden&&r.layers.some(l=>visible.has(l)));
+        const selected=candidates[0];
+        if(selected) {
+          const r=selected.record,p=r.geometry.primitive?.center?.map(n=>n/1000)||[(r.x1+r.x2)/2,(r.y1+r.y2)/2];
+          setT({x:p[0],y:p[1]});chooseImage(r,side,selected.kind,p);
+        } else {
+          clearImageSelection();selectImageNet(row.name);
+          imageSearchState.note='Net '+row.name+': no visible retained copper geometry. Check layer visibility or select another net.';
+          $('#image-search-note').textContent=imageSearchState.note;
+        }
+      }
+    };
+    button.onkeydown=e=>{
+      const buttons=[...host.querySelectorAll('button')],i=buttons.indexOf(button);
+      if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();buttons[(i+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}
+      if(e.key==='Home'||e.key==='End'){e.preventDefault();buttons[e.key==='Home'?0:buttons.length-1]?.focus();}
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();resetImageSearch();}
+    };
+  }
+}
+function resetImageSearch() {
+  imageSearchState.query='';imageSearchState.note='';$('#image-query').value='';
+  clearImageSelection();closeImageResults(true);
+}
+$('#image-query').oninput=e=>{imageSearchState.note='';imageSearchState.query=e.target.value;imageSearchState.open=true;renderImageResults();};
+$('#image-query').onfocus=()=>{imageSearchState.open=true;renderImageResults();};
+$('#image-query').onkeydown=e=>{
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();imageSearchState.open=true;renderImageResults();const buttons=[...document.querySelectorAll('#image-results button')];buttons[e.key==='ArrowDown'?0:buttons.length-1]?.focus();}
+  if(e.key==='Escape'){e.preventDefault();e.stopPropagation();resetImageSearch();}
+  if(e.key==='Enter'&&imageSearchState.open){e.preventDefault();$('#image-results button')?.click();}
+};
+$('#image-search-side').onchange=e=>{clearImageSelection();imageSearchState.note='';imageSearchState.side=e.target.value;imageSearchState.open=false;renderImageSearch();};
+$('#image-search-clear').onclick=()=>{clearImageSelection();S.s=null;imageSearchState.open=false;renderImageResults();saveHash();};
+// Safari does not focus pressed buttons. Keep the input focused until click selects a row.
+for(const type of ['pointerdown','mousedown'])$('#image-results').addEventListener(type,e=>{
+  if(e.button===0&&e.target.closest('button'))e.preventDefault();
+});
+$('#image-search').addEventListener('focusout',()=>queueMicrotask(()=>{if(!$('#image-search').contains(document.activeElement)){imageSearchState.open=false;renderImageResults();}}));
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('#image-search')){imageSearchState.open=false;renderImageResults();}});
+
+function mountImageMarks(world,view) {
+  world.querySelector('.marks')?.remove();if(view.kind!=='sheet')return;
+  const ns='http:'+'//www.w3.org/2000/svg',marks=document.createElementNS(ns,'svg');
+  marks.classList.add('marks');marks.setAttribute('viewBox','0 0 '+view.size.join(' '));
+  marks.style.width=view.size[0]*PX+'px';marks.style.height=view.size[1]*PX+'px';
+  const sheet=proj().sheets.find(s=>'sheet:'+s.path===S.v),vp=world.parentElement;
+  const box=[S.x-vp.clientWidth/(2*S.z),S.y-vp.clientHeight/(2*S.z),S.x+vp.clientWidth/(2*S.z),S.y+vp.clientHeight/(2*S.z)];
+  const elements=[];
+  for(const side of ['base','head']) {
+    if(!world.querySelector('.stack.'+side+' [data-image-artwork]'))continue;
+    const rows=decodedSheetHotspots.get(sheet?.hotspots?.[side])?.views.find(v=>v.sheet===sheet.path)?.elements||[];
+    for(const e of ImageView.visibleHotspots(rows,box))elements.push({e,side});
+  }
+  // Cull each revision before attaching its side, then bound the combined pane.
+  const survivors=elements.sort((a,b)=>{
+    const area=({bbox})=>(bbox[2]-bbox[0])*(bbox[3]-bbox[1]);
+    return area(b.e)-area(a.e);
+  }).slice(-400).reverse();
+  for(const {e,side} of survivors) {
+    const r=document.createElementNS(ns,'rect'),[x,y,x1,y1]=e.bbox;
+    for(const [key,value] of Object.entries({x,y,width:x1-x,height:y1-y}))r.setAttribute(key,value);
+    r.dataset.hotspot=e.uuid;r.dataset.side=side;
+    r.addEventListener('click',event=>{
+      event.stopPropagation();
+      // A target on the other Wipe side must not swallow the click.
+      pickAt(vp,event);
+    });
+    marks.append(r);
+  }
+  world.append(marks);
+}
 function afterDraw(view) {
   renderInspector();
   syncMarkStyles();
-  if (!view) return;
+  if (!view) { mountImageSearch(); return; }
   refreshAppearance();
   const sel = proj().changes.find(r => r.id === S.s) || allViolations().find(v => v.id === S.s);
   for (const w of document.querySelectorAll("#stage .world")) {
+    mountImageMarks(w,view);
     const side = sideOf(w);
     const marked = [...markersFor(view)];
     const rows = view.kind === "sheet"
@@ -1056,8 +1680,7 @@ function afterDraw(view) {
         m.dataset.markStyle = Appearance.get().markStyle;
         const word = `${semantic?.word || r.action || "finding"} ${r.ref || r.kind || ""}`.trim();
         m.setAttribute("aria-label", word);
-        const label = document.createElement("span"); label.className = "sch-mark-label"; label.textContent = word;
-        m.append(label);
+        // The accessible name also supplies the visible label without a child per marker.
         const schMark = KrAppearance.resolve(Appearance.get()).marks.schematic[r.action];
         if (schMark) m.style.setProperty("--sch-mark", cssAppearance(schMark.color));
       }
@@ -1078,7 +1701,9 @@ function afterDraw(view) {
     vp.append(legend);
   }
   refreshAppearance();
+  drawImageSelection();
   drawPins();
+  mountImageSearch();
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
@@ -1114,6 +1739,7 @@ function drawPins() {
 }
 function pickAt(vp, e) {
   if (S.placing) { stopPlacing(); proposePin(vp, e); return; }
+  if (pickImageAt(vp,e))return;
   if (boardDiff) {
     const hit=boardDiff.pick(vp,e,S.s);
     if (hit) { S.s=hit.id; markSelected(); saveHash(); boardDiff.render(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({block:"nearest"}); }
@@ -1125,16 +1751,24 @@ function pickAt(vp, e) {
   }
   const [x, y] = toWorld(vp, e);
   const rows = proj().changes.filter(c => onView(c, S.v));
-  const side = sideOf(vp);
-  const hit = hitTest(rows, x, y, rows.find(c => c.id === S.s) || null, side);
+  const sides=vp.querySelector('[data-image-artwork]')?imageSides(vp,[x,y]):[sideOf(vp)];
+  const hit=sides.map(side=>hitTest(rows.filter(r=>side==='base'?r.action!=='added':r.action!=='removed'),x,y,rows.find(c=>c.id===S.s)||null,side)).find(Boolean);
   if (hit) { S.s = hit.id; markSelected(); saveHash(); draw(); document.querySelector(`#panel [data-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" }); }
   else {
-    const o = (proj().objects || []).find(o => objView(o) === S.v && (o.side || "head") === side &&
-      (o.box ? x >= o.box[0] && y >= o.box[1] && x <= o.box[2] && y <= o.box[3] : o.pos && Math.hypot(x-o.pos[0], y-o.pos[1]) < 2));
+    const o = sides.map(side=>(proj().objects || []).find(o => objView(o) === S.v && (o.side || "head") === side &&
+      (o.box ? x >= o.box[0] && y >= o.box[1] && x <= o.box[2] && y <= o.box[3] : o.pos && Math.hypot(x-o.pos[0], y-o.pos[1]) < 2))).find(Boolean);
     if (o) { S.s = null; S.ig = null; S.io = proj().objects.indexOf(o); renderInspector(); saveHash(); }
   }
 }
-function markSelected() { S.part3d = null; S.io = null; S.ig = null; for (const e of document.querySelectorAll("#panel [data-id]")) e.setAttribute("aria-selected", e.dataset.id === S.s); updateStatus(); renderInspector(); }
+function syncSelectedChangeCard() {
+  revealChangeCard();
+  for(const e of document.querySelectorAll('#panel [data-id]')) {
+    const selected=e.dataset.id===S.s;
+    e.setAttribute('aria-selected',selected);
+    if(selected)e.scrollIntoView({block:'nearest'});
+  }
+}
+function markSelected() { S.part3d = null; clearImageSelection(); S.io = null; S.ig = null; syncSelectedChangeCard(); updateStatus(); renderInspector(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onPartPick = part => {
   S.s = null; markSelected(); S.part3d = {...part,box:part.box.slice()}; renderInspector(); saveHash();
 }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; window.Review3D.onStateChange = ({revision, assembled3d, lighting3d, hiddenGroups, partSelection}) => {
@@ -1181,6 +1815,10 @@ function geometryAnchor({object,side,point}) {
   return {...pointAnchor(p[0],p[1],side),target:'object',uuid:inventory?.uuid || object.uuid,
     kind:inventory?.kind || object.kind,ref:inventory?.ref || object.ref || null,layer:inventory?.layer || object.layer || object.layers?.[0] || null};
 }
+function hotspotViews(P,side) {
+  const ids=new Set(P.sheets.map(s=>s.hotspots?.[side]).filter(Boolean));
+  return [...ids].flatMap(id=>decodedSheetHotspots.get(id)?.views||[]);
+}
 function anchorAt(x, y, side) {
   const P = proj();
   if (!S.v || S.v === "3d") return null;
@@ -1191,6 +1829,16 @@ function anchorAt(x, y, side) {
   const hit = hitTest(objs, x, y, null, "head");
   const a = { v: 1, project: P.dir, file, sheet: S.v === "board" ? null : S.v.slice(6), layer: null,
               side, commit: side === "base" ? D.base : D.head, severity: "comment" };
+  const selection=S.imageSelection;
+  if(selection?.kind==='pin'&&selection.side===side&&selection.sheet===S.v.slice(6)) {
+    // Use inspection's pointer reach; .002 mm only validates the stored endpoint geometry.
+    const picked=sheetPinAt(side,[x,y]);
+    const pin=picked?.e.uuid===selection.uuid&&picked.e.unit===selection.unit&&picked.p.number===selection.pin
+      &&Math.hypot(picked.p.x-selection.point[0],picked.p.y-selection.point[1])<=.002?picked.p:null;
+    if(!pin)return {...a,target:"point",uuid:null,kind:null,ref:null,x:round3(x),y:round3(y)};
+    return {...a,target:'object',uuid:selection.uuid,kind:'symbol',ref:selection.ref,
+      x:round3(pin.x),y:round3(pin.y)};
+  }
   return hit ? { ...a, target: "object", uuid: hit.uuid, kind: hit.kind, ref: hit.ref, layer: hit.layer ?? null, x: round3(hit.pos[0]), y: round3(hit.pos[1]) }
              : { ...a, target: "point", uuid: null, kind: null, ref: null, x: round3(x), y: round3(y) };
 }
@@ -1211,6 +1859,20 @@ function resolveAnchor(a) {
     const position=o=>{const b=BoardDiff.objectBounds(o); return o.anchor || (b && [(b[0]+b[2])/2,(b[1]+b[3])/2]);};
     if (head && position(head)) return {view:'board',side:'head',pos:position(head),pos_before:base && position(base),added:!base,notes};
     if (base && position(base)) return {view:'board',side:'base',pos:position(base),notes:[...notes,`${a.ref || 'object'} was removed in this change`]};
+  }
+  if(a.target==='object'&&a.kind==='symbol'&&a.sheet!=null) {
+    const sourceSide=a.commit===D.base?'base':a.commit===D.head?'head':null;
+    const source=sourceSide?hotspotViews(P,sourceSide):[];
+    const destination=hotspotViews(P,'head').some(v=>v.sheet===a.sheet&&v.elements.some(e=>e.uuid===a.uuid))?'head':'base';
+    const pin=ImageView.pinPosition(a,source,hotspotViews(P,destination));
+    if(pin){
+      if(Math.hypot(pin.pos[0]-a.x,pin.pos[1]-a.y)>.01)notes.push(`moved since ${short(a.commit)}`);
+      const basePin=ImageView.pinPosition(a,source,hotspotViews(P,'base'));
+      const hasBase=!!basePin&&!basePin.notes.some(note=>/unavailable|ambiguous/.test(note));
+      return {view:'sheet:'+a.sheet,side:destination,pos:pin.pos,pos_before:hasBase?basePin.pos:undefined,
+        added:!hasBase,notes:[...notes,...pin.notes]};}
+    // No positive source-pin match: fall through to the unchanged ordinary object resolver.
+    // v1 has no pin discriminator; absence of source geometry is not evidence of a pin.
   }
   const objs = P.objects || [];
   const sameSheet = o => (o.sheet ?? null) === (a.sheet ?? null);
@@ -1258,6 +1920,7 @@ function inventoryHtml() {
   }).join("") || '<p class="muted">No parts match.</p>') + (objs.length > 1500 ? `<p class="muted">showing 1500 of ${objs.length}; narrow the search to see the rest</p>` : "");
 }
 function goToObject(i) {
+  clearImageSelection();
   const o = proj().objects?.[i]; if (!o) return Promise.resolve();
   S.s = null; S.ig = null; S.io = i; renderInspector();
   const view = objView(o); if (!currentView(view)) return Promise.resolve();
@@ -1273,23 +1936,54 @@ function goToObject(i) {
 function bindInventory() {
   for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
 }
-function cardsHtml() {
+const CHANGE_PAGE_SIZE = 50, changePage = {key:'',index:0,ids:[]};
+function filteredChangeRows() {
   const f = S.filter, q = f.q.toLowerCase();
   let rows = proj().changes.filter(r => f[r.action] && (!f.kind || r.kind === f.kind)
     && (!q || JSON.stringify([r.ref, r.kind, r.changes, r.props]).toLowerCase().includes(q)));
   if (f.sort === "reference") rows.sort((a, b) => String(a.ref).localeCompare(String(b.ref), undefined, {numeric:true}));
   if (f.sort === "kind") rows.sort((a, b) => a.kind.localeCompare(b.kind));
   if (f.group) rows.sort((a, b) => String(a[f.group]).localeCompare(String(b[f.group])));
+  return rows;
+}
+function changeCardIds() {
+  return rightTab==='changes' && !S.filter.all ? changePage.ids
+    : [...document.querySelectorAll('#panel .card[data-id]')].map(e=>e.dataset.id);
+}
+function cardsHtml() {
+  const f=S.filter, rows=filteredChangeRows(), key=JSON.stringify([S.p,f]);
+  changePage.ids=rows.map(r=>r.id);
+  if(changePage.key!==key){changePage.key=key;changePage.index=0;}
+  const pages=Math.max(1,Math.ceil(rows.length/CHANGE_PAGE_SIZE));
+  changePage.index=Math.max(0,Math.min(pages-1,changePage.index));
+  const start=changePage.index*CHANGE_PAGE_SIZE;
   let previous;
-  return (rows.slice(0, 1500).map(r => {
+  return (rows.slice(start,start+CHANGE_PAGE_SIZE).map(r => {
     const group = f.group ? r[f.group] : null;
     const heading = f.group && group !== previous ? `<h3 class="dock-group">${esc(group)}</h3>` : "";
     previous = group;
     return heading + card(r);
   }).join("") || '<p class="muted">No changes match.</p>')
-    + (rows.length > 1500 ? `<p class="muted">showing 1500 of ${rows.length}; narrow the filter to see the rest</p>` : "");
+    + (pages>1 ? `<nav class="dock-list-tools" aria-label="Changes pages"><button type="button" data-change-page="previous" ${changePage.index===0?'disabled':''}>Previous</button><span role="status">${start+1}–${Math.min(start+CHANGE_PAGE_SIZE,rows.length)} of ${rows.length}</span><button type="button" data-change-page="next" ${changePage.index===pages-1?'disabled':''}>Next</button></nav>` : "");
 }
-function bindCards() { for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id); }
+function bindCards() {
+  for (const b of document.querySelectorAll("#panel .card[data-id]")) b.onclick = () => goTo(b.dataset.id);
+  for (const b of document.querySelectorAll('#panel [data-change-page]')) b.onclick = () => {
+    const direction=b.dataset.changePage;
+    changePage.index+=direction==='next'?1:-1;
+    const cards=$('#panel .cards');cards.innerHTML=cardsHtml();bindCards();
+    const next=cards.querySelector(`[data-change-page="${direction}"]:not(:disabled)`) || cards.querySelector('[data-change-page]:not(:disabled)');
+    next?.focus();
+  };
+}
+function revealChangeCard() {
+  const cards=$('#panel .cards');
+  if(!cards || rightTab!=='changes' || S.filter.all || !S.s || cards.querySelector(`[data-id="${CSS.escape(S.s)}"]`))return;
+  const index=filteredChangeRows().findIndex(r=>r.id===S.s);
+  if(index<0)return;
+  changePage.index=Math.floor(index/CHANGE_PAGE_SIZE);
+  cards.innerHTML=cardsHtml();bindCards();
+}
 function waiverSnippet(v, check) {
   const today = new Date(), until = new Date(today.getTime() + 90 * 864e5).toISOString().slice(0, 10);
   const quote = x => '"' + String(x).replace(/["\\\u0000-\u001f\u007f]/g, c => c === '"' || c === "\\" ? "\\" + c : "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")) + '"';
@@ -1543,6 +2237,7 @@ function renderPanel() {
   for (const b of document.querySelectorAll("#panel [data-lib-object]")) b.onclick = () => goToObject(+b.dataset.libObject);
   bindInventory();
   bindCards();
+  revealChangeCard();
   for (const b of document.querySelectorAll("#panel [data-no-model]")) b.onclick = () => {
     const row = p.board.no_model.find(x => x.ref === b.dataset.noModel && x.side === b.dataset.noModelSide); if(!row)return;
     const side=row.side==='both'?(S.revision||'head'):row.side;
@@ -1579,9 +2274,14 @@ function encodeState(s = S) {
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;
-function saveHash() { clearTimeout(hashTimer); hashTimer = setTimeout(() => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); }, 200); }
+function saveHash(immediate = false) {
+  clearTimeout(hashTimer);
+  const publish = () => { history.replaceState(null, "", "#" + encodeState()); if (parent !== window) parent.postMessage({ kicadReviewHash: "#" + encodeState() }, "*"); };
+  if (immediate) publish(); else hashTimer = setTimeout(publish, 200);
+}
 function stepIds() {
-  const sel = S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : S.t === "threads" ? "#panel .thread-card[data-thread]" : "#panel .card[data-id]";
+  if(S.t!=='checks' && S.t!=='threads')return changeCardIds();
+  const sel = S.t === "checks" ? "#panel .viol[data-id]:not([aria-disabled])" : "#panel .thread-card[data-thread]";
   return [...document.querySelectorAll(sel)].map(e => e.dataset.id || e.dataset.thread);
 }
 function renderChangeCount() {
@@ -1597,7 +2297,7 @@ function step(dir) {
   if (!ids.length) return;
   const i = ids.indexOf(S.t === "threads" ? S.thread : S.s), next = ids[i < 0 ? (dir > 0 ? 0 : ids.length - 1) : (i + dir + ids.length) % ids.length];
   if (S.t === "threads") { openThread(next); document.querySelector(`#panel [data-thread="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }); return; }
-  goTo(next); document.querySelector(`#panel [data-id="${next}"]`)?.scrollIntoView({ block: "nearest" });
+  return goTo(next).then(() => document.querySelector(`#panel [data-id="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }));
 }
 // Hotkeys: KiCad common/tool/actions.cpp:717-767,809-815,1043-1057,1150-1155,1212-1218;
 // pcbnew/tools/pcb_actions.cpp:1869-1877,2125-2150,2160-2180. Browser Ctrl variants are explicit.
@@ -1757,21 +2457,17 @@ function setDock(name, open) {
     if (!open) { S.panelTable = false; document.getElementById("app").classList.remove("right-table"); }
   }
   if (name === "nav") { leftCollapsed = !open; syncLeftDock(); persistLeftDock(); }
-  document.getElementById(name).classList.toggle("dock-open", open);
   document.querySelector(`[data-dock="${name}"]`).setAttribute("aria-expanded", String(open));
 }
-const wide = matchMedia("(min-width:900px)");
-function syncDockButtons() {   // wide: toggles collapse a docked column; narrow: toggles the overlay
-  for (const b of document.querySelectorAll("[data-dock]")) b.setAttribute("aria-expanded", String(wide.matches ? !(b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed) : $("#" + b.dataset.dock).classList.contains("dock-open")));
+function syncDockButtons() {
+  for (const b of document.querySelectorAll("[data-dock]")) b.setAttribute("aria-expanded", String(!(b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed)));
 }
 for (const b of document.querySelectorAll("[data-dock]")) b.onclick = () => {
   // Each dock owns its collapse state (splitter, persisted width).
-  if (wide.matches) { setDock(b.dataset.dock, b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed); syncDockButtons(); return; }
-  const open = b.getAttribute("aria-expanded") !== "true";
-  if (matchMedia("(max-width:899px)").matches) setDock(b.dataset.dock === "nav" ? "panel" : "nav", false);
-  setDock(b.dataset.dock, open);
+  setDock(b.dataset.dock, b.dataset.dock === "panel" ? $("#app").classList.contains("right-collapsed") : leftCollapsed);
+  syncDockButtons();
 };
-wide.addEventListener("change", syncDockButtons); syncDockButtons();
+syncDockButtons();
 for (const b of document.querySelectorAll("#change-nav [data-step]")) b.onclick = () => step(+b.dataset.step);
 
 // Changed regions: rasterise both sides, compare pixels on a grid, merge touching cells into boxes.
@@ -1820,6 +2516,20 @@ async function computeRegions(view) {
 
 // bench-t6: one readout for change rows, inventory, geometry and check findings.
 function inspectorProperties() {
+  if(S.imageSelection) {
+    const selected=imageRecord(S.imageSelection);
+    if(selected) {
+      const values={...selected,kind:S.imageSelection.kind,
+        'X (mm)':S.imageSelection.point[0],'Y (mm)':S.imageSelection.point[1],pin:S.imageSelection.pin};
+      delete values.geometry;delete values.pins;
+      if(S.imageSelection.kind==='pin') {
+        const pin=selected.pins?.find(p=>p.number===S.imageSelection.pin);
+        values['Pin name']=pin?.name;
+      }
+      return {selected:{...selected,kind:S.imageSelection.kind},
+        base:S.imageSelection.side==='base'?values:{},head:S.imageSelection.side==='head'?values:{}};
+    }
+  }
   const p = proj(), row = p.changes.find(r => r.id === S.s) || allViolations().find(r => r.id === S.s);
   const selected = S.ig?.object || (S.io != null ? p.objects?.[S.io] : row);
   if (!selected) return null;
@@ -2005,7 +2715,7 @@ document.addEventListener("keydown", event => {
     document.querySelector("[data-panel-table]")?.focus();
   }
 }, true);
-if (!matchMedia("(max-width:899px)").matches) document.querySelector('[data-dock="panel"]').setAttribute("aria-expanded", "true");
+document.querySelector('[data-dock="panel"]').setAttribute("aria-expanded", "true");
 
 renderHeader();
 const shotMode = !!new URLSearchParams(location.hash.slice(1)).get("shot");

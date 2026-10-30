@@ -46,6 +46,293 @@ assert set(rows) == {("modified", "R1"), ("added", "R4")}, rows.keys()  # R2 reg
 assert rows["modified", "R1"]["changes"] == [["Value", "10k", "4.7k"], ["position", "(1, 0)", "(5, 0)"]]
 assert rows["modified", "R1"]["pos_before"] == [1, 0]
 
+# Image exports discover declared layers regardless of whitespace or declaration layout.
+import pathlib
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+import kicad_review as kr
+
+# Comparison resources preserve source paint and transparency; filtering happens inside the image.
+s = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path stroke="#009600" fill="none" d="M 1 1 L 2 2"/></svg>'
+t = kr.comparison_svg(s, 'base', schematic=True)
+assert '0 0 0 0 0.85' in t and 'fill="none"' in t
+assert 'filterUnits="userSpaceOnUse"' in t and 'width="100.0"' in t and 'height="100.0"' in t
+assert '-.3 -.59 -.11 1 0' in t and '<script' not in t
+for side, first in (('base', '0.85'), ('head', '0.1')):
+    for schematic in (False, True):
+        text = kr.comparison_svg(s, side, schematic)
+        assert '0 0 0 0 ' + first in text
+        assert ('-.3 -.59 -.11 1 0' if schematic else '0 0 0 1 0') in text
+# Definitions and metadata stay outside the single filtered artwork group.
+import xml.etree.ElementTree as ET
+source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs><path id="shape" d="M0 0h1"/></defs><title>Artwork</title><use href="#shape"/></svg>'
+root = ET.fromstring(kr.comparison_svg(source, 'base'))
+assert [c.tag.rsplit('}', 1)[-1] for c in root] == ['defs', 'title', 'defs', 'g']
+assert root[-1][0].get('href') == '#shape'
+expected = kr.comparison_svg(source, 'head', True)
+assert '<svg' in expected and 'xmlns="http://www.w3.org/2000/svg"' in expected
+assert kr.comparison_svg(source, 'head', True) == expected
+# A layer can contain only a horizontal/vertical stroke: its artwork bbox has zero area.
+for path in ('M 10 60 H 250', 'M 100 -10 V 150'):
+    source = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="-20 -30 300 200"><path d="{path}" stroke="black" stroke-width="20" fill="none"/></svg>'
+    root = ET.fromstring(kr.comparison_svg(source, 'base'))
+    filt = root.find('.//{http://www.w3.org/2000/svg}filter')
+    assert filt.get('filterUnits') == 'userSpaceOnUse'
+    assert [float(filt.get(key)) for key in ('x', 'y', 'width', 'height')] == [-20, -30, 300, 200]
+source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text data-note="keep ns0:attribute">keep ns0:text</text></svg>'
+root = ET.fromstring(kr.comparison_svg(source, 'base'))
+label = root.find('.//{http://www.w3.org/2000/svg}text')
+assert label.text == 'keep ns0:text' and label.get('data-note') == 'keep ns0:attribute'
+print('ok image comparison source matrix, retained definitions, filter bounds and namespace content')
+
+four = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb')
+assert kr.board_layers(str(four)) == ['B.Cu', 'In2.Cu', 'In1.Cu', 'F.Cu']
+with TemporaryDirectory() as d:
+    p = pathlib.Path(d, 'four.kicad_pcb')
+    p.write_text(four.read_text().replace('(layers ', '(layers\n '))
+    assert kr.board_layers(str(p)) == kr.board_layers(str(four))
+    with patch('kicad_review.kicad_cli') as cli, patch.object(kr, 'export_board_stats'):
+        kr.render_side(d, 'four', str(pathlib.Path(d, 'out')))
+    svg_call = next(c.args for c in cli.call_args_list if c.args[:3] == ('pcb', 'export', 'svg'))
+    layer_flag = '--layers' if '--layers' in svg_call else '-l'
+    assert svg_call[svg_call.index(layer_flag) + 1] == 'B.Cu,In2.Cu,In1.Cu,F.Cu'
+print('ok image export layer discovery')
+
+# Only plain, absolutely-started stroke runs may join; preserve metadata and custom paint.
+import xml.etree.ElementTree as ET
+svg = '<svg xmlns="http://www.w3.org/2000/svg"><g style="fill:none"><path d="M 0 0 L 1 1"/><desc>x</desc><path d="M 1 1 L 2 2"/><path d="m 3 3 l 1 1"/><path transform="translate(1)" d="M 0 0"/></g><g fill="#abcdef"><path d="M 0 0"/><path d="M 1 1"/></g></svg>'
+out = ET.fromstring(kr.simplify_sheet_svg(svg))
+ns = {'s': 'http://www.w3.org/2000/svg'}
+assert len(out.findall('.//s:path', ns)) == 5
+assert out.findall('.//s:path', ns)[0].get('d') == 'M 0 0 L 1 1 M 1 1 L 2 2'
+assert out.findall('.//s:g', ns)[1].get('fill') == '#abcdef'
+assert out.find('.//s:desc', ns).text == 'x'
+assert out.findall('.//s:path', ns)[1].get('d') == 'm 3 3 l 1 1'
+assert out.findall('.//s:path', ns)[2].get('transform') == 'translate(1)'
+inherited = '<svg xmlns="http://www.w3.org/2000/svg" fill="none"><g stroke="#abcdef"><path d="M0 0"/><path d="M1 1"/><circle r="1"/><path d="M2 2"/><path d="M3 3"/></g><g style="fill:#123456"><path d="M0 0"/><path d="M1 1"/></g></svg>'
+out = ET.fromstring(kr.simplify_sheet_svg(inherited))
+assert [p.get('d') for p in out.findall('.//s:path', ns)] == ['M0 0 M1 1', 'M2 2 M3 3', 'M0 0', 'M1 1']
+assert out.find('.//s:circle', ns).get('r') == '1'
+assert out.findall('.//s:g', ns)[0].get('stroke') == '#abcdef'
+assert out.findall('.//s:g', ns)[1].get('style') == 'fill:#123456'
+assert kr.simplify_sheet_svg(kr.simplify_sheet_svg(svg)) == kr.simplify_sheet_svg(svg)
+
+# Separate translucent strokes composite twice at overlaps; a compound path paints once.
+plain_pair = '<path d="M0 0 L10 0"/><path d="M0 0 L10 0"/>'
+for paint in ('stroke="red" stroke-opacity="0.5"',
+              'style="stroke:red;stroke-opacity:50%"',
+              'stroke="rgba(255,0,0,0.5)"', 'stroke="#ff000080"',
+              'stroke="currentColor"', 'stroke="url(#paint)"',
+              'stroke="red" opacity="0.5"', 'stroke="red" filter="url(#blur)"',
+              'stroke="red" mask="url(#mask)"', 'stroke="red" marker-end="url(#arrow)"',
+              'style="stroke:red;mix-blend-mode:multiply"',
+              'style="stroke:red;/* inherited alpha */stroke-opacity:.5"',
+              'stroke="red" stroke-dasharray="1 2"'):
+    unsafe = f'<svg xmlns="{ns["s"]}" fill="none"><g {paint}><g>{plain_pair}</g></g></svg>'
+    optimized = ET.fromstring(kr.simplify_sheet_svg(unsafe))
+    assert len(optimized.findall('.//s:path', ns)) == 2, paint
+    assert [p.get('d') for p in optimized.findall('.//s:path', ns)] == ['M0 0 L10 0'] * 2
+    assert kr.simplify_sheet_svg(kr.simplify_sheet_svg(unsafe)) == kr.simplify_sheet_svg(unsafe)
+# CSS may target otherwise plain paths; do not infer paint from presentation attributes alone.
+css_svg = f'<svg xmlns="{ns["s"]}"><style>path {{ stroke-opacity: .5 }}</style><g fill="none" stroke="red">{plain_pair}</g></svg>'
+assert len(ET.fromstring(kr.simplify_sheet_svg(css_svg)).findall('.//s:path', ns)) == 2
+animated_svg = f'<svg xmlns="{ns["s"]}"><g fill="none" stroke="red">{plain_pair}<animate attributeName="stroke-opacity" values="1;.5" dur="1s"/></g></svg>'
+assert len(ET.fromstring(kr.simplify_sheet_svg(animated_svg)).findall('.//s:path', ns)) == 2
+opaque_svg = f'<svg xmlns="{ns["s"]}" fill="none" stroke="#ff0000" stroke-opacity="1.0000"><g>{plain_pair}</g></svg>'
+assert len(ET.fromstring(kr.simplify_sheet_svg(opaque_svg)).findall('.//s:path', ns)) == 1
+stroked_text_svg = f'<svg xmlns="{ns["s"]}" fill="none" stroke="#840000" stroke-opacity="1"><g class="stroked-text"><desc>1</desc>{plain_pair}</g><g class="custom">{plain_pair}</g></svg>'
+assert [len(g.findall('s:path', ns)) for g in ET.fromstring(kr.simplify_sheet_svg(stroked_text_svg)).findall('s:g', ns)] == [1, 2]
+print('ok image export inherited compositing safety')
+assert kr.IMAGE_EXPORT_OPTIONS == {'page_size_mode': '1', 'drill_shape_opt': '0',
+                                   'check_zones': True, 'themes': ['light', 'dark']}
+print('ok image export contracts')
+
+# Optional revision statistics publish only validated, successful output, never stale/partial files.
+import json
+import subprocess
+for mode in ('ok', 'nonzero', 'missing', 'malformed', 'nonobject', 'timeout', 'unavailable'):
+    with TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        for name in ('stats.json', 'stats.pending.json', 'stats.json.error'):
+            (root / name).write_text('stale')
+        def stats_run(command, **kwargs):
+            assert command[:8] == ['kicad-cli', 'pcb', 'export', 'stats', '--format', 'json', '--units', 'mm']
+            assert kwargs == {'capture_output': True, 'text': True, 'timeout': 60}
+            pending = pathlib.Path(command[command.index('-o') + 1])
+            assert pending == root / 'stats.pending.json' and command[-1] == 'P.kicad_pcb'
+            assert not (root / 'stats.json').exists() and not pending.exists()
+            if mode == 'timeout':
+                pending.write_text('{}')
+                raise subprocess.TimeoutExpired(command, 60)
+            if mode == 'unavailable':
+                raise FileNotFoundError('kicad-cli unavailable')
+            if mode != 'missing':
+                pending.write_text('{broken' if mode == 'malformed' else '[]' if mode == 'nonobject' else '{"board":{}}')
+            return subprocess.CompletedProcess(command, 1 if mode == 'nonzero' else 0, stdout='', stderr='stats failed')
+        with patch.object(kr.subprocess, 'run', side_effect=stats_run) as run:
+            error = kr.export_board_stats('P.kicad_pcb', d)
+        assert run.call_count == 1
+        assert not (root / 'stats.pending.json').exists()
+        if mode == 'ok':
+            assert error is None and json.loads((root / 'stats.json').read_text()) == {'board': {}}
+            assert not (root / 'stats.json.error').exists()
+        else:
+            assert error and not (root / 'stats.json').exists()
+            assert (root / 'stats.json.error').read_text() == error
+            assert '\n' not in error and len(error) <= 1000
+            if mode == 'nonzero':
+                assert 'stats failed' in error
+print('ok optional atomic board statistics: seven outcomes')
+
+# Named export themes come from the entire canonical palette, with no runtime Node dependency.
+import os
+with TemporaryDirectory() as d:
+    kr.write_image_themes(d)
+    for theme in ('light', 'dark'):
+        data = json.loads(pathlib.Path(d, '10.0/colors', f'kicad-review-{theme}.json').read_text())
+        assert data['meta'] == {'name': 'kicad-review-' + theme, 'version': 5}
+        assert data['board']['copper']['f'] == 'rgb(200, 52, 52)'
+        assert data['schematic']['wire'] == 'rgb(0, 150, 0)'
+        for key, rgba in kr.IMAGE_PALETTES[theme]['colors'].items():
+            value = data
+            for part in key.split('.'):
+                value = value[part]
+            assert value == 'rgb(%d, %d, %d)' % tuple(round(v * 255) for v in rgba[:3])
+canonical = subprocess.check_output(['node', '--input-type=module', '-e',
+    'import fs from "node:fs";import vm from "node:vm";const c=vm.createContext({});'
+    'vm.runInContext(fs.readFileSync("ui/kicad-colors.js","utf8"),c);'
+    'console.log(JSON.stringify(c.KicadColors))'], text=True)
+colors = json.loads(canonical)
+assert set(kr.IMAGE_PALETTES) == {'light', 'dark'}
+for theme, palette in kr.IMAGE_PALETTES.items():
+    assert palette['colors'] == colors['themeDefaults'], 'canonical image palette drift'
+    assert palette['sourceRGB'] == {layer: [round(v * 255) for v in colors['themeDefaults'][key][:3]]
+                                    for layer, key in colors['layerThemeKeys'].items()}, 'canonical image palette drift'
+with patch.object(kr, 'kicad_cli') as cli, patch.object(kr.os.path, 'exists', return_value=True), \
+     patch.object(kr, 'board_layers', return_value=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']), \
+     patch.object(kr, 'sheet_pages', return_value=[]), \
+     patch.object(kr, 'export_board_stats', return_value=None) as stats_export:
+    with TemporaryDirectory() as d:
+        kr.render_side(d, 'H', d, netlist=True)
+        stats_export.assert_called_once_with(f'{d}/H.kicad_pcb', d)
+    commands = [call.args for call in cli.call_args_list]
+    sheets = [c for c in commands if c[:3] == ('sch', 'export', 'svg')]
+    boards = [c for c in commands if c[:3] == ('pcb', 'export', 'svg')]
+    assert len(sheets) == len(boards) == 2
+    for theme, sch, pcb in zip(('light', 'dark'), sheets, boards):
+        for c in (sch, pcb):
+            assert c[c.index('--theme') + 1] == 'kicad-review-' + theme
+        assert '--no-background-color' in sch and '--exclude-drawing-sheet' not in sch
+        assert '--mode-multi' in pcb and '--check-zones' in pcb and '--exclude-drawing-sheet' in pcb
+        assert pcb[pcb.index('--layers') + 1] == 'F.Cu,In1.Cu,In2.Cu,B.Cu'
+        assert pcb[pcb.index('--page-size-mode') + 1] == '1'
+        assert pcb[pcb.index('--drill-shape-opt') + 1] == '0'
+    assert sum(c[:2] == ('sch', 'erc') for c in commands) == 1
+    assert sum(c[:2] == ('pcb', 'drc') and '--schematic-parity' in c for c in commands) == 1
+    assert sum(c[:3] == ('sch', 'export', 'netlist') for c in commands) == 1
+    assert not any(c[:3] == ('pcb', 'export', 'stats') for c in commands), 'no fatal or duplicate statistics export'
+print('ok canonical image palettes and dual-theme exports')
+
+# Repeated source sheets resolve by instance UUID path; simplify each theme, restore private config even on failure.
+for failure in (None, 'missing-light', 'missing-dark', 'ambiguous', 'cli'):
+    for prior in (None, '/existing-kicad-config'):
+        with TemporaryDirectory() as d, patch.dict(os.environ):
+            if prior is None:
+                os.environ.pop('KICAD_CONFIG_HOME', None)
+            else:
+                os.environ['KICAD_CONFIG_HOME'] = prior
+            root = pathlib.Path(d)
+            (root / 'H.kicad_sch').write_text('(kicad_sch (uuid root) '
+                '(sheet (uuid a) (property "Sheetname" "One") (property "Sheetfile" "shared.kicad_sch")) '
+                '(sheet (uuid b) (property "Sheetname" "Two") (property "Sheetfile" "shared.kicad_sch")))')
+            (root / 'shared.kicad_sch').write_text('(kicad_sch)')
+            pages = kr.sheet_pages(d, 'H')
+            assert [p['path'] for p in pages] == ['/', '/a/', '/b/']
+            if failure == 'ambiguous':
+                pages[2]['stem'] = pages[1]['stem']
+            configs = []
+            raw = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="red"><path d="M0 0"/><path d="M1 1"/></svg>'
+            def image_cli(*command):
+                if command[:3] != ('sch', 'export', 'svg'):
+                    return
+                cfg = pathlib.Path(os.environ['KICAD_CONFIG_HOME'])
+                configs.append(cfg)
+                assert (cfg / '10.0/colors/kicad-review-light.json').is_file()
+                if failure == 'cli':
+                    raise SystemExit('export failed')
+                dest = pathlib.Path(command[command.index('-o') + 1])
+                dest.mkdir(parents=True, exist_ok=True)
+                for page in pages:
+                    if page['path'] == '/b/' and failure == ('missing-dark' if dest.name == 'sch-dark' else 'missing-light'):
+                        continue
+                    (dest / (page['stem'] + '.svg')).write_text(raw)
+            with patch.object(kr, 'kicad_cli', side_effect=image_cli), patch.object(kr, 'sheet_pages', return_value=pages):
+                try:
+                    kr.render_side(d, 'H', str(root / 'out'))
+                    assert failure is None, 'missing/ambiguous export must fail'
+                except (ValueError, SystemExit):
+                    assert failure is not None
+            assert os.environ.get('KICAD_CONFIG_HOME') == prior
+            assert configs and all(not cfg.exists() for cfg in configs)
+            if failure is None:
+                mapping = json.loads((root / 'out/sheet-images.json').read_text())
+                assert mapping == {p['path']: {theme: f"sch{suffix}/{p['stem']}.svg"
+                    for theme, suffix in (('light', ''), ('dark', '-dark'))} for p in pages}
+                for themes in mapping.values():
+                    for relative in themes.values():
+                        assert len(ET.fromstring((root / 'out' / relative).read_text()).findall('.//s:path', ns)) == 1
+print('ok instance image mappings, missing/ambiguous exports and config cleanup')
+
+# Image cache identity covers renderer, complete palettes/options and declared layers; host restore never runs KiCad.
+# CI exports KICAD_IMAGE job-wide, so the 3D tool identity needs no host kicad-cli probe.
+with TemporaryDirectory() as d, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
+     patch.dict(os.environ, {'KICAD_IMAGE': 'kicad/kicad:10.0.6-full@sha256:synthetic'}):
+    previous = os.getcwd()
+    try:
+        os.chdir(d)
+        p = {'dir': 'demo', 'name': 'H', 'status': 'modified'}
+        det = {'base': 'a' * 40, 'head': 'b' * 40, 'projects': [p]}
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        before = kr.render_cache(p, 'head', det, settings)
+        with patch.object(kr, 'IMAGE_EXPORT_OPTIONS', {**kr.IMAGE_EXPORT_OPTIONS, 'page_size_mode': '2'}):
+            assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored image options'
+        palette = json.loads(json.dumps(kr.IMAGE_PALETTES))
+        palette['light']['colors']['schematic.wire'] = [1, 0, 0, 1]
+        with patch.object(kr, 'IMAGE_PALETTES', palette):
+            assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored image palette'
+        with patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.0'):
+            assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored renderer'
+        pcb = pathlib.Path(kr.board_path(p, 'head'))
+        pcb.parent.mkdir(parents=True)
+        pcb.write_text('(kicad_pcb (layers (0 "F.Cu" signal)))')
+        assert kr.render_cache(p, 'head', det, settings) != before, 'cache ignored declared layers'
+        assert kr.image_export_identity(p, 'head')['layers'] == ['F.Cu']
+        pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps(det))
+        for side in ('base', 'head'):
+            cache = kr.render_cache(p, side, det, settings)
+            cache.mkdir(parents=True)
+            marker = cache / '.complete'
+            for invalid in ('complete', '{broken', 'null', '{}'):
+                marker.write_text(invalid)
+                assert not kr.image_cache_complete(cache, p, side), 'legacy/malformed identity accepted'
+            marker.write_text(json.dumps(kr.image_export_identity(p, side), sort_keys=True))
+            assert kr.image_cache_complete(cache, p, side)
+            with patch.object(kr, 'IMAGE_RENDERER', 'local-unverified'):
+                marker.write_text(json.dumps(kr.image_export_identity(p, side), sort_keys=True))
+                assert not kr.image_cache_complete(cache, p, side), 'unverified local renderer reused cache'
+            marker.write_text(json.dumps(kr.image_export_identity(p, side), sort_keys=True))
+            (cache / 'proof.txt').write_text(side)
+        with patch.object(kr, 'load_settings', return_value=settings), \
+             patch.object(kr, 'kicad_cli', side_effect=AssertionError('host CLI forbidden')), \
+             patch.object(kr.subprocess, 'run', side_effect=AssertionError('host subprocess forbidden')):
+            kr.restore_renders()
+        for side in ('base', 'head'):
+            assert pathlib.Path('review', kr.project_id('demo'), side, 'proof.txt').read_text() == side
+    finally:
+        os.chdir(previous)
+print('ok complete image cache fingerprint and CLI-free warm restore')
+
 # S-expression parsing: quoted strings with escapes, nesting.
 n = parse_sexpr('(a (b "x \\"y\\" z") (c 1 2))')
 assert find(n, "b") == ["b", 'x "y" z'] and find(n, "c") == ["c", "1", "2"]
@@ -118,6 +405,7 @@ assert "window.REVIEW_DATA = {\"version\": 1};" in html and "<style>" in html
 assert "http://" not in html and "https://fonts" not in html
 for asset in ('board-gl.js', 'appearance-state.js', 'appearance.js', 'board-marks.js', 'board-diff.js'):
     assert not re.search(r'''(?:src|href)=["']''' + re.escape(asset), html), asset
+assert 'globalThis.ImageView' in inline_page('window.REVIEW_DATA={};')
 assert 'window.BoardMarks' in html and 'window.BoardDiff' in html
 assert html.index('window.BoardMarks') < html.index('window.BoardDiff') < html.index('const D = window.REVIEW_DATA')
 assert not re.search(r'<script[^>]+src=', html)
@@ -184,7 +472,16 @@ r = subprocess.run([sys.executable, "-c", "import kicad_review as k; k.inline_pa
                    capture_output=True, text=True)
 assert r.returncode == 0, "inline_page must read UTF-8 regardless of locale: " + r.stderr[-200:]
 js = open("ui/review.js").read()
-assert "typeof " not in js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
+# Only expected runtime type checks remain; reject stray typeof scaffolding.
+allowed_typeof = ("typeof D.blobs?.[id] !== 'string'",
+                  "typeof v === 'object'", "typeof v === 'string'",
+                  "typeof v === 'number' && Number.isFinite(v)", "typeof v === 'number' ? finite(v)",
+                  "typeof o.hidden === 'boolean'", "typeof m.truncated[k] === 'boolean'")
+scaffolding_js = js
+for guard in allowed_typeof:
+    assert js.count(guard) == 1, f"allowlisted guard must occur exactly once: {guard}"
+    scaffolding_js = scaffolding_js.replace(guard, "")
+assert "typeof " not in scaffolding_js and "const KEYS" not in js and "markersFor(view);" not in js and "Task 5" not in js, "leftover scaffolding"
 assert "docs/superpowers" not in js and "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "window.REVIEW_DATA" in readme, "README documents regenerating the sample"
 print("ok")
@@ -258,12 +555,247 @@ with TemporaryDirectory() as t:
     assert [p["page"] for p in kr.sheet_pages(t, "H")] == ["1", "2"]
     write(t, {"P.kicad_sch": '(kicad_sch)'})
     calls = []
-    with patch.object(kr, "kicad_cli", side_effect=lambda *a: calls.append(a)):
+    with patch.object(kr, "kicad_cli", side_effect=lambda *a: calls.append(a)), \
+         patch.object(kr, "sheet_pages", return_value=[]):
         kr.render_side(t, "P", t + "/out")
     sch = next(c for c in calls if c[:3] == ("sch", "export", "svg"))
     assert "--exclude-drawing-sheet" not in sch
     assert "--no-background-color" in sch
 print("ok SCH6 instance pages and transparent framed export")
+
+# Inherited symbol geometry: a derived symbol draws its base's shared body and selected unit only.
+libs = {
+    'Base': kr.parse_sexpr('(symbol "Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))) (symbol "Base_2_1" (pin input line (at -5 0 0) (length 2) (name "B") (number "3"))))'),
+    'Derived': kr.parse_sexpr('(symbol "Derived" (extends "Base") (symbol "Derived_1_1" (circle (center 0 0) (radius 9))))')}
+parts = kr.symbol_primitives(libs, 'Derived', '2')
+coords, pins, approximate = kr.symbol_geometry(parts)
+assert pins == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}], pins
+assert [-3.0, 0.0] in coords and [-2.0, -1.0] in coords
+assert not approximate and max(p[0] for p in coords) == 2
+
+# Derived unit 1 selects circle and base rectangle, excluding unit 2 pin
+parts_u1 = kr.symbol_primitives(libs, 'Derived', '1')
+coords_u1, pins_u1, approx_u1 = kr.symbol_geometry(parts_u1)
+assert pins_u1 == []
+assert not approx_u1
+assert max(p[0] for p in coords_u1) == 9 and min(p[0] for p in coords_u1) == -9
+assert max(p[1] for p in coords_u1) == 9 and min(p[1] for p in coords_u1) == -9
+
+# Multi-level inheritance: Grandchild extends Derived extends Base with inherited bodies first
+libs['Grandchild'] = kr.parse_sexpr('(symbol "Grandchild" (extends "Derived") (symbol "Grandchild_0_1" (rectangle (start -10 -10) (end 10 10))))')
+parts_gc = kr.symbol_primitives(libs, 'Grandchild', '2')
+coords_gc, pins_gc, approx_gc = kr.symbol_geometry(parts_gc)
+assert pins_gc == [{'number': '3', 'name': 'B', 'x': -5.0, 'y': 0.0}]
+assert not approx_gc
+assert max(p[0] for p in coords_gc) == 10 and min(p[0] for p in coords_gc) == -10
+# Base rectangle (-2..2), Base pin (-5..-3), Grandchild rectangle (-10..10)
+assert parts_gc[0][0] == 'rectangle' and kr.find(parts_gc[0], 'start')[1] == '-2'
+assert parts_gc[-1][0] == 'rectangle' and kr.find(parts_gc[-1], 'start')[1] == '-10'
+
+# Alternate body style (style='2') vs default (style='1')
+libs['Alt'] = kr.parse_sexpr('(symbol "Alt" (symbol "Alt_1_1" (circle (center 0 0) (radius 1))) (symbol "Alt_1_2" (circle (center 0 0) (radius 5))))')
+parts_alt1 = kr.symbol_primitives(libs, 'Alt', '1', style='1')
+parts_alt2 = kr.symbol_primitives(libs, 'Alt', '1', style='2')
+assert len(parts_alt1) == 1 and float(kr.val(parts_alt1[0], 'radius')) == 1.0
+assert len(parts_alt2) == 1 and float(kr.val(parts_alt2[0], 'radius')) == 5.0
+
+# Circle bounds at (c, r) produce its bounding square
+circle_coords, _, circle_approx = kr.symbol_geometry([kr.parse_sexpr('(circle (center 2 3) (radius 4))')])
+assert not circle_approx
+assert sorted(circle_coords) == [[-2.0, -1.0], [-2.0, 7.0], [6.0, -1.0], [6.0, 7.0]]
+
+# Arc bounds through (1, 0), (0, 1), (-1, 0) produce circumcircle bounds [-1, 1] x [-1, 1] with approximate=True
+arc_coords, _, arc_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 1 0) (mid 0 1) (end -1 0))')])
+assert arc_approx
+assert sorted(arc_coords) == [[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]]
+
+# Degenerate collinear arc falls back to control points with approximate=True
+collinear_coords, _, collinear_approx = kr.symbol_geometry([kr.parse_sexpr('(arc (start 0 0) (mid 1 1) (end 2 2))')])
+assert collinear_approx
+assert collinear_coords == [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
+
+# Bezier control-point hull has approximate=True
+bezier_coords, _, bezier_approx = kr.symbol_geometry([kr.parse_sexpr('(bezier (pts (xy 0 0) (xy 2 5) (xy 4 1)))')])
+assert bezier_approx
+assert bezier_coords == [[0.0, 0.0], [2.0, 5.0], [4.0, 1.0]]
+
+# Polyline points preserve approximate=False
+poly_coords, _, poly_approx = kr.symbol_geometry([kr.parse_sexpr('(polyline (pts (xy 1 2) (xy 3 4)))')])
+assert not poly_approx
+assert poly_coords == [[1.0, 2.0], [3.0, 4.0]]
+
+libs['Base'].append(['extends', 'Derived'])
+try:
+    kr.symbol_primitives(libs, 'Derived', '2')
+    assert False, 'inheritance cycle must fail'
+except ValueError as error:
+    assert 'symbol inheritance cycle' in str(error)
+
+# Missing definition raises KeyError per interface contract
+try:
+    kr.symbol_primitives(libs, 'NonExistent', '1')
+    assert False, 'missing definition must raise KeyError'
+except KeyError:
+    pass
+
+# Parent extends missing symbol raises KeyError
+libs_broken = {'Broken': kr.parse_sexpr('(symbol "Broken" (extends "MissingParent"))')}
+try:
+    kr.symbol_primitives(libs_broken, 'Broken', '1')
+    assert False, 'broken parent inheritance must raise KeyError'
+except KeyError:
+    pass
+
+# Empty primitives produce empty coordinates and pins without approximation
+assert kr.symbol_geometry([]) == ([], [], False)
+
+# Angled pin rotates endpoint correctly across all cardinal orientations
+for angle, (dx, dy) in [(0, (4.0, 0.0)), (90, (0.0, 4.0)), (180, (-4.0, 0.0)), (270, (0.0, -4.0))]:
+    p_node = kr.parse_sexpr(f'(pin input line (at 10 20 {angle}) (length 4) (name "P") (number "1"))')
+    p_coords, p_pins, p_approx = kr.symbol_geometry([p_node])
+    assert not p_approx
+    assert p_pins == [{'number': '1', 'name': 'P', 'x': 10.0, 'y': 20.0}]
+    assert p_coords[0] == [10.0, 20.0]
+    assert abs(p_coords[1][0] - (10.0 + dx)) < 1e-6 and abs(p_coords[1][1] - (20.0 + dy)) < 1e-6
+
+print('ok inherited symbol geometry')
+
+# Task 2.2: hotspot manifests resolve by sheet-instance path, never by export name.
+def hotspot_regressions():
+    import base64, gzip, json, math
+
+    with TemporaryDirectory() as root:
+        root_sch = ('(kicad_sch (uuid root) (paper A4) ' +
+                    sheet('Left', 'shared.kicad_sch', 'left') +
+                    sheet('Right', 'shared.kicad_sch', 'right') + ')')
+        shared = '''(kicad_sch (uuid child) (paper A4)
+          (lib_symbols (symbol "Test:Op"
+            (symbol "Op_0_1" (rectangle (start -1 -1) (end 1 1)))
+            (symbol "Op_1_1" (pin input line (at -5 0 0) (length 2)
+              (name "A") (number "1")))
+            (symbol "Op_2_1" (pin input line (at -5 0 0) (length 2)
+              (name "B") (number "3")))))
+          (symbol (uuid placed) (lib_id "Test:Op") (unit 2)
+            (at 100 50 90) (mirror x)
+            (property "Reference" "U?") (property "Value" "Op")
+            (instances (project "Board"
+              (path "/root/left" (reference "U1") (unit 2))
+              (path "/root/right" (reference "U2") (unit 2)))))
+          (label "SIGNAL" (uuid lab) (at 10 20 0))
+          (no_connect (uuid nc) (at 10 20))
+          (wire (uuid wire) (pts (xy 1 2) (xy 3 4))))'''
+        write(root, {'Board.kicad_sch': root_sch, 'shared.kicad_sch': shared})
+        m = kr.sheet_hotspots(root, 'Board')
+        assert m['version'] == 1 and m['units'] == 'mm' and m['warnings'] == []
+        by_sheet = {v['sheet']: v for v in m['views']}
+        assert sorted(by_sheet) == ['/', '/left/', '/right/']
+        assert by_sheet['/']['elements'] == [] and by_sheet['/']['viewBox'] is None
+        assert by_sheet['/left/']['file'] == by_sheet['/right/']['file'] == 'shared.kicad_sch'
+        assert by_sheet['/left/']['elements'][0]['ref'] == 'U1'
+        assert by_sheet['/right/']['elements'][0]['ref'] == 'U2'
+        a = by_sheet['/left/']['elements'][0]
+        assert a['uuid'] == by_sheet['/right/']['elements'][0]['uuid'] == 'placed'
+        assert a['unit'] == '2' and [p['number'] for p in a['pins']] == ['3']
+        assert a['lib_id'] == 'Test:Op' and a['value'] == 'Op' and a['confidence'] == 'exact'
+        assert a['fields']['Reference'] == 'U1', 'fields carry the instance reference, not the U? placeholder'
+        assert all(math.isfinite(v) for v in a['bbox'])
+        assert by_sheet['/left/']['noConnects'][0]['x'] == 10.0
+        assert by_sheet['/left/']['labels'] == [{'uuid': 'lab', 'x': 10.0, 'y': 20.0, 'text': 'SIGNAL', 'kind': 'label'}]
+        assert len(by_sheet['/left/']['wires'][0]['points']) == 2
+        assert by_sheet['/left/']['wires'][0]['bbox'] == [1.0, 2.0, 3.0, 4.0]
+        # Review Focus 1: same file and UUID under two sheet instances, resolved by instance path.
+        assert a['pins'] == [{'number': '3', 'name': 'B', 'x': 100.0, 'y': 55.0}]
+        assert by_sheet['/right/']['elements'][0]['pins'] == a['pins']
+        assert by_sheet['/right/']['sheet'] != by_sheet['/left/']['sheet']
+        assert a['bbox'][0] <= 100 <= a['bbox'][2]
+        # Body corners land at x 99..101, y 49..51; the pin runs from its endpoint (100, 55) to (100, 53).
+        assert a['bbox'] == [99.0, 49.0, 101.0, 55.0], a['bbox']
+        json.dumps(m)  # plain JSON types only
+
+    # Placement transform: library y-up to sheet y-down, mirror before rotation.
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50 90))')) == [97, 48]
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50 90) (mirror x))')) == [103, 48]
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50 0) (mirror y))')) == [98, 47]
+    assert kr.sheet_point([2, 3], kr.parse_sexpr('(symbol (at 100 50))')) == [102, 47]
+    assert kr.hotspot_box([]) is None and kr.hotspot_box([[1, 5], [-2, 3]]) == [-2, 3, 1, 5]
+
+    # A nonzero-origin viewBox survives blob serialization and decode exactly.
+    # Task 4 owns mapped_viewbox(); this pins the same parse and the blob round trip it relies on.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) (paper A4))',
+                     'export/Board.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 40 30"><path d="M0 0"/></svg>'})
+        manifest = kr.sheet_hotspots(root, 'Board')
+        svg_root = ET.parse(pathlib.Path(root, 'export/Board.svg')).getroot()
+        manifest['views'][0]['viewBox'] = [float(n) for n in svg_root.get('viewBox').replace(',', ' ').split()]
+        blobs = {}
+        key = kr.add_blob(blobs, json.dumps(manifest, sort_keys=True))
+        decoded = json.loads(gzip.decompress(base64.b64decode(blobs[key])))
+        assert decoded['views'][0]['viewBox'] == [10, 20, 40, 30]
+
+    # Missing library symbol: approximate placeholder box, no pins, one warning.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) (lib_symbols) (symbol (uuid s1) (lib_id "X:Y") (at 10 10 0) (property "Reference" "R1")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        e = m['views'][0]['elements'][0]
+        assert e['confidence'] == 'approximate' and e['pins'] == [] and e['bbox'] == [9.0, 9.0, 11.0, 11.0], e
+        assert e['ref'] == 'R1' and e['unit'] == '1'
+        assert m['warnings'] == [{'sheet': '/', 'uuid': 's1', 'reason': 'library unavailable'}], m['warnings']
+
+    # Inherited symbols: embedded keys are qualified, `extends` names the unqualified parent.
+    lib = '''(lib_symbols
+      (symbol "L:Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))))
+      (symbol "L:Derived" (extends "Base")
+        (symbol "Derived_1_1" (pin input line (at -4 0 0) (length 1) (name "P") (number "7")))))'''
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + lib +
+                     '(symbol (uuid s1) (lib_id "L:Derived") (at 0 0 0) (property "Reference" "U1")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        e = m['views'][0]['elements'][0]
+        assert m['warnings'] == [] and e['confidence'] == 'exact'
+        assert e['bbox'] == [-4.0, -1.0, 2.0, 1.0], e['bbox']
+        assert e['pins'] == [{'number': '7', 'name': 'P', 'x': -4.0, 'y': 0.0}]
+    # Two parents sharing an unqualified name make the suffix ambiguous: never guess one.
+    ambiguous = lib.replace('(symbol "L:Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1))))',
+                            '(symbol "A:Base" (symbol "Base_0_1" (rectangle (start -2 -1) (end 2 1)))) '
+                            '(symbol "B:Base" (symbol "Base_0_1" (rectangle (start -9 -9) (end 9 9))))')
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + ambiguous +
+                     '(symbol (uuid s1) (lib_id "L:Derived") (at 0 0 0) (property "Reference" "U1")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        e = m['views'][0]['elements'][0]
+        assert e['confidence'] == 'approximate' and e['pins'] == [] and len(m['warnings']) == 1, m
+
+    # lib_name selects the embedded variant of a library symbol.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) (lib_symbols (symbol "Op_1" (symbol "Op_1_0_1" (rectangle (start -3 -3) (end 3 3))))) '
+                     '(symbol (uuid s1) (lib_id "Lib:Op") (lib_name "Op_1") (at 0 0 0) (property "Reference" "U1")))'})
+        e = kr.sheet_hotspots(root, 'Board')['views'][0]['elements'][0]
+        assert e['confidence'] == 'exact' and e['bbox'] == [-3.0, -3.0, 3.0, 3.0] and e['lib_id'] == 'Lib:Op'
+
+    # Without a root UUID there is no instance path: fall back to the property, never throw.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (lib_symbols) (symbol (uuid s1) (lib_id "X:Y") (at 1 1 0) (property "Reference" "R9")))'})
+        m = kr.sheet_hotspots(root, 'Board')
+        assert m['views'][0]['elements'][0]['ref'] == 'R9'
+
+    # A sheet file that cannot be read keeps its view and records a warning.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + sheet('Gone', 'gone.kicad_sch', 'g') + ')'})
+        m = kr.sheet_hotspots(root, 'Board')
+        assert [v['sheet'] for v in m['views']] == ['/', '/g/'] and m['views'][1]['elements'] == []
+        assert m['warnings'] == [{'sheet': '/g/', 'reason': 'sheet file missing'}], m['warnings']
+
+    # A sheet that contains itself is rejected rather than expanded forever.
+    with TemporaryDirectory() as root:
+        write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + sheet('Again', 'Board.kicad_sch', 'again') + ')'})
+        try:
+            kr.sheet_hotspots(root, 'Board')
+            raise AssertionError('recursive hierarchy must be rejected')
+        except ValueError as error:
+            assert 'recursive schematic hierarchy' in str(error)
+
+hotspot_regressions()
+print('ok instance-aware sheet hotspots and pins')
 
 # Unchanged drawings remain viewable, deduplicate blobs, and prefer head metadata.
 with TemporaryDirectory() as t:
@@ -272,7 +804,7 @@ with TemporaryDirectory() as t:
         os.chdir(t)
         for side, page in [("base", "2"), ("head", "10")]:
             write(t, {f"{side}/H/H.kicad_sch":
-                f'(kicad_sch (sheet_instances (path "/" (page "{page}"))))',
+                f'(kicad_sch (uuid root) (sheet_instances (path "/" (page "{page}"))))',
                 f"review/H/{side}/erc.json": '{"sheets": []}',
                 f"review/H/{side}/sch/H.svg":
                 '<svg viewBox="0 0 320 213"><path d="M10 10H310"/></svg>'})
@@ -283,7 +815,15 @@ with TemporaryDirectory() as t:
         assert pg["page"] == "10" and pg["status"] == "unchanged"
         assert pg["svg"]["base"] == pg["svg"]["head"]
         assert pg["size"] == [320, 213] and "stem" not in pg
-        assert len(blobs) == 1
+        artwork = {key for pair in pg['svgThemes'].values() for key in pair.values()}
+        assert artwork == {pg['svg']['head']}, 'unchanged artwork deduplicates independently of manifests'
+        assert pg['hotspots']['base'] == pg['hotspots']['head']
+        assert pg['svgCompare']['base'] != pg['svgCompare']['head'], 'tinted bytes never define identity'
+        assert len(blobs) == 4, 'one drawing, one revision manifest and two comparison resources'
+        # Missing root identity is a legacy compatibility case, not a fabricated anchor.
+        pathlib.Path('head/H/H.kicad_sch').write_text('(kicad_sch (paper A4))')
+        legacy = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS)
+        assert legacy['sheets'][0]['hotspots']['head'] is None
         os.remove("head/H/H.kicad_sch")
         removed = kr.build_project({"dir": "H", "name": "H", "status": "modified"},
                                    {}, kr.DEFAULT_SETTINGS)["sheets"][0]
@@ -741,6 +1281,14 @@ print("ok")
 wf = open(".github/workflows/review.yml", encoding="utf-8").read()
 readme = open("README.md", encoding="utf-8").read()
 assert "retention-days: 90" in wf, "workflow retention"
+image_upload = wf.split("      - name: Upload image assets\n", 1)[1].split("      - name:", 1)[0]
+assert "name: kicad-review-image-assets-${{ github.run_id }}-${{ github.run_attempt }}" in image_upload
+assert "archive: true" in image_upload and "path: review/assets/" in image_upload
+assert "retention-days: 90" in image_upload
+assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in image_upload
+html_upload = wf.split("      - name: Upload report\n", 1)[1].split("      - name:", 1)[0]
+assert "archive: false" in html_upload and "path: review/${{ steps.report.outputs.name }}" in html_upload
+
 assert "reports are kept 90 days" in readme, "README retention"
 print("ok")
 
@@ -1041,12 +1589,24 @@ def fake_cli(args, **kw):
 kicad_review.subprocess.run = fake_cli
 try:
     render_side(f"{t}/P", "P", f"{t}/render")
-    assert calls == [
-        ["kicad-cli", "sch", "export", "svg", "--no-background-color", "-o", f"{t}/render/sch", f"{t}/P/P.kicad_sch"],
-        ["kicad-cli", "sch", "erc", "--format", "json", "--severity-all", "-o", f"{t}/render/erc.json", f"{t}/P/P.kicad_sch"],
-        ["kicad-cli", "pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1", "--drill-shape-opt", "0", "-l", "F.Cu,B.Cu,Edge.Cuts", "-o", f"{t}/render/pcb", f"{t}/P/P.kicad_pcb"],
-        ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity", "-o", f"{t}/render/drc.json", f"{t}/P/P.kicad_pcb"]], "TS-S2 render commands"
-    assert all(pathlib.Path(f"{t}/render/{f}").read_text() == text for f, text in {"sch/P.svg": "<svg/>", "pcb/P.svg": "<svg/>", "erc.json": "{}", "drc.json": "{}"}.items())
+    expected = []
+    for theme, suffix in (('light', ''), ('dark', '-dark')):
+        expected.extend([
+            ['kicad-cli', 'sch', 'export', 'svg', '--no-background-color', '--theme', 'kicad-review-' + theme,
+             '-o', f'{t}/render/sch{suffix}', f'{t}/P/P.kicad_sch'],
+            ['kicad-cli', 'pcb', 'export', 'svg', '--mode-multi', '--exclude-drawing-sheet', '--page-size-mode', '1',
+             '--drill-shape-opt', '0', '--check-zones', '--layers', 'F.Cu,B.Cu,Edge.Cuts', '--theme', 'kicad-review-' + theme,
+             '-o', f'{t}/render/pcb{suffix}', f'{t}/P/P.kicad_pcb']])
+    expected.extend([
+        ['kicad-cli', 'pcb', 'export', 'stats', '--format', 'json', '--units', 'mm', '-o', f'{t}/render/stats.pending.json', f'{t}/P/P.kicad_pcb'],
+        ['kicad-cli', 'sch', 'erc', '--format', 'json', '--severity-all', '-o', f'{t}/render/erc.json', f'{t}/P/P.kicad_sch'],
+        ['kicad-cli', 'pcb', 'drc', '--format', 'json', '--severity-all', '--schematic-parity', '-o', f'{t}/render/drc.json', f'{t}/P/P.kicad_pcb']])
+    assert calls == expected, 'TS-S2 render commands'
+    assert all(pathlib.Path(f'{t}/render/{f}').read_text() == text for f, text in {
+        'sch/P.svg': '<svg />', 'sch-dark/P.svg': '<svg />', 'pcb/P.svg': '<svg/>', 'pcb-dark/P.svg': '<svg/>',
+        'erc.json': '{}', 'drc.json': '{}', 'stats.json': '{}'}.items())
+    assert json.loads(pathlib.Path(f'{t}/render/sheet-images.json').read_text()) == {
+        '/': {'light': 'sch/P.svg', 'dark': 'sch-dark/P.svg'}}
     fail_cli = True
     try:
         render_side(f"{t}/P", "P", f"{t}/render")
@@ -1137,6 +1697,28 @@ assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 on
 for suffix in ('', ' --dark'):
     assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
 assert "data['mode'] = 'single'" in test_wf and 'review-data-3d-processed.js' in test_wf
+# Image and supplemental fixture commands stay literal: CI and this contract change together.
+for command in (
+    'node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance"',
+    'node ui/check.mjs --no-skip "images compare and four copper layers" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images gesture lifecycle" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images fallback appearance" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images manifests and home" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images active gesture pixels" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing added-sheet" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing removed-sheet" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing added-board" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images missing removed-board" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images inspect search and anchors" --page "$PAGES/images.html"',
+    'node ui/check.mjs --persist-check --image-fallback --no-skip "Themes reload seed" --page "$PAGES/images.html"',
+    'node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
+):
+    assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
+assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"
 print("ok TS-S1 CI browser matrix")
 print("ok")
 
@@ -1447,6 +2029,7 @@ with tempfile.TemporaryDirectory() as t:
     try:
         os.chdir(t)
         write(t, {"review/data.json": json.dumps(rdata), "tools/kicad_review.py": tool_source,
+                  "tools/image-palettes.json": json.dumps(kr.IMAGE_PALETTES),
                   "bin/gh": "#!" + sys.executable + "\nimport os, pathlib, sys\nif sys.argv[2] == 'view':\n p = pathlib.Path('view-count'); n = int(p.read_text()) if p.exists() else 0; p.write_text(str(n + 1)); print('changed notes' if n and os.environ['BODY_CHANGED'] == '1' else 'human notes')\nelif sys.argv[2] == 'edit':\n pathlib.Path('edited').write_text('yes')\n"})
         pathlib.Path("bin/gh").chmod(0o755)
         for changed in (False, True):
@@ -1820,9 +2403,9 @@ with tempfile.TemporaryDirectory() as d:
     kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
     try:
         os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
-        with patch('builtins.print') as warning:
+        with patch('sys.stdout', new_callable=io.StringIO) as warnings:
             cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
-        warning.assert_called_once_with('::warning::PDF report failed: Chrome unavailable, failed or timed out')
+        assert warnings.getvalue() == '::warning::PDF report failed: Chrome unavailable, failed or timed out\n'
     finally:
         kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
     assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
@@ -1871,9 +2454,9 @@ with tempfile.TemporaryDirectory() as d:
         pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
-                with patch("kicad_review.subprocess.run", side_effect=failure), patch("builtins.print") as warning:
+                with patch("kicad_review.subprocess.run", side_effect=failure), patch('sys.stdout', new_callable=io.StringIO) as warnings:
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
-                warning.assert_called_once_with("::warning::PDF report failed: Chrome unavailable, failed or timed out")
+                assert warnings.getvalue() == '::warning::PDF report failed: Chrome unavailable, failed or timed out\n'
                 assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
     finally:
         os.chdir(old_cwd)
@@ -2596,7 +3179,11 @@ try:
                 assert json.dumps(off, sort_keys=True) == json.dumps(legacy, sort_keys=True)
                 # Golden JSON bytes from the pre-libraries parent, with inventory enabled.
                 import hashlib
-                assert hashlib.sha256(json.dumps(off, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
+                legacy_shape = copy.deepcopy(off)
+                legacy_shape['board'].pop('inspect', None)
+                for row in legacy_shape['sheets'] + legacy_shape['board']['layers']:
+                    for key in ('hotspots', 'svgThemes', 'sourceRGBThemes'): row.pop(key, None)
+                assert hashlib.sha256(json.dumps(legacy_shape, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
                 assert comment_markdown({**d2, "projects": [off]}, [], "") == comment_markdown({**d2, "projects": [legacy]}, [], "")
         with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.build_project", return_value=off):
             kicad_review.cmd_report(None)
@@ -3170,8 +3757,9 @@ with tempfile.TemporaryDirectory() as t:
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
                       "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+            legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
-            assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**legacy, "blobs": {}}, separators=(",", ":")) + ";"
+            assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
             with open("review/issues.json", "w") as fh: _json.dump(issues, fh)
             with patch("sys.stdout", new_callable=io.StringIO): cmd_summary(SimpleNamespace(image_base="", artifact_url="", artifact_id=""))
             assert open("review/comment.md").read() == comment_markdown(legacy, [], "")
@@ -3599,6 +4187,7 @@ with TemporaryDirectory() as t:
         with contextlib.redirect_stderr(err):
             bad = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
         assert "geometry" not in bad and "geometry unavailable" in err.getvalue()
+        assert bad["inspect"] == {"base": None, "head": None}
         # Unchanged boards retain both revisions, parsing identical geometry once.
         write(t, {"base/G/G.kicad_pcb": GEOMETRY_FIXTURE, "head/G/G.kicad_pcb": GEOMETRY_FIXTURE})
         same = {}
@@ -3606,12 +4195,24 @@ with TemporaryDirectory() as t:
             board = kr.build_project(pr, same, kr.DEFAULT_SETTINGS)["board"]
         assert board["geometry"]["base"] == board["geometry"]["head"] and board["geometry"]["base"]
         assert parse.call_count == 1
+        assert board["inspect"]["base"] == board["inspect"]["head"] and board["inspect"]["base"]
+        assert pathlib.Path("review/G/base/board-inspect.json").read_bytes() == pathlib.Path("review/G/head/board-inspect.json").read_bytes()
         assert board["status"] == "unchanged"
+        # Inspection is optional: its failure must not discard a working GL scene.
+        retained = {}
+        err = io.StringIO()
+        with patch.object(kr, 'board_inspect', side_effect=ValueError('bad inspection')), contextlib.redirect_stderr(err):
+            partial = kr.build_project(pr, retained, kr.DEFAULT_SETTINGS)['board']
+        assert partial['geometry']['base'] == partial['geometry']['head']
+        assert partial['geometry']['base'] in retained
+        assert partial['inspect'] == {'base': None, 'head': None}
+        assert 'inspection unavailable' in err.getvalue() and 'geometry unavailable' not in err.getvalue()
         os.remove("base/G/G.kicad_pcb")
         err = io.StringIO()
         with patch("kicad_review.board_geometry", side_effect=KeyError("unexpected")), contextlib.redirect_stderr(err):
             odd = kr.build_project(pr, {}, kr.DEFAULT_SETTINGS)["board"]
         assert "geometry" not in odd and "geometry unavailable" in err.getvalue()
+        assert odd["inspect"] == {"base": None, "head": None}
     finally:
         patch.stopall()
         os.chdir(old_cwd)
@@ -3654,7 +4255,7 @@ print("ok production geometry typed change IDs, unchanged isolation and multi-pr
 # SCH6: schematic rendering and styles ship inside the offline report.
 page = kr.inline_page('window.REVIEW_DATA={"version":1};')
 assert '--sch-paper:#f5f4ef' in page
-assert 'function themeSchematic(' in page
+assert 'function schematicPaints(' in page
 assert 'function schematicGridPlan(' in page
 assert not re.search(r'<script[^>]+src=["\'](?!data:)', page)
 assert not re.search(r'<link[^>]+href=["\'](?:https?:|tokens\.css|review\.css)', page)
@@ -3728,7 +4329,7 @@ print("ok unchanged board full SVG inventory, shared geometry and shared 3D")
 
 # Revision render caches avoid all KiCad exports on a warm run and track settings/tool identity.
 import shutil
-with TemporaryDirectory() as t:
+with TemporaryDirectory() as t, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'):
     old_cwd = os.getcwd()
     try:
         os.chdir(t)
@@ -3745,6 +4346,21 @@ with TemporaryDirectory() as t:
             assert pathlib.Path("review/G/base/drc.json").exists()
             kr.cmd_render(None)
             assert render.call_count == 2, "warm revision caches must skip all exports"
+            det = json.loads(pathlib.Path('review/detect.json').read_text())
+            cache = kr.render_cache(pr, 'head', det, kr.DEFAULT_SETTINGS)
+            marker = cache / '.complete'
+            assert json.loads(marker.read_text()) == kr.image_export_identity(pr, 'head')
+            marker.write_text('{}')
+            try:
+                kr.restore_renders(None)
+                raise AssertionError('restore accepted mismatched image metadata')
+            except SystemExit as exc:
+                assert exc.code == 1
+            kr.cmd_render(None)
+            assert render.call_count == 3, 'cmd_render reused mismatched image metadata'
+            with patch.object(kr, 'IMAGE_RENDERER', 'local-unverified'):
+                kr.cmd_render(None)
+            assert render.call_count == 5, 'cmd_render reused an unverified local renderer'
         assert pathlib.Path("review/G/base/drc.json").exists() and pathlib.Path("review/G/head/drc.json").exists()
         # Library exports compare a pair of commits, unlike standalone board/sheet exports.
         lib_settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
@@ -3948,6 +4564,7 @@ def br02_render_cache_contract():
                 pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
                 return subprocess.CompletedProcess(args, 0, 'GLB log' if 'glb' in args else 'poster log', '')
             with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side'), \
+                 patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
                  patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.0'), patch.object(kr.subprocess, 'run', cli):
                 kr.cmd_render(None)
                 assert len(calls) == 2, 'BR02 identical boards export GLB and poster once'
@@ -4629,7 +5246,7 @@ def br02_failed_export_cache_contract():
     from unittest.mock import patch
     import kicad_review as kr
     old = os.getcwd()
-    with tempfile.TemporaryDirectory() as t:
+    with tempfile.TemporaryDirectory() as t, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'):
         try:
             os.chdir(t)
             pathlib.Path('base/P').mkdir(parents=True)
@@ -4640,7 +5257,7 @@ def br02_failed_export_cache_contract():
             p = {'dir':'P','name':'P'}
             with patch.object(kr.subprocess, 'run', side_effect=OSError('no CLI')):
                 kr.export_glb(p, 'base', str(out))
-            (out/'.complete').write_text('complete')
+            (out/'.complete').write_text(json.dumps(kr.image_export_identity(p, 'base'), sort_keys=True))
             assert kr.render_cache_complete(out, p, 'base', settings), 'failed exports must be cacheable'
             assert (out/'board.raw.glb.failed').exists() and (out/'poster.png.failed').exists()
             with patch.object(kr.subprocess, 'run') as run:
@@ -4669,3 +5286,517 @@ def br02_failed_export_cache_contract():
     print('ok BR02 failed export attempts cache and successful retries clear markers')
 
 br02_failed_export_cache_contract()
+
+# Board inspection adapter: derive mm-units inspection graph and facts from retained scene
+scene = {'copperStack':['F.Cu','In1.Cu','In2.Cu','B.Cu'],
+         'nets':[{'id':1,'name':'12'}], 'warnings':[], 'complete':True,
+         'objects':[{'kind':'track','uuid':'t','changeUuid':'t','ref':'12',
+                     'layers':['In1.Cu'],'net':1,'side':None,
+                     'geometry':{'segments':[[0,0,3000,4000,200]]},'box':[0,0,3000,4000]}]}
+g = kr.board_inspect(scene)
+assert g['tracks'][0]['net'] == '12'
+assert g['tracks'][0]['width'] == .2
+assert g['stats']['routedLengthMm'] == 5
+assert g['stats']['copperLayers'] == 4
+assert g['stats']['boardSizeMm'] is None
+assert not any(g['truncated'].values())
+
+
+# Board inspection parser consumer: exact names, physical spans, duplicate pads, custom polygons, arcs, no outline.
+inspection_text = '''(kicad_pcb (version 20260206)
+ (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (2 "B.Cu" signal))
+ (segment (start 0 0) (end 3 4) (width .2) (layer "In1.Cu") (net "12") (uuid digits))
+ (arc (start 0 0) (mid 1 1) (end 2 0) (width .2) (layer "F.Cu") (net "12") (uuid arc1))
+ (via blind (at 1 1) (size .8) (drill .4) (layers "F.Cu" "In1.Cu") (net "12") (uuid blind))
+ (footprint "Test:D" (layer "F.Cu") (at 10 10) (uuid fp)
+  (property "Reference" "U1")
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net "12") (uuid p1))
+  (pad "1" smd custom (at 2 0) (size 1 1) (layers "F.Cu") (net "12")
+   (options (clearance outline) (anchor rect))
+   (primitives (gr_poly (pts (xy 0 0) (xy 2 0) (xy 1 2)) (width .1) (fill yes))) (uuid p2))
+  (pad "9" smd star (at 4 0) (size 1 1) (layers "F.Cu") (uuid p3))))'''
+inspection = kr.board_inspect(scene_from_text(inspection_text))
+assert [n['name'] for n in inspection['nets']] == ['12'], inspection['nets']
+assert inspection['tracks'] and all(t['net'] == '12' for t in inspection['tracks'])
+assert {t['layer'] for t in inspection['tracks']} == {'F.Cu', 'In1.Cu'}
+assert all('hidden' in r for r in inspection['tracks'] + inspection['pads'] + inspection['vias'])
+# Inspection preserves hidden copper (including inherited footprint visibility),
+# rather than silently dropping it and changing diagnostic/count provenance.
+hidden_inspection = kr.board_inspect(scene_from_text(inspection_text
+    .replace('(uuid digits)', '(uuid digits) (hide yes)')
+    .replace('(uuid blind)', '(uuid blind) (hide yes)')
+    .replace('(uuid fp)', '(uuid fp) (hide yes)')))
+assert all(p['hidden'] for p in hidden_inspection['pads'])
+assert all(v['hidden'] for v in hidden_inspection['vias'])
+assert all(t['hidden'] == (t['uuid'] == 'digits') for t in hidden_inspection['tracks'])
+assert not any(r['hidden'] for r in inspection['tracks'] + inspection['pads'] + inspection['vias'])
+assert hidden_inspection['stats'] == inspection['stats']
+assert hidden_inspection['unsupported'] == inspection['unsupported']
+print('ok board inspection preserves hidden copper and count provenance')
+straight = [t for t in inspection['tracks'] if t['kind'] == 'track']
+assert len(straight) == 1 and (straight[0]['layer'], straight[0]['x2'], straight[0]['y2']) == ('In1.Cu', 3.0, 4.0), straight
+arc_parts = [t for t in inspection['tracks'] if t['kind'] == 'arc']
+assert len(arc_parts) > 2, 'arc keeps its tessellation, not one chord'
+arc_length = sum(((t['x2'] - t['x1']) ** 2 + (t['y2'] - t['y1']) ** 2) ** .5 for t in arc_parts)
+assert 3.0 < arc_length < 3.2, arc_length  # semicircle of radius 1 mm
+assert abs(inspection['stats']['routedLengthMm'] - (5 + arc_length)) < 1e-3, inspection['stats']
+via, = inspection['vias']
+assert via['net'] == '12' and via['layers'] == ['F.Cu', 'In1.Cu']
+assert (via['fromLayer'], via['toLayer'], via['diameter'], via['drill']) == ('F.Cu', 'In1.Cu', .8, .4), via
+pads = inspection['pads']
+assert [p['pin'] for p in pads] == ['1', '1'], pads  # duplicate numbers stay distinct records
+assert len({p['uuid'] for p in pads}) == 2 and pads[0]['ref'] == 'U1' and pads[0]['net'] == '12'
+assert pads[1]['shape'] == 'rect' and len(pads[1]['custom']) == 1 and len(pads[1]['custom'][0]) == 3, pads[1]
+assert inspection['unsupported'] == {'pads': 1, 'vias': 0, 'tracks': 0, 'footprintGraphics': 0}, inspection['unsupported']
+assert any('unsupported pad shape star' in w['reason'] for w in inspection['warnings'])
+assert inspection['stats']['boardSizeMm'] is None
+assert inspection['truncated'] == {k: False for k in ('nets', 'pads', 'tracks', 'vias', 'footprintGraphics')}
+
+# Stats: CLI facts decide outline and counts only when present; graph counts and absent sizes are labelled.
+cli = {'board': {'has_outline': True, 'width': '100.0000 mm', 'height': '80 mm'},
+       'pads': {'through_hole': 2, 'smd': 3, 'npth': 1}, 'vias': {'through': 4, 'blind': 1}}
+sized = kr.board_inspect(scene_from_text(inspection_text), cli)
+assert sized['stats']['boardSizeMm'] == [100.0, 80.0]
+assert (sized['stats']['padCount'], sized['stats']['viaCount'], sized['stats']['countsSource']) == (6, 5, 'kicad-cli')
+no_outline = kr.board_inspect(scene_from_text(inspection_text), dict(cli, board={'has_outline': False, 'width': '100 mm', 'height': '80 mm'}))
+assert no_outline['stats']['boardSizeMm'] is None
+graph_only = kr.board_inspect(scene_from_text(inspection_text), {'board': {'has_outline': True, 'width': 'nan', 'height': None}})
+assert graph_only['stats']['boardSizeMm'] is None and graph_only['stats']['countsSource'] == 'inspection-graph'
+assert graph_only['stats']['padCount'] == len(graph_only['pads'])
+assert kr.stats_number('12.5 mm') == 12.5 and kr.stats_number('nan') is None
+print('ok board inspection parser consumer and stats provenance')
+
+# Producer-backed picker records: generated by this checked-in test, never handcrafted.
+fixture_dir = Path(__file__).parent / 'ui' / 'fixtures'
+board = (fixture_dir / 'vf-order-4.kicad_pcb').read_text()
+# Declare mask only in this writable synthetic source; the order fixture has copper only.
+board = board.replace('(layers ', '(layers (1 "F.Mask" user) ', 1)
+pick_pads = [
+ '(pad "1" smd rect (at 10 10) (size 2 2) (layers "F.Cu" "F.Mask") (solder_mask_margin 0.2))',
+ '(pad "2" thru_hole circle (at 20 10) (size 2 2) (drill 0.5) (layers "*.Cu" "*.Mask"))',
+ '(pad "3" thru_hole oval (at 30 10) (size 2 3) (drill oval 0.5 1.0) (layers "*.Cu" "*.Mask"))',
+ '(pad "4" smd custom (at 40 10) (size 1 1) (layers "F.Cu") (options (clearance outline) (anchor rect)) (primitives (gr_line (start 0 0) (end 5 0) (width 0.4))))',
+ '(pad "5" smd custom (at 50 10) (size 1 1) (layers "F.Cu") (options (clearance outline) (anchor rect)) (primitives (gr_arc (start 3 0) (mid 4 1) (end 3 2) (width 0.4))))',
+ '(pad "6" smd custom (at 60 10) (size 1 1) (layers "F.Cu") (options (clearance outline) (anchor rect)) (primitives (gr_poly (pts (xy 3 0) (xy 5 0) (xy 4 2)) (width 0.4) (fill no))))']
+pick_footprint = '(footprint "picker" (layer "F.Cu") (at 0 0) (uuid "picker") (property "Reference" "J1") ' + ''.join(pick_pads) + ')'
+with TemporaryDirectory() as d:
+    source = Path(d, 'picker.kicad_pcb')
+    source.write_text(board.rstrip()[:-1] + pick_footprint + ')')
+    records = kr.board_inspect(kr.board_geometry(source))
+by_pin = {r['pin']: r for r in records['pads']}
+assert by_pin['1']['geometry']['primitive'] and by_pin['1']['geometry']['layerPrimitives']['F.Mask']
+for pin in ('2', '3'):
+    drill = by_pin[pin]['geometry']['drill']
+    assert 'shape' not in drill and set(('center', 'size', 'angle', 'plated')) <= drill.keys()
+for pin in ('4', '5', '6'): assert by_pin[pin]['geometry']['segments']
+(fixture_dir / 'image-pick-records.json').write_text(json.dumps(records, sort_keys=True) + '\n')
+print('ok producer-backed image pick records')
+
+# Task 4: write_image_assets and image_pair
+blobs = {}
+key = kr.add_blob(blobs, '{"version":1,"units":"mm","views":[]}')
+raw = gzip.decompress(base64.b64decode(blobs[key]))
+assert json.loads(raw)['version'] == 1
+with tempfile.TemporaryDirectory() as d:
+    kr.write_image_assets(blobs, {key:{'kind':'json','name':'sheet-hotspots.json'}}, d)
+    assert pathlib.Path(d, key+'.json.gz').read_bytes() == base64.b64decode(blobs[key])
+assert kr.image_pair(None, 'head-id') == {'base':None, 'head':'head-id'}
+
+
+blobs={}
+svg_id=kr.add_blob(blobs,'<svg viewBox="0 0 10 10"></svg>')
+json_id=kr.add_blob(blobs,'{"version":1,"views":[]}')
+for head_only in (False,True):
+    pair=lambda key: {'base':None if head_only else key,'head':key}
+    data={'version':1,'base':None if head_only else 'a'*40,'head':'b'*40,
+          'projects':[{'sheets':[{'svg':pair(svg_id),'svgThemes':{'light':pair(svg_id)},
+                                  'hotspots':pair(json_id)}],
+                       'board':{'layers':[{'svg':pair(svg_id),'svgThemes':{'light':pair(svg_id)}}],
+                                'inspect':pair(json_id)}}], 'blobs':copy.deepcopy(blobs)}
+    if head_only: data['mode']='single'
+    with TemporaryDirectory() as d, patch.object(kr,'inline_page',side_effect=lambda script:script):
+        html=kr.finalize_report(data,d)
+        embedded=json.loads(html.removeprefix('window.REVIEW_DATA = ').removesuffix(';'))
+        assert embedded['assets']=={svg_id:{'kind':'svg','name':'layer.svg'},
+                                    json_id:{'kind':'json','name':'board-inspect.json'}}
+        assert embedded['blobs']==blobs and embedded['base']==data['base']
+        assert pathlib.Path(d,svg_id+'.svg.gz').read_bytes()==base64.b64decode(blobs[svg_id])
+        assert pathlib.Path(d,json_id+'.json.gz').read_bytes()==base64.b64decode(blobs[json_id])
+        assert set(p.name for p in pathlib.Path(d).iterdir())=={svg_id+'.svg.gz',json_id+'.json.gz'}
+with TemporaryDirectory() as d, patch.object(kr,'inline_page',side_effect=lambda script:script):
+    legacy={'version':1,'projects':[{'sheets':[],'board':{'layers':[]}}],'blobs':{}}
+    kr.finalize_report(legacy,d)
+    assert legacy['assets']=={} and legacy['blobs']=={}
+
+
+def missing_side_projects():
+    order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').resolve().read_text()
+    old = os.getcwd()
+    blobs, projects = {}, []
+    with TemporaryDirectory() as directory:
+        try:
+            os.chdir(directory)
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            for name in ('parts','threads','issues','inventory','libraries','3d'):
+                settings[name]['enabled'] = False
+            settings['checks'] = {k:'off' for k in settings['checks']}
+            for kind in ('sheet','board'):
+                for present, status in (('head','added'),('base','removed')):
+                    name = f'{status}-{kind}'
+                    desc = {'dir':name,'name':'H','status':status}
+                    out = f'review/{kr.project_id(name)}/{present}'
+                    source = f'{present}/{name}'
+                    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 80"><path stroke="#009600" fill="none" d="M 5 5 L 95 75"/></svg>'
+                    files = {f'{out}/sch/H.svg':svg,
+                             f'{source}/H.kicad_sch':'(kicad_sch (uuid root) (paper A4) (symbol (uuid moved) (at 50 40 0) (property "Reference" "U1") (property "Value" "test")))'} if kind == 'sheet' else {
+                        f'{source}/H.kicad_pcb':order_board, f'{out}/pcb/H-F_Cu.svg':svg}
+                    files[f'{out}/erc.json'] = json.dumps({'violations':[]})
+                    files[f'{out}/drc.json'] = json.dumps({'violations':[], 'unconnected_items':[]})
+                    write('.', files)
+                    project = kr.build_project(desc, blobs, settings)
+                    absent = 'base' if present == 'head' else 'head'
+                    rows = project['sheets'] if kind == 'sheet' else project['board']['layers']
+                    assert rows, (kind, present)
+                    assert project['board']['status'] == status if kind == 'board' else rows[0]['status'] == status
+                    for row in rows:
+                        assert row['svg'][absent] is None
+                        key = row['svg'][present]
+                        assert key in blobs and '<svg' in gzip.decompress(base64.b64decode(blobs[key])).decode()
+                        assert row['svgThemes']['light'][absent] is None
+                        assert row['svgThemes']['dark'][absent] is None
+                    if kind == 'sheet':
+                        assert rows[0]['hotspots'][absent] is None
+                        assert rows[0]['hotspots'][present] in blobs
+                    else:
+                        assert project['board']['inspect'][absent] is None
+                        assert project['board']['inspect'][present] in blobs
+                    assert project['changes'], 'present-side legacy picking needs real changes'
+                    projects.append(project)
+        finally:
+            os.chdir(old)
+    return projects, blobs
+missing_projects, missing_blobs = missing_side_projects()
+assert len(missing_projects) == 4
+
+
+# Runnable image fixture generator: real KiCad 10.0.0 exports, no CLI needed to regenerate.
+IMAGE_LAYER_EXPORTS = {'In2_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#CE7D2C; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n', 'F_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#C83434; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n', 'B_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#4D7FC4; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n', 'In1_Cu': '<?xml version="1.0" standalone="no"?>\n <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" \n "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"> \n<svg\n  xmlns:svg="http://www.w3.org/2000/svg"\n  xmlns="http://www.w3.org/2000/svg"\n  xmlns:xlink="http://www.w3.org/1999/xlink"\n  xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"\n  version="1.1"\n  width="297.0022mm" height="210.0072mm" viewBox="0.0000 0.0000 297.0022 210.0072">\n<title>KiCad 10 synthetic four-layer export</title>\n  <desc>Image generated by PCBNEW </desc>\n<g style="fill:#000000; fill-opacity:1.0000;stroke:#000000; stroke-opacity:1.0000;\nstroke-linecap:round; stroke-linejoin:round;"\n transform="translate(0 0) scale(1 1)">\n</g>\n<g style="fill:none; \nstroke:#7FC87F; stroke-width:2.0000; stroke-opacity:1; \nstroke-linecap:round; stroke-linejoin:round;">\n<path d="M2.0000 5.0000\nL18.0000 5.0000\n" />\n</g> \n</svg>\n'}
+
+# KiCad 10.0.0 export of synthetic 0.4 mm "R16 10k" text; paths, not browser fonts.
+IMAGE_TINY_TEXT = '<g class="stroked-text" style="fill:none;stroke:#009600;stroke-width:0.1;stroke-linecap:round;stroke-linejoin:round"><desc>R16 10k</desc>\n<path d="M149.0475 129.9298 L148.9141 129.7393 " />\n<path d="M148.8189 129.9298 L148.8189 129.5298 " />\n<path d="M148.8189 129.5298 L148.9713 129.5298 " />\n<path d="M148.9713 129.5298 L149.0094 129.5488 " />\n<path d="M149.0094 129.5488 L149.0284 129.5679 " />\n<path d="M149.0284 129.5679 L149.0475 129.6060 " />\n<path d="M149.0475 129.6060 L149.0475 129.6631 " />\n<path d="M149.0475 129.6631 L149.0284 129.7012 " />\n<path d="M149.0284 129.7012 L149.0094 129.7203 " />\n<path d="M149.0094 129.7203 L148.9713 129.7393 " />\n<path d="M148.9713 129.7393 L148.8189 129.7393 " />\n<path d="M149.4284 129.9298 L149.1998 129.9298 " />\n<path d="M149.3141 129.9298 L149.3141 129.5298 " />\n<path d="M149.3141 129.5298 L149.2760 129.5869 " />\n<path d="M149.2760 129.5869 L149.2379 129.6250 " />\n<path d="M149.2379 129.6250 L149.1998 129.6441 " />\n<path d="M149.7713 129.5298 L149.6951 129.5298 " />\n<path d="M149.6951 129.5298 L149.6570 129.5488 " />\n<path d="M149.6570 129.5488 L149.6380 129.5679 " />\n<path d="M149.6380 129.5679 L149.5999 129.6250 " />\n<path d="M149.5999 129.6250 L149.5808 129.7012 " />\n<path d="M149.5808 129.7012 L149.5808 129.8536 " />\n<path d="M149.5808 129.8536 L149.5999 129.8917 " />\n<path d="M149.5999 129.8917 L149.6189 129.9108 " />\n<path d="M149.6189 129.9108 L149.6570 129.9298 " />\n<path d="M149.6570 129.9298 L149.7332 129.9298 " />\n<path d="M149.7332 129.9298 L149.7713 129.9108 " />\n<path d="M149.7713 129.9108 L149.7904 129.8917 " />\n<path d="M149.7904 129.8917 L149.8094 129.8536 " />\n<path d="M149.8094 129.8536 L149.8094 129.7584 " />\n<path d="M149.8094 129.7584 L149.7904 129.7203 " />\n<path d="M149.7904 129.7203 L149.7713 129.7012 " />\n<path d="M149.7713 129.7012 L149.7332 129.6822 " />\n<path d="M149.7332 129.6822 L149.6570 129.6822 " />\n<path d="M149.6570 129.6822 L149.6189 129.7012 " />\n<path d="M149.6189 129.7012 L149.5999 129.7203 " />\n<path d="M149.5999 129.7203 L149.5808 129.7584 " />\n<path d="M150.4952 129.9298 L150.2666 129.9298 " />\n<path d="M150.3809 129.9298 L150.3809 129.5298 " />\n<path d="M150.3809 129.5298 L150.3428 129.5869 " />\n<path d="M150.3428 129.5869 L150.3047 129.6250 " />\n<path d="M150.3047 129.6250 L150.2666 129.6441 " />\n<path d="M150.7429 129.5298 L150.7810 129.5298 " />\n<path d="M150.7810 129.5298 L150.8191 129.5488 " />\n<path d="M150.8191 129.5488 L150.8381 129.5679 " />\n<path d="M150.8381 129.5679 L150.8572 129.6060 " />\n<path d="M150.8572 129.6060 L150.8762 129.6822 " />\n<path d="M150.8762 129.6822 L150.8762 129.7774 " />\n<path d="M150.8762 129.7774 L150.8572 129.8536 " />\n<path d="M150.8572 129.8536 L150.8381 129.8917 " />\n<path d="M150.8381 129.8917 L150.8191 129.9108 " />\n<path d="M150.8191 129.9108 L150.7810 129.9298 " />\n<path d="M150.7810 129.9298 L150.7429 129.9298 " />\n<path d="M150.7429 129.9298 L150.7048 129.9108 " />\n<path d="M150.7048 129.9108 L150.6857 129.8917 " />\n<path d="M150.6857 129.8917 L150.6667 129.8536 " />\n<path d="M150.6667 129.8536 L150.6476 129.7774 " />\n<path d="M150.6476 129.7774 L150.6476 129.6822 " />\n<path d="M150.6476 129.6822 L150.6667 129.6060 " />\n<path d="M150.6667 129.6060 L150.6857 129.5679 " />\n<path d="M150.6857 129.5679 L150.7048 129.5488 " />\n<path d="M150.7048 129.5488 L150.7429 129.5298 " />\n<path d="M151.0477 129.9298 L151.0477 129.5298 " />\n<path d="M151.0858 129.7774 L151.2001 129.9298 " />\n<path d="M151.2001 129.6631 L151.0477 129.8155 " />\n</g>'
+
+
+def augment_front_svg(text, original):
+    root = ET.fromstring(text)
+    x,y,w,h = map(float, root.get('viewBox').split())
+    color = '#%02x%02x%02x' % tuple(original)
+    for left, width, paint in ((.1,.3,color),(.25,.3,color),(.7,.1,'#abcdef')):
+        ET.SubElement(root, '{http://www.w3.org/2000/svg}rect', {
+            'x':str(x+left*w),'y':str(y+.3*h),'width':str(width*w),'height':str(.4*h),
+            'fill':paint,'stroke':'none'})
+    for attribute in list(root.attrib):
+        if attribute == 'xmlns' or attribute.startswith('{http://www.w3.org/2000/xmlns/}'):
+            del root.attrib[attribute]
+    ns = '{http://www.w3.org/2000/svg}'
+    for node in root.iter():
+        if isinstance(node.tag, str) and node.tag.startswith(ns):
+            node.tag = node.tag[len(ns):]
+    root.attrib = {'xmlns': ns[1:-1], **root.attrib}
+    serialized = ET.tostring(root, encoding='unicode')
+    return '\n'.join(line.rstrip() for line in serialized.split('\n'))
+
+
+def augment_front_svg_regressions():
+    result = augment_front_svg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>', [1, 2, 3])
+    assert result.startswith('<svg xmlns='), result
+    assert len(ET.fromstring(result)) == 3
+    source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text data-note="keep ns0:attribute">keep ns0:text</text></svg>'
+    label = ET.fromstring(augment_front_svg(source, [1, 2, 3])).find('{http://www.w3.org/2000/svg}text')
+    assert label.text == 'keep ns0:text' and label.get('data-note') == 'keep ns0:attribute'
+    print('ok standalone augmented SVG namespace and retained content')
+
+augment_front_svg_regressions()
+
+
+def build_augmented_image_project(desc, blobs, settings, committed_svg):
+    out=pathlib.Path('review',kr.project_id(desc['dir']))
+    for side in ('base','head'):
+        for theme,folder in (('light','pcb'),('dark','pcb-dark')):
+            front_path=out/side/folder/(desc['name']+'-F_Cu.svg')
+            if not front_path.is_file(): continue
+            original=kr.IMAGE_PALETTES[theme]['sourceRGB']['F.Cu']
+            front_path.write_text(augment_front_svg(front_path.read_text(),original))
+            if side == 'head' and theme == 'light':
+                committed_svg.write_text(front_path.read_text())
+    return kr.build_project(desc,blobs,settings)
+
+
+def generate_image_fixture(missing_projects, missing_blobs, destination, committed_svg):
+    """Generate browser data into caller-owned paths through the real producer."""
+    order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text()
+    settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    for name in ('parts', 'threads', 'issues', 'inventory', 'libraries', '3d'):
+        settings[name]['enabled'] = False
+    settings['checks'] = {k: 'off' for k in settings['checks']}
+    old = os.getcwd()
+    image_blobs = dict(missing_blobs)
+    try:
+        with TemporaryDirectory() as directory:
+            os.chdir(directory)
+            desc = {'dir': 'images', 'name': 'Images', 'status': 'modified'}
+            out = pathlib.Path('review', kr.project_id(desc['dir']))
+            root = ('(kicad_sch (uuid root) (paper A4) ' +
+                    sheet('Left', 'shared.kicad_sch', 'left') +
+                    sheet('Right', 'shared.kicad_sch', 'right') + ')')
+            for side in ('base', 'head'):
+                x = 105 if side == 'base' else 107.54
+                shared = f'''(kicad_sch (uuid child) (paper A4)
+                  (lib_symbols (symbol "Test:Base"
+                    (symbol "Base_0_1" (rectangle (start -1 -1) (end 1 1)))
+                    (symbol "Base_2_1" (pin input line (at -5 0 0) (length 2)
+                      (name "B") (number "3"))))
+                    (symbol "Test:Op" (extends "Base")))
+                  (symbol (uuid placed) (lib_id "Test:Op") (unit 2) (at {x} 55 0)
+                    (property "Reference" "U?") (property "Value" "Op")
+                    (instances (project "Images"
+                      (path "/root/left" (reference "U1") (unit 2))
+                      (path "/root/right" (reference "U2") (unit 2))))))'''
+                write('.', {f'{side}/images/Images.kicad_sch': root,
+                            f'{side}/images/shared.kicad_sch': shared,
+                            f'{side}/images/Images.kicad_pcb': order_board,
+                            f'{out}/{side}/erc.json': '{"violations":[]}',
+                            f'{out}/{side}/drc.json': '{"violations":[],"unconnected_items":[]}'})
+                mapping = {}
+                for page in kr.sheet_pages(f'{side}/images', 'Images'):
+                    mapping[page['path']] = {}
+                    for theme, folder in (('light', 'sch'), ('dark', 'sch-dark')):
+                        color = '#009600'  # real exports share inks; data-theme keeps blobs distinct
+                        text = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 20 297 210" data-theme="{theme}">'
+                                f'<rect x="{x-1}" y="54" width="2" height="2" fill="none" stroke="{color}"/>'
+                                f'<path d="M{x-5} 55h2" stroke="{color}"/>'
+                                # Broad revision ink on both Wipe sides, with a common stroke.
+                                f'<path d="M30 120H280 M{65 if side == "base" else 240} 80V180" '
+                                f'fill="none" stroke="{color}" stroke-width="8"/>'
+                                + IMAGE_TINY_TEXT + '</svg>')
+                        rel = f'{folder}/{page["stem"]}.svg'
+                        write('.', {f'{out}/{side}/{rel}': text})
+                        mapping[page['path']][theme] = rel
+                write('.', {f'{out}/{side}/sheet-images.json': json.dumps(mapping)})
+                for layer, text in IMAGE_LAYER_EXPORTS.items():
+                    # Replace only the exported layer ink, keeping every real track.
+                    canonical = layer.replace('_', '.')
+                    colors = re.findall(r'stroke:(#[0-9A-Fa-f]{6}); stroke-width:2', text)
+                    assert colors
+                    for theme, folder in (('light', 'pcb'), ('dark', 'pcb-dark')):
+                        ink = '#%02x%02x%02x' % tuple(kr.IMAGE_PALETTES[theme]['sourceRGB'][canonical])
+                        themed = text.replace(colors[0], ink)
+                        write('.', {f'{out}/{side}/{folder}/Images-{layer}.svg': themed})
+                # An exported, empty technical layer remains a real selectable image.
+                for folder in ('pcb', 'pcb-dark'):
+                    write('.', {f'{out}/{side}/{folder}/Images-Dwgs_User.svg':
+                                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297.0022 210.0072"><g/></svg>'})
+            with patch.object(kr, 'sheet_pages', wraps=kr.sheet_pages) as parsed_pages:
+                image_project = build_augmented_image_project(desc, image_blobs, settings, committed_svg)
+            # Per revision: producer page cache, hotspot parser, and object parser.
+            # The three manifest views must not each trigger another hierarchy parse.
+            assert parsed_pages.call_count == 6, parsed_pages.call_args_list
+            for side in ('base', 'head'):
+                manifest = json.loads(gzip.decompress(base64.b64decode(image_blobs[image_project['sheets'][0]['hotspots'][side]])))
+                assert all(view['viewBox'] == [10, 20, 297, 210] for view in manifest['views'])
+                for path, ref in (('/left/', 'U1'), ('/right/', 'U2')):
+                    view = next(v for v in manifest['views'] if v['sheet'] == path)
+                    symbol = next(e for e in view['elements'] if e['ref'] == ref)
+                    assert symbol['unit'] == '2' and symbol['uuid'] == 'placed'
+                    pin = next(p for p in symbol['pins'] if p['number'] == '3')
+                    assert pin['name'] == 'B' and pin['y'] == 55
+                    assert abs(pin['x'] - (100 if side == 'base' else 102.54)) < .0001
+                assert json.loads((out / side / 'sheet-hotspots.json').read_text()) == manifest
+                assert (out / side / 'board-inspect.json').is_file()
+            # Sample points are source-viewBox fractions: single, overlap, custom paint.
+            augmented = ET.fromstring(committed_svg.read_text())
+            rects = list(augmented)[-3:]
+            vx, vy, vw, vh = map(float, augmented.get('viewBox').split())
+            for fx, expected in ((.15, 1), (.3, 2), (.75, 1)):
+                covering = [r for r in rects if float(r.get('x')) <= vx+fx*vw <= float(r.get('x'))+float(r.get('width'))
+                            and float(r.get('y')) <= vy+.5*vh <= float(r.get('y'))+float(r.get('height'))]
+                assert len(covering) == expected
+                assert all(r.get('opacity', '1') == '1' and r.get('fill') != 'none' for r in covering)
+                assert covering[-1].get('fill') == ('#abcdef' if fx == .75 else '#%02x%02x%02x' % tuple(kr.IMAGE_PALETTES['light']['sourceRGB']['F.Cu']))
+    finally:
+        os.chdir(old)
+    copper = {r['name'].replace('_', '.'): r for r in image_project['board']['layers'] if r['name'].endswith('_Cu')}
+    assert set(copper) == {'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'}
+    for layer in copper.values():
+        for side in ('base', 'head'):
+            assert '<svg' in gzip.decompress(base64.b64decode(image_blobs[layer['svg'][side]])).decode()
+    for project in [image_project, *missing_projects]:
+        for rows, schematic in ((project['sheets'], True), (project['board']['layers'], False)):
+            for row in rows:
+                for side in ('base', 'head'):
+                    key = row['svgCompare'][side]
+                    assert bool(key) == bool(row['svg'][side])
+                    if key:
+                        text = gzip.decompress(base64.b64decode(image_blobs[key])).decode()
+                        assert text == kr.comparison_svg(gzip.decompress(base64.b64decode(image_blobs[row['svg'][side]])).decode(), side, schematic)
+                        assert '0 0 0 0 ' + ('0.85' if side == 'base' else '0.1') in text
+    data = {'version': 1, 'repo': 'fixture/images', 'base': 'a'*40, 'head': 'b'*40,
+            'links': {}, 'run_url': '', 'reason': 'synthetic image regression', 'settings': settings,
+            'projects': [image_project, *missing_projects], 'blobs': image_blobs}
+    kr.assign_ids(data['projects'])
+    with TemporaryDirectory() as directory:
+        html = kr.finalize_report(data, directory)
+        assert not re.search(r'<(?:script[^>]+src|link[^>]+href)=', html)
+        for project in data['projects']:
+            for row in project['sheets'] + project['board']['layers']:
+                for key in filter(None, row['svgCompare'].values()):
+                    assert data['assets'][key] == {'kind': 'svg', 'name': 'comparison.svg'}
+                    assert pathlib.Path(directory, key + '.svg.gz').read_bytes() == base64.b64decode(image_blobs[key])
+    destination.write_text('window.REVIEW_DATA = ' + json.dumps(data, separators=(',', ':')).replace('<', '\\u003c') + ';\n')
+    return image_project, image_blobs
+
+def image_fixture_content(raw):
+    """Compare report structure and exact decoded assets, not platform gzip bytes."""
+    prefix, suffix = b'window.REVIEW_DATA = ', b';\n'
+    assert raw.startswith(prefix) and raw.endswith(suffix), 'invalid image fixture wrapper'
+    data = json.loads(raw[len(prefix):-len(suffix)])
+    # Python 3.12 delegates mtime=0 headers to zlib (OS=3 on Linux), while
+    # Python 3.13 uses OS=255. Deflate output can also vary by zlib version.
+    data['blobs'] = {key: gzip.decompress(base64.b64decode(value, validate=True))
+                     for key, value in data['blobs'].items()}
+    return data
+
+
+def image_fixture_comparison_regressions():
+    payload = b'<svg><path d="M0 0h100"/></svg>' * 20
+    encode = lambda data: ('window.REVIEW_DATA = ' + json.dumps(data) + ';\n').encode()
+    blob = lambda level: base64.b64encode(gzip.compress(payload, compresslevel=level, mtime=0)).decode()
+    original = {'version': 1, 'projects': [{'svg': 'asset'}], 'blobs': {'asset': blob(9)}}
+    expected = image_fixture_content(encode(original))
+    recompressed = copy.deepcopy(original)
+    recompressed['blobs']['asset'] = blob(1)
+    assert recompressed['blobs'] != original['blobs']
+    assert image_fixture_content(encode(recompressed)) == expected
+    header = bytearray(base64.b64decode(original['blobs']['asset']))
+    header[9] = 3 if header[9] != 3 else 255
+    recompressed['blobs']['asset'] = base64.b64encode(header).decode()
+    assert image_fixture_content(encode(recompressed)) == expected
+    for change in ('metadata', 'reference', 'content', 'key', 'missing', 'extra'):
+        changed = copy.deepcopy(original)
+        if change == 'metadata':
+            changed['version'] = 2
+        elif change == 'reference':
+            changed['projects'][0]['svg'] = 'other'
+        elif change == 'content':
+            changed['blobs']['asset'] = base64.b64encode(gzip.compress(payload + b' ', mtime=0)).decode()
+        elif change == 'key':
+            changed['blobs']['other'] = changed['blobs'].pop('asset')
+        elif change == 'missing':
+            changed['blobs'].clear()
+        else:
+            changed['blobs']['extra'] = blob(9)
+        assert image_fixture_content(encode(changed)) != expected, change
+    print('ok image fixture comparison ignores gzip encoding but detects structure and decoded-byte drift')
+
+
+image_fixture_comparison_regressions()
+
+with TemporaryDirectory() as directory:
+    generated_data = pathlib.Path(directory, 'review-data-images.js')
+    generated_svg = pathlib.Path(directory, 'image-layer-overlap.svg')
+    image_project, image_blobs = generate_image_fixture(missing_projects, missing_blobs, generated_data, generated_svg)
+    for generated, committed in ((generated_data, pathlib.Path('ui/sample/review-data-images.js')),
+                                 (generated_svg, pathlib.Path('ui/fixtures/image-layer-overlap.svg'))):
+        # Updating fixtures is explicit; ordinary test runs only compare bytes
+        # after decoding report blobs, or directly for the standalone SVG.
+        if os.environ.get('REGENERATE_IMAGE_FIXTURES') == '1':
+            committed.write_bytes(generated.read_bytes())
+        committed_content, generated_content = committed.read_bytes(), generated.read_bytes()
+        if generated == generated_data:
+            committed_content = image_fixture_content(committed_content)
+            generated_content = image_fixture_content(generated_content)
+        assert committed_content == generated_content, f'{committed} drift; run REGENERATE_IMAGE_FIXTURES=1 python3 test_kicad_review.py'
+print('ok additive image finalization, missing sides, repeated-instance and four-layer fixtures')
+
+# Asset filenames and MIME kinds are never inferred from user-controlled names.
+for key, kind in (('../escape', 'svg'), ('a'*12, 'html'), ('A'*12, 'json')):
+    with TemporaryDirectory() as directory:
+        try:
+            kr.write_image_assets({}, {key: {'kind': kind, 'name': 'x'}}, directory)
+            raise AssertionError('invalid asset accepted')
+        except ValueError:
+            assert not list(pathlib.Path(directory).iterdir())
+print('ok image asset validation')
+
+# The command delegates finalization exactly once, before metadata drops offline blobs.
+old = os.getcwd()
+try:
+    with TemporaryDirectory() as directory:
+        os.chdir(directory)
+        write('.', {'review/detect.json': json.dumps({'base': 'a'*40, 'head': 'b'*40, 'reason': 'fixture', 'projects': []})})
+        with patch.object(kr, 'finalize_report', wraps=kr.finalize_report) as finalized:
+            kr.cmd_report(None)
+        assert finalized.call_count == 1
+        assert finalized.call_args.args[1] == 'review/assets'
+        assert json.loads(pathlib.Path('review/data.json').read_text())['assets'] == {}
+        assert pathlib.Path('review/assets').is_dir()
+finally:
+    os.chdir(old)
+print('ok report command shares image finalization')
+
+def image_asset_contract_regressions():
+    blobs = {}
+    key = kr.add_blob(blobs, '<svg viewBox="0 0 1 1"/>')
+    valid = {key: {'kind': 'svg', 'name': 'sheet.svg'}}
+    # A later malformed declaration must not publish an earlier valid entry.
+    invalid_declarations = [
+        {**valid, '../escape': {'kind': 'svg'}},
+        {**valid, 'a'*12: {'kind': 'html'}},
+        {**valid, 'b'*12: {'kind': 'svg'}},
+        {**valid, 'c'*12: {}},
+    ]
+    for declarations in invalid_declarations:
+        with TemporaryDirectory() as directory:
+            try:
+                kr.write_image_assets(blobs, declarations, directory)
+            except ValueError:
+                assert not list(Path(directory).iterdir()), 'partial assets published'
+            else:
+                raise AssertionError('invalid asset accepted')
+    # Shared artwork gets one explicit role-priority name, regardless of traversal.
+    sheet_project = {'sheets': [{'svgThemes': {'light': {'head': key}}}], 'board': {'layers': []}}
+    layer_project = {'sheets': [], 'board': {'layers': [{'svgThemes': {'light': {'head': key}}}]}}
+    expected = {key: {'kind': 'svg', 'name': 'layer.svg'}}
+    assert kr.image_asset_declarations([sheet_project, layer_project]) == expected
+    assert kr.image_asset_declarations([layer_project, sheet_project]) == expected
+    # Old reports have real artwork but none of the optional new fields.
+    legacy = {'version': 1, 'projects': [{'sheets': [{'svg': {'base': None, 'head': key}}],
+              'board': {'layers': [{'name': 'F_Cu', 'svg': {'base': None, 'head': key}}]}}],
+              'blobs': blobs.copy()}
+    assert kr.image_asset_declarations(legacy['projects']) == {}
+    with TemporaryDirectory() as directory, patch.object(kr, 'inline_page', side_effect=lambda script: script):
+        html = kr.finalize_report(legacy, directory)
+        embedded = json.loads(html.removeprefix('window.REVIEW_DATA = ').removesuffix(';'))
+        assert embedded['assets'] == {} and embedded['blobs'] == blobs
+        assert not list(Path(directory).iterdir())
+    print('ok atomic asset validation, deterministic names, legacy artwork finalization')
+
+image_asset_contract_regressions()
+
+# Hosted size limits use decoded UTF-8 bytes, not compressed or character counts.
+for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
+    blobs = {}
+    boundary = kr.add_blob(blobs, 'x' * cap)
+    oversized = kr.add_blob(blobs, 'é' * (cap // 2) + 'x')
+    project = {'sheets': [{'svgThemes': {'light': {'base': boundary, 'head': oversized}}}
+                           if kind == 'svg' else {'hotspots': {'base': boundary, 'head': oversized}}]}
+    data = {'projects': [project], 'blobs': blobs}
+    with TemporaryDirectory() as directory, patch.object(kr, 'inline_page', side_effect=lambda script: script), patch('sys.stderr') as log:
+        html = kr.finalize_report(data, directory)
+        embedded = json.loads(html.removeprefix('window.REVIEW_DATA = ').removesuffix(';'))
+        assert boundary in embedded['assets'], 'exact cap must remain lazy'
+        assert oversized not in embedded['assets'], 'oversized asset must stay inline'
+        assert embedded['blobs'][oversized] == blobs[oversized], 'inline fallback lost'
+        assert sorted(p.name for p in pathlib.Path(directory).iterdir()) == [boundary + '.' + kind + '.gz']
+        warning = ''.join(str(call.args[0]) for call in log.write.call_args_list)
+        assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
+print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')

@@ -44,7 +44,7 @@ export function historyPage({ user, owner, repo, pull, title, events, filter }) 
 export function frame({ title, user, crumbs = [], body, meta = '', navigation = true, reviewStatus = '' }) {
   const trail = crumbs.map((crumb, index) => `<span>${index < crumbs.length - 1 && crumb.href ? link(crumb.href, crumb.label) : e(crumb.label)}</span>`).join('');
   const account = `<details class="bench-menu account"><summary aria-label="User menu">${e(user || 'Viewer')} ▾</summary><div class="bench-popover"><span class="bench-label">Theme</span><div class="bench-themes">${['Dark', 'Light', 'System'].map(t => `<button type="button" data-theme-set="${t.toLowerCase()}" aria-pressed="false">${t}</button>`).join('')}</div>${user ? '<form method="post" action="/logout"><button>Sign out</button></form>' : '<span class="muted">Read-only viewer</span>'}</div></details>`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title>${meta}<script>${theme}</script><style>${tokens}\n${site}</style></head><body>${icons}<header class="top">${navigation ? '<a class="product" href="/">' : '<span class="product">'}<svg class="bench-mark" aria-hidden="true"><use href="#kr-mark"></use></svg>KiCad review${navigation ? '</a>' : '</span>'}${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}${reviewStatus ? `<span class="bench-state" role="status">${e(reviewStatus)}</span>` : ''}${account}</header>${body}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${e(title)} · KiCad review</title><meta name="deploy-sha" content="unknown">${meta}<script>${theme}</script><style>${tokens}\n${site}</style></head><body>${icons}<header class="top">${navigation ? '<a class="product" href="/">' : '<span class="product">'}<svg class="bench-mark" aria-hidden="true"><use href="#kr-mark"></use></svg>KiCad review${navigation ? '</a>' : '</span>'}${trail ? `<nav class="crumbs" aria-label="Breadcrumb">${trail}</nav>` : ''}${reviewStatus ? `<span class="bench-state" role="status">${e(reviewStatus)}</span>` : ''}${account}</header>${body}<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer></body></html>`;
 }
 
 export function signedOutPage({ sessionEnded = false } = {}) {
@@ -317,8 +317,57 @@ function mergeBadge(state, text) {
 function reviewOverflow(items) {
   return `<details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${items}<button type="button" data-review-copy>Copy link</button><label>Go to<input data-review-goto aria-label="Go to saved review position" placeholder="Paste a review link"></label><input data-review-copyfield aria-label="Link to copy" readonly hidden></div></details>`;
 }
+// This parent owns the only network capability. The child supplies identities, not URLs.
+export function assetParent(iframe,raw,scope=window,fetcher=fetch) {
+  const IMAGE_ASSET_LIMITS={svg:8*1024*1024,json:4*1024*1024};
+  let declarations,disposed=false;const jobs=new Map();
+  const manifest=()=>declarations ||= fetcher(raw,{credentials:'include',cache:'no-cache',redirect:'error',signal:AbortSignal.timeout(15000)}).then(async r=>{
+    if(!r.ok||r.redirected)throw Error('Asset unavailable');
+    const text=await r.text(),prefix='<script>window.REVIEW_DATA = ',start=text.indexOf(prefix);
+    if(start<0)throw Error('Asset unavailable');
+    const end=text.indexOf('<'+'/script>',start);
+    return JSON.parse(text.slice(start+prefix.length,end).trim().replace(/;$/,'')).assets||{};
+  }).catch(e=>{declarations=null;throw e;});
+  const receive=async e=>{
+    if(disposed||e.source!==iframe.contentWindow)return;
+    const cancel=e.data?.kicadReviewAssetCancel;
+    if(cancel){
+      if(typeof cancel.requestId!=='string'||!/^[\w-]{1,64}$/.test(cancel.requestId))return;
+      const job=jobs.get(cancel.requestId);if(!job)return;
+      job.cancelled=true;clearTimeout(job.timer);jobs.delete(cancel.requestId);job.abort.abort();return;
+    }
+    const a=e.data?.kicadReviewAsset;
+    if(disposed||e.source!==iframe.contentWindow||!a||typeof a.requestId!=='string'||!/^[\w-]{1,64}$/.test(a.requestId)
+      ||!/^[0-9a-f]{12}$/.test(a.digest)||!['svg','json'].includes(a.kind)||jobs.has(a.requestId))return;
+    const reply={requestId:a.requestId,digest:a.digest};
+    if(jobs.size>=8){iframe.contentWindow.postMessage({kicadReviewAssetResult:{...reply,error:'Busy; retry'}},'*');return;}
+    const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),15000),job={abort,timer,cancelled:false};jobs.set(a.requestId,job);
+    try {
+      const allowed=await manifest();
+      if(disposed||abort.signal.aborted||allowed[a.digest]?.kind!==a.kind)throw Error('Asset unavailable');
+      const response=await fetcher(raw.replace(/\/raw$/,'')+'/assets/'+a.digest+'.'+a.kind,
+        {credentials:'include',cache:'no-cache',redirect:'error',signal:abort.signal});
+      const mime=a.kind==='svg'?'image/svg+xml':'application/json';
+      if(!response.ok||response.redirected||!response.body||response.headers.get('ETag')!==`"${a.digest}"`
+        ||response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase()!==mime)throw Error('Asset unavailable');
+      const reader=response.body.getReader(),parts=[];let size=0;
+      const max=IMAGE_ASSET_LIMITS[a.kind];
+      try {for(;;){const {value,done}=await reader.read();if(done)break;
+        size+=value.byteLength;if(size>max)throw Error('Asset too large');parts.push(value);}}
+      finally {await reader.cancel();reader.releaseLock();}
+      reply.text=new TextDecoder('utf-8',{fatal:true}).decode(await new Blob(parts).arrayBuffer());
+    } catch {reply.error='Asset unavailable; retry';}
+    finally {clearTimeout(timer);if(jobs.get(a.requestId)===job)jobs.delete(a.requestId);}
+    if(!disposed&&!job.cancelled)iframe.contentWindow.postMessage({kicadReviewAssetResult:reply},'*');
+  };
+  scope.addEventListener('message',receive);
+  return ()=>{disposed=true;scope.removeEventListener('message',receive);for(const job of jobs.values()){clearTimeout(job.timer);job.abort.abort();}jobs.clear();};
+}
+
 function reportFrameScript(raw) {
-  return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; let reportedHash; let fallback; document.querySelector('[data-review-copy]').onclick = async () => { try { await navigator.clipboard.writeText(location.href); } catch { const input = document.querySelector('[data-review-copyfield]'); input.hidden = false; input.value = location.href; input.focus(); input.select(); } }; document.querySelector('[data-review-goto]').onchange = event => { const text = event.target.value; const i = text.indexOf('#'); if (i >= 0) location.hash = text.slice(i); event.target.value = ''; }; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; load(true); const syncTheme = () => { const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; iframe.contentWindow?.postMessage({ kicadReviewTheme: theme }, '*'); }; new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] }); iframe.addEventListener('load', () => { syncTheme(); fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) { loading.hidden = true; syncTheme(); } if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
+  const authenticated = /^\/r\/[^/]+\/[^/]+\/a\/\d{1,20}\/raw$/.test(raw);
+  const assetSetup = authenticated ? `const assetParentFactory=(${assetParent.toString()});let disposeAssets=assetParentFactory(iframe,raw);` : 'let disposeAssets=null;';
+  return `<script>(() => { const iframe = document.getElementById('review-report'); const loading = document.getElementById('review-loading'); const raw = ${JSON.stringify(raw)}; ${assetSetup} let reportedHash; let fallback; document.querySelector('[data-review-copy]').onclick = async () => { try { await navigator.clipboard.writeText(location.href); } catch { const input = document.querySelector('[data-review-copyfield]'); input.hidden = false; input.value = location.href; input.focus(); input.select(); } }; document.querySelector('[data-review-goto]').onchange = event => { const text = event.target.value; const i = text.indexOf('#'); if (i >= 0) location.hash = text.slice(i); event.target.value = ''; }; const load = (showLoading) => { if (showLoading) { loading.hidden = false; clearTimeout(fallback); } iframe.src = raw + location.hash; }; addEventListener('pagehide',()=>{disposeAssets?.();disposeAssets=null;}); load(true); const syncTheme = () => { const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; iframe.contentWindow?.postMessage({ kicadReviewTheme: theme }, '*'); }; new MutationObserver(syncTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] }); iframe.addEventListener('load', () => { syncTheme(); fallback = setTimeout(() => { loading.hidden = true; }, 20000); }); addEventListener('message', event => { if (event.source === iframe.contentWindow && event.data?.kicadReviewReady === true) { loading.hidden = true; syncTheme(); } if (event.source === iframe.contentWindow && typeof event.data?.kicadReviewHash === 'string' && event.data.kicadReviewHash.startsWith('#') && event.data.kicadReviewHash.length < 2000) { reportedHash = event.data.kicadReviewHash; history.replaceState(null, '', reportedHash); } }); addEventListener('hashchange', () => { if (location.hash !== reportedHash) load(false); }); })();</script>`;
 }
 
 export function sharedPage({ token, name }) {
@@ -371,4 +420,11 @@ function shareControls(create, revoke) {
       catch (error) { status.textContent = error.message; }
     };
   })();</script>`;
+}
+
+// Only the trusted site shell carries these slots; stored report HTML is never stamped.
+export function deploymentPage(html, sha) {
+  return html.replace('<meta name="deploy-sha" content="unknown">', () => `<meta name="deploy-sha" content="${sha}">`)
+    .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>',
+      () => `<footer class="deployment" aria-label="Deployment">Deployed commit <code>${sha}</code></footer>`);
 }

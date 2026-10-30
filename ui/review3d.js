@@ -500,6 +500,8 @@ window.Review3D = (() => {
     const {THREE, OrbitControls} = window.THREE3D, s = active, scene = new THREE.Scene();
     scene.environment = environment(s, s.lighting); scene.add(...roots);
     const camera = new THREE.PerspectiveCamera(35, 1, .01, 1000), controls = new OrbitControls(camera, host);
+    // Keep OrbitControls mouse/wheel handling; direct-touch mappings are disabled.
+    controls.touches = {ONE:null,TWO:null};
     const v = {host, canvas:s.canvas, renderer:s.renderer, camera, scene, controls, side, visible:true,
       sides:side ? [side] : s.allowedSides.filter(side => roots.includes(sideRoot(s, side)))};
     const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');

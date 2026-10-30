@@ -32,6 +32,7 @@ import tomllib
 import zipfile
 from collections import Counter
 from urllib.parse import urlsplit
+import xml.etree.ElementTree as ET
 
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
@@ -186,33 +187,160 @@ def kicad_cli(*args):
 
 
 def board_layers(pcb_path):
-    """Layer names declared in the board's (layers ...) block, in KiCad order."""
-    names, inside = [], False
+    """Declared layer names; physical draw order is resolved by the viewer."""
     with open(pcb_path, encoding="utf-8") as fh:
-        for line in fh:
-            s = line.strip()
-            if s == "(layers":
-                inside = True
-            elif inside and s == ")":
-                break
-            elif inside and s.startswith("("):
-                names.append(s.split('"')[1])
-    return names
+        root = parse_sexpr(fh.read())
+    return [str(row[1]) for row in (find(root, "layers") or [])[1:]
+            if isinstance(row, list) and len(row) > 1]
+
+
+def simplify_sheet_svg(text):
+    """Join plain sibling stroke paths without changing inherited paint or coordinates."""
+    root = ET.fromstring(text)
+
+    # Only optimize self-contained presentation paint. CSS, paint servers, alpha,
+    # markers and effects can make one compound path differ from separate strokes.
+    dynamic_paint = ('<?xml-stylesheet' in text or any(
+        node.tag.rsplit('}', 1)[-1] in {'style', 'link', 'animate', 'animateTransform', 'set'}
+        for node in root.iter()))
+    paint_attrs = {'fill', 'fill-opacity', 'stroke', 'stroke-opacity', 'stroke-width',
+                   'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit'}
+    container_attrs = {'class', 'style', 'transform', 'version', 'width', 'height', 'viewBox'}
+
+    def walk(group, unfilled=False, safe=True):
+        style = dict(re.findall(r'(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)', group.get('style', '')))
+        fill = style.get('fill', group.get('fill'))
+        if fill is not None:
+            unfilled = fill.strip() == 'none'
+        paint = {**group.attrib, **style}
+        safe = (safe and not dynamic_paint
+                and group.get('class') in (None, 'stroked-text')
+                and all(re.fullmatch(r'\s*[\w-]+\s*:\s*[^;]+', declaration)
+                        for declaration in group.get('style', '').split(';') if declaration.strip())
+                and set(group.attrib) <= paint_attrs | container_attrs
+                and set(style) <= paint_attrs)
+        if 'stroke-opacity' in paint:
+            safe = safe and bool(re.fullmatch(r'(?:1(?:\.0*)?|100(?:\.0*)?%)', paint['stroke-opacity'].strip()))
+        if 'stroke' in paint:
+            stroke = paint['stroke'].strip().lower()
+            safe = safe and bool(re.fullmatch(
+                r'#[0-9a-f]{3}(?:[0-9a-f]{3})?|rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)'
+                r'|none|black|white|red|green|blue', stroke))
+        run = None
+        for child in list(group):
+            tag = child.tag.rsplit('}', 1)[-1]
+            if safe and unfilled and tag == 'path' and set(child.attrib) == {'d'} and re.match(r'\s*M', child.get('d', '')):
+                if run is None:
+                    run = child
+                else:
+                    run.set('d', run.get('d') + ' ' + child.get('d'))
+                    group.remove(child)
+            elif tag != 'desc':
+                run = None
+                if tag == 'g':
+                    walk(child, unfilled, safe)
+
+    walk(root)
+    ET.register_namespace('', 'http://www.w3.org/2000/svg')
+    return ET.tostring(root, encoding='unicode')
+
+
+IMAGE_EXPORT_OPTIONS = {'page_size_mode': '1', 'drill_shape_opt': '0',
+                        'check_zones': True, 'themes': ['light', 'dark']}
+
+
+IMAGE_PALETTES = json.loads(pathlib.Path(__file__).with_name('image-palettes.json').read_text(encoding='utf-8'))
+IMAGE_RENDERER = os.environ.get('KICAD_IMAGE') or os.environ.get('KICAD_RENDERER_VERSION', 'local-unverified')
+
+
+def write_image_themes(config_home):
+    """Write renderer-owned KiCad 10 themes from the checked-in canonical inks."""
+    target = pathlib.Path(config_home, '10.0', 'colors')
+    target.mkdir(parents=True, exist_ok=True)
+    for theme, palette in IMAGE_PALETTES.items():
+        data = {'meta': {'name': 'kicad-review-' + theme, 'version': 5}}
+        for key, rgba in palette['colors'].items():
+            parent = data
+            *parts, leaf = key.split('.')
+            for part in parts:
+                parent = parent.setdefault(part, {})
+            parent[leaf] = 'rgb(%d, %d, %d)' % tuple(round(v * 255) for v in rgba[:3])
+        (target / f'kicad-review-{theme}.json').write_text(json.dumps(data, sort_keys=True), encoding='utf-8')
+
+
+def export_board_stats(pcb, out):
+    """Optional revision facts: publish validated JSON atomically, or a diagnostic."""
+    root = pathlib.Path(out)
+    root.mkdir(parents=True, exist_ok=True)
+    target, pending, marker = (root / name for name in ('stats.json', 'stats.pending.json', 'stats.json.error'))
+    for path in (target, pending, marker):
+        path.unlink(missing_ok=True)
+    command = ['kicad-cli', 'pcb', 'export', 'stats', '--format', 'json', '--units', 'mm', '-o', str(pending), pcb]
+    try:
+        # One synchronous export per revision, capped at 60 seconds; no retry queue.
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise ValueError('statistics export failed (%s): %s' %
+                             (result.returncode, (result.stderr or result.stdout).strip()[:500]))
+        if not pending.is_file():
+            raise ValueError('statistics export produced no output')
+        if not isinstance(json.loads(pending.read_text(encoding='utf-8')), dict):
+            raise ValueError('statistics export produced a non-object JSON value')
+        os.replace(pending, target)
+        return None
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        target.unlink(missing_ok=True)
+        pending.unlink(missing_ok=True)
+        error = ('statistics unavailable: ' + str(exc)).replace('\n', ' ')[:1000]
+        marker.write_text(error, encoding='utf-8')
+        return error
 
 
 def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
+    with tempfile.TemporaryDirectory() as cfg:
+        write_image_themes(cfg)
+        previous = os.environ.get('KICAD_CONFIG_HOME')
+        os.environ['KICAD_CONFIG_HOME'] = cfg
+        mapping = {}
+        try:
+            for theme in ('light', 'dark'):
+                suffix = '' if theme == 'light' else '-dark'
+                if os.path.exists(sch):
+                    kicad_cli('sch', 'export', 'svg', '--no-background-color', '--theme', 'kicad-review-' + theme,
+                              '-o', f'{out}/sch{suffix}', sch)
+                    resolved = set()
+                    for pg in sheet_pages(src_dir, name):
+                        light = pathlib.Path(page_svg(out, name, pg))
+                        path = light if theme == 'light' else pathlib.Path(out, 'sch-dark', light.name)
+                        if not path.is_file():
+                            raise ValueError('missing sheet export ' + str(path))
+                        if path in resolved or theme in mapping.get(pg['path'], {}):
+                            raise ValueError('ambiguous sheet export ' + str(path))
+                        resolved.add(path)
+                        path.write_text(simplify_sheet_svg(path.read_text(encoding='utf-8')), encoding='utf-8')
+                        mapping.setdefault(pg['path'], {})[theme] = str(path.relative_to(out))
+                if os.path.exists(pcb):
+                    # Drill marks off; page coordinates keep both revisions aligned in mm.
+                    kicad_cli('pcb', 'export', 'svg', '--mode-multi', '--exclude-drawing-sheet',
+                              '--page-size-mode', '1', '--drill-shape-opt', '0', '--check-zones',
+                              '--layers', ','.join(board_layers(pcb)), '--theme', 'kicad-review-' + theme,
+                              '-o', f'{out}/pcb{suffix}', pcb)
+            pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(out, 'sheet-images.json').write_text(json.dumps(mapping, sort_keys=True), encoding='utf-8')
+            if os.path.exists(pcb):
+                export_board_stats(pcb, out)  # Shared optional facts, once per revision, outside the theme loop.
+        finally:
+            if previous is None:
+                os.environ.pop('KICAD_CONFIG_HOME', None)
+            else:
+                os.environ['KICAD_CONFIG_HOME'] = previous
     if os.path.exists(sch):
-        kicad_cli("sch", "export", "svg", "--no-background-color", "-o", f"{out}/sch", sch)
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
             kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
     if os.path.exists(pcb):
-        # Drill marks off: with them every layer, even an empty one, is full of holes.
-        # Page-size mode 1 keeps page coordinates (mm from the page origin), so both revisions overlay exactly.
-        kicad_cli("pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "1",
-                  "--drill-shape-opt", "0", "-l", ",".join(board_layers(pcb)), "-o", f"{out}/pcb", pcb)
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
 
@@ -496,7 +624,7 @@ def render_tool_identity():
 
 
 def render_cache_complete(cache, p, side, settings):
-    if not cache or not (cache / ".complete").is_file():
+    if not cache or not image_cache_complete(cache, p, side):
         return False
     need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
     if need_still and pathlib.Path(board_path(p, side)).is_file():
@@ -521,6 +649,23 @@ def glb_input_digest(p, side):
     return digest.hexdigest()
 
 
+def image_export_identity(p, side):
+    """Explicit image inputs shared by host restore and the pinned renderer."""
+    pcb = board_path(p, side)
+    return {'renderer': IMAGE_RENDERER, 'options': IMAGE_EXPORT_OPTIONS,
+            'layers': board_layers(pcb) if os.path.isfile(pcb) else [], 'palettes': IMAGE_PALETTES}
+
+
+def image_cache_complete(cache, p, side):
+    """Legacy/unversioned renders cannot satisfy the image export contract."""
+    if IMAGE_RENDERER == 'local-unverified':
+        return False
+    try:
+        return json.loads((cache / '.complete').read_text(encoding='utf-8')) == image_export_identity(p, side)
+    except (OSError, ValueError):
+        return False
+
+
 def render_cache(p, side, det, settings):
     """Revision/project/tool/settings identity; outputs remain independent of report change IDs."""
     revision = det.get(side) or ""
@@ -531,6 +676,7 @@ def render_cache(p, side, det, settings):
               "glb": glb_argv("PCB", pathlib.Path(".")), "poster": poster_argv("PCB", pathlib.Path(".")),
               "board_models": glb_input_digest(p, side)}
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
+    identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -561,7 +707,7 @@ def cache_renders(args=None):
             out = pathlib.Path(f"review/{project_id(p['dir'])}/{side}")
             if cache and out.is_dir():
                 shutil.copytree(out, cache, dirs_exist_ok=True)
-                (cache / ".complete").write_text("complete")
+                (cache / '.complete').write_text(json.dumps(image_export_identity(p, side), sort_keys=True), encoding='utf-8')
 
 
 def cmd_render(args):
@@ -754,6 +900,61 @@ def box_of(pts, pad=0.5):
     return [min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad] if pts else None
 
 
+def symbol_primitives(libraries, identity, unit, style='1', trail=()):
+    """Drawing primitives of a library symbol for one unit and body style, with inherited (extends) bodies first."""
+    if identity in trail:
+        raise ValueError('symbol inheritance cycle: ' + ' -> '.join((*trail, identity)))
+    node = libraries[identity]
+    parent = val(node, 'extends')
+    out = symbol_primitives(libraries, parent, unit, style, (*trail, identity)) if parent else []
+    for child in findall(node, 'symbol'):
+        m = re.search(r'_(\d+)_(\d+)$', child[1])
+        if m and m[1] in ('0', str(unit)) and m[2] in ('0', str(style)):
+            out.extend(c for c in child[2:] if isinstance(c, list))
+    return out
+
+
+def symbol_geometry(parts):
+    """Conservative bounds (coords), pin records and an approximate flag for symbol primitives in millimetres."""
+    coords, pins, approximate = [], [], False
+    for n in parts:
+        kind = n[0]
+        if kind == 'rectangle':
+            a, b = find(n, 'start'), find(n, 'end')
+            coords.extend([[float(a[1]), float(a[2])], [float(b[1]), float(b[2])],
+                           [float(a[1]), float(b[2])], [float(b[1]), float(a[2])]])
+        elif kind in ('polyline', 'bezier'):
+            coords.extend([list(p) for p in points(n)])
+            approximate |= kind == 'bezier'  # conservative control-point hull
+        elif kind == 'circle':
+            c, r = find(n, 'center'), float(val(n, 'radius'))
+            coords.extend([[float(c[1]) + dx * r, float(c[2]) + dy * r] for dx in (-1, 1) for dy in (-1, 1)])
+        elif kind == 'arc':
+            a, m, b = [[float(v) for v in find(n, k)[1:3]] for k in ('start', 'mid', 'end')]
+            ax, ay = a
+            mx, my = m
+            bx, by = b
+            d = 2 * (ax * (my - by) + mx * (by - ay) + bx * (ay - my))
+            if abs(d) < 1e-12:
+                coords.extend([a, m, b])
+            else:
+                aa = ax * ax + ay * ay
+                mm = mx * mx + my * my
+                bb = bx * bx + by * by
+                cx = (aa * (my - by) + mm * (by - ay) + bb * (ay - my)) / d
+                cy = (aa * (bx - mx) + mm * (ax - bx) + bb * (mx - ax)) / d
+                r = math.hypot(ax - cx, ay - cy)
+                coords.extend([[cx + dx * r, cy + dy * r] for dx in (-1, 1) for dy in (-1, 1)])
+            approximate = True
+        elif kind == 'pin':
+            x, y, *angle = at(n)
+            theta = math.radians(angle[0] if angle else 0)
+            length = float(val(n, 'length', 0))
+            coords.extend([[x, y], [x + math.cos(theta) * length, y + math.sin(theta) * length]])
+            pins.append({'number': str(val(n, 'number', '')), 'name': str(val(n, 'name', '')), 'x': x, 'y': y})
+    return coords, pins, approximate
+
+
 def properties(node):
     return {p[1]: p[2] for p in findall(node, "property") if len(p) > 2}
 
@@ -840,6 +1041,118 @@ def sch_objects(proj_dir, name):
                 objs[key] = {"kind": kind.replace("_", " "), "ref": "", "props": {"position": fmt_at(at(n))},
                              "pos": at(n), "where": where}
     return objs
+
+
+def sheet_point(point, placed):
+    """A library-symbol point (y up) as a sheet point (y down) for the symbol's placement: mirror, rotate, translate."""
+    x, y = map(float, point[:2])
+    mirror = val(placed, 'mirror', '')
+    if mirror == 'x':
+        y = -y
+    elif mirror == 'y':
+        x = -x
+    pos = at(placed)
+    angle = math.radians(pos[2] if len(pos) > 2 else 0)
+    c, s = math.cos(angle), math.sin(angle)
+    return [round(pos[0] + c * x - s * y, 6),
+            round(pos[1] - s * x - c * y, 6)]
+
+
+def hotspot_box(points):
+    if not points:
+        return None
+    return [min(p[0] for p in points), min(p[1] for p in points),
+            max(p[0] for p in points), max(p[1] for p in points)]
+
+
+def library_index(lib_symbols):
+    """Embedded library symbols by qualified name and, when unique, by unqualified name (`extends` uses the latter)."""
+    libraries = {str(n[1]): n for n in findall(lib_symbols, 'symbol')}
+    for key in list(libraries):
+        short = key.split(':')[-1]
+        matches = [v for k, v in libraries.items() if k.split(':')[-1] == short]
+        if short not in libraries and len(matches) == 1:
+            libraries[short] = libraries[key]
+    return libraries
+
+
+def sheet_hotspots(proj_dir, name):
+    """Per-sheet-instance hotspot manifest: symbols with bounding boxes and pin endpoints, labels, no-connects, wires (mm)."""
+    views, warnings = [], []
+    pages = sheet_pages(proj_dir, name)
+    if any(p['path'].count('/') > 33 for p in pages):
+        raise ValueError('recursive schematic hierarchy')
+    root_uuid = None
+    for page in pages:
+        view = {'sheet': page['path'], 'file': page['file'], 'viewBox': None,
+                'elements': [], 'labels': [], 'noConnects': [], 'wires': []}
+        views.append(view)
+        full = pathlib.Path(proj_dir, page['file'])
+        if not full.is_file():
+            warnings.append({'sheet': page['path'], 'reason': 'sheet file missing'})
+            continue
+        root = parse_sexpr(full.read_text(encoding='utf-8'))
+        if page['parent'] is None:
+            root_uuid = val(root, 'uuid')
+        libraries = library_index(find(root, 'lib_symbols') or [])
+        # Instance paths are the root UUID plus the sheet UUID path; without a root identity use the properties.
+        inst_path = ('/' + str(root_uuid) + page['path'].rstrip('/')) if root_uuid else None
+        for n in root[1:]:
+            if not isinstance(n, list) or not n:
+                continue
+            uid = val(n, 'uuid')
+            if not uid:
+                continue
+            uid, kind = str(uid), n[0]
+            if kind == 'symbol':
+                props = {str(k): str(v) for k, v in properties(n).items()}
+                unit = str(val(n, 'unit', '1'))
+                ref = props.get('Reference', '?')
+                if inst_path:
+                    projects = findall(find(n, 'instances') or [], 'project')
+                    # Prefer this project's record; renamed projects keep older records for the same path.
+                    for project in sorted(projects, key=lambda p: p[1] != name):
+                        paths = [p for p in findall(project, 'path') if p[1].rstrip('/') == inst_path]
+                        if paths:
+                            ref = str(val(paths[0], 'reference', ref))
+                            break
+                props['Reference'] = ref
+                if not at(n):
+                    warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'symbol has no position'})
+                    continue
+                lib_id = str(val(n, 'lib_id', ''))
+                style = str(val(n, 'body_style', val(n, 'convert', '1')))
+                try:
+                    coords, pins, approximate = symbol_geometry(symbol_primitives(
+                        libraries, str(val(n, 'lib_name', lib_id)), unit, style))
+                except KeyError:
+                    coords, pins, approximate = [], [], True
+                    warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'library unavailable'})
+                if not coords:
+                    coords, approximate = [[-1, -1], [1, 1]], True
+                placed_pins = []
+                for pin in pins:
+                    x, y = sheet_point([pin['x'], pin['y']], n)
+                    placed_pins.append(dict(pin, x=x, y=y))
+                view['elements'].append({
+                    'uuid': uid, 'ref': ref, 'unit': unit, 'lib_id': lib_id,
+                    'value': props.get('Value', ''), 'footprint': props.get('Footprint', ''),
+                    'datasheet': props.get('Datasheet', ''), 'fields': props,
+                    'bbox': hotspot_box([sheet_point(p, n) for p in coords]), 'pins': placed_pins,
+                    'confidence': 'approximate' if approximate else 'exact'})
+            elif kind in ('label', 'global_label', 'hierarchical_label', 'no_connect'):
+                pos = at(n)
+                if not pos:
+                    continue
+                row = {'uuid': uid, 'x': pos[0], 'y': pos[1]}
+                if kind == 'no_connect':
+                    view['noConnects'].append(row)
+                else:
+                    view['labels'].append(dict(row, text=str(n[1]), kind=kind))
+            elif kind in ('wire', 'bus'):
+                pts = [list(p) for p in points(n)]
+                view['wires'].append({'uuid': uid, 'points': pts, 'bbox': hotspot_box(pts)})
+    return {'version': 1, 'units': 'mm', 'views': views, 'warnings': warnings}
 
 
 def pcb_objects(path):
@@ -1450,7 +1763,9 @@ def board_geometry(pcb_path):
                     counts[child[1]] += 1
                     child_uid = val(child, "uuid") or val(child, "tstamp") or f"{uid}/pad:{child[1]}:{counts[child[1]]}"
                     geometry, ls = pad_geometry(child, node, fp_at, child_uid)
-                    children.append(emit("pad", child_uid, uid, ref, ls, net_id(child), side, "pads", geometry, parent["hidden"] or hidden(child)))
+                    record = emit("pad", child_uid, uid, ref, ls, net_id(child), side, "pads", geometry, parent["hidden"] or hidden(child))
+                    record.update(pin=child[1], attr=child[2])
+                    children.append(record)
                 elif (child_kind in ("fp_text", "fp_text_box", "fp_line", "fp_arc", "fp_circle",
                                       "fp_rect", "fp_poly", "fp_curve", "image", "zone", "dimension", "table")
                       or (child_kind == "property" and all(find(child, key) for key in ("at", "layer", "effects")))):
@@ -1472,6 +1787,77 @@ def board_geometry(pcb_path):
             raise ValueError("board geometry outside supported integer range")
     check_numbers(scene)
     return scene
+
+
+def stats_number(value):
+    if value is None:
+        return None
+    m = re.match(r'^\s*([-+]?\d+(?:\.\d+)?)', str(value))
+    return float(m.group(1)) if m else None
+
+
+def board_inspect(scene, stats=None):
+    names = {n['id']: n['name'] for n in scene['nets']}
+    out = {'version': 1, 'units': 'mm', 'layers': scene['copperStack'],
+           'nets': [{'name': n['name'], 'netClass': None} for n in scene['nets'] if n['name']],
+           'pads': [], 'tracks': [], 'vias': [], 'footprintGraphics': [],
+           'warnings': list(scene['warnings']),
+           'truncated': dict.fromkeys(('nets', 'pads', 'tracks', 'vias', 'footprintGraphics'), False)}
+    unsupported = dict.fromkeys(('pads', 'vias', 'tracks', 'footprintGraphics'), 0)
+    length = 0.0
+    for o in scene['objects']:
+        # Scene tracks and arcs carry the net name; pads and vias carry the numeric net id.
+        net = o.get('net')
+        common = {k: o.get(k) for k in ('uuid', 'changeUuid', 'layers', 'side')}
+        common.update(net=names.get(net, net if isinstance(net, str) else ''), hidden=bool(o.get('hidden')),
+                      geometry=o['geometry'])
+        geom = o['geometry']
+        layers = o.get('layers') or []
+        if o['kind'] in ('track', 'arc'):
+            segments = geom.get('segments', [])
+            if not segments:
+                unsupported['tracks'] += 1
+            length += sum(math.hypot(s[2] - s[0], s[3] - s[1]) / 1000 for s in segments)
+            for i, s in enumerate(segments):
+                out['tracks'].append(dict(common, kind=o['kind'], segment=i, layer=layers[0] if layers else '',
+                                          x1=s[0] / 1000, y1=s[1] / 1000, x2=s[2] / 1000, y2=s[3] / 1000, width=s[4] / 1000))
+        elif o['kind'] in ('pad', 'via'):
+            if not geom.get('primitive'):
+                unsupported['pads' if o['kind'] == 'pad' else 'vias'] += 1
+            elif o['kind'] == 'via':
+                p, drill = geom['primitive'], geom.get('drill')
+                out['vias'].append(dict(common, x=p['center'][0] / 1000, y=p['center'][1] / 1000,
+                                        diameter=p['size'][0] / 1000,
+                                        fromLayer=layers[0] if layers else '', toLayer=layers[-1] if layers else '',
+                                        drill=drill['size'][0] / 1000 if drill else None))
+            else:
+                p, drill = geom['primitive'], geom.get('drill')
+                out['pads'].append(dict(common, ref=o.get('ref'), pin=o.get('pin', ''), attr=o.get('attr', ''),
+                                        x=p['center'][0] / 1000, y=p['center'][1] / 1000,
+                                        width=p['size'][0] / 1000, height=p['size'][1] / 1000,
+                                        shape=p['shape'], angle=p['angle'] / 1000,
+                                        radiusRatio=p.get('radius', 0) / min(p['size']) if min(p['size']) else 0,
+                                        custom=geom.get('rings', []), hole=drill))
+        elif o.get('ref') and o['kind'] in ('shape', 'text'):
+            if geom:
+                out['footprintGraphics'].append(dict(common, ref=o['ref'], kind=o['kind']))
+            else:
+                unsupported['footprintGraphics'] += 1
+    out['unsupported'] = unsupported
+    board = (stats or {}).get('board', {})
+    width, height = stats_number(board.get('width')), stats_number(board.get('height'))
+    cli = {key: (stats or {}).get(key) for key in ('pads', 'vias')}
+    def counted(key, fallback):
+        group = cli[key]
+        if isinstance(group, dict) and group:
+            return sum(v for v in group.values() if isinstance(v, (int, float)) and not isinstance(v, bool))
+        return fallback
+    out['stats'] = {'copperLayers': len(out['layers']), 'routedLengthMm': round(length, 6),
+                    'boardSizeMm': [width, height] if board.get('has_outline') is True and width is not None and height is not None else None,
+                    'padCount': counted('pads', len(out['pads'])), 'viaCount': counted('vias', len(out['vias'])),
+                    'netCount': len(out['nets']),
+                    'countsSource': 'kicad-cli' if all(isinstance(v, dict) and v for v in cli.values()) else 'inspection-graph'}
+    return out
 
 
 def pad_points(fp, a):
@@ -2732,16 +3118,58 @@ def svg_body(path):
         return re.sub(r"<title>.*?</title>", "", fh.read(), count=1, flags=re.S)
 
 
-def svg_size(text):
+def comparison_svg(text, side, schematic=False):
+    """Tint inside the decoded image, preserving custom source paints and alpha."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(text)
+    ns = '{http://www.w3.org/2000/svg}'
+    uid = 'kr-image-' + side
+    rgb = (.85, .1, .15) if side == 'base' else (.1, .6, .2)
+    alpha = '-.3 -.59 -.11 1 0' if schematic else '0 0 0 1 0'
+    defs = ET.SubElement(root, ns + 'defs')
+    box = svg_viewbox(text)
+    filt = ET.SubElement(defs, ns + 'filter', {
+        'id': uid, 'color-interpolation-filters': 'sRGB', 'filterUnits': 'userSpaceOnUse',
+        'x': str(box[0]), 'y': str(box[1]), 'width': str(box[2]), 'height': str(box[3]),
+    })
+    matrix = ' '.join(f'0 0 0 0 {v}' for v in rgb) + ' ' + alpha
+    ET.SubElement(filt, ns + 'feColorMatrix', {'type': 'matrix', 'values': matrix})
+    group = ET.Element(ns + 'g', {'filter': f'url(#{uid})'})
+    for child in list(root):
+        if child is defs or child.tag.rsplit('}', 1)[-1] in ('defs', 'title', 'desc'):
+            continue
+        root.remove(child)
+        group.append(child)
+    root.append(group)
+    # Keep SVG namespace explicit without mutating ElementTree's global registry.
+    for attribute in list(root.attrib):
+        if attribute == 'xmlns' or attribute.startswith('{http://www.w3.org/2000/xmlns/}'):
+            del root.attrib[attribute]
+    # Change SVG tag names only; namespace-like text and attribute values stay untouched.
+    for node in root.iter():
+        if isinstance(node.tag, str) and node.tag.startswith(ns):
+            node.tag = node.tag[len(ns):]
+    root.attrib = {'xmlns': ns[1:-1], **root.attrib}
+    return ET.tostring(root, encoding='unicode')
+
+
+def svg_viewbox(text):
     match = re.search(r"viewBox\s*=\s*[\"']([^\"']+)[\"']", text)
     values = [float(v) for v in re.split(r"[\s,]+", match[1].strip())] if match else []
     if len(values) != 4 or not all(math.isfinite(v) for v in values) or min(values[2:]) <= 0:
         raise ValueError("SVG needs a finite viewBox with positive width and height")
-    return values[2:]
+    return values
+
+
+def svg_size(text):
+    return svg_viewbox(text)[2:]
 
 
 def has_drawing(text):
     return re.search(r"<(path|polyline|polygon|circle|rect|line|ellipse|text)\b", text) is not None
+
+
+IMAGE_ASSET_LIMITS = {'svg': 8 * 1024 * 1024, 'json': 4 * 1024 * 1024}
 
 
 def add_blob(blobs, content):
@@ -2817,6 +3245,26 @@ def attach3d(board, out, blobs):
         board['coverage3d'] = coverage
 
 
+def image_pair(base, head):
+    return {'base': base, 'head': head}
+
+
+def write_image_assets(blobs, assets, directory):
+    # Validate and decode the complete batch before publishing any entry.
+    pending = []
+    for key, meta in assets.items():
+        if (not re.fullmatch(r'[0-9a-f]{12}', key)
+                or not isinstance(meta, dict)
+                or meta.get('kind') not in ('svg', 'json')
+                or key not in blobs):
+            raise ValueError('invalid image asset')
+        pending.append((f"{key}.{meta['kind']}.gz", base64.b64decode(blobs[key], validate=True)))
+    dest = pathlib.Path(directory)
+    dest.mkdir(parents=True, exist_ok=True)
+    for filename, payload in pending:
+        (dest / filename).write_bytes(payload)
+
+
 def model3d_missing(out, objs):
     """Missing 3D models from KiCad's export log and footprints without a model declaration."""
     missing = {}
@@ -2844,12 +3292,36 @@ def model3d_missing(out, objs):
     return rows
 
 
+def read_optional_json(path, default=None):
+    return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
+
+
 def build_project(p, blobs, settings, waivers=None, change_offset=0):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
+    theme_paths = {side: read_optional_json(f'{out}/{side}/sheet-images.json', {}) for side in sides}
+    pages_by_side = {side: sheet_pages(posixpath.join(side, p['dir']), p['name']) for side in sides}
+    hotspot_ids = image_pair(None, None)
+    for side in sides:
+        src = posixpath.join(side, p['dir'])
+        source = pathlib.Path(src, p['name'] + '.kicad_sch')
+        # Legacy fixtures may lack a root identity. Keep artwork without inventing anchors.
+        if source.is_file() and val(parse_sexpr(source.read_text()), 'uuid'):
+            manifest = sheet_hotspots(src, p['name'])
+            page_by_path = {page['path']: page for page in pages_by_side[side]}
+            for view in manifest['views']:
+                rel = theme_paths[side].get(view['sheet'], {}).get('light')
+                page = page_by_path.get(view['sheet'])
+                path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', p['name'], page)
+                text = svg_body(path)
+                if text:
+                    view['viewBox'] = svg_viewbox(text)
+            payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
+            pathlib.Path(out, side, 'sheet-hotspots.json').write_text(payload)
+            hotspot_ids[side] = add_blob(blobs, payload)
     pages = {}
     for side in sides:
-        for pg in sheet_pages(posixpath.join(side, p["dir"]), p["name"]):
+        for pg in pages_by_side[side]:
             entry = pages.setdefault(pg["path"], {**pg, "svg": {}})
             entry.update(pg)
             entry["svg"][side] = svg_body(page_svg(f"{out}/{side}", p["name"], pg))
@@ -2861,6 +3333,15 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         pg["status"] = "added" if b is None and h else "removed" if h is None and b else "modified" if b != h else "unchanged"
         pg["size"] = svg_size(h or b)
         pg["svg"] = {"base": add_blob(blobs, b), "head": add_blob(blobs, h)}
+        pg['hotspots'] = {side: hotspot_ids[side] if texts.get(side) is not None else None for side in ('base', 'head')}
+        pg['svgThemes'] = {}
+        for theme in ('light', 'dark'):
+            pair = {}
+            for side in ('base', 'head'):
+                rel = theme_paths.get(side, {}).get(pg['path'], {}).get(theme)
+                text = svg_body(str(pathlib.Path(out, side, rel))) if rel else texts.get(side)
+                pair[side] = add_blob(blobs, text) if texts.get(side) is not None else None
+            pg['svgThemes'][theme] = pair
         sheets.append(pg)
     layers, changed = [], False
     names = sorted({f for s in sides if os.path.isdir(f"{out}/{s}/pcb") for f in os.listdir(f"{out}/{s}/pcb")})
@@ -2877,10 +3358,29 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         board["layers"] = [{"name": l["name"], "changed": l["base"] != l["head"],
                             "svg": {"base": add_blob(blobs, l["base"]), "head": add_blob(blobs, l["head"])}}
                            for l in layers]
+    for row in board['layers']:
+        row['svgThemes'] = {}
+        for theme, folder in (('light', 'pcb'), ('dark', 'pcb-dark')):
+            pair = {}
+            for side in ('base', 'head'):
+                path = pathlib.Path(out, side, folder, p['name'] + '-' + row['name'] + '.svg')
+                pair[side] = add_blob(blobs, svg_body(str(path))) if row['svg'][side] and path.is_file() else row['svg'][side]
+            row['svgThemes'][theme] = pair
+        canonical = row['name'].replace('_', '.')
+        row['sourceRGBThemes'] = {t: IMAGE_PALETTES[t]['sourceRGB'].get(canonical, [255, 255, 255]) for t in ('light', 'dark')}
+    for rows, schematic in ((sheets, True), (board['layers'], False)):
+        for row in rows:
+            pair = {}
+            for side in ('base', 'head'):
+                key = row['svg'][side]
+                text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
+                pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
+            row['svgCompare'] = pair
     objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
     changes = diff_objects(objs["base"], objs["head"])
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
+    inspect = image_pair(None, None)
     geometry = {}
     pcbs = {side: posixpath.join(side, p["dir"], p["name"] + ".kicad_pcb") for side in ("base", "head")}
     same_board = all(os.path.isfile(f) for f in pcbs.values()) and filecmp.cmp(pcbs["base"], pcbs["head"], shallow=False)
@@ -2889,6 +3389,10 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         geometry[side] = None
         if side == "head" and same_board:
             geometry[side] = geometry["base"]
+            inspect[side] = inspect["base"]
+            if inspect[side]:
+                pathlib.Path(out, side).mkdir(parents=True, exist_ok=True)
+                pathlib.Path(out, side, "board-inspect.json").write_bytes(pathlib.Path(out, "base", "board-inspect.json").read_bytes())
             continue
         if os.path.isfile(pcb):
             try:
@@ -2906,6 +3410,16 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 geometry[side] = add_blob(blobs, json.dumps(scene, separators=(",", ":"), sort_keys=True))
             except Exception as exc:  # any unforeseen board construct falls back to SVG
                 print(f"{pcb}: geometry unavailable; retaining SVG: {exc!r}", file=sys.stderr)
+                continue
+            try:
+                manifest = board_inspect(scene, read_optional_json(f'{out}/{side}/stats.json'))
+                payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
+                pathlib.Path(out, side).mkdir(parents=True, exist_ok=True)
+                pathlib.Path(out, side, 'board-inspect.json').write_text(payload)
+                inspect[side] = add_blob(blobs, payload)
+            except Exception as exc:
+                print(f"{pcb}: inspection unavailable; retaining geometry and SVG: {exc!r}", file=sys.stderr)
+    board["inspect"] = inspect
     if any(geometry.values()):
         board["geometry"] = geometry
     parts = None
@@ -2976,6 +3490,51 @@ def review_links(env, det):
 UI_DIR = posixpath.join(posixpath.dirname(os.path.abspath(__file__)), "ui")
 
 
+def image_asset_declarations(projects):
+    """Declare only optional image capabilities; legacy drawings stay embedded."""
+    assets = {}
+    # Shared content has one descriptor. Prefer board roles explicitly, not by
+    # traversal order, preserving the established layer/inspection filenames.
+    priority = {'sheet.svg': 0, 'layer.svg': 1,
+                'sheet-hotspots.json': 0, 'board-inspect.json': 1, 'comparison.svg': 2}
+
+    def declare(pair, kind, name):
+        for key in (pair or {}).values():
+            if key:
+                previous = assets.get(key)
+                if previous and previous['kind'] != kind:
+                    raise ValueError('conflicting image asset kinds')
+                if not previous or priority[name] > priority[previous['name']]:
+                    assets[key] = {'kind': kind, 'name': name}
+
+    for project in projects:
+        for sheet in project.get('sheets', []):
+            declare(sheet.get('hotspots'), 'json', 'sheet-hotspots.json')
+            declare(sheet.get('svgCompare'), 'svg', 'comparison.svg')
+            for pair in sheet.get('svgThemes', {}).values():
+                declare(pair, 'svg', 'sheet.svg')
+        declare(project.get('board', {}).get('inspect'), 'json', 'board-inspect.json')
+        for layer in project.get('board', {}).get('layers', []):
+            declare(layer.get('svgCompare'), 'svg', 'comparison.svg')
+            for pair in layer.get('svgThemes', {}).values():
+                declare(pair, 'svg', 'layer.svg')
+    return assets
+
+
+def finalize_report(data, assets_dir):
+    """Share hosted declarations and sidecars without removing any offline blob."""
+    data['assets'] = image_asset_declarations(data['projects'])
+    for key, meta in list(data['assets'].items()):
+        size = len(gzip.decompress(base64.b64decode(data['blobs'][key], validate=True)))
+        cap = IMAGE_ASSET_LIMITS[meta['kind']]
+        if size > cap:
+            print(f"Warning: {meta['kind']} asset {key} decoded size {size} exceeds {cap} bytes; keeping inline.", file=sys.stderr)
+            del data['assets'][key]
+    write_image_assets(data['blobs'], data['assets'], assets_dir)
+    payload = json.dumps(data, separators=(',', ':')).replace('<', '\\u003c')
+    return inline_page(f'window.REVIEW_DATA = {payload};')
+
+
 def inline_page(data_js):
     """ui/review.html with its CSS, the run's data and its JS inlined: one file that works offline."""
     read = lambda name: open(posixpath.join(UI_DIR, name), encoding="utf-8").read()
@@ -2992,9 +3551,9 @@ def inline_page(data_js):
         worker_tag = f'<script type="application/octet-stream" id="three-decode-worker">{worker}</script>'
         prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script>{worker_tag}<script>\n{read("three-parts.js")}</script><script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
-    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js", "three-studio.js"):
+    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js", "three-studio.js", "image-view.js"):
         page = page.replace(f'<script src="{asset}"></script>', f'<script>\n{read(asset)}</script>')
-    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-marks\.js|board-diff\.js|three-studio\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
+    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-marks\.js|board-diff\.js|three-studio\.js|image-view\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
 
@@ -3119,8 +3678,7 @@ def cmd_report(args):
         data["waivers"] = {"stale": [e for key, e in waivers["active"].items() if key not in used],
                            "expired": waivers["expired"], "proposed": waivers["proposed"], "invalid": waivers["invalid"]}
     data["blobs"] = blobs
-    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")  # no </script> or <!-- in the data
-    html = inline_page(f"window.REVIEW_DATA = {payload};")
+    html = finalize_report(data, "review/assets")
     with open("review/kicad-review.html", "w", encoding="utf-8") as fh:
         fh.write(html)
     print(f"review/kicad-review.html: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
