@@ -3757,7 +3757,7 @@ with tempfile.TemporaryDirectory() as d:
         loaded = {"active": {("drc", k): {**entry, "check": "drc", "match": k}, ("erc", entry["match"]): entry},
                   "expired": wd["waivers"]["expired"], "proposed": [entry], "invalid": ["bad entry"]}
         with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.load_waivers", return_value=loaded), \
-             patch("kicad_review.build_project", side_effect=lambda *args: {"checks": [{"name": "drc", "violations": [{"waiver_key": k, "waived": {"reason": "intended"}}], "status": "pass"}], "changes": []}), \
+             patch("kicad_review.build_project", side_effect=lambda *args, **kwargs: {"checks": [{"name": "drc", "violations": [{"waiver_key": k, "waived": {"reason": "intended"}}], "status": "pass"}], "changes": []}), \
              patch("sys.stdout", new_callable=io.StringIO):
             kicad_review.cmd_report(None)
         data = json.loads(pathlib.Path("review/data.json").read_text())
@@ -6362,3 +6362,64 @@ with patch("kicad_review.side_context", return_value={"parts": [], "nets": [], "
                                  {"base": "a" * 40, "head": "b" * 40}, check_settings, summary=summary_in)
         assert (rec["headline"], rec["net_changes"]) == expected and rec["revisions"]["base"] is None
 print("ok ask board facts checks changes size")
+
+# Ask (spec 09): report writes the context beside the report and omits Ask data and exports when Ask is off; shared inlined assets may change.
+def run_report(ask_on):
+    with tempfile.TemporaryDirectory() as t:
+        old = os.getcwd(); os.chdir(t)
+        try:
+            project = {"dir": "P", "name": "P", "status": "modified"}
+            net = lambda r: netlist({"U1": ("MCU", "", "MCU:M"), "R1": (r, "", "Device:R")},
+                                    {"12": [("U1", "1", "PA1", "bidirectional"), ("R1", "1", "", "passive")]})
+            write(t, {"review/detect.json": json.dumps({"base": "b" * 40, "head": "c" * 40, "reason": "fixture", "projects": [project]}),
+                      "review/P/base/netlist.net": net("10k"), "review/P/head/netlist.net": net("4.7k")})
+            ask_symbol = lambda value: {**sym("R1", value, "C1"), "where": {"sheet": "/"}, "props": {**sym("R1", value, "C1")["props"], "reference": "R1"}}
+            objects = {"base": {"/r": ask_symbol("10k")}, "head": {"/r": ask_symbol("4.7k")}}
+            rows = [{"action": "modified", "kind": "symbol", "ref": "R1", "where": {"sheet": "/"}, "pos": None, "box": None, "changes": [["Value", "10k", "4.7k"]]}]
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS); settings["ask"]["enabled"] = ask_on
+            out = f"{t}/gh-output"
+            real_build_project = kr.build_project
+            def build_with_report_images(p, blobs, *args, **kwargs):
+                result = real_build_project(p, blobs, *args, **kwargs)
+                board = result.setdefault("board", {})
+                board["pcbdraw"] = {"head": {"front": "ask-pcbdraw-front", "back": "ask-pcbdraw-back", "note": ""}}
+                board["poster3d"] = {"head": "ask-poster3d"}
+                blobs.update({"ask-pcbdraw-front": "ASK_FRONT_IMAGE_SENTINEL", "ask-pcbdraw-back": "ASK_BACK_IMAGE_SENTINEL", "ask-poster3d": "ASK_POSTER_IMAGE_SENTINEL"})
+                return result
+            # project_pair passes its issues list as a third argument, so the stand-in accepts it (as the opted-out report test does).
+            with patch("kicad_review.build_project", side_effect=build_with_report_images), \
+                 patch("kicad_review.project_objects", side_effect=lambda path, name, issues=None: objects[path.split("/")[0]]), \
+                 patch("kicad_review.diff_objects", return_value=rows), patch("kicad_review.project_checks", return_value=[]), \
+                 patch("kicad_review.load_settings", return_value=settings), patch.dict(os.environ, {"GITHUB_OUTPUT": out, "GITHUB_REPOSITORY": "o/r"}):
+                kr.cmd_report(None)
+            ctx = json.loads(pathlib.Path("review/design-context.json").read_text(encoding="utf-8")) if os.path.exists("review/design-context.json") else None
+            # data.json drops the blobs table, so the report-only image blobs are read from the embedded payload.
+            embedded = json.loads(pathlib.Path("review/kicad-review.html").read_text().split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
+            data = {**json.loads(pathlib.Path("review/data.json").read_text()), "blobs": embedded["blobs"]}
+            return ctx, data, pathlib.Path(out).read_text()
+        finally:
+            os.chdir(old)
+ctx, data, outputs = run_report(True)
+assert data["projects"][0]["board"]["pcbdraw"]["head"]["front"] == "ask-pcbdraw-front"
+assert data["projects"][0]["board"]["poster3d"]["head"] == "ask-poster3d"
+assert data["blobs"]["ask-poster3d"] == "ASK_POSTER_IMAGE_SENTINEL"
+context_text = json.dumps(ctx)
+assert all(token not in context_text for token in ('"pcbdraw"', '"poster3d"', '"blobs"', "ask-pcbdraw-front", "ask-pcbdraw-back", "ask-poster3d", "ASK_FRONT_IMAGE_SENTINEL", "ASK_BACK_IMAGE_SENTINEL", "ASK_POSTER_IMAGE_SENTINEL")), "report image references and blobs must never enter model context"
+head = ctx["projects"][0]["revisions"]["head"]
+assert ctx["version"] == 1 and ctx["kind"] == "kicad-review-design-context" and ctx["head"] == "c" * 40 and ctx["truncated"] is False
+assert head["nets"][0]["id"] == "12" and head["nets"][0]["pins"] == ["U1.1", "R1.1"] and head["parts"][0]["value"] == "4.7k"
+assert ctx["projects"][0]["revisions"]["base"]["parts"][0]["value"] == "10k" and ctx["projects"][0]["changes"]["rows"][0]["ref"] == "R1"
+assert head["revision"] == "c"*40 and "sheets" in head
+assert ctx["projects"][0]["revisions"]["base"]["revision"] == "b"*40
+assert "sheets" in ctx["projects"][0]["revisions"]["base"]
+assert "ask=true\n" in outputs and "context_name=kicad-review-bbbbbbb-ccccccc-pass.context.json\n" in outputs
+assert data["settings"]["ask"] == {"enabled": True} and data["projects"][0]["ask"] == {"nets": {"base": {"12": {"fallback_ref":"U1"}}, "head": {"12": {"fallback_ref":"U1"}}}} and "objects" in data["projects"][0]
+ctx_off, data_off, outputs_off = run_report(False)
+assert ctx_off is None and "ask=false\n" in outputs_off and "context_name" not in outputs_off
+assert "ask" not in data_off["settings"] and "ask" not in data_off["projects"][0] and "objects" not in data_off["projects"][0], "Ask off adds no optional Ask data"
+with tempfile.TemporaryDirectory() as t:
+    write(t, {"base/netlist.net": netlist({}, {"REMOVED":[("U1","1","","passive")]}), "head/netlist.net": "(export (components) (nets))"})
+    assert "REMOVED" in kr.ask_index(f"{t}/base")["nets"] and "REMOVED" not in kr.ask_index(f"{t}/head")["nets"]
+    write(t, {"base/netlist.net.error":"failed after partial output"})
+    assert kr.ask_index(f"{t}/base")["nets"] == {}
+print("ok ask context is written beside the report")

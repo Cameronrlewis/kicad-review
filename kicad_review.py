@@ -3739,6 +3739,13 @@ def project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap,
             "revisions": revisions, "changes": context_changes(changes), "checks": complete_context_checks(checks, settings, bool(sheet_pages(posixpath.join("head", p["dir"]), p["name"])), os.path.isfile(pcbs["head"]))}
 
 
+def ask_index(side_dir):
+    """Revision-scoped exact names with a first-part fallback only when board geometry is unavailable."""
+    ctx = side_context(side_dir, {})
+    if not ctx["netlist_available"]: return {"nets": {}}
+    return {"nets": {n["id"]: {"fallback_ref": n["pins"][0].rsplit(".", 1)[0] if n["pins"] else None} for n in ctx["nets"]}}
+
+
 def context_bytes(doc):
     return len(json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
@@ -3997,7 +4004,8 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
-def build_project(p, blobs, settings, waivers=None, change_offset=0):
+def build_project(p, blobs, settings, waivers=None, change_offset=0, *, context=None):
+    """`context`, when a dict, receives this project's Ask context builder under p["dir"]. 06 adds the keyword-only `single` beside it."""
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
     theme_paths = {side: read_optional_json(f'{out}/{side}/sheet-images.json', {}) for side in sides}
@@ -4143,18 +4151,27 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                                             if has[side] and not board["model3d"][side]}})
         board["no_model"] = model3d_missing(out, objs)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
-        settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
+        settings.get(name, {}).get("enabled") for name in ("threads", "issues", "inventory", "libraries", "ask")) else None
     libraries = None
     if settings["libraries"]["enabled"]:
         roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
         items = {side: library_items(root) for side, root in roots.items()}
         libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
+    checks = project_checks(p, settings, objs, waivers)
+    ask = None
+    if context is not None:
+        with open("review/detect.json", encoding="utf-8") as fh: revision_shas = json.load(fh)
+        # Rebuilt from bounded facts, never from the report payload or its blobs. 03 Task 7 passes summary=project["summary"] here; until then headline is null and net_changes unavailable.
+        context[p["dir"]] = lambda net_cap, pin_cap: project_context(p, out, objs, sheets, pcbs, changes, checks, sides, net_cap, pin_cap, revision_shas, settings)
+        # An absent side is null, never {}.
+        ask = {"nets": {side: (ask_index(f"{out}/{side}")["nets"] if side in sides else None) for side in ("base", "head")}}
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": changes, "checks": project_checks(p, settings, objs, waivers),
+            "changes": changes, "checks": checks,
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
-            **({"objects": index} if index is not None else {})}
+            **({"objects": index} if index is not None else {}),
+            **({"ask": ask} if ask is not None else {})}
 
 
 def assign_ids(projects):
@@ -4335,6 +4352,8 @@ def cmd_report(args):
     blobs = {}
     env = os.environ
     settings = load_settings()
+    ask_on = bool(settings.get("ask", {}).get("enabled"))
+    builders = {} if ask_on else None
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
                        if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "ask") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
@@ -4357,7 +4376,7 @@ def cmd_report(args):
     data["projects"] = []
     change_offset = 0
     for p in det["projects"]:
-        project = build_project(p, blobs, settings, waivers, change_offset)
+        project = build_project(p, blobs, settings, waivers, change_offset, context=builders)
         data["projects"].append(project)
         change_offset += len(project["changes"])
     if settings.get("digikey", {}).get("enabled"):
@@ -4370,6 +4389,12 @@ def cmd_report(args):
             lookup = {"supplier": supplier_info(settings["digikey"]["currency"], error="lookup unavailable (lookup step did not finish)"), "results": {}}
         merge_supplier(data["projects"], lookup)
     assign_ids(data["projects"])
+    if ask_on:
+        doc = fit_context(lambda net_cap, pin_cap: {"version": 1, "kind": "kicad-review-design-context", "repo": env.get("GITHUB_REPOSITORY", ""),
+                                                      "base": det["base"], "head": det["head"], "reason": det["reason"],
+                                                      "projects": [b(net_cap, pin_cap) for b in builders.values()]})
+        with open("review/design-context.json", "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, separators=(",", ":"), ensure_ascii=False)
     if waivers is not None:
         used = {(c["name"], v["waiver_key"]) for p in data["projects"] for c in p["checks"]
                 for v in c["violations"] if v.get("waived")}
@@ -4393,6 +4418,8 @@ def cmd_report(args):
         fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
 
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
+        fh.write(f"ask={'true' if ask_on else 'false'}\n")
+        if ask_on: fh.write(f"context_name={name[:-5]}.context.json\n")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}
