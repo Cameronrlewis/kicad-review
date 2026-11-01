@@ -109,10 +109,11 @@
     if(netIds.has(object.net)) return true;
     const d=row.detail;
     if(d?.kind!=='pad-net') return false;
-    // Board anchors carry no sheet (PCBs have none); KiCad identity is UUID, ref, pin and commit.
+    // Board anchors carry no sheet (PCBs have none); KiCad identity is UUID, ref, pin, sheet path and commit.
     const commit=window.REVIEW_DATA?.[side];
     const anchors=row.anchors?.[side]||[];
-    return !!commit && anchors.some(a=>a.board && a.commit===commit && a.uuid===object.changeUuid &&
+    return !!commit && anchors.some(a=>a.board && a.commit===commit &&
+      (!a.sheet && !object.sheet || a.sheet===object.sheet) && a.uuid===object.changeUuid &&
       a.padUuid===object.uuid && a.ref===object.reference && String(a.pin)===String(object.number));
   }
   function electricalLook(look,row,side) {

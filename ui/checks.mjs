@@ -3692,6 +3692,20 @@ return true;
       if(staleCommit) return 'pad-net anchor matched a different commit';
       if(!baseCall.filter(object)) return 'pad-net anchor failed after commit restore';
 
+      anchor.sheet='/other/';
+      const staleSheet=baseCall.filter(object);
+      delete anchor.sheet;
+      if(staleSheet) return 'pad-net anchor matched wrong sheet';
+
+      // In-place mutation of scene.nets must be reflected in next render pass
+      S.s=row.id;
+      drawOpts.length=0;
+      scene.nets[1].name='OTHER';
+      boardDiff.render();
+      const [mutatedCall]=drawOpts.slice(-1);
+      if(mutatedCall?.filter(object)) return 'in-place scene.nets mutation returned stale name match';
+      scene.nets[1].name='GND';
+
       // Test unguarded scene.nets access: missing scene.nets should not throw
       delete scene.nets;
       try {
