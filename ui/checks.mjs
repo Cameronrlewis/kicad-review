@@ -3882,6 +3882,20 @@ return true;
       return true;
     } finally {dock.remove();p.sheets=sheets;prior===undefined?delete cache[id]:cache[id]=prior;}
   `],
+  ["BR03 old report selection", "", `
+    const p=proj(), old=p.changes, summary=p.summary;
+    const row=old.find(r=>r.where && (r.where.board || r.where.sheet!=null));
+    if(!row) return 'required legacy component fixture absent';
+    try {
+      delete p.summary;
+      p.changes=old.map(r=>Object.fromEntries(Object.entries(r).filter(([k])=>
+        !['detail','anchors','weight','channel','document'].includes(k))));
+      await goTo(row.id);
+      const decoded=valid(decodeState('#'+encodeState()));
+      return S.s===row.id && decoded.s===row.id && document.querySelector('#stage .vp')
+        ? true : 'legacy v1 selection no longer renders';
+    } finally {p.changes=old; p.summary=summary; await draw();}
+  `],
   ["board mark style survives reload and project changes", "v=board", `
     ${MARK_STYLE_FIXTURE}
     Appearance.patch({markStyle:'recolour',layerOpacity:{'F.Cu':.31},netColors:{GND:[.2,.3,.4,1]}});
