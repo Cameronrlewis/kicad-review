@@ -5297,6 +5297,11 @@ def br02_failed_export_cache_contract():
 
 br02_failed_export_cache_contract()
 
+docs = pathlib.Path('README.md').read_text()
+assert '3D coverage' in docs and 'parts3d' in docs, 'BR02 document 3D coverage and part index'
+assert 'world metres' in docs and '600,000' in docs, 'BR02 document bounds units and simplification ceiling'
+print('ok BR02 documentation')
+
 # Board inspection adapter: derive mm-units inspection graph and facts from retained scene
 scene = {'copperStack':['F.Cu','In1.Cu','In2.Cu','B.Cu'],
          'nets':[{'id':1,'name':'12'}], 'warnings':[], 'complete':True,
