@@ -6336,8 +6336,12 @@ CHECKS.push(
    event('pointerdown',b.left+b.width/2);event('pointermove',b.left+b.width/2+40);event('pointerup',b.left+b.width/2+40);
    const released=v.camera.position.clone();
    if(start.distanceTo(released)<1e-7)return 'rotation did not move camera';
-   await new Promise(r=>setTimeout(r,150));
-   if(v.controls.enableDamping&&released.distanceTo(v.camera.position)<1e-7)return 'damping did not move camera after release';
+   // Wait for the next tick itself: software WebGL can take far longer than a fixed sleep to deliver it.
+   if(v.controls.enableDamping){
+     if(!s.raf)return 'release did not schedule a damping frame';
+     await new Promise(r=>{s.frameReady=r;});
+     if(released.distanceTo(v.camera.position)<1e-7)return 'damping did not move camera after release';
+   }
    for(let i=0;i<300&&s.raf;i++)await new Promise(r=>setTimeout(r,100));
    const count=s.state.drawCount;
    await new Promise(r=>setTimeout(r,250));
