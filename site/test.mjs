@@ -4985,3 +4985,15 @@ test('BR02 guest shares keep embedded 3D blobs and never install the model broke
     assert.equal(raw.status, 200); assert.equal(readStoredData(await raw.text()).blobs.model, 'embedded-glb');
   } finally { restore(); }
 });
+
+test('BR02 measurement wrapper fixture keeps one opaque report frame that receives the deep link', () => {
+  // ui/measure3d.mjs --report-frame '#review-report' measures this exact page (Task 10A scratch wrapper).
+  const html = reviewPage({ user: 'test', owner: 'o', repo: 'r', id: 12, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9 });
+  const frames = [...html.matchAll(/<iframe\b[^>]*>/g)].map(m => m[0]);
+  assert.equal(frames.length, 1);
+  assert.match(frames[0], /id="review-report"/); assert.match(frames[0], /src="\/r\/o\/r\/a\/12\/raw"/);
+  assert.match(frames[0], /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(html, /const raw = "\/r\/o\/r\/a\/12\/raw";[\s\S]*iframe\.src = raw \+ location\.hash/);
+  assert.match(html, /"endpoint":"\/r\/o\/r\/a\/12\/3d\/"/);
+  assert.doesNotMatch(html, /Review3D|review3d\.js/, 'viewer runs only inside the report frame');
+});
