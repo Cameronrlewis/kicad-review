@@ -4890,6 +4890,38 @@ test('ask route: a daily limit of 0 disables questions and cold insight; unset s
   } finally { restore(); }
 });
 
+test('ask route: ASK_MODEL and ASK_SUMMARY_MODEL configure the model, defaulting to claude-sonnet-5-5', async () => {
+  const cookie = await signedIn({ t: 'model-config' });
+  const reply = () => new Response(JSON.stringify({ content: [{ type: 'text', text: '{"summary":"A board.","questions":["A?","B?","C?"]}' }] }));
+
+  const seenDefault = [];
+  const restoreDefault = mockFetch(askMocks({ seen: seenDefault, anthropic: answerStream }));
+  try {
+    const e = askEnv();
+    await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, e, cookie);
+    const call = seenDefault.find((s) => s.url === 'https://api.anthropic.com/v1/messages');
+    assert.equal(JSON.parse(call.options.body).model, 'claude-sonnet-5-5');
+  } finally { restoreDefault(); }
+
+  const seenModel = [];
+  const restoreModel = mockFetch(askMocks({ seen: seenModel, anthropic: reply }));
+  try {
+    const e = askEnv({ ASK_MODEL: 'claude-3-opus' });
+    await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+    const call = seenModel.find((s) => s.url === 'https://api.anthropic.com/v1/messages');
+    assert.equal(JSON.parse(call.options.body).model, 'claude-3-opus');
+  } finally { restoreModel(); }
+
+  const seenSummary = [];
+  const restoreSummary = mockFetch(askMocks({ seen: seenSummary, anthropic: reply }));
+  try {
+    const e = askEnv({ ASK_MODEL: 'claude-3-opus', ASK_SUMMARY_MODEL: 'claude-3-haiku' });
+    await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+    const call = seenSummary.find((s) => s.url === 'https://api.anthropic.com/v1/messages');
+    assert.equal(JSON.parse(call.options.body).model, 'claude-3-haiku');
+  } finally { restoreSummary(); }
+});
+
 test('ask context download is refused by Content-Length and stops reading past the limit', async () => {
   const cookie = await signedIn({ t: 'bounded-read' });
   let pulls = 0;

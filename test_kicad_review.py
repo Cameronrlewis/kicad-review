@@ -6611,6 +6611,7 @@ print("ok ask nets carry verified label kinds")
 # Task 13: Documentation: README, example settings, site setup
 readme = pathlib.Path("README.md").read_text(encoding="utf-8")
 site_readme = pathlib.Path("site/README.md").read_text(encoding="utf-8")
+site_ask = pathlib.Path("site/ask.js").read_text(encoding="utf-8")
 example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
 parsed = kr.tomllib.loads(example)
 assert parsed.get("ask", {}).get("enabled") is False
@@ -6624,6 +6625,25 @@ for needle in (
     "`projects[].ask` (optional",
 ):
     assert needle in readme, needle
-for needle in ("ANTHROPIC_API_KEY", "ASK_KV", "ASK_DAILY_LIMIT", "wrangler kv namespace create ASK_KV"):
+
+# User-facing README must not cite internal plan numbers (01, 03, 06)
+assert "(03)" not in readme and "(01)" not in readme and "(06)" not in readme, "README cites internal plan numbers"
+
+for needle in (
+    "ANTHROPIC_API_KEY",
+    "ASK_KV",
+    "ASK_DAILY_LIMIT",
+    "ASK_MODEL",
+    "ASK_SUMMARY_MODEL",
+    "claude-sonnet-5-5",
+    "503",
+    "wrangler kv namespace create ASK_KV",
+):
     assert needle in site_readme, needle
+
+# Verify documented defaults in site/README.md match implementation in site/ask.js
+assert "dailyLimit = (env) =>" in site_ask and ": 50" in site_ask, "ASK_DAILY_LIMIT default 50 in site/ask.js"
+assert "'claude-sonnet-5-5'" in site_ask, "ASK_MODEL / ASK_SUMMARY_MODEL default claude-sonnet-5-5 in site/ask.js"
+assert "!env.ANTHROPIC_API_KEY || !env.ASK_KV" in site_ask and "503" in site_ask, "503 on missing setup in site/ask.js"
+assert "export function askOptedIn" in site_ask, "TOML-subset reader in site/ask.js"
 print("ok ask documentation")
