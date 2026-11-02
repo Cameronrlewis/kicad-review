@@ -244,6 +244,16 @@ test('BR02 snapshotParts validates duplicates, unclassified meshes and non-finit
   }, /footprint has no finite position/);
 });
 
+test('BR02 snapshotParts classifies KiCad via meshes as copper', integration, () => {
+  // KiCad 10 names the via node by its STEP label and only the mesh carries the _via suffix.
+  const {d, metadata} = makeDocument(['R1']);
+  const via = d.createNode('=>[0:1:1:12]').setMesh(d.getRoot().listMeshes()[0].clone().setName('Board_via'));
+  d.getRoot().listScenes()[0].addChild(via);
+  P.snapshotParts(d, metadata);
+  assert.equal(via.getExtras().role, 'copper');
+  assert.match(via.getExtras().batch, /^board:copper:/);
+});
+
 test('BR02 240 compatible changed primitives fit the hard changed-part budget', integration, async () => {
   const {d, metadata} = makeDocument(['R12', 'R2', 'R3'], 240);
   d.getRoot().listNodes().find(n => n.getName() === 'R12').setTranslation([.017, .002, -.013]);

@@ -41,9 +41,9 @@ function snapshotParts(document,metadata) {
     const f=owner(n), b=bounds(n);
     const mName=n.getMesh()?.getName()||'';
     const nName=n.getName()||'';
-    const name=[nName,mName].find(s=>/_((?:PCB)|copper|pad|silkscreen|soldermask)$/i.test(s))||nName||mName;
-    const suffix=/_((?:PCB)|copper|pad|silkscreen|soldermask)$/i.exec(name)?.[1].toLowerCase();
-    const role=f?'body':({pcb:'fr4',soldermask:'mask',silkscreen:'silk',pad:'pads',copper:'copper'}[suffix]);
+    const name=[nName,mName].find(s=>/_((?:PCB)|copper|pad|via|silkscreen|soldermask)$/i.test(s))||nName||mName;
+    const suffix=/_((?:PCB)|copper|pad|via|silkscreen|soldermask)$/i.exec(name)?.[1].toLowerCase();
+    const role=f?'body':({pcb:'fr4',soldermask:'mask',silkscreen:'silk',pad:'pads',copper:'copper',via:'copper'}[suffix]);
     if(!role) throw Error('unclassified KiCad mesh: '+name);
     const side=f?f.side:b[1]<(top+bottom)/2&&b[4]>(top+bottom)/2?'both':
       (b[1]+b[4])/2>=(top+bottom)/2?'top':'bottom';
