@@ -6027,6 +6027,13 @@ def test_br03_summary():
     # tracks never count as components in the headline
     t=classify_change({"kind":"track","action":"added","changes":[]})
     assert electrical_summary([t],[],{"board"})["headline"]=="No headline changes"
+    # position detail computation and case-insensitive headline check
+    moved=classify_change({"kind":"symbol","action":"modified","changes":[["Position","a","b"]],
+                           "pos":[10,20],"pos_before":[7,16]})
+    assert moved["detail"]=={"kind":"position","before":[7,16],"after":[10,20],"distanceMm":5.0}
+    assert electrical_summary([moved],[])["headline"]=="1 moved"
+    # caller-supplied document overrides row key
+    assert classify_change({"kind":"symbol","action":"modified","document":"schematic"},document="board")["document"]=="board"
 test_br03_summary()
 print('ok BR03 classification and summary')
 

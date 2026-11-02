@@ -3657,7 +3657,10 @@ def classify_change(row, document=None):
     heavy = channel == "rules" or channel == "components" and (r["action"] != "modified" or "footprint" in props)
     weight = "heavy" if heavy else "medium" if channel in ("routing","board") or k == "wire" else "light"
     r.setdefault("channel",channel); r.setdefault("weight",weight)
-    r.setdefault("document",document or ("board" if (r.get("where") or {}).get("board") or r.get("uuid") in ("meta:setup","meta:pro","meta:dru","meta:title_block:board") else "schematic"))
+    if document is not None:
+        r["document"] = document
+    else:
+        r.setdefault("document", "board" if (r.get("where") or {}).get("board") or r.get("uuid") in ("meta:setup","meta:pro","meta:dru","meta:title_block:board") else "schematic")
     if "position" in props and r.get("pos") and r.get("pos_before"):
         a,b = r["pos_before"][:2],r["pos"][:2]
         r.setdefault("detail",{"kind":"position","before":a,"after":b,
@@ -3680,7 +3683,7 @@ def electrical_summary(rows, issues, present=None):
             (sum(r["kind"] == "net-added" for r in selected),"nets added"),
             (sum(r["kind"] == "net-removed" for r in selected),"nets removed"),
             (sum(r["kind"] == "net-joined" for r in selected),"net joins"),
-            (sum(component(r) and any(k == "position" for k,*_ in r.get("changes",[])) for r in selected),"moved")]
+            (sum(component(r) and any(k.lower() == "position" for k,*_ in r.get("changes",[])) for r in selected),"moved")]
         return " · ".join(f"{n} {label}" for n,label in counts if n) or "No headline changes"
     def channels(selected, documents, selected_issues):
         producers = {"schematic":{"components","wiring","visual"},
