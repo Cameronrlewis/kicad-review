@@ -4199,6 +4199,22 @@ def changes_markdown(p, limit=60):
     return lines
 
 
+def connectivity_markdown(project, limit=20):
+    rows = [r for r in project["changes"] if r["kind"] in
+            ("net-added","net-removed","net-joined","net-split","net-renamed","net-members")]
+    if not rows: return []
+    out = ["", "#### Connectivity", "", "| Change | Net | Members |", "|---|---|---|"]
+    for r in rows[:limit]:
+        d = r.get("detail",{})
+        pins = " ".join([*("+"+p for p in d.get("added",[])),*("−"+p for p in d.get("removed",[]))])
+        relation = " + ".join(d.get("beforeNets",[]))+" → "+" + ".join(d.get("afterNets",[]))
+        moved = "; ".join(t["pin"]+": "+(" + ".join(t["before"]) or "(unconnected)")+" → "+
+                          (" + ".join(t["after"]) or "(unconnected)") for t in d.get("transitions",[]))
+        out.append(f"| {cell(r['kind'])} | {cell(r['ref'])} | {cell(moved or pins or relation)} |")
+    if len(rows) > limit: out.append(f"| | | and {len(rows)-limit} more in the report |")
+    return out
+
+
 def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, log="", issues=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
@@ -4221,6 +4237,12 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
     for i, p in enumerate(data["projects"]):
         out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'").replace('\n', ' ').replace('\r', ' ')}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
+        summary = p.get("summary")
+        if summary:
+            out += [md(summary.get("headline",""))]
+            for issue in summary.get("incomplete",[]):
+                out += [md(issue["channel"]+": "+issue["reason"])]
+        out += connectivity_markdown(p)
         shots = [s for s in images if s["project"] == i]
         if shots:
             out += [""]
@@ -4633,6 +4655,10 @@ def log_row(data, when: str) -> str:
     per = [("" if len(data["projects"]) == 1 else f"{md(p['name'])}: ")
            + " · ".join(f"{md(c['title'])} {c['errors']} ({c['new_errors']})" for c in p["checks"])
            for p in data["projects"]]
+    for index, project in enumerate(data["projects"]):
+        headline = project.get("summary",{}).get("headline","")
+        if headline:
+            per[index] += (" · " if per[index] else "") + md(headline[:200])
     row = f"| [{when}]({data['links'].get('run', '')}) | `{(data['head'] or '')[:7]}` | {'❌ fail' if failed else '✅ pass'} | {' ; '.join(per) or '—'} |"
     row = row.replace("\n", " ").replace("\r", " ")
     return row if LOG_ROW.fullmatch(row) else ""

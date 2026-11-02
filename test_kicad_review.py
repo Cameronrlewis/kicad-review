@@ -6137,3 +6137,44 @@ def test_br03_hotspot_contract():
         assert json.loads(fixture.read_text(encoding='utf-8'))==contract, 'BR03 hotspot producer contract drift'
 test_br03_hotspot_contract()
 print('ok BR03 hotspot producer contract')
+
+
+def test_br03_connectivity_markdown():
+    from kicad_review import connectivity_markdown
+    p = {"changes":[kr.electrical_row("net-added",f"N{i}","added",detail={"kind":"members","added":["U1.1"],"removed":[],"beforeNets":[],"afterNets":[f"N{i}"]}) for i in range(21)]}
+    table = '\n'.join(connectivity_markdown(p))
+    assert 'Connectivity' in table and 'N19' in table and 'N20' not in table
+    assert 'and 1 more in the report' in table
+    p["changes"][0]["ref"] = 'pipe|line\n<script>'
+    assert '<script>' not in '\n'.join(connectivity_markdown(p))
+    p['changes'] = kr.diff_nets({'A':{'a','b'},'B':{'c','d'}},{'C':{'a','c'},'D':{'b','d'}})
+    table = '\n'.join(connectivity_markdown(p))
+    assert all(t in table for t in ('a: A → C','b: A → D','c: B → C','d: B → D'))
+
+    for count in (0,20,21):
+        project={"changes":[kr.electrical_row("net-added",f"N{i}","added",detail={"kind":"members","added":["U1.1"]}) for i in range(count)]}
+        table='\n'.join(connectivity_markdown(project))
+        assert bool(table)==bool(count)
+        if count: assert table.count('| net-added |')==min(count,20)
+        assert ('and 1 more in the report' in table)==(count==21)
+    joined=kr.electrical_row("net-joined","C",detail={"kind":"members","added":[],"removed":[],"beforeNets":["A","B"],"afterNets":["C"]})
+    assert 'A + B → C' in '\n'.join(connectivity_markdown({"changes":[joined]}))
+    assert connectivity_markdown({"changes":[]})==[]
+    project={**ld['projects'][0],"summary":{"headline":"rule|changed\n<script>","incomplete":[{"channel":"routing","reason":"<script>"}]}}
+    data={**ld,"projects":[project]}
+    row=log_row(data,"2026-10-12 10:04")
+    assert 'rule\\|changed' in row, 'BR03 log headline absent'
+    assert '<script>' not in row and extract_log(merge_log([],row))==[row]
+    body=comment_markdown(data,[],"")
+    assert 'routing' in body and '<script>' not in body
+    assert comment_markdown({**ld,"projects":[ld['projects'][0]]},[],"")
+    large_project={**project,"summary":{"headline":"x"*70000,"incomplete":[]}}
+    body=comment_markdown({**ld,"projects":[large_project]},[],"")
+    assert len(body)<=65536, 'BR03 electrical headline bypassed body budget'
+    readme=pathlib.Path('README.md').read_text()
+    assert all(token in readme for token in ('0.05','0.005','120'))
+    assert 'no new setting' in readme.lower()
+
+test_br03_connectivity_markdown()
+print('ok BR03 connectivity markdown and documentation')
+
