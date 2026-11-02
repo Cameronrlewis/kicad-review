@@ -2759,7 +2759,8 @@ return true;
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('[data-no-model="U3"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, b = st.blocks.find(x => x.ref === "U3" && x.side === "head"), c = new THREE.Box3().setFromObject(b.object).getCenter(new THREE.Vector3()).project(st.cameras[0]);
-    return Math.abs(c.x) < .15 && Math.abs(c.y) < .15 && /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "");`],
+    if (!(Math.abs(c.x) < .15 && Math.abs(c.y) < .15)) return "U3 not framed " + c.x.toFixed(3) + "," + c.y.toFixed(3);
+    return /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "") || "no 3D model tip missing";`],
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],

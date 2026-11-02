@@ -162,8 +162,9 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
   try {
     body = (async () => {
   if (name === "board geometry pin flipped Wipe Thermal") await send("Emulation.setDeviceMetricsOverride", {width,height:1080,deviceScaleFactor:2,mobile:false});
-  // The framing check tests final geometry, not the two-pane camera animation.
-  await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });
+  // Framing checks test final geometry, not the 400 ms camera animation (software GL can overrun a fixed wait).
+  const framing = ["3D change card keeps 3D and frames J2", "3D no-model list item frames its block and labels it"].includes(name);
+  await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:framing ? "reduce" : "no-preference" }] });
   errors.length = 0;
   if (lifecycle.beforeStartup) startupScript = (await send("Page.addScriptToEvaluateOnNewDocument", {source:lifecycle.beforeStartup})).result.identifier;
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);
