@@ -4200,18 +4200,42 @@ def changes_markdown(p, limit=60):
 
 
 def connectivity_markdown(project, limit=20):
-    rows = [r for r in project["changes"] if r["kind"] in
-            ("net-added","net-removed","net-joined","net-split","net-renamed","net-members")]
-    if not rows: return []
+    rows = [
+        r for r in project.get("changes", [])
+        if r.get("kind") in (
+            "net-added", "net-removed", "net-joined",
+            "net-split", "net-renamed", "net-members"
+        )
+    ]
+    if not rows:
+        return []
+
     out = ["", "#### Connectivity", "", "| Change | Net | Members |", "|---|---|---|"]
     for r in rows[:limit]:
-        d = r.get("detail",{})
-        pins = " ".join([*("+"+p for p in d.get("added",[])),*("−"+p for p in d.get("removed",[]))])
-        relation = " + ".join(d.get("beforeNets",[]))+" → "+" + ".join(d.get("afterNets",[]))
-        moved = "; ".join(t["pin"]+": "+(" + ".join(t["before"]) or "(unconnected)")+" → "+
-                          (" + ".join(t["after"]) or "(unconnected)") for t in d.get("transitions",[]))
-        out.append(f"| {cell(r['kind'])} | {cell(r['ref'])} | {cell(moved or pins or relation)} |")
-    if len(rows) > limit: out.append(f"| | | and {len(rows)-limit} more in the report |")
+        d = r.get("detail") or {}
+        added = d.get("added") or []
+        removed = d.get("removed") or []
+        pins = " ".join([*(f"+{p}" for p in added), *(f"−{p}" for p in removed)])
+
+        before_nets = d.get("beforeNets") or []
+        after_nets = d.get("afterNets") or []
+        relation = (" + ".join(str(b) for b in before_nets) + " → " + " + ".join(str(a) for a in after_nets)) if (before_nets or after_nets) else ""
+
+        transitions = []
+        for t in d.get("transitions") or []:
+            if not isinstance(t, dict):
+                continue
+            pin = str(t.get("pin", ""))
+            before = " + ".join(str(b) for b in (t.get("before") or [])) or "(unconnected)"
+            after = " + ".join(str(a) for a in (t.get("after") or [])) or "(unconnected)"
+            transitions.append(f"{pin}: {before} → {after}")
+        moved = "; ".join(transitions)
+
+        summary_text = moved or pins or relation
+        out.append(f"| {cell(r.get('kind', ''))} | {cell(r.get('ref', ''))} | {cell(summary_text)} |")
+
+    if len(rows) > limit:
+        out.append(f"| | | and {len(rows) - limit} more in the report |")
     return out
 
 
@@ -4239,9 +4263,13 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
                 summary_sentence(p) + "."]
         summary = p.get("summary")
         if summary:
-            out += [md(summary.get("headline",""))]
-            for issue in summary.get("incomplete",[]):
-                out += [md(issue["channel"]+": "+issue["reason"])]
+            headline = summary.get("headline", "")
+            if headline:
+                out += ["", md(headline[:200])]
+            for issue in summary.get("incomplete", []):
+                channel = str(issue.get("channel", ""))
+                reason = str(issue.get("reason", ""))
+                out += ["", md(f"{channel}: {reason}"[:200])]
         out += connectivity_markdown(p)
         shots = [s for s in images if s["project"] == i]
         if shots:

@@ -354,9 +354,9 @@ compressed geometry size alone is not the budget.
 
 ## Electrical and copper changes
 
-Electrical and copper comparison runs automatically on every review; there is **no new setting** and no opt-in required. Netlists are exported with interfaces off (`checks.interfaces = "off"`). Rename matching is by members before names: nets with identical member pin sets are matched as renames before examining changed pin sets. Ambiguous references mark wiring incomplete rather than guessing connections.
+Electrical and copper comparison runs automatically on every review; there is **no new setting** and no opt-in required. Schematic netlists are exported automatically for comparison, even when interface checks are disabled (the default `checks.interfaces = "off"`). Rename matching is by members before names: nets with identical member pin sets are matched as renames before examining changed pin sets. Ambiguous references mark wiring incomplete rather than guessing connections.
 
-Copper is refilled in disposable project copies using KiCad's zone filler with a 0.05 mm² threshold and 0.005 mm polygon approximation (`SHAPE_POLY_SET`). Pairwise copper computation is limited to 120 s per project safety ceiling; unavailable routing or container timeouts mark the routing channel incomplete and do not turn off other checks.
+Copper is refilled in disposable project copies using KiCad's zone filler with a 120 s zone refill per revision, a 0.05 mm² threshold and 0.005 mm polygon approximation (`SHAPE_POLY_SET`). Unavailable routing or container timeouts mark the routing channel incomplete and do not turn off other checks.
 
 Format v1 adds optional fields additively: `project.changes[].channel` (`components`, `wiring`, `routing`, `rules`, `board`, `visual`), `weight` (`heavy`, `medium`, `light`), `detail`, `anchors`, and `project.summary` (`headline`, `channels`, `incomplete`). Older reports and data without these fields continue to load normally, with legacy display behaviour.
 

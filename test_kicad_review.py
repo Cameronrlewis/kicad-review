@@ -6160,6 +6160,18 @@ def test_br03_connectivity_markdown():
     joined=kr.electrical_row("net-joined","C",detail={"kind":"members","added":[],"removed":[],"beforeNets":["A","B"],"afterNets":["C"]})
     assert 'A + B → C' in '\n'.join(connectivity_markdown({"changes":[joined]}))
     assert connectivity_markdown({"changes":[]})==[]
+    # Malformed or missing detail does not raise KeyError
+    malformed = [
+        {"kind": "net-members", "ref": "N1", "detail": {"transitions": [{"pin": "P1"}]}},
+        {"kind": "net-members", "ref": "N2", "detail": {"transitions": [{"before": ["A"], "after": ["B"]}]}},
+        {"kind": "net-members", "ref": "N3", "detail": {"transitions": ["not-a-dict"]}},
+        {"kind": "net-members", "ref": "N4", "detail": {}},
+        {"kind": "net-members", "ref": "N5"},
+    ]
+    malformed_table = '\n'.join(connectivity_markdown({"changes": malformed}))
+    assert 'P1: \\(unconnected\\) → \\(unconnected\\)' in malformed_table
+    assert ': A → B' in malformed_table
+
     project={**ld['projects'][0],"summary":{"headline":"rule|changed\n<script>","incomplete":[{"channel":"routing","reason":"<script>"}]}}
     data={**ld,"projects":[project]}
     row=log_row(data,"2026-10-12 10:04")
@@ -6167,10 +6179,12 @@ def test_br03_connectivity_markdown():
     assert '<script>' not in row and extract_log(merge_log([],row))==[row]
     body=comment_markdown(data,[],"")
     assert 'routing' in body and '<script>' not in body
+    assert '\n\nrule\\|changed\n&lt;script&gt;\n\nrouting: &lt;script&gt;' in body, 'Headline and incomplete notes must be separate paragraphs'
     assert comment_markdown({**ld,"projects":[ld['projects'][0]]},[],"")
     large_project={**project,"summary":{"headline":"x"*70000,"incomplete":[]}}
     body=comment_markdown({**ld,"projects":[large_project]},[],"")
     assert len(body)<=65536, 'BR03 electrical headline bypassed body budget'
+    assert 'x'*201 not in body, 'Comment headline must be capped'
     readme=pathlib.Path('README.md').read_text()
     assert all(token in readme for token in ('0.05','0.005','120'))
     assert 'no new setting' in readme.lower()
