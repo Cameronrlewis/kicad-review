@@ -6608,3 +6608,15 @@ with tempfile.TemporaryDirectory() as t:
     assert kr.context_bytes(doc_labels) <= kr.CONTEXT_LIMIT and doc_labels["truncated"] is True
 print("ok ask nets carry verified label kinds")
 
+# Task 13: Documentation: README, example settings, site setup
+readme = pathlib.Path("README.md").read_text(encoding="utf-8")
+site_readme = pathlib.Path("site/README.md").read_text(encoding="utf-8")
+example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
+assert "[ask]" in example and "enabled = false" in example.split("[ask]", 1)[1][:400]
+for needle in ("## Ask (optional)", "design-context.json", "ask.enabled", "third-party model provider", "`projects[].ask` (optional"):
+    assert needle in readme, needle
+for needle in ("ANTHROPIC_API_KEY", "ASK_KV", "ASK_DAILY_LIMIT", "wrangler kv namespace create ASK_KV"):
+    assert needle in site_readme, needle
+print("ok ask documentation")
+
+
