@@ -6612,11 +6612,18 @@ print("ok ask nets carry verified label kinds")
 readme = pathlib.Path("README.md").read_text(encoding="utf-8")
 site_readme = pathlib.Path("site/README.md").read_text(encoding="utf-8")
 example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
+parsed = kr.tomllib.loads(example)
+assert parsed.get("ask", {}).get("enabled") is False
 assert "[ask]" in example and "enabled = false" in example.split("[ask]", 1)[1][:400]
-for needle in ("## Ask (optional)", "design-context.json", "ask.enabled", "third-party model provider", "`projects[].ask` (optional"):
+for needle in (
+    "## Ask (optional)",
+    "design-context.json",
+    "kicad-review-<base>-<head>-<pass|fail>.context.json",
+    "| `ask.enabled` | `false` |",
+    "third-party model provider",
+    "`projects[].ask` (optional",
+):
     assert needle in readme, needle
 for needle in ("ANTHROPIC_API_KEY", "ASK_KV", "ASK_DAILY_LIMIT", "wrangler kv namespace create ASK_KV"):
     assert needle in site_readme, needle
 print("ok ask documentation")
-
-

@@ -72,7 +72,6 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `digikey.currency` | `"USD"` | price currency, three uppercase letters (for example `CAD`) |
 | `digikey.max_lookups` | `100` | maximum distinct MPNs per run, integer 1–900; excess lines show "not looked up: run limit" |
 | `pdf.enabled` | `false` | also make a printable PDF (cover, summaries, pictures, changes, new errors) as a separate artifact; download it from the review site |
-
 | `threads.enabled` | `false` | pin discussion threads to parts and points in the review site; they are stored as pull-request review comments |
 | `ask.enabled` | `false` | "Ask about this design": questions answered by Claude from a compact summary of the design; needs the review site |
 | `inventory.enabled` | `false` | add an "All parts" list to the report's Changes tab: every symbol and footprint, searchable, click to zoom |
