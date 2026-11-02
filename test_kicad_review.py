@@ -6185,6 +6185,10 @@ def test_br03_connectivity_markdown():
     body=comment_markdown({**ld,"projects":[large_project]},[],"")
     assert len(body)<=65536, 'BR03 electrical headline bypassed body budget'
     assert 'x'*201 not in body, 'Comment headline must be capped'
+    long_incomplete_proj = {**project, "summary": {"headline": "rule", "incomplete": [{"channel": "routing", "reason": "z" * 300}]}}
+    long_incomplete_body = comment_markdown({**ld, "projects": [long_incomplete_proj]}, [], "")
+    assert "routing: " + "z" * 190 + "…" in long_incomplete_body, "Incomplete reason over 200 chars must be truncated with ellipsis"
+    assert "z" * 192 not in long_incomplete_body
     readme=pathlib.Path('README.md').read_text()
     assert all(token in readme for token in ('0.05','0.005','120'))
     assert 'no new setting' in readme.lower()

@@ -4269,7 +4269,10 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
             for issue in summary.get("incomplete", []):
                 channel = str(issue.get("channel", ""))
                 reason = str(issue.get("reason", ""))
-                out += ["", md(f"{channel}: {reason}"[:200])]
+                note = f"{channel}: {reason}"
+                if len(note) > 200:
+                    note = note[:199] + "…"
+                out += ["", md(note)]
         out += connectivity_markdown(p)
         shots = [s for s in images if s["project"] == i]
         if shots:
