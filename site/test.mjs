@@ -192,7 +192,11 @@ async function callUrl(url, options) {
 }
 function mockFetch(handler) {
   const original = globalThis.fetch;
-  globalThis.fetch = handler;
+  // workerd throws on redirect 'error' (Node accepts it); fail the same way so server code cannot regress.
+  globalThis.fetch = (url, init) => {
+    if (init?.redirect === 'error') throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+    return handler(url, init);
+  };
   return () => { globalThis.fetch = original; };
 }
 function tokenResponse(overrides = {}) {

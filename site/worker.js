@@ -424,7 +424,7 @@ async function artifact3d(request, env, owner, repo, id, digest, kind) {
       const location = archive.status === 302 ? downloadUrl(archive.headers.get('Location')) : null;
       if (!location) return assetError();
       // Share downloader's host policy; never forward GitHub authorization or follow further redirects.
-      const body = await fetch(location, { redirect: 'error' });
+      const body = await fetch(location, { redirect: 'manual' });
       if (!body.ok) return assetError();
       const bytes = await readExactly(body, descriptor.bytes);
       return bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
