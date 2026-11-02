@@ -64,7 +64,7 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `bom.order_ready_fields` | preset's fields | fields every part needs to count as order-ready (JLCPCB: Value, Footprint, LCSC; PCBWay: Value, Footprint, MPN) |
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
-| `3d.enabled` | `false` | export every available board revision (including unchanged boards) as a realistic GLB with copper, soldermask, silkscreen, and still poster; viewer provides Assembled/Bare board toggling, studio lighting presets (Bench, Low sun, Photo); footprints with missing 3D models show placeholder boxes and coverage limitations; ruler/two-point measurement is deferred; failed exports are recorded without failing the review |
+| `3d.enabled` | `false` | export every available board revision (including unchanged boards) as a realistic GLB with copper, soldermask, silkscreen, and still poster; viewer provides Assembled/Bare board toggling, studio lighting presets (Bench, Low sun, Photo), narrow revision switch; footprints with missing 3D models show placeholder boxes and coverage limitations; ruler/two-point measurement is deferred; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 | `release.review` | `false` | on a `v*` tag, review changes since the previous `v*` tag and add a "KiCad review" section to the release notes |
 | `digikey.enabled` | `false` | look up stock and price by MPN; requires `parts.enabled = true` and the credentials below |
@@ -372,6 +372,7 @@ and remains as the fallback when WebGL is unavailable.
 
 - **Assembled / Bare**: toggle component meshes to inspect bare board routing and copper without a separate model download.
 - **Lighting**: generated studio environment with three presets (**Bench**, **Low sun**, **Photo**), bearing rotation in 30° steps, and exposure adjustment from 0.4 to 3.0 in steps of 0.05.
+- **Narrow revision switch**: in narrow viewports where side-by-side comparison cannot fit two panes, Side comparison mode displays a single revision with a revision switch (Base/Head) to inspect each revision.
 - **Picking and highlights**: changed components remain isolated meshes, preserving per-part revision highlights, diff tinting, and selection. Unchanged parts are batched by material, with pointer hover and click resolved against a world-space bounding box index in **world metres**.
 - **3D coverage and placeholders**: footprints lacking a 3D model render hatched placeholder boxes, and the view summarizes honest **3D coverage** (footprints, with-model, placeholders, triangles, and primitives). Missing models are also catalogued in the missing models table.
 - **Deferred measurements**: ruler and two-point measurement tools are deferred; standard camera orientation and Fit actions are provided.
