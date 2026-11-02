@@ -5355,10 +5355,10 @@ return true;
     const geometry=proj().board.geometry;delete proj().board.geometry;
     await askGo('net','12');proj().board.geometry=geometry;
     return /not a net highlight/.test(ASK.status) || 'missing-geometry fallback not disclosed';`],
-  ["BR09 base-only net link switches the revision (run at desktop widths)", "v=board", askOpen + `
+  ["Ask base-only net link switches the revision (run at desktop widths)", "v=board", askOpen + `
     await askGo('net','REMOVED','base');
     return S.revision === 'base' || 'base-only net link left the revision on ' + S.revision;`],
-  ["BR09 unavailable selected side: fallback is disclosed", "v=board", askOpen + `
+  ["Ask unavailable selected side: fallback is disclosed", "v=board", askOpen + `
     const geometry = proj().board.geometry; delete proj().board.geometry;
     try {
       await askGo('net', '12', 'head');
@@ -5366,7 +5366,7 @@ return true;
       if (S.revision !== 'head') return 'fallback left the revision on ' + S.revision;
     } finally { proj().board.geometry = geometry; }
     return true;`],
-  ["BR09 single design: an unready Ask falls back to Checks, never a hidden Changes tab", "v=board", askOpen + `
+  ["Ask single design: an unready Ask falls back to Checks, never a hidden Changes tab", "v=board", askOpen + `
     // askOpen leaves Ask ready; drop readiness so the fallback under test applies.
     document.body.classList.add('design-single'); ASK.ready = false;
     S.t = 'ask'; renderPanel();
