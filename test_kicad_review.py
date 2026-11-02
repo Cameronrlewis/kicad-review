@@ -1,5 +1,6 @@
 """Self-checks for kicad_review.py. Run: python3 test_kicad_review.py"""
 import os
+import re
 
 # Only the KiCad interpreter imports pcbnew; ordinary host checks stay dependency-free.
 if os.environ.get("BR03_PCBNEW_TEST") == "1":
@@ -6642,8 +6643,6 @@ for needle in (
     assert needle in site_readme, needle
 
 # Verify documented defaults in site/README.md match implementation in site/ask.js
-import re
-
 daily_limit_match = re.search(r"dailyLimit\s*=\s*\(env\)\s*=>.*?:\s*(\d+)", site_ask)
 assert daily_limit_match and int(daily_limit_match.group(1)) == 50, "ASK_DAILY_LIMIT default 50 in site/ask.js"
 
