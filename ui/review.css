@@ -342,10 +342,10 @@ body.shot #toolbar { display:none; }
 .board-mark-label.removed,.board-mark-key.removed {border-style:dashed;}
 .board-mark-label.modified,.board-mark-key.modified {border-style:dotted;}
 .board-mark-legend {position:absolute;bottom:8px;left:8px;display:flex;gap:6px;z-index:1;}
-.copper-selection { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
-.copper-selection path { fill:none; stroke-width:2; vector-effect:non-scaling-stroke; }
-.copper-selection [data-action=added] { stroke:var(--tint-add); }
-.copper-selection [data-action=removed] { stroke:var(--tint-del); stroke-dasharray:5 3; }
+.copper-selection, .copper-selection-fallback { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.copper-selection path, .copper-selection-fallback path { fill:none; stroke-width:2; vector-effect:non-scaling-stroke; }
+.copper-selection [data-action=added], .copper-selection-fallback [data-action=added] { stroke:var(--tint-add); }
+.copper-selection [data-action=removed], .copper-selection-fallback [data-action=removed] { stroke:var(--tint-del); stroke-dasharray:5 3; }
 
 /* Native radio buttons stay mounted while GPU mark passes update. */
 .mark-styles { display:flex; align-items:center; gap:var(--space-1); white-space:nowrap; }

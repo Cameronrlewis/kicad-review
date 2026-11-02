@@ -1763,8 +1763,14 @@ function renderFallbackCopper() {
   document.querySelectorAll('.copper-selection-fallback').forEach(e=>e.remove());
   const row=proj().changes.find(r=>r.id===S.s), view=currentView();
   if(S.v!=='board' || boardView.useGL || row?.detail?.kind!=='area' || !view) return;
+  const seen=new Set();
   for(const stack of document.querySelectorAll('#stage .world .stack')) {
-    const action=stack.classList.contains('base')?'removed':'added';
+    const action=stack.classList.contains('base')?'removed':stack.classList.contains('head')?'added':null;
+    if(!action) continue;
+    const target=S.m==='semantic'?stack.parentElement:stack;
+    const key=S.m==='semantic'?action:stack;
+    if(seen.has(key)) continue;
+    seen.add(key);
     const rings=row.detail[action+'Contours']||[]; if(!rings.length) continue;
     const svg=document.createElementNS('http:'+'//www.w3.org/2000/svg','svg');
     svg.classList.add('copper-selection','copper-selection-fallback');
@@ -1777,7 +1783,7 @@ function renderFallbackCopper() {
     svg.dataset.side=action==='removed'?'base':'head';
     svg.append(path);
     // Semantic artwork hides base and dims head; selection must remain visible in both signs.
-    (S.m==='semantic'?stack.parentElement:stack).append(svg);
+    target.append(svg);
   }
 }
 function markSelected() { clearImageSelection(); S.io = null; S.ig = null; syncSelectedChangeCard(); updateStatus(); renderInspector(); renderFallbackCopper(); }
