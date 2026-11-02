@@ -6134,7 +6134,9 @@ def test_br03_hotspot_contract():
         fixture=pathlib.Path('ui/fixtures/br03-hotspot-contract.json')
         if os.environ.get('BR03_WRITE_FIXTURES')=='1':
             fixture.write_text(json.dumps(contract,sort_keys=True,indent=2)+'\n',encoding='utf-8')
-        assert json.loads(fixture.read_text(encoding='utf-8'))==contract, 'BR03 hotspot producer contract drift'
+        # gzip headers record the host OS (macOS ff, Linux 03), so compare decoded blob content.
+        decoded=lambda c:{**c,'blobs':{k:gzip.decompress(base64.b64decode(v)) for k,v in c['blobs'].items()}}
+        assert decoded(json.loads(fixture.read_text(encoding='utf-8')))==decoded(contract), 'BR03 hotspot producer contract drift'
 test_br03_hotspot_contract()
 print('ok BR03 hotspot producer contract')
 
