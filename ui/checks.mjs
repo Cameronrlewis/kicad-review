@@ -5367,7 +5367,7 @@ return true;
     } finally { proj().board.geometry = geometry; }
     return true;`],
   ["Ask single design: an unready Ask falls back to Checks, never a hidden Changes tab", "v=board", askOpen + `
-    // askOpen leaves Ask ready; drop readiness so the fallback under test applies.
+    // ponytail: askOpen leaves Ask ready; drop readiness so the unready fallback under test applies.
     document.body.classList.add('design-single'); ASK.ready = false;
     S.t = 'ask'; renderPanel();
     const landed = S.t;
