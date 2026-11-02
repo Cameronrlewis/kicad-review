@@ -6374,7 +6374,9 @@ CHECKS.push(
    const count=s.state.drawCount;Review3D.frame('top');await new Promise(r=>setTimeout(r,150));
    if(s.raf||s.state.drawCount!==count)return 'hidden document kept drawing';
    Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));
-   await new Promise(r=>setTimeout(r,150));
+   // Wait for the resumed tick itself: software WebGL can take far longer than a fixed sleep to deliver it.
+   if(!s.raf)return 'visible document did not schedule a frame';
+   await new Promise(r=>{s.frameReady=r;});
    if(s.state.drawCount===count)return 'visible document did not resume';
    Review3D.frame('bottom');Review3D.dispose();const closed=s.state.drawCount;
    await new Promise(r=>setTimeout(r,150));
