@@ -1,7 +1,8 @@
 // One gentle, measured page load over CDP. Node 22+, no npm. Exit 3 on HTTP 429/503.
 // Frame-aware copy of the study tools/measure.mjs: probes, readiness, clicks and Review3D reads run in the
 // selected report context (the hosted wrapper's sandboxed iframe with --report-frame); screenshots and Input.* stay top-session.
-// Desktop profile only: phone profiles were dropped on 2026-10-29.
+// Desktop profile only: --phone, its Pixel 7 profile, touch input and throttling were dropped with phone support
+// (owner decision 2026-10-29, spec boardrepo/02-3d-viewer.md); the summary keeps phone:false for schema compatibility.
 // node ui/measure3d.mjs <url> <outdir> [--report-frame SEL] [--interaction-target SEL] [--cold] [--click-text T]... [--ready-expr E]
 //   [--rotate] [--zoom] [--zoom-steps N] [--settle MS] [--port P]
 // Env MEASURE_PROJECT/MEASURE_LAYERS/MEASURE_REVISION: reject a wrong project, view, mode, layer count or revision before sampling.
@@ -15,7 +16,7 @@ const opt = (n, d) => { const i = argv.indexOf(n); return i < 0 ? d : argv[i + 1
 const all = n => argv.flatMap((a, i) => a === n ? [argv[i + 1]] : []);
 const [url, out] = argv;
 if (!url || !out || url.startsWith('--')) { console.error('usage: measure3d.mjs <url> <outdir> [options]'); process.exit(2); }
-if (flag('--phone')) { console.error('--phone is not supported: phone profiles were dropped'); process.exit(2); }
+if (flag('--phone')) { console.error('--phone is not supported: phone support was dropped 2026-10-29 (spec 02-3d-viewer); measure desktop only'); process.exit(2); }
 const port = opt('--port', '9222'), settle = +opt('--settle', '8000'), zoomSteps = +opt('--zoom-steps', '10');
 const reportFrame = opt('--report-frame'), selector = opt('--interaction-target'), readyExpr = opt('--ready-expr'), clicks = all('--click-text');
 for (const d of ['bodies', 'shaders']) mkdirSync(join(out, d), { recursive: true });
