@@ -244,14 +244,21 @@ test('BR02 snapshotParts validates duplicates, unclassified meshes and non-finit
   }, /footprint has no finite position/);
 });
 
-test('BR02 snapshotParts classifies KiCad via meshes as copper', integration, () => {
+test('BR02 KiCad via meshes classify, color and batch as board copper', integration, async () => {
   // KiCad 10 names the via node by its STEP label and only the mesh carries the _via suffix.
   const {d, metadata} = makeDocument(['R1']);
-  const via = d.createNode('=>[0:1:1:12]').setMesh(d.getRoot().listMeshes()[0].clone().setName('Board_via'));
-  d.getRoot().listScenes()[0].addChild(via);
+  const source = d.getRoot().listMeshes()[0], scene = d.getRoot().listScenes()[0];
+  const via = d.createNode('=>[0:1:1:12]').setMesh(source.clone().setName('Board_via'));
+  const copper = d.createNode('=>[0:1:1:11]').setMesh(source.clone().setName('Board_copper'));
+  scene.addChild(via); scene.addChild(copper);
   P.snapshotParts(d, metadata);
-  assert.equal(via.getExtras().role, 'copper');
-  assert.match(via.getExtras().batch, /^board:copper:/);
+  // The via spans the default 1.6 mm board's mid-plane, like a real barrel.
+  assert.deepEqual([via.getExtras().role, via.getExtras().side, via.getExtras().batch], ['copper', 'both', 'board:copper:both']);
+  P.applyMaterials(d, 'ENIG'); await P.batchDocument(d);
+  const merged = d.getRoot().listNodes().filter(n => n.getExtras().batch === 'board:copper:both' && n.getMesh()?.listPrimitives().length);
+  assert.equal(merged.length, 1);
+  const prims = merged[0].getMesh().listPrimitives();
+  for (const p of prims) assert.deepEqual(p.getMaterial().getBaseColorFactor(), [.78, .63, .39, 1]);
 });
 
 test('BR02 240 compatible changed primitives fit the hard changed-part budget', integration, async () => {
