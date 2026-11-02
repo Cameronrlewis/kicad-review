@@ -1694,6 +1694,7 @@ function afterDraw(view) {
   drawPins();
   mountImageSearch();
   void renderElectricalPins();
+  renderFallbackCopper();
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
@@ -1758,7 +1759,28 @@ function syncSelectedChangeCard() {
     if(selected)e.scrollIntoView({block:'nearest'});
   }
 }
-function markSelected() { clearImageSelection(); S.io = null; S.ig = null; syncSelectedChangeCard(); updateStatus(); renderInspector(); }
+function renderFallbackCopper() {
+  document.querySelectorAll('.copper-selection-fallback').forEach(e=>e.remove());
+  const row=proj().changes.find(r=>r.id===S.s), view=currentView();
+  if(S.v!=='board' || boardView.useGL || row?.detail?.kind!=='area' || !view) return;
+  for(const stack of document.querySelectorAll('#stage .world .stack')) {
+    const action=stack.classList.contains('base')?'removed':'added';
+    const rings=row.detail[action+'Contours']||[]; if(!rings.length) continue;
+    const svg=document.createElementNS('http:'+'//www.w3.org/2000/svg','svg');
+    svg.classList.add('copper-selection','copper-selection-fallback');
+    svg.setAttribute('width',view.size[0]*PX);svg.setAttribute('height',view.size[1]*PX);
+    svg.setAttribute('viewBox','0 0 '+view.size.join(' '));
+    const path=document.createElementNS(svg.namespaceURI,'path');
+    path.dataset.action=action;
+    path.setAttribute('d',rings.map(ring=>ring.map(([x,y],i)=>(i?'L':'M')+x+' '+y).join(' ')+'Z').join(' '));
+    path.setAttribute('aria-label',action+' copper on '+row.detail.layer);
+    svg.dataset.side=action==='removed'?'base':'head';
+    svg.append(path);
+    // Semantic artwork hides base and dims head; selection must remain visible in both signs.
+    (S.m==='semantic'?stack.parentElement:stack).append(svg);
+  }
+}
+function markSelected() { clearImageSelection(); S.io = null; S.ig = null; syncSelectedChangeCard(); updateStatus(); renderInspector(); renderFallbackCopper(); }
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {

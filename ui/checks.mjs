@@ -3832,6 +3832,40 @@ return true;
       return true;
     } finally {p.changes=saved; Appearance.patch(appearance); S.s=null; disposeBoardRenderers(); await draw();}
   `],
+  ["BR03 fallback signed contours", "v=board", `
+    const p=proj(), changes=p.changes, failed=boardView.failed, layers=p.board.layers;
+    const row={id:'c909',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu',
+      addedMm2:1,removedMm2:1,addedContours:[[[4,4],[5,4],[5,5],[4,5]]],
+      removedContours:[[[3,4],[4,4],[4,5],[3,5]]]},anchors:{base:[],head:[]}};
+    try {
+      boardView.failed=S.p; disposeBoardRenderers(); // same state as a real WebGL mount/context failure
+      p.board.layers=[...layers,{...layers[0],name:'In1_Cu'}]; p.changes=[row];
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await electricalTarget(row,{kind:'board'});
+        if(boardView.useGL) return 'WebGL was not disabled';
+        if(!S.layers.includes('In1_Cu')) return 'inner layer not selected';
+        const paths=[...document.querySelectorAll('.copper-selection-fallback path')];
+        if(paths.length!==2) return mode+': fallback signs missing';
+        for(const action of ['added','removed']) {
+          const path=paths.find(p=>p.dataset.action===action);
+          if(!path || (mode!=='semantic' && !path.closest('.stack.'+(action==='added'?'head':'base')))) return 'wrong revision sign';
+          const svg=path.ownerSVGElement, expected=action==='added'?4:3;
+          const point=new DOMPoint(expected,4).matrixTransform(svg.getScreenCTM());
+          const world=svg.closest('.world'), stack=svg.closest('.stack');
+          const matrix=svg.getScreenCTM();
+          if(!Number.isFinite(point.x) || !matrix || !world || (mode!=='semantic' && !stack)) return 'invalid world projection';
+          if(getComputedStyle(svg).display==='none' || !svg.getClientRects().length) return 'hidden contour';
+          if(!path.getAttribute('d').startsWith('M'+expected+' 4')) return 'mm coordinates lost';
+        }
+        if(mode==='wipe' && !document.querySelector('.stack.base').style.clipPath.includes('inset')) return 'fallback clip absent';
+        S.x+=.25; S.z+=3; apply();
+        if(document.querySelectorAll('.copper-selection-fallback path').length!==2) return 'pan zoom lost contours';
+        S.s=null; markSelected();
+        if(document.querySelector('.copper-selection-fallback')) return 'stale fallback selection';
+      }
+      return true;
+    } finally {p.changes=changes;p.board.layers=layers;boardView.failed=failed;S.s=null;await draw();}
+  `],
   ["BR03 missing pin locations note", "", `
     const p=proj(), sheets=p.sheets, row={id:'c910',anchors:{base:[],head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/'}]}};
     const id='__br03_bad_manifest', prior=cache[id], dock=document.createElement('div');document.body.append(dock);
