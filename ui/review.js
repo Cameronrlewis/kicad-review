@@ -2152,7 +2152,9 @@ async function askGo(kind, name, preferredSide = "head") {
     ASK.status = "Board geometry unavailable for " + name + " (" + side + "); showing a connected part instead, not a net highlight.";
     const ref = p.ask.nets[side][name].fallback_ref;
     const i = objects.findIndex(o => (o.ref === ref || o.ref.startsWith(ref + " unit ")) && (!o.side || o.side === side));
-    if (i >= 0) await goToObject(i); else { S.revision = side; await draw(); saveHash(); }
+    // Desktop goToObject does not write S.revision, so record the cited side for both paths.
+    S.revision = side;
+    if (i >= 0) await goToObject(i); else { await draw(); saveHash(); }
     askRefresh(); return;
   }
   const match = o => o.ref === name || o.ref.startsWith(name + " unit ");

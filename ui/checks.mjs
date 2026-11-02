@@ -5276,6 +5276,134 @@ return true;
       wrapper(q.id,'answer',{text:'Next question succeeded.'}); wrapper(q.id,'done',{}); await settle();
       return !ASK.busy && !ASK.log.at(-1).error && document.querySelector('#ask-log').textContent.includes('Next question succeeded.') || 'next question did not complete';
     } finally { removeEventListener('message',capture); }`],
+  ["Ask project summaries ignore out-of-order replies", "", askOpen + `
+    const firstProject=ASK.project, firstId=ASK.insightId, original=S.p;
+    const second=structuredClone(proj()); second.dir='Ask-second-project'; second.name='Ask second'; D.projects.push(second);
+    S.p=D.projects.length-1; renderPanel(); const secondId=ASK.insightId;
+    if(!secondId || secondId===firstId) return 'summary request not reset';
+    wrapper(firstId,'insight',{summary:'STALE',questions:['A?','B?','C?']}); await settle();
+    if(ASK.insight) return 'stale project reply accepted';
+    wrapper(secondId,'insight',{summary:'SECOND',questions:['A?','B?','C?']}); await settle();
+    if(ASK.insight?.summary!=='SECOND') return 'current project reply lost';
+    S.p=original; renderPanel(); const thirdId=ASK.insightId;
+    wrapper(secondId,'insight',{summary:'STALE SECOND',questions:['A?','B?','C?']}); await settle();
+    return ASK.project===firstProject && thirdId!==firstId && !ASK.insight || 'returning project reused stale summary';`],
+  ["Ask rejects incomplete insight payloads and follows only the actual dock scroller", "", askOpen + `
+    window.postMessage({ kicadReviewAskReady: true }, '*'); await settle();
+    const id=ASK.insightId, root=document.querySelector('#panel-body');
+    for (const payload of [
+      {summary:'',questions:['A?','B?','C?']},
+      {summary:'A board.',questions:[]},
+      {summary:'A board.'},
+      {summary:'A board.',questions:['A?',null,'C?']},
+      {summary:'A board.',questions:['A?','B?']}
+    ]) {
+      wrapper(id,'insight',payload); await settle();
+      if (!ASK.insightError || ASK.insight || !document.querySelector('#ask-top .ask-error')) return 'incomplete insight was displayed as success';
+      ASK.insightError='';
+    }
+    wrapper(id,'insight',{summary:'A camera board.',questions:['A?','B?','C?']}); await settle();
+    ASK.log=Array.from({length:24},(_,i)=>({role:i%2?'assistant':'user',text:('conversation '+i+' ').repeat(45),followups:[]}));
+    askRefresh(); await settle();
+    if (root.scrollHeight <= root.clientHeight) return 'conversation did not overflow #panel-body';
+    root.scrollTop=root.scrollHeight; askRefresh(); await settle();
+    if (root.scrollHeight-root.scrollTop-root.clientHeight >= 40) return 'reader at bottom was not followed';
+    root.scrollTop=80; const before=root.scrollTop;
+    ASK.log.push({role:'assistant',text:'new streamed text '.repeat(80)}); askRefresh(); await settle();
+    return Math.abs(root.scrollTop-before)<2 || 'reader position moved while scrolled up';`],
+  ["Ask whole screen: no overflow, readable in both themes", "", askOpen + `
+    window.postMessage({ kicadReviewAskReady: true }, '*'); await settle();
+    wrapper(ASK.insightId, 'insight', { summary: 'A camera board with a USB-C input, an ESP32-S3 module and a TFT display on SPI.', questions: ['What powers it?', 'Which pin drives the LED?', 'What protects USB VBUS?'] }); await settle();
+    ASK.log.push({ role:'user', text:'What is on net 12?' }, { role:'assistant', text:'Net [net:12] joins [R16] and [R99].', followups:[] }); askRefresh(); await settle();
+    const root = document.querySelector('#ask-root'), panel = document.querySelector('#panel');
+    if (document.documentElement.scrollWidth > innerWidth) return 'page scrolls sideways at ' + innerWidth;
+    if ([root, document.querySelector('#ask-input'), document.querySelector('.ask-send')].some(el=>!el || el.getBoundingClientRect().width<=0 || el.getBoundingClientRect().height<=0)) return 'Ask controls hidden or zero-sized';
+    if (root.scrollWidth > panel.clientWidth + 1) return 'Ask panel overflows its dock';
+    const rgba = color => { const a=color.match(/[\\d.]+/g).map(Number); return [a[0],a[1],a[2],a[3]??1]; };
+    const over = (a,b) => {const alpha=a[3]+b[3]*(1-a[3]); return [...a.slice(0,3).map((v,i)=>(v*a[3]+b[i]*b[3]*(1-a[3]))/(alpha||1)),alpha];};
+    const background = el => {const chain=[]; for(let n=el;n;n=n.parentElement) chain.unshift(n); return chain.reduce((bg,n)=>over(rgba(getComputedStyle(n).backgroundColor),bg),[255,255,255,1]);};
+    const textBackground = el => over(rgba(getComputedStyle(el).backgroundColor), background(el.parentElement || el));
+    const lum = c => {const a=c.slice(0,3).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;}); return .2126*a[0]+.7152*a[1]+.0722*a[2];};
+    const contrast = el => {const bg=textBackground(el), fg=over(rgba(getComputedStyle(el).color),bg), a=lum(fg),b=lum(bg);return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);};
+    const probe=document.createElement('span'); probe.style.cssText='background:rgb(255,255,255);color:rgb(0,0,0)';root.append(probe);
+    if(Math.abs(contrast(probe)-21)>.01) return 'contrast passing fixture wrong';
+    probe.style.color='rgb(200,200,200)';if(contrast(probe)>=4.5)return 'contrast failing fixture wrong';
+    probe.style.cssText='background:rgb(255,255,255);color:rgb(0,0,0)';
+    const alphaProbe=document.createElement('span');alphaProbe.style.cssText='background:rgba(0,0,0,.5);color:rgba(255,255,255,.8)';probe.append(alphaProbe);
+    const expectedAlpha=(lum([229.5,229.5,229.5])+.05)/(lum([127.5,127.5,127.5])+.05);
+    if(background(alphaProbe).slice(0,3).some(v=>Math.abs(v-127.5)>.01)||Math.abs(contrast(alphaProbe)-expectedAlpha)>.01)return 'alpha background or foreground not composited';probe.remove();
+    const missing = document.querySelector('span.ask-link.missing'), live = document.querySelector('button.ask-link');
+    if(!missing || !live) return 'contrast chips missing';
+    const low = [...document.querySelectorAll('.ask-notice,.ask-summary p,.ask-chip,.ask-label,.ask-who,.ask-link,#ask-meta,#ask-input')].map(el=>[el.className || el.id,el]).filter(([,el])=>contrast(el)<4.5);
+    if (low.length) return 'low contrast in ' + KRTheme.get() + ': ' + low.map(l => l[0]).join(',');
+    for (const b of document.querySelectorAll('#panel-tabs [role=tab]')) { const r = b.getBoundingClientRect(); if (r.width && (r.right > innerWidth + 1 || r.left < -1)) return 'tab clipped: ' + b.textContent; }
+    return true;`],
+  ["BR09 fixture net links select and frame exact board nets on both revisions", "v=board", askOpen + `
+    if (!proj().board?.geometry?.head) return 'skip';
+    const scene=await loadBoardScene(proj().board.geometry.head);
+    if (!scene.nets.some(n=>n.name==='12')) return 'skip';
+    await askGo('net','12');
+    boardDiff?.render();
+    if(S.v!=='board'||Appearance.get().selectedNet!=='12'||!boardView.useGL||boardView.renderers.some(r=>r.appearance.selectedNet!=='12'))return 'net not highlighted in shipped board';
+    const boxes=scene.objects.filter(o=>o.net===scene.nets.find(n=>n.name==='12').id).map(BoardDiff.objectBounds).filter(Boolean);
+    const box=[Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))];
+    if(Math.abs(S.x-(box[0]+box[2])/2)>.1||Math.abs(S.y-(box[1]+box[3])/2)>.1) return 'net bounds not framed';
+    await askGo('net','REMOVED','base');
+    boardDiff?.render();
+    if(S.revision!=='base') return 'base-only net left the revision on '+S.revision;
+    if(Appearance.get().selectedNet!=='REMOVED' || !/base/.test(ASK.status) || boardView.renderers.some(r=>r.appearance.selectedNet!=='REMOVED')) return 'base-only net did not resolve';
+    const geometry=proj().board.geometry;delete proj().board.geometry;
+    await askGo('net','12');proj().board.geometry=geometry;
+    return /not a net highlight/.test(ASK.status) || 'missing-geometry fallback not disclosed';`],
+  ["BR09 base-only net link switches the revision (run at desktop widths)", "v=board", askOpen + `
+    await askGo('net','REMOVED','base');
+    return S.revision === 'base' || 'base-only net link left the revision on ' + S.revision;`],
+  ["BR09 unavailable selected side: fallback is disclosed", "v=board", askOpen + `
+    const geometry = proj().board.geometry; delete proj().board.geometry;
+    try {
+      await askGo('net', '12', 'head');
+      if (!/not a net highlight/.test(ASK.status)) return 'unavailable side not disclosed: ' + ASK.status;
+      if (S.revision !== 'head') return 'fallback left the revision on ' + S.revision;
+    } finally { proj().board.geometry = geometry; }
+    return true;`],
+  ["BR09 single design: an unready Ask falls back to Checks, never a hidden Changes tab", "v=board", askOpen + `
+    // askOpen leaves Ask ready; drop readiness so the fallback under test applies.
+    document.body.classList.add('design-single'); ASK.ready = false;
+    S.t = 'ask'; renderPanel();
+    const landed = S.t;
+    document.body.classList.remove('design-single');
+    return landed === 'checks' || 'single design fell back to ' + landed;`],
+  ...['top','flipped'].map(view => ["BR09 fixture keeps the 4-layer board in KiCad order with the tab open: " + view, "v=board", askOpen + `
+    const scene=await loadBoardScene(proj().board?.geometry?.head);
+    if(!scene?.copperStack || scene.copperStack.length!==4) return 'skip';
+    Object.assign(S,{v:'board',m:'side',layers:null,x:10,y:5,z:20}); await draw();
+    const names=['F.Cu','In1.Cu','In2.Cu','B.Cu'];
+    const baseLayers=()=>Object.fromEntries(names.map(n=>[n,{visible:true,opacity:1}]));
+    const close=(p,c)=>p.slice(0,3).every((v,i)=>Math.abs(v-c[i])<=2);
+    // Sample the shipped compositor, not renderer.draw(): in Side mode its last scene can be null on the Base pane.
+    const pixel=(index,x=10)=>{boardDiff.render();const q=boardView.panes[index].renderer.worldToScreen([x,5]);return Array.from(boardDiff.readPixel(index,q[0],q[1]));};
+    const order=${JSON.stringify(view==='flipped'?['B.Cu','In2.Cu','In1.Cu','F.Cu']:['F.Cu','In1.Cu','In2.Cu','B.Cu'])};
+    Appearance.reset();
+    changeBoardAppearance({grid:{visible:false},contrast:'normal',colors:Object.fromEntries(names.map(n=>[KicadColors.layerThemeKeys[n],KicadColors.layers[n].map((v,i)=>i<3?v/255:v)]))});
+    if(!boardDiff || boardView.panes.length!==2 || boardView.panes.some(p=>p.canvas.getBoundingClientRect().width<=0)) return 'shipped comparison panes missing';
+    const metadata=proj().board.layers.map(l=>canon(l.name));
+    if(names.some(n=>!metadata.includes(n))) return 'fixture layer-eye metadata omits copper';
+    const layers=baseLayers();
+    changeBoardAppearance({layers,activeLayer:null,selectedNet:null,flip:${view==='flipped'}});
+    if(names.some(n=>!S.layers?.map(canon).includes(n) || glAppearance().layers[n]?.visible!==true)) return 'shipped layer filter hides fixture copper, including inner layers';
+    for(const expected of order){
+      changeBoardAppearance({layers,activeLayer:null,selectedNet:null,flip:${view==='flipped'}});
+      for(const [index] of boardView.panes.entries()) if(!close(pixel(index),KicadColors.layers[expected]))return 'physical order wrong at '+expected;
+      layers[expected]={visible:false,opacity:1};
+    }
+    // Same-layer duplicate primitives in the generated fixture overlap at x=10, not x=4.
+    // At half opacity both pixels must equal ONE blend of the layer, not 0.75 from per-path alpha.
+    changeBoardAppearance({layers:baseLayers(),activeLayer:null,selectedNet:null,flip:${view==='flipped'}});
+    const top=order[0],under=order[1];
+    changeBoardAppearance({layers:{[top]:{opacity:.5}}});
+    const blend=KicadColors.layers[top].slice(0,3).map((v,i)=>Math.round(.5*v+.5*KicadColors.layers[under][i]));
+    for(const [index] of boardView.panes.entries())for(const x of [4,10])if(!close(pixel(index,x),blend))return 'not whole-layer alpha at '+x;
+    return document.querySelector('#ask-root').getBoundingClientRect().width>0 || 'Ask hidden';`]),
 
 ];
 
