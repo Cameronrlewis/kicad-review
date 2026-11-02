@@ -4888,6 +4888,24 @@ test('ask route: a daily limit of 0 disables questions and cold insight; unset s
     assert.equal(i.status, 429);
     assert.equal(seen.filter((s) => s.url.includes('anthropic')).length, 0);
   } finally { restore(); }
+
+  const cookie50 = await signedIn({ t: 'limit-default', u: 'limituser' });
+  const seenDefault = [];
+  const date = new Date().toISOString().slice(0, 10);
+  const restoreDefault = mockFetch(askMocks({ seen: seenDefault, anthropic: answerStream }));
+  try {
+    const e = askEnv();
+    e.ASK_KV.m.set(`ask:day:limituser:${date}`, '49');
+    const q49 = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, e, cookie50);
+    assert.equal(q49.status, 200);
+    const text49 = await q49.text();
+    assert.match(text49, /"remaining":0/);
+
+    e.ASK_KV.m.set(`ask:day:limituser:${date}`, '50');
+    const q50 = await askPost('/r/Cameronrlewis/repo/a/55/ask', { messages: [{ role: 'user', text: 'hi' }] }, e, cookie50);
+    assert.equal(q50.status, 429);
+    assert.equal(seenDefault.filter((s) => s.url.includes('anthropic')).length, 1);
+  } finally { restoreDefault(); }
 });
 
 test('ask route: ASK_MODEL and ASK_SUMMARY_MODEL configure the model, defaulting to claude-sonnet-5-5', async () => {
@@ -4911,6 +4929,15 @@ test('ask route: ASK_MODEL and ASK_SUMMARY_MODEL configure the model, defaulting
     const call = seenModel.find((s) => s.url === 'https://api.anthropic.com/v1/messages');
     assert.equal(JSON.parse(call.options.body).model, 'claude-3-opus');
   } finally { restoreModel(); }
+
+  const seenSummaryOnly = [];
+  const restoreSummaryOnly = mockFetch(askMocks({ seen: seenSummaryOnly, anthropic: reply }));
+  try {
+    const e = askEnv({ ASK_SUMMARY_MODEL: 'claude-3-haiku' });
+    await askPost('/r/Cameronrlewis/repo/a/55/ask/insight', { project: 'Thermal_Camera' }, e, cookie);
+    const call = seenSummaryOnly.find((s) => s.url === 'https://api.anthropic.com/v1/messages');
+    assert.equal(JSON.parse(call.options.body).model, 'claude-3-haiku');
+  } finally { restoreSummaryOnly(); }
 
   const seenSummary = [];
   const restoreSummary = mockFetch(askMocks({ seen: seenSummary, anthropic: reply }));

@@ -6642,8 +6642,25 @@ for needle in (
     assert needle in site_readme, needle
 
 # Verify documented defaults in site/README.md match implementation in site/ask.js
-assert "dailyLimit = (env) =>" in site_ask and ": 50" in site_ask, "ASK_DAILY_LIMIT default 50 in site/ask.js"
-assert "'claude-sonnet-5-5'" in site_ask, "ASK_MODEL / ASK_SUMMARY_MODEL default claude-sonnet-5-5 in site/ask.js"
-assert "!env.ANTHROPIC_API_KEY || !env.ASK_KV" in site_ask and "503" in site_ask, "503 on missing setup in site/ask.js"
+import re
+
+daily_limit_match = re.search(r"dailyLimit\s*=\s*\(env\)\s*=>.*?:\s*(\d+)", site_ask)
+assert daily_limit_match and int(daily_limit_match.group(1)) == 50, "ASK_DAILY_LIMIT default 50 in site/ask.js"
+
+setup_503_match = re.search(
+    r"if\s*\(!env\.ANTHROPIC_API_KEY\s*\|\|\s*!env\.ASK_KV\)\s*return\s*json\([^,]+,\s*(\d+)\)",
+    site_ask,
+)
+assert setup_503_match and int(setup_503_match.group(1)) == 503, "503 on missing setup in site/ask.js"
+
+assert re.search(r"env\.ASK_SUMMARY_MODEL\s*\|\|\s*env\.ASK_MODEL\s*\|\|\s*'claude-sonnet-5-5'", site_ask), (
+    "ASK_SUMMARY_MODEL falls back to ASK_MODEL then claude-sonnet-5-5 in site/ask.js"
+)
+assert re.search(r"env\.ASK_MODEL\s*\|\|\s*'claude-sonnet-5-5'", site_ask), (
+    "ASK_MODEL default claude-sonnet-5-5 in site/ask.js"
+)
+assert "ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`" in site_readme, (
+    "site/README.md documents ASK_SUMMARY_MODEL fallback"
+)
 assert "export function askOptedIn" in site_ask, "TOML-subset reader in site/ask.js"
 print("ok ask documentation")
