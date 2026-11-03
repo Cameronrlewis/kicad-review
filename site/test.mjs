@@ -6198,15 +6198,35 @@ test('MCP OAuth binding and replay matrix',async(t)=>{
   for(const {value} of local.OAUTH_KV.data.values())assert.ok(!value.includes('refresh-token')&&!value.includes('user-token'),'no plaintext GitHub credentials');
 });
 
-test('MCP Connect panel is escaped, site-specific and absent offline',()=>{
+test('MCP Connect panel is escaped, site-specific and absent offline', () => {
   assert.equal(connectPanel(), '');
-  const html=connectPanel('https://review.example');
-  assert.match(html,/Connect your AI assistant/);
-  assert.match(html,/claude mcp add --scope user --transport http kicad-review https:\/\/review.example\/mcp/);
-  assert.match(html,/read-only/i);assert.match(html,/\/mcp/);
+  assert.equal(connectPanel(null), '');
+  assert.equal(connectPanel(undefined), '');
+  assert.equal(connectPanel(''), '');
+  assert.equal(connectPanel('https://user:pass@review.example'), '');
+  assert.equal(connectPanel('https://review.example/'), '');
+  assert.equal(connectPanel('http://insecure.example'), '');
+  assert.equal(connectPanel('http://example.com'), '');
+
+  // Accepted loopback http
+  const loopbackLocalhost = connectPanel('http://localhost:8787');
+  assert.match(loopbackLocalhost, /claude mcp add --scope user --transport http kicad-review http:\/\/localhost:8787\/mcp/);
+  const loopbackIp = connectPanel('http://127.0.0.1:8787');
+  assert.match(loopbackIp, /claude mcp add --scope user --transport http kicad-review http:\/\/127\.0\.0\.1:8787\/mcp/);
+  assert.match(connectPanel('http://localhost'), /claude mcp add --scope user --transport http kicad-review http:\/\/localhost\/mcp/);
+  assert.match(connectPanel('http://127.0.0.1'), /claude mcp add --scope user --transport http kicad-review http:\/\/127\.0\.0\.1\/mcp/);
+
+  // Accepted https
+  const html = connectPanel('https://review.example');
+  assert.match(html, /Connect your AI assistant/);
+  assert.match(html, /claude mcp add --scope user --transport http kicad-review https:\/\/review\.example\/mcp/);
+  assert.match(html, /read-only/i);
+  assert.match(html, /\/mcp/);
+
+  // Rejected invalid / injection
   assert.equal(connectPanel('javascript:alert(1)'), '');
   assert.equal(connectPanel('https://bad.example/" onclick="bad'), '');
-  assert.doesNotMatch(sharedPage({name:'x',raw:'/s/x/raw',expires:'2030-01-01'}),/Connect your AI assistant/);
+  assert.doesNotMatch(sharedPage({ name: 'x', raw: '/s/x/raw', expires: '2030-01-01' }), /Connect your AI assistant/);
 });
 
 test('MCP Connect panel route presence, OAUTH_KV dependency and malicious artifact name', async () => {
@@ -6251,7 +6271,11 @@ test('MCP Connect panel route presence, OAUTH_KV dependency and malicious artifa
   }
 });
 
-test('MCP Connect panel details retains native keyboard semantics and wraps overflow', () => {
+test('MCP Connect panel details retains native keyboard semantics, in-flow expansion and reachability', () => {
+  const css = readFileSync('site/site.css', 'utf8');
+  // Nested popovers expand in-flow instead of absolutely overlaying outer menu items
+  assert.match(css, /\.bench-popover\s+\.bench-popover\s*\{[^}]*position:\s*static[^}]*box-shadow:\s*none/);
+
   const page = reviewPage({
     user: 'reviewer',
     owner: 'demo',
@@ -6264,6 +6288,7 @@ test('MCP Connect panel details retains native keyboard semantics and wraps over
     pdf: true,
     mcpOrigin: 'https://review.example',
   });
+
   // Connect panel details inside overflow popover
   assert.match(page, /<details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••<\/summary><div class="bench-popover">/);
   assert.match(page, /<details class="bench-menu"><summary>Connect your AI assistant<\/summary><div class="bench-popover">/);
@@ -6271,14 +6296,27 @@ test('MCP Connect panel details retains native keyboard semantics and wraps over
   // Command wraps without overflow
   assert.match(page, /<code style="white-space:pre-wrap;overflow-wrap:anywhere">claude mcp add --scope user --transport http kicad-review https:\/\/review\.example\/mcp<\/code>/);
 
-  // Native details structure: summary is first child inside details
+  // Native details structure: summary is first child inside details for native keyboard toggle
   assert.match(page, /<details class="bench-menu"><summary>Connect your AI assistant<\/summary>/);
 
-  // Existing review actions are still reachable within the popover
-  assert.match(page, /History/);
-  assert.match(page, /Share…/);
-  assert.match(page, /Open run/);
-  assert.match(page, /Download PDF/);
-  assert.match(page, /data-review-copy/);
-  assert.match(page, /data-review-goto/);
+  // Reachability and sequential DOM ordering:
+  // Preceding actions -> Connect details -> Trailing actions (Copy link, Go to)
+  const overflowStart = page.indexOf('<details class="bench-menu bench-overflow">');
+  assert.ok(overflowStart > 0);
+  const overflowEnd = page.indexOf('</details>', page.indexOf('data-review-goto', overflowStart));
+  const overflowSlice = page.slice(overflowStart, overflowEnd + 10);
+
+  const historyPos = overflowSlice.indexOf('History');
+  const sharePos = overflowSlice.indexOf('Share…');
+  const connectPos = overflowSlice.indexOf('Connect your AI assistant');
+  const copyPos = overflowSlice.indexOf('data-review-copy');
+  const gotoPos = overflowSlice.indexOf('data-review-goto');
+
+  assert.ok(historyPos > 0 && sharePos > historyPos && connectPos > sharePos, 'Preceding review actions precede Connect panel');
+  assert.ok(copyPos > connectPos && gotoPos > copyPos, 'Trailing actions follow Connect panel');
+
+  // Verify that trailing actions are not trapped inside the nested details
+  const nestedDetailsClose = overflowSlice.indexOf('</details>', connectPos);
+  assert.ok(copyPos > nestedDetailsClose, 'Copy link is sibling to nested details, not inside it');
+  assert.ok(gotoPos > nestedDetailsClose, 'Go to input is sibling to nested details, not inside it');
 });

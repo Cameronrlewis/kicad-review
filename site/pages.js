@@ -322,9 +322,20 @@ function reviewOverflow(items) {
 
 export function connectPanel(origin) {
   let u;
-  try {u=new URL(origin);} catch {return '';}
-  if(u.origin!==origin||u.username||u.password||!(u.protocol==='https:'||u.protocol==='http:'&&['localhost','127.0.0.1'].includes(u.hostname)))return '';
-  const command=`claude mcp add --scope user --transport http kicad-review ${u.origin}/mcp`;
+  try {
+    u = new URL(origin);
+  } catch {
+    return '';
+  }
+  if (
+    u.origin !== origin ||
+    u.username ||
+    u.password ||
+    !(u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname)))
+  ) {
+    return '';
+  }
+  const command = `claude mcp add --scope user --transport http kicad-review ${u.origin}/mcp`;
   return `<details class="bench-menu"><summary>Connect your AI assistant</summary><div class="bench-popover"><p>Read-only design access through your GitHub identity. Your assistant receives the tool results.</p><code style="white-space:pre-wrap;overflow-wrap:anywhere">${e(command)}</code><p>Then run <code>/mcp</code> in Claude Code to sign in and approve access. The connection lasts at most one hour. Never type your GitHub password into an assistant.</p><p>Source: reviewed workflow artifacts; missing or expired revisions stay unavailable. No edits or render triggers.</p></div></details>`;
 }
 // This parent owns the only network capability. The child supplies identities, not URLs.
