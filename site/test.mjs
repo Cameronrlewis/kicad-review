@@ -5664,6 +5664,16 @@ test('MCP grouped BOM follows 08 included flags and key',()=>{
  assert.equal(legacyRes.lines.items[0].key,null);
  assert.throws(() => bomProjection('unknown_bom_tool', {}, loaded, 'https://site.example'), /Unknown BOM projection/);
 });
+test('MCP grouped BOM CSV preserves verbatim values without formula prefix mangling per plan',()=>{
+ const loaded=projectionLoaded();
+ const bom=(ref,val)=>({included:true,excludedReason:null,ref,value:val,footprint:'F',lcsc:'C',mpn:'M',key:val});
+ loaded.revision.parts=[{ref:'R1',value:'+5V',bom:bom('R1','+5V')},{ref:'R2',value:'=10k',bom:bom('R2','=10k')},{ref:'R3',value:'-12V',bom:bom('R3','-12V')},{ref:'R4',value:'@special',bom:bom('R4','@special')}];
+ const csv=bomProjection('get_bom',{format:'csv'},loaded,'https://site.example');
+ assert.match(csv.csv,/"R1","\+5V","F","M","C","1"/);
+ assert.match(csv.csv,/"R2","=10k","F","M","C","1"/);
+ assert.match(csv.csv,/"R3","-12V","F","M","C","1"/);
+ assert.match(csv.csv,/"R4","@special","F","M","C","1"/);
+});
 test('MCP BOM replays the shared 08 fixture cases',async()=>{
  const cases=JSON.parse(await readFile(new URL('../ui/fixtures/bom-cases.json',import.meta.url),'utf8'));
  for(const c of cases){
