@@ -284,3 +284,32 @@ export function designParts(name, args, loaded, origin) {
   }
   throw new McpError('UNKNOWN_TOOL', 'Unknown design projection');
 }
+
+export function netProjection(name, args, loaded, origin) {
+  const { revision: r, doc } = loaded, limit = args.limit ?? 15;
+  const incomplete = !!doc.truncated, parts = r.parts || [], nets = r.nets || [], out = { provenance: loaded.provenance };
+  if (name === 'get_net') {
+    if (!r.netlist_available) return { ...out, error: { code: 'INCOMPLETE', message: r.netlist_reason || 'No exported netlist' } };
+    const net = nets.find(n => n.id === args.net);
+    if (!net) {
+      const near = nets.filter(n => n.id.toLowerCase().includes(args.net.toLowerCase())).map(n => ({ id: n.id, link: objectLink(origin, loaded, 'net', n.id) }));
+      return { ...out, found: false, nearby: page(near, limit, incomplete ? null : near.length, incomplete), incomplete };
+    }
+    const structured = Array.isArray(net.pin_records) ? net.pin_records : null;
+    const rows = (net.pins || []).map((id, index) => {
+      let member = structured?.[index];
+      if (!member) {
+        const matches = [];
+        for (const p of parts)
+          for (const entry of p.pins || [])
+            if (`${p.ref}.${entry.pin}` === id) matches.push({ ref: p.ref, pin: entry.pin });
+        if (matches.length === 1) member = matches[0];
+      }
+      if (!member) return { memberAvailable: false };
+      const p = parts.find(p => p.ref === member.ref && (!p.pins?.length || p.pins.some(entry => entry.pin === member.pin)));
+      return { ref: member.ref, pin: member.pin, value: p?.value ?? null, partId: p?.uuid || null, memberAvailable: !!p };
+    });
+    return { ...out, found: true, id: net.id, link: objectLink(origin, loaded, 'net', net.id), pins: page(rows, limit, net.pin_count ?? rows.length, !!net.more || incomplete) };
+  }
+  throw new McpError('UNKNOWN_TOOL', 'Unknown net projection');
+}

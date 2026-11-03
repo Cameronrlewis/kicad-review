@@ -10,7 +10,7 @@ import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, s
 import { historyEvents, HISTORY_QUERY } from './history.js';
 import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
 import { mcpResponse, TOOLS, validateTool } from './mcp.js';
-import { designParts, projectLists, objectLink } from './mcp-data.js';
+import { designParts, projectLists, objectLink, netProjection } from './mcp-data.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -5565,4 +5565,46 @@ test('MCP producer truncated fixture reports unknown total and incomplete search
   assert.equal(out.parts.total, null);
   assert.equal(out.parts.truncated, true);
   assert.equal(out.searchFieldsComplete, false);
+});
+test('MCP upstream truncation is not a complete negative result',()=>{
+ const loaded=projectionLoaded(),r=loaded.revision;
+ r.netlist_available=true;r.parts=[{uuid:'u',ref:'U1',value:'MCU',pins:[]}];
+ r.nets=[{id:'12',pins:['U1.1'],pin_records:[{ref:'U1',pin:'1'}],pin_count:300,more:299}];
+ const result=netProjection('get_net',{net:'12',limit:15},loaded,'https://site.example');
+ assert.equal(result.pins.total,300);assert.equal(result.pins.returned,1);assert.equal(result.pins.truncated,true);
+ assert.equal(result.pins.items[0].value,'MCU');
+ r.parts=[{uuid:'part-u1',ref:'U1',value:'Controller',pins:[{pin:'A.1',net:'12'}]}];
+ r.nets=[{id:'12',pins:['U1.A.1'],pin_records:[{ref:'U1',pin:'A.1'}],pin_count:1}];
+ const dotted=netProjection('get_net',{net:'12'},loaded,'https://site.example').pins.items[0];
+ assert.deepEqual({ref:dotted.ref,pin:dotted.pin,value:dotted.value,partId:dotted.partId},{ref:'U1',pin:'A.1',value:'Controller',partId:'part-u1'});
+ r.nets=[{id:'12',pins:['U1.A.1'],pin_count:1}];
+ const legacy=netProjection('get_net',{net:'12'},loaded,'https://site.example').pins.items[0];
+ assert.equal(legacy.memberAvailable,true);assert.equal(legacy.pin,'A.1');assert.equal(legacy.value,'Controller');
+ r.parts[0].pins=[]; // No structured record or uniquely reconstructable reverse pin.
+ assert.equal(netProjection('get_net',{net:'12'},loaded,'https://site.example').pins.items[0].memberAvailable,false);
+ r.netlist_available=false;r.netlist_reason='export failed';
+ assert.equal(netProjection('get_net',{net:'12'},loaded,'https://site.example').error.code,'INCOMPLETE');
+});
+test('MCP net projection nearby suggestions, link and unknown tool',()=>{
+ const loaded=projectionLoaded(),r=loaded.revision;
+ r.netlist_available=true;
+ r.nets=[{id:'+3V3',pins:[],pin_count:0},{id:'+3V3_MCU',pins:[],pin_count:0},{id:'GND',pins:[],pin_count:0}];
+ const missing=netProjection('get_net',{net:'3v3'},loaded,'https://site.example');
+ assert.equal(missing.found,false);
+ assert.equal(missing.nearby.returned,2);
+ assert.equal(missing.nearby.total,2);
+ assert.equal(missing.nearby.truncated,false);
+ assert.equal(missing.nearby.items[0].id,'+3V3');
+ assert.equal(missing.nearby.items[0].link,'https://site.example/r/Cameronrlewis/repo/a/90#p=0&net=%2B3V3');
+ assert.equal(missing.nearby.items[1].id,'+3V3_MCU');
+ loaded.doc.truncated=true;
+ const missingTruncated=netProjection('get_net',{net:'3v3'},loaded,'https://site.example');
+ assert.equal(missingTruncated.nearby.total,null);
+ assert.equal(missingTruncated.nearby.truncated,true);
+ assert.equal(missingTruncated.incomplete,true);
+ loaded.doc.truncated=false;
+ const found=netProjection('get_net',{net:'GND'},loaded,'https://site.example');
+ assert.equal(found.found,true);
+ assert.equal(found.link,'https://site.example/r/Cameronrlewis/repo/a/90#p=0&net=GND');
+ assert.throws(()=>netProjection('unknown_net_tool',{},loaded,'https://site.example'),/Unknown net projection/);
 });
