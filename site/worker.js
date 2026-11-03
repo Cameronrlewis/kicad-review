@@ -1,7 +1,10 @@
-import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
+import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { currentBody } from './report-shell.js';
-import { escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
+import { currentReport, readStoredData } from './report-shell.js';
+import { reportCache } from './report-cache.js';
+import { verifyReportFamily } from './report-kind.js';
+export { readStoredData } from './report-shell.js';
+import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
 import { threadsRoute } from './threads.js';
 import { issuesRoute } from './issues.js';
@@ -24,10 +27,15 @@ function base64url(bytes) {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
+function unbase64(value) {
+  const binary = atob(value), bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 function unbase64url(value) {
   const base64 = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return unbase64(base64);
 }
 
 async function key(env) {
@@ -125,7 +133,9 @@ export async function session(request, env) {
 
 export function response(body, init = {}) {
   const headers = new Headers(init.headers);
-  for (const [name, value] of Object.entries(securityHeaders)) headers.set(name, value);
+  for (const [name, value] of Object.entries(securityHeaders)) {
+    if (name !== 'Cache-Control' || !headers.has(name)) headers.set(name, value);
+  }
   if (!headers.has('Content-Security-Policy')) headers.set('Content-Security-Policy', "frame-ancestors 'none'");
   return new Response(body, { ...init, headers });
 }
@@ -237,13 +247,199 @@ async function pdfDownload(owner, repo, id, active) {
   } catch { return pdfError(active); }
 }
 
-async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false) {
+export function assetFromReport(html, id, kind) {
+  return assetFromData(readStoredData(html), id, kind);
+}
+
+function assetFromData(data, id, kind) {
+  if (!/^[0-9a-f]{12}$/.test(id) || !['svg', 'json'].includes(kind)) return null;
+  const meta = data?.assets?.[id], encoded = data?.blobs?.[id];
+  if (meta?.kind !== kind || typeof encoded !== 'string') return null;
+  try { return unbase64(encoded); } catch { return null; }
+}
+
+// Shared raw-report/asset validation. The repository-scoped GitHub endpoint rejects
+// IDs belonging to another repository; also check the recorded repository when present.
+async function reportArtifact(owner, repo, id, active, repository) {
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
+  const result = await gh(base, active.token);
+  if (result.status !== 200) return null;
+  const metadata = await result.json();
+  if (!metadata.name?.endsWith('.html')) return null;
+  if (repository?.id != null && metadata.workflow_run?.repository_id != null
+    && metadata.workflow_run.repository_id !== repository.id) return null;
+  if (metadata.expires_at != null && !Number.isFinite(Date.parse(metadata.expires_at))) return null;
+  const expired = metadata.expired || (metadata.expires_at && Date.parse(metadata.expires_at) <= Date.now());
+  return { base, metadata, expired: Boolean(expired) };
+}
+
+async function storedReport(artifact, active) {
+  const download = await gh(`${artifact.base}/zip`, active.token, { redirect: 'manual' });
+  if (download.status !== 302) throw new Error('Report unavailable');
+  const location = new URL(download.headers.get('Location'));
+  if (location.protocol !== 'https:' || location.username || location.password) throw new Error('Report unavailable');
+  // Signed storage URLs may redirect; never forward the GitHub authorization header.
+  const blob = await fetch(location.href);
+  if (!blob.ok || !blob.body) throw new Error('Report unavailable');
+  return blob;
+}
+
+// Reports whose 3D assets artifact3d serves from their own run: comparison reports, and
+// design snapshots whose name binds to the stored (unstripped) data.report.head.
+const served3d = (metadata, data) => /^\d{1,20}$/.test(String(metadata.workflow_run?.id))
+  && (data?.report?.kind == null ? verifyReportFamily('comparison', metadata.name)
+    : data.report.kind === 'design' && verifyReportFamily('design', metadata.name, data.report.head));
+
+const reportBuilds = new Map();
+// ponytail: one cold build at a time per isolate (peak ~ one report's transient copies); raise only if queued cold loads time out.
+let buildTail = Promise.resolve();
+
+// Only call after access() and reportArtifact() have validated this request.
+async function cachedReport(artifact, active) {
+  const { metadata, base } = artifact;
+  // Legacy metadata without an immutable upload identity is shared in flight but never cached.
+  const key = metadata.size_in_bytes != null && metadata.updated_at != null
+    ? JSON.stringify([base, metadata.workflow_run?.repository_id, metadata.size_in_bytes, metadata.updated_at]) : null;
+  const flight = key ?? JSON.stringify(['legacy', base]);
+  const hit = reportCache.get(flight);
+  if (hit) return hit;
+  // Authorization and artifact liveness were checked independently by every waiter.
+  // Share cold work too: a page's parallel raw/asset requests must not multiply peak memory.
+  if (reportBuilds.has(flight)) return reportBuilds.get(flight);
+  const build = buildTail.then(async () => {
+    const stored = await (await storedReport(artifact, active)).text();
+    const data = readStoredData(stored);
+    // Only the authenticated wrapper's raw report is built here; guest/share keep embedded blobs.
+    // Models are stripped only when artifact3d would serve them, so no report loses its 3D view.
+    const raw = currentReport(stored, { lazyAssets: true, lazy3d: served3d(metadata, data), storedData: data }) ?? stored;
+    // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
+    // Count shared/fallback strings twice rather than under-account retained report bytes.
+    // Stored HTML is temporary: only parsed data (4x envelope allowance) and raw body remain.
+    const entry = { data, raw, bytes: 4 * stored.length + 2 * raw.length };
+    if (key) reportCache.set(key, entry);
+    return entry;
+  });
+  buildTail = build.catch(() => {});
+  reportBuilds.set(flight, build);
+  try { return await build; }
+  finally { reportBuilds.delete(flight); }
+}
+
+function assetError() {
+  return new Response('Asset unavailable. Try again.', { status: 404,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'private,no-store' } });
+}
+
+// 01 owns private image and 3D transport: `load` runs access and artifact validation on
+// every call, before any ETag comparison, and returns bytes or a failure Response.
+export async function privateAsset(request, digest, kind, load) {
+  const result = await load();
+  if (result instanceof Response) {
+    if (result.status >= 300 && result.status < 400 || result.headers.get('Location'))
+      return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } });
+    const headers = new Headers(result.headers);
+    headers.set('Cache-Control', 'no-store');
+    return new Response(result.body, { status: result.status, headers });
+  }
+  const headers = { 'Content-Type': kind === 'svg' ? 'image/svg+xml' : kind === 'board.glb' ? 'model/gltf-binary' : 'application/json',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    'Content-Encoding': 'gzip', 'Cache-Control': 'private,no-cache', ETag: `"${digest}"`, Vary: 'Cookie', 'X-Content-Type-Options': 'nosniff' };
+  const matched = (request.headers.get('If-None-Match') || '').split(',').some(tag =>
+    tag.trim().replace(/^W\//, '') === headers.ETag || tag.trim() === '*');
+  return new Response(matched ? null : result, { status: matched ? 304 : 200, headers, encodeBody: 'manual' });
+}
+
+// Stored metadata/expiry/name/zip/download sequence; returns the stored HTML or a failure Response.
+// The validated result now includes parsed data and the raw body for isolate-local reuse.
+async function readArtifactHtml(owner, repo, id, active, repository) {
   try {
-    const metadataResponse = await gh(base, active.token);
-    if (metadataResponse.status !== 200) return errorPage(404, "Can't open this page", "This artifact may have been replaced by a re-run. Open the review from the pull request comment, or check that your GitHub account can see it.", [], active);
-    const metadata = await metadataResponse.json();
-    if (metadata.expired) {
+    const artifact = await reportArtifact(owner, repo, id, active, repository);
+    if (!artifact || artifact.expired) return assetError();
+    // ponytail: read the existing HTML envelope per asset; add range/indexed companion delivery only if Worker CPU or GitHub download traces require it.
+    // Measured Worker CPU now requires caching that envelope and its processed forms.
+    return { ...await cachedReport(artifact, active), metadata: artifact.metadata };
+  } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(); }
+}
+
+async function digestAsset(request, env, owner, repo, id, digest, kind) {
+  let active;
+  const asset = await privateAsset(request, digest, kind, async () => {
+    const allowed = await access(request, env, owner, repo);
+    if (allowed instanceof Response) return allowed;
+    active = allowed.s;
+    const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
+    if (stored instanceof Response) return stored;
+    return assetFromData(stored.data, digest, kind) || assetError();
+  });
+  return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
+    encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
+}
+
+// Exactly `size` bytes or null; a wrong declared length or a longer body is never buffered whole.
+async function readExactly(response, size) {
+  const declared = response.headers.get('Content-Length');
+  if (!response.body) return null;
+  // A real Content-Encoding (not identity) reply's length counts encoded bytes; the read bound below still caps it.
+  // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
+  if (declared != null && (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase() === 'identity' && Number(declared) !== size) { await response.body.cancel(); return null; }
+  // Chunks, not a size-length buffer: the descriptor's claimed size is never allocated up front.
+  const chunks = [], reader = response.body.getReader();
+  for (let n = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) return n === size ? new Uint8Array(await new Blob(chunks).arrayBuffer()) : null;
+    if ((n += value.length) > size) { await reader.cancel(); return null; }
+    chunks.push(value);
+  }
+}
+
+// 3D assets come only from the validated report's own run, named by a descriptor in its stored data.
+async function artifact3d(request, env, owner, repo, id, digest, kind) {
+  let active;
+  const asset = await privateAsset(request, digest, kind, async () => {
+    const allowed = await access(request, env, owner, repo);
+    if (allowed instanceof Response) return allowed;
+    active = allowed.s;
+    if (!/^[0-9a-f]{64}$/.test(digest) || !['board.glb', 'board-parts.json'].includes(kind)) return assetError();
+    try {
+      const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
+      if (stored instanceof Response) return stored;
+      const { metadata, data } = stored, run = String(metadata.workflow_run?.id);
+      if (!served3d(metadata, data)) return assetError();
+      const key = kind === 'board.glb' ? 'model' : 'parts', name = `kicad-3d-${digest}-${kind}.gz`;
+      const descriptor = (Array.isArray(data.projects) ? data.projects : []).flatMap((p) => ['base', 'head'].map((side) => p?.board?.assets3d?.[side]?.[key]))
+        .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0);
+      if (!descriptor) return assetError();
+      const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`, matches = [];
+      for (let page = 1; ; page++) {
+        const list = await gh(`${root}/runs/${run}/artifacts?per_page=100&page=${page}`, active.token);
+        const artifacts = list.ok ? (await list.json()).artifacts : null;
+        if (!Array.isArray(artifacts)) return assetError();
+        matches.push(...artifacts.filter((a) => a?.name === name));
+        if (artifacts.length < 100) break;
+      }
+      const [match] = matches;
+      if (matches.length !== 1 || match.expired || String(match.workflow_run?.id) !== run || !/^\d{1,20}$/.test(String(match.id))) return assetError();
+      const archive = await gh(`${root}/artifacts/${match.id}/zip`, active.token, { redirect: 'manual' });
+      const location = archive.status === 302 ? downloadUrl(archive.headers.get('Location')) : null;
+      if (!location) return assetError();
+      // Share downloader's host policy; never forward GitHub authorization or follow further redirects.
+      const body = await fetch(location, { redirect: 'manual' });
+      if (!body.ok) return assetError();
+      const bytes = await readExactly(body, descriptor.bytes);
+      return bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
+    } catch { return assetError(); }
+  });
+  return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
+    encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
+}
+
+async function artifactReport(request, env, owner, repo, id, active, raw, canShare = false, repository = null) {
+  try {
+    const artifact = await reportArtifact(owner, repo, id, active, repository);
+    if (!artifact) return errorPage(404, "Can't open this page", "This artifact may have been replaced by a re-run. Open the review from the pull request comment, or check that your GitHub account can see it.", [], active);
+    const { metadata } = artifact;
+    if (artifact.expired) {
       const match = String(metadata.name || '').match(/^kicad-review-([0-9a-f]{7})-([0-9a-f]{7})-(?:pass|fail)\.html$/);
       return sessionResponse(runPage({
         user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
@@ -262,18 +458,16 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
           if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
         }
       } catch { /* PR discovery must not prevent opening the report. */ }
+      // The browser parent downloads the authenticated raw envelope for its allowlist,
+      // never trusting child declarations. digestAsset revalidates authorization and
+      // declarations per request; the parent checks the returned MIME type and digest.
       const sharing = shareEnabled(env) && canShare;
       return sessionResponse(reviewPage({
         user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
-    const zipResponse = await gh(`${base}/zip`, active.token, { redirect: 'manual' });
-    const location = zipResponse.status === 302 ? zipResponse.headers.get('Location') : null;
-    if (!location) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
-    const blobResponse = await fetch(location);
-    if (!blobResponse.ok || !blobResponse.body) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
-    return sessionResponse(await currentBody(blobResponse), {
+    return sessionResponse((await cachedReport(artifact, active)).raw, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Security-Policy': reportCsp,
@@ -651,7 +845,7 @@ async function callback(request, env) {
   return redirect(nextPath(stateData.n), [await sessionCookie(value, env, secure), clear('st', secure)]);
 }
 
-export default {
+const routes = {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
@@ -672,6 +866,16 @@ export default {
       if (request.method === 'POST' && revoke) return await revokeShares(request, env, { owner: revoke[1], repo: revoke[2] }, { access, gh, response, sessionResponse });
       const shareCreate = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/share$/);
       if (request.method === 'POST' && shareCreate) return await createShare(request, env, { owner: shareCreate[1], repo: shareCreate[2], id: shareCreate[3] }, { access, gh, response, sessionResponse });
+      const assetRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/assets\/([0-9a-f]{12})\.(svg|json)$/);
+      if (request.method === 'GET' && assetRoute) {
+        const [, owner, repo, id, digest, kind] = assetRoute;
+        return digestAsset(request, env, owner, repo, id, digest, kind);
+      }
+      const modelRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/3d\/([^/]+)\/([^/]+)$/);
+      if (request.method === 'GET' && modelRoute) {
+        const [, owner, repo, id, digest, kind] = modelRoute;
+        return artifact3d(request, env, owner, repo, id, digest, kind);
+      }
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id, raw] = artifactRoute;
@@ -688,7 +892,7 @@ export default {
           }
           return pdfDownload(owner, repo, id, allowed.s);
         }
-        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, raw === '/raw', Boolean(allowed.repo.permissions?.push));
+        return allowed instanceof Response ? allowed : artifactReport(request, env, owner, repo, id, allowed.s, raw === '/raw', Boolean(allowed.repo.permissions?.push), allowed.repo);
       }
       const compareRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/compare$/);
       if (request.method === 'POST' && compareRoute) {
@@ -737,5 +941,21 @@ export default {
     } catch {
       return errorPage(500, 'Internal server error', 'Try again later.');
     }
+  },
+};
+
+export default {
+  async fetch(request, env) {
+    const result = await routes.fetch(request, env);
+    const sha = typeof env.DEPLOY_SHA === 'string' && /^[0-9a-f]{40}$/.test(env.DEPLOY_SHA) ? env.DEPLOY_SHA : 'unknown';
+    const headers = new Headers(result.headers);
+    headers.set('X-Deploy-Sha', sha);
+    // Never buffer or modify sandboxed reports, assets, redirects or downloads.
+    const shell = headers.get('Content-Type')?.startsWith('text/html')
+      && !headers.get('Content-Security-Policy')?.includes('sandbox');
+    const body = shell ? deploymentPage(await result.text(), sha) : result.body;
+    if (shell) headers.delete('Content-Length');
+    return new Response(body, { status: result.status, statusText: result.statusText, headers,
+      ...(headers.has('Content-Encoding') ? { encodeBody: 'manual' } : {}) });
   },
 };
