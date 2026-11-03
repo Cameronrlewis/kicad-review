@@ -5160,3 +5160,171 @@ test('MCP transport rejects invalid UTF-8, bounds tool results, and refuses unex
   await assert.rejects(mcpAccess({}, { credential: 'opaque' }, 'Cameronrlewis/private', deps), (e) => e instanceof McpError && e.code === 'AUTH_REQUIRED');
   assert.equal(seen.length, 0);
 });
+
+import { resolveRevision, selectContext, selectPrContext, loadPrReview, loadDesign } from './mcp-data.js';
+const SHA='a'.repeat(40), NEXT='a'.repeat(7)+'b'.repeat(33);
+const MERGE_BASE='b'.repeat(40), TARGET_TIP='d'.repeat(40);
+const prFixture=()=>({number:7,head:{sha:SHA},base:{sha:TARGET_TIP},merge_commit_sha:NEXT});
+const prRunFixture=()=>({id:77,head_sha:SHA,event:'pull_request',pull_requests:[{number:7,base:{sha:TARGET_TIP},head:{sha:SHA}}]});
+const mcpAccessFixture=()=>({root:'/repos/Cameronrlewis/repo',token:'secret',repository:{full_name:'Cameronrlewis/repo',default_branch:'main',permissions:{pull:true,push:true}}});
+// One real producer run; each mcpDoc() is a fresh copy with the requested head.
+const mcpDocBase=JSON.parse(execFileSync('python3',['-c', `
+import json, sys
+from unittest.mock import patch
+import kicad_review as k
+sheets=[{"path":"/","name":"Root","file":"P.kicad_sch","parent":None,"page":"1","status":"unchanged"}]
+p={"dir":"P","name":"P","status":"modified"}
+with patch.object(k,"sheet_pages",return_value=sheets), patch.object(k.os.path,"isfile",return_value=False):
+    project=k.project_context(p,"/nonexistent-mcp-fixture",{"base":{},"head":{}},sheets,{"base":"missing","head":"missing"},[],[],{"base","head"},40,64,{"base":"b"*40,"head":sys.argv[1]},k.DEFAULT_SETTINGS)
+print(json.dumps({"version":1,"kind":"kicad-review-design-context","repo":"Cameronrlewis/repo","base":"b"*40,"head":sys.argv[1],"truncated":False,"projects":[project]}))
+`,SHA],{encoding:'utf8'}));
+const mcpDoc=(head=SHA)=>{const doc=structuredClone(mcpDocBase);doc.head=head;doc.projects[0].revisions.head.revision=head;return doc;};
+const artifactsFixture=()=>({total_count:1,artifacts:[{id:90,name:'kicad-review-bbbbbbb-aaaaaaa-pass.html',created_at:'2026-10-24T12:00:00Z',expired:false,workflow_run:{id:77}}]});
+test('MCP exact commits never fall back to short SHA matches',async()=>{
+  const deps={gh:async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:NEXT}:artifactsFixture())),loadContext:async()=>({doc:mcpDoc(SHA),key:'digest'})};
+  const r=await resolveRevision(mcpAccessFixture(),undefined,deps.gh); assert.equal(r.sha,NEXT);
+  await assert.rejects(loadDesign(mcpAccessFixture(),{},deps),/No reviewed data for the requested commit/);
+  // PR-specific base/run tests follow separately; this test covers head-only design selection.
+  deps.loadContext=async()=>({doc:mcpDoc(NEXT),key:'digest'});
+  const got=await loadDesign(mcpAccessFixture(),{},deps); assert.equal(got.provenance.commit,NEXT);
+  deps.gh=async path=>new Response(JSON.stringify(path.endsWith('/pulls/7')?{head:{sha:SHA},merge_commit_sha:NEXT}:{}));
+  assert.equal((await resolveRevision(mcpAccessFixture(),'pr:7',deps.gh)).sha,SHA);
+});
+test('MCP expired history and ambiguous projects fail explicitly',async()=>{
+  const deps={gh:async()=>new Response(JSON.stringify({total_count:101,artifacts:artifactsFixture().artifacts})),loadContext:async()=>({doc:mcpDoc(),key:'d'})};
+  assert.equal((await selectContext(mcpAccessFixture(),SHA,deps)).doc.head,SHA,'first-page exact match works with more than 100 artifacts');
+  deps.gh=async()=>new Response(JSON.stringify({total_count:1001,artifacts:Array.from({length:100},(_,i)=>({id:i,name:'unrelated',expired:false}))}));
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,deps),/1,000 metadata rows/);
+  deps.gh=async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:SHA}:artifactsFixture()));
+  const doc=mcpDoc();doc.projects.push({...doc.projects[0],dir:'P2'});deps.loadContext=async()=>({doc,key:'d'});
+  await assert.rejects(loadDesign(mcpAccessFixture(),{},deps),/Choose a project/);
+  assert.equal((await loadDesign(mcpAccessFixture(),{project:'P2'},deps)).project.dir,'P2');
+});
+test('MCP PR provenance separates target tip from merge base',async()=>{
+  let doc=mcpDoc(),run=prRunFixture(),rows=artifactsFixture().artifacts;
+  const seen=[];
+  const deps={loadContext:async(_owner,_repo,id)=>({doc:id==='91'?{...mcpDoc(),base:'c'.repeat(40)}:doc,key:'d'}),
+    gh:async path=>{seen.push(path);let body;
+      if(path.endsWith('/pulls/7'))body=prFixture();
+      else if(path.endsWith(`/compare/${TARGET_TIP}...${SHA}`))body={merge_base_commit:{sha:MERGE_BASE}};
+      else if(path.endsWith('/actions/runs/77'))body=run;
+      else if(path.includes('/actions/artifacts?'))body={total_count:rows.length,artifacts:rows};
+      else assert.fail('Unexpected PR endpoint '+path);
+      return new Response(JSON.stringify(body));
+    }};
+  assert.notEqual(TARGET_TIP,MERGE_BASE);
+  const selected=await loadPrReview(mcpAccessFixture(),7,deps);
+  assert.equal(selected.doc.base,MERGE_BASE);assert.equal(selected.provenance.targetTip,TARGET_TIP);
+  assert.equal(selected.resolution.sha,SHA);assert.ok(seen.includes(`/repos/Cameronrlewis/repo/compare/${TARGET_TIP}...${SHA}`));
+  const comparison={sha:SHA,targetTip:TARGET_TIP,base:MERGE_BASE};
+  doc={...mcpDoc(),base:'c'.repeat(40)};
+  await assert.rejects(selectPrContext(mcpAccessFixture(),7,comparison,deps),/PR comparison context unavailable/);
+  doc=mcpDoc();
+  for(const bad of [{...prRunFixture(),event:'push'}, {...prRunFixture(),head_sha:NEXT},
+    {...prRunFixture(),pull_requests:[{number:8,base:{sha:TARGET_TIP},head:{sha:SHA}}]},
+    {...prRunFixture(),pull_requests:[{number:7,base:{sha:MERGE_BASE},head:{sha:SHA}}]}]){
+    run=bad;await assert.rejects(selectPrContext(mcpAccessFixture(),7,comparison,deps),/PR comparison context unavailable/);
+  }
+  run=prRunFixture();rows=[{...rows[0],id:91,created_at:'2026-10-25T12:00:00Z'},rows[0]];
+  assert.equal((await loadPrReview(mcpAccessFixture(),7,deps)).reportId,'90','skip same-head wrong-base candidate');
+});
+test('MCP selection failures are typed, never stale, and render guidance is writer-only',async()=>{
+  const twoRows={total_count:2,artifacts:[{...artifactsFixture().artifacts[0],id:92,created_at:'2026-10-25T12:00:00Z'},artifactsFixture().artifacts[0]]};
+  const listing=(body=twoRows)=>async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:SHA}:body));
+  const reader=()=>{const a=mcpAccessFixture();a.repository.permissions={pull:true,push:false};return a;};
+  let calls=0;
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>{calls++;return {status:502,error:'GitHub did not answer'};}}),
+    e=>e.code==='ARTIFACTS_UNAVAILABLE'&&e.message==='GitHub did not answer');
+  assert.equal(calls,1,'an outage never moves on to an older candidate');
+  calls=0;
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>{calls++;return {status:429,error:'GitHub rate limit while reading artifact metadata'};}}),
+    e=>e.code==='ARTIFACTS_UNAVAILABLE'&&/rate limit/.test(e.message));
+  assert.equal(calls,1);
+  const missing=e=>e.code==='MISSING_DATA'&&!('doc' in e)&&!/Other|SECRET-PART/.test(e.message);
+  const leaky=()=>{const d=mcpDoc();d.repo='Other/repo';d.projects[0].name='SECRET-PART';return d;};
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>({doc:leaky(),key:'d'})}),missing,'wrong repo');
+  await assert.rejects(selectContext(mcpAccessFixture(),NEXT,{gh:listing(),loadContext:async()=>({doc:mcpDoc(SHA),key:'d'})}),missing,'full-SHA collision');
+  calls=0;
+  await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:listing({total_count:1,artifacts:[{...artifactsFixture().artifacts[0],expired:true}]}),loadContext:async()=>{calls++;return {doc:mcpDoc(),key:'d'};}}),missing,'expired');
+  assert.equal(calls,0,'expired candidates are never downloaded');
+  const asked=[];
+  await assert.rejects(loadDesign(mcpAccessFixture(),{ref:'no/such ref'},{gh:async path=>{asked.push(path);return new Response('{}',{status:404});},loadContext:async()=>assert.fail('no artifact read')}),
+    e=>e.code==='REF_UNAVAILABLE');
+  assert.deepEqual(asked,['/repos/Cameronrlewis/repo/commits/no%2Fsuch%20ref']);
+  const unrelated=Array.from({length:100},(_,i)=>({id:1000+i,name:'unrelated',expired:false}));
+  const paged=async path=>new Response(JSON.stringify({total_count:101,artifacts:path.endsWith('page=1')?unrelated:artifactsFixture().artifacts}));
+  assert.equal((await selectContext(mcpAccessFixture(),SHA,{gh:paged,loadContext:async()=>({doc:mcpDoc(),key:'d'})})).reportId,'90','second page with total_count=101');
+  const writer=await selectContext(mcpAccessFixture(),SHA,{gh:listing(),loadContext:async()=>({status:404,error:'gone'})}).catch(e=>e);
+  assert.equal(writer.code,'MISSING_DATA');assert.equal(writer.canRender,true);assert.equal(writer.renderPath,'/r/Cameronrlewis/repo/commits');
+  const plain=await selectContext(reader(),SHA,{gh:listing(),loadContext:async()=>({status:404,error:'gone'})}).catch(e=>e);
+  assert.equal(plain.code,'MISSING_DATA');assert.equal(plain.canRender,false);assert.equal(plain.renderPath,undefined);
+});
+test('MCP actual producer sheets, legacy revision fields and removed/root projects',async()=>{
+  const doc=mcpDoc(), survivor=doc.projects[0];
+  survivor.dir='';delete survivor.revisions.head.revision;delete survivor.revisions.head.sheets;
+  doc.projects.push({...structuredClone(survivor),dir:'Nested',name:'Nested'});
+  doc.projects.push({...structuredClone(survivor),dir:'Removed',status:'removed',revisions:{base:survivor.revisions.base,head:null}});
+  const deps={gh:async path=>new Response(JSON.stringify(path.includes('/commits/')?{sha:SHA}:artifactsFixture())),loadContext:async()=>({doc,key:'d'})};
+  for(const project of ['', 'Nested']){
+    const args={project};
+    const got=await loadDesign(mcpAccessFixture(),args,deps);
+    assert.equal(got.project.dir,project);assert.equal(got.provenance.commit,SHA);
+    assert.equal(got.project.sheets[0].path,'/');
+  }
+  await assert.rejects(loadDesign(mcpAccessFixture(),{project:'Removed'},deps),e=>e.code==='PROJECT_UNAVAILABLE');
+  assert.equal((await loadDesign(mcpAccessFixture(),{allProjects:true},deps)).doc.projects.length,3);
+});
+
+import {loadContext,askRoute} from './ask.js';
+test('MCP smaller budget preserves legacy Ask acceptance',async()=>{
+  const doc=mcpDoc();doc.padding='x'.repeat(250000);
+  let text=JSON.stringify(doc),models=0;
+  assert.ok(Buffer.byteLength(text)>200000&&Buffer.byteLength(text)<400000);
+  const gh=async path=>{
+    if(path.includes('/contents/'))return new Response('[ask]\nenabled = true');
+    if(path.endsWith('/artifacts/91/zip'))return new Response(null,{status:302,headers:{Location:'https://blob.example/context'}});
+    return new Response(JSON.stringify(path.endsWith('/artifacts/90')?artifactsFixture().artifacts[0]:
+      {artifacts:[{id:91,name:'kicad-review-bbbbbbb-aaaaaaa-pass.context.json',expired:false,digest:'d'}]}));
+  };
+  const old=globalThis.fetch;
+  globalThis.fetch=async url=>{
+    if(String(url)==='https://blob.example/context')return new Response(text);
+    assert.equal(String(url),'https://api.anthropic.com/v1/messages');models++;
+    return new Response(JSON.stringify({content:[{type:'text',text:'{"summary":"test","questions":["a?","b?","c?"]}'}]}));
+  };
+  try {
+    const loaded=await loadContext('Cameronrlewis','repo','90','secret',gh);
+    assert.equal(loaded.doc.padding.length,250000);
+    await assert.rejects(selectContext(mcpAccessFixture(),SHA,{gh:async()=>new Response(JSON.stringify(artifactsFixture())),loadContext:async()=>loaded}),e=>e.code==='CONTEXT_TOO_LARGE');
+    const req=()=>new Request('https://site.example/r/Cameronrlewis/repo/a/90/ask/insight',{method:'POST',headers:{Origin:'https://site.example','Content-Type':'application/json'},body:'{"project":"P"}'});
+    const config={ANTHROPIC_API_KEY:'test-only',ASK_KV:{get:async()=>null,put:async()=>{}}};
+    const access=async()=>({s:{token:'secret',login:'cam'},repo:{default_branch:'main'}});
+    const route=()=>askRoute(req(),config,{owner:'Cameronrlewis',repo:'repo',id:'90',rest:'/insight'},{access,gh});
+    assert.equal((await route()).status,200);assert.equal(models,1);
+    text='x'.repeat(400001);assert.equal((await route()).status,502);assert.equal(models,1);
+    globalThis.fetch=async()=>new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(200001));c.enqueue(new Uint8Array(200001));c.close();}}));
+    assert.equal((await loadContext('Cameronrlewis','repo','90','secret',gh)).status,502);
+  } finally {globalThis.fetch=old;}
+});
+test('MCP shared loader keeps metadata status and refuses ZIP bodies',async()=>{
+  const meta=(status,body={})=>async path=>path.endsWith('/artifacts/90')?new Response(JSON.stringify(body),{status}):assert.fail('stopped at metadata: '+path);
+  assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(404)),{status:404,error:'Artifact unavailable'});
+  assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(200,{...artifactsFixture().artifacts[0],expired:true})),{status:404,error:'Artifact unavailable'});
+  assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(429)),{status:429,error:'GitHub rate limit while reading artifact metadata'});
+  for(const status of [500,503])assert.deepEqual(await loadContext('Cameronrlewis','repo','90','secret',meta(status)),{status:502,error:'GitHub artifact metadata service unavailable'});
+  const gh=async path=>{
+    if(path.endsWith('/artifacts/91/zip'))return new Response(null,{status:302,headers:{Location:'https://blob.example/context'}});
+    return new Response(JSON.stringify(path.endsWith('/artifacts/90')?artifactsFixture().artifacts[0]:{artifacts:[{id:91,name:'kicad-review-bbbbbbb-aaaaaaa-pass.context.json',expired:false}]}));
+  };
+  const old=globalThis.fetch;
+  try {
+    for(const bytes of [new Uint8Array([0x50,0x4b,0x03,0x04,0x14,0,0,0,8,0]),new Uint8Array([0x50,0x4b,0x03,0x04,0xff,0xfe])]){
+      globalThis.fetch=async()=>new Response(bytes);
+      const got=await loadContext('Cameronrlewis','repo','90','secret',gh);
+      assert.equal(got.status,502);assert.match(got.error,/unsupported artifact/);assert.equal(got.doc,undefined);
+    }
+  } finally {globalThis.fetch=old;}
+});
+test('MCP PR review rejects a non-positive or non-integer number before any request',async()=>{
+  for(const pr of [0,-1,1.5,'7'])await assert.rejects(loadPrReview(mcpAccessFixture(),pr,{gh:async()=>assert.fail('no request')}),e=>e.code==='INVALID_REF');
+});

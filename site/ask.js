@@ -1,5 +1,6 @@
 // Ask about this design: the Worker side. Pure helpers first, then the route.
 import { json, accessFailure, sessionResponse } from './threads.js';
+import { readBounded, McpError } from './mcp-data.js';
 
 export const LIMITS = { question: 4000, message: 16000, messages: 24, history: 20 };   // BoardRepo's limits
 
@@ -172,36 +173,18 @@ const anthropicUrl = 'https://api.anthropic.com/v1/messages';
 // ponytail: coalesce same-isolate cold misses; cross-isolate exact-once generation is deferred and is not promised.
 const insightFlights = new Map();
 
-// Refuses before buffering when Content-Length is over the limit; otherwise stops reading at the first byte past it.
-// Returns the text, '' for an empty body, or null when over the limit.
-async function readBounded(response, max) {
-  const declared = Number(response.headers.get('Content-Length'));
-  if (Number.isFinite(declared) && declared > max) { await response.body?.cancel().catch(() => {}); return null; }
-  if (!response.body) return '';
-  const reader = response.body.getReader(), chunks = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) { await reader.cancel().catch(() => {}); return null; }
-    chunks.push(value);
-  }
-  const all = new Uint8Array(size);
-  let at = 0;
-  for (const chunk of chunks) { all.set(chunk, at); at += chunk.byteLength; }
-  return new TextDecoder().decode(all);
-}
-
 export async function loadContext(owner, repo, id, token, gh) {
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
   try {
     const meta = await gh(`${root}/artifacts/${id}`, token);
-    if (!meta.ok) return { status: 404, error: 'This review was not found.' };
+    // Metadata failures keep their kind: a rate limit or outage must not read as a missing review.
+    if (meta.status === 429 || meta.headers.get('x-ratelimit-remaining') === '0') return { status: 429, error: 'GitHub rate limit while reading artifact metadata' };
+    if (meta.status >= 500) return { status: 502, error: 'GitHub artifact metadata service unavailable' };
+    if (!meta.ok) return { status: 404, error: 'Artifact unavailable' };
     const report = await meta.json();
     const snapshot = snapshotName.test(report.name || '');
     if (!snapshot && !reportName.test(report.name || '')) return { status: 404, error: 'This artifact is not a reviewed design.' };
-    if (report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'This review has expired.' };
+    if (report.expired || !/^\d{1,20}$/.test(String(report.workflow_run?.id))) return { status: 404, error: 'Artifact unavailable' };
     const list = await gh(`${root}/runs/${report.workflow_run.id}/artifacts?per_page=100`, token);
     if (!list.ok) return { status: 502, error: 'GitHub did not answer. Try again.' };
     const name = report.name.slice(0, -5) + '.context.json';
@@ -212,8 +195,13 @@ export async function loadContext(owner, repo, id, token, gh) {
     const location = new URL(download.headers.get('Location'));
     if (location.protocol !== 'https:' || location.username || location.password) return { status: 502, error: 'GitHub did not answer. Try again.' };
     const blob = await fetch(location.href, { redirect: 'manual' });
-    const body = blob.ok ? await readBounded(blob, MAX_CONTEXT) : null;
+    // UTF-8 bytes, counted while streaming. A ZIP or non-UTF-8 body is refused, never parsed (artifacts upload with archive: false).
+    const unsupported = { status: 502, error: 'The design data is an unsupported artifact format; raw JSON is expected.' };
+    let body = '';
+    try { body = blob.ok ? await readBounded(blob, MAX_CONTEXT) : ''; }
+    catch (e) { if (!(e instanceof McpError)) return unsupported; }   // McpError: over the byte limit
     if (!body) return { status: 502, error: 'The design data is missing or too large.' };
+    if (body.startsWith('PK')) return unsupported;
     let doc;
     try { doc = JSON.parse(body); } catch { return {status:502,error:'The design data is not in a known format.'}; }
     if (doc?.version !== 1 || !Array.isArray(doc.projects)) return { status: 502, error: 'The design data is not in a known format.' };

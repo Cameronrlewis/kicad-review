@@ -3738,8 +3738,9 @@ def stat_number(text):
 
 def board_facts(side_dir, pcb_path):
     """Layers from the board file; size, areas and counts from `pcb export stats` when it ran. No outline means size_mm is None."""
-    names = board_layers(pcb_path)
-    facts = {"layers": names, "copper_layers": [n for n in names if n.endswith(".Cu")], "stats_available": False}
+    scene = board_geometry(pcb_path)
+    names = [layer["name"] for layer in scene["layers"]]
+    facts = {"layers": names, "copper_layers": scene["copperStack"], "stats_available": False}
     try:
         if os.path.exists(f"{side_dir}/stats.json.error"):
             with open(f"{side_dir}/stats.json.error", encoding="utf-8") as fh:

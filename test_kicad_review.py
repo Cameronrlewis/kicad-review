@@ -6663,3 +6663,11 @@ assert "ASK_SUMMARY_MODEL` (defaults to `ASK_MODEL`, or `claude-sonnet-5-5`" in 
 )
 assert "export function askOptedIn" in site_ask, "TOML-subset reader in site/ask.js"
 print("ok ask documentation")
+
+# MCP (spec 10): exact four-layer board facts in physical copper order.
+four = "ui/fixtures/vf-order-4.kicad_pcb"
+facts = kr.board_facts("/nonexistent-mcp-facts", four)
+assert set(facts["layers"]) == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+assert facts["copper_layers"] == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], facts["copper_layers"]
+assert facts.get("size_mm") is None
+print("ok mcp board facts")
