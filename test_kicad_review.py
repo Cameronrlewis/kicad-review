@@ -140,6 +140,32 @@ if os.environ.get("BR03_PCBNEW_TEST") == "1":
 
 from kicad_review import is_kicad_file, owner_project
 
+
+def br02_png(width=1600, height=1000, *, channels=4, filter_type=0):
+    """Real, tiny-compressed RGB(A) fixture; all PNG row filters, no image dependency."""
+    import struct, zlib
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+    pixel = bytes((31, 73, 119, 255)[:channels])
+    row = pixel * width
+    rows = []
+    previous = bytes(len(row))
+    for _ in range(height):
+        filtered = bytearray()
+        for i, value in enumerate(row) if filter_type else ():
+            left = row[i-channels] if i >= channels else 0
+            above = previous[i]
+            corner = previous[i-channels] if i >= channels else 0
+            p = left + above - corner
+            distances = (abs(p-left), abs(p-above), abs(p-corner))
+            paeth = (left, above, corner)[distances.index(min(distances))]
+            predictor = (0, left, above, (left+above)//2, paeth)[filter_type]
+            filtered.append((value-predictor) & 255)
+        rows.append(bytes([filter_type]) + (filtered if filter_type else row))
+        previous = row
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8,
+            6 if channels == 4 else 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b''.join(rows))) + chunk(b'IEND', b''))
+
 dirs = {"", "boards/a", "boards/a/sub", "b"}
 assert owner_project("boards/a/x.kicad_sch", dirs) == "boards/a"
 assert owner_project("boards/a/sub/Libraries/y.kicad_mod", dirs) == "boards/a/sub"
@@ -399,7 +425,9 @@ for failure in (None, 'missing-light', 'missing-dark', 'ambiguous', 'cli'):
 print('ok instance image mappings, missing/ambiguous exports and config cleanup')
 
 # Image cache identity covers renderer, complete palettes/options and declared layers; host restore never runs KiCad.
-with TemporaryDirectory() as d, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'):
+# CI exports KICAD_IMAGE job-wide, so the 3D tool identity needs no host kicad-cli probe.
+with TemporaryDirectory() as d, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
+     patch.dict(os.environ, {'KICAD_IMAGE': 'kicad/kicad:10.0.6-full@sha256:synthetic'}):
     previous = os.getcwd()
     try:
         os.chdir(d)
@@ -522,6 +550,8 @@ assert 'globalThis.ImageView' in inline_page('window.REVIEW_DATA={};')
 assert 'window.BoardMarks' in html and 'window.BoardDiff' in html
 assert html.index('window.BoardMarks') < html.index('window.BoardDiff') < html.index('const D = window.REVIEW_DATA')
 assert not re.search(r'<script[^>]+src=', html)
+assert html.count('window.ThreeStudio=') == 1 and 'function normalizeLighting(value)' in html
+assert html.index('window.ThreeStudio=') < html.index('const D = window.REVIEW_DATA')
 assert 'src="appearance-state.js"' not in html
 assert 'function createStore(' in html
 assert html.index('function createStore(') < html.index('const D = window.REVIEW_DATA')
@@ -1099,7 +1129,7 @@ print("ok RC-S3 directory line breaks")
 r = subprocess.run([sys.executable, "-O", "-c", 'import io, kicad_review as k; from unittest.mock import patch\nwith patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(\'<script data-check src="review.js"></script>\' if path.endswith("review.html") else ""), create=True):\n k.inline_page("")'], capture_output=True, text=True)
 assert r.returncode != 0 and "RuntimeError: external report assets remain" in r.stderr, "RC-S4: optimized Python silently leaves external assets"
 template = open("ui/review.html", encoding="utf-8").read()
-for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"'):
+for marker in ('href="tokens.css"', 'href="review.css"', 'src="sample/review-data.js"', 'src="review.js"', 'src="three-studio.js"'):
     changed = template.replace(marker, "data-check " + marker)
     single_quoted = "<" + ("script " if marker.startswith("src") else "link ") + marker.replace('"', "'") + ("></script>" if marker.startswith("src") else ">")
     with patch("kicad_review.open", side_effect=lambda path, **kw: io.StringIO(single_quoted if path.endswith("review.html") else ""), create=True):
@@ -1495,7 +1525,12 @@ assert open("review/kicad-review.html", "rb").read() == html_before
 write(t, {"base/kicad-review.toml": "[3d]\nenabled = true\n"})
 # KiCad 10.0.0 emits this warning on stdout; the retained log must include both streams.
 real_run = kicad_review.subprocess.run
-kicad_review.subprocess.run = lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "Could not add 3D model for U5.\n", "stderr": "other diagnostic\n"})()
+def logged_export(args, **kw):
+    import pathlib
+    dest = pathlib.Path(args[args.index('-o') + 1])
+    dest.write_bytes(b'head glb\x00' if 'glb' in args else b'\x89PNG\r\n\x1a\n')
+    return type("R", (), {"returncode": 0, "stdout": "Could not add 3D model for U5.\n", "stderr": "other diagnostic\n"})()
+kicad_review.subprocess.run = logged_export
 export_glb({"dir": "P", "name": "P"}, "head", "review/P/head")
 kicad_review.subprocess.run = real_run
 assert open("review/P/head/glb.log", encoding="utf-8").read() == "Could not add 3D model for U5.\nother diagnostic\n"
@@ -1735,6 +1770,63 @@ finally:
     kicad_review.subprocess.run = real_run
 print("ok TS-S2 release zip and CSV contents")
 
+# BR02: synthetic populated four-layer board for 3D export/index regression probes.
+fixture = pathlib.Path('ui/fixtures/3d-four-layer.kicad_pcb')
+assert fixture.is_file(), 'BR02 four-layer 3D fixture missing'
+fixture_text = fixture.read_text(encoding='utf-8')
+root = kicad_review.parse_sexpr(fixture_text)
+assert all(name in fixture_text for name in ('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'))
+outline = kicad_review.findall(root, 'gr_line')
+assert len(outline) == 4, 'BR02 closed rectangular outline'
+assert [(kicad_review.find(n, 'start')[1:], kicad_review.find(n, 'end')[1:]) for n in outline] == [
+    (['0', '0'], ['20', '0']), (['20', '0'], ['20', '20']),
+    (['20', '20'], ['0', '20']), (['0', '20'], ['0', '0'])], 'BR02 20 mm closed outline'
+assert all(kicad_review.find(n, 'layer')[1] == 'Edge.Cuts' for n in outline)
+# KiCad 10 uses layer-table order for outer-side model placement. The separate
+# vf-order-4 fixture deliberately remains scrambled for layer-order regression.
+assert [n[1] for n in kicad_review.find(root, 'layers')[1:] if n[1].endswith('.Cu')] == [
+    'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'], 'BR02 physical copper layer table'
+stackup = kicad_review.find(kicad_review.find(root, 'setup'), 'stackup')
+assert [n[1] for n in kicad_review.findall(stackup, 'layer') if n[1].endswith('.Cu')] == [
+    'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'], 'BR02 physical stack order'
+assert kicad_review.find(stackup, 'copper_finish') == ['copper_finish', 'ENIG']
+footprints = {o['ref']: o for o in kicad_review.pcb_objects(str(fixture)).values() if o['kind'] == 'footprint'}
+assert set(footprints) == {'R1', 'R2', 'J1', 'U3', 'U4', 'LOGO1'}
+for ref, (pos, layer, model) in {
+    'R1': ([5, 5], 'F.Cu', True), 'R2': ([15, 5], 'F.Cu', True),
+    'J1': ([10, 15, 90], 'B.Cu', True), 'U3': ([15, 15], 'F.Cu', False),
+    'U4': ([5, 15], 'B.Cu', False), 'LOGO1': ([10, 10], 'F.Cu', False),
+}.items():
+    obj = footprints[ref]
+    assert obj['pos'] == pos and obj['props']['layer'] == layer and obj['has_model'] == model, ref
+logo = footprints['LOGO1']
+assert logo['box'] is None and all(isinstance(v, (int, float)) for v in logo['pos'][:2]), 'BR02 padless raw footprint'
+nodes = kicad_review.findall(root, 'footprint')
+by_ref = {next(p[2] for p in kicad_review.findall(n, 'property') if p[1] == 'Reference'): n for n in nodes}
+assert kicad_review.findall(by_ref['LOGO1'], 'fp_rect') and not kicad_review.findall(by_ref['LOGO1'], 'pad')
+# Flipping the stock header to B.Cu mirrors local Y; pin 2 must still align
+# with its installed model after the footprint's 90-degree board rotation.
+j1_pad2 = next(p for p in kicad_review.findall(by_ref['J1'], 'pad') if p[1] == '2')
+assert kicad_review.find(j1_pad2, 'at')[1:] == ['0', '-2.54', '90'], 'BR02 bottom header pad/model alignment'
+assert all(any(layer in kicad_review.find(p, 'layers')[1:] or '*.Cu' in kicad_review.find(p, 'layers')[1:]
+               for n in nodes for p in kicad_review.findall(n, 'pad'))
+           for layer in ('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu')), 'BR02 pads on every copper layer'
+assert {kicad_review.find(n, 'layer')[1] for n in kicad_review.findall(root, 'segment')} == {
+    'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'}, 'BR02 visible copper on every layer'
+models = [m[1] for n in nodes for m in kicad_review.findall(n, 'model')]
+assert len(models) == 3 and all(m.startswith('${KICAD10_3DMODEL_DIR}/') for m in models), 'BR02 portable installed models'
+import uuid as uuid_module
+def fixture_uuids(node):
+    for child in node:
+        if isinstance(child, list):
+            if child and child[0] == 'uuid':
+                yield child[1]
+            else:
+                yield from fixture_uuids(child)
+uuids = list(fixture_uuids(root))
+assert len(uuids) == len(set(uuids)) and all(str(uuid_module.UUID(u)) == u for u in uuids), 'BR02 unique valid identities'
+print('ok BR02 synthetic four-layer 3D fixture')
+
 # TS-S1: CI exercises default, real 3D and unchanged two-project pages without extra installs.
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
@@ -1742,7 +1834,19 @@ assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in t
 for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
-assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
+assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
+for suffix in ('', ' --dark'):
+    assert '      - run: node ui/check.mjs --no-skip "BR02 single renderer head only"' + suffix + ' --page "$PAGES/single.html"' in test_wf
+assert "data['mode'] = 'single'" in test_wf and 'review-data-3d-processed.js' in test_wf
+# BR02 processed fixture: CI builds it with inline_page and runs every processed check light and dark.
+assert '("processed", "review-data-3d-processed.js")' in test_wf, 'TS-S1 processed fixture missing'
+runner = pathlib.Path('ui/check.mjs').read_text()
+for command in (
+    'node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"',
+    'node ui/check.mjs --no-skip "BR02 processed" --dark --page "$PAGES/processed.html"',
+    'node --test ui/*.test.mjs',
+    'node ui/board-test.mjs'):
+    assert '      - run: ' + command in test_wf.splitlines(), 'TS-S1 CI missing ' + command
 # Image and supplemental fixture commands stay literal: CI and this contract change together.
 for command in (
     'node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"',
@@ -4355,8 +4459,10 @@ with TemporaryDirectory() as t:
                       f"review/G/{side}/pcb/G-B_Cu.svg": svg})
         write(t, {"review/detect.json": json.dumps({"projects": [pr]}),
                   "base/kicad-review.toml": "[3d]\nenabled = true\n"})
-        def fake_export(p, side, out):
-            write(t, {f"{out}/board.glb": "timestamped model", f"{out}/glb.log": ""})
+        def fake_export(p, side, out, *, model=True):
+            assert model
+            write(t, {f"{out}/board.raw.glb": "timestamped model", f"{out}/board.glb": "timestamped model",
+                      f"{out}/poster.png": "poster", f"{out}/glb.log": "", f"{out}/poster.log": "render log"})
         with patch("kicad_review.render_side"), patch("kicad_review.export_glb", side_effect=fake_export) as export:
             kr.cmd_render(None)
         assert export.call_count == 1, "identical 3D inputs export once even when board unchanged"
@@ -4436,6 +4542,920 @@ print("ok per-commit project render cache hits retain both revisions")
 
 assert '-e KICAD_IMAGE' in pathlib.Path('.github/workflows/review.yml').read_text(), "host and container cache identity must match"
 assert 'restore-renders' in pathlib.Path('.github/workflows/review.yml').read_text(), "warm caches must not pull the KiCad image"
+
+# BR02 Task 2: raw copper exports, shared posters and revision-scoped metadata.
+def br02_export_contract():
+    import pathlib, subprocess, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as t:
+        calls = []
+        def cli(args, **kw):
+            calls.append(args)
+            flag = '-o' if '-o' in args else '--output'
+            dest = pathlib.Path(args[args.index(flag) + 1])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b'glTF' if 'glb' in args else br02_png(1568, 984))
+            return subprocess.CompletedProcess(args, 0, 'export stdout\n', 'stderr\n')
+        out = pathlib.Path(t, 'new/output')
+        with patch.object(kr, 'board_path', return_value=__file__), patch.object(kr.subprocess, 'run', cli):
+            kr.export_glb({'dir': 'P', 'name': 'P'}, 'base', str(out))
+        assert '--include-tracks' in calls[0], 'BR02 copper export flags'
+        assert calls[0] == ['kicad-cli', 'pcb', 'export', 'glb', '--include-tracks', '--include-pads',
+                            '--include-zones', '--include-silkscreen', '--include-soldermask',
+                            '--subst-models', '-f', '-o', str(out/'board.raw.glb'), __file__]
+        assert (out/'board.raw.glb').read_bytes() == (out/'board.glb').read_bytes() == b'glTF'
+        assert calls[1] == ['kicad-cli', 'pcb', 'render', '--quality', 'basic', '--perspective',
+                            '--rotate', '-45,0,45', '-w', '1600', '-h', '1000', '-o', str(out/'poster.png'), __file__]
+        import struct
+        assert struct.unpack('>II', (out/'poster.png').read_bytes()[16:24]) == (1600, 1000), 'BR02 actual poster dimensions'
+        assert (out/'glb.log').read_text() == (out/'poster.log').read_text() == 'export stdout\nstderr\n'
+    print('ok BR02 raw copper export and exact poster argv')
+
+
+def br02_poster_only_contract():
+    import pathlib, subprocess, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as t:
+        calls = []
+        def cli(args, **kw):
+            calls.append(args)
+            pathlib.Path(args[args.index('-o')+1]).write_bytes(br02_png(1568, 984))
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(kr.subprocess, 'run', cli):
+            kr.export_glb({'dir': 'P', 'name': 'P'}, 'head', t, model=False)
+        assert len(calls) == 1 and calls[0][1:3] == ['pcb', 'render'], 'BR02 design-only still'
+        assert calls[0][calls[0].index('-w')+1] == '1600'
+        assert calls[0][calls[0].index('-h')+1] == '1000'
+        assert kr.poster_size(pathlib.Path(t, 'poster.png')) == (1600, 1000)
+        assert not pathlib.Path(t, 'board.raw.glb').exists() and not pathlib.Path(t, 'board.glb').exists()
+    print('ok BR02 design-only still')
+
+
+def br02_metadata_contract():
+    import os, pathlib, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+    def footprint(uid, ref, layer='F.Cu', x=10, model='body.step'):
+        return (f'(footprint "Package:R" (uuid "{uid}") (layer "{layer}") (at {x} 20 90) '
+                f'(property "Reference" "{ref}") (pad "1" smd rect (at 1 0) (size 2 1)) '
+                + (f'(model "{model}")' if model else '') + ')')
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as t:
+        try:
+            os.chdir(t)
+            for side in ('base', 'head'):
+                pathlib.Path(side, 'P').mkdir(parents=True)
+                pathlib.Path('review/P', side).mkdir(parents=True)
+            base = [footprint('rename', 'R1'), footprint('deleted', 'J1', 'B.Cu'),
+                    footprint('stable', 'U3'), footprint('old-id', 'R2'), footprint('no-model', 'U4', model=None)]
+            head = [footprint('rename', 'R12', x=11), footprint('stable', 'U3'),
+                    footprint('new-id', 'R2', x=12), footprint('no-model', 'U4', model=None), footprint('added', 'J2')]
+            for side, parts in (('base', base), ('head', head)):
+                pathlib.Path(side, 'P/P.kicad_pcb').write_text(
+                    '(kicad_pcb (setup (stackup (copper_finish "' + ('ENIG' if side == 'base' else 'ENEPIG') + '")))'
+                    + ''.join(parts) + ')')
+            pathlib.Path('review/P/head/glb.log').write_text('Could not add 3D model for U3.\n')
+            # Render warnings must not turn a valid GLB part into a placeholder.
+            pathlib.Path('review/P/base/poster.log').write_text('Could not add 3D model for R1.\n')
+            kr.prepare3d({'dir': 'P', 'name': 'P'})
+            import json
+            data = {s: json.loads(pathlib.Path('review/P', s, 'board-3d-input.json').read_text()) for s in ('base', 'head')}
+            # One kept set per comparison, shared by both revisions (kept_refs over base and head).
+            assert data['base']['keep'] == ['J1', 'J2', 'R1', 'R12', 'R2'], data['base']
+            assert data['head']['keep'] == ['J1', 'J2', 'R1', 'R12', 'R2'], data['head']
+            assert data['base']['finish'] == 'ENIG' and data['head']['finish'] == 'ENEPIG'
+            for side, d in data.items():
+                assert set(d) == {'version', 'side', 'keep', 'finish', 'footprints', 'warnings', 'skippedRefs'}
+                assert d['version'] == 1 and d['side'] == side and len(d['footprints']) == 5
+                objs = kr.pcb_objects(f'{side}/P/P.kicad_pcb')
+                for f in d['footprints']:
+                    assert set(f) == {'uuid', 'ref', 'side', 'pos', 'box', 'hasModel', 'reason'}
+                    assert f['pos'] == objs[f['uuid']]['pos'] and f['box'] == objs[f['uuid']]['box']
+                    assert f['side'] == ('bottom' if f['ref'] == 'J1' else 'top')
+                    assert f['hasModel'] == (f['reason'] is None)
+            b = {f['ref']: f for f in data['base']['footprints']}
+            h = {f['ref']: f for f in data['head']['footprints']}
+            assert b['R1']['uuid'] == h['R12']['uuid'] == 'rename'
+            assert h['U3']['reason'] == 'file not found' and b['U3']['hasModel']
+            assert h['U4']['reason'] == b['U4']['reason'] == 'no model in footprint'
+            before = pathlib.Path('review/P/head/board-3d-input.json').read_bytes()
+            kr.prepare3d({'dir': 'P', 'name': 'P'})
+            assert pathlib.Path('review/P/head/board-3d-input.json').read_bytes() == before
+            # Added/removed boards and absent stackups still produce side-specific input.
+            pathlib.Path('base/P/P.kicad_pcb').unlink()
+            pathlib.Path('review/P/base/board-3d-input.json').unlink()
+            pathlib.Path('head/P/P.kicad_pcb').write_text('(kicad_pcb' + footprint('added', 'J2') + ')')
+            kr.prepare3d({'dir': 'P', 'name': 'P'})
+            added = json.loads(pathlib.Path('review/P/head/board-3d-input.json').read_text())
+            assert added['keep'] == ['J2'] and added['finish'] == ''
+            assert not pathlib.Path('review/P/base/board-3d-input.json').exists()
+        finally:
+            os.chdir(old)
+    print('ok BR02 revision metadata rename, deleted bottom, UUID fallback and model coverage')
+
+
+br02_export_contract()
+br02_poster_only_contract()
+br02_metadata_contract()
+
+
+def br02_export_failures():
+    import pathlib, subprocess, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+    for failure in ('nonzero', 'empty', 'missing', 'oserror'):
+        with tempfile.TemporaryDirectory() as t:
+            out = pathlib.Path(t, 'nested/output')
+            # Pre-existing successful artifacts must not mask a later failed attempt.
+            out.mkdir(parents=True)
+            for name in ('board.raw.glb', 'board.glb', 'poster.png'):
+                (out/name).write_bytes(b'stale')
+            calls = []
+            def cli(args, **kw):
+                calls.append(args)
+                dest = pathlib.Path(args[args.index('-o')+1])
+                assert dest.parent.is_dir() and not dest.exists()
+                if failure == 'oserror':
+                    raise FileNotFoundError('CLI unavailable')
+                if failure != 'missing':
+                    dest.write_bytes(b'partial' if failure == 'nonzero' else b'')
+                return subprocess.CompletedProcess(args, 1 if failure == 'nonzero' else 0, None, 'diagnostic')
+            with patch.object(kr.subprocess, 'run', cli):
+                kr.export_glb({'dir': 'P', 'name': 'P'}, 'head', str(out))
+            assert len(calls) == 2, 'BR02 failed GLB must not suppress poster attempt'
+            assert all(not (out/n).exists() for n in ('board.raw.glb', 'board.glb', 'poster.png'))
+            for name in ('glb.log', 'poster.log'):
+                assert (out/name).read_text() == ('CLI unavailable' if failure == 'oserror' else 'diagnostic')
+    # A failed still must not discard a valid raw/fallback model, and logs stay isolated.
+    with tempfile.TemporaryDirectory() as t:
+        out = pathlib.Path(t, 'created/by/exporter')
+        def cli(args, **kw):
+            assert out.is_dir(), 'BR02 exporter creates output directory'
+            if 'glb' in args:
+                pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF')
+                return subprocess.CompletedProcess(args, 0, 'Could not add 3D model for U3.\n', '')
+            return subprocess.CompletedProcess(args, 1, '', 'Could not add 3D model for R1.\n')
+        with patch.object(kr.subprocess, 'run', cli):
+            kr.export_glb({'dir': 'P', 'name': 'P'}, 'base', str(out))
+        assert (out/'board.raw.glb').read_bytes() == (out/'board.glb').read_bytes() == b'glTF'
+        assert not (out/'poster.png').exists()
+        assert 'U3' in (out/'glb.log').read_text() and 'R1' not in (out/'glb.log').read_text()
+    print('ok BR02 failed, missing, empty and unavailable exports clean stale artifacts')
+
+
+def br02_render_cache_contract():
+    import copy, json, os, pathlib, subprocess, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as t:
+        try:
+            os.chdir(t)
+            pr = {'dir': 'P', 'name': 'P', 'status': 'modified'}
+            det = {'base': 'a'*40, 'head': 'b'*40, 'projects': [pr]}
+            pathlib.Path('review').mkdir()
+            pathlib.Path('review/detect.json').write_text(json.dumps(det))
+            for side in ('base', 'head'):
+                pathlib.Path(side, 'P').mkdir(parents=True)
+                pathlib.Path(side, 'P/P.kicad_pcb').write_text('(kicad_pcb)')
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            settings['3d']['enabled'] = True
+            calls = []
+            def cli(args, **kw):
+                calls.append(args)
+                pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
+                return subprocess.CompletedProcess(args, 0, 'GLB log' if 'glb' in args else 'poster log', '')
+            with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side'), \
+                 patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
+                 patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.0'), patch.object(kr.subprocess, 'run', cli):
+                kr.cmd_render(None)
+                assert len(calls) == 2, 'BR02 identical boards export GLB and poster once'
+                for name in ('board.raw.glb', 'board.glb', 'poster.png', 'glb.log', 'poster.log'):
+                    assert pathlib.Path('review/P/base', name).read_bytes() == pathlib.Path('review/P/head', name).read_bytes()
+                base_cache = kr.render_cache(pr, 'base', det, settings)
+                head_cache = kr.render_cache(pr, 'head', det, settings)
+                kr.cmd_render(None)
+                assert len(calls) == 2, 'BR02 complete caches need no exports'
+                (head_cache/'poster.png').unlink()
+                try:
+                    kr.restore_renders()
+                    raise AssertionError('BR02 requested missing poster must invalidate restore')
+                except SystemExit as e:
+                    assert e.code == 1
+                kr.cmd_render(None)
+                assert len(calls) == 2 and (head_cache/'poster.png').is_file(), 'BR02 repair poster by copying identical Base'
+                (base_cache/'poster.png').write_bytes(br02_png(1568, 984))
+                assert not kr.render_cache_complete(base_cache, pr, 'base', settings), 'undersized posters cannot be cache hits'
+                (base_cache/'poster.png').write_bytes(b'')
+                kr.cmd_render(None)
+                assert len(calls) == 4, 'BR02 empty poster invalidates render cache'
+                # A legacy processed-only cache must never be treated as a raw export.
+                (base_cache/'board.raw.glb').unlink()
+                assert not kr.render_cache_complete(base_cache, pr, 'base', settings), 'BR02 raw export required on cache hits'
+                try:
+                    kr.restore_renders()
+                    raise AssertionError('BR02 legacy processed-only cache must invalidate restore')
+                except SystemExit as e:
+                    assert e.code == 1
+                kr.cmd_render(None)
+                assert len(calls) == 6 and (base_cache/'board.raw.glb').read_bytes() == b'glTF'
+                (base_cache/'board.raw.glb').write_bytes(b'')
+                assert not kr.render_cache_complete(base_cache, pr, 'base', settings), 'BR02 empty raw export is not a hit'
+                (base_cache/'board.raw.glb').write_bytes(b'glTF')
+                cache = kr.render_cache(pr, 'base', det, settings)
+                same_revision = {**det, 'head': det['base']}
+                assert cache == kr.render_cache(pr, 'head', same_revision, settings), 'BR02 revision caches are side independent'
+                with patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.6'):
+                    assert kr.render_cache(pr, 'base', det, settings) != cache
+                with patch.object(kr, 'poster_argv', return_value=['changed render argv']):
+                    assert kr.render_cache(pr, 'base', det, settings) != cache
+                pathlib.Path('base/P/body.step').write_bytes(b'new model')
+                assert kr.render_cache(pr, 'base', det, settings) != cache
+                pathlib.Path('base/P/body.step').unlink()
+                pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb (version 20260101))')
+                assert kr.render_cache(pr, 'base', det, settings) != cache
+                pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb)')
+                settings['3d']['enabled'] = False
+                assert kr.render_cache(pr, 'base', det, settings) != cache
+                settings['design'] = {'enabled': True}
+                calls.clear()
+                kr.cmd_render(None)
+                assert len(calls) == 1 and calls[0][1:3] == ['pcb', 'render'], 'BR02 cmd_render design-only shared still'
+                # Different model inputs must prevent sharing even in design-only mode.
+                pathlib.Path('head/P/body.step').write_bytes(b'model edit')
+                calls.clear()
+                kr.cmd_render(None)
+                assert len(calls) == 1 and calls[0][1:3] == ['pcb', 'render'] and calls[0][-1].startswith('head/')
+                # Gate changes invalidate identity, while disabled runs invoke neither producer.
+                calls.clear()
+                settings['design']['enabled'] = False
+                kr.cmd_render(None)
+                assert calls == []
+            # Image pin identifies KiCad on host and container without running a CLI on the host.
+            with patch.dict(kr.os.environ, {'KICAD_IMAGE': 'kicad/kicad:10.0.6-full@sha256:synthetic'}), \
+                 patch.object(kr.subprocess, 'run') as run:
+                assert kr.render_tool_identity() == 'kicad/kicad:10.0.6-full@sha256:synthetic'
+                run.assert_not_called()
+            with patch.dict(kr.os.environ, {'KICAD_IMAGE': ''}), \
+                 patch.object(kr.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '10.0.0\n', '')) as run:
+                assert kr.render_tool_identity() == '10.0.0'
+                assert run.call_args.args[0] == ['kicad-cli', '--version']
+        finally:
+            os.chdir(old)
+    print('ok BR02 shared five-file exports, design gate, poster cache validity and input/tool/argv identity')
+
+
+br02_export_failures()
+br02_render_cache_contract()
+
+
+def br02_poster_dimensions():
+    import pathlib, struct, subprocess, tempfile, zlib
+    from unittest.mock import patch
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as t:
+        dest = pathlib.Path(t, 'poster.png')
+        # Every PNG filter must preserve RGB(A) pixels exactly, not just change IHDR.
+        for channels in (3, 4):
+            for filter_type in range(5):
+                dest.write_bytes(br02_png(4, 2, channels=channels, filter_type=filter_type))
+                kr.normalize_poster(dest)
+                png = dest.read_bytes()
+                assert struct.unpack('>II', png[16:24]) == (1600, 1000)
+                data = bytearray()
+                offset = 8
+                while offset < len(png):
+                    size = struct.unpack('>I', png[offset:offset+4])[0]
+                    kind = png[offset+4:offset+8]
+                    payload = png[offset+8:offset+8+size]
+                    assert zlib.crc32(kind+payload) == struct.unpack('>I', png[offset+8+size:offset+12+size])[0]
+                    if kind == b'IDAT':
+                        data.extend(payload)
+                    offset += 12+size
+                raw = zlib.decompress(data)
+                stride = 1+1600*4
+                assert len(raw) == stride*1000
+                pixel = bytes((31, 73, 119, 255))
+                for y in range(1000):
+                    row = raw[y*stride:(y+1)*stride]
+                    expected = bytes(798*4)+pixel*4+bytes(798*4) if y in (499, 500) else bytes(1600*4)
+                    assert row == b'\0'+expected, (channels, filter_type, y)
+        # Already conforming stills are left byte-identical.
+        exact = br02_png()
+        dest.write_bytes(exact)
+        with patch.object(kr.zlib, 'decompressobj', wraps=kr.zlib.decompressobj) as inflate:
+            kr.normalize_poster(dest)
+            assert inflate.call_count == 1, 'normal PNG validates IDAT without unfiltering'
+        assert dest.read_bytes() == exact
+        idat = exact.index(b'IDAT')
+        size = struct.unpack('>I', exact[idat-4:idat])[0]
+        payload = bytearray(exact[idat+4:idat+4+size]); payload[-1] ^= 1
+        def idat_png(data):
+            chunk = b'IDAT' + data
+            return exact[:idat-4] + struct.pack('>I', len(data)) + chunk + struct.pack('>I', zlib.crc32(chunk)) + exact[idat+8+size:]
+        for bad in (b'not PNG', br02_png()[:-10], br02_png(1601, 1),
+                    idat_png(bytes(payload)), idat_png(zlib.compress(b'\0'))):
+            def cli(args, **kw):
+                pathlib.Path(args[args.index('-o')+1]).write_bytes(bad)
+                return subprocess.CompletedProcess(args, 0, 'render stdout\n', '')
+            with patch.object(kr.subprocess, 'run', cli):
+                kr.export_glb({'dir': 'P', 'name': 'P'}, 'head', t, model=False)
+            assert not dest.exists(), 'invalid or oversized still is not a successful product'
+            assert 'Poster normalization failed' in pathlib.Path(t, 'poster.log').read_text()
+    print('ok BR02 1600x1000 poster dimensions, all PNG filters, pixel preservation and invalid cleanup')
+
+
+br02_poster_dimensions()
+
+
+def br02_task2a_metadata_contract():
+    base = {'stable': {'kind':'footprint','ref':'R1','has_model':True,
+        'props':{'layer':'F.Cu','reference':'R1'},'pos':[5,5,0],'box':[4,4,6,6],'where':'board',
+        'match':('footprint','R1')},
+        'bottom': {'kind':'footprint','ref':'J1','has_model':True,
+        'props':{'layer':'B.Cu'},'pos':[10,15,90],'box':[8,14,12,16],'where':'board',
+        'match':('footprint','J1')}}
+    head = {'stable': {**base['stable'],'ref':'R12','match':('footprint','R12'),
+        'props':{'layer':'F.Cu','reference':'R12'}}}
+    assert kicad_review.kept_refs(base,head) == ['J1','R1','R12'], 'BR02 renamed/deleted refs'
+    m = kicad_review.metadata3d('base',base,['R1','R12','J1'],'ENIG',
+        [{'ref':'J1','side':'base','reason':'file not found'}])
+    bottom = next(f for f in m['footprints'] if f['ref']=='J1')
+    assert bottom['uuid']=='bottom' and bottom['side']=='bottom'
+    assert bottom['box']==[8,14,12,16] and not bottom['hasModel']
+    assert bottom['reason']=='file not found', 'BR02 declared model is not coverage'
+    assert m['version'] == 1 and m['side'] == 'base' and m['finish'] == 'ENIG'
+    assert m['keep'] == ['J1', 'R1', 'R12']
+    assert bottom['pos'] == [10,15,90]
+    padless = {'logo': {'kind':'footprint','ref':'LOGO1','has_model':False,
+        'props':{'layer':'F.Cu'},'pos':[7,8,0],'box':None}}
+    logo = kicad_review.metadata3d('head',padless,[], '', [])['footprints'][0]
+    assert logo['box']==[6,7,8,9] and not logo['hasModel'], 'BR02 padless estimate'
+    duplicate = kicad_review.metadata3d('base',{**base,'duplicate':base['stable']},[], '', [])
+    assert all(f['ref'] != 'R1' for f in duplicate['footprints'])
+    assert len(duplicate['warnings']) == 2 and all('R1' in w for w in duplicate['warnings'])
+    unannotated = kicad_review.metadata3d('head', {
+        'logo1':{**padless['logo'], 'ref':'REF**'},
+        'logo2':{**padless['logo'], 'ref':'REF**'},
+        'valid':padless['logo']}, [], '', [])
+    assert [f['ref'] for f in unannotated['footprints']] == ['LOGO1']
+    assert len(unannotated['warnings']) == 2
+    # Reference fallback with a changed UUID must keep the old and new identity.
+    replaced = {'new-id': {**base['stable'], 'props': {'layer':'B.Cu'}}}
+    assert kicad_review.kept_refs({'old-id':base['stable']}, replaced) == ['R1']
+    assert kicad_review.kept_refs(base, base) == []
+    for bad_box in (None, [1,2], [0,0,float('inf'),1], [0,0,float('nan'),1]):
+        obj = {**padless['logo'], 'box':bad_box}
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert kicad_review.metadata3d('head',{'logo':obj},[], '', [])['footprints'][0]['box'] == [6,7,8,9]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                kicad_review.metadata3d('head',{'logo':{**obj,'pos':[float('nan'),8]}},[], '', [])
+            assert False, 'BR02 missing finite fallback position must fail metadata'
+        except ValueError as error:
+            assert 'finite position' in str(error)
+    valid_box = [4, 4, 6, 6]
+    for bad_pos in (None, [], [5], [float('nan'), 5], [5, float('nan')], [float('inf'), 5],
+                    ['str', 5], [5, 'str'], [None, 5], [5, None], [True, 5], [5, False],
+                    'not_a_seq', 123, [5, 5, 'str'], [5, 5, None], [5, 5, float('nan')]):
+        try:
+            kicad_review.metadata3d('head', {'r1': {'kind':'footprint', 'ref':'R1', 'has_model':True,
+                                                    'props':{'layer':'F.Cu'}, 'box':valid_box, 'pos':bad_pos}},
+                                    [], '', [])
+            assert False, f'BR02 finite box with invalid pos {bad_pos} must fail metadata'
+        except ValueError as error:
+            assert 'finite position' in str(error)
+    # Padless footprint (box is None) falls back to 2 mm estimate without emitting any warning
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        f = kicad_review.metadata3d('head', {'logo': padless['logo']}, [], '', [])['footprints'][0]
+    assert f['box'] == [6, 7, 8, 9] and out.getvalue() == '', 'BR02 padless footprint produces no warning'
+    # Malformed or non-numeric box falls back to finite pos estimate and emits warning
+    for bad_box in (['a', 1, 2, 3], [1, 'b', 3, 4], [None, 1, 2, 3], 'bad_box', 42,
+                    [1, 2], [0, 0, float('inf'), 1], [0, 0, float('nan'), 1]):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            f = kicad_review.metadata3d('head', {'r1': {'kind':'footprint', 'ref':'R1', 'has_model':True,
+                                                        'props':{'layer':'F.Cu'}, 'box':bad_box, 'pos':[5, 5, 0]}},
+                                        [], '', [])['footprints'][0]
+        assert f['box'] == [4, 4, 6, 6], f'BR02 non-numeric box fallback: {f["box"]}'
+        assert '::warning::R1: malformed bounding box' in out.getvalue(), f'BR02 warning emitted for bad box {bad_box}'
+    both = [{'ref':'R1','side':'both','reason':'file not found'}]
+    assert not kicad_review.metadata3d('head',base,[], '', both)['footprints'][1]['hasModel']
+    print('ok BR02 metadata rename/delete, UUID fallback, bottom models, finite estimates and per-footprint skip warnings')
+
+
+br02_task2a_metadata_contract()
+
+
+def br02_task2a_prepare_contract():
+    import contextlib, pathlib
+    with tempfile.TemporaryDirectory() as t:
+        old = os.getcwd()
+        os.chdir(t)
+        try:
+            pathlib.Path('base/P').mkdir(parents=True)
+            pcb = pathlib.Path('base/P/P.kicad_pcb')
+            pcb.write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            with patch.object(kicad_review.subprocess,'run',side_effect=OSError('missing binary')):
+                kicad_review.export_glb({'dir':'P','name':'P'},'base','review/P/base')
+            assert not pathlib.Path('review/P/base/poster.png').exists()
+            assert 'missing binary' in pathlib.Path('review/P/base/poster.log').read_text()
+            head_meta=pathlib.Path('review/P/head/board-3d-input.json')
+            head_meta.parent.mkdir(parents=True,exist_ok=True)
+            head_meta.write_text('{"stale":true}')
+            kicad_review.prepare3d({'dir':'P','name':'P'})
+            base_meta = pathlib.Path('review/P/base/board-3d-input.json')
+            assert json.loads(base_meta.read_text())['finish']=='ENIG'
+            assert not head_meta.exists(), 'BR02 stale absent-side metadata removed'
+            # Duplicate references disable only processing and remove any old input.
+            pcb.write_text('''(kicad_pcb
+                (footprint "Test" (layer "F.Cu") (uuid "one") (at 7 8)
+                    (property "Reference" "R1"))
+                (footprint "Test" (layer "B.Cu") (uuid "two") (at 9 10)
+                    (property "Reference" "R1")))''')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kicad_review.prepare3d({'dir':'P','name':'P'})
+            assert base_meta.exists() and len(json.loads(base_meta.read_text())['warnings']) == 2
+            assert 'R1 (one): duplicate reference skipped' in output.getvalue()
+            # Exercise the actual CLI and the same sanitized directory used by render.
+            project = {'dir':'nested/P', 'name':'P'}
+            source = pathlib.Path('head/nested/P/P.kicad_pcb')
+            source.parent.mkdir(parents=True)
+            source.write_text('(kicad_pcb (setup (stackup (copper_finish "ENEPIG"))))')
+            pathlib.Path('review/detect.json').write_text(json.dumps({'projects':[project]}))
+            proc = subprocess.run([sys.executable, str(pathlib.Path(kicad_review.__file__).resolve()),
+                                   'prepare-3d'], capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr
+            # An absent revision gets no folder: build_project reads folder presence as revision presence.
+            assert not pathlib.Path('review', kicad_review.project_id(project['dir']), 'base').exists()
+            target = pathlib.Path('review', kicad_review.project_id(project['dir']), 'head', 'board-3d-input.json')
+            assert json.loads(target.read_text()) == {
+                'version':1, 'side':'head', 'keep':[], 'finish':'ENEPIG', 'footprints':[], 'warnings':[], 'skippedRefs':[]}
+            # Malformed board leaves no stale input and later projects still run.
+            p_bad = {'dir': 'bad/P1', 'name': 'P1'}
+            p_good = {'dir': 'good/P2', 'name': 'P2'}
+            pathlib.Path('review/detect.json').write_text(json.dumps({'projects': [p_bad, p_good]}))
+            bad_pcb = pathlib.Path('head/bad/P1/P1.kicad_pcb')
+            bad_pcb.parent.mkdir(parents=True)
+            bad_pcb.write_text('(kicad_pcb (unbalanced')
+            stale_bad_meta = pathlib.Path('review', kicad_review.project_id(p_bad['dir']), 'head', 'board-3d-input.json')
+            stale_bad_meta.parent.mkdir(parents=True, exist_ok=True)
+            stale_bad_meta.write_text('{"stale": true}')
+            good_pcb = pathlib.Path('head/good/P2/P2.kicad_pcb')
+            good_pcb.parent.mkdir(parents=True)
+            good_pcb.write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            proc = subprocess.run([sys.executable, str(pathlib.Path(kicad_review.__file__).resolve()),
+                                   'prepare-3d'], capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr
+            assert not stale_bad_meta.exists(), 'BR02 malformed board leaves no stale input'
+            assert 'P1: 3D processing unavailable:' in proc.stdout
+            good_meta = pathlib.Path('review', kicad_review.project_id(p_good['dir']), 'head', 'board-3d-input.json')
+            assert json.loads(good_meta.read_text())['finish'] == 'ENIG', 'BR02 later projects still run after malformed board'
+            # Malformed base board unlinks both sides' inputs; comparison keep set cannot be computed.
+            p_base_bad = {'dir': 'badbase/P3', 'name': 'P3'}
+            pathlib.Path('base/badbase/P3').mkdir(parents=True)
+            pathlib.Path('base/badbase/P3/P3.kicad_pcb').write_text('(kicad_pcb (unbalanced')
+            stale_base_meta = pathlib.Path('review', kicad_review.project_id(p_base_bad['dir']), 'base', 'board-3d-input.json')
+            stale_base_meta.parent.mkdir(parents=True, exist_ok=True)
+            stale_base_meta.write_text('{"stale": true}')
+            stale_head_meta = pathlib.Path('review', kicad_review.project_id(p_base_bad['dir']), 'head', 'board-3d-input.json')
+            stale_head_meta.parent.mkdir(parents=True, exist_ok=True)
+            stale_head_meta.write_text('{"stale": true}')
+            pathlib.Path('head/badbase/P3').mkdir(parents=True)
+            pathlib.Path('head/badbase/P3/P3.kicad_pcb').write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kicad_review.prepare3d(p_base_bad)
+            assert not stale_base_meta.exists(), 'BR02 malformed base unlinks base input'
+            assert not stale_head_meta.exists(), 'BR02 malformed base unlinks head input when comparison cannot be computed'
+            assert 'P3: 3D processing unavailable:' in output.getvalue()
+            # Duplicate references are skipped individually; both revision inputs remain available with warnings.
+            p_side_bad = {'dir': 'badside/P4', 'name': 'P4'}
+            pathlib.Path('base/badside/P4').mkdir(parents=True)
+            pathlib.Path('base/badside/P4/P4.kicad_pcb').write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            pathlib.Path('head/badside/P4').mkdir(parents=True)
+            pathlib.Path('head/badside/P4/P4.kicad_pcb').write_text('''(kicad_pcb
+                (footprint "Test" (layer "F.Cu") (uuid "u1") (at 7 8) (property "Reference" "R1"))
+                (footprint "Test" (layer "B.Cu") (uuid "u2") (at 9 10) (property "Reference" "R1")))''')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kicad_review.prepare3d(p_side_bad)
+            base_p4_meta = pathlib.Path('review', kicad_review.project_id(p_side_bad['dir']), 'base', 'board-3d-input.json')
+            head_p4_meta = pathlib.Path('review', kicad_review.project_id(p_side_bad['dir']), 'head', 'board-3d-input.json')
+            assert base_p4_meta.exists() and json.loads(base_p4_meta.read_text())['finish'] == 'ENIG', 'BR02 valid base preserved'
+            assert head_p4_meta.exists() and len(json.loads(head_p4_meta.read_text())['warnings']) == 2
+            assert 'R1 (u1): duplicate reference skipped' in output.getvalue()
+            # Malformed head board unlinks both sides' inputs; comparison keep set cannot be computed.
+            p_head_bad = {'dir': 'badhead/P5', 'name': 'P5'}
+            pathlib.Path('base/badhead/P5').mkdir(parents=True)
+            pathlib.Path('base/badhead/P5/P5.kicad_pcb').write_text('(kicad_pcb (setup (stackup (copper_finish "ENIG"))))')
+            stale_base_meta5 = pathlib.Path('review', kicad_review.project_id(p_head_bad['dir']), 'base', 'board-3d-input.json')
+            stale_base_meta5.parent.mkdir(parents=True, exist_ok=True)
+            stale_base_meta5.write_text('{"stale": true}')
+            stale_head_meta5 = pathlib.Path('review', kicad_review.project_id(p_head_bad['dir']), 'head', 'board-3d-input.json')
+            stale_head_meta5.parent.mkdir(parents=True, exist_ok=True)
+            stale_head_meta5.write_text('{"stale": true}')
+            pathlib.Path('head/badhead/P5').mkdir(parents=True)
+            pathlib.Path('head/badhead/P5/P5.kicad_pcb').write_text('(kicad_pcb (unbalanced')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kicad_review.prepare3d(p_head_bad)
+            assert not stale_base_meta5.exists(), 'BR02 malformed head unlinks base input'
+            assert not stale_head_meta5.exists(), 'BR02 malformed head unlinks head input'
+            assert 'P5: 3D processing unavailable:' in output.getvalue()
+            # Absent base revision (new project): head metadata is written with all added footprints in keep.
+            p_new = {'dir': 'newproj/P6', 'name': 'P6'}
+            pathlib.Path('head/newproj/P6').mkdir(parents=True)
+            pathlib.Path('head/newproj/P6/P6.kicad_pcb').write_text('''(kicad_pcb
+                (setup (stackup (copper_finish "ENIG")))
+                (footprint "Test" (layer "F.Cu") (uuid "u1") (at 7 8) (property "Reference" "R1")))''')
+            kicad_review.prepare3d(p_new)
+            new_head_meta = json.loads(pathlib.Path('review', kicad_review.project_id(p_new['dir']), 'head', 'board-3d-input.json').read_text())
+            assert new_head_meta['keep'] == ['R1'], 'BR02 new project marks added footprints in keep'
+        finally:
+            os.chdir(old)
+    print('ok BR02 prepare-3d failed export, stale absent/invalid sides and sanitized CLI output')
+
+
+br02_task2a_prepare_contract()
+
+
+# BR02 Task 4A: verified additive coverage and digest artifacts.
+import gzip, hashlib, json, os, pathlib, tempfile
+with tempfile.TemporaryDirectory() as t:
+    old=os.getcwd();os.chdir(t)
+    try:
+        root=pathlib.Path(t);side=root/'head';side.mkdir()
+        raw=b'glTF-model';parts=json.dumps([{'uuid':'u','ref':'R1','side':'top',
+            'box':[0,0,0,1,1,1],'hasModel':True,'reason':None}]).encode()
+        counts={'footprints':1,'withModel':1,'placeholders':0,'triangles':1,'primitives':1,'warnings':[]}
+        values={'board.glb':raw,'parts.json':parts,'stats.json':json.dumps(counts).encode()}
+        for name,value in values.items():
+            target={'parts.json':'board-parts.json','stats.json':'board-stats.json'}.get(name,name)
+            (side/target).write_bytes(value)
+        (side/'poster.png').write_bytes(b'\x89PNG\r\n\x1a\n')
+        (side/'board-processed.json').write_text(json.dumps({'key':'pair','hashes':{
+            name:hashlib.sha256(value).hexdigest() for name,value in values.items()}}))
+        blobs={};board={'model3d':{'head':'existing-model-id','base':None}}
+        kicad_review.attach3d(board,str(root),blobs)
+        assert board['coverage3d']==counts and board['coverage3dBySide']['base'] is None
+        assert board['model3d']['head']=='existing-model-id'
+        assert board['parts3d']['head'] in blobs and board['poster3d']['head'] in blobs
+        # Test the asset function in a scratch directory; attach3d's artifact path is redirected by cwd below.
+        asset=kicad_review.artifact3d(raw,'board.glb',root/'assets')
+        assert gzip.decompress((root/'assets'/asset['artifactName']).read_bytes())==raw
+        assert asset['digest']==hashlib.sha256(raw).hexdigest()
+        assert asset==kicad_review.artifact3d(raw,'board.glb',root/'assets')
+        (side/'board-stats.json').write_text('{}')
+        legacy={'model3d':board['model3d']};kicad_review.attach3d(legacy,str(root),{})
+        assert legacy['coverage3dBySide']['head'] is None and 'coverage3d' not in legacy
+    finally:
+        os.chdir(old)
+
+# BR02 comparison attachments include both revisions and keep revision-local coverage.
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as t:
+    old=os.getcwd();os.chdir(t)
+    try:
+        root=pathlib.Path(t)/'P'
+        payloads={}
+        for side,count in (('base',2),('head',1)):
+            folder=root/side;folder.mkdir(parents=True)
+            parts=[{'uuid':side+str(i),'ref':'R'+str(i),'side':'top',
+                    'box':[0,0,0,1,1,1],'hasModel':True,'reason':None} for i in range(count)]
+            stats={'footprints':count,'withModel':count,'placeholders':0,
+                   'triangles':count,'primitives':count,'warnings':[]}
+            values={'board.glb':b'glTF-'+side.encode(),'parts.json':json.dumps(parts).encode(),
+                    'stats.json':json.dumps(stats).encode()}
+            for name,value in values.items():
+                target={'parts.json':'board-parts.json','stats.json':'board-stats.json'}.get(name,name)
+                (folder/target).write_bytes(value)
+            poster=b'\x89PNG\r\n\x1a\n'+side.encode();(folder/'poster.png').write_bytes(poster)
+            (folder/'board-processed.json').write_text(json.dumps({'hashes':{
+                name:hashlib.sha256(value).hexdigest() for name,value in values.items()}}))
+            payloads[side]=(values,poster)
+        blobs={};board={'model3d':{'base':'base-model','head':'head-model'}}
+        kicad_review.attach3d(board,str(root),blobs)
+        assert board['coverage3d']['footprints']==1
+        assert board['coverage3dBySide']['base']['footprints']==2
+        assert len(list(pathlib.Path('review/3d').iterdir()))==4
+    finally:
+        os.chdir(old)
+
+# BR02 design-only stills require no model or processed files.
+with tempfile.TemporaryDirectory() as t:
+    folder=pathlib.Path(t,'head');folder.mkdir()
+    png=b'\x89PNG\r\n\x1a\nhead-only-still';(folder/'poster.png').write_bytes(png)
+    board={};blobs={}
+    kicad_review.attach3d(board,t,blobs)
+    expected={};poster_id=kicad_review.add_blob(expected,png)
+    assert blobs==expected and board['poster3d']=={'base':None,'head':poster_id}
+    assert board['parts3d']=={'base':None,'head':None} and 'coverage3d' not in board
+
+
+def br02_task4a_attachment_contract():
+    import base64, contextlib, copy, gzip, hashlib, io, json, os, pathlib, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+
+    def processed(folder, count=1, triangles=1, missing=False):
+        folder.mkdir(parents=True, exist_ok=True)
+        parts = [{'uuid': 'u'+str(i), 'ref': 'R'+str(i), 'side': 'top',
+                  'box': [0,0,0,1,1,1], 'hasModel': not (missing and i == 0),
+                  'reason': 'processor missing model' if missing and i == 0 else None} for i in range(count)]
+        stats = {'footprints': count, 'withModel': count-int(missing), 'placeholders': int(missing),
+                 'triangles': triangles, 'primitives': count, 'warnings': []}
+        values = {'board.glb': b'glTF-model', 'parts.json': json.dumps(parts).encode(),
+                  'stats.json': json.dumps(stats).encode()}
+        for name, value in values.items():
+            target = {'parts.json': 'board-parts.json', 'stats.json': 'board-stats.json'}.get(name, name)
+            (folder/target).write_bytes(value)
+        (folder/'board-processed.json').write_text(json.dumps({'hashes': {
+            name: hashlib.sha256(value).hexdigest() for name, value in values.items()}}))
+        return values, stats
+
+    with tempfile.TemporaryDirectory() as t:
+        old = os.getcwd()
+        os.chdir(t)
+        try:
+            root = pathlib.Path('review/P')
+            _, base_stats = processed(root/'base', count=2, triangles=5)
+            _, head_stats = processed(root/'head')
+            board = {'no_model':[{'ref':'R0','side':'both','reason':'stale log'}]}; blobs = {}
+            kr.attach3d(board, str(root), blobs)
+            assert board['no_model'] == [], 'verified modeled parts override stale missing-model log rows'
+            assert board['coverage3d'] == head_stats
+            assert board['coverage3dBySide'] == {'base': base_stats, 'head': head_stats}
+            assert board['parts3d']['base'] != board['parts3d']['head']
+            values, _ = processed(root/'base', triangles=9)
+            kr.attach3d(board, str(root), blobs)
+            assert board['parts3d']['base'] == board['parts3d']['head'], 'identical indexes deduplicate'
+            assert board['coverage3dBySide']['base']['triangles'] == 9
+            assert board['coverage3d']['triangles'] == 1
+            asset = board['assets3d']['head']['parts']
+            packed = (pathlib.Path('review/3d')/asset['artifactName']).read_bytes()
+            assert asset['bytes'] == len(packed) and gzip.decompress(packed) == values['parts.json']
+            assert asset['artifactName'] == 'kicad-3d-'+asset['digest']+'-board-parts.json.gz'
+            assert packed == gzip.compress(values['parts.json'], mtime=0)
+
+            # A stale/corrupt optimized set never advertises an index or coverage; base remains valid.
+            (root/'head/board-parts.json').write_bytes(b'corrupt')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                kr.attach3d(board, str(root), {})
+            assert 'processed output hash mismatch' in output.getvalue()
+            assert board['coverage3d'] == board['coverage3dBySide']['base']
+            assert all(board[key]['head'] is None for key in ('parts3d','coverage3dBySide','assets3d'))
+            # Hash-valid but malformed coverage fails closed too.
+            for invalid in ([], {}, {'footprints': True}, {**head_stats, 'placeholders': 2}):
+                processed(root/'head')
+                raw = json.dumps(invalid).encode()
+                (root/'head/board-stats.json').write_bytes(raw)
+                manifest = json.loads((root/'head/board-processed.json').read_text())
+                manifest['hashes']['stats.json'] = hashlib.sha256(raw).hexdigest()
+                (root/'head/board-processed.json').write_text(json.dumps(manifest))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    kr.attach3d(board, str(root), {})
+                assert board['coverage3dBySide']['head'] is None
+            processed(root/'head', missing=True)
+            board = {'no_model':[{'ref':'STALE','side':'both','reason':'stale log'}]}
+            kr.attach3d(board, str(root), {})
+            assert board['no_model'] == [{'ref':'R0', 'side':'head',
+                'reason':'processor missing model', 'uuid':'u0'}], 'missing rows derive from verified parts only'
+            # Actual build/report integration: design-only attaches PNG without model/index files.
+            import shutil
+            shutil.rmtree(root)
+            (root/'head').mkdir(parents=True)
+            png = b'\x89PNG\r\n\x1a\ndesign-only'
+            (root/'head/poster.png').write_bytes(png)
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            settings['design'] = {'enabled': True}
+            project = {'name': 'P', 'dir': 'P', 'status': 'added'}
+            pathlib.Path('review/detect.json').write_text(json.dumps({
+                'projects': [project], 'base': '', 'head': 'abc123', 'reason': 'test'}))
+            with patch.object(kr, 'load_settings', return_value=settings), \
+                 patch.object(kr, 'project_checks', return_value=[]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                kr.cmd_report(None)
+            html = pathlib.Path('review/kicad-review.html').read_text()
+            embedded = json.JSONDecoder().raw_decode(html.split('window.REVIEW_DATA = ', 1)[1])[0]
+            disk = json.loads(pathlib.Path('review/data.json').read_text())
+            assert embedded['version'] == disk['version'] == 1
+            assert {k:v for k,v in embedded.items() if k != 'blobs'} == disk
+            still_board = disk['projects'][0]['board']
+            assert 'model3d' not in still_board and 'coverage3d' not in still_board
+            poster_id = still_board['poster3d']['head']
+            assert gzip.decompress(base64.b64decode(embedded['blobs'][poster_id])) == png
+            assert len(embedded['blobs']) == 1, 'design-only report embeds only its poster'
+            # 3D-enabled build keeps the established model blob IDs and attaches processed data.
+            processed(root/'head')
+            settings['3d']['enabled'] = True
+            with patch.object(kr, 'project_checks', return_value=[]):
+                blobs = {}; model_board = kr.build_project(project, blobs, settings)['board']
+            model_id = kr.add_blob({}, b'glTF-model')
+            assert model_board['model3d']['head'] == model_id and model_id in blobs
+            assert model_board['parts3d']['head'] in blobs and model_board['coverage3d'] == head_stats
+        finally:
+            os.chdir(old)
+
+    # Legacy fixture remains version 1 with the same embedded model IDs, no new fields required.
+    source = pathlib.Path(kr.UI_DIR, 'sample/review-data-3d.js').read_text()
+    legacy = json.JSONDecoder().raw_decode(source.split('window.REVIEW_DATA = ', 1)[1])[0]
+    page = kr.inline_page(source)
+    restored = json.JSONDecoder().raw_decode(page.split('window.REVIEW_DATA = ', 1)[1])[0]
+    assert restored == legacy and restored['version'] == 1
+    for project in restored['projects']:
+        for side in ('base', 'head'):
+            model_id = project['board'].get('model3d', {}).get(side)
+            if model_id:
+                assert gzip.decompress(base64.b64decode(restored['blobs'][model_id])).startswith(b'glTF')
+    # Hardening: strict coverage shape and fail-closed poster reads.
+    # attach3d writes digest assets under the relative review/3d; keep them out of the checkout.
+    with tempfile.TemporaryDirectory() as t, contextlib.chdir(t):
+        root = pathlib.Path(t)
+        (root/'head').mkdir()
+        for invalid in ({'footprints': 0, 'withModel': 0, 'placeholders': 0, 'triangles': 0,
+                         'primitives': 0, 'warnings': 'not-a-list'},):
+            folder = root/'head'
+            parts = b'[]'; glb = b'glTF-model'; stats_raw = json.dumps(invalid).encode()
+            values = {'board.glb': glb, 'parts.json': parts, 'stats.json': stats_raw}
+            (folder/'board.glb').write_bytes(glb); (folder/'board-parts.json').write_bytes(parts)
+            (folder/'board-stats.json').write_bytes(stats_raw)
+            (folder/'board-processed.json').write_text(json.dumps({'hashes': {
+                name: hashlib.sha256(value).hexdigest() for name, value in values.items()}}))
+            result = {}; kr.attach3d(result, str(root), {})
+            assert result['coverage3dBySide']['head'] is None
+        # Older valid producer stats may omit warnings; preserve coverage with an empty list.
+        folder = root/'head'
+        stats = {'footprints': 0, 'withModel': 0, 'placeholders': 0, 'triangles': 0, 'primitives': 0}
+        parts = b'[]'; glb = b'glTF-model'; stats_raw = json.dumps(stats).encode()
+        values = {'board.glb': glb, 'parts.json': parts, 'stats.json': stats_raw}
+        (folder/'board.glb').write_bytes(glb); (folder/'board-parts.json').write_bytes(parts)
+        (folder/'board-stats.json').write_bytes(stats_raw)
+        (folder/'board-processed.json').write_text(json.dumps({'hashes': {
+            name: hashlib.sha256(value).hexdigest() for name, value in values.items()}}))
+        result = {}; kr.attach3d(result, str(root), {})
+        assert result['coverage3dBySide']['head']['warnings'] == []
+        original = pathlib.Path.read_bytes
+        def unreadable(path, *args, **kwargs):
+            if path.name == 'poster.png':
+                raise PermissionError('test')
+            return original(path, *args, **kwargs)
+        with patch.object(pathlib.Path, 'read_bytes', unreadable):
+            result = {}; kr.attach3d(result, str(root), {})
+            assert result['poster3d']['head'] is None
+    print('ok BR02 verified coverage, digest assets, head-only/poster-only attachments and legacy offline v1')
+
+
+br02_task4a_attachment_contract()
+
+# BR02: processing is pair-specific, its integration gate is required, assets are individual files.
+wf = pathlib.Path('.github/workflows/review.yml').read_text()
+assert 'prepare-3d' in wf and '--cache .processed-3d-cache' in wf, 'BR02 pair-specific processing workflow'
+ci = pathlib.Path('.github/workflows/test.yml').read_text()
+assert 'name: Run 3D processor integration tests' not in wf, 'consumer reviews must not run tool integration tests'
+step = ci.split('name: Run 3D processor integration tests', 1)[1].split('\n      - name:', 1)[0]
+assert 'PROCESS3D_INTEGRATION=1' in step and 'node --test ui/compress3d.test.mjs' in step
+assert 'continue-on-error: true' not in step, 'self-test integration gate must block failures'
+assert 'INPUT_ARCHIVE=false' in wf and 'INPUT_RETENTION-DAYS=90' in wf
+assert '_actions/actions/upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/dist/upload/index.js' in wf
+for name in ('Install 3D compression dependencies', 'Compress 3D board models', 'Upload digest-keyed 3D assets'):
+    block = wf.split('name: ' + name, 1)[1].split('\n      - name:', 1)[0]
+    assert 'continue-on-error: true' in block, 'optional 3D must not fail consumer reviews'
+    assert 'hashFiles(' in block.split('run:', 1)[0], '3D steps need actual assets'
+assert wf.count("'tools/ui/compress3d.cjs', 'base/kicad-review.toml'") == 2
+cache = wf.split('name: Cache 3D compression dependencies', 1)[1].split('\n      - name:', 1)[0]
+assert '.processed-3d-cache' in cache and 'hashFiles(' in cache
+assert 'github.run_id' not in cache and 'github.run_attempt' not in cache
+assert 'restore-keys:' in cache
+assert 'uses: ./tools/.github/actions/upload-3d-assets' in wf
+assert 'using: node24' in pathlib.Path('.github/actions/upload-3d-assets/action.yml').read_text()
+assert wf.index('name: Upload report\n') < wf.index('name: Upload digest-keyed 3D assets') < wf.index('name: Screenshots of changed drawings')
+assert 'INPUT_OVERWRITE=true INPUT_INCLUDE-HIDDEN-FILES=false' in wf
+print('ok BR02 pair-specific processing workflow, required integration gate and immutable assets')
+
+
+def br02_processed_sample_contract():
+    import base64, gzip, hashlib, json, math, struct, zlib
+    source = pathlib.Path('ui/sample/review-data-3d-processed.js').read_text()
+    assert '<' not in source, 'BR02 sample uses the report producer escaped script'
+    data = json.JSONDecoder().raw_decode(source.split('window.REVIEW_DATA = ', 1)[1])[0]
+    assert data['version'] == 1 and len(data['projects']) == 1
+    project = data['projects'][0]; board = project['board']
+    blob = lambda field, side: gzip.decompress(base64.b64decode(data['blobs'][board[field][side]], validate=True))
+    indexes = {}
+    for side, resistor in (('base', 'R1'), ('head', 'R12')):
+        coverage = board['coverage3dBySide'][side]
+        assert [coverage[k] for k in ('footprints', 'withModel', 'placeholders')] == [6, 3, 3]
+        raw = blob('model3d', side)
+        assert struct.unpack('<4sII', raw[:12]) == (b'glTF', 2, len(raw))
+        length, kind = struct.unpack('<I4s', raw[12:20]); assert kind == b'JSON'
+        gltf = json.loads(raw[20:20+length])
+        assert 'EXT_meshopt_compression' in gltf['extensionsRequired']
+        assert any(n.get('extras', {}).get('batch') == 'ref:' + resistor for n in gltf['nodes'])
+        assert any(n.get('name') == 'parts:merged:top' for n in gltf['nodes'])
+        assert any(n.get('name') == 'parts:merged:bottom' for n in gltf['nodes'])
+        image = blob('poster3d', side)
+        assert image[:8] == b'\x89PNG\r\n\x1a\n' and struct.unpack('>II', image[16:24]) == (1600, 1000)
+        offset = 8; pixels = bytearray()
+        while offset < len(image):
+            size = struct.unpack('>I', image[offset:offset+4])[0]
+            chunk = image[offset+4:offset+8+size]
+            assert zlib.crc32(chunk) == struct.unpack('>I', image[offset+8+size:offset+12+size])[0]
+            if chunk[:4] == b'IDAT': pixels.extend(chunk[4:])
+            offset += size + 12
+        assert len(zlib.decompress(pixels)) == 1000 * (1 + 1600 * 4), 'BR02 real PNG pixels'
+        parts = json.loads(blob('parts3d', side)); indexes[side] = {p['ref']: p for p in parts}
+        assert set(indexes[side]) == {resistor, 'R2', 'J1', 'U3', 'U4', 'LOGO1'}
+        for part in parts:
+            assert len(part['box']) == 6 and all(math.isfinite(v) for v in part['box'])
+        for ref, surface in (('U3', 'top'), ('U4', 'bottom'), ('LOGO1', 'top')):
+            missing = indexes[side][ref]
+            assert not missing['hasModel'] and missing['side'] == surface and missing['reason']
+        # Missing selectable targets must not overlap a model body, even in an overhead ray.
+        for ref in ('U3', 'U4'):
+            a = indexes[side][ref]['box']
+            for body in (p for p in parts if p['hasModel']):
+                b = body['box']
+                assert any(a[i+3] < b[i] or b[i+3] < a[i] for i in (0, 2)), (side, ref, body['ref'])
+        for field, key, suffix in (('model3d', 'model', 'board.glb'), ('parts3d', 'parts', 'board-parts.json')):
+            raw = blob(field, side); asset = board['assets3d'][side][key]
+            digest = hashlib.sha256(raw).hexdigest()
+            assert asset == {'digest': digest, 'artifactName': 'kicad-3d-' + digest + '-' + suffix + '.gz',
+                             'bytes': len(gzip.compress(raw, mtime=0))}
+    for before, after in (('R1', 'R12'), ('U3', 'U3')):
+        a, b = indexes['base'][before], indexes['head'][after]
+        assert a['uuid'] == b['uuid']
+        assert abs(b['box'][0] - a['box'][0] - .001) < 1e-9
+    for ref in ('R2', 'J1', 'U4', 'LOGO1'):
+        assert indexes['base'][ref] == indexes['head'][ref]
+    assert {c['ref'] for c in project['changes']} == {'R12', 'U3'}
+    for side in ('base', 'head'):
+        geometry = json.loads(blob('geometry', side))
+        assert geometry['copperStack'] == ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+    print('ok BR02 real processed sample: renamed/moved UUIDs, isolated missing targets, Meshopt, PNG, indexes and four layers')
+
+
+br02_processed_sample_contract()
+
+# BR02: workers are inert, byte-identical offline assets, not external scripts.
+worker = base64.b64encode(pathlib.Path('ui/three-decode.js').read_bytes()).decode()
+worker_tag = '<script type="application/octet-stream" id="three-decode-worker">' + worker + '</script>'
+assert '</script>' not in worker
+html = kicad_review.inline_page(pathlib.Path('ui/sample/review-data-3d.js').read_text())
+assert worker_tag in html, 'BR02 inline decode worker source'
+assert pathlib.Path('ui/three-studio.js').read_text() in html and html.index('window.ThreeStudio') < html.index('window.Review3D'), 'BR02 studio script precedes the viewer'
+print('ok BR02 inline decode worker source')
+
+
+# Best-effort failures are complete attempts, not an invitation to export forever.
+def br02_failed_export_cache_contract():
+    import copy, os, subprocess, tempfile
+    from unittest.mock import patch
+    import kicad_review as kr
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as t, patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'):
+        try:
+            os.chdir(t)
+            pathlib.Path('base/P').mkdir(parents=True)
+            pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb)')
+            out = pathlib.Path('review/P/base')
+            settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            settings['3d']['enabled'] = True
+            p = {'dir':'P','name':'P'}
+            with patch.object(kr.subprocess, 'run', side_effect=OSError('no CLI')):
+                kr.export_glb(p, 'base', str(out))
+            (out/'.complete').write_text(json.dumps(kr.image_export_identity(p, 'base'), sort_keys=True))
+            assert kr.render_cache_complete(out, p, 'base', settings), 'failed exports must be cacheable'
+            assert (out/'board.raw.glb.failed').exists() and (out/'poster.png.failed').exists()
+            with patch.object(kr.subprocess, 'run') as run:
+                def success(args, **kw):
+                    pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
+                    return subprocess.CompletedProcess(args, 0, '', '')
+                run.side_effect = success
+                kr.export_glb(p, 'base', str(out))
+            assert not (out/'board.raw.glb.failed').exists() and not (out/'poster.png.failed').exists()
+            pathlib.Path('review/detect.json').write_text(json.dumps({
+                'base':'a'*40, 'head':'b'*40, 'projects':[{**p, 'status':'removed'}]}))
+            with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side'), \
+                 patch.object(kr, 'render_tool_identity', return_value='test'), \
+                 patch.object(kr.subprocess, 'run', side_effect=OSError('no CLI')) as run:
+                kr.cmd_render(None)
+                assert run.call_count == 2
+                kr.cmd_render(None)
+                assert run.call_count == 2, 'failed best-effort exports must not rerender next run'
+            with patch.object(kr, 'glb_inputs', return_value=(b'board', [('body.step', b'asset')])):
+                expected = hashlib.sha256()
+                for value in (b'board', b'body.step', b'asset'):
+                    expected.update(len(value).to_bytes(8, 'big')); expected.update(value)
+                assert kr.glb_input_digest(p, 'base') == expected.hexdigest()
+        finally:
+            os.chdir(old)
+    print('ok BR02 failed export attempts cache and successful retries clear markers')
+
+br02_failed_export_cache_contract()
+
+docs = pathlib.Path('README.md').read_text()
+assert '3D coverage' in docs and 'parts3d' in docs, 'BR02 document 3D coverage and part index'
+assert 'world metres' in docs and '600,000' in docs, 'BR02 document bounds units and simplification ceiling'
+print('ok BR02 documentation')
 
 # BR03: Electrical membership extraction and identity limits.
 from kicad_review import net_members
@@ -5938,6 +6958,36 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
         warning = ''.join(str(call.args[0]) for call in log.write.call_args_list)
         assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
+
+# BR02: KiCad stamps export time into the GLB; identical boards must keep identical raw bytes and cache keys.
+import json, os, pathlib, struct, tempfile, kicad_review
+def _glb(stamp):
+    doc = json.dumps({"asset": {"version": "2.0", "extras": {"pcb_name": "board.raw", "generated_at": stamp}}}).encode()
+    doc += b" " * (-len(doc) % 4)
+    binary = struct.pack("<I", 4) + b"BIN\0" + b"\1\2\3\4"
+    return b"glTF" + struct.pack("<II", 2, 20 + len(doc) + len(binary)) + struct.pack("<I", len(doc)) + b"JSON" + doc + binary
+with tempfile.TemporaryDirectory() as tmp:
+    a, b, other = (pathlib.Path(tmp, n) for n in ("a.glb", "b.glb", "other.bin"))
+    a.write_bytes(_glb("2026-11-02T23:47:26")); b.write_bytes(_glb("2026-11-02T23:47:33")); other.write_bytes(b"not a glb")
+    for f in (a, b, other): kicad_review.normalize_glb(f)
+    out = a.read_bytes()
+    assert out == b.read_bytes() and b"generated_at" not in out and b"pcb_name" in out
+    assert struct.unpack("<I", out[8:12])[0] == len(out) and out.endswith(b"BIN\0\1\2\3\4")
+    size = struct.unpack("<I", out[12:16])[0]
+    assert size % 4 == 0 and json.loads(out[20:20 + size])["asset"]["extras"] == {"pcb_name": "board.raw"}
+    assert other.read_bytes() == b"not a glb"
+    for broken in (b"glTF" + struct.pack("<III", 2, 28, 8) + b"JSON" + b"{bad json", _glb("x")[:20] + b"[]      "):
+        other.write_bytes(broken); kicad_review.normalize_glb(other)
+        assert other.read_bytes() == broken
+    assert not list(pathlib.Path(tmp).glob("*.tmp"))
+    stamped = _glb("2026-11-02T23:47:26"); a.write_bytes(stamped)
+    real_replace = os.replace
+    def failing_replace(*_): raise OSError("disk full")
+    os.replace = failing_replace
+    try: kicad_review.normalize_glb(a)
+    finally: os.replace = real_replace
+    assert a.read_bytes() == stamped and not list(pathlib.Path(tmp).glob("*.tmp"))
+print('ok BR02 GLB export timestamp normalized; bad input left as written')
 
 # BR03 Task 6.2: unreadable optional rules keep symbols, drop unknown metadata on both sides, and warn.
 import contextlib, hashlib

@@ -1,7 +1,8 @@
-import { createShare, serveShare, revokeShares, shareEnabled } from './share.js';
+import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { currentBody, currentReport, readStoredData } from './report-shell.js';
+import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
+import { verifyReportFamily } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
@@ -283,6 +284,12 @@ async function storedReport(artifact, active) {
   return blob;
 }
 
+// Reports whose 3D assets artifact3d serves from their own run: comparison reports, and
+// design snapshots whose name binds to the stored (unstripped) data.report.head.
+const served3d = (metadata, data) => /^\d{1,20}$/.test(String(metadata.workflow_run?.id))
+  && (data?.report?.kind == null ? verifyReportFamily('comparison', metadata.name)
+    : data.report.kind === 'design' && verifyReportFamily('design', metadata.name, data.report.head));
+
 const reportBuilds = new Map();
 // ponytail: one cold build at a time per isolate (peak ~ one report's transient copies); raise only if queued cold loads time out.
 let buildTail = Promise.resolve();
@@ -302,7 +309,9 @@ async function cachedReport(artifact, active) {
   const build = buildTail.then(async () => {
     const stored = await (await storedReport(artifact, active)).text();
     const data = readStoredData(stored);
-    const raw = currentReport(stored, { lazyAssets: true, storedData: data }) ?? stored;
+    // Only the authenticated wrapper's raw report is built here; guest/share keep embedded blobs.
+    // Models are stripped only when artifact3d would serve them, so no report loses its 3D view.
+    const raw = currentReport(stored, { lazyAssets: true, lazy3d: served3d(metadata, data), storedData: data }) ?? stored;
     // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
     // Count shared/fallback strings twice rather than under-account retained report bytes.
     // Stored HTML is temporary: only parsed data (4x envelope allowance) and raw body remain.
@@ -349,7 +358,7 @@ async function readArtifactHtml(owner, repo, id, active, repository) {
     if (!artifact || artifact.expired) return assetError();
     // ponytail: read the existing HTML envelope per asset; add range/indexed companion delivery only if Worker CPU or GitHub download traces require it.
     // Measured Worker CPU now requires caching that envelope and its processed forms.
-    return await cachedReport(artifact, active);
+    return { ...await cachedReport(artifact, active), metadata: artifact.metadata };
   } catch { /* Legacy/temporarily unavailable report: fail asset requests closed. */ return assetError(); }
 }
 
@@ -362,6 +371,64 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
     const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
     if (stored instanceof Response) return stored;
     return assetFromData(stored.data, digest, kind) || assetError();
+  });
+  return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
+    encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
+}
+
+// Exactly `size` bytes or null; a wrong declared length or a longer body is never buffered whole.
+async function readExactly(response, size) {
+  const declared = response.headers.get('Content-Length');
+  if (!response.body) return null;
+  // A real Content-Encoding (not identity) reply's length counts encoded bytes; the read bound below still caps it.
+  // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
+  if (declared != null && (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase() === 'identity' && Number(declared) !== size) { await response.body.cancel(); return null; }
+  // Chunks, not a size-length buffer: the descriptor's claimed size is never allocated up front.
+  const chunks = [], reader = response.body.getReader();
+  for (let n = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) return n === size ? new Uint8Array(await new Blob(chunks).arrayBuffer()) : null;
+    if ((n += value.length) > size) { await reader.cancel(); return null; }
+    chunks.push(value);
+  }
+}
+
+// 3D assets come only from the validated report's own run, named by a descriptor in its stored data.
+async function artifact3d(request, env, owner, repo, id, digest, kind) {
+  let active;
+  const asset = await privateAsset(request, digest, kind, async () => {
+    const allowed = await access(request, env, owner, repo);
+    if (allowed instanceof Response) return allowed;
+    active = allowed.s;
+    if (!/^[0-9a-f]{64}$/.test(digest) || !['board.glb', 'board-parts.json'].includes(kind)) return assetError();
+    try {
+      const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
+      if (stored instanceof Response) return stored;
+      const { metadata, data } = stored, run = String(metadata.workflow_run?.id);
+      if (!served3d(metadata, data)) return assetError();
+      const key = kind === 'board.glb' ? 'model' : 'parts', name = `kicad-3d-${digest}-${kind}.gz`;
+      const descriptor = (Array.isArray(data.projects) ? data.projects : []).flatMap((p) => ['base', 'head'].map((side) => p?.board?.assets3d?.[side]?.[key]))
+        .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0);
+      if (!descriptor) return assetError();
+      const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`, matches = [];
+      for (let page = 1; ; page++) {
+        const list = await gh(`${root}/runs/${run}/artifacts?per_page=100&page=${page}`, active.token);
+        const artifacts = list.ok ? (await list.json()).artifacts : null;
+        if (!Array.isArray(artifacts)) return assetError();
+        matches.push(...artifacts.filter((a) => a?.name === name));
+        if (artifacts.length < 100) break;
+      }
+      const [match] = matches;
+      if (matches.length !== 1 || match.expired || String(match.workflow_run?.id) !== run || !/^\d{1,20}$/.test(String(match.id))) return assetError();
+      const archive = await gh(`${root}/artifacts/${match.id}/zip`, active.token, { redirect: 'manual' });
+      const location = archive.status === 302 ? downloadUrl(archive.headers.get('Location')) : null;
+      if (!location) return assetError();
+      // Share downloader's host policy; never forward GitHub authorization or follow further redirects.
+      const body = await fetch(location, { redirect: 'manual' });
+      if (!body.ok) return assetError();
+      const bytes = await readExactly(body, descriptor.bytes);
+      return bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
+    } catch { return assetError(); }
   });
   return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
     encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
@@ -803,6 +870,11 @@ const routes = {
       if (request.method === 'GET' && assetRoute) {
         const [, owner, repo, id, digest, kind] = assetRoute;
         return digestAsset(request, env, owner, repo, id, digest, kind);
+      }
+      const modelRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/3d\/([^/]+)\/([^/]+)$/);
+      if (request.method === 'GET' && modelRoute) {
+        const [, owner, repo, id, digest, kind] = modelRoute;
+        return artifact3d(request, env, owner, repo, id, digest, kind);
       }
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {
