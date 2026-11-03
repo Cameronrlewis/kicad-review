@@ -6318,31 +6318,44 @@ test('MCP Connect panel details retains native keyboard semantics, in-flow expan
   // Preceding actions -> Connect details -> Trailing actions (Copy link, Go to)
   const overflowStart = page.indexOf('<details class="bench-menu bench-overflow">');
   assert.ok(overflowStart > 0, 'overflow menu exists');
+  const outerPopoverStart = page.indexOf('<div class="bench-popover">', overflowStart);
+  assert.ok(outerPopoverStart > overflowStart, 'outer popover div exists');
+  const outerPopoverContentStart = outerPopoverStart + '<div class="bench-popover">'.length;
 
-  const historyPos = page.indexOf('History', overflowStart);
-  const sharePos = page.indexOf('Share…', overflowStart);
+  const historyPos = page.indexOf('History', outerPopoverContentStart);
+  const sharePos = page.indexOf('Share…', outerPopoverContentStart);
   const connectSummary = '<summary>Connect your AI assistant</summary>';
-  const connectSummaryPos = page.indexOf(connectSummary, overflowStart);
+  const connectSummaryPos = page.indexOf(connectSummary, outerPopoverContentStart);
 
-  assert.ok(historyPos > overflowStart && sharePos > historyPos && connectSummaryPos > sharePos, 'Preceding review actions precede Connect panel');
+  assert.ok(historyPos > outerPopoverContentStart && sharePos > historyPos && connectSummaryPos > sharePos, 'Preceding review actions precede Connect panel');
 
   // Connect details is closed before trailing actions (not wrapping them)
   const connectDetailsOpen = page.lastIndexOf('<details class="bench-menu">', connectSummaryPos);
-  assert.ok(connectDetailsOpen > overflowStart, 'Connect panel is a nested details inside overflow menu');
+  assert.ok(connectDetailsOpen > outerPopoverContentStart, 'Connect panel is a nested details inside overflow menu');
   const connectDetailsClose = page.indexOf('</details>', connectSummaryPos);
   assert.ok(connectDetailsClose > connectSummaryPos, 'Connect panel details closes');
 
-  const copyPos = page.indexOf('data-review-copy', overflowStart);
-  const gotoPos = page.indexOf('data-review-goto', overflowStart);
-  const outerDetailsClose = page.indexOf('</details>', gotoPos);
+  // Prove preceding actions, nested Connect panel, and trailing actions are direct children of outer popover:
+  const precedingContent = page.slice(outerPopoverContentStart, connectDetailsOpen);
+  assert.equal(
+    precedingContent,
+    '<a href="/r/demo/Thermal_Camera/pull/7/history">History</a><button id="share-open" type="button">Share…</button><a href="https://github.com/demo/Thermal_Camera/actions/runs/99">Open run ↗</a><a href="/r/demo/Thermal_Camera/a/123/pdf">Download PDF</a>',
+    'Preceding actions are direct children of the outer popover'
+  );
 
-  assert.ok(copyPos > connectDetailsClose, 'Copy link is sibling to nested details, not inside it');
-  assert.ok(gotoPos > copyPos, 'Go to input follows Copy link');
-  assert.ok(outerDetailsClose > gotoPos, 'Overflow menu closes after Go to input');
+  const outerClose = page.indexOf('</div></details>', connectDetailsClose);
+  assert.ok(outerClose > connectDetailsClose, 'outer popover closes after connect panel');
+
+  const trailingContent = page.slice(connectDetailsClose + '</details>'.length, outerClose);
+  assert.equal(
+    trailingContent,
+    '<button type="button" data-review-copy>Copy link</button><label>Go to<input data-review-goto aria-label="Go to saved review position" placeholder="Paste a review link"></label><input data-review-copyfield aria-label="Link to copy" readonly hidden>',
+    'Copy link and Go-to are direct children of outer popover and direct siblings following Connect details'
+  );
 });
 
 test('MCP Connect panel 1440x900 browser layout and visual proof in light and dark', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
-  const proofDir = process.env.PROOF_DIR || '/Users/cameron/Code/kicad-review-study/tmp/10-mcp-server/proof';
+  const proofDir = process.env.PROOF_DIR || tmpdir();
   mkdirSync(proofDir, { recursive: true });
 
   for (const theme of ['light', 'dark']) {
@@ -6366,10 +6379,12 @@ test('MCP Connect panel 1440x900 browser layout and visual proof in light and da
 
     const diagnostic = `<script>
 const outer = document.querySelector('.bench-overflow');
+const outerPopover = outer.querySelector(':scope > .bench-popover') || outer.querySelector('.bench-popover');
 const innerDetails = outer.querySelector('details.bench-menu');
 const innerPopover = innerDetails.querySelector('.bench-popover');
 const copyBtn = outer.querySelector('button[data-review-copy]');
 const gotoInput = outer.querySelector('input[data-review-goto]');
+const gotoLabel = gotoInput.closest('label');
 const code = innerDetails.querySelector('code');
 
 const innerStyle = getComputedStyle(innerPopover);
@@ -6383,6 +6398,13 @@ const shareBtn = outer.querySelector('#share-open') || outer.querySelector('butt
 const historyRect = historyLink ? historyLink.getBoundingClientRect() : { width: 0, height: 0 };
 const shareRect = shareBtn ? shareBtn.getBoundingClientRect() : { width: 0, height: 0 };
 
+const directSiblings =
+  innerDetails.parentElement === outerPopover &&
+  copyBtn.parentElement === outerPopover &&
+  gotoLabel.parentElement === outerPopover &&
+  innerDetails.nextElementSibling === copyBtn &&
+  copyBtn.nextElementSibling === gotoLabel;
+
 const result = {
   theme: "${theme}",
   position: innerStyle.position,
@@ -6394,6 +6416,7 @@ const result = {
   docScrollWidth,
   codeReadable: code.offsetWidth > 0 && code.offsetHeight > 0,
   actionsReachable: historyRect.width > 0 && shareRect.width > 0 && copyRect.width > 0 && gotoRect.width > 0,
+  directSiblings,
 };
 const div = document.createElement('div');
 div.id = 'proof-results';
@@ -6433,6 +6456,7 @@ document.body.appendChild(div);
       assert.equal(metrics.noHorizontalOverflow, true, `${theme}: no horizontal overflow at 1440x900 (scrollWidth ${metrics.docScrollWidth})`);
       assert.equal(metrics.codeReadable, true, `${theme}: command code is readable and selectable`);
       assert.equal(metrics.actionsReachable, true, `${theme}: existing review actions remain reachable`);
+      assert.equal(metrics.directSiblings, true, `${theme}: inner details, Copy button, and Go to label are direct children of outer popover`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
