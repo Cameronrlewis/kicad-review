@@ -493,9 +493,12 @@ def normalize_glb(path):
     chunk += b' ' * (-len(chunk) % 4)
     rest = data[20 + size:]
     staged = path.with_name(path.name + '.tmp')
-    staged.write_bytes(b'glTF' + data[4:8] + struct.pack('<I', 20 + len(chunk) + len(rest))
-                       + struct.pack('<I', len(chunk)) + b'JSON' + chunk + rest)
-    os.replace(staged, path)
+    try:
+        staged.write_bytes(b'glTF' + data[4:8] + struct.pack('<I', 20 + len(chunk) + len(rest))
+                           + struct.pack('<I', len(chunk)) + b'JSON' + chunk + rest)
+        os.replace(staged, path)
+    except OSError:
+        staged.unlink(missing_ok=True)
 
 
 def poster_argv(pcb, folder):

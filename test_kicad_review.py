@@ -5817,7 +5817,7 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
 
 # BR02: KiCad stamps export time into the GLB; identical boards must keep identical raw bytes and cache keys.
-import json, pathlib, struct, tempfile, kicad_review
+import json, os, pathlib, struct, tempfile, kicad_review
 def _glb(stamp):
     doc = json.dumps({"asset": {"version": "2.0", "extras": {"pcb_name": "board.raw", "generated_at": stamp}}}).encode()
     doc += b" " * (-len(doc) % 4)
@@ -5837,4 +5837,11 @@ with tempfile.TemporaryDirectory() as tmp:
         other.write_bytes(broken); kicad_review.normalize_glb(other)
         assert other.read_bytes() == broken
     assert not list(pathlib.Path(tmp).glob("*.tmp"))
+    stamped = _glb("2026-11-02T23:47:26"); a.write_bytes(stamped)
+    real_replace = os.replace
+    def failing_replace(*_): raise OSError("disk full")
+    os.replace = failing_replace
+    try: kicad_review.normalize_glb(a)
+    finally: os.replace = real_replace
+    assert a.read_bytes() == stamped and not list(pathlib.Path(tmp).glob("*.tmp"))
 print('ok BR02 GLB export timestamp normalized; bad input left as written')
