@@ -5767,26 +5767,63 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
   } finally {release?.();if(pending)await pending;MODES[mode]=render;Object.assign(S,saved);await draw();}
 `],
 ["MCP unchanged identity links", "", `
-  const saved = {objects:proj().objects,identity:proj().identity};
+  const saved = {objects:proj().objects,identity:proj().identity}, savedState = {...S};
   const sheet=proj().sheets[0];if(!sheet)return "skip";
   const net="12 + & / # %";
   try {
-    proj().objects=[{uuid:"mcp-unchanged",ref:"U77",kind:"symbol",side:"head",sheet:sheet.path,pos:[20,20],box:[17,17,23,23]}];
-    proj().identity={head:{nets:{[net]:{uuid:"mcp-unchanged",sheet:sheet.path}},complete:true},base:{nets:{},complete:true}};
+    proj().objects=[
+      {uuid:"mcp-unchanged",ref:"U77",kind:"symbol",side:"head",sheet:sheet.path,pos:[20,20],box:[17,17,23,23]},
+      {uuid:"mcp-head-added",ref:"U88",kind:"symbol",side:"head",added:true,sheet:sheet.path,pos:[25,25],box:[22,22,28,28]},
+      {uuid:"mcp-base-only",ref:"R99",kind:"symbol",side:"base",sheet:sheet.path,pos:[30,30],box:[27,27,33,33]}
+    ];
+    proj().identity={
+      head:{nets:{[net]:{uuid:"mcp-unchanged",sheet:sheet.path}},complete:true},
+      base:{nets:{"BASE_NET":{uuid:"mcp-base-only",sheet:sheet.path}},complete:true}
+    };
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged"})));
     if(S.v!=="sheet:"+sheet.path||S.io!==0)return "unchanged UUID did not focus";
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),net})));
     if(S.io!==0||decodeState("#"+encodeState()).net!==net)return "net identity did not round-trip";
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"missing"})));
     if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not found"))return "missing identity was silent";
+
+    // Probes for revision=base resolution:
+    // 1. Unchanged-head fallback with !added
+    const baseUnchanged = resolveIdentity({part:"mcp-unchanged",revision:"base"}, proj());
+    if(baseUnchanged?.index!==0)return "revision=base did not resolve unchanged head object";
+    // 2. Head added object (!added is false) rejected on base
+    const headAddedOnBase = resolveIdentity({part:"mcp-head-added",revision:"base"}, proj());
+    if(!headAddedOnBase?.error?.includes("not found"))return "head added part matched revision=base";
+    // 3. Base-only removed object resolves on base, rejected on head
+    const baseOnlyOnBase = resolveIdentity({part:"mcp-base-only",revision:"base"}, proj());
+    if(baseOnlyOnBase?.index!==2)return "base-only object did not resolve on base";
+    const baseOnlyOnHead = resolveIdentity({part:"mcp-base-only",revision:"head"}, proj());
+    if(!baseOnlyOnHead?.error?.includes("not found"))return "base-only object resolved on head";
+    // 4. Base net lookup resolves on base, rejected on head
+    const baseNetRes = resolveIdentity({net:"BASE_NET",revision:"base"}, proj());
+    if(baseNetRes?.index!==2)return "base net did not resolve to base object";
+    const headNetRes = resolveIdentity({net:"BASE_NET",revision:"head"}, proj());
+    if(!headNetRes?.error?.includes("not found"))return "base net resolved on head";
+
+    // 5. Revision key round-trip with net and part
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",net:"BASE_NET"})));
+    if(S.revision!=="base"||S.net!=="BASE_NET"||S.io!==2)return "revision=base net did not focus base object";
+    if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).net!=="BASE_NET")return "revision=base net did not round-trip";
+
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",part:"mcp-base-only"})));
+    if(S.revision!=="base"||S.part!=="mcp-base-only"||S.io!==2)return "revision=base part did not focus base object";
+    if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).part!=="mcp-base-only")return "revision=base part did not round-trip";
+
+    // Repeated UUID ambiguity and explicit sheet disambiguation
     proj().objects.push({...proj().objects[0],sheet:"/repeated"});
     const ambiguous=resolveIdentity({part:"mcp-unchanged"},proj());
     if(!ambiguous?.error)return "repeated UUID was guessed instead of rejected";
-
-    // Probes:
-    // Explicit sheet disambiguation
     const disambiguated=resolveIdentity({part:"mcp-unchanged",v:"sheet:"+sheet.path},proj());
     if(disambiguated?.index!==0)return "explicit sheet disambiguation failed";
+
+    // Wrong sheet does not fall back to unscoped match on another sheet
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",v:"sheet:/wrong-sheet"})));
+    if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not found"))return "wrong sheet silently focused part";
 
     // Simultaneous part+net
     const simultaneous=resolveIdentity({part:"mcp-unchanged",net},proj());
@@ -5794,13 +5831,13 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",net})));
     if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not both"))return "simultaneous part+net message missing";
 
-    // Ordinary change selection after a net focus clears part/net
+    // Ordinary change selection after a net focus clears part/net/revision
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),net})));
     if(S.net!==net)return "net was not focused before change selection";
     const change=proj().changes[0];
     if(change){
       goTo(change.id);
-      if(S.net!==null||S.part!==null)return "ordinary change selection did not clear net";
+      if(S.net!==null||S.part!==null||S.revision!==null)return "ordinary change selection did not clear net";
       if(decodeState("#"+encodeState()).net)return "cleared net still encoded in state";
     }
 
@@ -5809,19 +5846,25 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     const legacyResult=resolveIdentity({part:"mcp-unchanged"},legacyProj);
     if(!legacyResult?.error?.includes("not found"))return "missing objects on legacy payload did not error";
 
-    // Second-project selection
-    if(D.projects.length>1){
+    // Second-project selection (probe never silently skipped)
+    const savedProjects = D.projects;
+    try {
+      if(D.projects.length<=1){
+        D.projects=[...D.projects,{...proj(),dir:"second_project",sheets:proj().sheets,objects:[],identity:{head:{nets:{}},base:{nets:{}}}}];
+      }
       const secondProj=D.projects[1],secondSheet=secondProj.sheets[0];
       const savedSecond={objects:secondProj.objects,identity:secondProj.identity};
       try {
         secondProj.objects=[{uuid:"mcp-second",ref:"R88",kind:"symbol",side:"head",sheet:secondSheet?.path,pos:[10,10],box:[8,8,12,12]}];
         await applyState(decodeState("#"+new URLSearchParams({p:"1",part:"mcp-second"})));
-        if(S.p!==1||S.v!=="sheet:"+secondSheet?.path)return "second-project selection failed";
+        if(S.p!==1||S.v!=="sheet:"+secondSheet?.path||S.io!==0)return "second-project selection failed";
       } finally {
         secondProj.objects=savedSecond.objects;secondProj.identity=savedSecond.identity;
       }
+    } finally {
+      D.projects = savedProjects;
     }
 
     return true;
-  } finally {proj().objects=saved.objects;proj().identity=saved.identity;}
+  } finally {proj().objects=saved.objects;proj().identity=saved.identity;Object.assign(S,savedState);await draw();}
 `]);

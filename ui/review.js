@@ -235,7 +235,7 @@ function resolveIdentity(st, p) {
   if (!st.part && !st.net) return null;
   if (st.part && st.net) return { error: 'Choose a part or a net, not both' };
   const side = st.revision === 'base' ? 'base' : 'head';
-  const target = st.part ? { uuid: st.part, sheet: String(st.v || '').startsWith('sheet:') ? st.v.slice(6) : undefined } : p.identity?.[side]?.nets?.[st.net];
+  const target = st.part ? { uuid: st.part, sheet: String(st.v || '').startsWith('sheet:') ? st.v.slice(6) : (st.sheet || (st.v ? String(st.v) : undefined)) } : p.identity?.[side]?.nets?.[st.net];
   if (!target) return { error: 'Object or net not found in this report' };
   const matches = (p.objects || []).map((o, index) => ({ o, index })).filter(({ o }) => (o.side === side || (side === 'base' && o.side === 'head' && !o.added)) && o.uuid === target.uuid && (target.sheet === undefined || o.sheet === target.sheet));
   if (matches.length !== 1) return { error: matches.length ? 'Object identity is ambiguous; include its sheet view' : 'Object or net not found in this report' };
@@ -248,8 +248,6 @@ async function focusIdentity(st) {
   if (st.net) { const status = $('#statusbar .status-message'); if (status) status.textContent = `Net ${st.net}: focused one stored member`; }
   return true;
 }
-window.resolveIdentity = resolveIdentity;
-window.focusIdentity = focusIdentity;
 
 function openProject(i) { clearImageSelection(); S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; S.part = null; S.net = null; S.revision = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
@@ -268,6 +266,7 @@ function decodeState(hash) {
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
+  else if (st.part && st.v === String(st.v)) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
@@ -876,10 +875,6 @@ function schematicDrawReady(sheet) {
   if (!stage || !stage.isConnected || document.querySelector('#stage') !== stage) return false;
   return !!stage.querySelector('.world svg path, .world svg circle, .world svg polygon, .world svg rect, .world svg line, .world svg text, .world img');
 }
-window.requestReviewDraw = requestReviewDraw;
-window.completeReviewDraw = completeReviewDraw;
-window.schematicDrawReady = schematicDrawReady;
-window.publishReadyAdapters = publishReadyAdapters;
 
 let gen = 0;
 async function draw() {

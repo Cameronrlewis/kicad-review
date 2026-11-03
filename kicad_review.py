@@ -4169,8 +4169,13 @@ def read_optional_json(path, default=None):
 
 def identity_objects(objs):
     """One revision's own symbols, read from that revision's raw object dict: uuid is the last key segment, sheet is where.sheet."""
-    return [{'uuid': key.split('/')[-1], 'kind': o['kind'], 'ref': o['ref'], 'sheet': o['where'].get('sheet')}
-            for key, o in objs.items() if o.get('kind') == 'symbol']
+    out = []
+    for key, o in objs.items():
+        if o.get('kind') == 'symbol':
+            uuid = key.split('/')[-1].strip()
+            if uuid:
+                out.append({'uuid': uuid, 'kind': o['kind'], 'ref': o['ref'], 'sheet': (o.get('where') or {}).get('sheet')})
+    return out
 
 
 def identity_index(nets, objects):
@@ -4182,6 +4187,7 @@ def identity_index(nets, objects):
     for name, source in nets.items():
         ref = source.get('fallback_ref') if isinstance(source, dict) else source
         candidates = by_ref.get(ref, [])
+        # ponytail: multi-unit symbols have multiple symbol objects sharing the base ref; dropping ambiguous multi-unit candidates leaves complete=false.
         if len(candidates) == 1:
             out[str(name)] = {'uuid': candidates[0]['uuid'], 'sheet': candidates[0]['sheet']}
     # ponytail: one unambiguous stored symbol per net, not a whole-net copper highlight.

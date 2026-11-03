@@ -6702,6 +6702,19 @@ assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_object
 assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_objects(head_objects)) == {'nets': {}, 'complete': False}
 assert kr.identity_index({'12': {'fallback_ref': 'R1'}}, kr.identity_objects(head_objects))['complete'] is True
 
+# Empty or missing UUID is omitted, never substituted.
+empty_uuid_objs = {'/root/': {'kind': 'symbol', 'ref': 'R3', 'where': {'sheet': '/'}},
+                   '': {'kind': 'symbol', 'ref': 'R4', 'where': {'sheet': '/'}}}
+assert kr.identity_objects(empty_uuid_objs) == []
+assert kr.identity_index({'NET': 'R3'}, kr.identity_objects(empty_uuid_objs)) == {'nets': {}, 'complete': False}
+
+# Multi-unit symbols have several candidates; dropping ambiguous candidates leaves complete=False.
+multi_unit_objs = {
+    '/root/u1-a': {'kind': 'symbol', 'ref': 'U1 unit 1', 'where': {'sheet': '/'}},
+    '/root/u1-b': {'kind': 'symbol', 'ref': 'U1 unit 2', 'where': {'sheet': '/'}},
+}
+assert kr.identity_index({'NET_MULTI': 'U1'}, kr.identity_objects(multi_unit_objs)) == {'nets': {}, 'complete': False}
+
 # build_project includes identity when Ask context is present, and omits it when opted out.
 p_out = kr.build_project({'dir': 'test', 'name': 'test', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS)
 assert 'identity' not in p_out, 'opted-out report must not include identity'
