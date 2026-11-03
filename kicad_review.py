@@ -298,6 +298,42 @@ def export_board_stats(pcb, out):
         return error
 
 
+def export_netlist(sch, out):
+    """Soft schematic connectivity evidence: validated netlist.net, or a one-line netlist.net.error."""
+    out = pathlib.Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    target, pending, marker = (out / n for n in ('netlist.net', 'netlist.pending.net', 'netlist.net.error'))
+    for path in (target, pending, marker):
+        path.unlink(missing_ok=True)
+    try:
+        run = subprocess.run(['kicad-cli', 'sch', 'export', 'netlist', '--format', 'kicadsexpr',
+                              '-o', str(pending), sch], capture_output=True, text=True, timeout=60)
+        if run.returncode:
+            raise ValueError(f'netlist export failed ({run.returncode}): {run.stderr or run.stdout}')
+        if not pending.is_file():
+            raise ValueError('netlist export produced no output')
+        validate_netlist(pending.read_text(encoding='utf-8'))
+        os.replace(pending, target)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        target.unlink(missing_ok=True)
+        reason = ' '.join(f'{sch}: connectivity unavailable: {exc}'.split())[:500]
+        marker.write_text(reason, encoding='utf-8')
+        print(reason, file=sys.stderr)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def read_netlist(out):
+    """The one consumer path: a failure marker wins over any coincident netlist.net."""
+    out = pathlib.Path(out)
+    marker = out / 'netlist.net.error'
+    if marker.exists():
+        raise ValueError(marker.read_text(encoding='utf-8')[:500] or 'netlist export unavailable')
+    text = (out / 'netlist.net').read_text(encoding='utf-8')
+    validate_netlist(text)
+    return text
+
+
 def render_side(src_dir, name, out, netlist=False):
     """SVG renders, ERC and DRC reports of one revision of one project."""
     sch, pcb = f"{src_dir}/{name}.kicad_sch", f"{src_dir}/{name}.kicad_pcb"
@@ -341,7 +377,7 @@ def render_side(src_dir, name, out, netlist=False):
     if os.path.exists(sch):
         kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", f"{out}/erc.json", sch)
         if netlist:
-            kicad_cli("sch", "export", "netlist", "--format", "kicadsexpr", "-o", f"{out}/netlist.net", sch)
+            export_netlist(sch, out)
     if os.path.exists(pcb):
         parity = ["--schematic-parity"] if os.path.exists(sch) else []
         kicad_cli("pcb", "drc", "--format", "json", "--severity-all", *parity, "-o", f"{out}/drc.json", pcb)
@@ -898,6 +934,29 @@ def cache_renders(args=None):
                 (cache / '.complete').write_text(json.dumps(image_export_identity(p, side), sort_keys=True), encoding='utf-8')
 
 
+def cmd_copper(args):
+    # ponytail: recompute pair-specific copper once per run; no polygon cache.
+    # Each existing revision gets 120 s for CLI refill plus 60 s for collection;
+    # reserve another 60 s for startup, signed booleans and JSON serialization.
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    script = pathlib.Path(__file__).resolve().parent / "tools" / "copper_area.py"
+    for p in det["projects"]:
+        paths = [pathlib.Path(side) / p["dir"] / (p["name"] + ".kicad_pcb") for side in ("base", "head")]
+        out = pathlib.Path("review") / project_id(p["dir"]) / "copper-diff.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        result = {"rows": [], "incomplete": []}
+        if any(f.exists() for f in paths):
+            try:
+                run = subprocess.run([sys.executable, str(script), *[str(f) if f.exists() else "-" for f in paths]],
+                                     capture_output=True, text=True,
+                                     timeout=180 * sum(f.exists() for f in paths) + 60, check=True)
+                result = json.loads(run.stdout)
+            except (subprocess.SubprocessError, ValueError, OSError) as exc:
+                result = {"rows": [], "incomplete": [{"channel": "routing", "reason": f"Copper comparison unavailable: {type(exc).__name__}"}]}
+                print(f"{p['name']}: copper unavailable: {exc}", file=sys.stderr)
+        out.write_text(json.dumps(result, allow_nan=False, separators=(",", ":")), encoding="utf-8")
+
+
 def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
@@ -915,7 +974,8 @@ def cmd_render(args):
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
-            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
+            # Connectivity evidence for every present schematic, whatever the check settings.
+            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
             if fab_enabled(settings):
                 try:
                     render_fab(p, side, out, settings)
@@ -1220,7 +1280,7 @@ def sch_objects(proj_dir, name):
             elif kind in ("wire", "bus"):
                 pts = points(n)
                 objs[key] = {"kind": kind, "ref": "", "props": {"points": " ".join(fmt_at(p) for p in pts)},
-                             "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
+                             "points_mm": pts, "pos": list(pts[0]) if pts else None, "box": box_of(pts), "where": where}
             elif kind in ("label", "global_label", "hierarchical_label"):
                 a = at(n)
                 objs[key] = {"kind": kind.replace("_", " "), "ref": n[1], "props": {"text": n[1], "shape": val(n, "shape"), "position": fmt_at(a)},
@@ -1351,6 +1411,10 @@ def sheet_hotspots(proj_dir, name):
 def pcb_objects(path):
     with open(path, encoding="utf-8") as fh:
         root = parse_sexpr(fh.read())
+    return pcb_objects_from_root(root)
+
+
+def pcb_objects_from_root(root):
     net_names = {n[1]: n[2] for n in findall(root, "net") if len(n) > 2 and is_net_number(n[1])}  # older files number their nets
     net = lambda node: (lambda n: (net_names.get(n[1], n[-1]) if is_net_number(n[1]) else n[1]) if n else None)(find(node, "net"))
     where = {"board": True}
@@ -2100,24 +2164,128 @@ def pro_objects(path):
                          "props": {k: v for k, v in flatten(keep).items() if v != "None"}}}
 
 
-def project_objects(proj_dir, name):
+MM_RULE_KEYS = {"min_clearance", "min_track_width", "min_via_diameter", "min_through_hole_diameter",
+                "min_microvia_diameter", "min_microvia_drill", "min_hole_clearance", "min_hole_to_hole",
+                "min_copper_edge_clearance", "clearance", "track_width", "via_diameter", "via_drill",
+                "microvia_diameter", "microvia_drill", "diff_pair_width", "diff_pair_gap", "diff_pair_via_gap",
+                "min_via_annular_width", "min_connection", "min_groove_width", "min_silk_clearance",
+                "min_text_height", "min_text_thickness", "solder_mask_to_copper_clearance"}
+
+
+def rule_values(root: str, name: str) -> dict[str, object]:
+    """Read rule sources without flatten's stringification; absent revisions are empty.
+
+    Malformed project JSON returns an explicit _unavailable marker; independent
+    custom rules and board stackup remain readable.
+    """
+    out = {}
+
+    def walk(value, key):
+        if isinstance(value, dict):
+            for k, v in sorted(value.items()):
+                walk(v, f"{key}.{k}")
+        elif isinstance(value, list) and value and all(isinstance(v, dict) and "name" in v for v in value):
+            for v in sorted(value, key=lambda v: v["name"]):
+                walk(v, f"{key}.{v['name']}")
+        else:
+            out[key] = value
+
+    pro = pathlib.Path(root) / (name + ".kicad_pro")
+    if pro.exists():
+        try:
+            data = json.loads(pro.read_text(encoding="utf-8"))
+        except ValueError:
+            out["_unavailable"] = f"Project rules unavailable: malformed {pro.name}"
+            data = {}
+        board = data.get("board") or {}
+        design_settings = board.get("design_settings") or {}
+        walk(design_settings.get("rules") or {}, "rules")
+        net_settings = data.get("net_settings") or {}
+        if "classes" in net_settings:
+            walk(net_settings["classes"], "net_settings.classes")
+        # Pattern order is meaningful, unlike named class order. Keep assignments intact.
+        if "netclass_patterns" in net_settings:
+            out["net_settings.netclass_patterns"] = net_settings["netclass_patterns"]
+    dru = pathlib.Path(root) / (name + ".kicad_dru")
+    if dru.exists():
+        out["custom rules"] = dru.read_text(encoding="utf-8").replace("\r\n", "\n")
+    pcb = pathlib.Path(root) / (name + ".kicad_pcb")
+    if pcb.exists():
+        setup = find(parse_sexpr(pcb.read_text(encoding="utf-8")), "setup") or []
+        stack = find(setup, "stackup")
+        if stack:
+            out["stackup"] = stack
+    return out
+
+
+def diff_rules(base_root, head_root, name) -> list[dict]:
+    """Describe dimensional constraints, ordered assignments, custom text and stackup."""
+    b, h = rule_values(base_root, name), rule_values(head_root, name)
+    rows = []
+    unavailable = {"before": b.pop("_unavailable", None), "after": h.pop("_unavailable", None)}
+    if any(unavailable.values()):
+        row = electrical_row("rules-unavailable", "Project rules unavailable", channel="rules",
+                             detail={"kind": "unavailable", **unavailable})
+        row["document"] = "board"
+        rows.append(row)
+        # Unknown project rules must not become fabricated additions or removals.
+        for values in (b, h):
+            for key in list(values):
+                if key.startswith(("rules.", "net_settings.")):
+                    del values[key]
+    for key in sorted(b.keys() | h.keys()):
+        before, after = b.get(key), h.get(key)
+        if before == after:
+            continue
+        dimensional = key.rsplit(".", 1)[-1] in MM_RULE_KEYS
+        numeric = dimensional and all(v is None or type(v) in (int, float) for v in (before, after))
+        detail = {"kind": "number", "unit": "mm", "before": before, "after": after} if numeric else {
+            "kind": "text", "before": before, "after": after}
+        stackup = key == "stackup"
+        row = electrical_row("stackup" if stackup else "rule", key,
+                             channel="visual" if stackup else "rules",
+                             weight="light" if stackup else "heavy", detail=detail)
+        row["document"] = "board"
+        rows.append(row)
+    return rows
+
+
+def project_objects(proj_dir, name, issues=None):
     if not os.path.isdir(proj_dir):
         return {}
     objs = sch_objects(proj_dir, name)
     pcb = posixpath.join(proj_dir, f"{name}.kicad_pcb")
     if os.path.exists(pcb):
         objs.update(pcb_objects(pcb))
-    objs.update(pro_objects(posixpath.join(proj_dir, f"{name}.kicad_pro")))
-    dru = posixpath.join(proj_dir, f"{name}.kicad_dru")
-    if os.path.exists(dru):
-        with open(dru, encoding="utf-8") as fh:
-            objs["meta:dru"] = {"kind": "design rules", "ref": f"{name}.kicad_dru", "where": None,
-                                "props": {"custom rules": hashlib.sha1(fh.read().encode()).hexdigest()[:10]}}
+    for key, suffix, load in (
+        ("meta:pro", ".kicad_pro", pro_objects),
+        ("meta:dru", ".kicad_dru", lambda path: {"meta:dru": {
+            "kind": "design rules", "ref": name + ".kicad_dru", "where": None,
+            "props": {"custom rules": hashlib.sha1(pathlib.Path(path).read_bytes()).hexdigest()[:10]}}}),
+    ):
+        path = posixpath.join(proj_dir, name + suffix)
+        if not os.path.exists(path):
+            continue
+        try:
+            objs.update(load(path))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            if issues is not None:
+                issues.append({"channel": "rules", "reason": f"Unreadable {suffix} evidence", "unknownMeta": key})
+            print(f"{path}: optional rules unavailable: {exc}", file=sys.stderr)
     return objs
 
 
-def diff_objects(base, head):
-    """Rows of added / removed / modified objects. UUID first; unmatched symbols and footprints by reference."""
+def project_pair(p):
+    issues = []
+    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"], issues) for side in ("base", "head")}
+    for key in {i["unknownMeta"] for i in issues if "unknownMeta" in i}:
+        for side in objs:
+            objs[side].pop(key, None)
+    return objs, issues
+
+
+def object_pairs(base, head):
+    """UUID pairs first; unmatched objects pair by their match key (reference for footprints and symbols)."""
     pairs = [(k, k) for k in base if k in head]
     b_left = {k: o for k, o in base.items() if k not in head}
     h_left = {k: o for k, o in head.items() if k not in base}
@@ -2127,6 +2295,12 @@ def diff_objects(base, head):
         if hk in h_left:
             pairs.append((k, hk))
             del b_left[k], h_left[hk]
+    return pairs, b_left, h_left
+
+
+def diff_objects(base, head):
+    """Rows of added / removed / modified objects. UUID first; unmatched symbols and footprints by reference."""
+    pairs, b_left, h_left = object_pairs(base, head)
     rows = []
     for bk, hk in pairs:
         b, h = base[bk], head[hk]
@@ -3370,6 +3544,472 @@ def parse_netlist(text):
     return comps, nets
 
 
+def net_members(text, objects, commit):
+    """Return observed members, candidate anchors and net-scoped wiring issues.
+
+    None marks an unknown net, distinct from an observed empty set. Comparers must
+    suppress a net pair if either side is unknown, not treat it as added/removed.
+    Multi-unit anchors are candidates: only the pin manifest can select the owning
+    unit (or units for shared pins); positions here are symbol, not pin, positions.
+    Task 8 resolves candidates against that manifest. Missing sheet identity makes
+    membership unknown rather than conflating distinct schematic instances.
+
+    Per spec and plan prose, power symbols ('#' references) are skipped rather than
+    fabricated into component pins. Per Open Question 4, missing or unannotated
+    references (e.g. 'R?', '') fall back to symbol UUID only when exactly one candidate
+    exists; otherwise connectivity identity is ambiguous and comparison is suppressed.
+    """
+    _, parsed = parse_netlist(text)
+    by_ref = {}
+    for uid, o in objects.items():
+        if o["kind"] == "symbol":
+            ref = o["props"].get("reference", o["ref"])
+            by_ref.setdefault(ref, []).append((uid, o))
+    nets, anchors, issues = {}, {}, []
+    for name, nodes in sorted(parsed.items()):
+        members, net_anchors, reasons = set(), {}, set()
+        unknown = False
+        for node in nodes:
+            ref, pin = node["ref"] or "", node["pin"] or ""
+            if ref.startswith("#"):  # Power symbols and flags (ref starts with '#') are skipped; they are not fabricated as component pins
+                continue
+            candidates = by_ref.get(ref, [])
+            units = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1"))
+                     for _, o in candidates]
+            invalid = not ref or "?" in ref
+            # A missing or unannotated reference has no UUID in the netlist node, so only a single matching symbol candidate can be disambiguated.
+            ambiguous = (not pin or not candidates
+                         or any(s is None for s, _ in units)
+                         or len(units) != len(set(units))
+                         or len({s for s, _ in units}) != 1
+                         or (invalid and len(candidates) != 1))
+            if ambiguous:
+                unknown = True
+                reasons.add(("Connectivity identity is ambiguous; schematic membership comparison suppressed", True))
+                continue
+            if invalid:
+                reasons.add(("Some connected pins have missing references; using symbol UUID and pin number", False))
+            key = f"{candidates[0][0]}:{pin}" if invalid else f"{ref}.{pin}"
+            members.add(key)
+            net_anchors[key] = [{"uuid":uid.rsplit("/",1)[-1], "ref":ref, "pin":pin,
+                                 "unit":o["props"].get("unit", "1"), "sheet":(o.get("where") or {}).get("sheet"),
+                                 "pos":o.get("pos"), "commit":commit}
+                                for uid, o in candidates]
+        nets[name] = None if unknown else members
+        if not unknown:
+            anchors.update(net_anchors)
+        issues.extend({"channel":"wiring", "net":name, "reason":r, "unknown":u} for r, u in sorted(reasons))
+    return nets, anchors, issues
+
+
+def validate_netlist(text):
+    """Raise ValueError unless text is exactly one usable netlist export."""
+    # parse_sexpr returns only the first expression, so reject truncated or trailing content here.
+    depth, quoted, escaped, roots, end = 0, False, False, 0, None
+    for index, char in enumerate(text):
+        if quoted:
+            if escaped: escaped = False
+            elif char == "\\": escaped = True
+            elif char == '"': quoted = False
+        elif char == '"': quoted = True
+        elif char == "(":
+            if depth == 0:
+                roots += 1
+                if roots != 1: raise ValueError("trailing netlist expression")
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0: raise ValueError("unbalanced netlist")
+            if depth == 0: end = index + 1
+    if quoted or depth != 0 or roots != 1 or text[end:].strip():
+        raise ValueError("incomplete or trailing netlist content")
+    root = parse_sexpr(text)
+    if not isinstance(root, list) or not root or root[0] != "export":
+        raise ValueError("not a netlist export")
+    if any(not isinstance(field, list) or not field or not isinstance(field[0], str) for field in root[1:]):
+        raise ValueError("bad export field")
+    sections = findall(root, "nets")
+    if len(sections) != 1:
+        raise ValueError("missing or duplicate nets section")
+    def identity(node, key):
+        fields = findall(node, key)
+        if len(fields) != 1 or len(fields[0]) != 2 or not isinstance(fields[0][1], str) or not fields[0][1]:
+            raise ValueError("invalid netlist " + key)
+        return fields[0][1]
+    names = set()
+    for net in sections[0][1:]:
+        if not isinstance(net, list) or not net or net[0] != "net":
+            raise ValueError("bad net")
+        if any(not isinstance(field, list) or not field for field in net[1:]):
+            raise ValueError("bad net field")
+        name = identity(net, "name")
+        if name in names:
+            raise ValueError("duplicate net name")
+        names.add(name)
+        for node in findall(net, "node"):
+            identity(node, "ref"); identity(node, "pin")
+    try:  # The legacy projection must also succeed, so every consumer sees the same envelope.
+        parse_netlist(text)
+    except (TypeError, AttributeError, IndexError, KeyError) as exc:
+        raise ValueError(f"malformed netlist projection: {exc}") from exc
+
+
+def validated_net_members(text, objects, commit):
+    validate_netlist(text)
+    return net_members(text, objects, commit)
+
+
+def electrical_row(kind, ref, action="modified", channel="wiring", weight="heavy", detail=None, where=None):
+    return {"kind":kind, "ref":ref, "action":action, "channel":channel, "weight":weight,
+            "detail":detail or {}, "where":where, "pos":None, "box":None,
+            "props":{}, "anchors":{"base":[], "head":[]}, "document":"schematic"}
+
+
+def diff_nets(base, head):
+    """Match equal memberships first, then compare connected overlap components.
+
+    A None from net_members is unknown, not empty: suppress that name on both
+    sides. The producer's issues carry the corresponding incompleteness reason.
+    Anchors remain empty until the caller attaches the side-specific evidence.
+    """
+    unknown = {n for side in (base, head) for n, members in side.items() if members is None}
+    b = {n:members for n, members in base.items() if n not in unknown}
+    h = {n:members for n, members in head.items() if n not in unknown}
+    rows = []
+
+    def emit(kind, bs, hs):
+        before = set().union(*(base[n] for n in bs))
+        after = set().union(*(head[n] for n in hs))
+        action = "added" if not bs else "removed" if not hs else "modified"
+        transitions = []
+        for pin in sorted(before | after):
+            old = sorted(n for n in bs if pin in base[n])
+            new = sorted(n for n in hs if pin in head[n])
+            if old != new:
+                transitions.append({"pin":pin, "before":old, "after":new})
+        detail = {"kind":"members", "added":sorted(after - before), "removed":sorted(before - after),
+                  "beforeNets":sorted(bs), "afterNets":sorted(hs), "transitions":transitions}
+        if kind == "net-renamed":
+            detail["autoNamed"] = any(n.startswith("Net-(") or n.startswith("unconnected-(") for n in [*bs, *hs])
+        rows.append(electrical_row(kind, " + ".join(sorted(hs or bs)), action, detail=detail))
+
+    for bn in sorted(list(b)):
+        matches = [hn for hn in sorted(h) if b[bn] and b[bn] == h[hn]]
+        if len(matches) == 1:
+            hn = matches[0]
+            if bn != hn:
+                emit("net-renamed", [bn], [hn])
+            del b[bn], h[hn]
+
+    edges = {(bn, hn) for bn in b for hn in h if b[bn] & h[hn]}
+    linked_b, linked_h = {bn for bn, hn in edges}, {hn for bn, hn in edges}
+    # A name cannot pre-empt a member overlap, including a join or split.
+    edges |= {(n, n) for n in b.keys() & h.keys() if n not in linked_b and n not in linked_h}
+    while b or h:
+        bs, hs = ({min(b)}, set()) if b else (set(), {min(h)})
+        while True:
+            nb = bs | {bn for bn, hn in edges if hn in hs}
+            nh = hs | {hn for bn, hn in edges if bn in nb}
+            if (nb, nh) == (bs, hs):
+                break
+            bs, hs = nb, nh
+        if not bs:
+            emit("net-added", bs, hs)
+        elif not hs:
+            emit("net-removed", bs, hs)
+        elif len(bs) == len(hs) == 1:
+            bn, hn = next(iter(bs)), next(iter(hs))
+            if bn != hn or b[bn] != h[hn]:
+                emit("net-members", bs, hs)
+        else:
+            if len(bs) > 1:
+                emit("net-joined", bs, hs)
+            if len(hs) > 1:
+                emit("net-split", bs, hs)
+        for n in bs:
+            b.pop(n)
+        for n in hs:
+            h.pop(n)
+        edges = {(bn, hn) for bn, hn in edges if bn in b and hn in h}
+    return rows
+
+
+def wire_counts(objects):
+    """Connected collinear wire runs per sheet; source endpoints rounded once to 0.001 mm."""
+    lines = {}
+    for o in objects.values():
+        if o["kind"] != "wire":
+            continue
+        raw_pts = o.get("points_mm")
+        if raw_pts is None:
+            values = [float(x) for x in re.findall(r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", o.get("props", {}).get("points", ""))]
+            raw_pts = [values[i:i + 2] for i in range(0, len(values), 2)]
+        pts = [tuple(round(round(x, 3) * 1000) for x in p) for p in raw_pts]
+        sheet = (o.get("where") or {}).get("sheet", "/")
+        for a, b in zip(pts, pts[1:]):
+            a, b = sorted((a, b))
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            divisor = math.gcd(dx, dy)
+            if not divisor:
+                continue
+            dx, dy = dx // divisor, dy // divisor
+            # Integer direction and line offset avoid floating-point slope tolerances.
+            key = (sheet, dx, dy, dx * a[1] - dy * a[0])
+            lines.setdefault(key, []).append((a, b))
+    result = Counter()
+    for (sheet, *_), segments in lines.items():
+        merged = []
+        for a, b in sorted(segments):
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+            else:
+                merged.append((a, b))
+        for a, b in merged:
+            result[(sheet, tuple(x / 1000 for x in a), tuple(x / 1000 for x in b))] = 1
+    return result
+
+
+def diff_wires(base, head):
+    b, h = wire_counts(base), wire_counts(head)
+    drawn, erased = sum((h - b).values()), sum((b - h).values())
+    return [electrical_row("wires", "Wires drawn / erased", weight="medium",
+                           detail={"kind": "wires", "drawn": drawn, "erased": erased})] if drawn or erased else []
+
+
+NUMBER_TOKEN = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def pad_geometry(tokens):
+    """Pad geometry key: bare numbers rounded to 0.0001 mm as pcb_objects does, so re-saved spellings match."""
+    def norm(x):
+        if isinstance(x, list):
+            return [norm(y) for y in x]
+        if isinstance(x, Quoted) or not NUMBER_TOKEN.fullmatch(x):
+            return str(x)
+        return round(float(x), 4) + 0.0
+    return repr([norm(x) for x in tokens])
+
+
+def board_pads(path):
+    """Physical pads per footprint UUID: UUID, number and local geometry from the PCB, net from the semantic parser."""
+    if not pathlib.Path(path).is_file():
+        return {}
+    root = parse_sexpr(pathlib.Path(path).read_text(encoding="utf-8"))
+    objects = pcb_objects_from_root(root)
+    result = {}
+    for fp in findall(root, "footprint"):
+        uid = val(fp, "uuid") or val(fp, "tstamp")
+        if uid not in objects:
+            continue
+        pads = findall(fp, "pad")
+        fp_at = at(fp)
+        fp_angle = fp_at[2] if fp_at and len(fp_at) > 2 else 0.0
+        counts, seen = Counter(p[1] for p in pads), Counter()
+        result[uid] = []
+        for p in pads:
+            number = p[1]
+            seen[number] += 1
+            suffix = "#" + str(seen[number]) if counts[number] > 1 else ""
+            geom = [x for x in p[1:] if not (isinstance(x, list) and x and x[0] in ("net", "uuid", "tstamp", "pinfunction", "pintype"))]
+            geom = [(["at", *x[1:3], str(round(((float(x[3]) if len(x) > 3 else 0.0) - fp_angle) % 360, 3) % 360)]
+                     if isinstance(x, list) and x and x[0] == "at" else x) for x in geom]
+            result[uid].append({"uuid": val(p, "uuid") or val(p, "tstamp"), "number": number,
+                                "geom": pad_geometry(geom),
+                                "net": objects[uid]["props"].get("pad " + number + suffix + " net") or ""})
+    return result
+
+
+def pad_pairs(base, head, replaced=False):
+    """Pair physical pads by UUID, then by unique number plus geometry; repeated numbers never pair by number alone."""
+    pairs, b, h = [], list(base), list(head)
+
+    def take(predicate):
+        for x in list(b):
+            matches = [y for y in h if predicate(x, y)]
+            if len(matches) != 1:
+                continue
+            y = matches[0]
+            if sum(predicate(z, y) for z in b) != 1:
+                continue
+            pairs.append((x, y))
+            b.remove(x)
+            h.remove(y)
+
+    take(lambda x, y: bool(x["uuid"]) and x["uuid"] == y["uuid"])
+    # Duplicate-number pads never pair by number alone once UUIDs are gone; only unique number-plus-geometry evidence does.
+    compatible = lambda x, y: not (x["uuid"] and y["uuid"] and x["uuid"] != y["uuid"])
+    take(lambda x, y: (compatible(x, y) or replaced) and (x["number"], x["geom"]) == (y["number"], y["geom"]))
+    # The replacement fallback pairs a pad by number only when that number is unique on both sides.
+    take(lambda x, y: (compatible(x, y) or replaced) and x["number"] == y["number"] and
+         sum(p["number"] == x["number"] for p in base) == 1 and
+         sum(p["number"] == y["number"] for p in head) == 1)
+    return pairs
+
+
+def diff_board_pins(base, head, base_pads, head_pads, commits):
+    """Rows for matched footprints whose physical pad net changed. Added or removed pads are not connectivity claims."""
+    rows = []
+    for bk, hk in object_pairs(base, head)[0]:
+        b, h = base[bk], head[hk]
+        if b["kind"] != "footprint" or h["kind"] != "footprint":
+            continue
+        for bp, hp in pad_pairs(base_pads.get(bk, []), head_pads.get(hk, []), replaced=bk != hk):
+            if bp["net"] == hp["net"]:
+                continue
+            r = electrical_row("board-pad-net", h["ref"] + "." + hp["number"],
+                               detail={"kind": "pad-net", "pin": hp["number"], "before": bp["net"],
+                                       "after": hp["net"], "boardOnly": True},
+                               where={"board": True})
+            r.update(document="board", pos=h.get("pos"), box=h.get("box"))
+            # Derived row does not own scene changeIds. Keep each revision identity separately.
+            # Board anchors carry board=True and omit sheet (PCBs have no sheet; consumed by Task 8.1/8.2).
+            for side, uid, o, pad in (("base", bk, b, bp), ("head", hk, h, hp)):
+                r["anchors"][side] = [{"uuid": uid, "padUuid": pad["uuid"], "ref": o["ref"],
+                                       "pin": pad["number"], "pos": o.get("pos"),
+                                       "commit": commits.get(side), "board": True}]
+            rows.append(r)
+    return rows
+
+
+def read_copper(path):
+    """Strict reader of the optional copper-diff.json; any malformed field makes routing unavailable."""
+    unavailable = lambda reason: ([], [{"channel": "routing", "reason": reason}])
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"),
+                          parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
+        if not isinstance(data, dict) or not isinstance(data.get("rows"), list) or not isinstance(data.get("incomplete"), list):
+            raise ValueError("bad envelope")
+        rows = []
+        for x in data["rows"]:
+            if not isinstance(x.get("net"), str) or not isinstance(x.get("layer"), str):
+                raise ValueError("bad identity")
+            for key in ("addedMm2", "removedMm2"):
+                # math.isfinite raises OverflowError for integers too large for a float.
+                if type(x.get(key)) not in (int, float) or not math.isfinite(x[key]) or x[key] < 0:
+                    raise ValueError("bad area")
+            for key in ("addedContours", "removedContours"):
+                if not isinstance(x.get(key), list):
+                    raise ValueError("bad contours")
+                for ring in x[key]:
+                    if not isinstance(ring, list) or len(ring) < 3:
+                        raise ValueError("bad ring")
+                    for pt in ring:
+                        if not isinstance(pt, list) or len(pt) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in pt):
+                            raise ValueError("bad point")
+            r = electrical_row("copper", f"{x['net'] or '(unconnected)'} on {x['layer']}", channel="routing", weight="medium",
+                               detail={"kind": "area", **{k: x[k] for k in ("layer", "addedMm2", "removedMm2", "addedContours", "removedContours")}},
+                               where={"board": True})
+            r["document"] = "board"
+            pts = [pt for key in ("addedContours", "removedContours") for ring in x[key] for pt in ring]
+            r["box"] = [min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)] if pts else None
+            rows.append(r)
+        issues = data["incomplete"]
+        if any(not isinstance(i, dict) or i.get("channel") != "routing" or not isinstance(i.get("reason"), str) for i in issues):
+            raise ValueError("bad issues")
+        return rows, issues
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return unavailable("Copper comparison missing or malformed")
+
+
+def schematic_pin_ids(text, objects):
+    """Pins proven to exist: a uniquely resolved component whose exported libpart enumerates the pin.
+
+    A missing net node alone is never proof of disconnection; without this proof a pin stays unknown.
+    """
+    def identity(node):
+        key = (val(node, "lib"), val(node, "part"))
+        return key if all(isinstance(k, str) and k for k in key) else None
+
+    root = parse_sexpr(text)
+    libraries = {}
+    for part in findall(find(root, "libparts") or [], "libpart"):
+        if identity(part):
+            libraries[identity(part)] = {
+                val(pin, "num") for pin in findall(find(part, "pins") or [], "pin") if val(pin, "num")}
+    refs = {}
+    for o in objects.values():
+        if o["kind"] == "symbol":
+            refs.setdefault(o["props"].get("reference", o.get("ref", "")), []).append(o)
+    result = set()
+    components = findall(find(root, "components") or [], "comp")
+    for comp in components:
+        ref = val(comp, "ref")
+        candidates = refs.get(ref, [])
+        identities = [((o.get("where") or {}).get("sheet"), o["props"].get("unit", "1")) for o in candidates]
+        if not ref or "?" in ref or not candidates or len(identities) != len(set(identities)):
+            continue
+        sheets = {sheet for sheet, _ in identities}
+        if len(sheets) != 1 or None in sheets:
+            continue
+        if sum(val(c, "ref") == ref for c in components) != 1:
+            continue
+        result.update(ref + "." + pin for pin in libraries.get(identity(find(comp, "libsource")), set()))
+    return result
+
+
+def electrical_changes(p, out, objs, commits):
+    """Net, wire, board-pad, copper and rule rows for one project pair, plus channel incompleteness issues.
+
+    A present schematic with missing, malformed or ambiguous netlist evidence makes the whole
+    schematic membership pair unknown: no net rows, and board-pad board-only status unknown.
+    """
+    roots = {s: posixpath.join(s, p["dir"]) for s in ("base", "head")}
+    members, anchors, issues = {}, {}, []
+    known_pins = {"base": set(), "head": set()}
+    usable = True
+    for side, root in roots.items():
+        members[side], anchors[side] = {}, {}
+        if not pathlib.Path(root, p["name"] + ".kicad_sch").is_file():
+            continue  # An absent schematic is an absent side, not unknown evidence.
+        try:
+            text = read_netlist(pathlib.Path(out) / side)
+            members[side], anchors[side], found = validated_net_members(text, objs[side], commits.get(side, ""))
+            known_pins[side] = schematic_pin_ids(text, objs[side])
+            issues += [{**i, "document": "schematic"} for i in found]
+            if any(i.get("unknown") for i in found):
+                usable = False
+        except (OSError, ValueError, TypeError, IndexError, KeyError, AttributeError) as exc:
+            usable = False
+            issues.append({"channel": "wiring", "document": "schematic",
+                           "reason": f"{side} netlist unavailable: {str(exc)[:500]}"})
+    netrows = diff_nets(members["base"], members["head"]) if usable else []
+    for r in netrows:
+        for side, key in (("base", "beforeNets"), ("head", "afterNets")):
+            pins = set().union(*(members[side][n] for n in r["detail"][key]))
+            r["anchors"][side] = [a for pin in sorted(pins) for a in anchors[side].get(pin, [])]
+        first = next(iter(r["anchors"]["head"] or r["anchors"]["base"]), None)
+        r["where"] = {"sheet": first["sheet"]} if first else None
+    pcbs = {s: pathlib.Path(root, p["name"] + ".kicad_pcb") for s, root in roots.items()}
+    padrows = diff_board_pins(objs["base"], objs["head"], board_pads(pcbs["base"]), board_pads(pcbs["head"]), commits)
+
+    def pin_net(side, key):
+        """Schematic net of a pin: None means unknown; "" means a proven pin with no net assignment."""
+        if not usable:
+            return None
+        found = [name for name, pins in members[side].items() if key in pins]
+        if len(found) == 1:
+            return found[0]
+        if found:
+            return None
+        return "" if key in known_pins[side] else None
+
+    for r in padrows:
+        bp, hp = r["anchors"]["base"][0], r["anchors"]["head"][0]
+        before, after = pin_net("base", bp["ref"] + "." + bp["pin"]), pin_net("head", hp["ref"] + "." + hp["pin"])
+        r["detail"]["boardOnly"] = (None if before is None or after is None else
+                                    (before, after) != (r["detail"]["before"], r["detail"]["after"]))
+        if r["detail"]["boardOnly"] is None:
+            r["detail"]["evidenceNote"] = "Schematic assignment unavailable; board-only status unknown"
+    copperrows, found = read_copper(pathlib.Path(out) / "copper-diff.json") if any(f.is_file() for f in pcbs.values()) else ([], [])
+    issues += [{**i, "document": "board"} for i in found]
+    try:
+        rulerows = diff_rules(roots["base"], roots["head"], p["name"])
+    except (OSError, ValueError, TypeError, AttributeError, IndexError):
+        rulerows = []
+        issues.append({"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"})
+    return netrows + diff_wires(objs["base"], objs["head"]) + padrows + copperrows + rulerows, issues
+
+
 def ohms(value):
     if not value or len(value) > 32:
         return None
@@ -3393,20 +4033,29 @@ def matches(name, patterns):
 def interface_check(p, settings, objs, out_dir):
     if settings["checks"].get("interfaces", "off") == "off":
         return None
+    def not_run(reason, incomplete=False):
+        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"],
+                "status": "not_run", "reason": reason, **({"incomplete": True} if incomplete else {}),
+                "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
+    if not pathlib.Path("head", p["dir"], p["name"] + ".kicad_sch").is_file():
+        return not_run("no schematic")
     patterns = {k: INTERFACE_PATTERNS[k] + settings["interfaces"].get(k, []) for k in INTERFACE_PATTERNS}
-    def side(s):
-        path = f"{out_dir}/{s}/netlist.net"
-        if not os.path.exists(path):
-            return None, None
-        syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(s) or {}).values() if o["kind"] == "symbol"}
-        where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
-        with open(path, encoding="utf-8") as fh:
-            return interface_findings(*parse_netlist(fh.read()), patterns, where_of)
-    (head, coverage), (base, _) = side("head"), side("base")
-    if head is None:
-        return {"name": "interfaces", "title": CHECK_NAMES["interfaces"], "level": settings["checks"]["interfaces"], "status": "not_run",
-                "reason": "no schematic", "errors": 0, "new_errors": 0, "warnings": 0, "new_warnings": 0, "fixed": 0, "violations": []}
-    c = run_check("interfaces", settings, head, base)
+    findings, coverage = {}, None
+    for side in ("head", "base"):
+        if not pathlib.Path(side, p["dir"], p["name"] + ".kicad_sch").is_file():
+            findings[side] = None  # An absent base schematic is an empty baseline, not failed evidence.
+            continue
+        try:
+            text = read_netlist(pathlib.Path(out_dir) / side)
+            syms = {o["ref"].split(" unit ")[0]: o for o in (objs.get(side) or {}).values() if o["kind"] == "symbol"}
+            where_of = lambda ref: (syms[ref]["where"], syms[ref]["pos"][:2] if syms[ref].get("pos") else None) if ref in syms else ({"sheet": "/"}, None)
+            findings[side], found = interface_findings(*parse_netlist(text), patterns, where_of)
+            if side == "head":
+                coverage = found
+        except (OSError, ValueError, TypeError, IndexError, KeyError, AttributeError) as exc:
+            # Never compute new/fixed counts against unavailable evidence for a present schematic.
+            return not_run(f"{side} netlist unavailable: {exc}", True)
+    c = run_check("interfaces", settings, findings["head"], findings["base"])
     c["coverage"] = coverage
     return c
 
@@ -3694,6 +4343,105 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
+CHANNELS = ("components","wiring","routing","rules","board","visual")
+
+
+def dedupe_electrical(rows, typed):
+    """Drop generic metadata keys that a typed rule or stackup row already describes.
+
+    Typed rule refs are rule_values keys; meta:pro flattens design_settings under "board.",
+    named classes by name and pattern lists by index, so map each ref to that flattened prefix.
+    """
+    refs = {r["ref"] for r in typed if r["kind"] in ("rule", "stackup")}
+    prefixes = {"board." + k if k.startswith("rules.") else k for k in refs
+                if k.startswith(("rules.", "net_settings.classes.")) or k == "net_settings.netclass_patterns"}
+    under = lambda key, p: key == p or key.startswith((p + ".", p + "["))
+    result = []
+    for row in rows:
+        uid = row.get("uuid")
+        if uid == "meta:dru" and "custom rules" in refs:
+            continue
+        if uid == "meta:pro":
+            superseded = lambda key: any(under(key, p) for p in prefixes)
+        elif uid == "meta:setup":
+            superseded = lambda key: "stackup" in refs and under(key, "stackup")
+        else:
+            result.append(row)
+            continue
+        row = dict(row)
+        if "changes" in row:
+            row["changes"] = [c for c in row["changes"] if not superseded(c[0])]
+            if not row["changes"]:
+                continue
+        else:
+            row["props"] = {k: v for k, v in row.get("props", {}).items() if not superseded(k)}
+            if not row["props"]:
+                continue
+        result.append(row)
+    return result
+
+
+def classify_change(row, document=None):
+    r = dict(row)
+    k = r["kind"]
+    channel = ("components" if k in ("symbol","footprint") else "wiring" if k in
+               ("wire","bus","junction","no connect","power symbol","label","global label","hierarchical label")
+               else "routing" if k in ("track","via","zone") else "rules" if k == "design rules"
+               else "board" if k == "board outline" else "visual")
+    props = {x[0].lower() for x in r.get("changes",[])}
+    heavy = channel == "rules" or channel == "components" and (r["action"] != "modified" or "footprint" in props)
+    weight = "heavy" if heavy else "medium" if channel in ("routing","board") or k == "wire" else "light"
+    r.setdefault("channel",channel); r.setdefault("weight",weight)
+    if document is not None:
+        r["document"] = document
+    else:
+        r.setdefault("document", "board" if (r.get("where") or {}).get("board") or r.get("uuid") in ("meta:setup","meta:pro","meta:dru","meta:title_block:board") else "schematic")
+    if "position" in props and r.get("pos") and r.get("pos_before"):
+        a,b = r["pos_before"][:2],r["pos"][:2]
+        r.setdefault("detail",{"kind":"position","before":a,"after":b,
+                              "distanceMm":sum((x-y)**2 for x,y in zip(a,b))**0.5})
+    return r
+
+
+def electrical_summary(rows, issues, present=None):
+    present = present if present is not None else {"schematic","board"}
+    # Legacy issues infer their producer; new producers always set document explicitly.
+    unique = {(i.get("document") or ("schematic" if i["channel"]=="wiring" else "board"),
+               i["channel"],i["reason"]) for i in issues}
+    issues = [{"document":d,"channel":c,"reason":r} for d,c,r in sorted(unique)]
+    def headline(selected):
+        component = lambda r: r["kind"] in ("symbol","footprint")
+        counts = [
+            (sum(component(r) and r["action"] == "added" for r in selected),"added"),
+            (sum(component(r) and any(k.lower() == "value" for k,*_ in r.get("changes",[])) for r in selected),"values"),
+            (sum(component(r) and any(k.lower() == "footprint" for k,*_ in r.get("changes",[])) for r in selected),"footprints"),
+            (sum(r["kind"] == "net-added" for r in selected),"nets added"),
+            (sum(r["kind"] == "net-removed" for r in selected),"nets removed"),
+            (sum(r["kind"] == "net-joined" for r in selected),"net joins"),
+            (sum(component(r) and any(k.lower() == "position" for k,*_ in r.get("changes",[])) for r in selected),"moved")]
+        return " · ".join(f"{n} {label}" for n,label in counts if n) or "No headline changes"
+    def channels(selected, documents, selected_issues):
+        producers = {"schematic":{"components","wiring","visual"},
+                     "board":{"components","wiring","routing","rules","board","visual"}}
+        applicable = set().union(*(producers[d] for d in documents)) if documents else set()
+        applicable |= {r.get("channel") for r in selected}
+        applicable |= {i["channel"] for i in selected_issues}
+        return [{"channel":c,"total":sum(r.get("channel") == c for r in selected),
+                 "heavy":sum(r.get("channel") == c and r.get("weight") == "heavy" for r in selected),
+                 "status":"incomplete" if any(i["channel"] == c for i in selected_issues) else
+                          "complete" if c in applicable else "not_applicable"}
+                for c in CHANNELS]
+    documents = []
+    for d in ("schematic","board"):
+        if d not in present: continue
+        selected = [r for r in rows if r.get("document") == d]
+        found = [i for i in issues if i["document"] == d]
+        documents.append({"document":d,"headline":headline(selected),
+                          "channels":channels(selected,{d},found),"incomplete":found})
+    return {"headline":headline(rows),"channels":channels(rows,present,issues),
+            "incomplete":issues,"documents":documents}
+
+
 def build_project(p, blobs, settings, waivers=None, change_offset=0):
     out = f"review/{project_id(p['dir'])}"
     sides = [s for s in ("base", "head") if os.path.isdir(f"{out}/{s}")]
@@ -3774,8 +4522,13 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 text = gzip.decompress(base64.b64decode(blobs[key])).decode() if key else None
                 pair[side] = add_blob(blobs, comparison_svg(text, side, schematic)) if text else None
             row['svgCompare'] = pair
-    objs = {side: project_objects(posixpath.join(side, p["dir"]), p["name"]) for side in ("base", "head")}
-    changes = diff_objects(objs["base"], objs["head"])
+    objs, source_issues = project_pair(p)
+    det = read_optional_json("review/detect.json", {})
+    extra, issues = electrical_changes(p, out, objs, {s: det.get(s, "") for s in ("base", "head")})
+    changes = [classify_change(r) for r in dedupe_electrical(diff_objects(objs["base"], objs["head"]), extra)] + extra
+    present = {d for d, suffix in (("schematic", ".kicad_sch"), ("board", ".kicad_pcb"))
+               if any(pathlib.Path(s, p["dir"], p["name"] + suffix).is_file() for s in ("base", "head"))}
+    summary = electrical_summary(changes, source_issues + issues, present)
     for n, change in enumerate(changes, change_offset + 1):
         change["id"] = f"c{n}"
     inspect = image_pair(None, None)
@@ -3797,8 +4550,9 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
                 scene = board_geometry(pcb)
                 # Child pads, text and graphics use their owning footprint's UUID;
                 # standalone tracks/vias/zones use their own. Never match by net/ref.
+                # Derived electrical rows carry anchors, not owner UUIDs, so they never claim objects.
                 ids = {(r["kind"], r.get("uuid_before", r["uuid"]) if side == "base" else r["uuid"]): r["id"]
-                       for r in changes if (r.get("where") or {}).get("board")
+                       for r in changes if r.get("uuid") and (r.get("where") or {}).get("board")
                        and r["action"] != ("added" if side == "base" else "removed")}
                 for obj in scene["objects"]:
                     uid = obj["changeUuid"]
@@ -3849,7 +4603,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0):
         libraries = library_report(library_changes(items["base"], items["head"]), index, out, blobs,
                                    local_items=set(items["base"]) | set(items["head"])) or None
     return {"name": p["name"], "dir": p["dir"], "status": p["status"], "sheets": sheets, "board": board,
-            "changes": changes, "checks": project_checks(p, settings, objs, waivers),
+            "changes": changes, "summary": summary, "checks": project_checks(p, settings, objs, waivers),
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {})}
@@ -4189,6 +4943,46 @@ def changes_markdown(p, limit=60):
     return lines
 
 
+def connectivity_markdown(project, limit=20):
+    rows = [
+        r for r in project.get("changes", [])
+        if r.get("kind") in (
+            "net-added", "net-removed", "net-joined",
+            "net-split", "net-renamed", "net-members"
+        )
+    ]
+    if not rows:
+        return []
+
+    out = ["", "#### Connectivity", "", "| Change | Net | Members |", "|---|---|---|"]
+    for r in rows[:limit]:
+        d = r.get("detail") or {}
+        added = d.get("added") or []
+        removed = d.get("removed") or []
+        pins = " ".join([*(f"+{p}" for p in added), *(f"−{p}" for p in removed)])
+
+        before_nets = d.get("beforeNets") or []
+        after_nets = d.get("afterNets") or []
+        relation = (" + ".join(str(b) for b in before_nets) + " → " + " + ".join(str(a) for a in after_nets)) if (before_nets or after_nets) else ""
+
+        transitions = []
+        for t in d.get("transitions") or []:
+            if not isinstance(t, dict):
+                continue
+            pin = str(t.get("pin", ""))
+            before = " + ".join(str(b) for b in (t.get("before") or [])) or "(unconnected)"
+            after = " + ".join(str(a) for a in (t.get("after") or [])) or "(unconnected)"
+            transitions.append(f"{pin}: {before} → {after}")
+        moved = "; ".join(transitions)
+
+        summary_text = moved or pins or relation
+        out.append(f"| {cell(r.get('kind', ''))} | {cell(r.get('ref', ''))} | {cell(summary_text)} |")
+
+    if len(rows) > limit:
+        out.append(f"| | | and {len(rows) - limit} more in the report |")
+    return out
+
+
 def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="", threads=None, log="", issues=None):
     out = [MARKER, "## KiCad review", ""]
     short = lambda s: s[:9] if s else "nothing"
@@ -4211,6 +5005,19 @@ def comment_markdown(data, images, artifact_url, artifact_id="", rows=60, site="
     for i, p in enumerate(data["projects"]):
         out += ["", f"### {md(p['name'])}" + (f" (`{p['dir'].replace('`', "'").replace('\n', ' ').replace('\r', ' ')}`, {p['status']})" if p["dir"] or p["status"] != "modified" else ""), "",
                 summary_sentence(p) + "."]
+        summary = p.get("summary")
+        if summary:
+            headline = summary.get("headline", "")
+            if headline:
+                out += ["", md(headline[:200])]
+            for issue in summary.get("incomplete", []):
+                channel = str(issue.get("channel", ""))
+                reason = str(issue.get("reason", ""))
+                note = f"{channel}: {reason}"
+                if len(note) > 200:
+                    note = note[:199] + "…"
+                out += ["", md(note)]
+        out += connectivity_markdown(p)
         shots = [s for s in images if s["project"] == i]
         if shots:
             out += [""]
@@ -4637,6 +5444,10 @@ def log_row(data, when: str) -> str:
     per = [("" if len(data["projects"]) == 1 else f"{md(p['name'])}: ")
            + " · ".join(f"{md(c['title'])} {c['errors']} ({c['new_errors']})" for c in p["checks"])
            for p in data["projects"]]
+    for index, project in enumerate(data["projects"]):
+        headline = project.get("summary",{}).get("headline","")
+        if headline:
+            per[index] += (" · " if per[index] else "") + md(headline[:200])
     row = f"| [{when}]({data['links'].get('run', '')}) | `{(data['head'] or '')[:7]}` | {'❌ fail' if failed else '✅ pass'} | {' ; '.join(per) or '—'} |"
     row = row.replace("\n", " ").replace("\r", " ")
     return row if LOG_ROW.fullmatch(row) else ""
@@ -4719,6 +5530,8 @@ def main():
     p.set_defaults(func=cmd_render)
     p = sub.add_parser("prepare-3d", help="write revision-scoped metadata for the 3D processor")
     p.set_defaults(func=cmd_prepare3d)
+    p = sub.add_parser("copper", help="refilled copper differences of both revisions (run inside the KiCad container)")
+    p.set_defaults(func=cmd_copper)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
     p.add_argument("--tag", required=True)
     p.set_defaults(func=cmd_release)

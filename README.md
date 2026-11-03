@@ -436,6 +436,14 @@ and remains as the fallback when WebGL is unavailable.
 - **3D coverage and placeholders**: footprints lacking a 3D model render hatched placeholder boxes, and the view summarizes honest **3D coverage** (footprints, with-model, placeholders, triangles, and primitives). Missing models are also catalogued in the missing models table.
 - **Deferred measurements**: ruler and two-point measurement tools are deferred; standard camera orientation and Fit actions are provided.
 
+## Electrical and copper changes
+
+Electrical and copper comparison runs automatically on every review; there is **no new setting** and no opt-in required. Schematic netlists are exported automatically for comparison, even when interface checks are disabled (the default `checks.interfaces = "off"`). Rename matching is by members before names: nets with identical member pin sets are matched as renames before examining changed pin sets. Ambiguous references mark wiring incomplete rather than guessing connections.
+
+Copper is refilled in disposable project copies using KiCad's zone filler with a 120 s zone refill per revision, a 0.05 mm² threshold and 0.005 mm polygon approximation (`SHAPE_POLY_SET`). Unavailable routing or container timeouts mark the routing channel incomplete and do not turn off other checks.
+
+Format v1 adds optional fields additively: `project.changes[].channel` (`components`, `wiring`, `routing`, `rules`, `board`, `visual`), `weight` (`heavy`, `medium`, `light`), `detail`, `anchors`, and `project.summary` (`headline`, `channels`, `incomplete`). Older reports and data without these fields continue to load normally, with legacy display behaviour.
+
 ## Developing the review page
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
@@ -515,7 +523,7 @@ Unchanged sheets, board layers (including blank layers), board geometry, and ena
 available at both revisions. The viewer labels these views “No layout changes”, “No schematic changes
 on this sheet”, or “No 3D changes” without hiding the design. Identical board/model inputs share one
 GLB export, including its generated timestamp. Actions caches rendered outputs per commit, project,
-settings, KiCad image, and tool version; a complete warm hit avoids starting the KiCad container.
+settings, KiCad image, and tool version; a warm render hit still performs pair-specific copper analysis, so it no longer promises no container start for this feature.
 
 Library review (`[libraries] enabled = true`) covers only library files inside the project folder. Nicknames come from the file name (`Parts.kicad_sym` or `Parts.pretty` means `Parts`); library tables and external libraries are not resolved. Footprint item names come from `.kicad_mod` file stems, including legacy KiCad `module` files; symbol item names come from their declarations without a library prefix. For placed-part usage, exact library IDs win. When a placed part's nickname is not a local library, its item name is matched only if exactly one local library across the compared revisions contains that item of the same kind. This supports renamed or global nicknames without guessing when names are ambiguous, including duplicates in unchanged local libraries. All symbol units contribute pins; the drawing shows unit 1. Pad removals or renumbering and symbol electrical-type changes warn when placed parts use the item.
 With waivers enabled, format v1 adds `violations[].waiver_key`, `violations[].waived` for matched findings, `checks[].waived` counts on waivable checks, and top-level `waivers` lists (`stale`, `expired`, `proposed`, `invalid`); these additive fields are absent when waivers are off.

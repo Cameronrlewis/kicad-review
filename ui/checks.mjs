@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+const BR03_HOTSPOT_CONTRACT=JSON.parse(readFileSync(new URL('./fixtures/br03-hotspot-contract.json',import.meta.url),'utf8'));
 // These dependency-free browser functions are shared by CDP and Safari WebDriver
 // calibration. Compare actual composited screenshots, not a second SVG renderer.
 export async function softnessProbe(phase, scale) {
@@ -111,7 +113,7 @@ const BOARD_LIFECYCLE_FIXTURE = `
 
 const MARK_STYLE_FIXTURE = `
     // The template may lack retained board data; enable the real toolbar against a retained fixture.
-    const object={kind:'pad',uuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
+    const object={kind:'pad',uuid:'style',changeUuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
       box:[2000,2000,6000,6000],geometry:{primitive:{shape:'circle',center:[4000,4000],size:[4000,4000],angle:0}}};
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[object]};
     disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
@@ -1030,6 +1032,55 @@ export const CHECKS = [
     }
     return count>0||'no sheets checked';
   `],
+  ["BR03 grouped electrical rows and old v1 fallback", "", `
+  const p=proj(), old=p.changes, summary=p.summary, filter={...S.filter}, savedTab=S.t;
+  try {
+    p.changes=[{id:'c903',kind:'net-members',ref:'USB',action:'modified',channel:'wiring',weight:'heavy',
+      detail:{kind:'members',added:['U1.19','R2.1'],removed:['J1.3'],beforeNets:['USB'],afterNets:['USB'],transitions:[{pin:'U1.19',before:['A'],after:['C']}]},where:null},
+      {id:'c904',kind:'rule',ref:'min clearance',action:'modified',channel:'rules',weight:'heavy',
+      detail:{kind:'number',unit:'mm',before:0.2,after:0.25},where:null}];
+    p.summary={headline:'No headline changes',incomplete:[{channel:'routing',reason:'pcbnew unavailable'}]};
+    S.t='changes'; Object.assign(S.filter,{all:false,q:'',added:true,removed:true,modified:true,kind:'',group:''});
+    renderPanel();
+    const text=document.querySelector('#panel').textContent;
+    if(!text.includes('Wiring') || !text.includes('+U1.19') || !text.includes('−J1.3') || !text.includes('heavy')) return 'missing grouping or chips';
+    if(!text.includes('U1.19: A → C')) return 'pin destination missing';
+    if(!text.includes('pcbnew unavailable') || !text.includes('0.25')) return 'missing completeness or numeric detail';
+    S.filter.q='U1.19'; renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length!==1) return 'member search failed';
+    delete p.summary; p.changes=[{id:'c905',kind:'symbol',ref:'R1',action:'added',props:{Value:'1k'},where:null}];
+    S.filter.q=''; renderPanel();
+    return document.querySelector('#panel .card[data-id="c905"]') ? true : 'old report failed';
+  } finally {p.changes=old; p.summary=summary; S.filter=filter; S.t=savedTab; renderPanel();}
+`],
+  ["BR03 hostile text and full array search", "", `
+  const p=proj(), changes=p.changes, summary=p.summary, filter={...S.filter};
+  const hostile='</button><img src=x onerror=alert(1)>', savedTab=S.t;
+  try {
+    p.changes=Array.from({length:1501},(_,i)=>({id:'c'+(10000+i),kind:'rule',ref:'rule '+i,
+      action:['added','removed','modified'][i%3],channel:'rules',weight:'heavy',where:null,
+      detail:{kind:'text',before:'safe',after:i===1500?'FINAL_NEEDLE':hostile}}));
+    p.summary={headline:hostile,incomplete:[{channel:'routing',reason:hostile}]};
+    S.t='changes';Object.assign(S.filter,{all:false,q:'FINAL_NEEDLE',added:true,removed:true,modified:true,kind:'',group:''});
+    renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length!==1) return 'last searchable row missing';
+    S.filter.q='';renderPanel();
+    if(document.querySelector('#panel img')) return 'unsafe electrical detail';
+    if(!document.querySelector('#panel').textContent.includes(hostile)) return 'hostile text lost';
+    if(document.querySelectorAll('#panel .card[data-id]').length!==50 || !document.querySelector('[data-change-page="next"]')) return 'Changes page size changed';
+    for(const action of ['added','removed','modified']) {
+      Object.assign(S.filter,{added:false,removed:false,modified:false,[action]:true}); renderPanel();
+      const ids=[...document.querySelectorAll('#panel .card[data-id]')].map(e=>e.dataset.id);
+      if(!ids.length || ids.some(id=>p.changes.find(r=>r.id===id).action!==action)) return action+' toggle failed';
+    }
+    Object.assign(S.filter,{added:true,removed:true,modified:true,q:'no match anywhere'});renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length || !document.querySelector('.electrical-incomplete')?.textContent.includes(hostile)) return 'empty search hid incompleteness';
+    const unknown=electricalDetail({detail:{kind:'pad-net',before:'A',after:'B',boardOnly:null,evidenceNote:hostile}});
+    const probe=document.createElement('div');probe.innerHTML=unknown;
+    if(probe.querySelector('img') || !probe.textContent.includes(hostile) || probe.textContent.includes('board-only net change')) return 'uncertain pad labelled definite';
+    return true;
+  } finally {p.changes=changes;p.summary=summary;S.filter=filter;S.t=savedTab;renderPanel();}
+`],
   ["images large Changes dock pages retain every row and selection", "", `
     const p=D.projects.findIndex(p=>p.changes.length>100);
     if(p<0)return true;
@@ -4200,6 +4251,303 @@ return true;
     if(Appearance.get().markStyle!=='recolour') return 'theme import reset marks';
     Appearance.reset(); if(Appearance.get().markStyle!=='outline') return 'reset';
     button.click(); return true;
+  `],
+  ["BR03 net selection masks", "v=board", `
+    ${MARK_STYLE_FIXTURE}
+    const p=proj(), saved=p.changes, savedNets=scene.nets, savedRef=object.reference, savedNum=object.number, savedNet=object.net;
+    let origSetAppearance=null;
+    const row={id:'c903',kind:'net-members',action:'modified',
+      detail:{kind:'members',beforeNets:['GND'],afterNets:['GND']},anchors:{base:[],head:[]}};
+    const padRow={id:'c904',kind:'board-pad-net',action:'modified',
+      detail:{kind:'pad-net',pin:'1',before:'NET_A',after:'NET_B'},
+      anchors:{
+        base:[{board:true,uuid:'style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.base}],
+        head:[
+          {board:false,uuid:'style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.head},
+          {board:true,uuid:'head-style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.head}
+        ]
+      }};
+    try {
+      p.changes=[row,padRow];
+      scene.nets=[{id:0,name:''},{id:1,name:'GND'},{id:2,name:'NET_A'},{id:3,name:'NET_B'}];
+      object.reference='U1'; object.number='1'; object.net=1;
+      const mount=()=>{
+        disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
+        boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:p.changes,state:S,appearance:glAppearance});
+        boardView.useGL=true; S.s=row.id; boardDiff.render();
+      };
+      mount();
+      const before=JSON.stringify(Appearance.get());
+      let selected=0;
+      const drawOpts=[];
+      const appearances=[];
+      origSetAppearance=new Map();
+      for(const pane of boardDiff.panes) {
+        const draw=pane.renderer.draw.bind(pane.renderer);
+        pane.renderer.draw=opts=>{
+          if(opts.mask && opts.filter) {
+            drawOpts.push(opts);
+            if(opts.filter(object)) selected++;
+          }
+          return draw(opts);
+        };
+        if(pane.renderer.setAppearance) {
+          const origSet=pane.renderer.setAppearance.bind(pane.renderer);
+          origSetAppearance.set(pane,origSet);
+          pane.renderer.setAppearance=app=>{
+            appearances.push(app);
+            return origSet(app);
+          };
+        }
+      }
+      boardDiff.render();
+      if(!selected) return 'net selection did not reach neutral mask';
+      if(object.changeIds.join(',')!=='c0') return 'derived net stole scene identity';
+
+      const baseTint=appearances.some(a=>a.netColors?.GND && a.netColors.GND[0]===1 && a.netColors.GND[1]===0.3);
+      const headTint=appearances.some(a=>a.netColors?.GND && a.netColors.GND[0]===0.3 && a.netColors.GND[1]===1);
+      if(!baseTint || !headTint) return 'electricalLook netColors did not reach setAppearance per side';
+
+      // Verify pad-net anchor match and before/after side mapping
+      object.net=0; // No net name match: test pure anchor matching
+      S.s=padRow.id;
+      drawOpts.length=0;
+      appearances.length=0;
+      boardDiff.render();
+      if(drawOpts.length<2) return 'did not draw selection masks';
+
+      const padBaseTint=appearances.some(a=>a.netColors?.NET_A && a.netColors.NET_A[0]===1 && a.netColors.NET_A[1]===0.3);
+      const padHeadTint=appearances.some(a=>a.netColors?.NET_B && a.netColors.NET_B[0]===0.3 && a.netColors.NET_B[1]===1);
+      if(!padBaseTint || !padHeadTint) return 'pad-net electricalLook netColors did not reach setAppearance per side';
+
+      const [baseCall,headCall]=drawOpts.slice(-2);
+      const netAObj={net:2,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
+      const netBObj={net:3,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
+      const headObj={...object,changeUuid:'head-style'};
+      const badPinObj={...object,number:'2'};
+      const badRefObj={...object,reference:'U2'};
+      const badPadUuidObj={...object,uuid:'other-pad'};
+
+      if(!baseCall.filter(object)) return 'pad-net base anchor failed to match';
+      if(baseCall.filter(headObj)) return 'pad-net base anchor matched head uuid';
+      if(!headCall.filter(headObj)) return 'pad-net head anchor failed to match';
+      if(headCall.filter(object)) return 'pad-net head anchor matched base uuid or non-board anchor';
+
+      if(!baseCall.filter(netAObj) || baseCall.filter(netBObj)) return 'pad-net base side beforeNets mapping failed';
+      if(!headCall.filter(netBObj) || headCall.filter(netAObj)) return 'pad-net head side afterNets mapping failed';
+
+      if(baseCall.filter(badPinObj) || baseCall.filter(badRefObj)) return 'pad-net anchor matched wrong pin or ref';
+      if(baseCall.filter(badPadUuidObj)) return 'pad-net anchor matched wrong padUuid';
+      const anchor=padRow.anchors.base[0];
+      anchor.commit='0000000';
+      const staleCommit=baseCall.filter(object);
+      anchor.commit=REVIEW_DATA.base;
+      if(staleCommit) return 'pad-net anchor matched a different commit';
+      if(!baseCall.filter(object)) return 'pad-net anchor failed after commit restore';
+
+      anchor.sheet='/other/';
+      const staleSheet=baseCall.filter(object);
+      delete anchor.sheet;
+      if(staleSheet) return 'pad-net anchor matched wrong sheet';
+
+      // In-place mutation of scene.nets must be reflected in next render pass
+      S.s=row.id;
+      drawOpts.length=0;
+      scene.nets[1].name='OTHER';
+      boardDiff.render();
+      const [mutatedCall]=drawOpts.slice(-1);
+      if(mutatedCall?.filter(object)) return 'in-place scene.nets mutation returned stale name match';
+      scene.nets[1].name='GND';
+
+      // Test unguarded scene.nets access: missing scene.nets should not throw
+      delete scene.nets;
+      try {
+        baseCall.filter(object);
+      } catch(e) {
+        return 'scene without nets threw: '+e.message;
+      }
+
+      scene.nets=savedNets;
+      appearances.length=0;
+      S.s=null; boardDiff.render();
+      if(appearances.some(a=>a.netColors?.GND || a.netColors?.NET_A || a.netColors?.NET_B)) return 'temporary net color persisted in setAppearance';
+      return JSON.stringify(Appearance.get())===before || 'temporary colour persisted';
+    } finally {
+      p.changes=saved;
+      if(savedNets!==undefined) scene.nets=savedNets; else delete scene.nets;
+      if(savedRef!==undefined) object.reference=savedRef; else delete object.reference;
+      if(savedNum!==undefined) object.number=savedNum; else delete object.number;
+      if(savedNet!==undefined) object.net=savedNet; else delete object.net;
+      if(origSetAppearance) for(const [pane,origSet] of origSetAppearance) pane.renderer.setAppearance=origSet;
+      S.s=null; disposeBoardRenderers(); await draw();
+    }
+  `],
+  ["BR03 producer hotspot handoff", "", `
+    const fixture=${JSON.stringify(BR03_HOTSPOT_CONTRACT)}, p=proj(), oldSheets=p.sheets;
+    const saved=Object.fromEntries(Object.keys(fixture.blobs).map(id=>[id,{blob:D.blobs[id],cached:cache[id]}]));
+    try {
+      p.sheets=fixture.sheets;
+      for(const [id,blob] of Object.entries(fixture.blobs)) {D.blobs[id]=blob;delete cache[id];}
+      if(p.sheets[0].hotspots.base!==p.sheets[1].hotspots.base) return 'producer not revision-wide';
+      const row={anchors:{base:[{uuid:'placed',ref:'U1',pin:'12',sheet:'/left/'}],head:[]}};
+      const base=await electricalManifest('/left/','base'), head=await electricalManifest('/left/','head');
+      const right=await electricalManifest('/right/','base');
+      if(base?.sheet!=='/left/' || right?.sheet!=='/right/' || right.elements[0].ref!=='U2') return 'views adapter lost instance';
+      const pins=electricalPins(row,'base','/left/',base), expected=base.elements[0].pins.find(p=>p.number==='12');
+      if(pins.length!==1 || pins[0].ref!=='U1' || pins[0].number!=='12' || pins[0].x!==expected.x || pins[0].y!==expected.y) return 'base-only numeric pin lost';
+      if(electricalPins(row,'base','/right/',right).length || electricalPins(row,'head','/left/',head).length) return 'base pin leaked across instance/revision';
+      if(!base.elements[0].pins.some(p=>p.number==='1' && p.name==='123') || expected.name!=='456') return 'numeric pin names changed';
+      return true;
+    } finally {
+      p.sheets=oldSheets;
+      for(const [id,old] of Object.entries(saved)) {
+        old.blob===undefined?delete D.blobs[id]:D.blobs[id]=old.blob;
+        old.cached===undefined?delete cache[id]:cache[id]=old.cached;
+      }
+    }
+  `],
+  ["BR03 pin identity and missing hotspot compatibility", "", `
+    const r={anchors:{head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/',commit:D.head}],base:[]}};
+    const manifest={elements:[{uuid:'u',ref:'U1',unit:'1',pins:[{number:'1',name:'A',x:10,y:20}]}]};
+    const pins=electricalPins(r,'head','/a/',manifest);
+    if(pins.length!==1 || pins[0].x!==10 || pins[0].number!=='1') return 'wrong pin';
+    if(electricalPins(r,'head','/b/',manifest).length) return 'cross-instance highlight';
+    if(electricalPins(r,'base','/a/',null).length) return 'missing old manifest failed';
+    const p=proj(), sheets=p.sheets, row={...r,id:'c906',detail:{kind:'members'}};
+    const id='__br03_manifest';
+    // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide envelope as spec 01.
+    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',views:[
+      {sheet:'/a/',elements:manifest.elements},{sheet:'/b/',elements:manifest.elements}]})});
+    try {
+      p.sheets=[{path:'/a/',hotspots:{head:id}},{path:'/b/',hotspots:{head:id}}];
+      const view=await electricalManifest('/a/','head');
+      if(!view || electricalPins(row,'head','/a/',view).length!==1) return 'manifest envelope adapter';
+      const dock=document.createElement('div'); document.body.append(dock); await electricalControls(dock,row); dock.remove();
+      return dock.querySelector('[data-electrical-target]') ? true : 'missing member navigation control';
+    } finally {p.sheets=sheets; previous===undefined?delete cache[id]:cache[id]=previous;}
+  `],
+  ["BR03 inner layer fallback and saved selection", "v=board", `
+    const p=proj(), layers=p.board.layers, changes=p.changes, saved=S.s;
+    if(!layers.length) return 'required SVG board fixture absent';
+    const row={id:'c907',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu'},anchors:{base:[],head:[]}};
+    try {
+      p.board.layers=[...layers,{...layers[0],name:'In1_Cu'}]; p.changes=[...changes,row];
+      changeBoardAppearance({layers:{'In1.Cu':{visible:false}}});
+      S.layers=[]; await electricalTarget(row,{kind:'board'});
+      if(!S.layers.includes('In1_Cu') || S.layers.includes('In1.Cu')) return 'canonical/exported names confused';
+      if(!glAppearance().layers['In1.Cu']?.visible) return 'Appearance eye still hidden';
+      if(!currentView().layers.some(l=>l.name==='In1_Cu')) return 'SVG fallback lost inner layer';
+      const link=encodeState(), decoded=valid(decodeState('#'+link));
+      if(!decoded.layers?.includes('In1_Cu') || decoded.s!==row.id) return 'saved link loses selection';
+      await applyState(decodeState('#'+link));
+      return S.layers.includes('In1_Cu') && S.s===row.id || 'reload loses selected layer';
+    } finally {p.board.layers=layers; p.changes=changes; S.s=saved; await draw();}
+  `],
+  ["BR03 copper selection", "v=board", `
+    const p=proj(), saved=p.changes, appearance=structuredClone(Appearance.get());
+    const row={id:'c908',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu',
+      addedMm2:1,removedMm2:1,addedContours:[[[4,4],[5,4],[5,5],[4,5]]],
+      removedContours:[[[3,4],[4,4],[4,5],[3,5]]]},anchors:{base:[],head:[]}};
+    const object={kind:'pad',uuid:'inner',changeUuid:'inner',changeIds:[],layers:['In1.Cu'],net:1,category:'pads',side:'front',hidden:false,
+      box:[3000,4000,5000,5000],geometry:{primitive:{shape:'rect',center:[4000,4500],size:[2000,1000],angle:0}}};
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],
+      layers:[{id:1,name:'In1.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''},{id:1,name:'GND'}],objects:[object]};
+    const mount=mode=>{
+      disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
+      Object.assign(S,{m:mode,x:4,y:4,z:40,s:row.id,wipe:.4,blend:.35});
+      boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:p.changes,state:S,appearance:glAppearance});
+      boardView.useGL=true; boardView.panes=boardDiff.panes; boardDiff.render();
+    };
+    try {
+      p.changes=[row]; S.layers=['In1_Cu']; Appearance.patch({layers:{'In1.Cu':{visible:true}}});
+      for(const mode of ['overlay','side','wipe','blend','semantic']) {
+        mount(mode);
+        const paths=[...document.querySelectorAll('.copper-selection path')];
+        if(paths.length!==2 || !paths.some(e=>e.dataset.action==='added') || !paths.some(e=>e.dataset.action==='removed')) return mode+': missing signed contours';
+        if(mode==='side') for(const pane of boardDiff.panes) {
+          const expected=pane.sides[0]==='base'?'removed':'added';
+          if(pane.markHud.querySelector('path')?.dataset.action!==expected) return 'side sign ownership';
+        }
+        if(mode==='wipe' && !paths.every(e=>e.closest('svg').style.clipPath.includes('inset'))) return 'wipe contours not clipped';
+        if(mode==='blend' && !paths.some(e=>e.dataset.action==='added' && e.closest('svg').style.opacity==='0.35')) return 'blend alpha';
+        for(const flip of [false,true]) {
+          Appearance.patch({flip}); S.x+=.25; S.z+=3; boardDiff.render();
+          for(const pane of boardDiff.panes) for(const path of pane.markHud.querySelectorAll('.copper-selection path')) {
+            const pt=path.dataset.action==='added'?[4,4]:[3,4], expected=pane.renderer.worldToScreen(pt);
+            const actual=path.getAttribute('d').match(/[-+]?[0-9]*\\.?[0-9]+/g).slice(0,2).map(Number);
+            if(actual.length!==2 || !actual.every(Number.isFinite)) return 'invalid projected coordinates';
+            if(actual.some((n,i)=>Math.abs(n-expected[i])>.01)) return 'projection drift after pan zoom flip';
+          }
+        }
+        S.s=null; boardDiff.render();
+        if(document.querySelector('.copper-selection')) return 'clear selection leaves contours';
+      }
+      return true;
+    } finally {p.changes=saved; Appearance.patch(appearance); S.s=null; disposeBoardRenderers(); await draw();}
+  `],
+  ["BR03 fallback signed contours", "v=board", `
+    const p=proj(), changes=p.changes, failed=boardView.failed, layers=p.board.layers;
+    const row={id:'c909',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu',
+      addedMm2:1,removedMm2:1,addedContours:[[[4,4],[5,4],[5,5],[4,5]]],
+      removedContours:[[[3,4],[4,4],[4,5],[3,5]]]},anchors:{base:[],head:[]}};
+    try {
+      boardView.failed=S.p; disposeBoardRenderers(); // same state as a real WebGL mount/context failure
+      p.board.layers=[...layers,{...layers[0],name:'In1_Cu'}]; p.changes=[row];
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await electricalTarget(row,{kind:'board'});
+        if(boardView.useGL) return 'WebGL was not disabled';
+        if(!S.layers.includes('In1_Cu')) return 'inner layer not selected';
+        const paths=[...document.querySelectorAll('.copper-selection-fallback path')];
+        if(paths.length!==2) return mode+': fallback signs missing';
+        for(const action of ['added','removed']) {
+          const path=paths.find(p=>p.dataset.action===action);
+          if(!path || (mode!=='semantic' && !path.closest('.stack.'+(action==='added'?'head':'base')))) return 'wrong revision sign';
+          const svg=path.ownerSVGElement, expected=action==='added'?4:3;
+          const point=new DOMPoint(expected,4).matrixTransform(svg.getScreenCTM());
+          const world=svg.closest('.world'), stack=svg.closest('.stack');
+          const matrix=svg.getScreenCTM();
+          if(!Number.isFinite(point.x) || !matrix || !world || (mode!=='semantic' && !stack)) return 'invalid world projection';
+          if(getComputedStyle(svg).display==='none' || !svg.getClientRects().length) return 'hidden contour';
+          if(!path.getAttribute('d').startsWith('M'+expected+' 4')) return 'mm coordinates lost';
+        }
+        if(mode==='wipe' && !document.querySelector('.stack.base').style.clipPath.includes('inset')) return 'fallback clip absent';
+        S.x+=.25; S.z+=3; apply();
+        if(document.querySelectorAll('.copper-selection-fallback path').length!==2) return 'pan zoom lost contours';
+        S.s=null; markSelected();
+        if(document.querySelector('.copper-selection-fallback')) return 'stale fallback selection';
+      }
+      return true;
+    } finally {p.changes=changes;p.board.layers=layers;boardView.failed=failed;S.s=null;await draw();}
+  `],
+  ["BR03 missing pin locations note", "", `
+    const p=proj(), sheets=p.sheets, row={id:'c910',anchors:{base:[],head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/'}]}};
+    const id='__br03_bad_manifest', prior=cache[id], dock=document.createElement('div');document.body.append(dock);
+    try {
+      const cases=[['empty',{}],['missing-side',{base:id}],['missing-blob',{head:'__not_in_blobs'}],
+        ['malformed',{head:id},'{'],['missing-sheet',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/other/',elements:[]}]})],
+        ['unresolved-pin',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/a/',elements:[{uuid:'u',ref:'U1',pins:[]}]}]})]];
+      for(const [name,hotspots,text] of cases) {
+        cache[id]=Promise.resolve({text:text||'{}'});p.sheets=[{path:'/a/',hotspots}];
+        await electricalControls(dock,row);
+        if(!dock.querySelector('.electrical-pin-unavailable')?.textContent.includes('Pin locations unavailable')) return name+': missing unavailable note';
+        if(dock.querySelector('img,script')) return name+': unsafe note';
+      }
+      return true;
+    } finally {dock.remove();p.sheets=sheets;prior===undefined?delete cache[id]:cache[id]=prior;}
+  `],
+  ["BR03 old report selection", "", `
+    const p=proj(), old=p.changes, summary=p.summary;
+    const row=old.find(r=>r.where && (r.where.board || r.where.sheet!=null));
+    if(!row) return 'required legacy component fixture absent';
+    try {
+      delete p.summary;
+      p.changes=old.map(r=>Object.fromEntries(Object.entries(r).filter(([k])=>
+        !['detail','anchors','weight','channel','document'].includes(k))));
+      await goTo(row.id);
+      const decoded=valid(decodeState('#'+encodeState()));
+      return S.s===row.id && decoded.s===row.id && document.querySelector('#stage .vp')
+        ? true : 'legacy v1 selection no longer renders';
+    } finally {p.changes=old; p.summary=summary; await draw();}
   `],
   ["board mark style survives reload and project changes", "v=board", `
     ${MARK_STYLE_FIXTURE}
