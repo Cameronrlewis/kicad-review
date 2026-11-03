@@ -2763,7 +2763,7 @@ return true;
     return /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "") || "no 3D model tip missing";`],
   ["3D no-model chips keep text contrast in both themes", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
-    const lum = c => { const [r, g, b] = c.match(/\\d+/g).map(Number).map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
+    const lum = c => { const [r, g, b] = c.match(/\\d+/g).map(Number).map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
     const ratio = (f, b) => (Math.max(lum(f), lum(b)) + .05) / (Math.min(lum(f), lum(b)) + .05);
     const start = KRTheme.get(), res = {};
     try {
@@ -2771,7 +2771,10 @@ return true;
         KRTheme.set(theme, {persist:false});
         const btn = document.querySelector("[data-no-model]");
         if (!btn) return "no chip";
-        const bg = getComputedStyle(btn).backgroundColor, ref = ratio(getComputedStyle(btn.querySelector("b")).color, bg), note = ratio(getComputedStyle(btn.querySelector(".muted")).color, bg);
+        const bg = getComputedStyle(btn).backgroundColor;
+        // Contrast is only meaningful against an opaque chip; a translucent one would read as black here.
+        if (/rgba\\(.*,\\s*0?\\.\\d+\\)|rgba\\(.*,\\s*0\\)/.test(bg)) return theme + " chip background is translucent: " + bg;
+        const ref = ratio(getComputedStyle(btn.querySelector("b")).color, bg), note = ratio(getComputedStyle(btn.querySelector(".muted")).color, bg);
         res[theme] = {bg, ref:+ref.toFixed(2), note:+note.toFixed(2)};
         if (!(ref >= 4.5 && note >= 4.5)) return JSON.stringify(res);
       }
