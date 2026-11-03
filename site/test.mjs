@@ -5657,7 +5657,11 @@ test('MCP grouped BOM follows 08 included flags and key',()=>{
  assert.match(csv.csv,/"R1 R2","10k,é"/);assert.doesNotMatch(csv.csv,/R3/);
  loaded.doc.truncated=true;assert.equal(bomProjection('get_bom',{},loaded,'https://site.example').lines.total,null);
  const legacy=structuredClone(loaded);legacy.revision.parts.forEach(p=>delete p.bom);
- assert.equal(bomProjection('get_bom',{},legacy,'https://site.example').bom.complete,false);
+ const legacyRes=bomProjection('get_bom',{},legacy,'https://site.example');
+ assert.equal(legacyRes.bom.complete,false);
+ assert.equal(legacyRes.incomplete,true);
+ assert.equal(legacyRes.lines.total,null);
+ assert.equal(legacyRes.lines.items[0].key,null);
  assert.throws(() => bomProjection('unknown_bom_tool', {}, loaded, 'https://site.example'), /Unknown BOM projection/);
 });
 test('MCP BOM replays the shared 08 fixture cases',async()=>{

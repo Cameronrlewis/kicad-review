@@ -327,14 +327,15 @@ export function netProjection(name, args, loaded, origin) {
 }
 
 // Legacy fallback only for contexts without parts[].bom: DNP-only, no canonical key; the result is marked bom.complete:false.
-const legacyBom = p => ({ included: !p.dnp, excludedReason: p.dnp ? 'dnp' : null, ref: p.ref, value: p.value || '', footprint: p.footprint || '', lcsc: p.lcsc || '', mpn: p.mpn || '', category: '', key: JSON.stringify([p.value || '', p.footprint || '', p.lcsc || '', p.mpn || '']) });
+const legacyBom = p => ({ included: !p.dnp, excludedReason: p.dnp ? 'dnp' : null, ref: p.ref, value: p.value || '', footprint: p.footprint || '', lcsc: p.lcsc || '', mpn: p.mpn || '', category: '', key: null, groupKey: JSON.stringify([p.value || '', p.footprint || '', p.lcsc || '', p.mpn || '']) });
 export function bomLines(parts) {
   const groups = new Map();
   for (const p of parts) {
     const bom = p.bom ?? legacyBom(p);
     if (!bom.included) continue;
-    if (!groups.has(bom.key)) groups.set(bom.key, { key: bom.key, value: bom.value, footprint: bom.footprint, mpn: bom.mpn, lcsc: bom.lcsc, category: bom.category, refs: [] });
-    groups.get(bom.key).refs.push(bom.ref ?? p.ref);
+    const groupKey = bom.groupKey ?? bom.key;
+    if (!groups.has(groupKey)) groups.set(groupKey, { key: bom.key, value: bom.value, footprint: bom.footprint, mpn: bom.mpn, lcsc: bom.lcsc, category: bom.category, refs: [] });
+    groups.get(groupKey).refs.push(bom.ref ?? p.ref);
   }
   return [...groups.values()].map(g => ({ ...g, quantity: g.refs.length, refs: g.refs.sort((a, b) => a.localeCompare(b, 'en', { numeric: true })) }));
 }
