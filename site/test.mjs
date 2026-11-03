@@ -5974,3 +5974,47 @@ test('MCP consent renders consent page on GET and completes authorization on POS
   assert.equal(sealedCredential.u, 'cam');
   assert.ok(sealedCredential.e >= now + 3600000 && sealedCredential.e <= Date.now() + 3600000);
 });
+
+import {oauthFetch} from './mcp-auth.js';
+import {makeMcpWorker} from './mcp-entry.js';
+test('MCP refresh policy does not expose copied GitHub refresh credentials',async()=>{
+  let calls=0;
+  const provider={fetch:async()=>{calls++;return new Response(JSON.stringify({access_token:'access',refresh_token:'never-return',token_type:'Bearer',expires_in:3600}),{headers:{'Content-Type':'application/json'}});}};
+  const env={OAUTH_KV:{}};
+  const refresh=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=refresh_token&refresh_token=old'});
+  assert.equal((await oauthFetch(refresh,env,{},provider,{})).status,400);assert.equal(calls,0);
+  const grant=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=authorization_code&code=x'});
+  const body=await (await oauthFetch(grant,env,{},provider,{})).json();
+  assert.equal(body.access_token,'access');assert.ok(!Object.hasOwn(body,'refresh_token'));
+  // RFC 7009 revocation shares the token endpoint (metadata revocation_endpoint) and stays available.
+  const revoke=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token=t&token_type_hint=access_token&client_id=c'});
+  await oauthFetch(revoke,env,{},provider,{});assert.equal(calls,2);
+  const huge=new Request('https://site.example/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=authorization_code&code='+'x'.repeat(16384)});
+  assert.equal((await oauthFetch(huge,env,{},provider,{})).status,413);assert.equal(calls,2);
+});
+test('MCP without OAUTH_KV leaves the legacy site unchanged',async()=>{
+  const legacy={fetch:async()=>new Response('legacy')};
+  assert.equal(await (await oauthFetch(new Request('https://site.example/r/a/b'),{},{},null,legacy)).text(),'legacy');
+  for(const path of ['/mcp','/authorize','/token','/register','/.well-known/oauth-authorization-server'])
+    assert.equal((await oauthFetch(new Request('https://site.example'+path),{},{},null,legacy)).status,503,path);
+});
+test('MCP provider integration publishes read-only discovery',async()=>{
+  const worker=makeMcpWorker(),local={...env,OAUTH_KV:{}},ctx={waitUntil:()=>{}};
+  for(const path of ['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp']){
+    const response=await worker.fetch(new Request('https://site.example'+path),local,ctx);
+    assert.equal(response.status,200);
+    const metadata=await response.json();assert.equal(metadata.resource,'https://site.example/mcp');
+    assert.deepEqual(metadata.scopes_supported,['read:design']);
+  }
+  const response=await worker.fetch(new Request('https://site.example/.well-known/oauth-authorization-server'),local,ctx);
+  assert.equal(response.status,200);const metadata=await response.json();
+  assert.equal(metadata.token_endpoint,'https://site.example/token');
+  assert.equal(metadata.registration_endpoint,'https://site.example/register');
+  assert.deepEqual(metadata.grant_types_supported,['authorization_code']);
+  const denied=await worker.fetch(rpcRequest('tools/list'),local,ctx);
+  assert.equal(denied.status,401);assert.match(denied.headers.get('WWW-Authenticate'),/resource_metadata=/);
+});
+test('MCP authorization metadata HEAD has no body to rewrite',async()=>{
+  const response=await makeMcpWorker().fetch(new Request('https://site.example/.well-known/oauth-authorization-server',{method:'HEAD'}),{...env,OAUTH_KV:{}},{waitUntil:()=>{}});
+  assert.equal(response.status,200);
+});

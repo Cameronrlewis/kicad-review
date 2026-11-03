@@ -1,5 +1,5 @@
 name = "kicad-review-site"
-main = "worker.js"
+main = "mcp-entry.js"
 compatibility_date = "2026-10-07"
 # threadsClient is sent via .toString(); name helpers would not exist in the browser.
 keep_names = false
@@ -12,3 +12,13 @@ globs = ["**/*.css", "**/ui/*.js", "**/ui/review.html", "**/ui/icons/sprite.svg"
 # npx wrangler secret put NAME; never commit those secrets.
 [vars]
 ALLOWED_OWNERS = "Cameronrlewis"
+
+# MCP OAuth state (owner-approved exception, ORDER.md decision 14): OAuth protocol state and
+# sealed one-hour GitHub access credentials only; never designs, ACLs or refresh tokens.
+# Without this binding /mcp and the OAuth routes answer 503 and the site is unchanged.
+# Bind only the real ID from `npx --yes wrangler@4.148.0 kv namespace create OAUTH_KV`
+# (a separate owner approval); never a placeholder, and never leave `id` out: Wrangler
+# can then try to provision a namespace itself on deploy.
+# [[kv_namespaces]]
+# binding = "OAUTH_KV"
+# id = "<real namespace id>"

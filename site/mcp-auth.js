@@ -51,3 +51,35 @@ export async function consentRoute(request, env, { session, open, seal }) {
     metadata: { label: active.login + ' read-only design access' }, scope: ['read:design'], props: { credential } });
   head.set('Location', redirectTo); return new Response(null, { status: 302, headers: head });
 }
+
+// OAuth policy around the provider: no refresh grants, no refresh tokens, RFC 9728 discovery on both paths.
+const OAUTH_PATHS = ['/mcp', '/authorize', '/token', '/register', '/revoke'];
+const rejson = (response, body) => { const headers = new Headers(response.headers); headers.delete('Content-Length'); return new Response(JSON.stringify(body), { status: response.status, headers }); };
+export async function oauthFetch(request, env, ctx, provider, legacy) {
+  const url = new URL(request.url);
+  if (!env.OAUTH_KV) return OAUTH_PATHS.includes(url.pathname) || url.pathname.startsWith('/.well-known/') ? json({ error: 'MCP is not configured' }, 503) : legacy.fetch(request, env, ctx);
+  if (['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) return json({ resource: url.origin + '/mcp', authorization_servers: [url.origin], scopes_supported: ['read:design'], bearer_methods_supported: ['header'] });
+  if (url.pathname === '/token' && request.method === 'POST') {
+    let body;
+    try { body = await readBounded(request, 16384); } catch (error) { return error.code === 'TOO_LARGE' ? json({ error: 'invalid_request', error_description: 'Request too large' }, 413) : json({ error: 'invalid_request' }, 400); }
+    const form = new URLSearchParams(body), grant = form.get('grant_type');
+    // RFC 7009 revocation (no grant_type, a token) shares this endpoint; every other grant except authorization_code is refused.
+    if (grant !== 'authorization_code' && !(grant === null && form.get('token'))) return json({ error: 'unsupported_grant_type', error_description: 'Reconnect through browser sign-in; refresh grants are not supported.' }, 400);
+    request = new Request(request, { body });
+  }
+  const response = await provider.fetch(request, env, ctx);
+  if (url.pathname === '/token' && response.ok && response.headers.get('Content-Type')?.includes('json')) {
+    const body = await response.json(); delete body.refresh_token; return rejson(response, body);
+  }
+  if (url.pathname === '/.well-known/oauth-authorization-server' && request.method === 'GET' && response.ok) {
+    const body = await response.json(); body.grant_types_supported = ['authorization_code']; return rejson(response, body);
+  }
+  if (url.pathname === '/mcp' && response.status === 401) {
+    const headers = new Headers(response.headers);
+    // Keep the provider's challenge (it carries error="invalid_token"); add discovery only when missing.
+    if (!/resource_metadata=/.test(headers.get('WWW-Authenticate') || '')) headers.set('WWW-Authenticate', `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`);
+    headers.set('Cache-Control', 'private, no-store');
+    return new Response(response.body, { status: 401, headers });
+  }
+  return response;
+}
