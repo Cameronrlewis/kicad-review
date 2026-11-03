@@ -5095,7 +5095,7 @@ test('MCP stateless transport handles origin check, payload limit, tool calls, a
     body: 'x'.repeat(16385),
   }), [], async () => ({}));
   assert.equal(large.status, 413);
-  assert.equal(await large.text(), 'Request too large');
+  assert.equal(await large.text(), 'Request too large or invalid UTF-8');
 
   const callRes = await mcpResponse(
     rpcRequest('tools/call', { name: 'find_parts', arguments: { query: 'R1' } }),
@@ -5120,3 +5120,43 @@ test('MCP stateless transport handles origin check, payload limit, tool calls, a
   assert.equal(errBody.result.isError, true);
 });
 
+
+import { mcpAccess, readBounded, page, bounded, McpError } from './mcp-data.js';
+test('MCP revoked repository access is checked before artifacts', async () => {
+  const seen=[];
+  const deps={open:async()=>({t:'secret',u:'cam',e:Date.now()+600000}), allowedOwners:()=>['cameronrlewis'],
+    gh:async path=>{seen.push(path); return new Response(JSON.stringify(path==='/user'?{login:'cam'}:{}), {status:path==='/user'?200:404});}};
+  await assert.rejects(mcpAccess({}, {credential:'opaque'}, 'Cameronrlewis/private', deps), /Repository unavailable/);
+  assert.deepEqual(seen, ['/user','/repos/Cameronrlewis/private']);
+  seen.length=0;
+  await assert.rejects(mcpAccess({}, {credential:'opaque'}, 'https://attacker/repo', deps), /Repository unavailable/);
+  assert.equal(seen.length,0);
+  let readable=true;
+  deps.gh=async path=>{seen.push(path);return new Response(JSON.stringify(path==='/user'?{login:'cam'}:readable?{owner:{login:'Cameronrlewis'},permissions:{pull:true},full_name:'Cameronrlewis/private'}:{}),{status:path==='/user'||readable?200:404});};
+  assert.equal((await mcpAccess({}, {credential:'opaque'}, 'Cameronrlewis/private', deps)).login,'cam');
+  readable=false;
+  await assert.rejects(mcpAccess({}, {credential:'opaque'}, 'Cameronrlewis/private', deps), /Repository unavailable/);
+  assert.deepEqual(seen,['/user','/repos/Cameronrlewis/private','/user','/repos/Cameronrlewis/private']);
+});
+test('MCP byte bounds and unknown totals are truthful', async () => {
+  await assert.rejects(readBounded(new Response('é'.repeat(9)),16), /too large/);
+  const response=new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(9));c.enqueue(new Uint8Array(9));c.close();}}));
+  await assert.rejects(readBounded(response,16), /too large/);
+  assert.deepEqual(page([1,2,3],2,null,true), {items:[1,2],limit:2,returned:2,total:null,truncated:true});
+  const value=bounded({rows:page(Array.from({length:50},()=>({text:'é'.repeat(1000)})),50)});
+  assert.ok(new TextEncoder().encode(JSON.stringify(value)).length<=32768);
+  assert.equal(value.error.code,'RESULT_TOO_LARGE');
+});
+test('MCP transport rejects invalid UTF-8, bounds tool results, and refuses unexpiring credentials', async () => {
+  const bad = await mcpResponse(new Request('https://site.example/mcp', { method: 'POST', body: new Uint8Array([0xff, 0xfe]) }), [], async () => ({}));
+  assert.equal(bad.status, 413);
+  const big = await mcpResponse(rpcRequest('tools/call', { name: 'get_bom', arguments: {} }), [{ name: 'get_bom' }],
+    async () => ({ text: 'x'.repeat(40000) }));
+  const result = (await big.json()).result;
+  assert.equal(result.isError, true);
+  assert.equal(JSON.parse(result.content[0].text).error.code, 'RESULT_TOO_LARGE');
+  const seen = [];
+  const deps = { open: async () => ({ t: 'secret', u: 'cam' }), allowedOwners: () => ['cameronrlewis'], gh: async (path) => { seen.push(path); return repoOk(); } };
+  await assert.rejects(mcpAccess({}, { credential: 'opaque' }, 'Cameronrlewis/private', deps), (e) => e instanceof McpError && e.code === 'AUTH_REQUIRED');
+  assert.equal(seen.length, 0);
+});
