@@ -213,6 +213,18 @@ jobs:
           path: review/${{ steps.report.outputs.name }}
           retention-days: 90
 
+      # One archived artifact per run holds every project's exported files (<project index>/<file>). Entries are
+      # stored, not recompressed: STEP and GLB are the bulk, and the review site reads one entry by byte range.
+      - name: Upload downloads
+        if: steps.report.outputs.downloads == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.report.outputs.downloads_name }}
+          path: review/downloads
+          compression-level: 0
+          retention-days: 90
+
       - name: Upload digest-keyed 3D assets
         if: steps.detect.outputs.changed == 'true' && hashFiles('review/3d/kicad-3d-*.gz') != ''
         continue-on-error: true

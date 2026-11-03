@@ -6832,4 +6832,15 @@ with tempfile.TemporaryDirectory() as d:
         os.chdir(cwd)
 print("ok report manifest, artifact folder, outputs and opt-out byte identity")
 
+wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+upload = wf[wf.index("- name: Upload downloads"):]
+upload = upload[:upload.index("\n      - name:", 10)]
+for needle in ("if: steps.report.outputs.downloads == 'true'", "continue-on-error: true",
+               "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+               "name: ${{ steps.report.outputs.downloads_name }}", "path: review/downloads", "compression-level: 0", "retention-days: 90"):
+    assert needle in upload, needle
+assert "archive: false" not in upload, "several files need an archived artifact"
+assert wf.index("- name: Upload report") < wf.index("- name: Upload downloads") < wf.index("- name: Screenshots of changed drawings")
+print("ok review.yml uploads the downloads artifact")
+
 
