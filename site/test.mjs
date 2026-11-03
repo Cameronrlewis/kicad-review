@@ -5888,10 +5888,13 @@ test('MCP consent renders consent page on GET and completes authorization on POS
         scope: ['read:design'],
         state: 'oauth-state-1',
       }),
-      lookupClient: async (id) => ({
-        clientName: 'Test AI Assistant',
-        redirectUris: ['https://client.example/cb'],
-      }),
+      lookupClient: async (id) => {
+        assert.equal(id, 'client-123');
+        return {
+          clientName: 'Test AI Assistant',
+          redirectUris: ['https://client.example/cb'],
+        };
+      },
       completeAuthorization: async (params) => {
         completedParams = params;
         return { redirectTo: 'https://client.example/cb?code=auth-code-ok&state=oauth-state-1' };
@@ -5942,9 +5945,9 @@ test('MCP consent renders consent page on GET and completes authorization on POS
   const html = await getRes.text();
   assert.ok(html.includes('<form method="post" action="/authorize">'));
   assert.ok(html.includes('<input type="hidden" name="pending" value="pending-cookie-token">'));
-  assert.ok(html.includes('Test AI Assistant'));
-  assert.ok(html.includes('https://client.example/cb'));
-  assert.ok(html.includes('cam'));
+  assert.ok(html.includes('<p>Signed in as cam.</p>'));
+  assert.ok(html.includes('<p>Client: Test AI Assistant</p>'));
+  assert.ok(html.includes('<p>Redirect: https://client.example/cb</p>'));
 
   // 2. Successful POST /authorize (allow) with mixed-case and padded Content-Type
   const postReq = new Request('https://site.example/authorize', {
@@ -5969,5 +5972,5 @@ test('MCP consent renders consent page on GET and completes authorization on POS
   });
   assert.equal(sealedCredential.t, 'gh-user-token');
   assert.equal(sealedCredential.u, 'cam');
-  assert.ok(sealedCredential.e <= now + 3600000);
+  assert.ok(sealedCredential.e >= now + 3600000 && sealedCredential.e <= Date.now() + 3600000);
 });
