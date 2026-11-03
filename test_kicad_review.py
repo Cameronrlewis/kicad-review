@@ -5833,3 +5833,8 @@ with tempfile.TemporaryDirectory() as tmp:
     size = struct.unpack("<I", out[12:16])[0]
     assert size % 4 == 0 and json.loads(out[20:20 + size])["asset"]["extras"] == {"pcb_name": "board.raw"}
     assert other.read_bytes() == b"not a glb"
+    for broken in (b"glTF" + struct.pack("<III", 2, 28, 8) + b"JSON" + b"{bad json", _glb("x")[:20] + b"[]      "):
+        other.write_bytes(broken); kicad_review.normalize_glb(other)
+        assert other.read_bytes() == broken
+    assert not list(pathlib.Path(tmp).glob("*.tmp"))
+print('ok BR02 GLB export timestamp normalized; bad input left as written')

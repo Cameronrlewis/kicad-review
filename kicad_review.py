@@ -472,22 +472,30 @@ def glb_argv(pcb, folder):
 
 
 def normalize_glb(path):
-    """Drop KiCad's export timestamp so identical boards keep identical bytes and cache keys."""
+    """Drop KiCad's export timestamp so identical boards keep identical bytes and cache keys.
+
+    Only cache stability depends on this, so anything unexpected leaves KiCad's file as written."""
     path = pathlib.Path(path)
-    data = path.read_bytes()
-    if len(data) < 20 or data[:4] != b'glTF' or data[16:20] != b'JSON':
+    try:
+        data = path.read_bytes()
+        if len(data) < 20 or data[:4] != b'glTF' or data[16:20] != b'JSON':
+            return
+        size = struct.unpack('<I', data[12:16])[0]
+        doc = json.loads(data[20:20 + size])
+    except (OSError, ValueError):
         return
-    size = struct.unpack('<I', data[12:16])[0]
-    doc = json.loads(data[20:20 + size])
-    extras = doc.get('asset', {}).get('extras')
+    asset = doc.get('asset') if isinstance(doc, dict) else None
+    extras = asset.get('extras') if isinstance(asset, dict) else None
     if not isinstance(extras, dict) or 'generated_at' not in extras:
         return
     del extras['generated_at']
     chunk = json.dumps(doc, separators=(',', ':')).encode('utf-8')
     chunk += b' ' * (-len(chunk) % 4)
     rest = data[20 + size:]
-    path.write_bytes(b'glTF' + data[4:8] + struct.pack('<I', 20 + len(chunk) + len(rest))
-                     + struct.pack('<I', len(chunk)) + b'JSON' + chunk + rest)
+    staged = path.with_name(path.name + '.tmp')
+    staged.write_bytes(b'glTF' + data[4:8] + struct.pack('<I', 20 + len(chunk) + len(rest))
+                       + struct.pack('<I', len(chunk)) + b'JSON' + chunk + rest)
+    os.replace(staged, path)
 
 
 def poster_argv(pcb, folder):
