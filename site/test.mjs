@@ -5379,3 +5379,67 @@ test('MCP inherited keys fail before the call boundary',async()=>{
   assert.equal(JSON.parse(batchBody[1].result.content[0].text).error.code,'INVALID_ARGUMENT');
   assert.equal(calls,0,'invalid arguments never reach authorization or GitHub');
 });
+
+import {designParts,projectLists} from './mcp-data.js';
+const projectionLoaded=()=>{const doc=mcpDoc();return {doc,project:doc.projects[0],revision:doc.projects[0].revisions.head,projectIndex:0,reportId:'90',provenance:{repo:doc.repo,commit:doc.head}};};
+function assertMcpLists(v,key=''){
+  if(Array.isArray(v)){
+    assert.ok(key==='items'||['size_mm','pos','pos_before','box','before','after'].includes(key)&&[2,4].includes(v.length)&&v.every(Number.isFinite),'unenveloped semantic array: '+key);
+    for(const item of v)assertMcpLists(item);return;
+  }
+  if(!v||typeof v!=='object')return;
+  if(Array.isArray(v.items))for(const k of ['limit','returned','total','truncated'])assert.ok(Object.hasOwn(v,k));
+  for(const [k,x] of Object.entries(v))assertMcpLists(x,k);
+}
+test('MCP actual producer design sheets and part properties',()=>{
+ const loaded=projectionLoaded(),r=loaded.revision;
+ r.parts=[{uuid:'u1',ref:'U1',value:'é'.repeat(2001),datasheet:'javascript:alert(1)',properties:{Voltage:'50V'},pins:[],pin_count:0}];
+ const clipped=designParts('find_parts',{query:'é'.repeat(1999)},loaded,'https://site.example');
+ assert.equal([...clipped.parts.items[0].value].length,2000);
+ assert.equal(clipped.parts.items[0].datasheet,null);
+ assert.ok(clipped.incompleteFields.items.includes('parts.U1.value'));
+ r.parts[0].datasheet='https://user:pass@example.com/datasheet.pdf';
+ assert.equal(designParts('find_parts',{query:'50V'},loaded,'https://site.example').parts.items[0].datasheet,null);
+ r.parts[0].datasheet='https://example.com/datasheet.pdf';
+ assert.equal(designParts('find_parts',{query:'50V'},loaded,'https://site.example').parts.items[0].datasheet,'https://example.com/datasheet.pdf');
+ const design=designParts('get_design',{},loaded,'https://site.example');
+ assert.equal(design.sheets.items[0].path,'/');assert.equal(design.sheets.total,1);
+ r.board={layers:['B.Cu','In2.Cu','In1.Cu','F.Cu'],copper_layers:['F.Cu','In1.Cu','In2.Cu','B.Cu'],size_mm:[20,30]};
+ loaded.project.checks=[{name:'drc',status:'fail',findings:[{type:'unconnected',items:['U1 pad 1','R1 pad 1']}]}];
+ const populated=designParts('get_design',{limit:1},loaded,'https://site.example');
+ assert.equal(populated.board.layers.total,4);assert.equal(populated.board.copper_layers.returned,1);
+ assert.deepEqual(populated.board.size_mm,[20,30]);
+ assert.equal(populated.checks.items[0].findings.items[0].items.total,null);
+ assert.equal(populated.checks.items[0].findings.items[0].items.truncated,true);
+ assertMcpLists(populated);
+ assert.equal(designParts('find_parts',{query:'50V'},loaded,'https://site.example').parts.returned,1);
+ loaded.doc.truncated=true;
+ assert.equal(designParts('find_parts',{query:'missing'},loaded,'https://site.example').parts.total,null);
+});
+test('MCP exact part references survive display clipping and byte rejection',()=>{
+  const loaded=projectionLoaded(),ref='R'+'é'.repeat(2001);
+  loaded.revision.parts=[{uuid:'long-ref',ref,value:'é'.repeat(2001),pins:[],pin_count:0}];
+  const out=designParts('find_parts',{query:'R'},loaded,'https://site.example');
+  assert.equal(out.parts.items[0].ref,ref);
+  assert.equal([...out.parts.items[0].value].length,2000);
+  assert.ok(out.incompleteFields.items.includes(`parts.${ref}.value`));
+  assert.ok(!out.incompleteFields.items.includes(`parts.${ref}.ref`));
+  assert.equal(bounded(out).parts.items[0].ref,ref);
+  loaded.revision.parts[0].ref='R'+'é'.repeat(20000);
+  assert.equal(bounded(designParts('find_parts',{query:'R'},loaded,'https://site.example')).error.code,'RESULT_TOO_LARGE');
+});
+test('MCP recursive lists retain tuples and source incompleteness',()=>{
+  const value={board:{layers:['F.Cu','B.Cu'],copper_layers:['F.Cu','B.Cu'],size_mm:[20,30]},
+    finding:{items:['U1','U2']},detail:{kind:'members',added:['R1.1'],removed:[],beforeNets:['12'],afterNets:['12'],transitions:[{pin:'R1.1',before:[],after:['12']} ]}};
+  const out=projectLists(value,1);
+  assert.equal(out.board.layers.total,2);assert.equal(out.board.layers.truncated,true);
+  assert.deepEqual(out.board.size_mm,[20,30]);assert.equal(out.finding.items.total,null);
+  assert.equal(out.detail.transitions.items[0].after.returned,1);
+  assert.deepEqual(out.detail.transitions.items[0].before,{items:[],limit:1,returned:0,total:0,truncated:false});
+  assert.equal(out.detail.removed.returned,0);
+  assertMcpLists(out);
+  assert.equal(projectLists({layers:['F.Cu'],layers_more:9},2).layers.total,10);
+  assert.equal(projectLists({layers:['F.Cu']},2,'',true).layers.total,null);
+  const stored={items:['F.Cu'],limit:8,returned:1,total:null,truncated:true};
+  assert.deepEqual(projectLists(stored,2),{items:['F.Cu'],limit:2,returned:1,total:null,truncated:true});
+});

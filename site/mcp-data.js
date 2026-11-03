@@ -172,3 +172,104 @@ export async function loadPrReview(access, pr, deps) {
     revisionKind: resolution.kind, commit: sha, base, targetTip, pr, artifactId: loaded.reportId,
     createdAt: loaded.artifact.created_at, upstreamTruncated: !!loaded.doc.truncated } };
 }
+
+// Semantic lists are bounded recursively. Coordinate tuples are fixed-size values, not list results.
+export function projectLists(value, limit = 15, key = '', unknown = false) {
+  const tupleKeys = new Set(['pos', 'pos_before', 'box', 'size_mm', 'before', 'after']);
+  if (Array.isArray(value)) {
+    if (tupleKeys.has(key) && [2, 4].includes(value.length) && value.every(n => typeof n === 'number' && Number.isFinite(n))) return value;
+    const rows = value.map(v => projectLists(v, limit, '', unknown));
+    return page(rows, limit, unknown || key === 'items' ? null : rows.length, unknown || key === 'items');
+  }
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value.items) && ['limit', 'returned', 'total', 'truncated'].every(k => Object.hasOwn(value, k))) {
+    const count = value.total, rows = value.items.map(v => projectLists(v, limit, '', unknown));
+    return { ...value, ...page(rows, Math.min(limit, value.limit), count, !!value.truncated || unknown) };
+  }
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => {
+    const more = value[k + '_more'];
+    if (Array.isArray(v) && !(tupleKeys.has(k) && [2, 4].includes(v.length) && v.every(n => typeof n === 'number' && Number.isFinite(n))) && Number.isInteger(more))
+      return [k, page(v.map(x => projectLists(x, limit, '', unknown)), limit, unknown ? null : v.length + more, more > 0 || unknown)];
+    return [k, projectLists(v, limit, k, unknown || !!value.truncated)];
+  }));
+}
+
+export const objectLink = (origin, loaded, key, value) => {
+  const hash = new URLSearchParams({ p: String(loaded.projectIndex), [key]: value });
+  return `${origin}/r/${loaded.provenance.repo.split('/').map(encodeURIComponent).join('/')}/a/${loaded.reportId}#${hash}`;
+};
+
+const displayText = (value, path, clipped) => {
+  const text = String(value ?? '');
+  if ([...text].length <= 2000) return text;
+  clipped.push(path);
+  return [...text].slice(0, 2000).join('');
+};
+
+const safeDatasheet = value => {
+  try {
+    const u = new URL(value);
+    return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password ? u.href : null;
+  } catch {
+    return null;
+  }
+};
+
+export function designParts(name, args, loaded, origin) {
+  const clipped = [];
+  const displayPart = p => ({
+    ...p,
+    ...Object.fromEntries(['value', 'footprint', 'mpn', 'lcsc'].filter(k => p[k] != null).map(k => [k, displayText(p[k], `parts.${p.ref}.${k}`, clipped)])),
+    datasheet: safeDatasheet(p.datasheet),
+  });
+  const { revision: r, project: p, doc } = loaded, limit = args.limit ?? 15;
+  const incomplete = !!doc.truncated, unknown = incomplete ? null : undefined;
+  const parts = r.parts || [], nets = r.nets || [];
+  const summaries = (p.checks || []).map(({ findings, more, ...summary }) => ({
+    ...summary,
+    findings: page((findings || []).map(f => projectLists(f, limit)), limit, (findings || []).length + (more || 0), !!more),
+  }));
+  const out = { provenance: loaded.provenance };
+  const part = p => ({
+    ...projectLists(displayPart(p), limit, '', incomplete),
+    id: p.uuid || null,
+    link: p.uuid ? objectLink(origin, loaded, 'part', p.uuid) : null,
+    pins: page((p.pins || []).map(v => projectLists(v, limit)), limit, p.pin_count ?? (p.pins || []).length, !!p.pins_more),
+  });
+  if (name === 'get_design') {
+    let sheets, sheetsIncomplete = false;
+    if (Array.isArray(r.sheets)) sheets = r.sheets;
+    else if (Array.isArray(p.sheets)) {
+      sheets = p.sheets.filter(s => s.status !== 'removed');
+      sheetsIncomplete = p.sheets.some(s => !['added', 'modified', 'unchanged', 'removed'].includes(s.status));
+    } else {
+      sheets = [];
+      sheetsIncomplete = true;
+    }
+    return {
+      ...out,
+      board: projectLists(r.board, limit, '', incomplete),
+      partCount: incomplete ? null : parts.length,
+      storedPartCount: parts.length,
+      sheets: page(sheets, limit, incomplete || sheetsIncomplete ? null : sheets.length, incomplete || sheetsIncomplete),
+      sheetsIncomplete,
+      checks: page(summaries, limit),
+      incompleteFields: page(clipped, limit),
+      netlist_available: r.netlist_available,
+      netlist_reason: r.netlist_reason || null,
+      incomplete,
+    };
+  }
+  if (name === 'find_parts') {
+    const q = args.query.toLowerCase();
+    const rows = parts.filter(p => [p.ref, p.value, p.mpn, ...Object.entries(p.properties || {}).flat()].some(x => String(x ?? '').toLowerCase().includes(q)));
+    return {
+      ...out,
+      parts: page(rows.map(part), limit, incomplete ? null : rows.length, incomplete),
+      incompleteFields: page(clipped, limit),
+      searchFieldsComplete: !incomplete && parts.every(p => p.properties && !p.properties_truncated && !(p.incomplete_fields || []).length),
+      ...(incomplete ? { reason: 'Source context is truncated; an empty match is not proof of absence.' } : {}),
+    };
+  }
+  throw new McpError('UNKNOWN_TOOL', 'Unknown design projection');
+}
