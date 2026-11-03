@@ -2837,13 +2837,17 @@ def collect_downloads(p, index, head, *, policy=None, purpose="comparison", repo
     try:
         envelope = json.loads(pathlib.Path(f"{src}/downloads.json").read_text(encoding="utf-8"))
         entries = envelope["files"]
-    except (OSError, KeyError, ValueError):
+        if not isinstance(entries, list):
+            return None
+    except (OSError, KeyError, ValueError, TypeError):
         return None
     if snapshot and envelope.get("policy") != download_policy_key(policy):
         return None  # a comparison-policy package never reaches a trusted snapshot
     out = []
     for e in entries:
-        item = {"kind": e["kind"], "label": e["label"]}
+        if not isinstance(e, dict):
+            continue
+        item = {"kind": e.get("kind"), "label": e.get("label")}
         path = f"{src}/{e['path']}" if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", e.get("path", "")) else ""
         if path and os.path.isfile(path) and os.path.getsize(path) > 0:
             os.makedirs(f"{staging}/{index}", exist_ok=True)
