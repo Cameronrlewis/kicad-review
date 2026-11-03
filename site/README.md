@@ -105,7 +105,7 @@ OAuth provider facts the MCP code relies on, checked against the installed types
 - Helpers: `listUserGrants(userId: string, options?) -> Promise<{items: GrantSummary[], cursor?: string}>` (each item has `id`), and `revokeGrant(grantId: string, userId: string) -> Promise<void>`, which deletes the grant and every token under it. The next bearer call returns 401 `invalid_token`.
 - Public revocation (RFC 7009) uses the token endpoint, which metadata advertises as `revocation_endpoint`. Send `POST` with `Content-Type: application/x-www-form-urlencoded` and the body `token=<access or refresh token>&token_type_hint=access_token&client_id=<client id>`; a confidential client authenticates the way it does at the token endpoint. The response is always 200. Revoking an access token deletes only that token; revoking a refresh token revokes the whole grant. After revocation the revoked bearer gets 401 with `WWW-Authenticate: Bearer ... error="invalid_token"`.
 
-The provider imports `cloudflare:workers`, so tests in Node that load it need that module stubbed.
+The provider imports `cloudflare:workers`, so `site/css-loader.mjs` defines a Node `resolve` hook stubbing `cloudflare:workers` (providing `WorkerEntrypoint`) so Node test suites can load the real OAuth provider.
 
 ## Settings
 

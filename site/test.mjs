@@ -6022,8 +6022,8 @@ test('MCP authorization metadata HEAD has no body to rewrite',async()=>{
 test('MCP entry honors injected deps.open in consent and suppresses default error warnings',async()=>{
   let openCalled=false,errorCaptured=null;
   const sealed=await signedIn();
-  const worker=makeMcpWorker({
-    open:async(val,e)=>{openCalled=true;return {auth:{redirectUri:'https://client.example/cb',state:'st'},nonce:'n',exp:Date.now()+60000,login:'Cameronrlewis'};},
+  const customWorker=makeMcpWorker({
+    open:async()=>{openCalled=true;return null;},
     onError:(err)=>{errorCaptured=err;},
   });
   const local={...env,OAUTH_KV:{}},ctx={waitUntil:()=>{}};
@@ -6032,14 +6032,34 @@ test('MCP entry honors injected deps.open in consent and suppresses default erro
     headers:{Origin:'https://site.example','Content-Type':'application/x-www-form-urlencoded',Cookie:`s=${sealed}; mc=pending-val`},
     body:'pending=pending-val&decision=deny',
   });
-  await worker.fetch(consentReq,local,ctx);
+  await customWorker.fetch(consentReq,local,ctx);
   assert.equal(openCalled,true);
   const invalidTokenReq=new Request('https://site.example/token',{
     method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'grant_type=authorization_code&code=invalid',
   });
-  await worker.fetch(invalidTokenReq,local,ctx);
+  await customWorker.fetch(invalidTokenReq,local,ctx);
   assert.ok(errorCaptured);
   assert.equal(errorCaptured.code,'invalid_client');
+
+  // Assert default makeMcpWorker() suppresses console.warn on expected 400/401 errors
+  const originalWarn=console.warn;
+  let warnCalls=0;
+  console.warn=(...args)=>{warnCalls++;};
+  try{
+    const defaultWorker=makeMcpWorker();
+    const tokenRes=await defaultWorker.fetch(invalidTokenReq,local,ctx);
+    assert.equal(tokenRes.status,400);
+    const unauthMcpReq=new Request('https://site.example/mcp',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'}),
+    });
+    const mcpRes=await defaultWorker.fetch(unauthMcpReq,local,ctx);
+    assert.equal(mcpRes.status,401);
+    assert.equal(warnCalls,0);
+  }finally{
+    console.warn=originalWarn;
+  }
 });
