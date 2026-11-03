@@ -6663,5 +6663,40 @@ with tempfile.TemporaryDirectory() as d:
     assert (folder / "board.raw.glb").is_file(), "board.raw.glb missing"
     assert not (folder / "board.glb").exists(), "board.glb should not exist when viewer is off"
     assert not (folder / "poster.png").exists(), "poster.png should not exist when poster is off"
+# render_cache_complete: raw GLB required on head only for downloads.enabled, not release-only (spec lines 27-28)
+with tempfile.TemporaryDirectory() as d, patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"):
+    c = pathlib.Path(d) / "cache"
+    c.mkdir()
+    prj = {"dir": "p", "name": "P"}
+    pcb_path = pathlib.Path(d) / "head/p/P.kicad_pcb"
+    pcb_path.parent.mkdir(parents=True)
+    pcb_path.write_text("(kicad_pcb)")
+    old_cwd = os.getcwd()
+    os.chdir(d)
+    try:
+        (c / ".complete").write_text(json.dumps(kr.image_export_identity(prj, "head")))
+        dl_set = copy.deepcopy(DEFAULT_SETTINGS)
+        dl_set["downloads"]["enabled"] = True
+        rel_set = copy.deepcopy(DEFAULT_SETTINGS)
+        rel_set["checks"]["release"] = "informational"
+        # downloads.enabled requires board.raw.glb on head
+        assert not kr.render_cache_complete(c, prj, "head", dl_set), "head downloads requires board.raw.glb"
+        (c / "board.raw.glb").write_bytes(b"")
+        assert not kr.render_cache_complete(c, prj, "head", dl_set), "empty board.raw.glb rejected"
+        (c / "board.raw.glb").write_bytes(b"glTF")
+        assert kr.render_cache_complete(c, prj, "head", dl_set), "valid board.raw.glb accepted"
+        (c / "board.raw.glb").unlink()
+        (c / "board.raw.glb.failed").write_text("failed")
+        assert kr.render_cache_complete(c, prj, "head", dl_set), "board.raw.glb.failed accepted"
+        (c / "board.raw.glb.failed").unlink()
+        # release-only does not export raw GLB, so it must not require board.raw.glb
+        assert kr.render_cache_complete(c, prj, "head", rel_set), "release-only must not require board.raw.glb"
+        # base side does not require board.raw.glb for downloads
+        pathlib.Path("base/p/P.kicad_pcb").parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path("base/p/P.kicad_pcb").write_text("(kicad_pcb)")
+        (c / ".complete").write_text(json.dumps(kr.image_export_identity(prj, "base")))
+        assert kr.render_cache_complete(c, prj, "base", dl_set), "base downloads must not require board.raw.glb"
+    finally:
+        os.chdir(old_cwd)
 print("ok render head gating, release-only staging and role/opt-in cache isolation")
 

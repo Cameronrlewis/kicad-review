@@ -671,6 +671,9 @@ def render_tool_identity():
 def render_cache_complete(cache, p, side, settings):
     if not cache or not image_cache_complete(cache, p, side):
         return False
+    # board.raw.glb is required for head only when downloads.enabled is True (spec lines 27-28,
+    # plan-context.md line 7). Release-only renders stage fab files but never produce raw GLB,
+    # so requiring raw GLB for release-only would cause permanent cache misses.
     if side == "head" and settings.get("downloads", {}).get("enabled") and pathlib.Path(board_path(p, side)).is_file():
         raw = cache / "board.raw.glb"
         if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
