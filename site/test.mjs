@@ -1,9 +1,12 @@
 import test from 'node:test';
-import { createHash } from 'node:crypto';
+import {createServer} from 'node:http';
+import {gzipSync, gunzipSync} from 'node:zlib';
+import { createHash, webcrypto } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
+import { threeClient } from './three-client.js';
 import { fixturePages } from './proof.mjs';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
@@ -189,7 +192,11 @@ async function callUrl(url, options) {
 }
 function mockFetch(handler) {
   const original = globalThis.fetch;
-  globalThis.fetch = handler;
+  // workerd throws on redirect 'error' (Node accepts it); fail the same way so server code cannot regress.
+  globalThis.fetch = (url, init) => {
+    if (init?.redirect === 'error') throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+    return handler(url, init);
+  };
   return () => { globalThis.fetch = original; };
 }
 function tokenResponse(overrides = {}) {
@@ -416,7 +423,9 @@ test('review page keeps its loading overlay until the framed report is ready and
   assert.match(page, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true/);
   assert.match(page, /setTimeout[\s\S]*20000/);
   assert.match(page, /pointer-events: none/);
-  assert.match(page, /const load = \(showLoading\) => \{ if \(showLoading\) \{ loading\.hidden = false; clearTimeout\(fallback\); \} iframe\.src = raw \+ location\.hash; \}; load\(true\);/);
+  assert.match(page, /assetParentFactory/);
+  assert.match(page, /let disposeAssets=assetParentFactory\(iframe,raw\);/);
+  assert.match(page, /const load = \(showLoading\) => \{[^}]*\} iframe\.src = raw \+ location\.hash;/);
   const hashchange = page.match(/addEventListener\('hashchange', \(\) => \{ if \(location\.hash !== reportedHash\) load\(false\); \}\);/);
   assert.ok(hashchange, 'hash changes forward without requesting the loading overlay');
   assert.doesNotMatch(hashchange[0], /loading\.hidden = false|clearTimeout/);
@@ -529,8 +538,12 @@ test('review route shows the repository after a pull-access check and refreshes 
   } finally { restore(); }
 });
 
-test('shared CSP module preserves the original report sandbox and wrapper policies', () => {
-  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'");
+test('shared CSP module permits report WebAssembly without weakening sandbox or wrapper policies', () => {
+  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; worker-src blob:; connect-src 'none'; frame-ancestors 'self'");
+  assert.match(reportCsp, /'wasm-unsafe-eval'/);
+  assert.doesNotMatch(reportCsp, /'unsafe-eval'/);
+  assert.match(reportCsp, /connect-src 'none'/);
+  assert.doesNotMatch(reportCsp, /allow-same-origin/);
   assert.equal(frameCsp, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
 });
 
@@ -545,10 +558,8 @@ test('report CSP and both iframe sandboxes allow only the BOM downloads token', 
     for (const attr of attrs) assert.deepEqual(tokens(attr), expected);
   }
   assert.ok(!reportCsp.includes('allow-same-origin') && /connect-src 'none'/.test(reportCsp));
-  // Preserve the optional 02 worker directive once that plan has merged.
-  // 02 has not merged here: pin its absence, never condition on the policy under test.
-  // On rebase onto 02, replace this with assert.match(reportCsp, /worker-src blob:/).
-  assert.doesNotMatch(reportCsp, /(?:^|;)\s*worker-src\b/);
+  // Preserve the 02 worker directive.
+  assert.match(reportCsp, /worker-src blob:/);
 });
 
 test('artifact frame and raw route redirect unsigned users without GitHub calls', async () => {
@@ -2097,10 +2108,15 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
   const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
     // BOM downloads add only this separately asserted sandbox token to the pinned frame.
     .replace('allow-popups-to-escape-sandbox allow-downloads', 'allow-popups-to-escape-sandbox')
+    // Deployment provenance is additive to the pinned pre-footer shell.
+    .replace('<meta name="deploy-sha" content="unknown">', '')
+    .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>', '')
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
-    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
+    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '')
+    // BR02 lazy 3D model broker (authenticated wrapper only) is additive.
+    .replace(/<script>\(function threeClient\([\s\S]*?<\/script>/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
-  assert.equal(createHash('sha256').update(current).digest('hex'), 'e425e07582503d0703ce8562bf3aafe8bded02bc802e1dcb55f7a0a01b4a966e');
+  assert.equal(createHash('sha256').update(current).digest('hex'), '34c84c0ecd44924b5e60d973f98419dfe51b49ce83d31841488613eecab462c7');
   const restore = shareCreationFetch();
   try {
     const cookie = await signedIn();
@@ -3283,6 +3299,9 @@ import { currentReport } from './report-shell.js';
 import { execFileSync } from 'node:child_process';
 const inlinePage = data => execFileSync('python3', ['-c', 'import runpy,sys;sys.stdout.write(runpy.run_path("kicad_review.py")["inline_page"](sys.stdin.read()))'],
   { cwd: new URL('..', import.meta.url), input: data, encoding: 'utf8', maxBuffer: 1 << 28 });
+test('image artwork controller is bundled into hosted reports', () => {
+  assert.ok(currentReport('<script>window.REVIEW_DATA = {};</script>').includes('globalThis.ImageView'));
+});
 test('stored reports are re-dressed exactly as kicad_review.py builds the current report', () => {
   for (const sample of ['review-data-2.js', 'review-data-3d.js']) {
     const data = readFileSync(new URL(`../ui/sample/${sample}`, import.meta.url), 'utf8');
@@ -3290,6 +3309,9 @@ test('stored reports are re-dressed exactly as kicad_review.py builds the curren
     // An old report: same data, an outdated interface around it.
     const old = current.replace(/<style>[\s\S]*?<\/style>/, '<style>old</style>').replace('KiCad review', 'Old review');
     assert.equal(currentReport(old), current);
+    assert.equal(current.split('window.ThreeStudio=').length - 1, 1);
+    assert.ok(current.indexOf('window.ThreeStudio=') < current.indexOf('const D = window.REVIEW_DATA'));
+    assert.doesNotMatch(current, /<script[^>]+src=/);
   }
 });
 test('reports without a recognisable data script are served unchanged', () => {
@@ -3299,4 +3321,1700 @@ test('reports without a recognisable data script are served unchanged', () => {
 test('data with replacement patterns is inserted literally', () => {
   const html = currentReport('<script>window.REVIEW_DATA = {"v":"$& $1 $$"};</script>');
   assert.match(html, /window\.REVIEW_DATA = \{"v":"\$& \$1 \$\$"\};/);
+});
+
+test('BR02 report embeds the decode worker and permits only blob workers', () => {
+  const html = inlinePage(readFileSync(new URL('../ui/sample/review-data-3d.js', import.meta.url), 'utf8'));
+  const dressed = currentReport(html);
+  const tag = dressed.match(/<script type="application\/octet-stream" id="three-decode-worker">([^<]*)<\/script>/);
+  assert.ok(tag);
+  assert.equal(Buffer.from(tag[1], 'base64').toString('utf8'), readFileSync(new URL('../ui/three-decode.js', import.meta.url), 'utf8'));
+  const studio = readFileSync(new URL('../ui/three-studio.js', import.meta.url), 'utf8');
+  assert.ok(dressed.includes(studio) && dressed.indexOf(studio) < dressed.indexOf('window.Review3D'), 'BR02 dressed report carries the studio script before the viewer');
+  assert.match(reportCsp, /(?:^|; )worker-src blob:(?:;|$)/);
+  assert.match(reportCsp, /connect-src 'none'/);
+  assert.doesNotMatch(reportCsp, /allow-same-origin|'unsafe-eval'|https?:|connect-src (?!'none')/);
+});
+
+test('BR02 broker enforces source and names and has a valid positive control',async()=>{
+  const listeners=[],sent=[],fetches=[], digest=createHash('sha256').update(new Uint8Array([103,108,84,70])).digest('hex');
+  const child={postMessage:(message,origin,transfer)=>sent.push({message,origin,transfer})};
+  const window={addEventListener:(name,fn)=>{if(name==='message')listeners.push(fn)}};
+  const document={querySelector:selector=>{assert.equal(selector,'#review-report');return {contentWindow:child};}};
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window,document,crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+    fetch:async(url,options)=>{fetches.push({url,options});return {
+      ok:true,arrayBuffer:async()=>new Uint8Array([103,108,84,70]).buffer};}
+  });
+  const valid={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest,kind:'board.glb'};
+  await listeners[0]({source:{},data:valid,origin:'null'});
+  assert.equal(fetches.length,0,'wrong window with valid asset must not fetch');
+  assert.equal(sent.length,0,'wrong window receives no reply');
+  for(const data of [{...valid,digest:'../secret'},{...valid,kind:'https://evil/model'},
+                     {...valid,id:0},{...valid,digest:'A'.repeat(64)},{...valid,nonce:null},{...valid,nonce:'old'},
+                     {...valid,digest:[digest]},{...valid,id:1.5},{...valid,id:Number.MAX_SAFE_INTEGER+1},
+                     {...valid,kicad3d:0},{...valid,kind:'board.raw.glb'},null])
+    await listeners[0]({source:child,data,origin:'null'});
+  assert.equal(fetches.length,0,'correct child invalid names must not fetch');
+  assert.equal(sent.length,0);
+  await listeners[0]({source:child,data:valid,origin:'null'});
+  assert.equal(fetches.length,1);
+  assert.equal(fetches[0].url,'/r/o/r/a/12/3d/'+digest+'/board.glb');
+  assert.equal(fetches[0].options.credentials,'same-origin');
+  assert.equal(fetches[0].options.redirect,'error');
+  assert.equal(sent.length,1);assert.equal(sent[0].message.id,1);assert.equal(sent[0].message.nonce,valid.nonce);
+  assert.equal(sent[0].message.kicad3d,1);assert.equal(sent[0].message.gzip,false);
+  assert.deepEqual([...new Uint8Array(sent[0].message.bytes)],[103,108,84,70]);
+  assert.equal(sent[0].transfer[0],sent[0].message.bytes);assert.equal(sent[0].origin,'*');
+});
+
+test('BR02 broker deduplicates inflight requests and replies on fetch failure',async()=>{
+  let listener,release,count=0;const replies=[];
+  const child={postMessage:m=>replies.push(m)};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{count++;await gate;return {ok:false}}});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'b'.repeat(64),kind:'board-parts.json'};
+  const a=listener({source:child,data}),b=listener({source:child,data:{...data,id:2}});
+  release();await Promise.all([a,b]);assert.equal(count,1);
+  assert.equal(replies.length,2);assert.ok(replies.every(r=>r.error==='Model unavailable. Retry.'&&!r.bytes&&r.nonce===data.nonce));
+  assert.deepEqual(replies.map(r=>r.id),[1,2]);
+  await listener({source:child,data:{...data,id:3}});
+  assert.equal(count,2,'failed asset can be retried');
+});
+
+test('BR02 broker limits distinct inflight assets and transfers independent deduplicated buffers',async()=>{
+  let listener,release;const fetches=[],sent=[],buffers=[];
+  const payloads=new Map([1,2,3,4].map(i=>{const bytes=new Uint8Array([1,2,3,i]);return [createHash('sha256').update(bytes).digest('hex'),bytes];}));
+  const digests=[...payloads.keys()];
+  const child={postMessage:(message,origin,transfer)=>{
+    assert.equal(origin,'*');
+    if(message.bytes){
+      assert.equal(transfer[0],message.bytes);
+      buffers.push(message.bytes);
+      // A real transfer detaches the sender buffer. The next reply must still work.
+      message=structuredClone(message,{transfer});
+    }
+    sent.push(message);
+  }};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async url=>{
+      fetches.push(url);await gate;
+      return {ok:true,arrayBuffer:async()=>payloads.get(url.split('/').at(-2)).buffer};
+    }});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:digests[0],kind:'board.glb'};
+  const requests=[listener({source:child,data})];
+  for(let i=2;i<=4;i++)requests.push(listener({source:child,data:{...data,id:i,digest:digests[i-1]}}));
+  requests.push(listener({source:child,data:{...data,id:5}}));
+  await listener({source:child,data:{...data,id:6,kind:'board-parts.json'}});
+  assert.equal(fetches.length,4,'duplicate shares a slot; different kind needs its own slot');
+  assert.equal(sent.length,1);assert.equal(sent[0].id,6);
+  assert.equal(sent[0].error,'Too many model requests. Retry.');
+  release();await Promise.all(requests);
+  const replies=sent.filter(m=>m.bytes);
+  assert.equal(replies.length,5);assert.equal(new Set(buffers).size,5);
+  assert.ok(buffers.every(b=>b.byteLength===0),'each reply buffer was transferred');
+  assert.ok(replies.every(m=>m.nonce===data.nonce&&m.gzip===false));
+  for(const reply of replies)assert.deepEqual([...new Uint8Array(reply.bytes)].slice(0,3),[1,2,3]);
+  await listener({source:child,data:{...data,id:7,kind:'board-parts.json'}});
+  assert.equal(fetches.length,5,'settled assets release their slots');
+  assert.equal(sent.at(-1).id,7);assert.ok(sent.at(-1).bytes);
+});
+
+test('BR02 broker drops success and error replies when the report frame changes',async()=>{
+  for(const outcome of ['success','http','network','body']){
+    let listener,release;const sent=[];
+    const child={postMessage:message=>sent.push(message)};
+    let frame={contentWindow:child};
+    const gate=new Promise(r=>release=r);
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>frame},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{
+        await gate;
+        if(outcome==='network')throw Error('network failure');
+        return {ok:outcome!=='http',arrayBuffer:async()=>{
+          if(outcome==='body')throw Error('body failure');
+          return new ArrayBuffer(4);
+        }};
+      }});
+    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'d'.repeat(64),kind:'board.glb'};
+    const pending=listener({source:child,data});
+    frame={contentWindow:{postMessage:message=>sent.push(message)}};
+    release();await pending;
+    assert.equal(sent.length,0,outcome);
+    frame=null;
+    await listener({source:child,data});
+    assert.equal(sent.length,0,'removed frame ignored');
+  }
+});
+
+test('BR02 broker reports network and body errors and allows retry',async()=>{
+  for(const outcome of ['network','body']){
+    let listener,count=0;const replies=[];
+    const child={postMessage:m=>replies.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{
+        count++;
+        if(count===1&&outcome==='network')throw Error('network failure');
+        return {ok:true,arrayBuffer:async()=>{
+          if(count===1)throw Error('body failure');
+          return new ArrayBuffer(4);
+        }};
+      }});
+    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:createHash('sha256').update(new Uint8Array(4)).digest('hex'),kind:'board.glb'};
+    await listener({source:child,data});
+    assert.equal(replies[0].error,outcome+' failure');
+    assert.equal(replies[0].nonce,data.nonce);assert.equal(replies[0].id,1);assert.ok(!replies[0].bytes);
+    await listener({source:child,data:{...data,id:2}});
+    assert.equal(count,2);assert.equal(replies[1].id,2);assert.ok(replies[1].bytes);
+  }
+});
+
+test('BR02 broker caps duplicate waiters per asset',async()=>{
+  let listener,release,count=0;const replies=[];
+  const child={postMessage:m=>replies.push(m)};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{count++;await gate;return {ok:true,arrayBuffer:async()=>new ArrayBuffer(4)}}});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:createHash('sha256').update(new Uint8Array(4)).digest('hex'),kind:'board.glb'};
+  const requests=[];
+  for(let id=1;id<=17;id++)requests.push(listener({source:child,data:{...data,id}}));
+  assert.equal(replies.length,1);
+  assert.equal(replies[0].error,'Too many requests for this model. Retry.');
+  release();await Promise.all(requests);assert.equal(count,1);
+  assert.equal(replies.length,17);
+});
+
+test('BR02 broker distinguishes authorization denial from retryable unavailability',async()=>{
+  for(const status of [401,403]){
+    let listener;const replies=[];const child={postMessage:m=>replies.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>({ok:false,status})});
+    await listener({source:child,data:{kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:status,digest:'9'.repeat(64),kind:'board.glb'}});
+    assert.equal(replies[0].error,'Model access denied. Refresh the review link or sign in, then retry.');
+  }
+});
+
+test('BR02 broker rejects endpoints outside the authenticated model route',()=>{
+  for(const endpoint of ['https://evil/model/','//evil/','/r/o/r/a/12/raw','/r/o/r/a/no/3d/','/s/token/3d/']){
+    assert.throws(()=>runInNewContext(`(${threeClient.toString()})(${JSON.stringify({endpoint})})`,{Error}),/invalid model endpoint/);
+  }
+});
+
+
+test('BR02 broker verifies SHA-256 before transferring models and allows retry',async()=>{
+  let listener;const sent=[],bytes=new Uint8Array([103,108,84,70]);
+  const digest=createHash('sha256').update(bytes).digest('hex');
+  const child={postMessage:message=>sent.push(message)};
+  let corrupt=true;
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+    fetch:async()=>({ok:true,arrayBuffer:async()=>corrupt?new ArrayBuffer(4):bytes.buffer})
+  });
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest,kind:'board.glb'};
+  await listener({source:child,data});
+  assert.equal(sent[0].error,'Model digest mismatch. Retry.');
+  assert.equal(sent[0].bytes,undefined);
+  corrupt=false;await listener({source:child,data:{...data,id:2}});
+  assert.deepEqual([...new Uint8Array(sent[1].bytes)],[...bytes]);
+});
+
+
+for(const encoded of [true,false])test('BR02 broker gzip transport '+(encoded?'fetch-decodes before hashing':'without Content-Encoding fails closed'),async()=>{
+  const raw=Buffer.from('glTF model payload'),packed=gzipSync(raw);
+  const server=createServer((req,res)=>{
+    res.writeHead(200,{'Content-Type':'model/gltf-binary',...(encoded?{'Content-Encoding':'gzip'}:{})});
+    res.end(packed);
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try {
+    let listener;const sent=[],child={postMessage:m=>sent.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+      fetch:(url,options)=>fetch(`http://127.0.0.1:${server.address().port}${url}`,options)
+    });
+    await listener({source:child,data:{kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,
+      digest:createHash('sha256').update(raw).digest('hex'),kind:'board.glb'}});
+    if(encoded){assert.deepEqual(Buffer.from(sent[0].bytes),raw);assert.equal(sent[0].gzip,false);}
+    else {assert.equal(sent[0].error,'Model digest mismatch. Retry.');assert.equal(sent[0].bytes,undefined);}
+  } finally {await new Promise(resolve=>server.close(resolve));}
+});
+
+// Task 9.1: authenticated image delivery and the opaque-frame bridge.
+import { assetFromReport, readStoredData, privateAsset } from './worker.js';
+const imageId = 'abcdef123456';
+const imageText = '<svg xmlns="http://www.w3.org/2000/svg"/>';
+const imageData = () => ({ version: 1, assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
+  blobs: { [imageId]: gzipSync(imageText).toString('base64'), deadbeef0000: 'kept-glb' }, unknown: { keep: true } });
+const storedImageReport = (data = imageData()) => `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+
+test('asset extraction only accepts declared digest and kind', () => {
+  const data = imageData(), html = storedImageReport(data);
+  assert.deepEqual(readStoredData(html), data);
+  assert.deepEqual(Buffer.from(assetFromReport(html, imageId, 'svg')), gzipSync(imageText));
+  for (const [id, kind] of [[imageId, 'json'], ['../../secret', 'svg'], ['deadbeef0000', 'svg'], [imageId, 'glb']])
+    assert.equal(assetFromReport(html, id, kind), null);
+  for (const value of ['null', '[]', '42', '{bad', '{"blobs":{}} trailing'])
+    assert.equal(readStoredData(`<script>window.REVIEW_DATA = ${value};</script>`), null);
+  data.blobs[imageId] = '!invalid base64';
+  assert.equal(assetFromReport(storedImageReport(data), imageId, 'svg'), null);
+});
+
+test('asset extraction preserves every byte of blobs larger than 256 KB', () => {
+  const bytes = Buffer.alloc(300 * 1024 + 1);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = i % 256;
+  const base64 = bytes.toString('base64'), data = imageData();
+  data.blobs[imageId] = base64;
+  assert.deepEqual(Buffer.from(assetFromReport(storedImageReport(data), imageId, 'svg')), Buffer.from(base64, 'base64'));
+});
+
+test('hosted asset descriptors strip only eligible blobs; offline and guest keep every blob', () => {
+  const stored = storedImageReport();
+  const hosted = readStoredData(currentReport(stored, { lazyAssets: true }));
+  assert.equal(hosted.blobs[imageId], undefined);
+  assert.equal(hosted.blobs.deadbeef0000, 'kept-glb');
+  assert.deepEqual(hosted.assets, imageData().assets);
+  assert.deepEqual(hosted.unknown, { keep: true });
+  assert.deepEqual(readStoredData(currentReport(stored)), imageData());
+  assert.equal(readStoredData(stored).blobs[imageId], imageData().blobs[imageId]);
+});
+
+for (const [digest, kind, mime] of [
+  ['abcdef123456', 'svg', 'image/svg+xml'], ['abcdef123456', 'json', 'application/json'],
+  ['c'.repeat(64), 'board.glb', 'model/gltf-binary'], ['d'.repeat(64), 'board-parts.json', 'application/json'],
+]) test('conditional asset reuse authorizes before 200 or 304: ' + kind, async () => {
+  let allowed = true, calls = 0;
+  const load = async () => { calls++; return allowed ? new Uint8Array([1, 2, 3]) : new Response('absent', { status: 404, headers: { 'Cache-Control': 'no-store' } }); };
+  const path = kind === 'svg' || kind === 'json' ? 'assets/' + digest + '.' + kind : '3d/' + digest + '/' + kind;
+  const url = 'https://site/r/Cameronrlewis/repo/a/42/' + path;
+  const first = await privateAsset(new Request(url), digest, kind, load);
+  assert.equal(first.status, 200); assert.equal(first.headers.get('Cache-Control'), 'private,no-cache');
+  assert.equal(first.headers.get('Content-Security-Policy'), "default-src 'none'; sandbox");
+  assert.equal(first.headers.get('ETag'), '"' + digest + '"');
+  assert.equal(first.headers.get('Vary'), 'Cookie'); assert.equal(first.headers.get('Content-Type'), mime);
+  const req = new Request(url, { headers: { 'If-None-Match': first.headers.get('ETag') } });
+  const reused = await privateAsset(req, digest, kind, load);
+  assert.equal(reused.status, 304); assert.equal(reused.headers.get('Cache-Control'), 'private,no-cache');
+  assert.equal(reused.headers.get('Content-Security-Policy'), "default-src 'none'; sandbox");
+  allowed = false;
+  const denied = await privateAsset(req, digest, kind, load);
+  assert.equal(denied.status, 404); assert.equal(calls, 3);
+  assert.equal(denied.headers.get('Cache-Control'), 'no-store');
+});
+
+test('digest assets revalidate permissions and expiry before 200 or 304 and never leak redirects', async () => {
+  const sealed = await signedIn(); let denied = false, expired = false, unknown = false, pullRevoked = false;
+  const seen = [];
+  const restore = mockFetch(async (url, options) => {
+    seen.push(url);
+    if (url.endsWith('/repo')) return pullRevoked ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })) : denied ? new Response('{}', { status: 404 }) : accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return unknown ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({ name: 'kicad-review.html', expired, workflow_run: { repository_id: 5 } }));
+    if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/image-envelope' } });
+    assert.equal(url, 'https://signed.example/image-envelope');
+    assert.equal(options?.headers?.Authorization, undefined);
+    return new Response(storedImageReport());
+  });
+  const path = `/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`;
+  const get = (etag = false) => call(path, { headers: { Cookie: `s=${sealed}`, ...(etag ? { 'If-None-Match': `"${imageId}"` } : {}) } });
+  try {
+    let r = await call(path); assert.equal(r.status, 404); assert.equal(r.headers.get('Location'), null); assert.match(r.headers.get('cache-control'), /no-store/); assert.doesNotMatch(await r.text(), /<html|Sign in/i); assert.equal(seen.length, 0);
+    r = await get(); assert.equal(r.status, 200);
+    assert.equal(r.headers.get('Cache-Control'), 'private,no-cache'); assert.equal(r.headers.get('Vary'), 'Cookie');
+    assert.equal(r.headers.get('ETag'), `"${imageId}"`); assert.equal(r.headers.get('Content-Encoding'), 'gzip');
+    assert.equal(r.headers.get('Content-Type'), 'image/svg+xml'); assert.equal(r.headers.get('Access-Control-Allow-Origin'), null);
+    assert.deepEqual(Buffer.from(await r.arrayBuffer()), gzipSync(imageText));
+    r = await get(true); assert.equal(r.status, 304); assert.equal(await r.text(), '');
+    denied = true; r = await get(true); assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
+    denied = false; pullRevoked = true; r = await get(true); assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
+    pullRevoked = false; expired = true; r = await get(true); assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
+    expired = false; unknown = true; r = await get(true); assert.equal(r.status, 404);
+    unknown = false;
+    for (const tail of [`${imageId}.json`, 'deadbeef0000.svg', 'bad.svg']) {
+      r = await call(`/r/Cameronrlewis/repo/a/42/assets/${tail}`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
+    }
+    for (const url of seen) assert.doesNotMatch(url, /Other/);
+  } finally { restore(); }
+});
+
+test('worker wrapper response defers the allowlist envelope fetch to the browser; raw and each asset read it once', async () => {
+  const sealed = await signedIn(), seen = [];
+  const restore = mockFetch(async url => {
+    seen.push(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired: false });
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
+    assert.equal(url, 'https://signed.example/envelope');
+    return new Response(storedImageReport());
+  });
+  try {
+    const options = { headers: { Cookie: `s=${sealed}` } };
+    const page = await call('/r/Cameronrlewis/repo/a/42', options);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /assetParentFactory/);
+    assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42']);
+    for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
+      const result = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, options);
+      assert.equal(result.status, 200);
+      await result.arrayBuffer();
+    }
+    assert.equal(seen.filter(url => url.endsWith('/zip')).length, 2);
+    assert.equal(seen.filter(url => url === 'https://signed.example/envelope').length, 2);
+  } finally { restore(); }
+});
+
+test('asset parent validates server-declared kind and digest before reading response bytes', async () => {
+  for (const manifest of [{}, {assets: {[imageId]: {kind: 'json'}}}, {assets: {deadbeef0000: {kind: 'svg'}}}]) {
+    let reads = 0;
+    const h = assetBridgeHarness({ manifest, fetcher: async () => { reads++; return new Response(imageText); } });
+    await h.message({ requestId: 'invalid', digest: imageId, kind: 'svg' });
+    assert.equal(reads, 0, 'undeclared response bytes must not be requested');
+    assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+    assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, undefined);
+  }
+});
+
+const assetHeaders = (digest = imageId, kind = 'svg') => ({
+  'Content-Type': kind === 'svg' ? 'image/svg+xml' : 'application/json', ETag: `"${digest}"`,
+});
+function assetBridgeHarness({ fetcher = async () => new Response(imageText, { headers: assetHeaders() }),
+  manifest = {assets: {[imageId]: {kind: 'svg'}, deadbeef1111: {kind: 'json'}}}, realManifest = false } = {}) {
+  const listeners = {}, sent = [], calls = [], timers = new Map(); let timerId = 0;
+  const iframe = { contentWindow: { postMessage: message => sent.push(message) } };
+  const scope = {addEventListener: (n, f) => { listeners[n] = f; }, removeEventListener: n => { delete listeners[n]; }};
+  const stop = runInNewContext(`(${assetParent.toString()})(iframe, '/r/o/r/a/42/raw', scope, fetcher)`, {
+    iframe, scope, AbortController, AbortSignal, Blob, TextDecoder,
+    setTimeout: f => { timers.set(++timerId, f); return timerId; }, clearTimeout: id => timers.delete(id),
+    fetcher: (url, options) => {
+      calls.push([url, options]);
+      return url.endsWith('/raw') && !realManifest
+        ? Promise.resolve(new Response('<script>window.REVIEW_DATA = '+JSON.stringify(manifest)+';</script>'))
+        : fetcher(url, options);
+    },
+  });
+  listeners.pagehide = stop;
+  return { sent, calls, timers, listeners, stop, cancel: requestId => listeners.message({source:iframe.contentWindow,data:{kicadReviewAssetCancel:{requestId}}}), message: (value, source = iframe.contentWindow) => listeners.message({ source, data: { kicadReviewAsset: value } }) };
+}
+const settleAsset = async () => { for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve)); };
+test('asset parent ignores foreign windows, forged IDs and unsupported kinds', async () => {
+  const h = assetBridgeHarness(); const valid = { requestId: 'r1', digest: imageId, kind: 'svg' };
+  h.message(valid, {});
+  for (const bad of [{ ...valid, requestId: {} }, { ...valid, requestId: 'x'.repeat(129) }, { ...valid, digest: '../../secret' }, { ...valid, kind: 'glb' }]) h.message(bad);
+  await settleAsset(); assert.equal(h.calls.length, 0);
+  h.message({...valid,url:'https://attacker.example'}); await settleAsset(); assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[0][0], '/r/o/r/a/42/raw');
+  assert.equal(h.calls[1][0], `/r/o/r/a/42/assets/${imageId}.svg`);
+  assert.equal(h.calls[1][1].credentials, 'include');
+  assert.equal(h.calls[1][1].cache, 'no-cache');
+  assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, imageText);
+});
+test('asset parent uses authenticated route declarations without trusting the child manifest', async () => {
+  const sealed = await signedIn(); let denied = false, expired = false, downloads = 0;
+  const data = imageData();
+  data.assets.deadbeef1111 = { kind: 'json', name: 'hotspots.json' };
+  data.blobs.deadbeef1111 = gzipSync('{"version":1}').toString('base64');
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return denied ? new Response('{}', { status: 404 }) : accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired });
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
+    assert.equal(url, 'https://signed.example/envelope'); downloads++;
+    return new Response(storedImageReport(data));
+  });
+  const h = assetBridgeHarness({ realManifest: true, fetcher: async url => {
+    const result = await call(url.replace('/r/o/r/', '/r/Cameronrlewis/repo/'), { headers: { Cookie: `s=${sealed}` } });
+    // Fetch decodes Content-Encoding in the browser; the Worker test Response does not.
+    return result.ok && !url.endsWith('/raw') ? new Response(gunzipSync(await result.arrayBuffer()), { headers: result.headers }) : result;
+  } });
+  const ask = (requestId, digest = imageId, kind = 'svg') => h.message({ requestId, digest, kind });
+  try {
+    await ask('svg'); assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, imageText);
+    await ask('json', 'deadbeef1111', 'json'); assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, '{"version":1}');
+    for (const [digest, kind] of [[imageId, 'json'], ['deadbeef0000', 'svg']]) {
+      await ask(`invalid_${kind}`, digest, kind);
+      assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+      assert.equal(h.sent.at(-1).kicadReviewAssetResult.text, undefined);
+    }
+    assert.equal(downloads, 3, 'one allowlist envelope plus one envelope per declared asset');
+    denied = true; await ask('revoked'); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+    denied = false; expired = true; await ask('expired'); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+    assert.equal(downloads, 3, 'revocation and expiry revalidate every fetch before downloading');
+  } finally { restore(); }
+});
+
+test('asset parent bounds concurrency, times out, rejects oversized decoded SVG and JSON, permits retry', async () => {
+  const h = assetBridgeHarness({ fetcher: (_, {signal}) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(Error('aborted')))) });
+  for (let i = 0; i < 9; i++) h.message({ requestId: `r${i}`, digest: imageId, kind: 'svg' });
+  await settleAsset();
+  assert.equal(h.calls.length, 9); assert.match(h.sent.at(-1).kicadReviewAssetResult.error, /Busy; retry/);
+  for (const timer of [...h.timers.values()]) timer(); await settleAsset();
+  assert.equal(h.calls[1][1].signal.aborted, true);
+  assert.equal(h.sent.filter(x => x.kicadReviewAssetResult.error).length, 9);
+  h.message({ requestId: 'retry', digest: imageId, kind: 'svg' }); await settleAsset(); assert.equal(h.calls.length, 10);
+  h.stop();
+  for (const [kind, digest, size] of [['svg', imageId, 8 * 1024 * 1024], ['json', 'deadbeef1111', 4 * 1024 * 1024]]) {
+    const over = assetBridgeHarness({ fetcher: async () => new Response('x'.repeat(size + 1), { headers: assetHeaders(digest, kind) }) });
+    over.message({ requestId: 'over', digest, kind }); await settleAsset();
+    assert.match(over.sent.at(-1).kicadReviewAssetResult.error, /unavailable/i);
+    assert.equal(over.sent.at(-1).kicadReviewAssetResult.text, undefined);
+  }
+});
+
+function assetClientHarness() {
+  const listeners = {}, sent = [], timers = new Map(), delays = new Map(); let id = 0;
+  const parent = { postMessage: value => sent.push(value) };
+  const source = readFileSync(new URL('../ui/image-view.js', import.meta.url), 'utf8');
+  const context = { parent, console, TextEncoder,
+    addEventListener: (n, f) => { listeners[n] = f; }, removeEventListener: n => { delete listeners[n]; },
+    setTimeout: (f, delay) => { const key = ++id; delays.set(key, delay); timers.set(key, () => { timers.delete(key); f(); }); return key; }, clearTimeout: key => timers.delete(key) };
+  const client = runInNewContext(`${source}; ImageView.assetClient(parent,{'${imageId}':{kind:'svg'}},globalThis)`, context);
+  return { client: {request: id => client.get(id,'svg'), dispose: () => client.dispose()}, sent, timers, delays, listeners,
+    result(value, from = parent) { listeners.message?.({ source: from, data: { kicadReviewAssetResult: value } }); } };
+}
+test('asset child accepts only parent results for pending digest, times out and retries in a new view', async () => {
+  const h = assetClientHarness(); let complete = false;
+  const p = h.client.request(imageId).then(x => { complete = true; return x; });
+  const { requestId } = h.sent[0].kicadReviewAsset;
+  const valid = { requestId, digest: imageId, text: imageText };
+  h.result(valid, {}); h.result({ ...valid, digest: 'deadbeef0000' }); h.result({ ...valid, requestId: 'forged' });
+  await settleAsset(); assert.equal(complete, false);
+  h.result(valid); assert.equal(await p, imageText); assert.equal(h.timers.size, 0);
+  const pending = Array.from({ length: 10 }, () => h.client.request(imageId));
+  const rejected = pending.map(p => assert.rejects(p, /unavailable|disposed/i));
+  assert.equal(h.sent.length, 9, 'at most eight simultaneous parent requests');
+  h.client.dispose(); await Promise.all(rejected); assert.equal(h.timers.size, 0); assert.equal(h.listeners.message, undefined);
+  await assert.rejects(h.client.request(imageId), /unavailable/i);
+  const next = assetClientHarness(), retry = next.client.request(imageId), timeout = assert.rejects(retry, /timeout; retry available/i);
+  for (const timer of [...next.timers.values()]) timer(); await timeout;
+  const last = next.client.request(imageId), message = next.sent.at(-1).kicadReviewAsset;
+  next.result({ requestId: message.requestId, digest: imageId, text: imageText }); assert.equal(await last, imageText);
+});
+test('asset child retries Busy replies after backoff and resolves the text', async () => {
+  const h = assetClientHarness(), p = h.client.request(imageId);
+  p.catch(() => {});
+  const first = h.sent[0].kicadReviewAsset;
+  assert.equal(h.delays.get([...h.timers.keys()][0]), 15000);
+  h.result({ ...first, error: 'Busy; retry' });
+  assert.equal(h.sent.length, 1, 'no immediate retry');
+  assert.equal(h.timers.size, 1, 'Busy schedules a backoff');
+  const [key, retry] = [...h.timers][0];
+  assert.ok(h.delays.get(key) >= 100 && h.delays.get(key) <= 250);
+  const queued = h.client.request(imageId);
+  assert.equal(h.sent.length, 1, 'new requests cannot bypass backoff');
+  retry();
+  assert.equal(h.sent.length, 3);
+  const next = h.sent[1].kicadReviewAsset;
+  assert.notEqual(next.requestId, first.requestId);
+  assert.equal(h.delays.get([...h.timers.keys()][0]), 15000);
+  h.result({ ...next, text: imageText });
+  assert.equal(await p, imageText, 'Busy request retries ahead of newly queued work');
+  h.result({ ...h.sent[2].kicadReviewAsset, text: 'queued' });
+  assert.equal(await queued, 'queued'); assert.equal(h.timers.size, 0);
+  h.client.dispose();
+});
+for (const order of [[0, 1], [1, 0]]) test(`asset child preserves FIFO when Busy replies arrive in order ${order}`, async () => {
+  const h = assetClientHarness(), requests = [h.client.request(imageId), h.client.request(imageId)];
+  const initial = h.sent.map(message => message.kicadReviewAsset);
+  h.result({ ...initial[order[0]], error: 'Busy; retry' });
+  requests.push(h.client.request(imageId));
+  h.result({ ...initial[order[1]], error: 'Busy; retry' });
+  assert.equal(h.sent.length, 2, 'later work waits for backoff');
+  assert.equal(h.timers.size, 1);
+  for (const timer of [...h.timers.values()]) timer();
+  assert.equal(h.sent.length, 5);
+  const texts = ['A', 'B', 'later'];
+  h.sent.slice(2).forEach((message, i) => h.result({ ...message.kicadReviewAsset, text: texts[i] }));
+  assert.deepEqual(await Promise.all(requests), texts, 'retries retain get() order ahead of later work');
+  assert.equal(h.timers.size, 0); h.client.dispose();
+});
+test('asset child disposal during Busy backoff rejects without posting again', async () => {
+  const h = assetClientHarness(), p = h.client.request(imageId);
+  const rejected = assert.rejects(p, /disposed/i);
+  h.result({ ...h.sent[0].kicadReviewAsset, error: 'Busy; retry' });
+  const callbacks = [...h.timers.values()];
+  h.client.dispose();
+  await rejected;
+  assert.equal(h.timers.size, 0);
+  for (const timer of callbacks) timer();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.listeners.message, undefined);
+});
+test('asset child rejects non-Busy errors without scheduling retry', async () => {
+  const h = assetClientHarness();
+  for (const error of ['revoked', 'Busy; retry later']) {
+    const p = h.client.request(imageId), rejected = assert.rejects(p, /Asset unavailable/);
+    h.result({ ...h.sent.at(-1).kicadReviewAsset, error });
+    await rejected;
+    assert.equal(h.timers.size, 0);
+  }
+  assert.equal(h.sent.length, 2); h.client.dispose();
+});
+test('asset child rejects oversized and error replies without caching a false success', async () => {
+  const h = assetClientHarness();
+  for (const fields of [{ error: 'revoked' }, { text: 'x'.repeat(8 * 1024 * 1024 + 1) }, { text: 'é'.repeat(5 * 1024 * 1024) }]) {
+    const p = h.client.request(imageId), rejection = assert.rejects(p, /unavailable/i);
+    h.result({ ...h.sent.at(-1).kicadReviewAsset, ...fields }); await rejection;
+  }
+});
+test('digest asset denies foreign repository IDs, expired timestamps and unknown artifacts before downloading', async () => {
+  const sealed = await signedIn(); let mode = 'foreign', downloads = 0;
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return new Response(JSON.stringify({ id: 10, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
+    if (url.endsWith('/artifacts/42')) return mode === 'unknown' ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({
+      name: 'kicad-review.html', expired: false, expires_at: mode === 'invalid' ? 'not-a-date' : mode === 'expired' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z',
+      workflow_run: { repository_id: mode === 'foreign' ? 20 : 10 } }));
+    downloads++; throw new Error(`must not download ${url}`);
+  });
+  try {
+    for (mode of ['foreign', 'expired', 'invalid', 'unknown']) {
+      const r = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${imageId}"` } });
+      assert.equal(r.status, 404); assert.match(r.headers.get('cache-control'), /no-store/);
+    }
+    assert.equal(downloads, 0);
+  } finally { restore(); }
+});
+test('digest JSON uses gzip MIME and hosted raw takes declarations only from the stored envelope', async () => {
+  const sealed = await signedIn(), data = imageData(); data.assets[imageId].kind = 'json';
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
+    return new Response(storedImageReport(data));
+  });
+  try {
+    const options = { headers: { Cookie: `s=${sealed}` } };
+    const r = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.json`, options);
+    assert.equal(r.headers.get('Content-Type'), 'application/json'); assert.equal(r.headers.get('Content-Encoding'), 'gzip');
+    const page = await (await call('/r/Cameronrlewis/repo/a/42', options)).text();
+    assert.ok(!page.includes(`"${imageId}":{"kind":"json"}`), 'wrapper does not parse or embed the envelope allowlist');
+    const raw = await (await call('/r/Cameronrlewis/repo/a/42/raw', options)).text();
+    assert.equal(readStoredData(raw).blobs[imageId], undefined);
+    assert.equal(readStoredData(raw).assets[imageId].kind, 'json');
+    assert.match(reportCsp, /connect-src 'none'/); assert.doesNotMatch(page, /allow-same-origin/);
+    assert.doesNotMatch(sharedPage({ token: 'x', name: 'kicad-review.html' }), /assetParentFactory/);
+  } finally { restore(); }
+});
+test('private gzip responses preserve encodeBody manual through the wrapper', async () => {
+  const sealed = await signedIn({ e: Date.now() - 1 });
+  const Original = globalThis.Response, encodings = new WeakMap(); let refreshes = 0;
+  globalThis.Response = class extends Original {
+    constructor(body, init) { super(body, init); encodings.set(this, init?.encodeBody); }
+  };
+  const restore = mockFetch(async url => {
+    if (url === 'https://github.com/login/oauth/access_token') { refreshes++; return tokenResponse(); }
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
+    assert.equal(url, 'https://signed.example/envelope');
+    return new Response(storedImageReport());
+  });
+  try {
+    for (const status of [200, 304]) {
+      const headers = { Cookie: `s=${sealed}` };
+      if (status === 304) headers['If-None-Match'] = `"${imageId}"`;
+      const r = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, { headers });
+      assert.equal(r.status, status);
+      assert.equal(encodings.get(r), 'manual', 'final session-wrapped response must preserve manual gzip encoding');
+      assert.equal(r.headers.get('Content-Encoding'), 'gzip');
+      assert.equal(r.headers.get('Content-Type'), 'image/svg+xml');
+      assert.equal(r.headers.get('Cache-Control'), 'private,no-cache');
+      assert.equal(r.headers.get('ETag'), `"${imageId}"`);
+      assert.equal(r.headers.get('Vary'), 'Cookie');
+      assert.equal(r.headers.get('X-Content-Type-Options'), 'nosniff');
+      const refreshed = cookieValue(r, 's');
+      assert.ok(refreshed); assert.notEqual(refreshed, sealed);
+      assert.equal((await open(refreshed, env)).t, 'access-secret');
+      assert.deepEqual(Buffer.from(await r.arrayBuffer()), status === 200 ? gzipSync(imageText) : Buffer.alloc(0));
+    }
+    assert.equal(refreshes, 2);
+  } finally { restore(); globalThis.Response = Original; }
+});
+for (const failure of ['open', 'close']) test(`browser cache test releases its HTTP listener when browser ${failure} fails`, () => {
+  const probe = failure === 'open'
+    ? 'export const FrameCDP={async open(port){if(port!==9223)throw new Error("unexpected browser port");throw new Error("browser open probe failed");}};'
+    : 'export const FrameCDP={async open(){return {async root(){throw new Error("browser setup probe failed");},async close(){throw new Error("browser close probe failed");}};}};';
+  const result = spawnSync(process.execPath, ['--import', new URL('./css-loader.mjs', import.meta.url).pathname,
+    '--test', new URL('./asset-cache.test.mjs', import.meta.url).pathname], {
+    encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, CDP_PORT: '9223', FRAME_CDP: 'data:text/javascript,' + encodeURIComponent("globalThis.fetch=async()=>new Response('{\"webSocketDebuggerUrl\":\"ws://test\"}');"+probe) },
+  });
+  assert.equal(result.error, undefined, `cache test must exit without hanging: ${result.error}`);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'browser failure must still fail the cache test');
+  assert.match(result.stdout + result.stderr, new RegExp(`browser ${failure} probe failed`));
+  assert.doesNotMatch(result.stdout + result.stderr, /unexpected browser port/);
+});
+test('parent asset disposal aborts old navigation without delivering its late result', async () => {
+  let resolve;
+  const h = assetBridgeHarness({ fetcher: () => new Promise(r => { resolve = r; }) });
+  h.message({ requestId: 'old', digest: imageId, kind: 'svg' }); await settleAsset();
+  h.listeners.pagehide(); assert.equal(h.calls[1][1].signal.aborted, true); assert.equal(h.timers.size, 0);
+  resolve(new Response(imageText, { headers: assetHeaders() })); await settleAsset(); assert.equal(h.sent.length, 0);
+});
+test('hosted stripping preserves GLB, Three bundle and unknown fields with script-safe JSON', () => {
+  const data = imageData(); data.board = { model3d: { enabled: true, head: 'deadbeef0000' } };
+  data.unknown.text = '</script><script>alert(1)</script>';
+  const bundle = '<script type="application/octet-stream" id="three-bundle">retained</script>';
+  const stored = storedImageReport(data).replace(/<\/script><script>alert\(1\)<\/script>/, '\\u003c/script>\\u003cscript>alert(1)\\u003c/script>') + bundle;
+  const hosted = currentReport(stored, { lazyAssets: true }), parsed = readStoredData(hosted);
+  assert.equal(parsed.blobs.deadbeef0000, 'kept-glb'); assert.deepEqual(parsed.board, data.board);
+  assert.deepEqual(parsed.unknown, data.unknown); assert.ok(hosted.includes(bundle));
+  assert.doesNotMatch(hosted, /<script>alert\(1\)<\/script>/);
+});
+test('guest raw delivery retains image blobs and never installs hosted asset descriptors', async () => {
+  const token = await guestToken(), restore = guestFetch(), originalMock = globalThis.fetch;
+  mockFetch((url, options) => url === shareBlob ? Promise.resolve(new Response(storedImageReport())) : originalMock(url, options));
+  try {
+    const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
+    assert.equal(raw.status, 200); guestSecurity(raw);
+    const data = readStoredData(await raw.text());
+    assert.equal(data.blobs[imageId], imageData().blobs[imageId]); assert.equal(data.assetDescriptors, undefined);
+  } finally { restore(); }
+});
+
+test('raw and digest delivery follow signed blob redirects without forwarding GitHub credentials', async () => {
+  const sealed = await signedIn(), redirects = [];
+  const restore = mockFetch(async (url, options) => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/redirecting-blob' } });
+    assert.equal(url, 'https://signed.example/redirecting-blob');
+    redirects.push(options?.redirect ?? 'follow');
+    assert.equal(options?.headers?.Authorization, undefined);
+    // Simulate the Fetch redirect policy: only follow returns the final blob.
+    return options?.redirect === 'manual' ? new Response(null, { status: 302, headers: { Location: 'https://storage.example/final' } }) : new Response(storedImageReport());
+  });
+  try {
+    for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
+      const r = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(r.status, 200, suffix);
+      if (suffix === '/raw') assert.equal(readStoredData(await r.text()).assets[imageId].kind, 'svg');
+      else assert.deepEqual(Buffer.from(await r.arrayBuffer()), gzipSync(imageText));
+    }
+    assert.deepEqual(redirects, ['follow', 'follow']);
+  } finally { restore(); }
+});
+
+test('mode rendering handles only tagged asset failures and rethrows programming errors', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const body = source.slice(source.indexOf('  if (!view) stage.innerHTML'), source.indexOf('  assetRetry(stage);'));
+  const exercise = error => {
+    const stage = { messages: [], append(message) { this.messages.push(message); } };
+    const context = { stage, view: {}, S: { m: 'side' }, MODES: { side: async () => { throw error; } },
+      document: { createElement: () => ({ setAttribute() {} }) } };
+    return { stage, result: runInNewContext(`${errorClass}\n(async()=>{${body}})()`, context) };
+  };
+  const bug = new TypeError('render bug'), generic = exercise(bug);
+  await assert.rejects(generic.result, error => error === bug);
+  assert.equal(generic.stage.messages.length, 0);
+  // Construct the error and execute draw's catch in the same realm as its class.
+  const context = { messages: [], document: { createElement: () => ({ setAttribute() {} }) } };
+  await runInNewContext(`${errorClass}\n(async()=>{const view={}, S={m:'side'}, stage={append:m=>messages.push(m)}, MODES={side:async()=>{throw new AssetUnavailableError();}};${body}})()`, context);
+  assert.match(context.messages[0].textContent, /Image unavailable: Asset unavailable/);
+});
+
+test('JSON asset corruption is tagged at decode, evicted, shown unavailable and retryable', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const body = source.slice(source.indexOf('  if (!view) stage.innerHTML'), source.indexOf('  assetRetry(stage);'));
+  for (const transport of ['embedded', 'hosted', 'legacy']) {
+    const hosted = transport === 'hosted';
+    let attempts = 0;
+    const D = hosted ? { assets: { [imageId]: { kind: 'json' } } }
+      : { blobs: { [imageId]: gzipSync('{bad json').toString('base64') },
+        ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
+    const messages = [], cache = {};
+    const context = { D, cache, atob, Uint8Array, Blob, Response, DecompressionStream, messages,
+      repaired: gzipSync('{"version":1}').toString('base64'),
+      imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => ++attempts < 3 ? '{bad json' : '{"version":1}' })},
+      document: { createElement: () => ({ setAttribute() {} }) } };
+    await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+      for(let i=0;i<2;i++) {
+        const view={}, S={m:'side'}, stage={append:m=>messages.push(m)},
+          MODES={side:async()=>{await jsonAsset('${imageId}');}};
+        ${body}
+        if('${imageId}' in cache)throw Error('corrupt JSON cached');
+      }
+      if(D.blobs)D.blobs['${imageId}']=repaired;
+      if((await jsonAsset('${imageId}')).version!==1)throw Error('retry failed');
+    })()`, context);
+    assert.equal(messages.length, 2, transport);
+    for (const message of messages) assert.match(message.textContent, /Image unavailable: Asset unavailable/);
+    if (hosted) assert.equal(attempts, 3);
+    assert.ok(cache[imageId], 'successful retry is cached');
+  }
+});
+
+test('JSON assets share one parsed value with mode consumers and keep the text API', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const scene = source.slice(source.indexOf('async function loadBoardScene('), source.indexOf('const HIDE_LAYERS ='));
+  for (const transport of ['embedded', 'hosted', 'legacy']) {
+    const text = '{"version":1}', D = transport === 'hosted'
+      ? { assets: { [imageId]: { kind: 'json' } } }
+      : { blobs: { [imageId]: gzipSync(text).toString('base64') },
+        ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
+    let parses = 0, requests = 0, validations = 0;
+    const context = { D, cache: {}, atob, Uint8Array, Blob, Response, DecompressionStream,
+      JSON: { parse: value => { parses++; return JSON.parse(value); } },
+      imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => { requests++; return text; } })},
+      BoardGL: { validateScene: value => { validations++; assert.equal(value.version, 1); } } };
+    await runInNewContext(`${errorClass}\n${decode}\n${scene}\n(async()=>{
+      if(await svgText('${imageId}')!==${JSON.stringify(text)})throw Error('text API changed');
+      const values=await Promise.all([loadBoardScene('${imageId}'),jsonAsset('${imageId}'),loadBoardScene('${imageId}')]);
+      if(values.some(value=>value!==values[0]) || values[0].version!==1)throw Error('parsed value not reused');
+    })()`, context);
+    assert.equal(parses, 1, `${transport}: validation and mode must share the parse`);
+    assert.equal(validations, 1);
+    assert.equal(requests, transport === 'hosted' ? 1 : 0);
+  }
+});
+
+test('JSON asset caches retain only the parsed value without losing exact text access', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  for (const transport of ['embedded', 'hosted', 'legacy']) {
+    for (const textFirst of [true, false]) {
+      const text = ' { "version": 1, "items": [1, 2] }\n', cache = {};
+      const D = transport === 'hosted' ? { assets: { [imageId]: { kind: 'json' } } }
+        : { blobs: { [imageId]: gzipSync(text).toString('base64') },
+          ...(transport === 'embedded' ? { assets: { [imageId]: { kind: 'json' } } } : {}) };
+      let requests = 0, parses = 0;
+      const context = { D, cache, atob, Uint8Array, Blob, Response, DecompressionStream,
+        JSON: { parse: value => { parses++; return JSON.parse(value); } },
+        imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => { requests++; return text; } })} };
+      await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+        const jobs=${textFirst ? `[svgText('${imageId}'),jsonAsset('${imageId}')]` : `[jsonAsset('${imageId}'),svgText('${imageId}')]`};
+        const values=await Promise.all(jobs), json=values[${textFirst ? 1 : 0}];
+        if(values[${textFirst ? 0 : 1}]!==${JSON.stringify(text)})throw Error('concurrent text changed');
+        const asset=await cache['${imageId}'];
+        if(Object.hasOwn(asset,'text'))throw Error('JSON cache retains source text');
+        if(Object.keys(asset).join()!=='json' || asset.json!==json)throw Error('parsed value not retained');
+        if(assetTextLoads.size)throw Error('settled text load retained');
+        if(await svgText('${imageId}')!==${JSON.stringify(text)})throw Error('late text access changed');
+        if(await jsonAsset('${imageId}')!==json)throw Error('late text access displaced parsed value');
+        if(assetTextLoads.size)throw Error('late text load retained');
+      })()`, context);
+      assert.equal(parses, 1, `${transport}: ${textFirst ? 'text' : 'JSON'} first shares one parse`);
+      // An explicit late text request decodes again instead of retaining a second large representation.
+      assert.equal(requests, transport === 'hosted' ? 2 : 0);
+    }
+  }
+  // SVG text is still cached; the memory policy applies only to parsed JSON.
+  let requests = 0;
+  const context = { D: { assets: { [imageId]: { kind: 'svg' } } }, cache: {},
+    imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({ get: async () => { requests++; return imageText; } })} };
+  await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+    if(await svgText('${imageId}')!==${JSON.stringify(imageText)})throw Error('SVG changed');
+    if(await svgText('${imageId}')!==${JSON.stringify(imageText)})throw Error('cached SVG changed');
+  })()`, context);
+  assert.equal(requests, 1);
+});
+
+test('asset text loads are discarded synchronously on view disposal', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const jobs = new Map();
+  let requests = 0;
+  const context = { D: { assets: { [imageId]: { kind: 'json' } } }, cache: {},
+    imageAssetClient: null, parent: {}, window: {}, ImageView: {assetClient: () => ({
+      get(id) { requests++; return new Promise((resolve, reject) => jobs.set(id, { resolve, reject })); },
+      dispose() { const ids = [...jobs.keys()]; for (const job of jobs.values()) job.reject(new Error('disposed')); jobs.clear(); return ids; },
+    })}, repair() { jobs.get(imageId).resolve('{"version":1}'); jobs.delete(imageId); } };
+  await runInNewContext(`${errorClass}\n${decode}\n(async()=>{
+    const stale=svgText('${imageId}'), rejected=stale.catch(()=>null);
+    disposeAssets();
+    if(assetTextLoads.size || '${imageId}' in cache)throw Error('disposed load retained');
+    const fresh=jsonAsset('${imageId}');
+    await rejected;
+    if(!assetTextLoads.has('${imageId}') || !('${imageId}' in cache))throw Error('stale rejection removed fresh load');
+    repair();
+    if((await fresh).version!==1)throw Error('new view could not load asset');
+    if(assetTextLoads.size)throw Error('settled new load retained');
+  })()`, context);
+  assert.equal(requests, 2, 'new view starts fresh transport before old rejection settles');
+  assert.match(source, /addEventListener\('pagehide', disposeAssets\)/);
+  assert.match(source.slice(source.indexOf('async function draw(')), /\n  disposeAssets\(\);/);
+});
+
+test('new views reload pending inspection and scenes through the bridge after disposal', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  const scenes = source.slice(source.indexOf('async function loadBoardScene('), source.indexOf('const HIDE_LAYERS ='));
+  const client = readFileSync(new URL('../ui/image-view.js', import.meta.url), 'utf8');
+  for (const kind of ['board', 'sheet', 'scene']) {
+    const listeners = new Set(), sent = [], warnings = [];
+    const parent = {postMessage: value => { if (value.kicadReviewAsset) sent.push(value.kicadReviewAsset); }};
+    const manifest = kind === 'board' ? {version:1, units:'mm', warnings:[], layers:['F.Cu'],
+      pads:[], tracks:[], vias:[], nets:[], footprintGraphics:[],
+      stats:{copperLayers:1,routedLengthMm:0,padCount:0,viaCount:0,netCount:0,boardSizeMm:null},
+      truncated:{nets:false,pads:false,tracks:false,vias:false,footprintGraphics:false}}
+      : {version:1,units:'mm',warnings:[],views:[{sheet:'/',file:'test.kicad_sch',viewBox:[0,0,10,10],
+        elements:[],labels:[],noConnects:[],wires:[]}]};
+    const context = {D:{assets:{[imageId]:{kind:'json'}}}, cache:{}, imageAssetClient:null,
+      parent, TextEncoder, setTimeout, clearTimeout, kind, assert,
+      console:{warn:(...args)=>warnings.push(args)},
+      KicadColors:{appearanceOrder:['F.Cu'],layers:{}}, BoardGL:{validateScene(){}},
+      addEventListener:(_,fn)=>listeners.add(fn), removeEventListener:(_,fn)=>listeners.delete(fn),
+      document:{createElement:()=>({setAttribute(){}})},
+      reply() { for (const fn of listeners) fn({source:parent,data:{kicadReviewAssetResult:{
+        ...sent.at(-1),text:JSON.stringify(manifest)}}}); },
+    };
+    context.window = context;
+    try {
+      await runInNewContext(`${client}\n${errorClass}\n${decode}\n${scenes}\n(async()=>{
+        const P={sheets:[{path:'/',hotspots:{base:'${imageId}',head:'${imageId}'}}],
+          board:{inspect:{base:'${imageId}',head:'${imageId}'},layers:[{svg:{base:'art',head:'art'}}]}};
+        if(kind!=='sheet')P.sheets=[];
+        if(kind!=='board')delete P.board.inspect;
+        const load=()=>kind==='scene'?loadBoardScene('${imageId}'):loadImageManifests(P);
+        const stale=load().catch(()=>null);
+        disposeAssets();
+        const fresh=load();
+        await stale;
+        if(kind==='scene')assert.ok(boardSceneCache.has('${imageId}'),'stale rejection must not delete replacement scene');
+        else assert.ok(imageManifestLoads.has(kind+':${imageId}'),'stale finally must not delete replacement manifest');
+        reply();
+        await fresh;
+        if(kind==='scene')assert.ok(decodedBoardScenes.has('${imageId}'));
+        else {
+          assert.ok((kind==='board'?decodedBoardInspect:decodedSheetHotspots).has('${imageId}'));
+          const notices=[],stage={dataset:{view:kind==='board'?'board':'sheet:/'},append:n=>notices.push(n)};
+          inspectionNotice(stage,{kind,layers:P.board.layers},P);
+          assert.equal(notices.length,0,'new view has inspection, no unavailable notice');
+        }
+        const before=cache['${imageId}'];
+        disposeAssets();
+        await load();
+        assert.equal(cache['${imageId}'],before,'completed decoded assets survive disposal');
+      })()`,context);
+      assert.equal(sent.length,2,kind+': fresh view requests the same digest before old reply');
+      assert.equal(warnings.length,kind==='scene'?0:1,'only cancelled inspection warns');
+    } finally {context.imageAssetClient?.dispose();}
+  }
+});
+
+test('asset decode failures are tagged and evicted so the next attempt can retry', async () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const errorClass = source.slice(source.indexOf('class AssetUnavailableError'), source.indexOf('// The opaque hosted frame'));
+  const decode = source.slice(source.indexOf('function svgText('), source.indexOf('function assetRetry('));
+  for (const encoded of ['!bad base64', Buffer.from('not gzip').toString('base64')]) {
+    const context = { D: { blobs: { [imageId]: encoded } }, cache: {}, atob, Uint8Array, Blob, Response, DecompressionStream };
+    await runInNewContext(`${errorClass}\n${decode}\n(async()=>{for(let i=0;i<2;i++){try{await svgText('${imageId}');throw Error('unexpected success');}catch(error){if(!(error instanceof AssetUnavailableError))throw error;}if('${imageId}' in cache)throw Error('failed decode cached');}})()`, context);
+  }
+});
+
+import {assetParent} from './pages.js';
+test('asset parent permits only source-window declared digests and generated URLs',async()=>{
+  let receive;const results=[],urls=[],child={postMessage:m=>results.push(m)};
+  const scope={addEventListener:(_,fn)=>receive=fn,removeEventListener(){}};
+  const raw='/r/o/r/a/42/raw',digest='abcdef123456';
+  const stop=assetParent({contentWindow:child},raw,scope,async url=>{
+    urls.push(url);
+    return url===raw?new Response('<script>window.REVIEW_DATA = '+JSON.stringify({assets:{[digest]:{kind:'svg'}}})+';</script>')
+      :new Response('<svg/>',{headers:assetHeaders(digest)});
+  });
+  const data={kicadReviewAsset:{requestId:'asset-1',digest,kind:'svg',url:'https://attacker/'}};
+  await receive({source:{},data});assert.equal(urls.length,0);
+  await receive({source:child,data});assert.deepEqual(urls,[raw,'/r/o/r/a/42/assets/'+digest+'.svg']);
+  assert.equal(results[0].kicadReviewAssetResult.text,'<svg/>');
+  await receive({source:child,data:{kicadReviewAsset:{requestId:'asset-2',digest:'000000000000',kind:'svg'}}});
+  assert.equal(urls.length,2);assert.ok(results[1].kicadReviewAssetResult.error);stop();
+});
+
+test('asset parent wrapper factory survives HTML script parsing and never enters guest pages', () => {
+  const page = reviewPage({owner:'o',repo:'r',id:42,name:'kicad-review.html'});
+  const scripts = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+  for(const script of scripts) assert.doesNotThrow(() => new Function(script));
+  const bridge = scripts.find(script => script.includes('assetParentFactory'));
+  assert.ok(bridge?.includes("addEventListener('pagehide'"));
+  assert.match(bridge, /disposeAssets=assetParentFactory\(iframe,raw\)/);
+  assert.doesNotMatch(sharedPage({token:'t',name:'kicad-review.html'}), /assetParentFactory/);
+});
+
+test('asset parent aborts a stalled fetch at 15001 ms and replies unavailable', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  let receive,signal;const results=[],child={postMessage:m=>results.push(m)};
+  const scope={addEventListener:(_,fn)=>receive=fn,removeEventListener(){}};
+  const raw='/r/o/r/a/42/raw';
+  const stop=assetParent({contentWindow:child},raw,scope,async (url,options)=>{
+    if(url===raw)return new Response('<script>window.REVIEW_DATA = '+JSON.stringify({assets:{[imageId]:{kind:'svg'}}})+';</script>');
+    signal=options.signal;
+    return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Error('aborted'))));
+  });
+  const job=receive({source:child,data:{kicadReviewAsset:{requestId:'timeout',digest:imageId,kind:'svg'}}});
+  await settleAsset();assert.equal(signal.aborted,false);
+  t.mock.timers.tick(15001);await job;
+  assert.equal(signal.aborted,true);
+  assert.match(results[0].kicadReviewAssetResult.error,/unavailable/i);
+  assert.equal(results[0].kicadReviewAssetResult.text,undefined);stop();
+});
+
+test('asset parent retries a failed allowlist load without trusting a child announcement',async()=>{
+  let manifests=0;
+  const h=assetBridgeHarness({realManifest:true,fetcher:async url=>{
+    if(url.endsWith('/raw'))return ++manifests===1 ? new Response('denied',{status:403})
+      :new Response(storedImageReport());
+    return new Response(imageText,{headers:assetHeaders()});
+  }});
+  const ask=requestId=>h.message({requestId,digest:imageId,kind:'svg',assets:{[imageId]:{kind:'svg'}}});
+  await ask('first');assert.match(h.sent[0].kicadReviewAssetResult.error,/unavailable/i);
+  await ask('retry');assert.equal(h.sent[1].kicadReviewAssetResult.text,imageText);
+  assert.equal(manifests,2);h.stop();
+});
+
+test('asset parent actual wrapper hash navigation preserves transport and manifest',async()=>{
+  const page=reviewPage({owner:'o',repo:'r',id:42,name:'kicad-review.html'});
+  const script=[...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].find(m=>m[1].includes('assetParentFactory'))[1];
+  const listeners=new Map(),calls=[],sent=[],navigations=[],controls=new Map();
+  const iframe={contentWindow:{postMessage:value=>sent.push(value)},addEventListener(){},set src(value){navigations.push(value);}};
+  const loading={hidden:false},location={hash:'#v=board'};
+  let hold=false,release,activeSignal;
+  const context={location,history:{replaceState(){}},AbortController,AbortSignal,Blob,TextDecoder,setTimeout,clearTimeout,
+    document:{getElementById:id=>id==='review-report'?iframe:loading,documentElement:{dataset:{theme:'dark'}},
+      querySelector:selector=>{if(!controls.has(selector))controls.set(selector,{});return controls.get(selector);}},
+    MutationObserver:class{observe(){}},
+    addEventListener:(name,fn)=>{if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},
+    removeEventListener:(name,fn)=>listeners.get(name)?.delete(fn),
+    fetch:async (url,options)=>{calls.push(url);
+      if(hold&&!url.endsWith('/raw')){activeSignal=options.signal;return new Promise(resolve=>{release=()=>resolve(new Response(imageText,{headers:assetHeaders()}));});}
+      return new Response(url.endsWith('/raw')?storedImageReport():imageText,{headers:assetHeaders()});}};
+  context.window=context;
+  runInNewContext(script,context);
+  assert.deepEqual(navigations,['/r/o/r/a/42/raw#v=board']);
+  assert.equal(listeners.get('message').size,2);
+  const first=[...listeners.get('message')][0],ask={source:iframe.contentWindow,data:{kicadReviewAsset:{requestId:'one',digest:imageId,kind:'svg'}}};
+  await first(ask);assert.equal(sent.at(-1).kicadReviewAssetResult.text,imageText);
+  hold=true;const inFlight=first({...ask,data:{kicadReviewAsset:{...ask.data.kicadReviewAsset,requestId:'inflight'}}});
+  await settleAsset();
+  location.hash='#v=sheet:/left/';for(const fn of listeners.get('hashchange'))fn();
+  assert.equal(activeSignal.aborted,false,'hash navigation does not abort active jobs');
+  hold=false;release();await inFlight;
+  assert.equal(listeners.get('message').size,2);assert.equal(listeners.get('message').has(first),true);
+  assert.equal(navigations.at(-1),'/r/o/r/a/42/raw#v=sheet:/left/');
+  await first(ask);assert.equal(calls.length,4,'hash navigation reuses transport');
+  assert.equal(calls.filter(url=>url.endsWith('/raw')).length,1,'hash navigation reuses allowlist');
+  for(const fn of listeners.get('pagehide'))fn();assert.equal(listeners.get('message').size,1);
+});
+
+
+test('asset parent rejects redirects, MIME or digest mismatches and invalid UTF-8',async()=>{
+  const failures=[
+    ['missing headers',()=>new Response(imageText)],
+    ['HTML login',()=>new Response('<html>login</html>',{headers:{...assetHeaders(),'Content-Type':'text/html'}})],
+    ['wrong digest',()=>new Response(imageText,{headers:assetHeaders('000000000000')})],
+    ['unquoted digest',()=>new Response(imageText,{headers:{...assetHeaders(),ETag:imageId}})],
+    ['wrong kind',()=>new Response(imageText,{headers:assetHeaders(imageId,'json')})],
+    ['bad UTF-8',()=>new Response(new Uint8Array([0xc3,0x28]),{headers:assetHeaders()})],
+    ['redirect response',()=>new Response(null,{status:302,headers:{Location:'/login'}})],
+    ['followed redirect',()=>{const r=new Response(imageText,{headers:assetHeaders()});Object.defineProperty(r,'redirected',{value:true});return r;}],
+  ];
+  for(const [name,response] of failures){
+    const h=assetBridgeHarness({fetcher:async()=>response()});
+    try {
+      await h.message({requestId:'bad',digest:imageId,kind:'svg'});
+      assert.match(h.sent[0].kicadReviewAssetResult.error,/unavailable/i,name);
+      assert.equal(h.sent[0].kicadReviewAssetResult.text,undefined,name);
+      assert.ok(h.calls.every(([,options])=>options.redirect==='error'),'raw and asset redirects forbidden');
+    } finally {h.stop();}
+  }
+  const bytes=new TextEncoder().encode('<svg>é</svg>');
+  const h=assetBridgeHarness({fetcher:async()=>new Response(new ReadableStream({start(c){for(const byte of bytes)c.enqueue(new Uint8Array([byte]));c.close();}}),{headers:assetHeaders()})});
+  try {
+    await h.message({requestId:'unicode',digest:imageId,kind:'svg'});
+    assert.equal(h.sent[0].kicadReviewAssetResult.text,'<svg>é</svg>','split multibyte UTF-8 remains valid');
+  } finally {h.stop();}
+});
+
+test('multi-project lazy manifests and artwork use the production client and parent with eight in flight',async()=>{
+  const assets={},texts={},projects=[],warnings=[],calls=[],waiting=[];
+  let serial=0,active=0,peak=0,receive;
+  const add=(kind,text)=>{const id=(++serial).toString(16).padStart(12,'0');assets[id]={kind};texts[id]=text;return id;};
+  for(let p=0;p<6;p++)projects.push({dir:'project-'+p,sheets:['/left/','/right/'].map(path=>({path,
+    hotspots:Object.fromEntries(['base','head'].map(side=>[side,add('json',JSON.stringify({version:1,units:'mm',warnings:[],
+      views:[{sheet:path,file:'fixture.kicad_sch',viewBox:[0,0,100,100],elements:[],labels:[],noConnects:[],wires:[]}]}))])),
+    svg:Object.fromEntries(['base','head'].map(side=>[side,add('svg',imageText)])),
+  }))});
+  const childListeners=new Set();
+  const host={postMessage:data=>queueMicrotask(()=>receive({source:child,data}))};
+  const child={postMessage:data=>queueMicrotask(()=>{for(const fn of childListeners)fn({source:host,data});})};
+  const scope={addEventListener:(_,fn)=>receive=fn,removeEventListener(){}};
+  const stop=assetParent({contentWindow:child},'/r/o/r/a/42/raw',scope,async(url,options)=>{
+    calls.push([url,options]);
+    if(url.endsWith('/raw'))return new Response('<script>window.REVIEW_DATA = '+JSON.stringify({assets})+';</script>');
+    const id=url.match(/\/assets\/([0-9a-f]{12})\./)[1];
+    active++;peak=Math.max(peak,active);
+    return new Promise(resolve=>waiting.push(()=>{active--;resolve(new Response(texts[id],{headers:assetHeaders(id,assets[id].kind)}));}));
+  });
+  const source=readFileSync(new URL('../ui/review.js',import.meta.url),'utf8');
+  const errorClass=source.slice(source.indexOf('class AssetUnavailableError'),source.indexOf('// The opaque hosted frame'));
+  const decode=source.slice(source.indexOf('function svgText('),source.indexOf('function assetRetry('));
+  const context={D:{assets,projects},cache:{},imageAssetClient:null,parent:host,TextEncoder,setTimeout,clearTimeout,
+    console:{warn:(...args)=>warnings.push(args)},
+    addEventListener:(_,fn)=>childListeners.add(fn),removeEventListener:(_,fn)=>childListeners.delete(fn)};
+  context.window=context;
+  const result=runInNewContext(readFileSync(new URL('../ui/image-view.js',import.meta.url),'utf8')+'\n'+errorClass+'\n'+decode+`\n(async()=>{
+    try {
+      const artwork=D.projects.flatMap(P=>P.sheets.flatMap(s=>Object.values(s.svg)));
+      await Promise.all([...D.projects.map(P=>loadImageManifests(P)),...artwork.map(id=>svgText(id))]);
+      return {manifests:decodedSheetHotspots.size,artwork:artwork.length};
+    } finally {disposeAssets();}
+  })()`,context);
+  try {
+    await settleAsset();assert.equal(active,8,'first eight requests run, forty wait');
+    for(let batch=0;batch<6;batch++){
+      assert.equal(waiting.length,8,'next FIFO batch fills all eight slots');
+      for(const release of waiting.splice(0))release();
+      await settleAsset();
+    }
+    const counts=await result;
+    assert.equal(counts.manifests,24);assert.equal(counts.artwork,24);
+    assert.equal(peak,8);assert.equal(active,0);assert.equal(warnings.length,0);
+    assert.equal(calls.length,49,'one raw allowlist plus 48 declared assets');
+    assert.equal(childListeners.size,0,'production disposeAssets removes the real client');
+  } finally {context.imageAssetClient?.dispose();stop();for(const release of waiting.splice(0))release();}
+});
+
+test('deployment provenance reports the serving commit, never a fabricated fallback', async () => {
+  assert.ok(readFileSync('.github/workflows/site-deploy.yml', 'utf8').includes('npx --yes wrangler@4.148.0 deploy --var DEPLOY_SHA:${{ github.sha }}'));
+  assert.ok(readFileSync('site/README.md', 'utf8').includes('npx --yes wrangler@4.148.0 deploy --var DEPLOY_SHA:$(git rev-parse HEAD)'));
+  const restore = shareCreationFetch();
+  try {
+    const cookie = await signedIn();
+    for (const value of ['a'.repeat(40), 'b'.repeat(40), undefined, '', '<script>bad</script>']) {
+      const sha = /^[0-9a-f]{40}$/.test(value || '') ? value : 'unknown';
+      for (const path of ['/', '/missing', '/r/Cameronrlewis/repo/a/123']) {
+        const result = await worker.fetch(request(path, { headers: { Cookie: `s=${cookie}` } }), { ...env, DEPLOY_SHA: value });
+        assert.equal(result.headers.get('X-Deploy-Sha'), sha);
+        const html = await result.text();
+        assert.ok(html.includes(`<meta name="deploy-sha" content="${sha}">`));
+        assert.ok(html.includes(`<footer class="deployment" aria-label="Deployment">Deployed commit <code>${sha}</code></footer>`));
+        assert.equal((html.match(/class="deployment"/g) || []).length, 1);
+      }
+    }
+  } finally { restore(); }
+});
+
+test('asset disposal cancels only pending child requests, once', async () => {
+  const h = assetClientHarness();
+  const promises = Array.from({length:10}, () => h.client.request(imageId));
+  const rejected = promises.map(p => assert.rejects(p, /disposed/i));
+  const ids = h.sent.map(m => m.kicadReviewAsset.requestId);
+  h.client.dispose(); h.client.dispose();
+  await Promise.all(rejected);
+  assert.deepEqual(h.sent.filter(m => m.kicadReviewAssetCancel).map(m => m.kicadReviewAssetCancel.requestId), ids);
+  assert.equal(h.timers.size, 0);
+});
+
+test('asset parent cancellation validates source and ID, frees slots and never replies', async () => {
+  const h = assetBridgeHarness({fetcher: (_, {signal}) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(Error('aborted')));
+  })});
+  try {
+    const jobs = Array.from({length:8}, (_, i) => h.message({requestId:'cancel'+i,digest:imageId,kind:'svg'}));
+    await settleAsset();
+    const cancel = (requestId, source) => h.listeners.message({source,data:{kicadReviewAssetCancel:{requestId}}});
+    await cancel('cancel0', {});
+    assert.equal(h.calls[1][1].signal.aborted, false);
+    // Obtain the trusted source through the harness's default message path.
+    h.cancel('missing'); h.cancel({}); h.cancel('x'.repeat(65));
+    assert.equal(h.timers.size, 8);
+    h.cancel('cancel0');
+    assert.equal(h.calls[1][1].signal.aborted, true);
+    assert.equal(h.timers.size, 7);
+    h.message({requestId:'replacement',digest:imageId,kind:'svg'});
+    await settleAsset();
+    assert.equal(h.calls.length, 10, 'cancellation immediately frees a slot');
+    assert.equal(h.sent.length, 0, 'cancelled job sends no reply');
+    h.stop(); await Promise.all(jobs);
+  } finally { h.stop(); }
+});
+
+test('fallback comparison source cache retains at most eight recently used SVGs', () => {
+  const source = readFileSync(new URL('../ui/review.js', import.meta.url), 'utf8');
+  const block = source.slice(source.indexOf('      if(comparison&&!l.svgCompare?.[side]) {'), source.indexOf("      if (view.kind==='lib')"));
+  const comparisonSources = new Map(); let builds = 0;
+  const context = {comparisonSources,comparison:true,l:{},side:'head',view:{kind:'sheet'},
+    ImageView:{comparisonSource:text=>{builds++;return 'comparison:'+text;}}};
+  const render = id => {context.sourceID=id;context.t=id;runInNewContext(block,context);return context.t;};
+  for(let i=0;i<8;i++)assert.equal(render('svg'+i),'comparison:svg'+i);
+  render('svg0'); render('svg8');
+  assert.equal(comparisonSources.size,8);
+  assert.equal(comparisonSources.has('["svg0","head",true]'),true,'cache hit refreshes age');
+  assert.equal(comparisonSources.has('["svg1","head",true]'),false,'least recent source evicted');
+  render('svg1');assert.equal(builds,10,'evicted SVG rebuilt from immutable source');
+});
+
+test('optional cache checks skip when debug port serves something other than Chrome', () => {
+  const probe = `globalThis.fetch=async()=>new Response('<html>not Chrome</html>');
+    export const FrameCDP={async open(){throw Error('must not connect without Chrome');}};`;
+  const result = spawnSync(process.execPath, ['--import', new URL('./css-loader.mjs', import.meta.url).pathname,
+    '--test', new URL('./asset-cache.test.mjs', import.meta.url).pathname], {
+    encoding:'utf8', timeout:5000,
+    env:{...process.env,NODE_TEST_CONTEXT:undefined,CDP_PORT:'9223',FRAME_CDP:'data:text/javascript,'+encodeURIComponent(probe)},
+  });
+  assert.equal(result.error,undefined);
+  assert.equal(result.status,0);
+  assert.match(result.stdout, /# skipped 3/);
+  assert.match(result.stdout, /No dedicated Chrome debug port reachable/);
+});
+
+test('desktop camera keeps wheel zoom and mouse pan with one active pointer', () => {
+  const source=readFileSync(new URL('../ui/review.js',import.meta.url),'utf8');
+  const handlers=new Map(),S={x:0,y:0,z:1},zooms=[];
+  const vp={setAttribute(){},addEventListener:(name,fn)=>handlers.set(name,fn),
+    getBoundingClientRect:()=>({width:100,height:100}),setPointerCapture(){},hasPointerCapture:()=>false};
+  const context={S,window:{},BOARD_WHEEL_PIXEL_RATE:.001,BOARD_WHEEL_MAC_ROTATION_RATE:1,
+    placed:()=>true,currentView:()=>({kind:'board'}),gesture(){},flipOn:()=>false,
+    setT:value=>Object.assign(S,value),zoomBoardAt:(_vp,_x,_y,factor)=>zooms.push(factor),
+    requestAnimationFrame:()=>1,cancelAnimationFrame(){},updateCoordinates(){},updateStatus(){},vp};
+  runInNewContext(source.slice(source.indexOf('function attachPanZoom('),source.indexOf('function contentBox('))+';attachPanZoom(vp);',context);
+  const pointer=(type,id,pointerType,x=0,y=0)=>handlers.get(type)({type,pointerId:id,pointerType,button:0,clientX:x,clientY:y,target:{closest:()=>null}});
+  pointer('pointerdown',10,'touch');pointer('pointermove',10,'touch',20,10);
+  assert.deepEqual(S,{x:0,y:0,z:1},'direct touch does not control desktop camera');
+  pointer('pointerdown',1,'mouse');pointer('pointerdown',2,'pen',20,0);pointer('pointermove',2,'pen',40,10);
+  assert.deepEqual(S,{x:0,y:0,z:1},'additional pointer does not pinch');
+  pointer('pointermove',1,'mouse',10,5);pointer('pointerup',1,'mouse',10,5);
+  assert.deepEqual(S,{x:-10,y:-5,z:1});
+  let prevented=false;
+  handlers.get('wheel')({deltaY:-10,deltaMode:0,ctrlKey:true,clientX:50,clientY:50,preventDefault(){prevented=true;}});
+  assert.equal(prevented,true);assert.equal(zooms.length,1);assert.ok(zooms[0]>1);
+});
+
+test('desktop dock toggles remain independent without viewport queries', () => {
+  const source=readFileSync(new URL('../ui/review.js',import.meta.url),'utf8');
+  const classList=()=>{const values=new Set();return {contains:v=>values.has(v),toggle(v,on){if(on)values.add(v);else values.delete(v);},remove:v=>values.delete(v)};};
+  const app={classList:classList()},nav={classList:classList()},panel={classList:classList()},buttons=['nav','panel'].map(name=>({dataset:{dock:name},setAttribute(){}}));
+  const document={getElementById:id=>({app,nav,panel}[id]),querySelector:selector=>buttons.find(b=>selector.includes('"'+b.dataset.dock+'"')),querySelectorAll:()=>buttons};
+  const context={document,S:{},leftCollapsed:false,$:selector=>selector==='#app'?app:nav,
+    syncLeftDock(){},persistLeftDock(){}};
+  runInNewContext(source.slice(source.indexOf('function setDock('),source.indexOf('for (const b of document.querySelectorAll("#change-nav',source.indexOf('function setDock('))),context);
+  buttons[0].onclick();assert.equal(context.leftCollapsed,true);
+  buttons[1].onclick();assert.equal(app.classList.contains('right-collapsed'),true);
+  buttons[0].onclick();assert.equal(context.leftCollapsed,false);
+  assert.equal(app.classList.contains('right-collapsed'),true);
+});
+
+test('3D camera retains desktop OrbitControls with direct-touch mappings disabled', () => {
+  const source=readFileSync(new URL('../ui/review3d.js',import.meta.url),'utf8');
+  assert.match(source,/controls\.touches\s*=\s*\{ONE:null,\s*TWO:null\}/);
+});
+
+// Warm isolate cache must never become an authorization or artifact-liveness cache.
+test('report cache reuses raw parsing and assets but revalidates every request', async () => {
+  const sealed = await signedIn();
+  let mode = 'ok', downloads = 0, parses = 0, metadataCalls = 0, updated = '2026-10-29T00:00:00Z';
+  const data = imageData(); data.cacheProbe = 'cache-parse-probe-01';
+  const stored = storedImageReport(data), originalParse = JSON.parse;
+  JSON.parse = function(value, ...args) {
+    if (typeof value === 'string' && value.includes('cache-parse-probe-01')) parses++;
+    return originalParse.call(this, value, ...args);
+  };
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo') || url.endsWith('/other')) return mode === 'denied'
+      ? new Response('{}', { status: 404 }) : Response.json({ id: url.endsWith('/other') ? 99 : 5,
+        owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
+    if (url.endsWith('/artifacts/987654')) {
+      metadataCalls++;
+      return mode === 'missing' ? new Response('{}', { status: 404 }) : Response.json({
+        name: 'kicad-review.html', size_in_bytes: stored.length, updated_at: updated,
+        expired: mode === 'expired', expires_at: mode === 'past' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z',
+        workflow_run: { repository_id: 5 } });
+    }
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/cache-probe' } });
+    assert.equal(url, 'https://signed.example/cache-probe'); downloads++; return new Response(stored);
+  });
+  const get = (suffix = '/raw', repo = 'repo') => call(`/r/Cameronrlewis/${repo}/a/987654${suffix}`, { headers: { Cookie: `s=${sealed}` } });
+  try {
+    const first = await get(), body = await first.text(); assert.equal(first.status, 200);
+    const parsed = parses; assert.equal(parsed, 1);
+    const second = await get(); assert.equal(await second.text(), body); assert.equal(second.status, 200);
+    assert.equal(downloads, 1); assert.equal(parses, parsed);
+    const asset = await get(`/assets/${imageId}.svg`); assert.equal(asset.status, 200);
+    assert.deepEqual(Buffer.from(await asset.arrayBuffer()), gzipSync(imageText));
+    assert.equal(downloads, 1); assert.equal(parses, parsed); assert.equal(metadataCalls, 3);
+    for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
+      assert.equal((await get(suffix, 'other')).status, 404);
+      for (mode of ['denied', 'expired', 'past', 'missing']) assert.equal((await get(suffix)).status, 404);
+      mode = 'ok';
+    }
+    assert.equal(downloads, 1);
+    updated = '2026-10-29T01:00:00Z'; assert.equal((await get()).status, 200); assert.equal(downloads, 2);
+  } finally { restore(); JSON.parse = originalParse; (await import('./report-cache.js')).reportCache.clear(); }
+});
+
+test('report LRU enforces byte and entry ceilings, refreshes recency and rejects oversized entries', async () => {
+  const { ReportCache } = await import('./report-cache.js');
+  const cache = new ReportCache(10, 3);
+  cache.set('a', { bytes: 4 }); cache.set('b', { bytes: 4 });
+  assert.equal(cache.get('a').bytes, 4);
+  cache.set('c', { bytes: 4 }); assert.equal(cache.get('b'), undefined);
+  assert.equal(cache.bytes, 8);
+  cache.set('a', { bytes: 7 }); assert.equal(cache.get('c'), undefined); assert.equal(cache.bytes, 7);
+  cache.set('huge', { bytes: 11 }); assert.equal(cache.get('huge'), undefined); assert.equal(cache.bytes, 7);
+  for (const bytes of [NaN, Infinity, -1, undefined]) cache.set('bad', { bytes });
+  assert.equal(cache.get('bad'), undefined); assert.equal(cache.bytes, 7);
+  cache.clear(); assert.equal(cache.bytes, 0); assert.equal(cache.entries.size, 0);
+  const count = new ReportCache(100, 2);
+  for (const key of ['a', 'b', 'c']) count.set(key, { bytes: 1 });
+  assert.equal(count.get('a'), undefined); assert.equal(count.bytes, 2);
+});
+
+test('raw handler evicts least recently used reports by retained bytes before entry ceiling', async () => {
+  const { reportCache } = await import('./report-cache.js');
+  const ceiling = reportCache.maxBytes;
+  const sealed = await signedIn(), stored = storedImageReport(), downloads = [];
+  let downloading;
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    const artifact = url.match(/\/artifacts\/(87650[1-3])$/);
+    if (artifact) return Response.json({ name: 'kicad-review.html', size_in_bytes: stored.length,
+      updated_at: '2026-10-29T00:00:00Z', workflow_run: { repository_id: 5 } });
+    const zip = url.match(/\/artifacts\/(87650[1-3])\/zip$/);
+    if (zip) { downloading = zip[1]; return new Response(null, { status: 302, headers: { Location: 'https://signed.example/lru' } }); }
+    assert.equal(url, 'https://signed.example/lru'); downloads.push(downloading); return new Response(stored);
+  });
+  const get = async id => {
+    const result = await call(`/r/Cameronrlewis/repo/a/${id}/raw`, { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(result.status, 200); await result.arrayBuffer();
+  };
+  try {
+    reportCache.clear();
+    await get('876501');
+    reportCache.maxBytes = reportCache.bytes * 2;
+    await get('876502'); await get('876501'); await get('876503');
+    assert.equal(reportCache.entries.size, 2);
+    assert.ok(reportCache.bytes <= reportCache.maxBytes);
+    await get('876502');
+    assert.deepEqual(downloads, ['876501', '876502', '876503', '876502']);
+  } finally {
+    restore(); reportCache.clear(); reportCache.maxBytes = ceiling;
+  }
+});
+
+// Cold-build harness: the download is held until all N requests have entered cachedReport
+// (each calls reportCache.get once), so the sharing assertions are not timing dependent.
+async function coldHarness({ legacy = false } = {}) {
+  const { reportCache } = await import('./report-cache.js');
+  reportCache.clear();
+  const sealed = await signedIn(), data = imageData(); data.cacheProbe = 'single-flight-probe-01';
+  const stored = storedImageReport(data), originalParse = JSON.parse, originalGet = reportCache.get;
+  const h = { downloads: 0, parses: 0, active: 0, maxActive: 0, fail: false, entered: 0, want: 0 };
+  let open; h.gate = new Promise(resolve => { open = resolve; });
+  JSON.parse = function(value, ...args) {
+    if (typeof value === 'string' && value.includes('single-flight-probe-01')) h.parses++;
+    return originalParse.call(this, value, ...args);
+  };
+  reportCache.get = function(key) {
+    if (++h.entered === h.want) open();
+    return originalGet.call(this, key);
+  };
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (/\/artifacts\/\d+$/.test(url)) return Response.json({ name: 'kicad-review.html',
+      ...(legacy ? {} : { size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z' }), workflow_run: { repository_id: 5 } });
+    if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/single-flight' } });
+    assert.equal(url, 'https://signed.example/single-flight'); h.downloads++;
+    h.maxActive = Math.max(h.maxActive, ++h.active);
+    await h.gate; await new Promise(resolve => setImmediate(resolve)); h.active--;
+    return h.fail ? new Response('unavailable', { status: 503 }) : new Response(stored);
+  });
+  // Starts n requests for the given ids and releases the download once all have entered cachedReport.
+  h.batch = async (ids, status) => {
+    h.entered = 0; h.want = ids.length; h.gate = new Promise(resolve => { open = resolve; });
+    const responses = await Promise.all(ids.map((id, index) => call(`/r/Cameronrlewis/repo/a/${id}${index % 3 ? `/assets/${imageId}.svg` : '/raw'}`,
+      { headers: { Cookie: `s=${sealed}` } })));
+    for (const response of responses) { assert.equal(response.status, status); await response.arrayBuffer(); }
+  };
+  h.get = async id => { h.want = -1; const r = await call(`/r/Cameronrlewis/repo/a/${id}/raw`, { headers: { Cookie: `s=${sealed}` } }); await r.arrayBuffer(); return r; };
+  h.done = () => { open(); restore(); JSON.parse = originalParse; reportCache.get = originalGet; reportCache.clear(); };
+  return h;
+}
+
+test('concurrent cold raw and asset requests share one build and failed builds can retry', async () => {
+  const h = await coldHarness();
+  try {
+    await h.batch(Array(10).fill('765431'), 200);
+    assert.equal(h.downloads, 1); assert.equal(h.parses, 1);
+    h.fail = true;
+    await h.batch(Array(10).fill('765432'), 404);
+    assert.equal(h.downloads, 2); assert.equal(h.parses, 1);
+    h.fail = false;
+    assert.equal((await h.get('765432')).status, 200);
+    assert.equal(h.downloads, 3); assert.equal(h.parses, 2);
+    assert.equal((await h.get('765432')).status, 200); assert.equal(h.downloads, 3);
+  } finally { h.done(); }
+});
+
+test('cold builds for different artifacts run one at a time', async () => {
+  const h = await coldHarness();
+  try {
+    const first = h.batch(['765441', '765441', '765442', '765442'], 200);
+    await first;
+    assert.equal(h.downloads, 2); assert.equal(h.maxActive, 1);
+  } finally { h.done(); }
+});
+
+test('legacy metadata shares in-flight builds but is never cached', async () => {
+  const h = await coldHarness({ legacy: true });
+  try {
+    await h.batch(Array(6).fill('765451'), 200);
+    assert.equal(h.downloads, 1); assert.equal(h.parses, 1);
+    h.want = -1; await h.get('765451');
+    assert.equal(h.downloads, 2);
+  } finally { h.done(); }
+});
+
+test('BR02 report family binds design names to the full head SHA', () => {
+  const head = 'b'.repeat(40);
+  assert.ok(verifyReportFamily('comparison', 'kicad-review-aaaaaaa-bbbbbbb-pass.html'));
+  assert.ok(verifyReportFamily('comparison', 'kicad-review-none-bbbbbbb-fail.html'));
+  assert.ok(!verifyReportFamily('comparison', 'kicad-design-bbbbbbb.html', head));
+  for (const name of ['kicad-design-bbbbbbb.html', 'kicad-design-bbbbbbb.context.json', 'kicad-design-downloads-bbbbbbb'])
+    assert.ok(verifyReportFamily('design', name, head), name);
+  for (const [name, sha] of [['kicad-design-bbbbbbb.html', 'd'.repeat(40)], ['kicad-design-bbbbbbb.html', 'bbbbbbb'],
+    ['kicad-design-bbbbbbb.html', 'B'.repeat(40)], ['kicad-design-bbbbbbb.html', undefined], ['kicad-review-aaaaaaa-bbbbbbb-pass.html', head],
+    ['kicad-design-bbbbbbb.htm', head], ['kicad-design-downloads-bbbbbbb.html', head], ['kicad-design-bbbbbbb', head], ['x/kicad-design-bbbbbbb.html', head]])
+    assert.ok(!verifyReportFamily('design', name, sha), name + ' ' + sha);
+  assert.ok(!verifyReportFamily('other', 'kicad-design-bbbbbbb.html', head));
+});
+for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
+  'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',
+  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'identity-length', 'encoded-length', 'bad-host']) {
+  test('BR02 asset route ' + scenario, async () => {
+    const digest = 'c'.repeat(64), kind = scenario === 'valid-parts' ? 'board-parts.json' : 'board.glb';
+    const key = kind === 'board.glb' ? 'model' : 'parts', bytes = gzipSync(kind === 'board.glb' ? 'glTF' : '[]');
+    let downloads = 0, accessChecks = 0, metadataChecks = 0, pulls = 0;
+    let revoked = scenario === 'no-pull', expired = scenario === 'expired-html', siblingExpired = scenario === 'expired-sibling';
+    const sealed = await signedIn();
+    const asset = () => ({ id: 91, name: `kicad-3d-${digest}-${kind}.gz`, expired: siblingExpired, workflow_run: { id: 9 } });
+    const descriptor = { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes: bytes.length };
+    if (scenario === 'malformed-descriptor') descriptor.bytes = 'big';
+    if (scenario === 'unlisted') descriptor.digest = 'e'.repeat(64);
+    if (scenario === 'size-mismatch') descriptor.bytes = bytes.length + 1;
+    if (scenario === 'not-gzip') descriptor.bytes = 'not gzip'.length;
+    const data = { version: 1, blobs: { model: 'embedded-model' }, projects: [{ board: { model3d: { head: 'model' },
+      ...(scenario === 'no-descriptor' ? {} : { assets3d: { base: null, head: { [key]: descriptor } } }) } }] };
+    if (scenario.startsWith('design')) data.report = { kind: 'design', head: (scenario === 'design-head-mismatch' ? 'd' : 'b').repeat(40) };
+    const reportName = scenario.startsWith('design') && scenario !== 'design-comparison-name' ? 'kicad-design-bbbbbbb.html'
+      : scenario === 'bad-name' ? 'other.html' : 'kicad-review-aaaaaaa-bbbbbbb-pass.html';
+    const stored = '<script>window.REVIEW_DATA = ' + JSON.stringify(data) + ';</script>';
+    const restore = mockFetch(async (url) => {
+      url = String(url);
+      if (url.endsWith('/repos/Cameronrlewis/repo')) {
+        accessChecks++;
+        return revoked ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: false } }))
+          : new Response(JSON.stringify({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
+      }
+      if (url.endsWith('/artifacts/12')) {
+        metadataChecks++;
+        return new Response(JSON.stringify({ name: reportName, expired,
+          workflow_run: { id: 9, repository_id: scenario === 'foreign-repo' ? 6 : 5 } }));
+      }
+      if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302,
+        headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
+      if (url === 'https://artifact.actions.githubusercontent.com/report') return new Response(stored);
+      if (url.includes('/runs/9/artifacts?')) {
+        const page = Number(new URL(url).searchParams.get('page') || 1);
+        const artifacts = scenario === 'missing' ? [] : scenario === 'second-page' && page === 1
+          ? Array.from({ length: 100 }, (_, i) => ({ id: 100 + i, name: 'other-' + i }))
+          : scenario === 'wrong-run' ? [{ ...asset(), workflow_run: { id: 10 } }]
+            : scenario === 'ambiguous' ? [asset(), { ...asset(), id: 92 }] : [asset()];
+        return new Response(JSON.stringify({ artifacts }));
+      }
+      if (url.endsWith('/artifacts/91/zip')) return new Response(null, { status: 302,
+        headers: { Location: scenario === 'bad-host' ? 'https://evil.example/model' : 'https://artifact.actions.githubusercontent.com/file' } });
+      if (url === 'https://artifact.actions.githubusercontent.com/file') {
+        downloads++;
+        // Oversized: valid bytes then endless filler; a whole-body read would pull every chunk.
+        if (scenario === 'oversized') return new Response(new ReadableStream({ pull(c) {
+          c.enqueue(pulls++ ? new Uint8Array(65536) : new Uint8Array(bytes)); if (pulls > 64) c.close(); } }));
+        if (scenario === 'declared-length' || scenario === 'identity-length') return new Response(new ReadableStream({ pull(c) {
+          pulls++; c.enqueue(new Uint8Array(bytes)); c.close(); } }, { highWaterMark: 0 }), { headers: { 'Content-Length': String(bytes.length + 5), ...(scenario === 'identity-length' ? { 'Content-Encoding': 'identity' } : {}) } });
+        // Encoded transfer: Content-Length counts encoded bytes, so only the read bound applies.
+        if (scenario === 'encoded-length') return new Response(bytes, { headers: { 'Content-Encoding': 'gzip', 'Content-Length': String(bytes.length + 5) } });
+        return new Response(['corrupt', 'not-gzip'].includes(scenario) ? 'not gzip' : bytes);
+      }
+      throw Error('unexpected URL ' + url);
+    });
+    try {
+      const suffix = scenario === 'invalid-kind' ? digest + '/other' : scenario === 'invalid-digest' ? 'ABC/board.glb'
+        : scenario === 'short-digest' ? digest.slice(0, 12) + '/board.glb' : digest + '/' + kind;
+      const endpoint = '/r/Cameronrlewis/repo/a/12/3d/' + suffix;
+      const response = await call(endpoint, { headers: scenario === 'no-session' ? {} : { Cookie: `s=${sealed}` } });
+      if (['valid', 'valid-parts', 'design', 'second-page', 'encoded-length'].includes(scenario)) {
+        assert.equal(response.status, 200); assert.equal(downloads, 1);
+        assert.equal(response.headers.get('Content-Encoding'), 'gzip');
+        assert.equal(response.headers.get('Content-Type'), kind === 'board.glb' ? 'model/gltf-binary' : 'application/json');
+        assert.equal(response.headers.get('Cache-Control'), 'private,no-cache');
+        assert.equal(response.headers.get('ETag'), '"' + digest + '"');
+        assert.equal(response.headers.get('Vary'), 'Cookie');
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+        if (['valid', 'valid-parts', 'design'].includes(scenario)) {
+          const conditional = { headers: { Cookie: `s=${sealed}`, 'If-None-Match': response.headers.get('ETag') } };
+          const denied = async (label) => {
+            const before = { accessChecks, metadataChecks, downloads };
+            const result = await call(endpoint, conditional);
+            assert.equal(result.status, 404, label); assert.match(result.headers.get('Cache-Control'), /no-store/, label);
+            assert.equal(result.headers.get('ETag'), null, label);
+            assert.ok(accessChecks > before.accessChecks, label);
+            assert.equal(downloads, before.downloads, label);
+            return before;
+          };
+          const before = { accessChecks, metadataChecks };
+          const reused = await call(endpoint, conditional);
+          assert.equal(reused.status, 304);
+          assert.equal(reused.headers.get('Cache-Control'), 'private,no-cache');
+          assert.equal(reused.headers.get('ETag'), '"' + digest + '"');
+          assert.equal(reused.headers.get('Vary'), 'Cookie');
+          assert.equal((await reused.arrayBuffer()).byteLength, 0);
+          assert.ok(accessChecks > before.accessChecks); assert.ok(metadataChecks > before.metadataChecks);
+          revoked = true; await denied('revoked');
+          revoked = false; expired = true;
+          const stale = await denied('expired html');
+          assert.ok(metadataChecks > stale.metadataChecks);
+          expired = false; siblingExpired = true;
+          const sibling = await denied('expired model artifact');
+          assert.ok(metadataChecks > sibling.metadataChecks);
+        }
+      } else {
+        assert.equal(response.status, 404, scenario);
+        assert.match(response.headers.get('Cache-Control') || '', /no-store/, scenario);
+        assert.equal(response.headers.get('ETag'), null, scenario);
+        if (!['corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'identity-length'].includes(scenario)) assert.equal(downloads, 0, scenario);
+        if (scenario === 'oversized') assert.ok(pulls <= 3, 'read stops past descriptor size: ' + pulls);
+        if (scenario === 'declared-length' || scenario === 'identity-length') assert.equal(pulls, 0, 'declared size checked before reading');
+      }
+    } finally { restore(); }
+  });
+}
+
+test('BR02 image route rejects 64-character 3D model digests', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => { throw Error('unexpected URL ' + url); });
+  try {
+    for (const path of [`/r/Cameronrlewis/repo/a/12/assets/${'c'.repeat(64)}.json`, `/r/Cameronrlewis/repo/a/12/assets/${'c'.repeat(64)}.svg`]) {
+      const result = await call(path, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(result.status, 404, path); assert.equal(result.headers.get('ETag'), null);
+    }
+  } finally { restore(); }
+});
+
+import { lazy3dData, currentBody } from './report-shell.js';
+import { verifyReportFamily } from './report-kind.js';
+test('BR02 lazy stripping is opt-in and retains blobs used outside 3D',async()=>{
+  const digest='d'.repeat(64);
+  const asset=kind=>({digest,artifactName:`kicad-3d-${digest}-${kind}.gz`,bytes:32});
+  const data={version:1,blobs:{model:'large-base64',parts:'index-base64',poster:'png-base64'},
+    projects:[{board:{model3d:{base:'model',head:'model'},parts3d:{base:'parts',head:'parts'},
+      poster3d:{head:'poster'},assets3d:{base:{model:asset('board.glb'),parts:asset('board-parts.json')},
+        head:{model:asset('board.glb'),parts:asset('board-parts.json')}}}}]};
+  const lazy=lazy3dData(data);
+  assert.equal(lazy.projects[0].board.model3d.head,'model');
+  assert.equal(lazy.blobs.model,undefined);assert.equal(lazy.blobs.parts,undefined);
+  assert.equal(lazy.blobs.poster,'png-base64');assert.equal(data.blobs.model,'large-base64');
+  const shared=structuredClone(data);shared.projects[0].other='model';
+  assert.equal(lazy3dData(shared).blobs.model,'large-base64');
+  const stored='<script>window.REVIEW_DATA = '+JSON.stringify(data)+';</script>';
+  assert.match(currentReport(stored),/large-base64/);
+  assert.doesNotMatch(currentReport(stored,{lazy3d:true}),/large-base64/);
+  assert.match(await currentBody(new Response(stored)),/large-base64/);
+  assert.equal(currentReport('<p>legacy foreign body</p>'),null);
+});
+
+test('BR02 asset nonce rejects late old success and error replies',async()=>{
+  const source=readFileSync(new URL('../ui/review3d.js',import.meta.url),'utf8');
+  const match=source.match(/^([ \t]*)function requestAsset3d\(asset,kind,s\) \{[\s\S]*?^\1\}/m);
+  assert.ok(match,'actual requestAsset3d declaration');
+  const listeners=new Set(),sent=[],parent={postMessage:m=>sent.push(m)};
+  const window={parent,addEventListener:(_,fn)=>listeners.add(fn),removeEventListener:(_,fn)=>listeners.delete(fn)};
+  const request=runInNewContext('('+match[0]+')',{window,Promise,Error,DOMException,ArrayBuffer,Uint8Array,
+    crypto:globalThis.crypto,setTimeout,clearTimeout});
+  const bytes=new TextEncoder().encode('new indexed payload').buffer;
+  const digest=Buffer.from(await crypto.subtle.digest('SHA-256',bytes)).toString('hex');
+  const session=nonce=>({assetId:0,assetNonce:nonce,abort:new AbortController(),dead:false});
+  const old=session('11111111-1111-4111-8111-111111111111');
+  const a=request({digest:'a'.repeat(64)},'board.glb',old).catch(e=>e.name);
+  const oldMessage=sent[0];old.dead=true;old.abort.abort();assert.equal(await a,'AbortError');
+  const current=session('22222222-2222-4222-8222-222222222222');let settled=false;
+  const b=request({digest},'board-parts.json',current).finally(()=>{settled=true});
+  const emit=async data=>{await Promise.all([...listeners].map(fn=>fn({source:parent,data})));};
+  await emit({...oldMessage,error:'old request failed'});
+  await emit({...oldMessage,bytes:new Uint8Array([0]).buffer});
+  assert.equal(settled,false,'old nonce must not settle new id 1');
+  await emit({...sent[1],bytes,gzip:false});assert.deepEqual(await b,bytes);
+  assert.equal(listeners.size,0);
+});
+
+// Authenticated lazy 3D end to end in Node: real Worker dispatch for wrapper, raw report and
+// 3D route; the real parent broker; the real report-side requestAsset3d. Only GitHub is mocked.
+// fetch() in a browser removes HTTP gzip; the broker's fetch adapter does the same here.
+async function lazy3dHarness({ family = 'comparison', scenario = 'valid' } = {}) {
+  const head = 'b'.repeat(40), glb = Buffer.concat([Buffer.from('glTF'), Buffer.from([2, 0, 0, 0]), Buffer.alloc(24, 7)]);
+  const index = Buffer.from(JSON.stringify([{ ref: 'R16', uuid: '0a1b2c3d-0000-4000-8000-000000000001', hasModel: true, box: [0, 0, 0, 1, 1, 1] }]));
+  const files = { model: { kind: 'board.glb', raw: glb, id: 91 }, parts: { kind: 'board-parts.json', raw: index, id: 92 } };
+  for (const f of Object.values(files)) {
+    f.gz = gzipSync(f.raw); f.digest = createHash('sha256').update(f.raw).digest('hex');
+    f.descriptor = { digest: f.digest, artifactName: `kicad-3d-${f.digest}-${f.kind}.gz`, bytes: f.gz.length };
+  }
+  const data = { version: 1, blobs: { model: files.model.gz.toString('base64'), parts: files.parts.gz.toString('base64'), poster: 'png-base64' },
+    projects: [{ dir: 'Thermal_Camera', changes: [], board: { model3d: { base: null, head: 'model', enabled: true }, parts3d: { base: null, head: 'parts' }, poster3d: { head: 'poster' },
+      assets3d: { base: null, head: { model: files.model.descriptor, parts: files.parts.descriptor } } } }] };
+  if (family === 'design') data.report = { kind: 'design', head: scenario === 'head-mismatch' ? 'd'.repeat(40) : head };
+  const name = scenario === 'bad-name' ? 'other.html' : family === 'design' ? `kicad-design-${head.slice(0, 7)}.html` : 'kicad-review-aaaaaaa-bbbbbbb-pass.html';
+  const stored = '<script>window.REVIEW_DATA = ' + JSON.stringify(data) + ';</script>';
+  const h = { files, stored, name, html: 0, model: 0, parts: 0, threeRequests: [], replies: [], revoked: scenario === 'no-pull', expired: scenario === 'expired-html',
+    siblingExpired: scenario === 'expired-sibling', siblingRun: scenario === 'other-run' ? 10 : 9, sealed: await signedIn() };
+  h.restore = mockFetch(async url => {
+    url = String(url);
+    if (url.endsWith('/repos/Cameronrlewis/repo')) return h.revoked
+      ? Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })
+      : Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
+    if (url.endsWith('/actions/runs/9')) return Response.json({ status: 'completed', conclusion: 'success', event: 'push' });
+    if (url.endsWith('/artifacts/12')) return Response.json({ name, expired: h.expired, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
+    if (url === 'https://artifact.actions.githubusercontent.com/report') { h.html++; return new Response(stored); }
+    if (url.includes('/runs/9/artifacts?')) return Response.json({ artifacts: Object.values(files).map(f => ({ id: f.id, name: f.descriptor.artifactName,
+      expired: h.siblingExpired, workflow_run: { id: h.siblingRun } })) });
+    const zip = url.match(/\/artifacts\/(9[12])\/zip$/);
+    if (zip) return new Response(null, { status: 302, headers: { Location: `https://artifact.actions.githubusercontent.com/file${zip[1]}` } });
+    const file = Object.entries(files).find(([, f]) => url === `https://artifact.actions.githubusercontent.com/file${f.id}`);
+    if (file) { h[file[0]]++; return new Response(file[1].gz); }
+    throw Error('unexpected URL ' + url);
+  });
+  const cookie = { Cookie: `s=${h.sealed}` };
+  h.wrapper = async () => call('/r/Cameronrlewis/repo/a/12', { headers: cookie });
+  h.raw = async () => call('/r/Cameronrlewis/repo/a/12/raw', { headers: { ...cookie, 'Sec-Fetch-Dest': 'iframe' } });
+  h.route = async (kind, etag) => call(`/r/Cameronrlewis/repo/a/12/3d/${files[kind].digest}/${files[kind].kind}`,
+    { headers: etag ? { ...cookie, 'If-None-Match': etag } : cookie });
+  // Wire the real broker (parent) and real report-side request (child) through fake WindowProxies.
+  const childListeners = new Set(); let brokerListener;
+  const child = { postMessage: (message, origin, transfer) => { h.replies.push({ message, origin, transfer }); for (const fn of [...childListeners]) fn({ source: parentWindow, data: message }); } };
+  const parentWindow = { postMessage: message => brokerListener({ source: child, data: message, origin: 'null' }) };
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/Cameronrlewis/repo/a/12/3d/'})`, {
+    window: { addEventListener: (_, fn) => { brokerListener = fn; } }, document: { querySelector: () => ({ contentWindow: child }) },
+    Map, Number, ArrayBuffer, Uint8Array, Array, Error, String, crypto: globalThis.crypto,
+    fetch: async (url, options) => {
+      assert.equal(options.credentials, 'same-origin'); assert.equal(options.redirect, 'error');
+      const response = await call(url, { headers: cookie }); h.threeRequests.push({ url, status: response.status, headers: response.headers });
+      return response.ok && response.headers.get('Content-Encoding') === 'gzip'
+        ? new Response(gunzipSync(Buffer.from(await response.arrayBuffer()))) : response;
+    },
+  });
+  const source = readFileSync(new URL('../ui/review3d.js', import.meta.url), 'utf8');
+  const fn = source.match(/^([ \t]*)function requestAsset3d\(asset,kind,s\) \{[\s\S]*?^\1\}/m)[0];
+  const request = runInNewContext('(' + fn + ')', { window: { parent: parentWindow, addEventListener: (_, f) => childListeners.add(f),
+    removeEventListener: (_, f) => childListeners.delete(f) }, Promise, Error, DOMException, ArrayBuffer, Uint8Array, crypto: globalThis.crypto, setTimeout, clearTimeout });
+  const session = { assetId: 0, assetNonce: crypto.randomUUID(), abort: new AbortController(), dead: false };
+  h.open = key => request(files[key].descriptor, files[key].kind, session);
+  return h;
+}
+
+async function assertStrippedShell(h) {
+  const wrapper = await h.wrapper(), page = await wrapper.text();
+  assert.equal(wrapper.status, 200);
+  assert.ok(page.includes('{"endpoint":"/r/Cameronrlewis/repo/a/12/3d/"}'), 'wrapper installs the broker for this artifact id');
+  assert.match(wrapper.headers.get('Content-Security-Policy'), /connect-src 'self'/);
+  const raw = await h.raw(), served = readStoredData(await raw.text()), board = served.projects[0].board;
+  assert.equal(raw.status, 200);
+  assert.match(raw.headers.get('Content-Security-Policy'), /connect-src 'none'/);
+  assert.doesNotMatch(raw.headers.get('Content-Security-Policy'), /allow-same-origin/);
+  assert.equal(board.model3d.head, 'model'); assert.equal(board.parts3d.head, 'parts');
+  assert.deepEqual(board.assets3d.head, { model: h.files.model.descriptor, parts: h.files.parts.descriptor });
+  assert.equal(served.blobs.model, undefined); assert.equal(served.blobs.parts, undefined); assert.equal(served.blobs.poster, 'png-base64');
+  const original = readStoredData(h.stored);
+  assert.equal(original.blobs.model, h.files.model.gz.toString('base64')); assert.equal(original.blobs.parts, h.files.parts.gz.toString('base64'));
+  // Opening the report is not opening 3D: no route request and no model/index sibling download.
+  assert.equal(h.threeRequests.length, 0); assert.equal(h.model + h.parts, 0); assert.ok(h.html > 0);
+}
+
+// Reports the 3D route cannot serve keep their embedded models, so the authenticated view still renders 3D.
+async function assertEmbeddedShell(h) {
+  const raw = await h.raw(), served = readStoredData(await raw.text());
+  assert.equal(raw.status, 200);
+  assert.equal(served.blobs.model, h.files.model.gz.toString('base64')); assert.equal(served.blobs.parts, h.files.parts.gz.toString('base64'));
+  assert.equal(h.threeRequests.length, 0); assert.equal(h.model + h.parts, 0);
+}
+
+for (const [family, title] of [['comparison', 'BR02 authenticated comparison report opens lazy 3D through the broker after stripping'],
+  ['design', 'BR02 authenticated design snapshot opens 3D after stripping']]) test(title, async () => {
+  const h = await lazy3dHarness({ family });
+  try {
+    await assertStrippedShell(h);
+    const glb = await h.open('model'), parts = await h.open('parts');
+    assert.equal(h.model, 1); assert.equal(h.parts, 1);
+    assert.deepEqual(h.threeRequests.map(r => r.url), ['model', 'parts'].map(k => `/r/Cameronrlewis/repo/a/12/3d/${h.files[k].digest}/${h.files[k].kind}`));
+    for (const [i, key] of ['model', 'parts'].entries()) {
+      const { status, headers } = h.threeRequests[i];
+      assert.equal(status, 200); assert.equal(headers.get('Content-Encoding'), 'gzip'); assert.equal(headers.get('Cache-Control'), 'private,no-cache');
+      assert.equal(headers.get('ETag'), `"${h.files[key].digest}"`); assert.equal(headers.get('Vary'), 'Cookie');
+    }
+    assert.equal(createHash('sha256').update(new Uint8Array(glb)).digest('hex'), h.files.model.digest);
+    assert.equal(new DataView(glb).getUint32(0, true), 0x46546c67, 'GLB magic, decoded exactly once');
+    assert.equal(JSON.parse(new TextDecoder().decode(parts))[0].ref, 'R16');
+    assert.ok(h.replies.every(r => r.message.gzip === false && r.transfer[0] === r.message.bytes && r.origin === '*'));
+  } finally { h.restore(); }
+});
+
+for (const family of ['comparison', 'design']) for (const scenario of ['bad-name', ...(family === 'design' ? ['head-mismatch'] : []), 'no-pull', 'expired-html', 'expired-sibling', 'other-run']) {
+  test(`BR02 authenticated lazy 3D fails closed: ${family} ${scenario}`, async () => {
+    const h = await lazy3dHarness({ family, scenario: scenario === 'no-pull' || scenario === 'expired-html' ? 'valid' : scenario });
+    try {
+      // Unverifiable names keep their embedded models: never stripped, never silently served.
+      if (scenario === 'bad-name' || scenario === 'head-mismatch') await assertEmbeddedShell(h);
+      else if (scenario !== 'no-pull' && scenario !== 'expired-html') await assertStrippedShell(h);
+      // A previously issued ETag must never turn a denial into 304.
+      const etags = { model: `"${h.files.model.digest}"`, parts: `"${h.files.parts.digest}"` };
+      if (scenario === 'no-pull' || scenario === 'expired-html') {
+        await assertStrippedShell(h); assert.equal((await h.route('model')).status, 200); h.threeRequests.length = 0;
+        if (scenario === 'no-pull') h.revoked = true; else h.expired = true;
+      }
+      const before = h.model + h.parts;
+      for (const key of ['model', 'parts']) {
+        await assert.rejects(h.open(key), /Model (unavailable|access denied)/);
+        const direct = await h.route(key, etags[key]);
+        assert.equal(direct.status, 404, key); assert.match(direct.headers.get('Cache-Control'), /no-store/); assert.equal(direct.headers.get('ETag'), null);
+      }
+      assert.ok(h.threeRequests.every(r => r.status === 404), 'broker saw only denials');
+      if (scenario !== 'expired-sibling' && scenario !== 'other-run') assert.equal(h.model + h.parts, before, 'no asset body download');
+      assert.ok(h.replies.every(r => r.message.error && !r.message.bytes), 'no silent fallback bytes');
+    } finally { h.restore(); }
+  });
+}
+
+test('BR02 guest shares keep embedded 3D blobs and never install the model broker', async () => {
+  const digest = 'e'.repeat(64), data = { version: 1, blobs: { model: 'embedded-glb' }, projects: [{ board: { model3d: { head: 'model' },
+    assets3d: { head: { model: { digest, artifactName: `kicad-3d-${digest}-board.glb.gz`, bytes: 40 } } } } }] };
+  assert.doesNotMatch(sharedPage({ token: 'a.b', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' }), /threeClient|kicad3d/);
+  const token = await guestToken(), restore = guestFetch(), originalMock = globalThis.fetch;
+  mockFetch((url, options) => url === shareBlob ? Promise.resolve(new Response(`<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`)) : originalMock(url, options));
+  try {
+    const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
+    assert.equal(raw.status, 200); assert.equal(readStoredData(await raw.text()).blobs.model, 'embedded-glb');
+  } finally { restore(); }
+});
+
+test('BR02 measurement wrapper fixture keeps one opaque report frame that receives the deep link', () => {
+  // ui/measure3d.mjs --report-frame '#review-report' measures this exact page (Task 10A scratch wrapper).
+  const html = reviewPage({ user: 'test', owner: 'o', repo: 'r', id: 12, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9 });
+  const frames = [...html.matchAll(/<iframe\b[^>]*>/g)].map(m => m[0]);
+  assert.equal(frames.length, 1);
+  assert.match(frames[0], /id="review-report"/); assert.match(frames[0], /src="\/r\/o\/r\/a\/12\/raw"/);
+  assert.match(frames[0], /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
+  assert.match(html, /const raw = "\/r\/o\/r\/a\/12\/raw";[\s\S]*iframe\.src = raw \+ location\.hash/);
+  assert.match(html, /"endpoint":"\/r\/o\/r\/a\/12\/3d\/"/);
+  assert.doesNotMatch(html, /Review3D|review3d\.js/, 'viewer runs only inside the report frame');
 });
