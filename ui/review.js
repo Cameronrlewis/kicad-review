@@ -4,7 +4,7 @@ const D = window.REVIEW_DATA;
 // bench-t2: never repeat the site frame inside its sandboxed report.
 document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
-const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
+const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false }, part: null, net: null, revision: null };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
 let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
@@ -231,14 +231,34 @@ function firstChangedView(p) {
   const s = p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
-function openProject(i) { clearImageSelection(); S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
+function resolveIdentity(st, p) {
+  if (!st.part && !st.net) return null;
+  if (st.part && st.net) return { error: 'Choose a part or a net, not both' };
+  const side = st.revision === 'base' ? 'base' : 'head';
+  const target = st.part ? { uuid: st.part, sheet: String(st.v || '').startsWith('sheet:') ? st.v.slice(6) : undefined } : p.identity?.[side]?.nets?.[st.net];
+  if (!target) return { error: 'Object or net not found in this report' };
+  const matches = (p.objects || []).map((o, index) => ({ o, index })).filter(({ o }) => (o.side === side || (side === 'base' && o.side === 'head' && !o.added)) && o.uuid === target.uuid && (target.sheet === undefined || o.sheet === target.sheet));
+  if (matches.length !== 1) return { error: matches.length ? 'Object identity is ambiguous; include its sheet view' : 'Object or net not found in this report' };
+  return { index: matches[0].index };
+}
+async function focusIdentity(st) {
+  const target = resolveIdentity(st, proj()); if (!target) return false;
+  if (target.error) { const status = $('#statusbar .status-message'); if (status) status.textContent = target.error; return false; }
+  await goToObject(target.index);
+  if (st.net) { const status = $('#statusbar .status-message'); if (status) status.textContent = `Net ${st.net}: focused one stored member`; }
+  return true;
+}
+window.resolveIdentity = resolveIdentity;
+window.focusIdentity = focusIdentity;
+
+function openProject(i) { clearImageSelection(); S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; S.part = null; S.net = null; S.revision = null; select(firstChangedView(proj())); renderPanel(); }
 function stopPlacing() { S.placing = false; document.body.classList.remove("placing"); }
-function select(view) { clearImageSelection(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
+function select(view) { clearImageSelection(); const library = String(S.v).startsWith("lib:") || String(view).startsWith("lib:") || tabsChange(view); stopPlacing(); S.v = view; if (String(view).startsWith("lib:")) S.t = "changes"; S.x = S.y = S.z = null; S.part = null; S.net = null; S.revision = null; renderModes(); renderNav(); if (library) renderPanel(); renderZoombar(); draw(); saveHash(); }
 
 function decodeState(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, "").replace(/^.*?#/, "")), out = {};
   if (q.has("p")) out.p = +q.get("p");
-  for (const k of ["v", "m", "s", "t"]) if (q.has(k)) out[k] = q.get(k);
+  for (const k of ["v", "m", "s", "t", "part", "net", "revision"]) if (q.has(k)) out[k] = q.get(k);
   for (const k of ["x", "y", "z"]) if (q.has(k)) out[k] = +q.get(k);
   if (q.has("l")) out.layers = q.get("l").split(",").filter(Boolean);
   if (q.has("c")) out.camera3d = q.get("c").split(",").map(Number);
@@ -258,6 +278,9 @@ function valid(st) {   // drop anything that does not exist in this report
   }
   if (Array.isArray(st.camera3d) && st.camera3d.length === 6 && st.camera3d.every(Number.isFinite)) out.camera3d = st.camera3d;
   if (Array.isArray(st.hidden3d)) out.hidden3d = st.hidden3d.filter(x => GROUPS3D.some(([id]) => id === x));
+  if (st.part === String(st.part) && st.part.length <= 100) out.part = st.part;
+  if (st.net === String(st.net) && st.net.length <= 2000) out.net = st.net;
+  if (st.revision === 'base' || st.revision === 'head') out.revision = st.revision;
   return out;
 }
 function applyState(st) {
@@ -265,7 +288,8 @@ function applyState(st) {
   if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
   Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, io: null, ig: null, t: v.t ?? S.t,
-                     layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
+                     layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null,
+                     part: v.part ?? null, net: v.net ?? null, revision: v.revision ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
   const hasPos = S.z != null;
@@ -273,7 +297,10 @@ function applyState(st) {
   renderNav();
   renderPanel();
   renderZoombar();
-  return draw().then(() => S.s && !hasPos && !v.v && goTo(S.s));
+  return draw().then(async () => {
+    if (v.part || v.net) { await focusIdentity(v); return; }
+    if (S.s && !hasPos && !v.v) goTo(S.s);
+  });
 }
 
 const PX = 4;                       // CSS px per mm at z = PX
@@ -806,6 +833,54 @@ function viewport(stage, label, kind) {
   }
   return world;
 }
+function publishReadyAdapters(ticket) {
+  const current = !!ticket && ticket === window.reviewDrawTicket &&
+    ticket.project === S.p && ticket.view === S.v && ticket.generation === gen;
+  const done = current && ticket.complete;
+  document.body.dataset.readyDraw = JSON.stringify(ticket ? {
+    project: ticket.project,
+    sheet: ticket.sheet,
+    generation: ticket.generation,
+    complete: !!done
+  } : null);
+}
+function requestReviewDraw(generation) {
+  const ticket = {
+    project: S.p,
+    dir: proj()?.dir || '',
+    view: S.v,
+    sheet: String(S.v || '').startsWith('sheet:') ? S.v.slice(6) : null,
+    generation,
+    complete: false,
+    renderer: ''
+  };
+  window.reviewDrawTicket = ticket;
+  window.__requestedDrawGeneration = generation;
+  publishReadyAdapters(ticket);
+  return ticket;
+}
+function completeReviewDraw(ticket, stage, renderer) {
+  if (ticket !== window.reviewDrawTicket || ticket.generation !== gen ||
+      ticket.project !== S.p || ticket.view !== S.v || !stage?.isConnected ||
+      document.querySelector('#stage') !== stage) return;
+  if (stage.querySelector('.image-error')) return;
+  if (ticket.sheet && !stage.querySelector('.world svg path, .world svg circle, .world svg polygon, .world svg rect, .world svg line, .world svg text, .world img')) return;
+  Object.assign(ticket, { complete: true, renderer: renderer || '' });
+  publishReadyAdapters(ticket);
+}
+function schematicDrawReady(sheet) {
+  const t = window.reviewDrawTicket;
+  if (!t || !t.complete || t.generation !== gen || t.project !== S.p ||
+      t.view !== S.v || t.sheet !== sheet || S.v !== 'sheet:' + sheet) return false;
+  const stage = document.querySelector('#stage');
+  if (!stage || !stage.isConnected || document.querySelector('#stage') !== stage) return false;
+  return !!stage.querySelector('.world svg path, .world svg circle, .world svg polygon, .world svg rect, .world svg line, .world svg text, .world img');
+}
+window.requestReviewDraw = requestReviewDraw;
+window.completeReviewDraw = completeReviewDraw;
+window.schematicDrawReady = schematicDrawReady;
+window.publishReadyAdapters = publishReadyAdapters;
+
 let gen = 0;
 async function draw() {
   activeBoardGate?.cancel(); activeBoardGate = null;
@@ -815,7 +890,7 @@ async function draw() {
   Appearance.configure([], JSON.stringify([D.repo || location.pathname, proj().dir]));
   schematicResize.disconnect();
   resetCoordinates();
-  const my = ++gen, view = currentView(), P = proj(), stage = document.createElement("main");
+  const my = ++gen, ticket = requestReviewDraw(my), view = currentView(), P = proj(), stage = document.createElement("main");
   if(imageSearchState.context!==S.p+":"+S.v)$("#image-search").hidden=true;
   stage.id = "stage"; stage.className = `mode-${S.m}`;
   stage.dataset.view = S.v; stage.dataset.imageReady = "false"; stage.dataset.generation = String(my);
@@ -951,6 +1026,7 @@ async function draw() {
   stage.imageMounted = true; stage.setAttribute("aria-busy", "false");
   if (view && view.kind !== "lib" && !stage.querySelector(".image-error")) stage.dataset.imageReady = "true";
   finishBoard(stage);
+  completeReviewDraw(ticket, stage, S.m);
 }
 function noChangeNotice(stage) {
   const text = S.v === "board" ? (!proj().board.changed && "No layout changes") :
@@ -1766,6 +1842,7 @@ function markSelected() { clearImageSelection(); S.io = null; S.ig = null; syncS
 if (window.Review3D) { window.Review3D.onPick = id => { S.s = id; markSelected(); saveHash(); document.querySelector(`#panel [data-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); const r = proj().changes.find(c => c.id === id); if (r) window.Review3D.focus(r); }; window.Review3D.onCameraEnd = () => { S.camera3d = window.Review3D.cameraState(); saveHash(); }; }
 const viewOf = r => r.where?.board ? "board" : r.where?.sheet != null ? `sheet:${r.where.sheet}` : null;
 function goTo(id) {
+  S.part = null; S.net = null; S.revision = null;
   const r = proj().changes.find(c => c.id === id) || allViolations().find(v => v.id === id);
   if (!r) return Promise.resolve();
   S.s = id;
@@ -1915,7 +1992,10 @@ function goToObject(i) {
   });
 }
 function bindInventory() {
-  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => goToObject(+b.dataset.obj);
+  for (const b of document.querySelectorAll("#panel .inv-row[data-obj]")) b.onclick = () => {
+    S.part = null; S.net = null; S.revision = null;
+    goToObject(+b.dataset.obj);
+  };
 }
 const CHANGE_PAGE_SIZE = 50, changePage = {key:'',index:0,ids:[]};
 function filteredChangeRows() {
@@ -2370,6 +2450,9 @@ function encodeState(s = S) {
   if (s.layers) q.set("l", s.layers.join(","));
   if (Array.isArray(s.camera3d)) q.set("c", s.camera3d.map(n => (+n.toFixed(1))).join(","));
   if (s.hidden3d?.length) q.set("h", s.hidden3d.join(","));
+  if (s.part) q.set('part', s.part);
+  if (s.net) q.set('net', s.net);
+  if (s.revision === 'base') q.set('revision', 'base');
   return q.toString().replace(/%2F/g, "/").replace(/%3A/g, ":").replace(/%2C/g, ",");
 }
 let hashTimer;

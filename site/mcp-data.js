@@ -197,8 +197,12 @@ export function projectLists(value, limit = 15, key = '', unknown = false) {
   }));
 }
 
-export const objectLink = (origin, loaded, key, value) => {
-  const hash = new URLSearchParams({ p: String(loaded.projectIndex), [key]: value });
+export const objectLink = (origin, loaded, key, value, sheet, side) => {
+  const params = { p: String(loaded.projectIndex) };
+  if (side === 'base') params.revision = 'base';
+  params[key] = value;
+  if (key === 'part' && sheet != null) params.v = `sheet:${sheet}`;
+  const hash = new URLSearchParams(params);
   return `${origin}/r/${loaded.provenance.repo.split('/').map(encodeURIComponent).join('/')}/a/${loaded.reportId}#${hash}`;
 };
 
@@ -232,7 +236,7 @@ export function designParts(name, args, loaded, origin) {
   const part = p => ({
     ...projectLists(displayPart(p), limit, '', incomplete),
     id: p.uuid || null,
-    link: p.uuid ? objectLink(origin, loaded, 'part', p.uuid) : null,
+    link: p.uuid ? objectLink(origin, loaded, 'part', p.uuid, p.sheet, p.side === 'base' || loaded.side === 'base' ? 'base' : undefined) : null,
     pins: page((p.pins || []).map(v => projectLists(v, limit)), limit, p.pin_count ?? (p.pins || []).length, !!p.pins_more),
   });
   if (name === 'get_design') {
@@ -293,9 +297,19 @@ export function netProjection(name, args, loaded, origin) {
   const incomplete = !!doc.truncated, parts = r.parts || [], nets = r.nets || [], out = { provenance: loaded.provenance };
   if (name === 'get_net') {
     if (!r.netlist_available) return { ...out, error: { code: 'INCOMPLETE', message: r.netlist_reason || 'No exported netlist' } };
-    const net = nets.find(n => n.id === args.net);
+    let net = nets.find(n => n.id === args.net);
+    let netSide = loaded.side === 'base' ? 'base' : 'head';
+    let netParts = parts;
+    if (!net && loaded.project?.revisions?.base?.nets) {
+      const baseNet = loaded.project.revisions.base.nets.find(n => n.id === args.net);
+      if (baseNet) {
+        net = baseNet;
+        netSide = 'base';
+        netParts = loaded.project.revisions.base.parts || [];
+      }
+    }
     if (!net) {
-      const near = nets.filter(n => n.id.toLowerCase().includes(args.net.toLowerCase())).map(n => ({ id: n.id, link: objectLink(origin, loaded, 'net', n.id) }));
+      const near = nets.filter(n => n.id.toLowerCase().includes(args.net.toLowerCase())).map(n => ({ id: n.id, link: objectLink(origin, loaded, 'net', n.id, undefined, netSide) }));
       return { ...out, found: false, nearby: page(near, limit, incomplete ? null : near.length, incomplete), incomplete };
     }
     const ids = net.pins || [], total = net.pin_count ?? ids.length;
@@ -305,7 +319,7 @@ export function netProjection(name, args, loaded, origin) {
     const reverseMatches = id => {
       if (!reverse) {
         reverse = new Map();
-        for (const p of parts)
+        for (const p of netParts)
           for (const entry of p.pins || []) {
             const key = `${p.ref}.${entry.pin}`, match = { ref: p.ref, pin: entry.pin };
             if (reverse.has(key)) reverse.get(key).push(match); else reverse.set(key, [match]);
@@ -321,10 +335,10 @@ export function netProjection(name, args, loaded, origin) {
         if (matches.length === 1) member = matches[0];
       }
       if (!member) return { memberAvailable: false };
-      const p = parts.find(p => p.ref === member.ref && (!p.pins?.length || p.pins.some(entry => entry.pin === member.pin)));
+      const p = netParts.find(p => p.ref === member.ref && (!p.pins?.length || p.pins.some(entry => entry.pin === member.pin)));
       return { ref: member.ref, pin: member.pin, value: p?.value ?? null, partId: p?.uuid || null, memberAvailable: !!p };
     });
-    return { ...out, found: true, id: net.id, link: objectLink(origin, loaded, 'net', net.id), pins: page(rows, limit, total, !!net.more || incomplete) };
+    return { ...out, found: true, id: net.id, link: objectLink(origin, loaded, 'net', net.id, undefined, netSide), pins: page(rows, limit, total, !!net.more || incomplete) };
   }
   throw new McpError('UNKNOWN_TOOL', 'Unknown net projection');
 }

@@ -5740,4 +5740,88 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     delete cache[id];assetText=fail;await draw();
     return true;
   } finally {assetText=original;window.setTimeout=nativeTimeout;client.dispose();}
+`],
+["MCP schematic completed draw readiness", "", `
+  const sheet=proj().sheets[0];if(!sheet)return "no sheet in mandatory fixture";
+  const saved={...S},mode=S.m,render=MODES[S.m];let release,pending;
+  try {
+    S.v="sheet:"+sheet.path;await draw();
+    if(!schematicDrawReady(sheet.path))return "initial real sheet did not complete";
+    const old=document.querySelector('#stage'),previous=window.__requestedDrawGeneration;
+    const gate=new Promise(resolve=>{release=resolve;});
+    MODES[mode]=async(stage,view)=>{await gate;return render(stage,view);};
+    pending=draw();
+    const requested=JSON.parse(document.body.dataset.readyDraw||'null');
+    if(window.__requestedDrawGeneration!==previous+1||requested?.generation!==window.__requestedDrawGeneration||requested?.complete!==false)return "request did not invalidate matching generation";
+    if(!old.isConnected||!old.querySelector('.world svg path,.world svg circle,.world svg polygon,.world svg rect,.world svg line,.world svg text,.world img'))return "prior artwork not retained during delay";
+    if(schematicDrawReady(sheet.path))return "stale prior-stage artwork reported ready";
+    const empty=document.createElement('main');empty.id='stage';empty.innerHTML='<div class="world"></div>';
+    old.replaceWith(empty);
+    if(schematicDrawReady(sheet.path))return "empty world reported ready";
+    empty.replaceWith(old);release();await pending;pending=null;
+    const completed=JSON.parse(document.body.dataset.readyDraw||'null');
+    if(completed?.project!==S.p||completed?.sheet!==sheet.path||completed?.generation!==window.__requestedDrawGeneration||completed?.complete!==true)return "completion marker does not match request";
+    if(!schematicDrawReady(sheet.path))return "completed actual sheet not ready";
+    if(schematicDrawReady('/not-the-requested-sheet'))return "wrong sheet reported ready";
+    return true;
+  } finally {release?.();if(pending)await pending;MODES[mode]=render;Object.assign(S,saved);await draw();}
+`],
+["MCP unchanged identity links", "", `
+  const saved = {objects:proj().objects,identity:proj().identity};
+  const sheet=proj().sheets[0];if(!sheet)return "skip";
+  const net="12 + & / # %";
+  try {
+    proj().objects=[{uuid:"mcp-unchanged",ref:"U77",kind:"symbol",side:"head",sheet:sheet.path,pos:[20,20],box:[17,17,23,23]}];
+    proj().identity={head:{nets:{[net]:{uuid:"mcp-unchanged",sheet:sheet.path}},complete:true},base:{nets:{},complete:true}};
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged"})));
+    if(S.v!=="sheet:"+sheet.path||S.io!==0)return "unchanged UUID did not focus";
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),net})));
+    if(S.io!==0||decodeState("#"+encodeState()).net!==net)return "net identity did not round-trip";
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"missing"})));
+    if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not found"))return "missing identity was silent";
+    proj().objects.push({...proj().objects[0],sheet:"/repeated"});
+    const ambiguous=resolveIdentity({part:"mcp-unchanged"},proj());
+    if(!ambiguous?.error)return "repeated UUID was guessed instead of rejected";
+
+    // Probes:
+    // Explicit sheet disambiguation
+    const disambiguated=resolveIdentity({part:"mcp-unchanged",v:"sheet:"+sheet.path},proj());
+    if(disambiguated?.index!==0)return "explicit sheet disambiguation failed";
+
+    // Simultaneous part+net
+    const simultaneous=resolveIdentity({part:"mcp-unchanged",net},proj());
+    if(!simultaneous?.error?.includes("not both"))return "simultaneous part+net not rejected";
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",net})));
+    if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not both"))return "simultaneous part+net message missing";
+
+    // Ordinary change selection after a net focus clears part/net
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),net})));
+    if(S.net!==net)return "net was not focused before change selection";
+    const change=proj().changes[0];
+    if(change){
+      goTo(change.id);
+      if(S.net!==null||S.part!==null)return "ordinary change selection did not clear net";
+      if(decodeState("#"+encodeState()).net)return "cleared net still encoded in state";
+    }
+
+    // Missing objects on a legacy payload
+    const legacyProj={...proj(),objects:null,identity:null};
+    const legacyResult=resolveIdentity({part:"mcp-unchanged"},legacyProj);
+    if(!legacyResult?.error?.includes("not found"))return "missing objects on legacy payload did not error";
+
+    // Second-project selection
+    if(D.projects.length>1){
+      const secondProj=D.projects[1],secondSheet=secondProj.sheets[0];
+      const savedSecond={objects:secondProj.objects,identity:secondProj.identity};
+      try {
+        secondProj.objects=[{uuid:"mcp-second",ref:"R88",kind:"symbol",side:"head",sheet:secondSheet?.path,pos:[10,10],box:[8,8,12,12]}];
+        await applyState(decodeState("#"+new URLSearchParams({p:"1",part:"mcp-second"})));
+        if(S.p!==1||S.v!=="sheet:"+secondSheet?.path)return "second-project selection failed";
+      } finally {
+        secondProj.objects=savedSecond.objects;secondProj.identity=savedSecond.identity;
+      }
+    }
+
+    return true;
+  } finally {proj().objects=saved.objects;proj().identity=saved.identity;}
 `]);

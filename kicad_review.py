@@ -4167,6 +4167,27 @@ def read_optional_json(path, default=None):
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).is_file() else default
 
 
+def identity_objects(objs):
+    """One revision's own symbols, read from that revision's raw object dict: uuid is the last key segment, sheet is where.sheet."""
+    return [{'uuid': key.split('/')[-1], 'kind': o['kind'], 'ref': o['ref'], 'sheet': o['where'].get('sheet')}
+            for key, o in objs.items() if o.get('kind') == 'symbol']
+
+
+def identity_index(nets, objects):
+    """Net names remain exact strings; each net maps to one symbol of the same revision's own objects, never to the other revision's list."""
+    by_ref = {}
+    for obj in objects:
+        by_ref.setdefault(obj['ref'].split(' unit ', 1)[0], []).append(obj)
+    out = {}
+    for name, source in nets.items():
+        ref = source.get('fallback_ref') if isinstance(source, dict) else source
+        candidates = by_ref.get(ref, [])
+        if len(candidates) == 1:
+            out[str(name)] = {'uuid': candidates[0]['uuid'], 'sheet': candidates[0]['sheet']}
+    # ponytail: one unambiguous stored symbol per net, not a whole-net copper highlight.
+    return {'nets': out, 'complete': len(out) == len(nets)}
+
+
 def build_project(p, blobs, settings, waivers=None, change_offset=0, *, context=None):
     """`context`, when a dict, receives this project's Ask context builder under p["dir"]. 06 adds the keyword-only `single` beside it."""
     out = f"review/{project_id(p['dir'])}"
@@ -4334,7 +4355,10 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, context=
             **({"parts": parts} if parts else {}),
             **({"libraries": libraries} if libraries else {}),
             **({"objects": index} if index is not None else {}),
-            **({"ask": ask} if ask is not None else {})}
+            **({"ask": ask} if ask is not None else {}),
+            **({"identity": {side: identity_index(ask["nets"][side], identity_objects(objs[side]))
+                             for side in ("base", "head") if ask["nets"][side] is not None}}
+               if ask is not None else {})}
 
 
 def assign_ids(projects):

@@ -6680,3 +6680,57 @@ assert set(facts["layers"]) == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
 assert facts["copper_layers"] == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], facts["copper_layers"]
 assert facts.get("size_mm") is None
 print("ok mcp board facts")
+
+# MCP identities are additive; unchanged parts remain targetable.
+objects = {'/root/uuid-r': {'kind': 'symbol', 'ref': 'R1', 'where': {'sheet': '/'},
+            'props': {'reference': 'R1', 'Value': '10k', 'Footprint': 'R_0402', 'Voltage': '50V'}}}
+parts = kr.context_parts(objects)
+assert parts['R1']['uuid'] == 'uuid-r'
+assert parts['R1']['properties']['Voltage'] == '50V'
+# Each revision's map comes from its own raw objects (09's input shape: key is sheet path + UUID, where.sheet is the sheet).
+base_objects = objects
+head_objects = {**objects, '/root/uuid-new': {'kind': 'symbol', 'ref': 'R2', 'where': {'sheet': '/'}, 'props': {'reference': 'R2', 'Value': '4.7k'}}}
+# The unchanged R1 is in both maps, so a base-side net on an unchanged part resolves; R2 is head-only.
+assert kr.identity_index({'12': 'R1'}, kr.identity_objects(head_objects)) == {
+    'nets': {'12': {'uuid': 'uuid-r', 'sheet': '/'}}, 'complete': True}
+assert kr.identity_index({'12': 'R1'}, kr.identity_objects(base_objects)) == {
+    'nets': {'12': {'uuid': 'uuid-r', 'sheet': '/'}}, 'complete': True}, 'an unchanged part must reach the base map'
+assert kr.identity_index({'N': {'fallback_ref': 'R99'}}, []) == {'nets': {}, 'complete': False}
+# Removed nets stay navigable on base: a base UUID is only ever placed in the base map, never the head map.
+base_only = {'/root/uuid-base-r9': {'kind': 'symbol', 'ref': 'R9', 'where': {'sheet': '/'}, 'props': {'reference': 'R9'}}}
+assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_objects(base_only))['complete'] is True
+assert kr.identity_index({'REMOVED': {'fallback_ref': 'R9'}}, kr.identity_objects(head_objects)) == {'nets': {}, 'complete': False}
+assert kr.identity_index({'12': {'fallback_ref': 'R1'}}, kr.identity_objects(head_objects))['complete'] is True
+
+# build_project includes identity when Ask context is present, and omits it when opted out.
+p_out = kr.build_project({'dir': 'test', 'name': 'test', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS)
+assert 'identity' not in p_out, 'opted-out report must not include identity'
+with tempfile.TemporaryDirectory() as td:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(td)
+        os.makedirs('review', exist_ok=True)
+        with open('review/detect.json', 'w') as fh:
+            json.dump({'base': '0' * 40, 'head': '1' * 40, 'reason': 'test', 'projects': []}, fh)
+        os.makedirs('review/test/head/sch', exist_ok=True)
+        with open('review/test/head/sch/test.svg', 'w') as fh:
+            fh.write('<svg viewBox="0 0 100 100"><g/></svg>')
+        with open('review/test/head/erc.json', 'w') as fh:
+            fh.write('{"sheets": []}')
+        os.makedirs('head/test', exist_ok=True)
+        with open('head/test/test.kicad_sch', 'w') as fh:
+            fh.write('(kicad_sch (uuid root) (sheet_instances (path "/" (page "1"))))')
+        ctx = {}
+        with patch('kicad_review.project_pair', return_value=({'base': {}, 'head': head_objects}, [])), \
+             patch('kicad_review.project_checks', return_value=[]), \
+             patch('kicad_review.ask_index', return_value={'nets': {'12': {'fallback_ref': 'R1'}}}):
+            res = kr.build_project({'dir': 'test', 'name': 'test', 'status': 'modified'}, {}, kr.DEFAULT_SETTINGS, context=ctx)
+            assert 'identity' in res
+            assert res['identity']['head']['nets']['12']['uuid'] == 'uuid-r'
+            assert res['identity']['head']['complete'] is True
+            assert 'base' not in res['identity']
+    finally:
+        os.chdir(old_cwd)
+
+print('ok MCP stable identities and net focus index')
+
