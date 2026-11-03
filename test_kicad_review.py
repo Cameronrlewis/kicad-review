@@ -6774,57 +6774,85 @@ with tempfile.TemporaryDirectory() as d:
         # always-on Download UI overhead under 12 KB uncompressed without relying on origin/main ref.
         repo_dir = pathlib.Path(kr.__file__).resolve().parent
         main_commit = "10ffebe"
+        @contextlib.contextmanager
         def downloads_main_root():
-            root = pathlib.Path(os.environ.get("DOWNLOADS_MAIN_BASELINE") or tempfile.mkdtemp(prefix="downloads-main-"))
-            root.mkdir(parents=True, exist_ok=True)
-            if not (root / "kicad_review.py").is_file():
-                archive = subprocess.run(
-                    ["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"],
-                    check=True, capture_output=True
-                ).stdout
-                with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-                    if hasattr(tarfile, "data_filter"):
-                        tar.extractall(root, filter="data")
-                    else:
-                        tar.extractall(root)
-            return root
+            override = os.environ.get("DOWNLOADS_MAIN_BASELINE")
+            temp_dir = None
+            try:
+                if override:
+                    root = pathlib.Path(override)
+                    root.mkdir(parents=True, exist_ok=True)
+                else:
+                    temp_dir = tempfile.TemporaryDirectory(prefix="downloads-main-")
+                    root = pathlib.Path(temp_dir.name)
+                if not (root / "kicad_review.py").is_file():
+                    try:
+                        archive = subprocess.run(
+                            ["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"],
+                            check=True, capture_output=True
+                        ).stdout
+                        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                            if hasattr(tarfile, "data_filter"):
+                                tar.extractall(root, filter="data")
+                            else:
+                                tar.extractall(root)
+                    except (subprocess.CalledProcessError, subprocess.SubprocessError, OSError):
+                        yield None
+                        return
+                yield root
+            finally:
+                if temp_dir is not None:
+                    temp_dir.cleanup()
 
-        main_root = downloads_main_root()
         # Verify the DOWNLOADS_MAIN_BASELINE override path:
         # A pre-extracted override must not invoke git archive.
-        with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": str(main_root)}), patch("subprocess.run", side_effect=AssertionError("pre-extracted main baseline must not invoke git archive")):
-            assert downloads_main_root() == main_root
+        with tempfile.TemporaryDirectory(prefix="downloads-main-pre-") as pre_dir:
+            pre_root = pathlib.Path(pre_dir)
+            (pre_root / "kicad_review.py").write_text("# baseline stub")
+            with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": str(pre_root)}), patch("subprocess.run", side_effect=AssertionError("pre-extracted main baseline must not invoke git archive")):
+                with downloads_main_root() as override_root:
+                    assert override_root == pre_root
+
         # An unextracted override directory is populated via git archive.
         with tempfile.TemporaryDirectory(prefix="downloads-main-unextracted-") as unextracted_dir:
             target = os.path.join(unextracted_dir, "baseline")
             with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": target}), patch("subprocess.run", wraps=subprocess.run) as archive_run:
-                extracted_root = downloads_main_root()
-            archive_run.assert_called_once_with(["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"], check=True, capture_output=True)
-            assert extracted_root == pathlib.Path(target)
-            assert (extracted_root / "kicad_review.py").is_file()
-        # Separately exercise the no-override path into a fresh directory,
-        # while cwd remains outside every Git checkout.
-        with tempfile.TemporaryDirectory(prefix="downloads-main-fallback-") as fallback_main:
-            with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": ""}), patch("tempfile.mkdtemp", return_value=fallback_main), patch("subprocess.run", wraps=subprocess.run) as archive_run:
-                fallback_main_root = downloads_main_root()
-            archive_run.assert_called_once_with(["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"], check=True, capture_output=True)
-            assert fallback_main_root == pathlib.Path(fallback_main)
-            for relative in ("kicad_review.py", "image-palettes.json", "ui/review.html", "ui/review.js", "ui/review.css"):
-                assert (fallback_main_root / relative).read_bytes() == (main_root / relative).read_bytes(), relative
+                with downloads_main_root() as extracted_root:
+                    archive_run.assert_called_once_with(["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"], check=True, capture_output=True)
+                    assert extracted_root == pathlib.Path(target)
+                    assert (extracted_root / "kicad_review.py").is_file()
 
-        main_spec = importlib.util.spec_from_file_location("downloads_main", main_root / "kicad_review.py")
-        main_mod = importlib.util.module_from_spec(main_spec)
-        main_spec.loader.exec_module(main_mod)
-        with patch.object(main_mod, "load_settings", return_value=copy.deepcopy(main_mod.DEFAULT_SETTINGS)):
-            main_mod.cmd_report(None)
-        main_html = pathlib.Path("review/kicad-review.html").read_bytes()
-        assert b'id="downloads-open"' not in main_html, "pinned-main report must not contain the Download button"
-        # Rebuild after_html to restore current report state after main_mod.cmd_report
-        with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
-            kr.cmd_report(None)
-        after_html = pathlib.Path("review/kicad-review.html").read_bytes()
-        ui_overhead = len(after_html) - len(main_html)
-        assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
+        # In a shallow clone where 10ffebe is not present, git archive raises CalledProcessError.
+        # downloads_main_root must degrade gracefully (yield None) instead of failing with an uncaught error,
+        # and its temporary directory must be cleaned up without leakage.
+        with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": ""}), patch("subprocess.run", side_effect=subprocess.CalledProcessError(128, ["git", "archive"], stderr=b"fatal: not a tree object")):
+            with downloads_main_root() as shallow_root:
+                assert shallow_root is None
+
+        saved_main_path = None
+        with downloads_main_root() as main_root:
+            if main_root is None:
+                print("skip always-on Download UI overhead check: commit 10ffebe not present in shallow checkout (set DOWNLOADS_MAIN_BASELINE to enable)")
+            else:
+                saved_main_path = main_root
+                for relative in ("kicad_review.py", "image-palettes.json", "ui/review.html", "ui/review.js", "ui/review.css"):
+                    assert (main_root / relative).is_file(), f"missing extracted baseline file: {relative}"
+                main_spec = importlib.util.spec_from_file_location("downloads_main", main_root / "kicad_review.py")
+                main_mod = importlib.util.module_from_spec(main_spec)
+                main_spec.loader.exec_module(main_mod)
+                with patch.object(main_mod, "load_settings", return_value=copy.deepcopy(main_mod.DEFAULT_SETTINGS)):
+                    main_mod.cmd_report(None)
+                main_html = pathlib.Path("review/kicad-review.html").read_bytes()
+                assert b'id="downloads-open"' not in main_html, "pinned-main report must not contain the Download button"
+                # Rebuild after_html to restore current report state after main_mod.cmd_report
+                with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
+                    kr.cmd_report(None)
+                after_html = pathlib.Path("review/kicad-review.html").read_bytes()
+                ui_overhead = len(after_html) - len(main_html)
+                assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
+
+        if saved_main_path is not None and not os.environ.get("DOWNLOADS_MAIN_BASELINE"):
+            assert not saved_main_path.exists(), "temporary main_root directory must be cleaned up after use"
 
         shown = {"name": "b", "dir": "p", "status": "modified", "sheets": [], "board": {}, "changes": [], "checks": []}
         on = copy.deepcopy(DEFAULT_SETTINGS); on["downloads"]["enabled"] = True
