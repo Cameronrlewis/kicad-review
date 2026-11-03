@@ -5065,3 +5065,17 @@ test('ask client: CRLF frames split across chunks are parsed', async () => {
   assert.deepEqual(page.posts.map((p) => p.kicadReviewAskEvent.event), ['answer', 'done']);
   assert.deepEqual(page.posts[0].kicadReviewAskEvent.data, { text: 'Hi' });
 });
+
+import { mcpResponse } from './mcp.js';
+const rpcRequest = (method, params = {}, id = 1) => new Request('https://site.example/mcp', {
+  method: 'POST', headers: {'Content-Type':'application/json', Accept:'application/json, text/event-stream', 'MCP-Protocol-Version':'2025-03-26'},
+  body: JSON.stringify({jsonrpc:'2.0', id, method, params}),
+});
+test('MCP stateless transport lists tools and rejects event-stream GET', async () => {
+  const init = await mcpResponse(rpcRequest('initialize', {protocolVersion:'2025-03-26', capabilities:{}, clientInfo:{name:'test',version:'1'}}), [], async () => ({}));
+  assert.equal(init.status, 200);
+  assert.equal((await init.json()).result.serverInfo.name, 'kicad-review');
+  const list = await mcpResponse(rpcRequest('tools/list'), [], async () => ({}));
+  assert.deepEqual((await list.json()).result.tools, []);
+  assert.equal((await mcpResponse(new Request('https://site.example/mcp'), [], async () => ({}))).status, 405);
+});
