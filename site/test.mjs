@@ -5328,3 +5328,40 @@ test('MCP shared loader keeps metadata status and refuses ZIP bodies',async()=>{
 test('MCP PR review rejects a non-positive or non-integer number before any request',async()=>{
   for(const pr of [0,-1,1.5,'7'])await assert.rejects(loadPrReview(mcpAccessFixture(),pr,{gh:async()=>assert.fail('no request')}),e=>e.code==='INVALID_REF');
 });
+
+import {TOOLS,validateTool} from './mcp.js';
+test('MCP six schemas are strict and have read-only annotations',()=>{
+  assert.deepEqual(TOOLS.map(t=>t.name),['list_projects','get_design','find_parts','get_net','get_review','get_bom']);
+  for(const tool of TOOLS){assert.equal(tool.inputSchema.additionalProperties,false);assert.deepEqual(tool.annotations,
+    {readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false});}
+  for(const args of [{repo:'Cameronrlewis/repo',write:true},{repo:'Cameronrlewis/repo',limit:51},{repo:'Cameronrlewis/repo',limit:1.5}])
+    assert.throws(()=>validateTool('list_projects',args),/Invalid/);
+  assert.throws(()=>validateTool('get_net',{repo:'Cameronrlewis/repo'}),/Invalid/);
+  for(const key of ['constructor','toString','__proto__']){
+    const args=JSON.parse('{"repo":"Cameronrlewis/repo","'+key+'":true}');
+    assert.throws(()=>validateTool('list_projects',args),/Invalid/);
+  }
+  for(const project of ['', 'Nested'])assert.equal(validateTool('get_design',{repo:'Cameronrlewis/repo',project}).project,project);
+});
+
+test('MCP inherited keys fail before the call boundary',async()=>{
+  let calls=0;
+  for(const key of ['constructor','toString','__proto__']){
+    const args=JSON.parse('{"repo":"Cameronrlewis/repo","'+key+'":true}');
+    const response=await mcpResponse(rpcRequest('tools/call',{name:'list_projects',arguments:args}),TOOLS,async()=>{calls++;return {};});
+    const result=(await response.json()).result;
+    assert.equal(result.isError,true);assert.equal(JSON.parse(result.content[0].text).error.code,'INVALID_ARGUMENT');
+  }
+  for(const testCase of [
+    {name:'unknown_tool',args:{repo:'Cameronrlewis/repo'}},
+    {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:51}},
+    {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:1.5}},
+  ]){
+    const response=await mcpResponse(rpcRequest('tools/call',{name:testCase.name,arguments:testCase.args}),TOOLS,async()=>{calls++;return {};});
+    const result=(await response.json()).result;
+    assert.equal(result.isError,true);assert.equal(JSON.parse(result.content[0].text).error.code,'INVALID_ARGUMENT');
+  }
+  assert.equal(calls,0,'invalid arguments never reach authorization or GitHub');
+});
+
+
