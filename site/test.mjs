@@ -104,9 +104,10 @@ test('history checks access before timeline calls', async () => {
 });
 
 import { CHECKS } from '../ui/checks.mjs';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, statSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 test('TS-S3 absent fixture data is SKIP, never PASS', async () => {
@@ -6274,7 +6275,21 @@ test('MCP Connect panel route presence, OAUTH_KV dependency and malicious artifa
 test('MCP Connect panel details retains native keyboard semantics, in-flow expansion and reachability', () => {
   const css = readFileSync('site/site.css', 'utf8');
   // Nested popovers expand in-flow instead of absolutely overlaying outer menu items
-  assert.match(css, /\.bench-popover\s+\.bench-popover\s*\{[^}]*position:\s*static[^}]*box-shadow:\s*none/);
+  const nestedRule = css.match(/\.bench-popover\s+\.bench-popover\s*\{([^}]+)\}/);
+  assert.ok(nestedRule, 'nested .bench-popover rule exists in site.css');
+  const decls = Object.fromEntries(
+    nestedRule[1]
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(decl => {
+        const colon = decl.indexOf(':');
+        return [decl.slice(0, colon).trim(), decl.slice(colon + 1).trim()];
+      })
+  );
+  assert.equal(decls['position'], 'static');
+  assert.equal(decls['box-shadow'], 'none');
+  assert.equal(decls['border'], '0');
 
   const page = reviewPage({
     user: 'reviewer',
@@ -6299,24 +6314,131 @@ test('MCP Connect panel details retains native keyboard semantics, in-flow expan
   // Native details structure: summary is first child inside details for native keyboard toggle
   assert.match(page, /<details class="bench-menu"><summary>Connect your AI assistant<\/summary>/);
 
-  // Reachability and sequential DOM ordering:
+  // Reachability and sequential DOM ordering within overflow menu:
   // Preceding actions -> Connect details -> Trailing actions (Copy link, Go to)
   const overflowStart = page.indexOf('<details class="bench-menu bench-overflow">');
-  assert.ok(overflowStart > 0);
-  const overflowEnd = page.indexOf('</details>', page.indexOf('data-review-goto', overflowStart));
-  const overflowSlice = page.slice(overflowStart, overflowEnd + 10);
+  assert.ok(overflowStart > 0, 'overflow menu exists');
 
-  const historyPos = overflowSlice.indexOf('History');
-  const sharePos = overflowSlice.indexOf('Share…');
-  const connectPos = overflowSlice.indexOf('Connect your AI assistant');
-  const copyPos = overflowSlice.indexOf('data-review-copy');
-  const gotoPos = overflowSlice.indexOf('data-review-goto');
+  const historyPos = page.indexOf('History', overflowStart);
+  const sharePos = page.indexOf('Share…', overflowStart);
+  const connectSummary = '<summary>Connect your AI assistant</summary>';
+  const connectSummaryPos = page.indexOf(connectSummary, overflowStart);
 
-  assert.ok(historyPos > 0 && sharePos > historyPos && connectPos > sharePos, 'Preceding review actions precede Connect panel');
-  assert.ok(copyPos > connectPos && gotoPos > copyPos, 'Trailing actions follow Connect panel');
+  assert.ok(historyPos > overflowStart && sharePos > historyPos && connectSummaryPos > sharePos, 'Preceding review actions precede Connect panel');
 
-  // Verify that trailing actions are not trapped inside the nested details
-  const nestedDetailsClose = overflowSlice.indexOf('</details>', connectPos);
-  assert.ok(copyPos > nestedDetailsClose, 'Copy link is sibling to nested details, not inside it');
-  assert.ok(gotoPos > nestedDetailsClose, 'Go to input is sibling to nested details, not inside it');
+  // Connect details is closed before trailing actions (not wrapping them)
+  const connectDetailsOpen = page.lastIndexOf('<details class="bench-menu">', connectSummaryPos);
+  assert.ok(connectDetailsOpen > overflowStart, 'Connect panel is a nested details inside overflow menu');
+  const connectDetailsClose = page.indexOf('</details>', connectSummaryPos);
+  assert.ok(connectDetailsClose > connectSummaryPos, 'Connect panel details closes');
+
+  const copyPos = page.indexOf('data-review-copy', overflowStart);
+  const gotoPos = page.indexOf('data-review-goto', overflowStart);
+  const outerDetailsClose = page.indexOf('</details>', gotoPos);
+
+  assert.ok(copyPos > connectDetailsClose, 'Copy link is sibling to nested details, not inside it');
+  assert.ok(gotoPos > copyPos, 'Go to input follows Copy link');
+  assert.ok(outerDetailsClose > gotoPos, 'Overflow menu closes after Go to input');
+});
+
+test('MCP Connect panel 1440x900 browser layout and visual proof in light and dark', { skip: spawnSync(chrome, ['--version']).status !== 0 && 'no Chrome' }, () => {
+  const proofDir = process.env.PROOF_DIR || '/Users/cameron/Code/kicad-review-study/tmp/10-mcp-server/proof';
+  mkdirSync(proofDir, { recursive: true });
+
+  for (const theme of ['light', 'dark']) {
+    let page = reviewPage({
+      user: 'reviewer',
+      owner: 'demo',
+      repo: 'Thermal_Camera',
+      id: 123,
+      name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html',
+      workflowRunId: 99,
+      pull: 7,
+      share: true,
+      pdf: true,
+      mcpOrigin: 'https://review.example',
+    });
+
+    const setup = `<script>try{localStorage.setItem('kr.theme',${JSON.stringify(theme)})}catch(e){}document.documentElement.dataset.theme=${JSON.stringify(theme)};</script>`;
+    page = page.replace('<head>', '<head>' + setup);
+    page = page.replace('<details class="bench-menu bench-overflow">', '<details class="bench-menu bench-overflow" open>');
+    page = page.replace('<details class="bench-menu"><summary>Connect your AI assistant</summary>', '<details class="bench-menu" open><summary>Connect your AI assistant</summary>');
+
+    const diagnostic = `<script>
+const outer = document.querySelector('.bench-overflow');
+const innerDetails = outer.querySelector('details.bench-menu');
+const innerPopover = innerDetails.querySelector('.bench-popover');
+const copyBtn = outer.querySelector('button[data-review-copy]');
+const gotoInput = outer.querySelector('input[data-review-goto]');
+const code = innerDetails.querySelector('code');
+
+const innerStyle = getComputedStyle(innerPopover);
+const copyRect = copyBtn.getBoundingClientRect();
+const gotoRect = gotoInput.getBoundingClientRect();
+const innerRect = innerPopover.getBoundingClientRect();
+const docScrollWidth = document.documentElement.scrollWidth;
+
+const historyLink = outer.querySelector('a[href*="/history"]') || outer.querySelector('button');
+const shareBtn = outer.querySelector('#share-open') || outer.querySelector('button');
+const historyRect = historyLink ? historyLink.getBoundingClientRect() : { width: 0, height: 0 };
+const shareRect = shareBtn ? shareBtn.getBoundingClientRect() : { width: 0, height: 0 };
+
+const result = {
+  theme: "${theme}",
+  position: innerStyle.position,
+  boxShadow: innerStyle.boxShadow,
+  innerBottom: innerRect.bottom,
+  copyTop: copyRect.top,
+  inFlowExpansion: copyRect.top >= innerRect.bottom,
+  noHorizontalOverflow: docScrollWidth <= 1440,
+  docScrollWidth,
+  codeReadable: code.offsetWidth > 0 && code.offsetHeight > 0,
+  actionsReachable: historyRect.width > 0 && shareRect.width > 0 && copyRect.width > 0 && gotoRect.width > 0,
+};
+const div = document.createElement('div');
+div.id = 'proof-results';
+div.textContent = JSON.stringify(result);
+document.body.appendChild(div);
+</script>`;
+    page = page.replace('</body>', diagnostic + '</body>');
+
+    const dir = mkdtempSync(join(tmpdir(), `connect-1440-${theme}-`));
+    const pagePath = join(dir, 'page.html');
+    const shotPath = join(proofDir, `connect-1440x900-${theme}.png`);
+    writeFileSync(pagePath, page);
+
+    try {
+      const r = spawnSync(chrome, [
+        '--headless=new',
+        '--no-first-run',
+        '--no-default-browser-check',
+        `--user-data-dir=${join(dir, 'profile')}`,
+        '--virtual-time-budget=2000',
+        '--window-size=1440,900',
+        `--screenshot=${shotPath}`,
+        '--dump-dom',
+        pathToFileURL(pagePath).href,
+      ], { timeout: 15000, encoding: 'utf8' });
+
+      assert.equal(r.status, 0, `Chrome exited cleanly for ${theme}`);
+      assert.ok(statSync(shotPath).size > 0, `Screenshot created for ${theme}`);
+
+      const match = r.stdout.match(/<div id="proof-results">([^<]+)<\/div>/);
+      assert.ok(match, `Proof metrics recorded for ${theme}`);
+      const metrics = JSON.parse(match[1]);
+
+      assert.equal(metrics.position, 'static', `${theme}: inner popover is position: static`);
+      assert.equal(metrics.boxShadow, 'none', `${theme}: inner popover has no box-shadow`);
+      assert.equal(metrics.inFlowExpansion, true, `${theme}: Copy link is below expanded connect panel (in-flow expansion)`);
+      assert.equal(metrics.noHorizontalOverflow, true, `${theme}: no horizontal overflow at 1440x900 (scrollWidth ${metrics.docScrollWidth})`);
+      assert.equal(metrics.codeReadable, true, `${theme}: command code is readable and selectable`);
+      assert.equal(metrics.actionsReachable, true, `${theme}: existing review actions remain reachable`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const light = readFileSync(join(proofDir, 'connect-1440x900-light.png'));
+  const dark = readFileSync(join(proofDir, 'connect-1440x900-dark.png'));
+  assert.notDeepEqual(light, dark, 'light and dark 1440x900 captures are distinct');
 });
