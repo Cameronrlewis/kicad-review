@@ -6560,3 +6560,65 @@ with tempfile.TemporaryDirectory() as case:
             except SystemExit as error:
                 assert "unexpected CPL rotation table header" in str(error), error
 print("ok complete CPL table header validation")
+
+cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+        seen = []
+        with patch("kicad_review.render_side"), patch("kicad_review.export_downloads", side_effect=lambda *a: seen.append(a)):
+            kr.cmd_render(None)
+            assert seen == [], "off by default"
+            pathlib.Path("base/kicad-review.toml").write_text("[downloads]\nenabled = true\n")
+            kr.cmd_render(None)
+        assert [(a[0]["name"], a[1], a[2], a[4]) for a in seen] == [("b", "head/p", "review/p/head", "b" * 40)], seen  # head only
+    finally:
+        os.chdir(cwd)
+# Same revision first cached as base must never satisfy a download-producing head.
+p = {"dir":"p", "name":"P", "status":"modified"}
+det = {"base":"a"*40, "head":"a"*40, "reason":"t", "projects":[p]}
+enabled = copy.deepcopy(DEFAULT_SETTINGS); enabled["downloads"]["enabled"] = True
+assert kr.render_cache(p, "base", det, enabled) != kr.render_cache(p, "head", det, enabled), "base/head cache collision"
+assert kr.render_cache(p, "head", det, DEFAULT_SETTINGS) != kr.render_cache(p, "head", det, enabled), "opt-in cache collision"
+for initial in (DEFAULT_SETTINGS, enabled):
+    with tempfile.TemporaryDirectory() as d:
+        os.chdir(d)
+        try:
+            pathlib.Path("review").mkdir(); pathlib.Path("base/p").mkdir(parents=True); pathlib.Path("head/p").mkdir(parents=True)
+            pathlib.Path("review/detect.json").write_text(json.dumps(det))
+            # Cache only the base role, including a complete marker, as an earlier comparison would.
+            cache = kr.render_cache(p, "base", det, initial); cache.mkdir(parents=True)
+            (cache / ".complete").write_text("complete")
+            with patch("kicad_review.load_settings", return_value=enabled):
+                try:
+                    kr.restore_renders(); raise AssertionError("head restored a downloads-less base cache")
+                except SystemExit as e: assert e.code == 1
+                with patch("kicad_review.render_side"), patch("kicad_review.export_downloads") as export:
+                    kr.cmd_render(None)
+                    assert any(c.args[2] == "review/p/head" for c in export.call_args_list), "head skipped after base/disabled cache"
+        finally: os.chdir(cwd)
+# Release-only runs stage/upload their already-built fabrication package; no PDF/STEP/GLB.
+release_only = copy.deepcopy(DEFAULT_SETTINGS); release_only["checks"]["release"] = "informational"
+with tempfile.TemporaryDirectory() as d:
+    source = dl_project(d, "P"); dl_calls.clear(); dl_mode.clear()
+    with patch("kicad_review.subprocess.run", side_effect=dl_fake):
+        entries = kr.export_downloads({"name":"P","dir":""}, source, f"{d}/out", release_only, "b"*40)
+    assert [e["kind"] for e in entries] == ["fab"] and not entries[0]["error"], entries
+    assert [c[0][3] for c in dl_calls] == ["gerbers", "drill", "pos", "bom"], dl_calls
+# The head requests 02's raw GLB even with the 3D viewer off; the base never does so for downloads (needs 02's cmd_render gate).
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+        pathlib.Path("base/kicad-review.toml").write_text("[downloads]\nenabled = true\n[3d]\nenabled = false\n")
+        glb_calls = []
+        with patch("kicad_review.render_side"), patch("kicad_review.export_downloads"), patch("kicad_review.export_glb", side_effect=lambda p, side, out, **kw: glb_calls.append((side, kw.get("model")))):
+            kr.cmd_render(None)
+        assert ("head", True) in glb_calls and not any(side == "base" and model for side, model in glb_calls), glb_calls
+    finally:
+        os.chdir(cwd)
+print("ok render head gating, release-only staging and role/opt-in cache isolation")
+

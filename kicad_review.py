@@ -665,6 +665,10 @@ def render_tool_identity():
 def render_cache_complete(cache, p, side, settings):
     if not cache or not image_cache_complete(cache, p, side):
         return False
+    if side == "head" and settings.get("downloads", {}).get("enabled") and pathlib.Path(board_path(p, side)).is_file():
+        raw = cache / "board.raw.glb"
+        if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
+            return False
     need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
     if need_still and pathlib.Path(board_path(p, side)).is_file():
         if settings["3d"]["enabled"]:
@@ -716,6 +720,9 @@ def render_cache(p, side, det, settings):
               "board_models": glb_input_digest(p, side)}
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
     identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
+    needs_downloads = side == "head" and (settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off")
+    if needs_downloads:
+        identity += b"\0head-downloads-v1"
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -767,7 +774,9 @@ def cmd_render(args):
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
-            if need_still and pathlib.Path(board_path(p, side)).is_file():
+            if side == "head" and settings["downloads"]["enabled"]:
+                export_glb(p, side, out, model=True)
+            elif need_still and pathlib.Path(board_path(p, side)).is_file():
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
                     for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
@@ -782,7 +791,12 @@ def cmd_render(args):
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
                     os.makedirs(f"{out}/fab", exist_ok=True)
-                    release_project(pro, "review", settings, f"{out}/fab", p["name"])
+                    try:
+                        release_project(pro, "review", settings, f"{out}/fab", p["name"])
+                    except (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
+                        print("::warning::" + workflow_command_escape(f"{p['name']}: release outputs incomplete; continuing other exports"))
+            if side == "head" and det.get("head") and (settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"):
+                export_downloads(p, posixpath.join(side, p["dir"]), out, settings, det["head"])
             print(f"{p['name']}: rendered {side}")
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
@@ -2742,10 +2756,10 @@ def export_downloads(p, src, out, settings, head, *, policy=None, purpose="compa
     if os.path.exists(pcb):
         fab_dir = f"{out}/" + ("fab-snapshot" if purpose == "snapshot" else "fab")
         entries.append(fab_entry(f"{src}/{name}.kicad_pro", name, settings, fab_dir, f"{dl}/fab-{stem}.zip"))
-    if os.path.exists(sch):
+    if settings["downloads"]["enabled"] and os.path.exists(sch):
         dest = f"{dl}/{stem}-schematic.pdf"
         entries.append(export_one("pdf", ["sch", "export", "pdf", "-o", dest, sch], dest))
-    if os.path.exists(pcb):
+    if settings["downloads"]["enabled"] and os.path.exists(pcb):
         if settings["downloads"]["step"]:
             dest = f"{dl}/{stem}-board.step"
             entries.append(export_one("step", ["pcb", "export", "step", "--subst-models", "-f", "-o", dest, pcb], dest, DOWNLOAD_STEP_TIMEOUT))
