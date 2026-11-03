@@ -29,7 +29,7 @@ export async function consentRoute(request, env, { session, open, seal }) {
   }
   if (request.method !== 'POST') return new Response(null, { status: 405, headers: { Allow: 'GET, POST' } });
   if (request.headers.get('Origin') !== url.origin) return json({ error: 'Forbidden' }, 403);
-  if (request.headers.get('Content-Type')?.split(';')[0] !== 'application/x-www-form-urlencoded') return json({ error: 'Send form data' }, 415);
+  if (request.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/x-www-form-urlencoded') return json({ error: 'Send form data' }, 415);
   let body;
   try { body = await readBounded(request, 16384); } catch (error) { return error.code === 'TOO_LARGE' ? json({ error: 'Request too large' }, 413) : json({ error: 'Send form data' }, 400); }
   const form = new URLSearchParams(body), pending = form.get('pending'), saved = await open(pending || '', env);

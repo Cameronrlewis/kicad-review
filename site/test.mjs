@@ -5876,3 +5876,98 @@ test('MCP consent rejects missing expiry, oversize forms and unparseable request
   assert.equal(get.status,400);assert.equal(get.headers.get('Location'),null);
   assert.equal(grants,0);
 });
+
+test('MCP consent renders consent page on GET and completes authorization on POST allow', async () => {
+  const now = Date.now();
+  let sealedPending = null;
+  const env = {
+    OAUTH_PROVIDER: {
+      parseAuthRequest: async () => ({
+        clientId: 'client-123',
+        redirectUri: 'https://client.example/cb',
+        scope: ['read:design'],
+        state: 'oauth-state-1',
+      }),
+      lookupClient: async (id) => ({
+        clientName: 'Test AI Assistant',
+        redirectUris: ['https://client.example/cb'],
+      }),
+      completeAuthorization: async (params) => {
+        completedParams = params;
+        return { redirectTo: 'https://client.example/cb?code=auth-code-ok&state=oauth-state-1' };
+      },
+    },
+  };
+  let completedParams = null;
+  let sealedCredential = null;
+  const deps = {
+    session: async () => ({ login: 'cam', token: 'secret' }),
+    open: async (value) => {
+      if (value === 'pending-cookie-token') {
+        return {
+          auth: { clientId: 'client-123', redirectUri: 'https://client.example/cb', scope: ['read:design'], state: 'oauth-state-1' },
+          login: 'cam',
+          nonce: 'nonce-123',
+          exp: now + 600000,
+        };
+      }
+      if (value === 'site-session-token') {
+        return { t: 'gh-user-token', u: 'cam', e: now + 7200000 };
+      }
+      return null;
+    },
+    seal: async (payload) => {
+      if (payload.nonce) {
+        sealedPending = payload;
+        return 'pending-cookie-token';
+      }
+      if (payload.t) {
+        sealedCredential = payload;
+        return 'sealed-cred-jwt';
+      }
+      return 'other';
+    },
+  };
+
+  // 1. Successful GET /authorize
+  const getReq = new Request('https://site.example/authorize?response_type=code&code_challenge_method=S256&code_challenge=' + 'a'.repeat(43) + '&resource=https://site.example/mcp');
+  const getRes = await consentRoute(getReq, env, deps);
+  assert.equal(getRes.status, 200);
+  assert.match(getRes.headers.get('Content-Type') || '', /text\/html/);
+  assert.match(getRes.headers.get('Set-Cookie') || '', /mc=pending-cookie-token; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=600; Secure/);
+  assert.equal(sealedPending.login, 'cam');
+  assert.equal(sealedPending.auth.clientId, 'client-123');
+  assert.ok(sealedPending.nonce);
+  assert.ok(sealedPending.exp >= now + 600000 && sealedPending.exp <= Date.now() + 600000);
+  const html = await getRes.text();
+  assert.ok(html.includes('<form method="post" action="/authorize">'));
+  assert.ok(html.includes('<input type="hidden" name="pending" value="pending-cookie-token">'));
+  assert.ok(html.includes('Test AI Assistant'));
+  assert.ok(html.includes('https://client.example/cb'));
+  assert.ok(html.includes('cam'));
+
+  // 2. Successful POST /authorize (allow) with mixed-case and padded Content-Type
+  const postReq = new Request('https://site.example/authorize', {
+    method: 'POST',
+    headers: {
+      Origin: 'https://site.example',
+      Cookie: 'mc=pending-cookie-token; s=site-session-token',
+      'Content-Type': '  Application/x-www-form-urlencoded ; charset=UTF-8  ',
+    },
+    body: new URLSearchParams({ pending: 'pending-cookie-token', decision: 'allow' }),
+  });
+  const postRes = await consentRoute(postReq, env, deps);
+  assert.equal(postRes.status, 302);
+  assert.equal(postRes.headers.get('Location'), 'https://client.example/cb?code=auth-code-ok&state=oauth-state-1');
+  assert.match(postRes.headers.get('Set-Cookie') || '', /mc=; Path=\/authorize; HttpOnly; SameSite=Lax; Max-Age=0; Secure/);
+  assert.deepEqual(completedParams, {
+    request: { clientId: 'client-123', redirectUri: 'https://client.example/cb', scope: ['read:design'], state: 'oauth-state-1' },
+    userId: 'cam',
+    metadata: { label: 'cam read-only design access' },
+    scope: ['read:design'],
+    props: { credential: 'sealed-cred-jwt' },
+  });
+  assert.equal(sealedCredential.t, 'gh-user-token');
+  assert.equal(sealedCredential.u, 'cam');
+  assert.ok(sealedCredential.e <= now + 3600000);
+});
