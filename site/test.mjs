@@ -5713,4 +5713,58 @@ test('MCP live review uses wiring support, zero changes and removed projects',as
   const access={...mcpAccessFixture(),repository:{owner:{login:'Cameronrlewis'},name:'repo'}};
   const gh=async path=>new Response(JSON.stringify(path==='/graphql'?{data:{repository:{pullRequest:{headRefOid:SHA,reviewThreads:{totalCount:0,nodes:[]}}}}}:[]));
   assert.equal((await reviewLive(access,7,SHA,15,gh)).readiness.state,'review_evidence_only');
+
+  const blockBody = threadBody({ anchor, text: 'B'.repeat(1200), link: 'https://s/r' });
+  const blockGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 1, nodes: [
+        { id: 't_block', isResolved: false, resolvedBy: null, comments: { nodes: [
+          { databaseId: 101, body: blockBody, author: { login: 'reviewer' }, createdAt: '2026-10-12T10:00:00Z', url: 'https://x#1' },
+        ] } },
+      ] } } } } }
+    : []));
+  const blockLive = await reviewLive(access, 7, SHA, 15, blockGh);
+  assert.equal(blockLive.readiness.state, 'needs_work');
+  assert.equal(blockLive.readiness.blocking, 1);
+  assert.equal(blockLive.openThreads.items[0].comments.items[0].body.length, 1000);
+  assert.equal(blockLive.openThreads.items[0].comments.items[0].body, 'B'.repeat(1000));
+
+  const crGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0, nodes: [] } } } } }
+    : [{ id: 1, user: { login: 'alice' }, state: 'CHANGES_REQUESTED', commit_id: SHA, submitted_at: '2026-01-01T00:00:00Z' }]));
+  assert.equal((await reviewLive(access, 7, SHA, 15, crGh)).readiness.state, 'needs_work');
+
+  const headMismatchGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: { totalCount: 0, nodes: [] } } } } }
+    : []));
+  const headMismatchLive = await reviewLive(access, 7, SHA, 15, headMismatchGh);
+  assert.equal(headMismatchLive.readiness.state, 'unknown');
+  assert.equal(headMismatchLive.openThreads.truncated, true);
+
+  const moreThreadsGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 5, nodes: [] } } } } }
+    : []));
+  assert.equal((await reviewLive(access, 7, SHA, 15, moreThreadsGh)).readiness.state, 'unknown');
+
+  const nonOkThreadsGh = async path => (path === '/graphql' ? new Response('err', { status: 500 }) : new Response('[]'));
+  assert.equal((await reviewLive(access, 7, SHA, 15, nonOkThreadsGh)).readiness.state, 'unknown');
+
+  const nonOkReviewsGh = async path => (path === '/graphql'
+    ? new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0, nodes: [] } } } } }))
+    : new Response('err', { status: 500 }));
+  assert.equal((await reviewLive(access, 7, SHA, 15, nonOkReviewsGh)).readiness.state, 'unknown');
+
+  const reviews100Gh = async path => (path === '/graphql'
+    ? new Response(JSON.stringify({ data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0, nodes: [] } } } } }))
+    : new Response(JSON.stringify(new Array(100).fill({ id: 1, user: { login: 'u' }, state: 'APPROVED', commit_id: SHA, submitted_at: '2026-01-01' }))));
+  const reviews100Live = await reviewLive(access, 7, SHA, 15, reviews100Gh);
+  assert.equal(reviews100Live.readiness.state, 'unknown');
+  assert.equal(reviews100Live.readiness.decisions.truncated, true);
+
+  const throwsGh = async () => { throw new Error('network rejection'); };
+  assert.equal((await reviewLive(access, 7, SHA, 15, throwsGh)).readiness.state, 'unknown');
+
+  const malformedGh = async path => new Response(JSON.stringify(path === '/graphql'
+    ? { data: { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0 } } } } }
+    : []));
+  assert.equal((await reviewLive(access, 7, SHA, 15, malformedGh)).readiness.state, 'unknown');
 });

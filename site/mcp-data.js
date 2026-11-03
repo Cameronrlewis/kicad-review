@@ -380,25 +380,28 @@ export function reviewProjects(doc, limit = 15) {
 export async function reviewLive(access, pr, sha, limit = 15, gh) {
   const query = { query: LIST_QUERY, variables: { owner: access.repository.owner.login, name: access.repository.name, number: pr } };
   const [reviews, threads] = await Promise.all([
-    gh(`${access.root}/pulls/${pr}/reviews?per_page=100`, access.token),
-    gh('/graphql', access.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query) }),
+    gh(`${access.root}/pulls/${pr}/reviews?per_page=100`, access.token).catch(() => null),
+    gh('/graphql', access.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query) }).catch(() => null),
   ]);
-  const body = threads.ok ? await threads.json().catch(() => null) : null;
+  const body = threads?.ok ? await threads.json().catch(() => null) : null;
   const raw = body?.data?.repository?.pullRequest, rt = raw?.reviewThreads;
-  const complete = !!rt && !body.errors?.length && rt.totalCount <= rt.nodes.length && raw.headRefOid === sha;
-  const open = complete ? parseThreads(body).filter(t => !t.resolved) : null;
-  const reviewRows = reviews.ok ? await reviews.json().catch(() => null) : null;
+  let open = null;
+  const complete = !!rt && Array.isArray(rt.nodes) && !body?.errors?.length && typeof rt.totalCount === 'number' && rt.totalCount <= rt.nodes.length && raw.headRefOid === sha;
+  if (complete) {
+    try { open = parseThreads(body).filter(t => !t.resolved); } catch { /* malformed */ }
+  }
+  const isComplete = complete && open !== null;
+  const reviewRows = reviews?.ok ? await reviews.json().catch(() => null) : null;
   const decisions = Array.isArray(reviewRows) && reviewRows.length < 100 ? latestDecisions(reviewRows, sha) : null;
   return {
     head: sha,
-    openThreads: page((open || []).map(t => ({ id: t.id, anchor: projectLists(t.anchor, limit), comments: page(t.comments.map(c => ({ ...projectLists(c, limit), body: String(c.body).slice(0, 1000) })), limit, null, true) })), limit, open ? open.length : null, !complete),
+    openThreads: page((open || []).map(t => ({ id: t.id, anchor: projectLists(t.anchor, limit), comments: page(t.comments.map(c => ({ ...projectLists(c, limit), body: String(c.body).slice(0, 1000) })), limit, null, true) })), limit, open ? open.length : null, !isComplete),
     readiness: {
       head: sha,
       decisions: page((decisions || []).map(d => projectLists(d, limit)), limit, decisions ? decisions.length : null, !decisions),
-      blocking: open ? open.filter(t => t.anchor.severity === 'blocking').length : null,
+      blocking: open ? open.filter(t => t.anchor?.severity === 'blocking').length : null,
       open: open ? open.length : null,
-      state: !complete || !decisions ? 'unknown' : decisions.some(d => !d.stale && d.state === 'CHANGES_REQUESTED') || open.some(t => t.anchor.severity === 'blocking') ? 'needs_work' : 'review_evidence_only',
+      state: !isComplete || !decisions ? 'unknown' : decisions.some(d => !d.stale && d.state === 'CHANGES_REQUESTED') || open.some(t => t.anchor?.severity === 'blocking') ? 'needs_work' : 'review_evidence_only',
     },
   };
 }
-
