@@ -1780,9 +1780,9 @@ assert 'npm ci --prefix site' in wf and wf.index('npm ci --prefix site') < wf.in
 assert 'npm ci --prefix site' in deploy and deploy.index('npm ci --prefix site') < deploy.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP site-deploy.yml locked site install before site test"
 assert 'node ui/check.mjs --no-skip "MCP unchanged identity links"' in wf, "MCP browser check in test.yml"
 assert 'OAUTH_KV' in site_docs and 'read:design' in site_docs, "MCP OAUTH_KV and read:design documented in site/README.md"
-assert 'No model-provider request' in site_docs and 'one hour' in site_docs, "MCP no model request and one hour TTL documented in site/README.md"
-assert 'Connect panel' in site_docs and 'no Connect panel is shown' in site_docs, "MCP Connect panel wording and absence documented in site/README.md"
-assert '32 properties' in root_docs and '200 code points' in root_docs and 'searchFieldsComplete:false' in root_docs, "MCP property limits and searchFieldsComplete documented in README.md"
+assert re.search(r'No\s+model-provider\s+request', site_docs) and re.search(r'one\s+hour', site_docs), "MCP no model request and one hour TTL documented in site/README.md"
+assert re.search(r'Connect\s+panel', site_docs) and re.search(r'no\s+Connect\s+panel\s+is\s+shown', site_docs), "MCP Connect panel wording and absence documented in site/README.md"
+assert re.search(r'32\s+properties', root_docs) and re.search(r'200\s+code\s+points', root_docs) and 'searchFieldsComplete:false' in root_docs, "MCP property limits and searchFieldsComplete documented in README.md"
 print('ok MCP locked installation and settings docs')
 print("ok")
 
