@@ -1,4 +1,143 @@
 """Self-checks for kicad_review.py. Run: python3 test_kicad_review.py"""
+import os
+
+# Only the KiCad interpreter imports pcbnew; ordinary host checks stay dependency-free.
+if os.environ.get("BR03_PCBNEW_TEST") == "1":
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("copper_area", "tools/copper_area.py")
+    copper = importlib.util.module_from_spec(spec); spec.loader.exec_module(copper)
+    import pcbnew
+
+    def square(x0, y0, x1, y1):
+        p = pcbnew.SHAPE_POLY_SET(); p.NewOutline()
+        for x, y in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]:
+            p.Append(int(x*1e6), int(y*1e6))
+        return p
+
+    a, b = square(0, 0, 2, 2), square(1, 0, 3, 2)
+    result = copper.compare({("F.Cu", "GND"): a}, {("F.Cu", "GND"): b})["rows"][0]
+    assert result["addedMm2"] == result["removedMm2"] == 2.0
+    assert result["addedContours"] and result["removedContours"]
+    u = square(0, 0, 2, 2); u.BooleanAdd(square(1, 0, 3, 2)); u.Simplify()
+    assert abs(u.Area()/1e12 - 6) < 1e-9
+    hole = square(0, 0, 4, 4); hole.BooleanSubtract(square(1, 1, 3, 3))
+    assert len(copper.contours(hole)[0]) == 2
+    assert not copper.compare({("F.Cu", "A"): square(0, 0, 1, 1)},
+                              {("F.Cu", "A"): square(0, 0, 1.05, 1)})["rows"]
+    # Strict threshold, deterministic rows, missing sides, and numeric-looking names.
+    assert copper.collect("-") == {}
+    assert copper.compare({}, {}) == {"rows": [], "incomplete": []}
+    before = (a.Area(), b.Area())
+    assert copper.compare({("F.Cu", "GND"): a}, {("F.Cu", "GND"): b})["rows"][0] == result
+    assert (a.Area(), b.Area()) == before, "BR03 compare mutated input polygons"
+    tiny = square(0, 0, 1.050001, 1)
+    assert copper.compare({("F.Cu", "A"): square(0, 0, 1, 1)},
+                          {("F.Cu", "A"): tiny})["rows"]
+    polys = {("In1.Cu", "12"): square(-2, -1, 0, 0), ("F.Cu", ""): a}
+    added = copper.compare({}, polys)
+    removed = copper.compare(polys, {})
+    assert [(r["layer"], r["net"]) for r in added["rows"]] == [("F.Cu", ""), ("In1.Cu", "12")]
+    assert [r["addedMm2"] for r in added["rows"]] == [4.0, 2.0]
+    assert all(r["removedMm2"] == 0 and not r["removedContours"] for r in added["rows"])
+    assert [r["removedMm2"] for r in removed["rows"]] == [4.0, 2.0]
+    assert all(r["addedMm2"] == 0 and not r["addedContours"] for r in removed["rows"])
+    assert [-2.0, -1.0] in added["rows"][1]["addedContours"][0]
+    # Coordinate budget spans every row and both signs; exact areas are unaffected.
+    from unittest.mock import patch
+    with patch.object(copper, "MAX_CONTOUR_POINTS", 4):
+        bounded = copper.compare({}, polys)
+        signed = copper.compare({("F.Cu", "GND"): a}, {("F.Cu", "GND"): b})["rows"][0]
+    assert sum(len(c) for key in ("addedContours", "removedContours") for c in signed[key]) <= 4
+    assert signed["truncated"] and signed["addedMm2"] == signed["removedMm2"] == 2.0
+    assert copper.contours(a, 3) == ([], True)
+    assert sum(len(c) for r in bounded["rows"] for key in ("addedContours", "removedContours")
+               for c in r[key]) <= 4
+    assert [r["addedMm2"] for r in bounded["rows"]] == [4.0, 2.0]
+    assert bounded["rows"][1]["truncated"] and bounded["incomplete"]
+    points, truncated = copper.contours(hole, 7)
+    assert len(points) == 1 and truncated, "do not emit a partially cut contour"
+    assert not result["truncated"]
+    # Refill failures preserve actionable CLI diagnostics (and never reach LoadBoard).
+    import pathlib
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="br03-refill-test-") as tmp:
+        source = pathlib.Path(tmp) / "fixture.kicad_pcb"
+        source.write_text("synthetic fixture path")
+        failure = type("Run", (), {"returncode": 2, "stderr": "fixture CLI failure", "stdout": ""})()
+        with patch.object(copper.subprocess, "run", return_value=failure):
+            try:
+                copper.refill_board(str(source))
+            except RuntimeError as exc:
+                assert "exit 2" in str(exc) and "fixture CLI failure" in str(exc)
+            else:
+                raise AssertionError("refill failure should retain CLI diagnostic")
+    # Refill must actually update the copied board, not merely see its initial copy.
+    with tempfile.TemporaryDirectory(prefix="br03-refill-save-test-") as tmp:
+        source = pathlib.Path(tmp) / "fixture.kicad_pcb"
+        source.write_text("stale")
+        def silent_success(*args, **kwargs):
+            assert kwargs["timeout"] == 120, "each revision needs an independent refill budget"
+            target = pathlib.Path(args[0][-1])
+            target.write_text("refilled")
+            return type("Run", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        fake_board = object()
+        with patch.object(copper.subprocess, "run", side_effect=silent_success), patch.object(
+                copper.pcbnew, "LoadBoard", return_value=fake_board):
+            assert copper.refill_board(str(source)) is fake_board
+        with patch.object(copper.subprocess, "run", return_value=type(
+                "Run", (), {"returncode": 0, "stderr": "", "stdout": ""})()), patch.object(
+                copper.pcbnew, "LoadBoard") as load_board:
+            try:
+                copper.refill_board(str(source))
+            except RuntimeError as exc:
+                assert "did not save" in str(exc)
+            else:
+                raise AssertionError("unchanged copied board must fail save verification")
+            load_board.assert_not_called()
+    # Hidden Reference/Value fields do not export copper; visible ones do.
+    board = pcbnew.BOARD()
+    footprint = pcbnew.FOOTPRINT(board)
+    board.Add(footprint)
+    fields = (footprint.Reference(), footprint.Value())
+    for index, field in enumerate(fields):
+        field.SetText("BR03")
+        field.SetLayer(pcbnew.F_Cu)
+        field.SetPosition(pcbnew.VECTOR2I(index * 10000000, 0))
+        field.SetVisible(False)
+    with patch.object(copper, "refill_board", return_value=board):
+        assert copper.collect("fixture") == {}, "hidden fields must not contribute copper"
+        for field in fields:
+            field.SetVisible(True)
+            original = copper.collect("fixture")
+            assert original[("F.Cu", "")].Area() > 0
+            board.SetLayerName(pcbnew.F_Cu, "Renamed front copper")
+            renamed = copper.collect("fixture")
+            assert set(renamed) == set(original) == {("F.Cu", "")}
+            assert copper.compare(original, renamed)["rows"] == []
+            field.SetVisible(False)
+        fields[0].SetLayer(pcbnew.F_SilkS)
+        fields[0].SetVisible(True)
+        assert copper.collect("fixture") == {}, "non-copper fields must be ignored"
+    # Identical bytes saved in the same coarse timestamp tick are still a save.
+    with tempfile.TemporaryDirectory(prefix="br03-refill-coarse-time-test-") as tmp:
+        source = pathlib.Path(tmp) / "fixture.kicad_pcb"
+        source.write_text("unchanged")
+        coarse_time = 1700000000
+        os.utime(source, (coarse_time, coarse_time))
+        source_stat = source.stat()
+        def identical_save(*args, **kwargs):
+            target = pathlib.Path(args[0][-1])
+            target.write_bytes(source.read_bytes())
+            os.utime(target, (coarse_time, coarse_time))
+            return type("Run", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+        with patch.object(copper.subprocess, "run", side_effect=identical_save), patch.object(
+                copper.pcbnew, "LoadBoard", return_value=fake_board):
+            assert copper.refill_board(str(source)) is fake_board
+        assert source.read_text() == "unchanged"
+        assert source.stat().st_mtime_ns == source_stat.st_mtime_ns
+    print("ok BR03 signed copper polygons")
+
 from kicad_review import is_kicad_file, owner_project
 
 
@@ -26,6 +165,139 @@ def br02_png(width=1600, height=1000, *, channels=4, filter_type=0):
         previous = row
     return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8,
             6 if channels == 4 else 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b''.join(rows))) + chunk(b'IEND', b''))
+
+import copy, json, pathlib, tempfile
+import kicad_review as kr
+
+# FAB-04: waiver eligibility and DRC-scale coordinates.
+settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+settings['fabrication']['check_limits'] = True
+settings['checks']['fab_limits'] = 'required'
+assert 'fab_limits' in kr.WAIVABLE, 'FAB-04 waiver parser accepts fab'
+v = kr.violation({'type':'track_width','severity':'error','description':'too narrow',
+                  'items':[{'uuid':'track','description':'track','pos':{'x':42.5,'y':20}}]},
+                 1, {'board':True})
+c = kr.run_check('fab_limits', settings, [v], None)
+assert c['status'] == 'fail' and c['new_errors'] == 1 and c['fixed'] == 0
+waivers = {'active':{('fab_limits',kr.waiver_key(v)):{'reason':'prototype','by':'reviewer',
+            'until':'2026-12-31','ref':None}}}
+c = kr.run_check('fab_limits', settings, [dict(v)], None, waivers)
+assert c['waived'] == 1 and c['status'] == 'pass' and c['errors'] == 0
+assert c['violations'][0]['pos'] == [42.5,20], 'FAB-04 DRC must not receive ERC scale'
+
+# FAB-01: dated profiles, opt-in settings and copper coverage.
+profiles = kr.fab_profiles()
+assert len(profiles) == 12, "FAB-01 twelve exact profiles"
+assert profiles["jlcpcb-2l"]["values"]["holeToHoleViaMm"] == .2
+assert profiles["pcbway-std"]["values"]["drillPlatedMaxMm"] == 6
+assert all(p["checkedOn"] >= "2026-10-24" and p["source"].startswith("https://")
+           for p in profiles.values()), "FAB-01 dated provenance (Task 8 may later move the three sign-off profiles to a newer date)"
+# FAB-08: refresh only the three sign-off profiles from current vendor pages.
+FRESH_VENDOR_PROFILES = ('jlcpcb-2l', 'jlcpcb-multilayer', 'pcbway-std')
+FRESH_VENDOR_SOURCES = {'https://jlcpcb.com/capabilities/pcb-capabilities',
+                        'https://www.pcbway.com/capabilities.html'}
+profiles = kr.fab_profiles()
+for key in FRESH_VENDOR_PROFILES:
+    assert profiles[key]['checkedOn'] >= '2026-10-26', key + ' still has the study date'
+    assert profiles[key]['source'] in FRESH_VENDOR_SOURCES, key + ' cites an unlisted page'
+assert all(profiles[k]['checkedOn'] == '2026-10-24' for k in profiles if k not in FRESH_VENDOR_PROFILES), 'other nine profiles keep the study date'
+# Published changes are asserted; unverified study assumptions are recorded, not pinned.
+assert all(profiles[k]['values']['drillPlatedMinMm'] == .15 for k in FRESH_VENDOR_PROFILES)
+assert profiles['pcbway-std']['values']['holeToHoleMm'] == .45
+assert 'holeToHoleViaMm' not in profiles['pcbway-std']['values']
+
+assert kr.DEFAULT_SETTINGS["fabrication"]["check_limits"] is False
+assert kr.DEFAULT_SETTINGS["checks"]["fab_limits"] == "informational"
+with tempfile.TemporaryDirectory() as td:
+    pcb = pathlib.Path(td, "four.kicad_pcb")
+    pcb.write_text(pathlib.Path("ui/fixtures/vf-order-4.kicad_pcb").read_text())
+    sections = {s["vendor"]: s for s in kr.fab_context(pcb)}
+    assert (sections["jlcpcb"]["profile"], sections["jlcpcb"]["layers"], sections["jlcpcb"]["unsupported"]) == ("jlcpcb-multilayer", 4, None)
+    assert (sections["pcbway"]["profile"], sections["pcbway"]["unsupported"]) == ("pcbway-std", None), "FAB-01 PCBWay checked on 4 layers"
+    assert sections["jlcpcb"]["coverageWarnings"] == [], "FAB-01 explicit standard copper has no warning"
+    pcb.write_text(pcb.read_text().replace('(thickness 0.035)', '', 1))
+    assert all(any("thickness unknown" in x for x in s["coverageWarnings"]) for s in kr.fab_context(pcb)), "FAB-01 missing thickness is unknown in both sections"
+    pcb.write_text('(kicad_pcb (layers (0 "F.Cu" signal)))')
+    assert all(s["unsupported"] for s in kr.fab_context(pcb)), "FAB-01 unsupported is not pass in both sections"
+    pcb.write_text('(kicad_pcb (layers (0 "F.Cu" signal) (2 "B.Cu" signal)) '
+                   '(setup (stackup (layer "F.Cu" (thickness 0.07)) '
+                   '(layer "B.Cu" (thickness 0.035)))))')
+    assert all(any("0.07" in x for x in s["coverageWarnings"]) for s in kr.fab_context(pcb))
+
+with tempfile.TemporaryDirectory() as td:
+    base, head = pathlib.Path(td, 'base'), pathlib.Path(td, 'head')
+    base.mkdir(); head.mkdir()
+    (base / kr.SETTINGS_FILE).write_text('[fabrication]\ncheck_limits = true\n')
+    (head / kr.SETTINGS_FILE).write_text('[fabrication]\ncheck_limits = false\n')
+    assert kr.load_settings((str(base), str(head)))['fabrication']['check_limits'] is True
+    for toml, message in (
+        ('[fabrication]\ncheck_limits = "true"\n', f'{kr.SETTINGS_FILE}: fabrication.check_limits must be true or false'),
+        ('[fabrication]\ncheck_limits = true\n[checks]\ndrc = "off"\n', f'{kr.SETTINGS_FILE}: fabrication.check_limits requires checks.drc != "off"'),
+        ('[fabrication]\ncheck_limits = 1\n', f'{kr.SETTINGS_FILE}: fabrication.check_limits must be true or false'),
+        ('[checks]\nfab_limits = "banana"\n', f"{kr.SETTINGS_FILE}: checks.fab_limits = 'banana'; expected one of {', '.join(kr.CHECK_NAMES)} = required/informational/off")):
+        (base / kr.SETTINGS_FILE).write_text(toml)
+        try:
+            kr.load_settings((str(base),))
+            raise AssertionError('FAB-01 invalid setting accepted')
+        except SystemExit as exc:
+            assert str(exc) == message
+
+print("ok FAB-01 profiles, copper coverage and settings")
+
+# FAB-02: owned bytes, grouped bounds and one-to-one raw DRC subtraction.
+raw = lambda ids: {"type": "track_width", "severity": "error", "description": "minimum changed",
+                   "items": [{"uuid": u, "description": u} for u in ids]}
+a, reverse = raw(["a", "b"]), raw(["b", "a"])
+assert kr.fab_subtract([a, reverse, a], [reverse]) == [reverse, a], "FAB-02 multiset, not set"
+no_uuid = {"type": "clearance", "items": [{"description": "Pad 1 of R1"}]}
+assert kr.fab_subtract([no_uuid, no_uuid], [no_uuid]) == [no_uuid]
+assert kr.fab_subtract([raw(["other"])], [a]) == [raw(["other"])]
+assert kr.fab_subtract([a, a], [a, a]) == []
+assert kr.fab_identity(a) == kr.fab_identity({**reverse, "description": "different numeric minimum"})
+assert kr.fab_identity(a) != kr.fab_identity({**a, "type": "clearance"})
+one = {"type": "clearance", "items": [{"description": "pad", "pos": {"x": 1, "y": 2}}]}
+two = {"type": "clearance", "items": [{"description": "pad", "pos": {"x": 9, "y": 2}}]}
+assert kr.fab_subtract([one, two], [one]) == [two]
+partial = {"type": "clearance", "items": [{"uuid": "a", "description": "pad"}, {"description": "via"}]}
+assert kr.fab_identity(partial) == kr.fab_identity({**partial, "items": partial["items"][::-1]})
+assert kr.fab_identity(partial) != kr.fab_identity({**partial, "items": [{"uuid": "b", "description": "pad"}, {"description": "via"}]})
+assert kr.fab_identity({"type": "clearance", "description": "first"}) != kr.fab_identity({"type": "clearance", "description": "second"})
+original = '(version 1)\n# team rules\n(rule "house" (constraint track_width (min .3mm)))\n'
+merged = kr.fab_owned_rules(original, '(rule "fab test" (constraint track_width (min .1mm)))')
+assert original in merged and kr.fab_owned_rules(merged, 'new-section').count('new-section') == 1
+assert kr.fab_owned_rules(merged, 'new-section').startswith(original)
+for malformed in (original + kr.FAB_START + '\n', kr.FAB_END + kr.FAB_START,
+                  kr.FAB_END, kr.FAB_START + kr.FAB_END + kr.FAB_START + kr.FAB_END):
+    try:
+        kr.fab_owned_rules(malformed, '')
+        raise AssertionError('FAB-02 malformed markers accepted')
+    except ValueError:
+        pass
+owned = original + kr.FAB_START + '\nold\n' + kr.FAB_END + '\n# after\n'
+assert kr.fab_owned_rules(owned, 'new') == original + kr.FAB_START + '\nnew\n' + kr.FAB_END + '\n# after\n'
+assert kr.fab_owned_rules('', '') == kr.fab_owned_rules(kr.fab_owned_rules('', ''), '')
+context = {"layers": 2, "values": kr.fab_profiles()["jlcpcb-2l"]["values"]}
+rules, unchecked = kr.fab_rule_section(context)
+assert '(layer outer)' in rules and '(layer inner)' not in rules
+assert '(max 6.3mm)' in rules and 'holeToHoleMixedMm' in unchecked
+assert 'trackWidthInnerMm' not in unchecked, "FAB-02 inner does not apply on 2 layers"
+hole_rules = [line for line in rules.splitlines() if 'constraint hole_size' in line and '(max' in line]
+assert len(hole_rules) == 1 and '(min 0.15mm)' in hole_rules[0] and '(max 6.3mm)' in hole_rules[0]
+assert 'viaDiameterMinMm' in unchecked
+four_rules, four_unchecked = kr.fab_rule_section({"layers": 4, "values": kr.fab_profiles()["jlcpcb-multilayer"]["values"]})
+assert '(layer inner)' in four_rules and 'trackWidthInnerMm' not in four_unchecked
+_, missing_inner = kr.fab_rule_section({"layers": 4, "values": context["values"]})
+assert 'trackWidthInnerMm' in missing_inner and 'clearanceInnerMm' in missing_inner
+vendor_rules, covered = kr.fab_vendor_rules(context)
+assert 'via_diameter' not in covered and 'track_width' in covered
+assert covered == {'track_width', 'clearance', 'drill_out_of_range', 'annular_width',
+                   'copper_edge_clearance', 'hole_to_hole'}
+assert vendor_rules.index('fab neutral track_width') < vendor_rules.index('fab track_width')
+assert vendor_rules.endswith(rules)
+assert '(rule "fab neutral hole_size" (constraint hole_size (min 0mm) (max 1000000mm)))' in vendor_rules
+empty_rules, empty_covered = kr.fab_vendor_rules({"layers": 2, "values": {}})
+assert empty_covered == set() and empty_rules.count('(rule "fab neutral ') == 7
+print("ok FAB-02 owned rules, grouping, multiset identity and attribution categories")
 
 dirs = {"", "boards/a", "boards/a/sub", "b"}
 assert owner_project("boards/a/x.kicad_sch", dirs) == "boards/a"
@@ -211,10 +483,12 @@ for theme, palette in kr.IMAGE_PALETTES.items():
 with patch.object(kr, 'kicad_cli') as cli, patch.object(kr.os.path, 'exists', return_value=True), \
      patch.object(kr, 'board_layers', return_value=['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']), \
      patch.object(kr, 'sheet_pages', return_value=[]), \
-     patch.object(kr, 'export_board_stats', return_value=None) as stats_export:
+     patch.object(kr, 'export_board_stats', return_value=None) as stats_export, \
+     patch.object(kr, 'export_netlist') as netlist_export:
     with TemporaryDirectory() as d:
         kr.render_side(d, 'H', d, netlist=True)
         stats_export.assert_called_once_with(f'{d}/H.kicad_pcb', d)
+        netlist_export.assert_called_once_with(f'{d}/H.kicad_sch', d)  # bounded soft export, outside the theme loop
     commands = [call.args for call in cli.call_args_list]
     sheets = [c for c in commands if c[:3] == ('sch', 'export', 'svg')]
     boards = [c for c in commands if c[:3] == ('pcb', 'export', 'svg')]
@@ -229,7 +503,7 @@ with patch.object(kr, 'kicad_cli') as cli, patch.object(kr.os.path, 'exists', re
         assert pcb[pcb.index('--drill-shape-opt') + 1] == '0'
     assert sum(c[:2] == ('sch', 'erc') for c in commands) == 1
     assert sum(c[:2] == ('pcb', 'drc') and '--schematic-parity' in c for c in commands) == 1
-    assert sum(c[:3] == ('sch', 'export', 'netlist') for c in commands) == 1
+    assert not any(c[:3] == ('sch', 'export', 'netlist') for c in commands), 'netlist export is not fatal'
     assert not any(c[:3] == ('pcb', 'export', 'stats') for c in commands), 'no fatal or duplicate statistics export'
 print('ok canonical image palettes and dual-theme exports')
 
@@ -1714,7 +1988,8 @@ with tempfile.TemporaryDirectory() as output:
     text = pathlib.Path(output, "multiboard.html").read_text(encoding="utf-8")
     data = json.loads(text.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
     assert data["bom"]["summary"]["components"] == 7 and data["bom"]["boards"] == ["Alpha", "Beta"]
-for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"'):
+assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
+for command in ('node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
@@ -1752,6 +2027,9 @@ for command in (
 ):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"
+fixture_block = test_wf.split("      - name: Build browser fixtures\n        run: |\n", 1)[1].split("\n      - ", 1)[0]
+assert '          FAB_REPORT_FIXTURE="$PAGES/fab.html" python3 test_kicad_review.py' in fixture_block.splitlines(), "TS-S1 fab producer must run inside fixture-generation block"
+assert fixture_block.index('export PAGES=') < fixture_block.index('FAB_REPORT_FIXTURE='), "TS-S1 fab producer needs PAGES"
 print("ok TS-S1 CI browser matrix")
 print("ok")
 
@@ -2158,7 +2436,7 @@ try:
     project = {"dir": "P", "name": "P", "status": "modified"}
     write(t, {"review/detect.json": json.dumps({"base": "b", "head": "h", "reason": "fixture", "projects": [project]})})
     objects = {"base": {"r": sym("R1", "10k", "C1")}, "head": {"r": sym("R1", "10k", "C9")}}
-    with patch("kicad_review.project_objects", side_effect=lambda path, name: objects[path.split("/")[0]]), \
+    with patch("kicad_review.project_objects", side_effect=lambda path, name, issues=None: objects[path.split("/")[0]]), \
          patch("kicad_review.diff_objects", return_value=[]), patch("kicad_review.project_checks", return_value=[]):
         for parts_enabled in (False, True):
             for models_enabled in (False, True):
@@ -2210,7 +2488,7 @@ try:
         board_objects = {b["name"]: b["objects"] for b in boards}
         for enabled in (False, True):
             settings["parts"]["enabled"] = enabled
-            with patch("kicad_review.project_objects", side_effect=lambda path, name: board_objects[name]), \
+            with patch("kicad_review.project_objects", side_effect=lambda path, name, issues=None: board_objects[name]), \
                  patch("kicad_review.load_settings", return_value=settings), patch("sys.stdout", new=io.StringIO()):
                 kicad_review.cmd_report(None)
             multi_data = json.loads(pathlib.Path("review/data.json").read_text())
@@ -2813,7 +3091,8 @@ assert "pictures unavailable" in print_html(pdata, [], "", "", "now")
 print("ok missing screenshots are explained")
 
 from kicad_review import cmd_pdf
-import types as _types, kicad_review as kr
+import contextlib, io, types as _types, kicad_review as kr
+import contextlib as _contextlib, io as _io
 _cwd = os.getcwd()
 with tempfile.TemporaryDirectory() as d:
     os.chdir(d); os.makedirs("review/images")
@@ -2873,6 +3152,7 @@ with tempfile.TemporaryDirectory() as d:
         os.makedirs("review")
         pathlib.Path("review/data.json").write_text(json.dumps({**pdata, "settings": {"pdf": {"enabled": True}}}))
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
+            expected_warning = "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
                 with patch("kicad_review.subprocess.run", side_effect=failure), patch('sys.stdout', new_callable=io.StringIO) as warnings:
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
@@ -2952,6 +3232,7 @@ with tempfile.TemporaryDirectory() as d:
     os.chdir(d)
     for s in ("base", "head"):
         os.makedirs(f"review/p/{s}")
+        write(s, {"p/b.kicad_sch": "(kicad_sch)"})
         open(f"review/p/{s}/netlist.net", "w").write(netlist({"R1": ("10k", "", "Device:R")}, {"GND": [("R1", "1", "", "passive")]}))
     c = interface_check({"dir": "p", "name": "b"}, settings, {"base": {}, "head": {}}, "review/p")
     os.chdir(_cwd)
@@ -3004,10 +3285,13 @@ class FinalReviewTests(unittest.TestCase):
         settings["checks"]["interfaces"] = "required"
         settings["interfaces"] = {"uart_tx": ["SEND"]}
         with tempfile.TemporaryDirectory() as d:
-            os.makedirs(f"{d}/head")
-            with open(f"{d}/head/netlist.net", "w") as f:
-                f.write(netlist({}, {"TX": [("U1", "1", "TX", "output"), ("U2", "1", "SEND", "output")]}))
-            result = interface_check({}, settings, {}, d)
+            old=os.getcwd(); os.chdir(d)
+            try:
+                write('head',{'p/b.kicad_sch':'(kicad_sch)'})
+                write('review/p',{'head/netlist.net':netlist({}, {'TX': [
+                    ('U1','1','TX','output'),('U2','1','SEND','output')]})})
+                result=interface_check({'dir':'p','name':'b'},settings,{},'review/p')
+            finally: os.chdir(old)
         self.assertIn(("uart_tx_to_tx", "error"), types(result["violations"]))
 
     def test_ohms(self):
@@ -3600,11 +3884,19 @@ try:
                 assert json.dumps(off, sort_keys=True) == json.dumps(legacy, sort_keys=True)
                 # Golden JSON bytes from the pre-libraries parent, with inventory enabled.
                 import hashlib
-                legacy_shape = copy.deepcopy(off)
+                def legacy_projection(project):
+                    projected = {k: v for k, v in project.items() if k != "summary"}
+                    projected["changes"] = [{k: v for k, v in r.items() if k not in
+                        {"channel", "weight", "document", "detail", "anchors"}} for r in project["changes"]
+                        if r["kind"] not in {"net-added", "net-removed", "net-joined", "net-split", "net-renamed",
+                                             "net-members", "board-pad-net", "wires", "copper", "rule", "stackup"}]
+                    return projected
+                legacy_shape = copy.deepcopy(legacy_projection(off))
                 legacy_shape['board'].pop('inspect', None)
                 for row in legacy_shape['sheets'] + legacy_shape['board']['layers']:
                     for key in ('hotspots', 'svgThemes', 'sourceRGBThemes'): row.pop(key, None)
                 assert hashlib.sha256(json.dumps(legacy_shape, sort_keys=True).encode()).hexdigest() == "b937e0cb731bbe1beced3891a85e9cfd37a8353c23eae0c84c24fc2e35809c0c"
+                assert "summary" in off and isinstance(off["summary"]["channels"], list)
                 assert comment_markdown({**d2, "projects": [off]}, [], "") == comment_markdown({**d2, "projects": [legacy]}, [], "")
         with patch("kicad_review.load_settings", return_value=settings), patch("kicad_review.build_project", return_value=off):
             kicad_review.cmd_report(None)
@@ -4177,7 +4469,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
             legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
@@ -5714,6 +6006,973 @@ assert '3D coverage' in docs and 'parts3d' in docs, 'BR02 document 3D coverage a
 assert 'world metres' in docs and '600,000' in docs, 'BR02 document bounds units and simplification ceiling'
 print('ok BR02 documentation')
 
+# BR03: Electrical membership extraction and identity limits.
+from kicad_review import net_members
+nettext = '''(export (components (comp (ref U1)))
+(nets (net (name GND) (node (ref U1) (pin 1))
+(node (ref U1) (pin 1)))))'''
+obj = lambda ref, unit, sheet: {"kind":"symbol", "ref":ref,
+    "props":{"reference":ref,"unit":unit},"where":{"sheet":sheet},"pos":[1,2,0]}
+units = {"/a":obj("U1","1","/"), "/b":obj("U1","2","/")}
+nets, anchors, issues = net_members(nettext, units, "a"*40)
+assert nets == {"GND":{"U1.1"}}
+assert len(anchors["U1.1"]) == 2 and not issues
+bad = {"/a":obj("U1","1","/"), "/b":obj("U1","1","/")}
+nets, anchors, issues = net_members(nettext, bad, "a"*40)
+assert not nets["GND"] and issues and not anchors
+missing = nettext.replace("U1", "R?")
+nets, anchors, issues = net_members(missing, {"/a":obj("R?","1","/")}, "a"*40)
+assert nets["GND"] == {"/a:1"} and issues
+assert anchors["/a:1"][0]["commit"] == "a"*40
+inst = {"/s1/a":obj("R1","1","/s1/"), "/s2/a":obj("R2","1","/s2/")}
+text = '(export (nets (net (name A) (node (ref R1) (pin 1)) (node (ref R2) (pin 1)))))'
+nets, anchors, issues = net_members(text, inst, "b"*40)
+assert nets["A"] == {"R1.1","R2.1"} and not issues
+assert anchors["R1.1"][0]["sheet"] != anchors["R2.1"][0]["sheet"]
+# Power symbols (#PWR) are not component pins: skipped without suppressing the rest of the net.
+pwr = '(export (nets (net (name GND) (node (ref U1) (pin 1)) (node (ref "#PWR01") (pin 1)))))'
+nets, anchors, issues = net_members(pwr, {"/a": obj("U1","1","/")}, "c"*40)
+assert nets == {"GND": {"U1.1"}} and not issues
+# A missing reference shared by several symbols has no recoverable UUID: suppressed, never guessed.
+two = {"/a": obj("U?","1","/"), "/b": obj("U?","2","/")}
+nets, anchors, issues = net_members('(export (nets (net (name GND) (node (ref "U?") (pin 2)))))', two, "c"*40)
+assert not nets["GND"] and issues and not anchors
+print("ok BR03 electrical membership")
+
+# BR03 review regressions: independently runnable identity-policy tests.
+def br03_object(ref, unit="1", sheet="/"):
+    return {"kind": "symbol", "ref": ref, "props": {"reference": ref, "unit": unit},
+            "where": {"sheet": sheet}, "pos": [1, 2, 0]}
+
+
+def test_br03_unknown_net():
+    objects = {"/r": br03_object("R1"), "/a": br03_object("U1"), "/b": br03_object("U1")}
+    # An ambiguous node poisons its entire net, regardless of node order; other nets stay usable.
+    for nodes in ('(node (ref R1) (pin 1)) (node (ref U1) (pin 1))',
+                  '(node (ref U1) (pin 1)) (node (ref R1) (pin 1))'):
+        text = '(export (nets (net (name BAD) ' + nodes + ''')
+          (net (name GOOD) (node (ref R1) (pin 2))) (net (name EMPTY))))'''
+        nets, anchors, issues = net_members(text, objects, "a" * 40)
+        assert nets == {"BAD": None, "GOOD": {"R1.2"}, "EMPTY": set()}, nets
+        assert set(anchors) == {"R1.2"}, anchors  # no anchors leaked from partial evidence
+        assert len(issues) == 1 and issues[0]["unknown"] is True, issues
+        assert issues[0]["channel"] == "wiring" and issues[0]["net"] == "BAD", issues
+    # The same shared member remains anchored if independently observed on a trustworthy net.
+    text = '''(export (nets (net (name GOOD) (node (ref R1) (pin 1)))
+      (net (name BAD) (node (ref R1) (pin 1)) (node (ref U1) (pin 1)))))'''
+    nets, anchors, issues = net_members(text, objects, "a" * 40)
+    assert nets == {"GOOD": {"R1.1"}, "BAD": None} and set(anchors) == {"R1.1"}
+    # Every affected net has its own marker, not a deduplicated global reason.
+    text = '''(export (nets (net (name B) (node (ref U1) (pin 1)))
+      (net (name A) (node (ref U1) (pin 2)))))'''
+    nets, anchors, issues = net_members(text, objects, "a" * 40)
+    assert nets == {"A": None, "B": None} and not anchors
+    assert [i["net"] for i in issues if i["unknown"]] == ["A", "B"], issues
+
+
+def test_br03_missing_pin():
+    for pin in ("", '(pin "")'):
+        text = '(export (nets (net (name N) (node (ref U1) ' + pin + '))))'
+        nets, anchors, issues = net_members(text, {"/a": br03_object("U1")}, "a" * 40)
+        assert nets["N"] is None and not anchors, (nets, anchors)
+        assert len(issues) == 1 and issues[0]["unknown"] and issues[0]["net"] == "N", issues
+    # An absent reference with no matching symbol cannot become a fabricated member either.
+    nets, anchors, issues = net_members('(export (nets (net (name N) (node (pin 1)))))',
+                                        {"/a": br03_object("U1")}, "a" * 40)
+    assert nets["N"] is None and not anchors and issues[0]["unknown"]
+
+
+def test_br03_power_policy():
+    # Power refs are ignored even if a symbol candidate exists or its pin is absent.
+    text = '''(export (nets (net (name GND) (node (ref R1) (pin 1))
+      (node (ref "#PWR01") (pin 1)) (node (ref "#FLG01")))
+      (net (name POWER_ONLY) (node (ref "#PWR01") (pin 1)))))'''
+    nets, anchors, issues = net_members(text, {"/r": br03_object("R1"),
+                                              "/p": br03_object("#PWR01")}, "a" * 40)
+    assert nets == {"GND": {"R1.1"}, "POWER_ONLY": set()} and not issues, (nets, issues)
+    assert set(anchors) == {"R1.1"}
+
+
+def test_br03_missing_multi_policy():
+    # Standalone assertion: must fail on 41559c2 independently of the power-symbol regression.
+    objects = {"/a": br03_object("U?"), "/b": br03_object("U?", "2")}
+    text = '(export (nets (net (name N) (node (ref "U?") (pin 2)))))'
+    nets, anchors, issues = net_members(text, objects, "a" * 40)
+    assert not nets["N"] and not anchors and any(i["unknown"] for i in issues), (nets, anchors, issues)
+    # One symbol instance is recoverable, including a genuinely empty reference.
+    for ref in ("U?", ""):
+        text = '(export (nets (net (name N) (node (ref "' + ref + '") (pin 2)))))'
+        nets, anchors, issues = net_members(text, {"/s/a": br03_object(ref, sheet="/s/")}, "a" * 40)
+        assert nets == {"N": {"/s/a:2"}} and set(anchors) == {"/s/a:2"}
+        assert issues and not any(i["unknown"] for i in issues)
+    # Multiple genuinely empty references cannot be disambiguated either.
+    objects_empty = {"/a": br03_object("", sheet="/s/"), "/b": br03_object("", "2", sheet="/s/")}
+    text_empty = '(export (nets (net (name N) (node (pin 2)))))'
+    nets_em, anchors_em, issues_em = net_members(text_empty, objects_empty, "a" * 40)
+    assert not nets_em["N"] and not anchors_em and any(i["unknown"] for i in issues_em)
+
+
+def test_br03_unit_anchor_candidates():
+    # Membership is REF.PIN, not unit-specific. These are candidate anchors, not proven pin positions.
+    # Only the UI hotspot manifest can resolve these candidates to owning units.
+    objects = {"/s/a": br03_object("U1", "1", "/s/"), "/s/b": br03_object("U1", "2", "/s/")}
+    text = '''(export (nets (net (name N) (node (ref U1) (pin 1))
+      (node (ref U1) (pin 1)) (node (ref U1) (pin 2)))))'''
+    nets, anchors, issues = net_members(text, objects, "b" * 40)
+    assert nets == {"N": {"U1.1", "U1.2"}} and not issues
+    for pin in ("1", "2"):
+        assert anchors["U1." + pin] == [
+            {"uuid": "a", "ref": "U1", "pin": pin, "unit": "1", "sheet": "/s/", "pos": [1, 2, 0], "commit": "b" * 40},
+            {"uuid": "b", "ref": "U1", "pin": pin, "unit": "2", "sheet": "/s/", "pos": [1, 2, 0], "commit": "b" * 40}], anchors
+
+
+def test_br03_where_sheet_contract():
+    # Missing where or missing sheet attribute is safely handled without KeyError/TypeError.
+    bad_obj = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "where": None, "pos": [1, 2, 0]}
+    text = '(export (nets (net (name N) (node (ref U1) (pin 1)))))'
+    nets, anchors, issues = net_members(text, {"/a": bad_obj}, "a" * 40)
+    assert nets["N"] is None and not anchors
+    assert any(i["unknown"] for i in issues)
+
+    # Empty where dictionary without sheet key.
+    bad_obj2 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "where": {}, "pos": [1, 2, 0]}
+    nets2, anchors2, issues2 = net_members(text, {"/a": bad_obj2}, "a" * 40)
+    assert nets2["N"] is None and not anchors2
+    assert any(i["unknown"] for i in issues2)
+
+    # Object with where key omitted entirely.
+    bad_obj3 = {"kind": "symbol", "ref": "U1", "props": {"reference": "U1", "unit": "1"}, "pos": [1, 2, 0]}
+    nets3, anchors3, issues3 = net_members(text, {"/a": bad_obj3}, "a" * 40)
+    assert nets3["N"] is None and not anchors3
+    assert any(i["unknown"] for i in issues3)
+
+
+def test_br03_manifest_owns_pin_resolution():
+    # Backend membership and candidate anchors must not depend on optional pin metadata.
+    objects = {"/a": br03_object("U1", "1", "/"), "/b": br03_object("U1", "2", "/")}
+    text = ('(export (nets (net (name A) (node (ref U1) (pin 1))) '
+            '(net (name P) (node (ref U1) (pin VCC))) '
+            '(net (name Z) (node (ref U1) (pin 99)))))')
+    expected = net_members(text, objects, "c" * 40)
+    objects["/a"]["pins"] = {"1", "VCC"}
+    objects["/b"]["pins"] = {"3", "VCC"}
+    assert net_members(text, objects, "c" * 40) == expected
+    objects["/b"]["pins"] = frozenset()
+    assert net_members(text, objects, "c" * 40) == expected
+    nets, anchors, issues = expected
+    assert nets == {"A": {"U1.1"}, "P": {"U1.VCC"}, "Z": {"U1.99"}} and not issues
+    for pin in ("1", "VCC", "99"):
+        assert [a["uuid"] for a in anchors["U1." + pin]] == ["a", "b"]
+        assert all("shared" not in a for a in anchors["U1." + pin])
+
+
+def test_br03_parser_preserves_unit_candidates():
+    # Embedded definitions (including lib_name overrides) are not a second pin manifest.
+    pin = lambda n: '(pin passive line (number "' + n + '"))'
+    with tempfile.TemporaryDirectory() as td:
+        (pathlib.Path(td) / "t.kicad_sch").write_text(
+            '(kicad_sch (uuid root) (lib_symbols (symbol "L:Dual" '
+            '(symbol "Dual_1_1" ' + pin("1") + ')) (symbol "Modified" '
+            '(symbol "Modified_2_1" ' + pin("3") + ')))'
+            '(symbol (lib_id "L:Dual") (uuid ua) (unit 1) (at 1 2 0) (property "Reference" "U1"))'
+            '(symbol (lib_id "L:Dual") (lib_name "Modified") (uuid ub) (unit 2) '
+            '(at 5 2 0) (property "Reference" "U1")))')
+        objects = kr.sch_objects(td, "t")
+        assert all("pins" not in o for o in objects.values())
+        text = '(export (nets (net (name N) (node (ref U1) (pin 1)) (node (ref U1) (pin 99)))))'
+        nets, anchors, issues = net_members(text, objects, "d" * 40)
+        assert nets == {"N": {"U1.1", "U1.99"}} and not issues
+        for member in nets["N"]:
+            assert [a["uuid"] for a in anchors[member]] == ["ua", "ub"]
+            assert all("shared" not in a for a in anchors[member])
+
+
+# Run the BR03 review regressions in the full plain-assertion suite as well.
+for test in (test_br03_unknown_net, test_br03_missing_pin, test_br03_power_policy,
+             test_br03_missing_multi_policy, test_br03_unit_anchor_candidates,
+             test_br03_where_sheet_contract, test_br03_manifest_owns_pin_resolution,
+             test_br03_parser_preserves_unit_candidates):
+    test()
+print("ok BR03 review identity regressions (8 tests)")
+
+# BR03: graph-based membership comparisons (also runnable without the full suite).
+def test_br03_net_graph():
+    from kicad_review import diff_nets
+    kinds = lambda b, h: [r["kind"] for r in diff_nets(b, h)]
+    assert kinds({"old":{"U1.1","R1.1"}}, {"new":{"U1.1","R1.1"}}) == ["net-renamed"]
+    assert kinds({"A":{"U1.1"}}, {"A":{"J1.1"}}) == ["net-members"]
+    assert kinds({"A":{"U1.1"},"B":{"R1.1"}}, {"C":{"U1.1","R1.1"}}) == ["net-joined"]
+    assert kinds({"C":{"U1.1","R1.1"}}, {"A":{"U1.1"},"B":{"R1.1"}}) == ["net-split"]
+    many = diff_nets({"A":{"a","b"},"B":{"c","d"}}, {"C":{"a","c"},"D":{"b","d"}})
+    assert [r["kind"] for r in many] == ["net-joined","net-split"]
+    expected = [{"pin":p,"before":[b],"after":[h]} for p,b,h in
+                [("a","A","C"),("b","A","D"),("c","B","C"),("d","B","D")]]
+    assert all(r["detail"]["transitions"] == expected for r in many)
+    assert all(r["detail"]["added"] == r["detail"]["removed"] == [] for r in many)
+    assert all(r["detail"]["beforeNets"] == ["A","B"] and
+               r["detail"]["afterNets"] == ["C","D"] for r in many)
+    cross = diff_nets({"A":{"a","b"},"B":{"c","d"}}, {"A":{"c","e"},"C":{"a","f"}})
+    assert [(r["kind"],r["detail"]["beforeNets"],r["detail"]["afterNets"]) for r in cross] == [
+        ("net-members",["A"],["C"]),("net-members",["B"],["A"])]
+    assert cross[0]["detail"]["transitions"] == [
+        {"pin":"a","before":["A"],"after":["C"]},
+        {"pin":"b","before":["A"],"after":[]},
+        {"pin":"f","before":[],"after":["C"]}]
+    assert cross[1]["detail"]["transitions"] == [
+        {"pin":"c","before":["B"],"after":["A"]},
+        {"pin":"d","before":["B"],"after":[]},
+        {"pin":"e","before":[],"after":["A"]}]
+    assert diff_nets({"A":{"a"}}, {"A":{"a"}}) == []
+    assert sorted(kinds({"A":{"a"}}, {"B":{"b"}})) == ["net-added","net-removed"]
+    assert kinds({"empty":set()}, {"different":set()}) == ["net-removed","net-added"]
+    assert diff_nets({"empty":set()}, {"empty":set()}) == []
+    r = diff_nets({"A":{"U1.1","R1.1"}}, {"A":{"U1.1","J1.1"}})[0]
+    assert r["detail"]["added"] == ["J1.1"] and r["detail"]["removed"] == ["R1.1"]
+    assert r["weight"] == "heavy" and r["action"] == "modified"
+
+
+def test_br03_net_rows():
+    from kicad_review import diff_nets, electrical_row
+    r = electrical_row("net-members", "A")
+    assert r == {"kind":"net-members", "ref":"A", "action":"modified", "channel":"wiring",
+                 "weight":"heavy", "detail":{}, "where":None, "pos":None, "box":None,
+                 "props":{}, "anchors":{"base":[], "head":[]}, "document":"schematic"}
+    other = electrical_row("wires", "sheet", channel="visual", weight="medium", where={"sheet":"/"})
+    assert other["channel"] == "visual" and other["weight"] == "medium" and other["where"] == {"sheet":"/"}
+    r["anchors"]["base"].append({"uuid":"a"})
+    r["detail"]["x"] = 1
+    assert not other["anchors"]["base"] and not other["detail"]
+    for base, head, action, kind, added, removed in [
+        ({}, {"12":{"U1.1"}}, "added", "net-added", ["U1.1"], []),
+        ({"12":{"U1.1"}}, {}, "removed", "net-removed", [], ["U1.1"])]:
+        r, = diff_nets(base, head)
+        assert (r["ref"], r["action"], r["kind"]) == ("12", action, kind)
+        assert r["detail"]["kind"] == "members"
+        assert r["detail"]["added"] == added and r["detail"]["removed"] == removed
+        assert r["detail"]["transitions"] == [{"pin":"U1.1", "before":list(base), "after":list(head)}]
+        assert r["anchors"] == {"base":[], "head":[]} and r["document"] == "schematic"
+    for name in ("Net-(U1-A)", "unconnected-(U1-A-Pad1)", "MANUAL"):
+        r, = diff_nets({name:{"U1.1"}}, {"new":{"U1.1"}})
+        assert r["detail"]["autoNamed"] is (name != "MANUAL")
+        r, = diff_nets({"old":{"U1.1"}}, {name:{"U1.1"}})
+        assert r["detail"]["autoNamed"] is (name != "MANUAL")
+
+
+def test_br03_net_unknown_pair():
+    from kicad_review import diff_nets
+    # The Task 1 marker is unknown evidence, never an observed empty/disconnected net.
+    for base, head in [({"BAD":None}, {"BAD":{"U1.1"}}),
+                       ({"BAD":{"U1.1"}}, {"BAD":None}),
+                       ({"BAD":None}, {}), ({}, {"BAD":None}),
+                       ({"BAD":None}, {"BAD":None})]:
+        assert diff_nets(base, head) == []
+        rows = diff_nets({**base, "GOOD":{"R1.1"}}, {**head, "GOOD":{"R1.2"}})
+        assert len(rows) == 1 and rows[0]["ref"] == "GOOD", rows
+    # Integration: reject partial known members on an ambiguous net, keep independent changes.
+    text = '''(export (nets (net (name BAD) (node (ref U1) (pin 1)) (node (ref R1) (pin 1)))
+      (net (name GOOD) (node (ref R1) (pin 2)))))'''
+    objects = {"/a":br03_object("U1"), "/b":br03_object("U1"), "/r":br03_object("R1")}
+    base, _, issues = net_members(text, objects, "a" * 40)
+    assert base["BAD"] is None and issues[0]["net"] == "BAD" and issues[0]["unknown"]
+    rows = diff_nets(base, {"BAD":{"R1.1"}, "GOOD":{"R1.3"}})
+    assert len(rows) == 1 and rows[0]["ref"] == "GOOD", rows
+
+
+def test_br03_net_determinism():
+    from kicad_review import diff_nets
+    import copy
+    base = {"Z":{"z"}, "B":{"c","d"}, "A":{"a","b"}, "EMPTY":set()}
+    head = {"D":{"b","d"}, "C":{"a","c"}, "12":{"z"}, "NEW":set()}
+    original = copy.deepcopy((base, head))
+    expected = diff_nets(base, head)
+    assert diff_nets(dict(reversed(list(base.items()))), dict(reversed(list(head.items())))) == expected
+    assert (base, head) == original
+    assert [r["kind"] for r in expected] == ["net-renamed", "net-joined", "net-split", "net-removed", "net-added"]
+    assert expected[1]["ref"] == expected[2]["ref"] == "C + D"
+    # Equal members must win over a same-name edge, even if the names exchanged.
+    swapped = diff_nets({"A":{"a"}, "B":{"b"}}, {"A":{"b"}, "B":{"a"}})
+    assert [r["kind"] for r in swapped] == ["net-renamed", "net-renamed"]
+    assert [(r["detail"]["beforeNets"], r["detail"]["afterNets"]) for r in swapped] == [(["A"],["B"]), (["B"],["A"])]
+
+
+for test in (test_br03_net_graph, test_br03_net_rows, test_br03_net_unknown_pair, test_br03_net_determinism):
+    test()
+print("ok BR03 net graph regressions (4 tests)")
+
+# BR03: wire multisets and physical board-pad connectivity, through the real parsers.
+def br03_pcb(fp, pads):
+    return ('(kicad_pcb (footprint "x" (uuid '+fp+') (property "Reference" "D1") '
+            '(at 0 0) '+''.join('(pad "'+n+'" smd rect (uuid '+u+') (at '+str(x)+' 0) '
+            '(size 1 1) (layers "F.Cu")'+ (' (net "'+net+'")' if net else '')+')'
+            for u,n,x,net in pads)+'))')
+
+
+def test_br03_wires():
+    from kicad_review import diff_wires, wire_counts
+    wire = lambda *pts, sheet="/": {"kind":"wire", "where":{"sheet":sheet}, "points_mm":list(pts)}
+    assert diff_wires({"a":wire((0,0),(1,0)), "b":wire((1,0),(0,0))},
+                      {"c":wire((1.0004,0),(0,0))}) == []
+    r, = diff_wires({}, {"c":wire((0,0),(1,0))})
+    assert (r["kind"], r["ref"], r["weight"], r["channel"]) == (
+        "wires", "Wires drawn / erased", "medium", "wiring")
+    assert diff_wires({}, {}) == []
+    assert diff_wires({"a":wire((-0.0004,-0.0002),(1.0,2.0))},
+                      {"b":wire((1,2),(0,0))}) == []
+    assert wire_counts({"a":wire((0,0),(1,0),(2,0))}) == wire_counts(
+        {"b":wire((1,0),(0,0)), "c":wire((2,0),(1,0))})
+    assert diff_wires({"a":wire((0,0),(2,0))},
+                      {"b":wire((0,0),(1,0)), "c":wire((1,0),(2,0))}) == []
+    assert diff_wires({"a":wire((0,0),(2,2))},
+                      {"b":wire((2,2),(1,1)), "c":wire((0,0),(1,1))}) == []
+    for start, joint, end in (((0,0),(0,1),(0,2)), ((0,2),(1,1),(2,0))):
+        assert diff_wires({"a":wire(start,end)}, {"b":wire(start,joint), "c":wire(end,joint)}) == []
+    assert len(wire_counts({"a":wire((0,0),(1,0)), "b":wire((2,0),(3,0))})) == 2
+    assert len(wire_counts({"a":wire((0,0),(1,0)), "b":wire((1,0),(1,1))})) == 2
+    assert diff_wires({"a":wire((0,0),(3,0))},
+                      {"b":wire((0,0),(2,0)), "c":wire((1,0),(3,0))}) == []
+    r, = diff_wires({"a":wire((0,0),(1,0),sheet="/a/")},
+                   {"b":wire((0,0),(1,0),sheet="/b/")})
+    assert r["detail"] == {"kind":"wires", "drawn":1, "erased":1}
+    assert wire_counts({"ignored":{"kind":"bus"}}) == {}
+    # Synthetic wires without points_mm using props.points string
+    syn_wire = lambda pts: {"kind": "wire", "where": {"sheet": "/"}, "props": {"points": pts}}
+    assert diff_wires({"a": syn_wire("(0, 0) (1, 0)"), "b": syn_wire("(1, 0) (0, 0)")},
+                      {"c": syn_wire("(1.0004, 0) (0, 0)")}) == []
+
+
+def test_br03_wire_parser():
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        sch = pathlib.Path(td) / "test.kicad_sch"
+        sch.write_text('''(kicad_sch (uuid root)
+          (wire (pts (xy 0 0) (xy 2 0)) (uuid original)))''')
+        base = kr.sch_objects(td, "test")
+        sch.write_text('''(kicad_sch (uuid root)
+          (wire (pts (xy 0 0) (xy 1 0)) (uuid first))
+          (wire (pts (xy 2 0) (xy 1 0)) (uuid second))
+          (junction (at 1 0) (uuid joint))
+          (bus (pts (xy 0 0) (xy 3 0)) (uuid ignored)))''')
+        assert kr.diff_wires(base, kr.sch_objects(td, "test")) == []
+
+
+def test_br03_board_pins():
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    from kicad_review import diff_board_pins, board_pads
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td)/"b.kicad_pcb", pathlib.Path(td)/"h.kicad_pcb"
+        def compare(bp, hp, bfp="fp", hfp="fp"):
+            b.write_text(br03_pcb(bfp, bp)); h.write_text(br03_pcb(hfp, hp))
+            return diff_board_pins(kr.pcb_objects(b), kr.pcb_objects(h), board_pads(b), board_pads(h),
+                                   {"base":"b"*40, "head":"h"*40})
+        rows = compare([("c","C",0,"12")], [("c","C",0,"GND")], "old-fp", "new-fp")
+        assert [(r["detail"]["before"],r["detail"]["after"]) for r in rows] == [("12","GND")]
+        r, = rows
+        assert r["anchors"]["base"][0]["uuid"] == "old-fp"
+        assert r["anchors"]["head"][0]["uuid"] == "new-fp"
+        assert (r["kind"],r["ref"],r["weight"],r["channel"],r["document"]) == (
+            "board-pad-net","D1.C","heavy","wiring","board")
+        assert r["detail"] == {"kind":"pad-net","pin":"C","before":"12","after":"GND","boardOnly":True}
+        assert r["where"] == {"board":True} and r["pos"] == [0,0] and r["box"] is not None
+        assert "uuid" not in r and "uuid_before" not in r  # derived rows do not own scene changeIds
+        for side, uid, commit in (("base","old-fp","b"*40), ("head","new-fp","h"*40)):
+            assert r["anchors"][side] == [{"uuid":uid,"padUuid":"c","ref":"D1","pin":"C",
+                                           "pos":[0,0],"commit":commit,"board":True}]
+            assert "sheet" not in r["anchors"][side][0]
+        assert compare([("c","C",0,"GND")],[("c","C",0,"")],"old","new")[0]["detail"]["after"] == ""
+        assert compare([("c","C",0,"")],[("c","C",0,"12")])[0]["detail"]["before"] == ""
+        assert compare([("old-pad","C",0,"GND")],[("new-pad","C",0,"12")],"old","new")[0]["detail"]["after"] == "12"
+        # Renewed pad identity on the same footprint is replacement geometry, not proven rewiring.
+        assert compare([("old-pad","C",0,"GND")],[("new-pad","C",0,"12")]) == []
+        two = [("p1","1",0,"GND"),("p2","1",2,"A")]
+        one = [("p1","1",0,"GND")]
+        assert compare(two,one) == [] and compare(one,two) == []
+        changed = [("p1","1",0,"B")]
+        assert len(compare(two,changed)) == 1
+        # The repeated pad's occurrence index may change; its UUID must win.
+        assert compare(two,list(reversed(two))) == []
+        assert len(compare(two,[("p2","1",2,"B"),("p1","1",0,"GND")])) == 1
+        # Explicit fallback: absent UUIDs, unique same-number/local-geometry match; no net-based pairing.
+        b.write_text(br03_pcb("fp",two).replace('(uuid p1)','').replace('(uuid p2)',''))
+        h.write_text(br03_pcb("fp",one).replace('(uuid p1)',''))
+        assert diff_board_pins(kr.pcb_objects(b),kr.pcb_objects(h),board_pads(b),board_pads(h),{}) == []
+        # The same fallback must pair the unique match: a changed net on it is exactly one row.
+        b.write_text(br03_pcb("fp",[("p1","1",0,"GND")]).replace('(uuid p1)',''))
+        h.write_text(br03_pcb("fp",[("p1","1",0,"B")]).replace('(uuid p1)',''))
+        r, = diff_board_pins(kr.pcb_objects(b),kr.pcb_objects(h),board_pads(b),board_pads(h),{})
+        assert (r["detail"]["before"],r["detail"]["after"]) == ("GND","B")
+        # Removing/adding a physical footprint never invents disconnections/connections.
+        assert diff_board_pins(kr.pcb_objects(b),{},board_pads(b),{},{}) == []
+        assert diff_board_pins({},kr.pcb_objects(h),{},board_pads(h),{}) == []
+        assert board_pads(pathlib.Path(td)/"missing.kicad_pcb") == {}
+
+
+def test_br03_pad_pair_identity():
+    import copy
+    from kicad_review import pad_pairs
+    pad = lambda uid, number, geom, net: {"uuid":uid,"number":number,"geom":geom,"net":net}
+    a, b = pad("a","1","x","A"), pad("b","1","y","B")
+    # UUID survives geometry edits; even identical nets cannot identify a lost duplicate-number pad.
+    h = [pad("b","1","changed","A"),pad("a","1","changed","B")]
+    original = copy.deepcopy(([a,b],h))
+    assert pad_pairs([a,b],h) == [(a,h[1]),(b,h[0])]
+    assert ([a,b],h) == original
+    assert pad_pairs([a,b],[pad("c","1","z","A")],replaced=True) == []
+    assert pad_pairs([a,b],[pad("c","1","y","A")],replaced=True) == [(b,pad("c","1","y","A"))]
+    # No pairing when either side has indistinguishable physical candidates.
+    repeated = [pad("","1","x","A"),pad("","1","x","B")]
+    assert pad_pairs(repeated,[pad("","1","x","A")]) == []
+    assert pad_pairs([pad("","1","x","A")],repeated) == []
+    assert pad_pairs([a],[pad("c","1","x","B")]) == []
+    assert pad_pairs([a],[pad("c","1","changed","B")],replaced=True) == [(a,pad("c","1","changed","B"))]
+
+
+def test_br03_pad_net_parser():
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td)/"board.kicad_pcb"
+        modern = br03_pcb("fp",[("c","C",0,"12"),("g","1",2,"GND"),("u","1",4,"")])
+        old = modern.replace('(kicad_pcb ', '(kicad_pcb (net 12 "GND") (net 13 "12") ', 1).replace(
+            '(net "12")','(net 13)').replace('(net "GND")','(net 12 "GND")')
+        expected = None
+        for text in (modern,old):
+            p.write_text(text)
+            pads = kr.board_pads(p)["fp"]
+            assert [(v["uuid"],v["number"],v["net"]) for v in pads] == [
+                ("c","C","12"),("g","1","GND"),("u","1","")]
+            if expected is None: expected = pads
+            else: assert pads == expected
+            props = kr.pcb_objects(p)["fp"]["props"]
+            assert props["pad C net"] == "12" and props["pad 1#1 net"] == "GND"
+            assert "pad 1#2 net" not in props
+            scene = kr.board_geometry(p)
+            nets = {v["id"]:v["name"] for v in scene["nets"]}
+            assert {o["uuid"]:nets[o["net"]] for o in scene["objects"] if o["kind"] == "pad"} == {
+                "c":"12","g":"GND","u":""}
+        # Legacy tstamp identity remains available for both footprints and physical pads.
+        p.write_text(modern.replace("(uuid ","(tstamp "))
+        assert kr.board_pads(p)["fp"] == expected
+
+        # Pin function/type metadata is descriptive, not physical pad geometry.
+        annotated = modern.replace('(pad "C" smd rect (uuid c)',
+                                  '(pad "C" smd rect (uuid c) (pinfunction "OLD") (pintype "passive")')
+        p.write_text(annotated)
+        assert kr.board_pads(p)["fp"][0]["geom"] == expected[0]["geom"]
+
+
+def test_br03_pad_metadata_fallback():
+    # Repeated-number pads without UUIDs need physical geometry to prove rewiring.
+    # Test each descriptive field independently: excluding only one is insufficient.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    base = br03_pcb("fp", [("p1", "1", 0, "GND"), ("p2", "1", 2, "A")])
+    base = base.replace('(uuid p1)', '').replace('(uuid p2)', '')
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td) / "b.kicad_pcb", pathlib.Path(td) / "h.kicad_pcb"
+        b.write_text(base)
+        base_objects, base_pads = kr.pcb_objects(b), kr.board_pads(b)
+        for metadata in ('(pinfunction "NEW")', '(pintype "output")',
+                         '(pinfunction "NEW") (pintype "output")'):
+            head = base.replace('(at 0 0) (size 1 1)', '(at 0 0) ' + metadata + ' (size 1 1)')
+            head = head.replace('(net "GND")', '(net "B")')
+            h.write_text(head)
+            head_pads = kr.board_pads(h)
+            assert head_pads["fp"][0]["geom"] == base_pads["fp"][0]["geom"], metadata
+            row, = kr.diff_board_pins(base_objects, kr.pcb_objects(h), base_pads, head_pads, {})
+            assert (row["detail"]["pin"], row["detail"]["before"], row["detail"]["after"]) == ("1", "GND", "B")
+            # Do not weaken the geometry requirement to make metadata-only changes pair.
+            h.write_text(head.replace('(size 1 1)', '(size 3 1)', 1))
+            assert kr.diff_board_pins(base_objects, kr.pcb_objects(h), base_pads, kr.board_pads(h), {}) == []
+
+
+def test_br03_object_pairs():
+    import copy
+    from kicad_review import object_pairs, diff_objects
+    obj = lambda ref: {"kind":"footprint","ref":ref,"match":("footprint",ref),"props":{},"where":{"board":True}}
+    base = {"same":obj("D1"),"old":obj("D2"),"gone":obj("D3")}
+    head = {"same":obj("D9"),"new":obj("D2"),"added":obj("D4")}
+    original = copy.deepcopy((base,head))
+    pairs,b_left,h_left = object_pairs(base,head)
+    assert pairs == [("same","same"),("old","new")]
+    assert b_left == {"gone":base["gone"]} and h_left == {"added":head["added"]}
+    assert [(r["action"],r["ref"]) for r in diff_objects(base,head)] == [("removed","D3"),("added","D4")]
+    assert (base,head) == original
+
+
+def test_br03_wire_rounding():
+    # Endpoints round once, from source values, to 0.001 mm. The 4 dp display text must not round again.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        sch = pathlib.Path(td) / "test.kicad_sch"
+        sch.write_text('(kicad_sch (uuid root) (wire (pts (xy 0.00049 0) (xy 1 0)) (uuid a)))')
+        base = kr.sch_objects(td, "test")
+        sch.write_text('(kicad_sch (uuid root) (wire (pts (xy 0 0) (xy 1 0)) (uuid a)))')
+        assert kr.diff_wires(base, kr.sch_objects(td, "test")) == []
+
+
+def test_br03_pad_geometry_format():
+    # Re-saved numeric spellings of the same repeated-number pads still pair by geometry, without UUIDs.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    from kicad_review import board_pads, diff_board_pins
+    pad = ('(pad "1" smd rect {at} (size {size}) (layers "F.Cu") (net "{net}"))')
+    def pcb(pads):
+        return ('(kicad_pcb (footprint "x" (uuid fp) (property "Reference" "D1") (at 0 0) '
+                + " ".join(pads) + "))")
+    base = pcb([pad.format(at="(at 0 0)", size="1 1", net="GND"), pad.format(at="(at 2 0)", size="1 1", net="A")])
+    head = pcb([pad.format(at="(at 0.0 0.0)", size="1.0 1.0", net="B"),
+                pad.format(at="(at 2.0 0.0)", size="1.00 1.0", net="A")])
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td) / "b.kicad_pcb", pathlib.Path(td) / "h.kicad_pcb"
+        b.write_text(base)
+        h.write_text(head)
+        r, = diff_board_pins(kr.pcb_objects(b), kr.pcb_objects(h), board_pads(b), board_pads(h), {})
+        assert (r["detail"]["before"], r["detail"]["after"]) == ("GND", "B")
+
+
+def test_br03_pad_rotation_fallback():
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td) / 'b.kicad_pcb', pathlib.Path(td) / 'h.kicad_pcb'
+        base = br03_pcb('fp', [('p1', '1', 0, 'GND'), ('p2', '1', 2, 'A')])
+        base = base.replace('(uuid p1)', '').replace('(uuid p2)', '')
+        b.write_text(base)
+        bp = kr.board_pads(b)
+        for angle in (90, 180, 360, -90):
+            head = base.replace('(at 0 0)', f'(at 0 0 {angle})', 1)
+            head = head.replace('(at 0 0) (size', f'(at 0 0 {angle}) (size')
+            head = head.replace('(at 2 0) (size', f'(at 2 0 {angle}) (size')
+            h.write_text(head.replace('(net "GND")', '(net "B")'))
+            hp = kr.board_pads(h)
+            assert [p['geom'] for p in bp['fp']] == [p['geom'] for p in hp['fp']]
+            row, = kr.diff_board_pins(kr.pcb_objects(b), kr.pcb_objects(h), bp, hp, {})
+            assert (row['detail']['before'], row['detail']['after']) == ('GND', 'B')
+
+
+def test_br03_board_parse_once():
+    # board_pads reads the PCB through one parse, shared with the footprint and pad net lookup.
+    import pathlib
+    import tempfile
+    import kicad_review as kr
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "b.kicad_pcb"
+        p.write_text(br03_pcb("fp", [("p1", "1", 0, "GND")]))
+        calls, real = [], kr.parse_sexpr
+        def counting(text):
+            calls.append(text)
+            return real(text)
+        kr.parse_sexpr = counting
+        try:
+            assert kr.board_pads(p)["fp"][0]["net"] == "GND"
+        finally:
+            kr.parse_sexpr = real
+        assert len(calls) == 1, len(calls)
+
+
+for test in (test_br03_wires, test_br03_wire_parser, test_br03_board_pins, test_br03_pad_pair_identity,
+             test_br03_pad_net_parser, test_br03_object_pairs, test_br03_wire_rounding,
+             test_br03_pad_geometry_format, test_br03_board_parse_once, test_br03_pad_metadata_fallback,
+             test_br03_pad_rotation_fallback):
+    test()
+print("ok BR03 physical pads and wires (11 tests)")
+
+
+def test_br03_typed_rules():
+    import pathlib
+    import tempfile
+    from kicad_review import diff_rules, rule_values
+    with tempfile.TemporaryDirectory() as td:
+        b, h = pathlib.Path(td)/"base", pathlib.Path(td)/"head"
+        b.mkdir(); h.mkdir()
+        assert rule_values(b, "p") == {} and diff_rules(b, h, "p") == []
+        for data in ({"board": None, "net_settings": None},
+                     {"board": {"design_settings": None}, "net_settings": None}):
+            (b/"p.kicad_pro").write_text(json.dumps(data), encoding="utf-8")
+            assert rule_values(b, "p") == {}
+
+        def pair(before, after):
+            for root, data in ((b, before), (h, after)):
+                (root/"p.kicad_pro").write_text(json.dumps(data), encoding="utf-8")
+            return diff_rules(str(b), str(h), "p")
+
+        def rulepro(values):
+            return {"board": {"design_settings": {"rules": values}}}
+
+        pro = {**rulepro({"min_clearance": .2}), "net_settings": {
+            "classes": [{"name": "Default", "clearance": .2}],
+            "netclass_patterns": [{"pattern": "USB*", "netclass": "Default"}]}}
+        assert pair(pro, pro) == []
+        pro["board"]["design_settings"]["rules"]["min_clearance"] = .25
+        pro["net_settings"]["netclass_patterns"][0]["netclass"] = "Fast"
+        (h/"p.kicad_pro").write_text(json.dumps(pro), encoding="utf-8")
+        (b/"p.kicad_dru").write_bytes(b'(version 1)\r\n')
+        custom = '(version 1)\n(rule "custom" (constraint clearance (min 0.3mm)))\n'
+        (h/"p.kicad_dru").write_text(custom, encoding="utf-8")
+        rows = diff_rules(str(b), str(h), "p")
+        n = next(r for r in rows if r["ref"].endswith("min_clearance"))
+        assert n["detail"] == {"kind": "number", "unit": "mm", "before": .2, "after": .25}
+        assert n["weight"] == "heavy"
+        assert any("netclass_patterns" in r["ref"] for r in rows)
+        dru = next(r for r in rows if r["ref"] == "custom rules")
+        assert dru["detail"] == {"kind": "text", "before": '(version 1)\n', "after": custom}
+        assert all(r["channel"] == "rules" and r["document"] == "board" for r in rows)
+        assert [r['ref'] for r in rows] == sorted(r['ref'] for r in rows)
+        reverse = diff_rules(str(h), str(b), "p")
+        assert all(r['weight'] == 'heavy' for r in reverse)
+        assert next(r for r in reverse if r['ref'] == 'rules.min_clearance')['detail'] == {
+            'kind': 'number', 'unit': 'mm', 'before': .25, 'after': .2}
+        (h/"p.kicad_dru").write_text('(version 1)\n', encoding='utf-8')
+        assert not any(r['ref'] == 'custom rules' for r in diff_rules(b, h, 'p'))
+        (b/"p.kicad_dru").unlink(); (h/"p.kicad_dru").unlink()
+
+        keys = ('min_via_annular_width', 'min_connection', 'min_groove_width', 'min_silk_clearance',
+                'min_text_height', 'min_text_thickness', 'solder_mask_to_copper_clearance')
+        for key in ('min_clearance', *keys):
+            row, = pair(rulepro({key: .1}), rulepro({key: .2}))
+            assert row['detail'] == {"kind": "number", "unit": "mm", "before": .1, "after": .2}, 'BR03 missing dimensional rule'
+            assert pair(rulepro({}), rulepro({key: .2}))[0]['detail']['before'] is None
+            assert pair(rulepro({key: .1}), rulepro({}))[0]['detail']['after'] is None
+        for key, values in {'min_resolved_spokes': (2, 3), 'use_height_for_length_calcs': (False, True),
+                            'unknown_count': (1, 2), 'min_clearance': (.2, "0.2")}.items():
+            detail = pair(rulepro({key: values[0]}), rulepro({key: values[1]}))[0]['detail']
+            assert detail == {'kind': 'text', 'before': values[0], 'after': values[1]}
+        assert pair(rulepro({'min_clearance': False}), rulepro({'min_clearance': True}))[0]['detail']['kind'] == 'text'
+        classes = [{"name": "A", "clearance": .1}, {"name": "B", "clearance": .2}]
+        patterns = [{"pattern": "USB*", "netclass": "A"}, {"pattern": "*", "netclass": "B"}]
+        assert pair({"net_settings": {"classes": classes}}, {"net_settings": {"classes": classes[::-1]}}) == []
+        rows = pair({"net_settings": {"netclass_patterns": patterns}},
+                    {"net_settings": {"netclass_patterns": patterns[::-1]}})
+        assert len(rows) == 1 and rows[0]['ref'] == 'net_settings.netclass_patterns'
+        assert rows[0]['detail'] == {'kind': 'text', 'before': patterns, 'after': patterns[::-1]}
+        row, = pair({"net_settings": {"classes": [{"name": "A", "clearance": .1}]}},
+                    {"net_settings": {"classes": [{"name": "A", "clearance": .2}]}})
+        assert row['ref'] == 'net_settings.classes.A.clearance' and row['detail']['unit'] == 'mm'
+        pair({}, {})
+        for root, thickness in ((b, '.2'), (h, '.3')):
+            (root/'p.kicad_pcb').write_text('(kicad_pcb (setup (stackup (layer "dielectric 1" (thickness '+thickness+')))))')
+        row, = diff_rules(str(b), str(h), 'p')
+        assert (row['channel'], row['weight'], row['ref'], row['kind']) == ('visual', 'light', 'stackup', 'stackup')
+        assert row['detail'] == {'kind': 'text',
+                                 'before': ['stackup', ['layer', 'dielectric 1', ['thickness', '.2']]],
+                                 'after': ['stackup', ['layer', 'dielectric 1', ['thickness', '.3']]]}
+        # Malformed project data is unknown, not an empty source or removed rules.
+        (b/'p.kicad_pro').write_text(json.dumps(pro), encoding='utf-8')
+        (h/'p.kicad_pro').write_text('{invalid', encoding='utf-8')
+        assert rule_values(h, 'p')['_unavailable']
+        rows = diff_rules(b, h, 'p')
+        unavailable, = [r for r in rows if r['detail']['kind'] == 'unavailable']
+        assert unavailable['channel'] == 'rules' and unavailable['document'] == 'board'
+        assert unavailable['detail']['before'] is None
+        assert unavailable['detail']['after']
+        assert not any(r['ref'].startswith(('rules.', 'net_settings.')) for r in rows)
+        assert any(r['kind'] == 'stackup' for r in rows)
+        reverse = diff_rules(h, b, 'p')
+        assert not any(r['ref'].startswith(('rules.', 'net_settings.')) for r in reverse)
+        (b/'p.kicad_pro').write_text('{invalid', encoding='utf-8')
+        assert any(r['detail']['kind'] == 'unavailable' for r in diff_rules(b, h, 'p'))
+
+
+test_br03_typed_rules()
+print("ok BR03 typed rules, assignments and stackup")
+
+
+def test_br03_cmd_copper():
+    from kicad_review import cmd_copper
+    from unittest.mock import patch
+    import subprocess
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd(); os.chdir(td)
+        try:
+            projects = [{"dir": "p", "name": "p"}, {"dir": "q", "name": "q"}]
+            write('review', {'detect.json': json.dumps({'projects': projects})})
+            write('base', {'p/p.kicad_pcb': 'board', 'q/q.kicad_pcb': 'board'})
+            write('head', {'q/q.kicad_pcb': 'board'})
+            ok = subprocess.CompletedProcess([], 0, json.dumps({'rows': [], 'incomplete': []}), '')
+            outcomes = [ok, subprocess.TimeoutExpired('python', 240),
+                        subprocess.CalledProcessError(2, ['python'], stderr='failed'),
+                        OSError('missing interpreter'), subprocess.CompletedProcess([], 0, 'not json', '')]
+            for outcome in outcomes:
+                with patch('kicad_review.subprocess.run', side_effect=[outcome, ok]) as run, _contextlib.redirect_stderr(io.StringIO()) as stderr:
+                    cmd_copper(None)
+                if outcome is ok:
+                    assert stderr.getvalue() == ''
+                else:
+                    assert 'p: copper unavailable:' in stderr.getvalue()
+                    if isinstance(outcome, subprocess.CalledProcessError):
+                        assert 'returned non-zero exit status 2' in stderr.getvalue()
+                    elif isinstance(outcome, OSError):
+                        assert 'missing interpreter' in stderr.getvalue()
+                    elif isinstance(outcome, subprocess.TimeoutExpired):
+                        assert 'timed out after 240 seconds' in stderr.getvalue()
+                    else:
+                        assert 'Expecting value' in stderr.getvalue()
+                assert run.call_count == 2, 'BR03 copper failure stopped subsequent project'
+                first, second = run.call_args_list
+                assert first.kwargs == {'capture_output': True, 'text': True, 'timeout': 240, 'check': True}
+                assert second.kwargs['timeout'] == 420
+                assert first.args[0][-2:] == ['base/p/p.kicad_pcb', '-']
+                assert second.args[0][-2:] == ['base/q/q.kicad_pcb', 'head/q/q.kicad_pcb']
+                result = json.loads(pathlib.Path('review/p/copper-diff.json').read_text())
+                assert result['rows'] == []
+                assert bool(result['incomplete']) == (outcome is not ok)
+                if outcome is not ok: assert result['incomplete'][0]['channel'] == 'routing'
+                assert json.loads(pathlib.Path('review/q/copper-diff.json').read_text()) == {'rows': [], 'incomplete': []}
+            pathlib.Path('base/p/p.kicad_pcb').unlink(); write('head', {'p/p.kicad_pcb': 'board'})
+            with patch('kicad_review.subprocess.run', return_value=ok) as run: cmd_copper(None)
+            assert run.call_args_list[0].args[0][-2:] == ['-', 'head/p/p.kicad_pcb']
+        finally: os.chdir(old)
+    w = pathlib.Path('.github/workflows/review.yml').read_text()
+    render = w.index('python3 tools/kicad_review.py render')
+    assert render < w.index('fi', render) < w.index('python3 tools/kicad_review.py copper')
+
+
+import pathlib
+test_br03_cmd_copper()
+print("ok BR03 cmd_copper bounded orchestration")
+
+# BR03 Task 6.1: one bounded, validated netlist export shared by electrical and interfaces consumers.
+BR03_EMPTY_NETLIST = '(export (components) (nets))'
+
+
+BR03_BAD_PROJECTION = '(export (components (comp (ref (bad)))) (nets))'
+bad_netlists = ['(export)','(export (components))','(other (nets))',
+    '(export (nets) (nets))','junk (export (nets))','(export (nets))(garbage)',
+    '(export (nets)','(export (nets) trailing)',
+    '(export (nets (net (name A) (node (ref U1)))))',
+    '(export (nets (net (name A) (node (ref U1) (pin (bad))))))',
+    '(export (nets (net (node (ref U1) (pin 1)))))',
+    '(export-other (nets))',BR03_BAD_PROJECTION]
+
+
+def test_br03_netlist_export():
+    import subprocess
+    from unittest.mock import patch
+    from kicad_review import export_netlist, validate_netlist, read_netlist, validated_net_members
+    with tempfile.TemporaryDirectory() as td:
+        target, pending, marker = (pathlib.Path(td)/n for n in
+                                  ('netlist.net','netlist.pending.net','netlist.net.error'))
+        cases = [(7,BR03_EMPTY_NETLIST,'failed after partial output'),
+                 (0,None,''),(0,'(export)',''),(0,'(export (nets))(garbage)',''),
+                 (0,'(export (nets)',''),(0,'(export-other (nets))',''),(0,BR03_BAD_PROJECTION,''),
+                 (None,None,'timeout'),(None,None,'oserror')]
+        def export_result(cmd, **kwargs):
+            assert not target.exists() and not marker.exists() and not pending.exists(), 'stale export not cleared'
+            assert pathlib.Path(cmd[cmd.index('-o')+1]) == pending, 'non-atomic output path'
+            if body is not None: pending.write_text(body,encoding='utf-8')
+            if error == 'timeout': raise subprocess.TimeoutExpired(cmd,60)
+            if error == 'oserror': raise OSError('executable unavailable')
+            return subprocess.CompletedProcess(cmd,rc,stdout='',stderr=error)
+        for rc,body,error in cases:
+            for f in (target,pending,marker): f.write_text('stale evidence')
+            with patch('kicad_review.subprocess.run',side_effect=export_result) as run, \
+                 _contextlib.redirect_stderr(io.StringIO()) as stderr:
+                export_netlist('p.kicad_sch',td)
+            assert run.call_count == 1 and run.call_args.kwargs['timeout'] == 60
+            assert not target.exists() and not pending.exists(), 'BR03 failed export reused stale evidence'
+            reason=marker.read_text(encoding='utf-8')
+            assert reason and len(reason)<=500 and '\n' not in reason
+            assert reason in stderr.getvalue()
+            if error == 'failed after partial output': assert error in reason
+            target.write_text(BR03_EMPTY_NETLIST)  # marker takes precedence over stale-but-valid output
+            try: read_netlist(td)
+            except ValueError as exc: assert reason in str(exc)
+            else: raise AssertionError('BR03 marker ignored')
+        rc,body,error = 0,BR03_EMPTY_NETLIST,''
+        pending.write_text('stale pending')
+        with patch('kicad_review.subprocess.run',side_effect=export_result), \
+             patch('kicad_review.os.replace',wraps=os.replace) as replace:
+            export_netlist('p.kicad_sch',td)
+        replace.assert_called_once_with(pending,target)
+        assert read_netlist(td)==BR03_EMPTY_NETLIST and not marker.exists() and not pending.exists()
+        # A long multi-line diagnostic stays one capped line.
+        rc,body,error = 3,None,'line one\nline two ' + 'x'*900
+        with patch('kicad_review.subprocess.run',side_effect=export_result), \
+             _contextlib.redirect_stderr(io.StringIO()):
+            export_netlist('p.kicad_sch',td)
+        reason = marker.read_text(encoding='utf-8')
+        assert len(reason) == 500 and '\n' not in reason and 'line one line two' in reason
+        # Empty nets are valid evidence, and numeric pin names plus escaped quotes stay strings.
+        validate_netlist(r'(export (nets (net (name "A\\\"B") (node (ref U1) (pin "12")))))')
+        # Since spec 01, render_side also walks sheet pages; stub it so only the netlist branch is observed.
+        with patch('kicad_review.os.path.exists',side_effect=lambda f:str(f).endswith('.kicad_sch')), \
+             patch('kicad_review.kicad_cli'), patch('kicad_review.sheet_pages',return_value=[]), \
+             patch('kicad_review.export_netlist') as export:
+            kr.render_side('src','p',td,netlist=True)
+            export.assert_called_once_with('src/p.kicad_sch',td)
+    for text in bad_netlists:
+        try:
+            validated_net_members(text,{},"b"*40)
+            raise AssertionError("BR03 malformed netlist accepted: "+text)
+        except ValueError:
+            pass
+    assert validated_net_members('(export (nets))',{},'b'*40) == ({},{},[])
+    for text in ('(export (nets))(garbage)', '(export (nets)'):
+        try: validated_net_members(text,{},'b'*40)
+        except ValueError: pass
+        else: raise AssertionError('trailing or truncated netlist accepted')
+    # Interfaces-off still schedules one schematic export per present revision.
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            settings=kr.load_settings()
+            settings["checks"]["interfaces"]="off"
+            settings["checks"]["release"]="off"
+            settings["3d"]["enabled"]=False
+            settings["libraries"]["enabled"]=False
+            write("review",{"detect.json":json.dumps({"projects":[{"dir":"p","name":"p","status":"modified"}]})})
+            with patch("kicad_review.load_settings",return_value=settings), \
+                 patch("kicad_review.render_side") as render, patch("kicad_review.cache_renders"), \
+                 _contextlib.redirect_stdout(io.StringIO()):
+                kr.cmd_render(None)
+            assert len(render.call_args_list)==2
+            assert all(c.kwargs["netlist"] is True for c in render.call_args_list)
+        finally: os.chdir(old)
+
+
+def test_br03_interfaces_unavailable():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={'dir':'p','name':'p'}; out=pathlib.Path('review/p')
+            for side in ('base','head'):
+                write(side,{'p/p.kicad_sch':'(kicad_sch)'})
+                write(str(out/side),{'netlist.net':BR03_EMPTY_NETLIST})
+            for level in ('required','informational'):
+                settings=kr.load_settings(); settings['checks']['interfaces']=level
+                for side in ('base','head'):
+                    target=out/side/'netlist.net'; marker=out/side/'netlist.net.error'
+                    for failure in ('missing','malformed','marker'):
+                        target.write_text(BR03_EMPTY_NETLIST)
+                        if failure=='missing': target.unlink()
+                        elif failure=='malformed': target.write_text('(export)')
+                        else: marker.write_text('boom: library table')
+                        with patch('kicad_review.export_netlist') as export:
+                            result=kr.interface_check(p,settings,{'base':{},'head':{}},str(out))
+                        export.assert_not_called()
+                        assert result['status']=='not_run' and result['incomplete'] is True
+                        assert side in result['reason'] and 'unavailable' in result['reason']
+                        if failure=='marker': assert 'boom: library table' in result['reason']
+                        assert result['level']==level
+                        assert result['violations']==[] and not any(result[k] for k in
+                            ('errors','warnings','new_errors','new_warnings','fixed'))
+                        marker.unlink(missing_ok=True); target.write_text(BR03_EMPTY_NETLIST)
+                assert kr.interface_check(p,settings,{'base':{},'head':{}},str(out))['status']=='pass'
+            pathlib.Path('base/p/p.kicad_sch').unlink()
+            (out/'base/netlist.net').unlink()
+            assert kr.interface_check(p,settings,{'base':{},'head':{}},str(out))['status']=='pass'
+            pathlib.Path('head/p/p.kicad_sch').unlink()
+            missing = kr.interface_check(p,settings,{'base':{},'head':{}},str(out))
+            assert missing['reason']=='no schematic' and 'incomplete' not in missing
+        finally: os.chdir(old)
+
+
+test_br03_netlist_export()
+test_br03_interfaces_unavailable()
+print("ok BR03 shared bounded netlist evidence and interfaces unavailable result")
+
+
+# BR03 Task 6.3: pairwise electrical assembly never turns unknown schematic evidence into removals.
+def test_br03_electrical_pair():
+    from kicad_review import electrical_changes, read_copper
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={"dir":"p","name":"p"}; out=pathlib.Path("review/p")
+            text='(export (nets (net (name A) (node (ref U1) (pin 1)))))'
+            good={"/a":obj("U1","1","/")}
+            ambiguous={**good,"/b":obj("U1","1","/")}
+            for side in ("base","head"):
+                write(side,{"p/p.kicad_sch":"(kicad_sch)"})
+                write(str(out/side),{"netlist.net":text})
+            for objects in ({"base":good,"head":ambiguous},{"base":ambiguous,"head":good}):
+                rows,issues=electrical_changes(p,str(out),objects,{"base":"b"*40,"head":"h"*40})
+                assert any(i["channel"]=="wiring" and i.get("unknown") for i in issues)
+                assert not any(r["kind"].startswith("net-") for r in rows), "BR03 fabricated ambiguous removal"
+            for side in ("base","head"):
+                for bad in bad_netlists:
+                    (out/side/"netlist.net").write_text(bad)
+                    rows,issues=electrical_changes(p,str(out),{"base":good,"head":good},{})
+                    assert any(i["channel"]=="wiring" for i in issues)
+                    assert not any(r["kind"].startswith("net-") for r in rows)
+                (out/side/"netlist.net").write_text(text)
+            for side in ("base","head"):
+                file=out/side/"netlist.net"; file.unlink()
+                rows,issues=electrical_changes(p,str(out),{"base":good,"head":good},{})
+                assert any(i["channel"]=="wiring" for i in issues)
+                assert not any(r["kind"].startswith("net-") for r in rows)
+                file.write_text(text)
+                marker=out/side/'netlist.net.error'; marker.write_text('boom: timed out after 60 seconds')
+                with patch('kicad_review.export_netlist') as export:
+                    rows,issues=electrical_changes(p,str(out),{'base':good,'head':good},{})
+                export.assert_not_called()
+                assert any(i['channel']=='wiring' for i in issues)
+                assert not any(r['kind'].startswith('net-') for r in rows), 'BR03 ignored netlist error marker'
+                marker.unlink()
+            file=out/"copper-diff.json"
+            artifact={"rows":[{"net":"GND","layer":"F.Cu","addedMm2":1,"removedMm2":0,
+                        "addedContours":[[[0,0],[1,0],[1,1]]],"removedContours":[]}],"incomplete":[]}
+            for field in ("area","point"):
+                bad=json.loads(json.dumps(artifact))
+                if field=="area": bad["rows"][0]["addedMm2"]=10**399
+                else: bad["rows"][0]["addedContours"][0][0][0]=10**399
+                file.write_text(json.dumps(bad)); assert read_copper(file)[0]==[] and read_copper(file)[1]
+        finally: os.chdir(old)
+
+
+def test_br03_pad_evidence():
+    from kicad_review import electrical_changes
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={"dir":"p","name":"p"}; out=pathlib.Path("review/p")
+            def schematic(net):
+                node='(net (name '+net+') (node (ref D1) (pin C)))' if net else ''
+                return ('(export (components (comp (ref D1) (libsource (lib Device) (part D))))'
+                        '(libparts (libpart (lib Device) (part D) (pins (pin (num C)))))'
+                        '(nets '+node+'))')
+            def assembled(board_before,board_after,sch_before,sch_after,fail=False):
+                objects={}
+                for side,net,sch in (("base",board_before,sch_before),("head",board_after,sch_after)):
+                    write(side,{"p/p.kicad_sch":"(kicad_sch)","p/p.kicad_pcb":br03_pcb("fp",[("pad","C",0,net)])})
+                    write(str(out/side),{"netlist.net":"broken" if fail else schematic(sch)})
+                    objects[side]={**kr.pcb_objects(pathlib.Path(side,"p/p.kicad_pcb")),
+                                   "/d":obj("D1","1","/")}
+                write(str(out),{"copper-diff.json":json.dumps({"rows":[],"incomplete":[]})})
+                rows,issues=electrical_changes(p,str(out),objects,{})
+                return next(r for r in rows if r["detail"]["kind"]=="pad-net")["detail"]
+            assert assembled("A","","A","")["boardOnly"] is False, "BR03 synchronized disconnection misclassified"
+            assert assembled("","A","","A")["boardOnly"] is False
+            assert assembled("A","B","A","A")["boardOnly"] is True
+            unknown=assembled("A","B","A","B",fail=True)
+            assert unknown["boardOnly"] is None and "unknown" in unknown["evidenceNote"]
+        finally: os.chdir(old)
+    from kicad_review import schematic_pin_ids
+    d={"/d":obj("D1","1","/")}
+    pins='(pins (pin (num C)))'
+    assert schematic_pin_ids('(export (components (comp (ref D1) (libsource (lib Device) (part D))))'
+                             '(libparts (libpart (lib Device) (part D) '+pins+')) (nets))',d)=={"D1.C"}
+    for comp,lib in (('(comp (ref D1))','(libpart '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib Device) (part D)))','(libpart (lib Device) '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib Device)))','(libpart (lib Device) '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib "") (part "")))','(libpart (lib "") (part "") '+pins+')'),
+                     ('(comp (ref D1) (libsource (lib (x)) (part D)))','(libpart (lib (x)) (part D) '+pins+')')):
+        text='(export (components '+comp+') (libparts '+lib+') (nets))'
+        assert schematic_pin_ids(text,d)==set(), "BR03 missing library identity proved a disconnected pin: "+text
+
+
+test_br03_electrical_pair()
+test_br03_pad_evidence()
+print("ok BR03 pairwise electrical assembly and pad evidence")
 # Board inspection adapter: derive mm-units inspection graph and facts from retained scene
 scene = {'copperStack':['F.Cu','In1.Cu','In2.Cu','B.Cu'],
          'nets':[{'id':1,'name':'12'}], 'warnings':[], 'complete':True,
@@ -5856,10 +7115,12 @@ with TemporaryDirectory() as d, patch.object(kr,'inline_page',side_effect=lambda
     assert legacy['assets']=={} and legacy['blobs']=={}
 
 
-def missing_side_projects():
-    order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').resolve().read_text()
+def missing_side_projects(change_offset=0):
+    # Cumulative change_offset mirrors production, so scene changeIds resolve to unique rows.
+    order_board = pathlib.Path(__file__).resolve().parent.joinpath('ui/fixtures/vf-order-4.kicad_pcb').read_text()
     old = os.getcwd()
     blobs, projects = {}, []
+    offset = change_offset
     with TemporaryDirectory() as directory:
         try:
             os.chdir(directory)
@@ -5880,7 +7141,8 @@ def missing_side_projects():
                     files[f'{out}/erc.json'] = json.dumps({'violations':[]})
                     files[f'{out}/drc.json'] = json.dumps({'violations':[], 'unconnected_items':[]})
                     write('.', files)
-                    project = kr.build_project(desc, blobs, settings)
+                    project = kr.build_project(desc, blobs, settings, change_offset=offset)
+                    offset += len(project['changes'])
                     absent = 'base' if present == 'head' else 'head'
                     rows = project['sheets'] if kind == 'sheet' else project['board']['layers']
                     assert rows, (kind, present)
@@ -5902,8 +7164,6 @@ def missing_side_projects():
         finally:
             os.chdir(old)
     return projects, blobs
-missing_projects, missing_blobs = missing_side_projects()
-assert len(missing_projects) == 4
 
 
 # Runnable image fixture generator: real KiCad 10.0.0 exports, no CLI needed to regenerate.
@@ -5958,7 +7218,7 @@ def build_augmented_image_project(desc, blobs, settings, committed_svg):
     return kr.build_project(desc,blobs,settings)
 
 
-def generate_image_fixture(missing_projects, missing_blobs, destination, committed_svg):
+def generate_image_fixture(destination, committed_svg):
     """Generate browser data into caller-owned paths through the real producer."""
     order_board = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text()
     settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
@@ -5966,7 +7226,7 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
         settings[name]['enabled'] = False
     settings['checks'] = {k: 'off' for k in settings['checks']}
     old = os.getcwd()
-    image_blobs = dict(missing_blobs)
+    image_blobs = {}
     try:
         with TemporaryDirectory() as directory:
             os.chdir(directory)
@@ -6024,6 +7284,10 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
                                 '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297.0022 210.0072"><g/></svg>'})
             with patch.object(kr, 'sheet_pages', wraps=kr.sheet_pages) as parsed_pages:
                 image_project = build_augmented_image_project(desc, image_blobs, settings, committed_svg)
+            # Side-only projects continue the image project's change IDs, as production does.
+            missing_projects, missing_blobs = missing_side_projects(len(image_project['changes']))
+            assert len(missing_projects) == 4
+            image_blobs.update(missing_blobs)
             # Per revision: producer page cache, hotspot parser, and object parser.
             # The three manifest views must not each trigger another hierarchy parse.
             assert parsed_pages.call_count == 6, parsed_pages.call_args_list
@@ -6070,6 +7334,22 @@ def generate_image_fixture(missing_projects, missing_blobs, destination, committ
             'links': {}, 'run_url': '', 'reason': 'synthetic image regression', 'settings': settings,
             'projects': [image_project, *missing_projects], 'blobs': image_blobs}
     kr.assign_ids(data['projects'])
+    # Every scene object's changeIds must resolve to a row owned by its UUID on that side.
+    by_id = {r['id']: r for project in data['projects'] for r in project['changes']}
+    assert len(by_id) == sum(len(project['changes']) for project in data['projects']), 'duplicate change IDs'
+    resolved = 0
+    for project in data['projects']:
+        for side in ('base', 'head'):
+            key = (project['board'].get('geometry') or {}).get(side)
+            if not key:
+                continue
+            for obj in json.loads(gzip.decompress(base64.b64decode(image_blobs[key])))['objects']:
+                for change_id in obj['changeIds']:
+                    row = by_id[change_id]
+                    owner = row.get('uuid_before', row.get('uuid')) if side == 'base' else row.get('uuid')
+                    assert obj['changeUuid'] == owner, (side, change_id, obj['changeUuid'], owner)
+                    resolved += 1
+    assert resolved, 'fixture geometry carries no resolvable change IDs'
     with TemporaryDirectory() as directory:
         html = kr.finalize_report(data, directory)
         assert not re.search(r'<(?:script[^>]+src|link[^>]+href)=', html)
@@ -6130,7 +7410,7 @@ image_fixture_comparison_regressions()
 with TemporaryDirectory() as directory:
     generated_data = pathlib.Path(directory, 'review-data-images.js')
     generated_svg = pathlib.Path(directory, 'image-layer-overlap.svg')
-    image_project, image_blobs = generate_image_fixture(missing_projects, missing_blobs, generated_data, generated_svg)
+    image_project, image_blobs = generate_image_fixture(generated_data, generated_svg)
     for generated, committed in ((generated_data, pathlib.Path('ui/sample/review-data-images.js')),
                                  (generated_svg, pathlib.Path('ui/fixtures/image-layer-overlap.svg'))):
         # Updating fixtures is explicit; ordinary test runs only compare bytes
@@ -6257,3 +7537,1336 @@ with tempfile.TemporaryDirectory() as tmp:
     finally: os.replace = real_replace
     assert a.read_bytes() == stamped and not list(pathlib.Path(tmp).glob("*.tmp"))
 print('ok BR02 GLB export timestamp normalized; bad input left as written')
+
+# FAB-01 integration: actual fixture + parsed settings, separately opt-in and no KiCad required.
+if os.environ.get("KICAD_REVIEW_FAB_INTEGRATION") == "1":
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        pcb = root / "four.kicad_pcb"
+        pcb.write_text(pathlib.Path("ui/fixtures/vf-order-4.kicad_pcb").read_text())
+        for preset in ("jlcpcb", "pcbway"):
+            (root / kr.SETTINGS_FILE).write_text(
+                f'[fabrication]\npreset = "{preset}"\ncheck_limits = true\n'
+                '[checks]\nfab_limits = "required"\n')
+            settings = kr.load_settings((str(root),))
+            assert settings["fabrication"]["check_limits"] is True
+            assert settings["checks"]["fab_limits"] == "required"
+            sections = kr.fab_context(pcb)
+            assert [s["vendor"] for s in sections] == ["jlcpcb", "pcbway"]
+            assert [s["profile"] for s in sections] == ["jlcpcb-multilayer", "pcbway-std"]
+            for section in sections:
+                assert section == {
+                    "vendor": section["vendor"], "profile": section["profile"], "layers": 4,
+                    "checkedOn": profiles[section["profile"]]["checkedOn"], "assumedCopperOz": 1,
+                    "unsupported": None, "coverageWarnings": [], "unchecked": [],
+                    "values": profiles[section["profile"]]["values"],
+                }, "FAB-01 full supported context contract"
+    print("ok FAB-01 integration: both vendors independent of parsed fabrication preset")
+
+import uuid
+
+
+def fab_uid(name):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'kicad-review/fab-probe/' + name))
+
+
+def fab_probe_board(objects, outline=True):
+    source = pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text()
+    # Preserve the four explicit 0.035 mm copper thicknesses, discard wide fixture tracks.
+    prefix = source.split(' (segment', 1)[0]
+    # The fixture lists its copper layers in reverse; probes use canonical physical order.
+    prefix = prefix.replace(
+        '(layers (2 "B.Cu" signal) (6 "In2.Cu" signal) (4 "In1.Cu" signal) (0 "F.Cu" signal))',
+        '(layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) '
+        '(2 "B.Cu" signal) (25 "Edge.Cuts" user))')
+    edge = ('(gr_rect (start 0 0) (end 60 60) (stroke (width .05) (type default)) '
+            f'(fill none) (layer "Edge.Cuts") (uuid "{fab_uid("outline")}"))') if outline else ''
+    return prefix + '\n' + edge + '\n' + objects + '\n)\n'
+
+
+def fab_segment(name, layer='F.Cu', width=.2, x=5, y=5, net='FAB_A'):
+    return (f'(segment (start {x} {y}) (end {x+4} {y}) (width {width}) '
+            f'(layer "{layer}") (net "{net}") (uuid "{fab_uid(name)}"))')
+
+
+def fab_via(name, x=20, y=20, size=.8, drill=.3):
+    return (f'(via (at {x} {y}) (size {size}) (drill {drill}) '
+            f'(layers "F.Cu" "B.Cu") (net "FAB_A") (uuid "{fab_uid(name)}"))')
+
+
+def fab_pad(name, x=30, y=30, size=2, drill=.8, npth=False):
+    kind = 'np_thru_hole' if npth else 'thru_hole'
+    return (f'(footprint "FAB:Probe" (layer "F.Cu") (at {x} {y}) (uuid "{fab_uid(name+"-fp")}") '
+            f'(pad "1" {kind} circle (at 0 0) (size {size} {size}) (drill {drill}) '
+            f'(layers "*.Cu" "*.Mask") (uuid "{fab_uid(name)}")))')
+
+
+FAB_PROBE_SEVERITIES = dict.fromkeys((
+    'track_width', 'clearance', 'drill_out_of_range', 'annular_width',
+    'copper_edge_clearance', 'hole_to_hole', 'via_diameter', 'invalid_outline'), 'error')
+
+
+def fab_probe_drc(root, label, text, rules, severity=None, refill=False, all_severities=False, exclusions=None):
+    target = root / label
+    target.mkdir(parents=True, exist_ok=False)  # Fresh output: stale JSON cannot satisfy this gate.
+    pcb = target / 'four.kicad_pcb'
+    pcb.write_text(text)
+    pcb.with_suffix('.kicad_dru').write_text('(version 1)\n' + rules + '\n')
+    project = {'board': {'design_settings': {'rule_severities':
+               dict(FAB_PROBE_SEVERITIES if severity is None else severity),
+               'drc_exclusions': list(exclusions or [])}}}
+    pcb.with_suffix('.kicad_pro').write_text(json.dumps(project))
+    args = ['kicad-cli', 'pcb', 'drc', '--format', 'json',
+            '--severity-all' if all_severities else '--severity-error', '--exit-code-violations']
+    if refill:
+        args.append('--refill-zones')
+    args += ['-o', str(target / 'drc.json'), str(pcb)]
+    result = subprocess.run(args, capture_output=True, text=True)
+    (target / 'command.json').write_text(json.dumps({'args': args, 'rc': result.returncode}))
+    (target / 'stdout.txt').write_text(result.stdout)
+    (target / 'stderr.txt').write_text(result.stderr)
+    assert result.returncode in (0, 5), (label, result.returncode, result.stderr)
+    data = json.loads((target / 'drc.json').read_text())
+    assert data['coordinate_units'] == 'mm' and isinstance(data['violations'], list)
+    return data['violations']
+
+
+def fab_target(rows, kind, names):
+    ids = {fab_uid(n) for n in names}
+    return [v for v in rows if v['type'] == kind and
+            ids <= {i.get('uuid') for i in v.get('items', [])}]
+
+
+def fab_assert_via_position(rows):
+    # Deliberately located via centre (20,20); 0.01 mm tolerance for DRC JSON serialization.
+    positions = [i['pos'] for v in rows for i in v['items'] if i.get('uuid') == fab_uid('via')]
+    assert positions and all(abs(p['x']-20) <= .01 and abs(p['y']-20) <= .01
+                             for p in positions), 'FAB real-mm via centre'
+
+
+def fab_four_fixture(root):
+    """Generate the synthetic four-layer report input, including its house rules."""
+    board = root / 'four.kicad_pcb'
+    board.write_text(fab_probe_board(''.join(
+        fab_segment('four-'+layer, layer, .08, y=10+10*i)
+        for i, layer in enumerate(('F.Cu', 'In1.Cu', 'B.Cu')))))
+    # KiCad's project-less 0.2 mm minimum would classify every narrow track as
+    # a house violation and subtract it from the vendor ledger. This generated
+    # fixture deliberately uses a weaker house minimum; report production never
+    # rewrites the input board, project or authored rules.
+    board.with_suffix('.kicad_pro').write_text(json.dumps(
+        {'board': {'design_settings': {'rules': {'min_track_width': .05}}}}))
+    return board
+
+
+def fab_capability_probe(root):
+    summaries = []
+    for profile, layers in (('jlcpcb-multilayer', 4), ('pcbway-std', 4),
+                            ('jlcpcb-2l', 2), ('pcbway-std', 2)):
+        target = root / f'{profile}-{layers}l'
+        target.mkdir(parents=True, exist_ok=False)
+        summaries.append(fab_profile_probe(target, profile, layers))
+    (root / 'manifest.json').write_text(json.dumps(summaries, indent=2))
+    fab_four_fixture(root)
+    print('ok FAB-03 geometry, precedence, exclusions and stale fills (both vendors, 2/4 layers)')
+
+
+def fab_profile_probe(root, profile, layers):
+    def probe_board(objects, outline=True):
+        text = fab_probe_board(objects, outline)
+        if layers == 2:
+            text = text.replace(' (6 "In2.Cu" signal)', '').replace(' (4 "In1.Cu" signal)', '')
+            for layer in ('In1.Cu', 'In2.Cu'):
+                text = text.replace(f'  (layer "{layer}" (type "copper") (thickness 0.035))\n', '')
+        return text
+
+    context = {'layers': layers, 'values': kr.fab_profiles()[profile]['values']}
+    _, unchecked = kr.fab_rule_section(context)
+    _, covered = kr.fab_vendor_rules(context)
+    # ponytail: fixed synthetic geometry, not a general PCB generator.
+    cases = []
+    for layer in (('F.Cu', 'In1.Cu', 'B.Cu') if layers == 4 else ('F.Cu', 'B.Cu')):
+        key = 'trackWidthInnerMm' if layer.startswith('In') else 'trackWidthOuterMm'
+        cases.append((key + '-' + layer, key, .09, 'track_width', ['track'],
+                      .08, .12, lambda d, layer=layer: fab_segment('track', layer, d)))
+        key = 'clearanceInnerMm' if layer.startswith('In') else 'clearanceOuterMm'
+        # Two distinct nets; gap = centre spacing minus .2 mm track width.
+        cases.append((key + '-' + layer, key, .09, 'clearance', ['track-a', 'track-b'],
+                      .04, .2, lambda d, layer=layer: fab_segment('track-a', layer, y=10) +
+                      fab_segment('track-b', layer, y=10+.2+d, net='FAB_B')))
+    # Distinct synthetic limits make layer-predicate swaps observable: 0.09 mm passes outer 0.08 and fails inner 0.12.
+    cases += [
+        ('distinct-outer-width','trackWidthOuterMm',.08,'track_width',['outer-track'],.07,.09,
+         lambda d: fab_segment('outer-track','F.Cu',d)),
+        ('distinct-inner-width','trackWidthInnerMm',.12,'track_width',['inner-track'],.09,.13,
+         lambda d: fab_segment('inner-track','In1.Cu',d)),
+        ('plated-min','drillPlatedMinMm',.2,'drill_out_of_range',['via'],.15,.3,
+         lambda d: fab_via('via', drill=d)),
+        ('plated-max','drillPlatedMaxMm',6.3,'drill_out_of_range',['pad'],6.5,6.0,
+         lambda d: fab_pad('pad', size=8, drill=d)),
+        ('npth-min','drillNpthMinMm',.5,'drill_out_of_range',['npth'],.4,.6,
+         lambda d: fab_pad('npth', size=1, drill=d, npth=True)),
+        ('annular','annularMinMm',.15,'annular_width',['via'],.1,.2,
+         lambda d: fab_via('via', drill=.3, size=.3+2*d)),
+        ('edge','edgeClearanceMm',.2,'copper_edge_clearance',['edge-track'],.1,.3,
+         lambda d: fab_segment('edge-track', width=.2, y=.1+d)),
+        ('pad-pair','holeToHoleMm',.45,'hole_to_hole',['pad-a','pad-b'],.2,.6,
+         lambda d: fab_pad('pad-a',x=30,size=1,drill=.8) + fab_pad('pad-b',x=30+.8+d,size=1,drill=.8)),
+        ('via-pair','holeToHoleViaMm',.2,'hole_to_hole',['via-a','via-b'],.1,.3,
+         lambda d: fab_via('via-a',x=20,size=.4,drill=.3) + fab_via('via-b',x=20+.3+d,size=.4,drill=.3)),
+]
+    manifest = []
+    for label, key, threshold, kind, names, bad, good, geometry in cases:
+        if layers == 2 and 'Inner' in key:
+            continue
+        synthetic = label.startswith('distinct-')
+        if not synthetic and key not in context['values']:
+            assert key in unchecked
+            manifest.append({'case': label, 'key': key, 'unchecked': True})
+            continue
+        values = dict(context['values'])
+        if synthetic:
+            values[key] = threshold
+        else:
+            actual = values[key]
+            bad, good = bad * actual / threshold, good * actual / threshold
+            threshold = actual
+        assert bad > threshold > good if key == 'drillPlatedMaxMm' else bad < threshold < good
+        rules, _ = kr.fab_vendor_rules({'layers': layers, 'values': values})
+        for state, dimension in (('fail', bad), ('pass', good)):
+            text = probe_board(geometry(dimension))
+            rows = fab_probe_drc(root, label+'-'+state, text, rules)
+            hits = fab_target(rows, kind, names)
+            assert bool(hits) == (state == 'fail'), (label, state, kind, names, rows)
+            if hits and label == 'plated-min':
+                fab_assert_via_position(hits)
+                scaled = copy.deepcopy(hits)
+                for row in scaled:
+                    for item in row['items']:
+                        if 'pos' in item:
+                            item['pos'] = {k:v/100 for k,v in item['pos'].items()}
+                try:
+                    fab_assert_via_position(scaled)
+                    raise AssertionError('coordinate-scale mutation escaped')
+                except AssertionError as exc:
+                    assert str(exc) == 'FAB real-mm via centre'
+            manifest.append({'case':label, 'key':key, 'type':kind, 'uuids':[fab_uid(n) for n in names],
+                             'dimensionMm':dimension, 'thresholdMm':threshold, 'state':state,
+                             'synthetic':synthetic, 'hits':len(hits), 'findings':hits})
+    # Probe above the built-in 0.4 mm minimum: it must not masquerade
+    # as a working vendor rule. The published active profiles omit this bound.
+    diameter_context = {'layers': layers, 'values': {'viaDiameterMinMm': .8}}
+    diameter_rules, omitted = kr.fab_rule_section(diameter_context)
+    _, diameter_covered = kr.fab_vendor_rules(diameter_context)
+    assert 'viaDiameterMinMm' not in omitted and 'via_diameter' in diameter_covered
+    for state, diameter in (('fail', .6), ('pass', .9)):
+        rows = fab_probe_drc(root, 'synthetic-via-diameter-'+state,
+                             probe_board(fab_via('via', size=diameter)), diameter_rules)
+        hits = fab_target(rows, 'via_diameter', ['via'])
+        assert bool(hits) == (state == 'fail'), ('via-diameter', state, rows)
+        manifest.append({'case': 'via-diameter', 'key': 'viaDiameterMinMm',
+                         'synthetic': True, 'type': 'via_diameter', 'uuids': [fab_uid('via')],
+                         'dimensionMm': diameter, 'thresholdMm': .8, 'state': state,
+                         'hits': len(hits), 'findings': hits})
+    # Ordinary house findings must remain visible even when vendor rules win last-match precedence.
+    text = probe_board(fab_segment('track', width=.08))
+    vendor, _ = kr.fab_vendor_rules({'layers':4,'values':{'trackWidthOuterMm':.1}})
+    for bound in (.30, .05):
+        house = f'(rule "house" (constraint track_width (min {bound}mm)))'
+        before = fab_probe_drc(root, f'house-{bound}-ordinary', text, house, all_severities=True)
+        board = fab_probe_drc(root, f'house-{bound}-baseline', text, house)
+        after = fab_probe_drc(root, f'house-{bound}-vendor', text, house+'\n'+vendor)
+        additions = kr.fab_subtract(after, board)
+        assert fab_target(before + additions, 'track_width', ['track']), 'stricter union lost finding'
+        assert bool(fab_target(before, 'track_width', ['track'])) == (bound == .30)
+        assert bool(fab_target(additions, 'track_width', ['track'])) == (bound == .05)
+    ignored = {**FAB_PROBE_SEVERITIES,'track_width':'ignore'}
+    before = fab_probe_drc(root,'ignored-ordinary',text,'',ignored)
+    after = fab_probe_drc(root,'ignored-vendor',text,vendor,FAB_PROBE_SEVERITIES)
+    assert not fab_target(before,'track_width',['track']) and fab_target(after,'track_width',['track'])
+    # Ignored house constraints must not become vendor findings outside published bounds.
+    for label, objects, house, kind, names in (
+        ('unpublished-via',fab_via('via',size=.6,drill=.3),
+         '(rule "house via" (constraint via_diameter (min 0.8mm)))','via_diameter',['via']),
+        ('stricter-width',fab_segment('track',width=.12),
+         '(rule "house width" (constraint track_width (min 0.3mm)))','track_width',['track']),
+        ('outside-predicate',fab_via('via',size=.8,drill=.3)+fab_pad('pad',x=21,y=20,size=1,drill=.3),
+         '(rule "house mixed" (constraint hole_to_hole (min 2mm)))','hole_to_hole',['via','pad']),
+        ('omitted-max',fab_segment('track',width=.4),
+         '(rule "house maximum" (constraint track_width (max 0.3mm)))','track_width',['track'])):
+        geometry = probe_board(objects)
+        ignored_house = {**FAB_PROBE_SEVERITIES,kind:'ignore'}
+        baseline = fab_probe_drc(root,label+'-ignored',geometry,house,ignored_house)
+        visible = fab_probe_drc(root,label+'-house-error',geometry,house,FAB_PROBE_SEVERITIES)
+        assert fab_target(visible,kind,names), 'negative fixture must really violate house rule'
+        isolated, covered = kr.fab_vendor_rules(context)
+        vendor_rows = fab_probe_drc(root,label+'-vendor',geometry,house+'\n'+isolated,FAB_PROBE_SEVERITIES)
+        additions = [v for v in kr.fab_subtract(vendor_rows,baseline) if v['type'] in covered]
+        assert not fab_target(additions,kind,names), label
+        assert not fab_target(vendor_rows,kind,names), 'neutral override must work, not merely filtering'
+    # A valid exclusion must first demonstrably suppress the exact row, then be removed.
+    # An open edge has a persistent UUID; no-edge diagnostics instead reference
+    # KiCad's transient in-memory PCB UUID, which changes between CLI loads.
+    open_edge = (f'(gr_line (start 0 0) (end 60 0) (stroke (width .05) (type default)) '
+                 f'(layer "Edge.Cuts") (uuid "{fab_uid("open-edge")}"))')
+    for label, geometry, kind, names, rules in (
+        ('excluded-width',text,'track_width',['track'],vendor),
+        ('excluded-outline',probe_board(fab_segment('track')+open_edge,outline=False),
+         'invalid_outline',['open-edge'],'')):
+        visible = fab_probe_drc(root,label+'-visible',geometry,rules)
+        row = fab_target(visible,kind,names)[0]
+        item_ids = [i['uuid'] for i in row['items']]
+        # Exclusions use the marker position, not items[].pos: a track-width
+        # marker is the segment midpoint while its JSON item is the start.
+        pos = {'x':7,'y':5} if kind == 'track_width' else {'x':30,'y':0}
+        # KiCad .kicad_pro exclusion encoding is unverified until hidden assertion passes.
+        ids = (item_ids + ['00000000-0000-0000-0000-000000000000']*2)[:2]
+        exclusion = '|'.join([kind,str(round(pos['x']*1e6)),str(round(pos['y']*1e6)),*ids])
+        hidden = fab_probe_drc(root,label+'-hidden',geometry,rules,exclusions=[exclusion])
+        assert not fab_target(hidden,kind,names), 'exclusion encoding/position not verified'
+        restored = fab_probe_drc(root,label+'-cleared',geometry,rules,exclusions=[])
+        assert fab_target(restored,kind,names), 'clearing exclusions must restore covered finding'
+        manifest.append({'case':label,'exclusion':exclusion,'visible':len(visible),'hidden':len(hidden)})
+    for severity in ('warning','ignore'):
+        missing = probe_board(fab_segment('track'), outline=False)
+        ordinary = fab_probe_drc(root,'outline-'+severity+'-ordinary',missing,'',
+                                 {**FAB_PROBE_SEVERITIES,'invalid_outline':severity})
+        promoted = fab_probe_drc(root,'outline-'+severity+'-promoted',missing,'',FAB_PROBE_SEVERITIES)
+        assert not any(v['type']=='invalid_outline' for v in ordinary)
+        assert any(v['type']=='invalid_outline' for v in promoted), severity
+    # Deliberately stale copper fill crosses a newly added foreign-net track.
+    # Keep the fill inside the authored zone bounds so KiCad tests its geometry.
+    zone = (f'(zone (net "FAB_B") (layer "F.Cu") (uuid "{fab_uid("stale-zone")}") '
+            '(hatch edge .5) (connect_pads (clearance .3)) (min_thickness .1) '
+            '(fill yes (thermal_gap .3) (thermal_bridge_width .3)) '
+            '(polygon (pts (xy 4 4) (xy 40 4) (xy 40 40) (xy 4 40))) '
+            '(filled_polygon (layer "F.Cu") (pts (xy 4 4) (xy 10 4) (xy 10 5.3) (xy 4 5.3))))')
+    stale = probe_board(fab_segment('track',width=.2) + zone)
+    house = '(rule "house clearance" (constraint clearance (min 0.3mm)))'
+    old = fab_probe_drc(root,'stale-ordinary',stale,house,all_severities=True)
+    saved = fab_probe_drc(root,'stale-baseline',stale,house)
+    filled = fab_probe_drc(root,'stale-refilled-probe-only',stale,house,refill=True)
+    target_types = {'clearance','shorting_items','zone_intersect'}
+    old_ids = {kr.fab_identity(v) for v in saved if v['type'] in target_types}
+    filled_ids = {kr.fab_identity(v) for v in filled if v['type'] in target_types}
+    assert old_ids != filled_ids, 'FAB stale fixture must change a copper/clearance finding when refilled'
+    vendor, _ = kr.fab_vendor_rules({'layers':4,'values':{'clearanceOuterMm':.1,'clearanceInnerMm':.1}})
+    after = fab_probe_drc(root,'stale-vendor',stale,house+'\n'+vendor)
+    suppressed = {kr.fab_identity(v) for v in after} - {kr.fab_identity(v) for v in kr.fab_subtract(after,saved)}
+    assert suppressed <= {kr.fab_identity(v) for v in old}, 'suppressed findings must remain in ordinary report'
+    manifest.append({'case':'stale-zone','saved':len(old_ids),'refilled':len(filled_ids)})
+    (root / 'manifest.json').write_text(json.dumps(manifest,indent=2))
+    checked = sorted({entry['key'] for entry in manifest
+                      if entry.get('state') == 'fail' and not entry.get('synthetic') and not entry.get('unchecked')})
+    assert checked == sorted(key for key in context['values'] if not (layers == 2 and 'Inner' in key))
+    return {'profile': profile, 'layers': layers, 'covered': sorted(covered),
+            'checked': checked, 'unchecked': unchecked, 'cases': len(manifest)}
+
+# FAB-03: isolated execution, coverage and revision-only cache identity.
+from unittest.mock import patch
+from types import SimpleNamespace
+# Reject malformed project containers before invoking the vendor CLI.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    for index, project in enumerate(([], None, "project", 1, {"board": []},
+            {"board": None}, {"board": {"design_settings": []}},
+            {"board": {"design_settings": None}},
+            {"board": {"design_settings": {"rule_severities": []}}},
+            {"board": {"design_settings": {"rule_severities": None}}})):
+        with patch.object(kr, "fab_drc") as drc:
+            try:
+                kr.fab_run_drc(root / "b.kicad_pcb", root / str(index), b"(kicad_pcb)",
+                               json.dumps(project).encode(), b"", ("", set()))
+                raise AssertionError("FAB-03 malformed project accepted")
+            except RuntimeError as exc:
+                assert "project" in str(exc)
+            drc.assert_not_called()
+
+# KiCad can silently discard a bad authored rule and every appended vendor rule.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    for index, rules in enumerate((
+            '(version 1)\n(rule "house" (constraint track_width (min .3mm)))',
+            '(version 1)\n(rule "house" (constraint track_width (min -.3mm)))',
+            '(version 1)\n(rule "house" (constraint track_width (min 0.3mm))',
+            '(version 1)\n(rule "unterminated)',
+            '(version 1))',
+            '(version 1)\n# comment\n(rule "house" (constraint track_width (min 0.3mm))))')):
+        with patch.object(kr, "fab_drc") as drc:
+            try:
+                kr.fab_run_drc(root / "b.kicad_pcb", root / str(index), b"(kicad_pcb)",
+                               b"", rules.encode(), ("", set()))
+                raise AssertionError("FAB-03 malformed authored rules accepted")
+            except RuntimeError as exc:
+                assert "rules" in str(exc)
+            drc.assert_not_called()
+    # Quotes/comments may contain parentheses and leading-dot prose, not numeric tokens.
+    valid = ('(version 1)\n# .3mm (comment)\n'
+             '(rule "house .3mm (name)" (condition "A.NetName == \\\".3mm\\\"") '
+             '(constraint track_width (min 0.3mm)))')
+    with patch.object(kr, "fab_drc", return_value={"violations": []}) as drc:
+        assert kr.fab_run_drc(root / "b.kicad_pcb", root / "valid", b"(kicad_pcb)",
+                              b"", valid.encode(), ("", set())) == []
+        drc.assert_called_once()
+
+with tempfile.TemporaryDirectory() as td:
+    pcb, out = pathlib.Path(td, 'b.kicad_pcb'), pathlib.Path(td, 'drc.json')
+    pcb.write_text('(kicad_pcb)')
+    def cli_ok(args, **kwargs):
+        out.write_text(json.dumps({'coordinate_units':'mm','violations':[]}))
+        return SimpleNamespace(returncode=5, stdout='', stderr='')
+    with patch.object(kr.subprocess, 'run', side_effect=cli_ok) as runner:
+        assert kr.fab_drc(pcb, out)['violations'] == []
+        assert '--exit-code-violations' in runner.call_args.args[0]
+        assert '--refill-zones' not in runner.call_args.args[0]
+    for rc in (1, 2, 137):
+        with patch.object(kr.subprocess, 'run', return_value=SimpleNamespace(returncode=rc,stdout='',stderr='broken')):
+            try:
+                kr.fab_drc(pcb, out)
+                raise AssertionError('FAB-03 crash accepted')
+            except RuntimeError:
+                pass
+    def cli_clean(args, **kwargs):
+        result = cli_ok(args, **kwargs)
+        result.returncode = 0
+        return result
+    with patch.object(kr.subprocess, 'run', side_effect=cli_clean):
+        assert kr.fab_drc(pcb, out)['violations'] == [], 'FAB-03 clean exit accepted'
+    with patch.object(kr.subprocess, 'run', return_value=SimpleNamespace(returncode=0,stdout='',stderr='')):
+        out.write_text(json.dumps({'coordinate_units':'mm','violations':[]}))
+        try:
+            kr.fab_drc(pcb, out)
+            raise AssertionError('FAB-03 absent output reused stale JSON')
+        except (RuntimeError, OSError):
+            pass
+
+def fab_test_raw(uid, kind='track_width'):
+    return {'type':kind,'severity':'error','description':'too narrow',
+            'items':[{'uuid':uid,'description':uid,'pos':{'x':42.5,'y':20}}]}
+
+
+def fab_assert_multiset():
+    a = fab_test_raw('a'); b = fab_test_raw('b')
+    assert kr.fab_subtract([a,a,b],[a]) == [a,b], 'FAB mutation: multiset regression escaped'
+
+
+def fab_assert_exit_one():
+    with tempfile.TemporaryDirectory() as td:
+        pcb=pathlib.Path(td,'b.kicad_pcb'); pcb.write_text('(kicad_pcb)')
+        with patch.object(kr.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout='',stderr='broken')):
+            try:
+                kr.fab_drc(pcb,pathlib.Path(td,'out.json'))
+            except RuntimeError:
+                return
+        raise AssertionError('FAB mutation: exit 1 accepted')
+
+
+fab_assert_multiset(); fab_assert_exit_one()
+for name, mutation, assertion, diagnostic in (
+    ('fab_subtract',lambda after,before:before,fab_assert_multiset,'FAB mutation: multiset regression escaped'),
+    ('fab_drc',lambda pcb,out:{'violations':[]},fab_assert_exit_one,'FAB mutation: exit 1 accepted')):
+    with patch.object(kr,name,side_effect=mutation):
+        try:
+            assertion()
+            raise AssertionError('mutation did not trigger its regression')
+        except AssertionError as exc:
+            assert str(exc)==diagnostic
+
+
+def fab_test_render(root, outline_severity='error', missing_outline=False,
+                    rules_text='(version 1)\n# house bytes\n'):
+    root = root.resolve()
+    source = root / 'four.kicad_pcb'
+    source.write_text(pathlib.Path('ui/fixtures/vf-order-4.kicad_pcb').read_text().replace('(thickness 0.035)', '', 1))
+    project = source.with_suffix('.kicad_pro')
+    project.write_text(json.dumps({'board':{'design_settings':{'drc_exclusions':['unrelated-house-exclusion'],
+        'rule_severities':{'invalid_outline':outline_severity,'via_diameter':'ignore'}}}}))
+    rule = source.with_suffix('.kicad_dru')
+    rule.write_text(rules_text)
+    originals = {f:f.read_bytes() for f in (source,project,rule)}
+    settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    settings['fabrication']['check_limits'] = True
+    settings['checks']['fab_limits'] = 'required'
+    ordinary, extra = fab_test_raw('house'), fab_test_raw('track')
+    calls = []
+    def fake_drc(pcb, out):
+        mode = pcb.parent.name
+        calls.append(mode)
+        severities = json.loads(pcb.with_suffix('.kicad_pro').read_text())['board']['design_settings']['rule_severities']
+        assert severities['invalid_outline'] == ('error' if mode != 'board' else outline_severity)
+        design = json.loads(pcb.with_suffix('.kicad_pro').read_text())['board']['design_settings']
+        assert design['drc_exclusions'] == ([] if mode != 'board' else ['unrelated-house-exclusion'])
+        assert severities['via_diameter'] == 'ignore', 'unpublished dimension promoted'
+        if mode != 'board':
+            text = pcb.with_suffix('.kicad_dru').read_text()
+            assert text.index('fab neutral track_width') < text.index('fab track_width')
+        rows = [ordinary, extra] if mode != 'board' else [ordinary]
+        if missing_outline and mode != 'board':
+            rows += [{'type':'invalid_outline','severity':'error','description':'no outline','items':[]}]
+        return {'coordinate_units':'mm','violations':rows}
+    p = {'name':'Four','dir':'','status':'modified'}
+    output = root / 'report' / 'head'
+    with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_drc',side_effect=fake_drc):
+        kr.render_fab(p,'head',str(output),settings)
+    assert calls == ['board','jlcpcb','pcbway'], 'FAB-03 both vendor passes and one board pass'
+    assert all(f.read_bytes() == text for f,text in originals.items()), 'FAB-03 source mutated'
+    sections = {s['vendor']: s for s in json.loads((output / 'fab-limits.json').read_text())['sections']}
+    assert set(sections) == {'jlcpcb','pcbway'}
+    for meta in sections.values():
+        assert meta['violations'] == [extra] and meta['coverageWarnings']
+        assert ('edgeClearanceMm' in meta['unchecked']) == missing_outline
+        assert ('edgeClearanceMm' in meta['checked']) != missing_outline
+        assert not any(v['type']=='invalid_outline' for v in meta['violations'])
+    return p, source, root / 'report', settings, sections
+
+
+# Lexically valid authored files are not proof that KiCad loaded appended rules.
+# Track that residual risk even when the fake CLI returns valid geometry results.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    for index, rules in enumerate(('', '(version 1)\n',
+            '(version 1)\n(rule "house" (constraint unknown_constraint (min 0.3mm)))',
+            '(version 1)\n(rule "house" (constraint track_width (min 0.3 mm)))',
+            '(version 1)\n(rule "house" (condition "not a condition") (constraint track_width (min 0.3mm)))')):
+        case = root / str(index); case.mkdir()
+        _, _, _, _, sections = fab_test_render(case, rules_text=rules)
+        for meta in sections.values():
+            notices = [w for w in meta['coverageWarnings'] if 'rule loading' in w]
+            assert bool(notices) == bool(rules.strip()), 'FAB-03 authored-rule loading risk hidden'
+            if notices:
+                assert 'not independently verified' in notices[0]
+            assert len(meta['violations']) == 1, 'FAB-03 uncertainty changed violation counts'
+
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    pcb, out = root / 'b.kicad_pcb', root / 'drc.json'
+    pcb.write_text('(kicad_pcb)')
+    for text in ('', '{', '{}', '{"coordinate_units":"in","violations":[]}',
+                 '{"coordinate_units":"mm"}', '{"coordinate_units":"mm","violations":{}}'):
+        def bad_json(args, **kwargs):
+            out.write_text(text)
+            return SimpleNamespace(returncode=0,stdout='',stderr='')
+        with patch.object(kr.subprocess,'run',side_effect=bad_json):
+            try:
+                kr.fab_drc(pcb,out)
+                raise AssertionError('FAB-03 malformed output accepted: '+text)
+            except (ValueError, RuntimeError):
+                pass
+    invalid_rows = [None, {}, {**fab_test_raw('x'),'type':''},
+                    {**fab_test_raw('x'),'severity':'banana'},
+                    {**fab_test_raw('x'),'description':None},
+                    {**fab_test_raw('x'),'items':'not an array'},
+                    {**fab_test_raw('x'),'items':[None]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','uuid':3}]},
+                    {**fab_test_raw('x'),'items':[{'description':None}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':1}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':1,'y':float('inf')}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':None}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':'1','y':2}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':float('nan'),'y':2}}]},
+                    {**fab_test_raw('x'),'items':[{'description':'x','pos':{'x':True,'y':2}}]}]
+    for row in invalid_rows:
+        def malformed_row(args, **kwargs):
+            out.write_text(json.dumps({'coordinate_units':'mm','violations':[row]}))
+            return SimpleNamespace(returncode=5,stdout='',stderr='')
+        with patch.object(kr.subprocess,'run',side_effect=malformed_row):
+            try:
+                kr.fab_drc(pcb,out)
+                raise AssertionError('FAB-03 malformed row became clean check')
+            except RuntimeError:
+                pass
+    # Unit attribution negatives: inspect the actual disposable project/rules.
+    for label, objects, house, kind in (
+        ('ignored-unpublished-via',fab_via('via',size=.6,drill=.3),
+         '(rule "house" (constraint via_diameter (min 0.8mm)))','via_diameter'),
+        ('ignored-stricter-house',fab_segment('track',width=.12),
+         '(rule "house" (constraint track_width (min 0.3mm)))','track_width')):
+        case=root/label; case.mkdir()
+        source=case/'four.kicad_pcb'; source.write_text(fab_probe_board(objects))
+        source.with_suffix('.kicad_dru').write_text('(version 1)\n'+house)
+        source.with_suffix('.kicad_pro').write_text(json.dumps({'board':{'design_settings':{
+            'rule_severities':{kind:'ignore'},'drc_exclusions':['excluded-unrelated-house']}}}))
+        cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+        cfg['fabrication']['check_limits']=True; cfg['checks']['fab_limits']='required'
+        def attribution_drc(pcb,out):
+            design=json.loads(pcb.with_suffix('.kicad_pro').read_text())['board']['design_settings']
+            if pcb.parent.name=='board':
+                assert design['rule_severities'][kind]=='ignore'
+                return {'coordinate_units':'mm','violations':[]}
+            assert design['drc_exclusions']==[]
+            generated=pcb.with_suffix('.kicad_dru').read_text()
+            constraint='via_diameter' if kind=='via_diameter' else 'track_width'
+            assert house in generated
+            assert generated.index('fab neutral '+constraint) > generated.index('rule "house"')
+            if kind=='via_diameter':
+                assert design['rule_severities'][kind]=='ignore'
+                # Even an unrelated diagnostic emitted by the tool must not be attributed.
+                rows=[fab_test_raw('via',kind)]
+            else:
+                assert design['rule_severities'][kind]=='error'
+                assert generated.index('fab neutral track_width') < generated.index('fab track_width')
+                rows=[]  # .12 mm passes .09 mm vendor; real gate independently proves this.
+            return {'coordinate_units':'mm','violations':rows}
+        with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_drc',side_effect=attribution_drc):
+            kr.render_fab({'name':'Four'},'head',str(case/'out'),cfg)
+        sections=json.loads((case/'out'/'fab-limits.json').read_text())['sections']
+        for meta in sections:
+            assert meta['violations']==[], (label, meta['vendor'])
+        if kind=='via_diameter':
+            assert 'viaDiameterMinMm' in next(m for m in sections if m['vendor']=='jlcpcb')['unchecked']
+    for severity in ('error','warning','ignore'):
+        case = root / severity; case.mkdir()
+        fab_test_render(case,severity,missing_outline=True)
+    duplicate = root / 'duplicate-outline'; duplicate.mkdir()
+    original_context = kr.fab_context
+    warning = 'Edge clearance not checked: no valid closed board outline'
+    def preunchecked_context(pcb):
+        sections = original_context(pcb)
+        for section in sections:
+            section['values'].pop('edgeClearanceMm', None)
+            section['coverageWarnings'].append(warning)
+        return sections
+    with patch.object(kr, 'fab_context', side_effect=preunchecked_context):
+        _, _, _, _, sections = fab_test_render(duplicate, missing_outline=True)
+    for section in sections.values():
+        assert section['unchecked'].count('edgeClearanceMm') == 1, 'FAB-03 duplicate unchecked edge clearance'
+        assert section['coverageWarnings'].count(warning) == 1, 'FAB-03 duplicate outline coverage warning'
+    complete = root / 'complete'; complete.mkdir()
+    _, _, _, settings, _ = fab_test_render(complete)
+    for suffix, dangling in ((s,d) for s in ('.kicad_pcb','.kicad_pro','.kicad_dru') for d in (False,True)):
+        case = root / ('link'+suffix+str(dangling)); case.mkdir()
+        source = case / 'b.kicad_pcb'; source.write_text('(kicad_pcb)')
+        target = case / 'secret'
+        if not dangling:
+            target.write_text('must not read target')
+        link = source.with_suffix(suffix); link.unlink(missing_ok=True); link.symlink_to(target)
+        with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_context') as context, patch.object(kr,'fab_drc') as drc, patch.object(pathlib.Path,'read_text') as read_text, patch.object(pathlib.Path,'read_bytes') as read_bytes:
+            try:
+                kr.render_fab({'name':'B'},'head',str(case/'out'),settings)
+                raise AssertionError('FAB-03 symlink accepted: '+suffix)
+            except RuntimeError as exc:
+                assert 'symlink' in str(exc)
+            context.assert_not_called(); drc.assert_not_called()
+            read_text.assert_not_called(); read_bytes.assert_not_called()
+        if not dangling:
+            assert target.read_text() == 'must not read target'
+        else:
+            assert not target.exists()
+    actual = root / 'actual'; actual.mkdir()
+    (actual/'b.kicad_pcb').write_text('(kicad_pcb)')
+    parent = root/'linked-parent'; parent.symlink_to(actual, target_is_directory=True)
+    try:
+        kr.fab_regular_input(parent/'b.kicad_pcb')
+        raise AssertionError('FAB-03 symlinked parent accepted')
+    except RuntimeError as exc:
+        assert str(parent) in str(exc) and 'physical checkout path' in str(exc)
+        assert '/private/tmp' in str(exc), 'FAB-03 symlink recovery guidance missing'
+    kr.fab_regular_input((parent/'b.kicad_pcb').resolve())
+    table = root/'profiles.json'; table.write_bytes(kr.FAB_TABLE.read_bytes())
+    det = {'base':'a'*40,'head':'a'*40}
+    with patch.object(kr,'FAB_TABLE',table):
+        before = kr.render_cache({'dir':'','name':'P'},'head',det,settings)
+        values = json.loads(table.read_text()); values['jlcpcb-2l']['checkedOn']='2026-10-25'
+        table.write_text(json.dumps(values))
+        assert kr.render_cache({'dir':'','name':'P'},'head',det,settings) != before
+        assert kr.render_cache({'dir':'','name':'P'},'base',det,settings) != kr.render_cache({'dir':'','name':'P'},'head',det,settings)
+    disabled = copy.deepcopy(settings)
+    disabled['fabrication']['check_limits'] = False
+    with patch.object(kr,'FAB_TABLE',root / 'absent-table.json'):
+        assert kr.render_cache({'dir':'','name':'P'},'head',det,disabled) == kr.render_cache({'dir':'','name':'P'},'base',det,disabled)
+# Subtracting a shared house/vendor error is invalid without the ordinary DRC check.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    source = root/'four.kicad_pcb'; source.write_text(fab_probe_board(fab_segment('track',width=.08)))
+    source.with_suffix('.kicad_dru').write_text('(version 1)\n(rule "house" (constraint track_width (min 0.3mm)))')
+    cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits']=True; cfg['checks'].update(drc='off',fab_limits='required')
+    with patch.object(kr,'board_path',return_value=str(source)):
+        try:
+            if kr.fab_enabled(cfg):
+                kr.render_fab({'name':'Four'},'head',str(root/'out'),cfg)
+            raise AssertionError('FAB-03 DRC off accepted')
+        except ValueError as exc:
+            assert 'requires checks.drc != "off"' in str(exc)
+    cfg['fabrication']['check_limits']=False
+    assert kr.fab_enabled(cfg) is False
+workflow = pathlib.Path('.github/workflows/review.yml').read_text()
+outer = "hashFiles('tools/kicad_review.py', 'tools/fab_limits.json', 'tools/ui/compress3d.cjs', 'base/kicad-review.toml', 'head/kicad-review.toml')"
+assert workflow.count(outer) == 2, 'FAB-03 outer cache omits profile bytes'
+
+# Exercise the actual cmd_render boundary, not merely fab_enabled.
+with tempfile.TemporaryDirectory() as td:
+    cwd = os.getcwd()
+    try:
+        os.chdir(td); pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps({'projects':[{'dir':'','name':'B','status':'modified'}]}))
+        for enabled, level, expected in ((False,'required',0),(True,'off',0),(True,'informational',2),(True,'required',2)):
+            cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            cfg['fabrication']['check_limits'] = enabled; cfg['checks']['fab_limits'] = level
+            with patch.object(kr,'load_settings',return_value=cfg), patch.object(kr,'render_cache',return_value=None), patch.object(kr,'render_side'), patch.object(kr,'render_fab') as fab:
+                kr.cmd_render(SimpleNamespace())
+                assert fab.call_count == expected
+                if expected:
+                    assert sorted(c.args[1] for c in fab.call_args_list) == ['base', 'head'], 'FAB-03 both revisions render'
+        for error in (OSError('missing output'), ValueError('malformed JSON'), RuntimeError('tool crash')):
+            with patch.object(kr,'load_settings',return_value=cfg), patch.object(kr,'render_cache',return_value=None), patch.object(kr,'render_side'), patch.object(kr,'render_fab',side_effect=error), patch.object(kr,'cache_renders') as cache:
+                try:
+                    kr.cmd_render(SimpleNamespace())
+                    raise AssertionError('FAB-03 failed audit completed render cache')
+                except SystemExit as exc:
+                    assert str(exc) == f'Fab limits could not run for B: {error}'
+                cache.assert_not_called()
+    finally:
+        os.chdir(cwd)
+# Missing/unsupported revisions have no fabricated pass or comparison metadata.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    source = root / 'absent.kicad_pcb'
+    cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits'] = True
+    with patch.object(kr, 'board_path', return_value=str(source)), patch.object(kr, 'fab_drc') as drc:
+        for side in ('base', 'head'):
+            kr.render_fab({'name':'Absent'}, side, str(root / side), cfg)
+            assert json.loads((root / side / 'fab-limits.json').read_text()) == {
+                'sections': [], 'reason': f'no {side} board'}
+        source.write_text('(kicad_pcb (layers (0 "F.Cu" signal)))')
+        kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'unsupported'), cfg)
+        sections = json.loads((root / 'unsupported' / 'fab-limits.json').read_text())['sections']
+        assert [s['vendor'] for s in sections] == ['jlcpcb', 'pcbway']
+        assert all(s['unsupported'] and s['checked'] == [] and s['violations'] == [] for s in sections)
+        assert all('baselineAvailable' not in s and 'fixed' not in s for s in sections)
+        drc.assert_not_called()
+    # Each adjacent input and the profile bytes are in the deterministic input hash.
+    for suffix in ('.kicad_pcb', '.kicad_pro', '.kicad_dru'):
+        path = source.with_suffix(suffix)
+        if not path.exists():
+            path.write_text('')
+    table = root / 'profiles.json'; table.write_bytes(kr.FAB_TABLE.read_bytes())
+    def audit_hash():
+        with patch.object(kr, 'board_path', return_value=str(source)), patch.object(kr, 'FAB_TABLE', table):
+            kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'hash'), cfg)
+        return json.loads((root / 'hash' / 'fab-limits.json').read_text())['sections'][0]['inputHash']
+    before = audit_hash()
+    assert before == audit_hash()
+    for path in (source, source.with_suffix('.kicad_pro'), source.with_suffix('.kicad_dru'), table):
+        original = path.read_bytes()
+        path.write_bytes(original + b'\n')
+        assert audit_hash() != before, path.suffix
+        path.write_bytes(original)
+        assert audit_hash() == before
+
+# Both disabled modes permit DRC off at the real settings/report boundary.
+with tempfile.TemporaryDirectory() as td:
+    root = pathlib.Path(td).resolve()
+    for enabled, level in ((False, 'required'), (True, 'off')):
+        (root / kr.SETTINGS_FILE).write_text(
+            f'[fabrication]\ncheck_limits = {str(enabled).lower()}\n'
+            f'[checks]\ndrc = "off"\nfab_limits = "{level}"\n')
+        assert kr.fab_enabled(kr.load_settings((str(root),))) is False
+print('ok FAB-03 isolated execution, coverage, cache identity and cmd_render')
+
+def fab_head_only(source):
+    """board_path side effect: the head board exists and the base board does not (so no base audit is compared)."""
+    return lambda p, side: str(source) if side == 'head' else str(source.with_name('no-base.kicad_pcb'))
+
+
+def fab_produced_checks():
+    with tempfile.TemporaryDirectory() as td:
+        p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+        with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+            checks = {c['vendor']: c for c in kr.fab_checks(p,cfg,str(out),{'active':{}})}
+        jl = checks['jlcpcb']
+        assert type(jl['warnings']) is int and jl['warnings'] == 0
+        assert jl['errors'] == 1 and jl['coverageWarnings'] == sections['jlcpcb']['coverageWarnings']
+        assert jl['errors'] + jl['warnings'] == 1, 'FAB-04 numeric v1 contract'
+        assert checks['pcbway']['errors'] == 1 and checks['pcbway']['baselineAvailable'] is False
+        return checks
+
+
+# FAB-06: summarize actual produced audits, including every vendor and project.
+produced = fab_produced_checks()
+jl, pw = produced['jlcpcb'], produced['pcbway']
+assert type(jl['warnings']) is int and isinstance(jl['coverageWarnings'],list)
+assert jl['warnings'] == 0 and jl['coverageWarnings']
+project = lambda name,checks: {'name':name,'dir':'','status':'modified','changes':[],
+                              'sheets':[],'board':{'changed':False},'checks':checks}
+jl_other = copy.deepcopy(jl)
+jl_other.update(errors=2,new_errors=2,status='fail')
+data = {'base':'a'*40,'head':'b'*40,'reason':'fab regression','links':{},
+        'settings':copy.deepcopy(kr.DEFAULT_SETTINGS),
+        'projects':[project('First',[jl,pw]),project('Second',[jl_other])]}
+block = kr.checks_markdown(data)
+assert block.startswith('\n### Checks\n')
+assert '| First | Fab limits · JLCPCB (required) |' in block, 'FAB-06 vendor-qualified JLCPCB table row'
+assert '| First | Fab limits · PCBWay (required) |' in block, 'FAB-06 vendor-qualified PCBWay table row'
+expected = ('**First**: Fab limits (JLCPCB): 1 violations',
+            '**First**: Fab limits (PCBWay): 1 violations',
+            '**Second**: Fab limits (JLCPCB): 2 violations')
+assert all(text in block for text in expected), 'FAB-06 every vendor section of every project is summarized'
+body = kr.comment_markdown(data,[], '')
+start = body.index('### Checks')
+assert all(body.index(text)>start for text in expected)
+assert not any(text in body[:start] for text in expected)
+runs = [r for r in kr.check_runs(data) if r['name']=='kicad-review / Fab limits']
+assert len(runs)==1 and runs[0]['conclusion']=='failure'
+summary = runs[0]['output']['summary']
+assert '| First (JLCPCB) |' in summary and '| First (PCBWay) |' in summary, 'FAB-06 vendor-qualified check-run rows'
+assert '| 0 (0) |' in summary, 'warning count is numeric in check-run output'
+assert all(w not in block for w in jl['coverageWarnings']), 'coverage belongs to ledger, not numeric counts'
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, _ = fab_test_render(pathlib.Path(td))
+    source.unlink()
+    with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+        removed = kr.fab_checks(p,cfg,str(out),{'active':{}})
+line = kr.checks_markdown({**data,'projects':[project('Removed board',removed)]})
+assert 'Fab limits (JLCPCB): not checked' in line and 'Fab limits (PCBWay): not checked' in line
+no_vendor = {k:v for k,v in removed[0].items() if k != 'vendor'}
+assert 'Fab limits: not checked' in kr.checks_markdown({**data,'projects':[project('Legacy',[no_vendor])]}), 'FAB-06 vendor-neutral only without vendor'
+legacy = {**data,'projects':[project('Old',[kr.run_check('drc',kr.DEFAULT_SETTINGS,[],[])])]}
+assert 'Fab limits' not in kr.comment_markdown(legacy,[], '')
+print('ok FAB-06 produced vendor summaries, placement, check run and removed board')
+
+readme = pathlib.Path('README.md').read_text()
+example = pathlib.Path('examples/kicad-review.toml').read_text()
+config = kr.tomllib.loads(example)
+assert config['checks']['fab_limits']=='informational' and config['fabrication']['check_limits'] is False
+assert 'checks.fab_limits' in readme and 'fabrication.check_limits' in readme
+assert 'coverageWarnings' in readme and 'integer' in readme
+assert 'server Run button' not in readme
+assert len(kr.fab_profiles())==12
+print('ok FAB-06 documentation defaults and coverage contract')
+
+off_cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+off_cfg['fabrication']['check_limits']=True
+off_cfg['checks'].update(drc='off',fab_limits='required')
+try:
+    kr.fab_checks({'name':'Four'},off_cfg,'absent-output')
+    raise AssertionError('FAB-04 report accepted DRC off')
+except ValueError as exc:
+    assert 'requires checks.drc != "off"' in str(exc)
+
+produced_fabs = fab_produced_checks()
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    audit = out/'head'/'fab-limits.json'
+    def write_head(**changes):
+        audit.write_text(json.dumps({'sections':[{**s,**changes} for s in sections.values()]}))
+    with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+        for level,status in (('informational','warn'),('required','fail')):
+            cfg['checks']['fab_limits']=level
+            write_head(layers=8,unsupported='not checked: profile covers 4, 6 layers; board has 8',violations=[])
+            assert all(kr.fab_check(p,cfg,str(out),None,v)['status']==status for v in kr.FAB_VENDORS)
+        cfg['fabrication']['check_limits']=False
+        assert kr.fab_checks(p,cfg,str(out))==[]
+        cfg['fabrication']['check_limits']=True; cfg['checks']['fab_limits']='off'
+        assert kr.fab_checks(p,cfg,str(out))==[]
+        cfg['checks']['fab_limits']='required'
+        audit.unlink()
+        try:
+            kr.fab_checks(p,cfg,str(out))
+            raise AssertionError('FAB-04 missing artifact accepted')
+        except SystemExit as exc:
+            assert 'Fab limits output missing for Four (head)' in str(exc)
+        source.unlink()
+        removed = kr.fab_checks(p,cfg,str(out))
+        assert [c['vendor'] for c in removed] == ['jlcpcb','pcbway']
+        assert all(c['status']=='not_run' and type(c['warnings']) is int for c in removed)
+
+# Contract cases come from the actual producer, including an unsupported present board.
+def fab_contract_cases():
+    with tempfile.TemporaryDirectory() as td:
+        p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+        cfg['fail_on'] = 'new'
+        with patch.object(kr, 'board_path', side_effect=fab_head_only(source)):
+            failed = kr.fab_check(p, cfg, str(out), {'active':{}}, 'jlcpcb')
+            unsupported_sections = [{**s, 'layers':8, 'checked':[], 'violations':[],
+                                     'unsupported':'not checked: profile covers 4, 6 layers; board has 8'}
+                                    for s in sections.values()]
+            (out/'head'/'fab-limits.json').write_text(json.dumps({'sections': unsupported_sections}))
+            unsupported = kr.fab_check(p, cfg, str(out), {'active':{}}, 'jlcpcb')
+            source.unlink()
+            absent = kr.fab_check(p, cfg, str(out), {'active':{}}, 'jlcpcb')
+        return failed, unsupported, absent
+
+
+fab_failed, fab_unsupported, fab_absent = fab_contract_cases()
+assert kr.FAB_TABLE.name == 'fab_limits.json', 'FAB contract: immutable table name'
+assert [c['status'] for c in (fab_failed, fab_unsupported, fab_absent)] == ['fail','fail','not_run']
+assert fab_failed['baselineAvailable'] is False and fab_failed['fixed'] == 0, 'FAB contract: this fixture has no base board'
+assert fab_unsupported['baselineAvailable'] is False and fab_unsupported['fixed'] == 0, 'FAB contract: no base board'
+assert 'baselineAvailable' not in fab_absent and 'fixed' not in fab_absent, 'FAB contract: not_run has no base comparison'
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    source.unlink()
+    with patch.object(kr, 'board_path', side_effect=fab_head_only(source)):
+        not_run_waived = kr.fab_check(p, cfg, str(out), {'active': {}}, 'jlcpcb')
+    assert not_run_waived['status'] == 'not_run' and not_run_waived['waived'] == 0
+for c in (fab_failed, fab_unsupported, fab_absent):
+    assert c['name'] == 'fab_limits'
+    assert c['confidence'] == 'deterministic' and c['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+    assert all(v['confidence'] == c['confidence'] and v['evidence_source'] == c['evidence_source']
+               for v in c['violations']), 'FAB contract: explicit finding provenance'
+assert fab_failed['new_errors'] == fab_failed['errors'] == 1
+assert fab_absent['checked'] == [] and fab_absent['reason'] == 'no head board'
+
+# Base/head pairing (Owner decision 2026-10-26): multiset identity, so one base occurrence matches one head occurrence.
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    cfg['fail_on'] = 'new'
+    same, gone, added = fab_test_raw('same'), fab_test_raw('gone'), fab_test_raw('added')
+    def write_audit(side, rows):
+        pathlib.Path(out, side).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(out, side, 'fab-limits.json').write_text(json.dumps(
+            {'sections': [{**s, 'violations': rows} for s in sections.values()]}))
+    write_audit('head', [copy.deepcopy(same), copy.deepcopy(same), copy.deepcopy(added)])
+    write_audit('base', [copy.deepcopy(same), copy.deepcopy(gone)])
+    with patch.object(kr, 'board_path', return_value=str(source)):
+        c = kr.fab_check(p, cfg, str(out), {'active': {}}, 'jlcpcb')
+    assert c['baselineAvailable'] is True
+    assert (c['errors'], c['new_errors'], c['fixed']) == (3, 2, 1), 'FAB pairing: multiset, not set'
+    assert c['status'] == 'fail'
+    assert sorted(v['new'] for v in c['violations']) == [False, True, True]
+    assert [v['new'] for v in c['violations']] == [True, True, False], 'FAB pairing: new findings first'
+
+# Supported base findings are existing; unsupported bases cannot mask new findings.
+with tempfile.TemporaryDirectory() as td:
+    p, source, out, cfg, sections = fab_test_render(pathlib.Path(td))
+    (out/'base').mkdir()
+    base_audit = out/'base'/'fab-limits.json'
+    base_audit.write_bytes((out/'head'/'fab-limits.json').read_bytes())
+    with patch.object(kr, 'board_path', return_value=str(source)):
+        cfg['fail_on'] = 'new'
+        checks = kr.fab_checks(p, cfg, str(out), {'active':{}})
+        assert all(c['status']=='pass' and c['errors']==1 and c['new_errors']==0
+                   and c['baselineAvailable'] and c['fixed']==0 for c in checks)
+        cfg['fail_on'] = 'all'
+        assert all(c['status']=='fail' for c in kr.fab_checks(p, cfg, str(out)))
+        # One fab waiver applies across vendors, but never to ordinary DRC.
+        key = kr.waiver_key(checks[0]['violations'][0])
+        waivers = {'active':{('fab_limits',key):{'reason':'prototype','by':'reviewer',
+                    'until':'2026-12-31','ref':None}}}
+        waived = kr.fab_checks(p, cfg, str(out), waivers)
+        assert all(c['status']=='pass' and c['waived']==1 and c['errors']==0 for c in waived)
+        assert kr.run_check('drc',cfg,[kr.violation(fab_test_raw('track'),1,{'board':True})],
+                            None,waivers)['waived']==0
+        base_audit.write_text(json.dumps({'sections':[{**s,'unsupported':'unsupported base layers'}
+                                                     for s in sections.values()]}))
+        cfg['fail_on'] = 'new'
+        assert all(not c['baselineAvailable'] and c['new_errors']==1 and c['fixed']==0
+                   for c in kr.fab_checks(p, cfg, str(out)))
+        base_audit.unlink()
+        try:
+            kr.fab_checks(p, cfg, str(out))
+            raise AssertionError('FAB missing base audit accepted')
+        except SystemExit as exc:
+            assert 'Fab limits output missing for Four (base)' in str(exc)
+
+# These helpers are owned by 06/09 and do not exist on main 335db72.
+# Standalone 04 runs the producer assertions above; the combined gate must not silently skip.
+if os.environ.get('FAB_CROSS_SPEC') == '1':
+    assert hasattr(kr, 'absolute_checks'), 'FAB integration requires merged spec 06'
+    assert hasattr(kr, 'complete_context_checks'), 'FAB integration requires merged spec 09'
+
+if hasattr(kr, 'absolute_checks'):
+    for original in (fab_failed, fab_unsupported, fab_absent):
+        current = copy.deepcopy(original)
+        kr.absolute_checks([current])
+        expected = copy.deepcopy(original)
+        expected.update(new_errors=0, new_warnings=0)
+        if 'fixed' in expected:
+            expected['fixed'] = 0
+        for v in expected['violations']:
+            v['new'] = False
+        assert json.loads(json.dumps(current)) == expected, 'FAB snapshot: only comparison fields may change'
+    assert fab_failed['new_errors'] == 1 and fab_failed['violations'][0]['new'] is True
+
+if hasattr(kr, 'complete_context_checks'):
+    cfg = copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits'] = True
+    cfg['checks']['fab_limits'] = 'required'
+    ledger_keys = ('vendor','profile','checkedOn','assumedCopperOz','checked','unchecked','unsupported',
+                   'coverageWarnings','baselineAvailable','fixed')
+    for original in (fab_failed, fab_unsupported, fab_absent):
+        contexts = kr.complete_context_checks([copy.deepcopy(original)], cfg, True,
+                                               original['status'] != 'not_run')
+        matches = [c for c in contexts if c['name'] == 'fab_limits']
+        assert len(matches) == 1, 'FAB context: supplied check lost or duplicated'
+        current = matches[0]
+        assert current['status'] == original['status'] and current['reason'] == original.get('reason')
+        assert (current['errors'], current['warnings']) == (original['errors'], original['warnings'])
+        assert current['confidence'] == 'deterministic' and current['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+        assert {k:current[k] for k in ledger_keys if k in original} == {k:original[k] for k in ledger_keys if k in original}, 'FAB context: coverage ledger lost'
+        assert len(current['findings']) == len(original['violations'])
+        assert all(v['confidence'] == 'deterministic' and v['evidence_source'] == kr.FAB_EVIDENCE_SOURCE
+                   for v in current['findings'])
+    contexts = kr.complete_context_checks(list(copy.deepcopy(produced_fabs).values()), cfg, True, True)
+    assert sorted(c['vendor'] for c in contexts if c['name']=='fab_limits') == ['jlcpcb','pcbway'], 'FAB context: retain both vendors'
+    for opt_in, level in ((False,'required'), (True,'off')):
+        cfg['fabrication']['check_limits'] = opt_in
+        cfg['checks']['fab_limits'] = level
+        assert kr.fab_checks({'name':'Disabled'}, cfg, 'unused') == []
+        contexts = kr.complete_context_checks([], cfg, True, True)
+        assert not any(c['name'] == 'fab_limits' for c in contexts), 'FAB context: disabled check synthesized'
+
+entries,bad = kr.parse_waivers('''
+[[waiver]]
+check = "fab_limits"
+match = "w-0123456789ab"
+reason = "Prototype only"
+by = "reviewer"
+date = 2026-10-25
+until = 2026-12-31
+''', 'fab fixture')
+assert len(entries)==1 and not bad
+raw_v = kr.violation(fab_test_raw('track'),1,{'board':True})
+key = kr.waiver_key(raw_v)
+wrong = {'active':{('drc',key):{'reason':'house only','by':'reviewer','until':'2026-12-31','ref':None}}}
+assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,wrong)['waived']==0
+right = {'active':{('fab_limits',key):wrong['active'][('drc',key)]}}
+assert kr.run_check('fab_limits',cfg,[copy.deepcopy(raw_v)],None,right)['waived']==1
+
+# Optional integration fixture is built by CI after its PAGES directory exists.
+if os.environ.get('FAB_REPORT_FIXTURE'):
+    sample = pathlib.Path('ui/sample/review-data.js').read_text()
+    data = json.loads(sample.split('=',1)[1].strip().rstrip(';'))
+    project = next(p for p in data['projects'] if p.get('board',{}).get('layers'))
+    data['fabProducerFixture'] = True
+    project['checks'] = [*project['checks'],*(copy.deepcopy(c) for c in produced_fabs.values())]
+    data.setdefault('settings',{}).setdefault('checks',{})['fab_limits']='required'
+    kr.assign_ids(data['projects'])
+    payload = 'window.REVIEW_DATA = '+json.dumps(data).replace('<','\\u003c')+';'
+    pathlib.Path(os.environ['FAB_REPORT_FIXTURE']).write_text(kr.inline_page(payload),encoding='utf-8')
+
+with tempfile.TemporaryDirectory() as td:
+    cwd=os.getcwd()
+    try:
+        os.chdir(td); pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps({'base':'a'*40,'head':'b'*40,'reason':'fab opt-out','projects':[]}))
+        cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+        with patch.object(kr,'load_settings',return_value=cfg), patch.dict(os.environ,{'GITHUB_OUTPUT':str(pathlib.Path(td,'outputs'))}):
+            kr.cmd_report(None)
+        data=json.loads(pathlib.Path('review/data.json').read_text())
+        assert data['version']==1 and data['projects']==[]
+        assert 'fab_limits' not in data['settings']['checks']
+        assert 'check_limits' not in data['settings']['fabrication']
+        assert cfg['checks']['fab_limits']=='informational' and cfg['fabrication']['check_limits'] is False
+        legacy=copy.deepcopy(cfg)
+        del legacy['checks']['fab_limits']; del legacy['fabrication']['check_limits']
+        with patch.object(kr,'load_settings',return_value=legacy), patch.dict(os.environ,{'GITHUB_OUTPUT':str(pathlib.Path(td,'outputs'))}):
+            kr.cmd_report(None)
+        assert json.loads(pathlib.Path('review/data.json').read_text())==data
+    finally:
+        os.chdir(cwd)
+
+print('ok FAB-04 report producer, multiset baseline, provenance, waivers and legacy opt-out')
+
+
+def fab_four_report(root, board):
+    root.mkdir(parents=True,exist_ok=False)
+    cfg=copy.deepcopy(kr.DEFAULT_SETTINGS)
+    cfg['fabrication']['check_limits']=True
+    cfg['checks'].update(drc='required',fab_limits='required')
+    p={'name':'Four','dir':'','status':'modified'}
+    # Read the Task 3 fixture and its generated project in place, unmodified.
+    source=board.resolve()
+    with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
+        kr.render_fab(p,'head',str(root/'head'),cfg)
+        checks=kr.fab_checks(p,cfg,str(root),{'active':{}})
+    sections={s['vendor']:s for s in json.loads((root/'head'/'fab-limits.json').read_text())['sections']}
+    jl=sections['jlcpcb']
+    assert jl['profile']=='jlcpcb-multilayer' and jl['layers']==4
+    assert sections['pcbway']['profile']=='pcbway-std' and sections['pcbway']['unsupported'] is None
+    assert jl['values']['trackWidthOuterMm']==jl['values']['trackWidthInnerMm']==.09
+    for check in checks:
+        vendor=check['vendor']
+        assert {'trackWidthOuterMm','trackWidthInnerMm'} <= set(check['checked']), vendor
+        assert 'edgeClearanceMm' in check['checked'] and not check['unsupported'], vendor
+        for layer in ('F.Cu','In1.Cu','B.Cu'):
+            assert fab_target(sections[vendor]['violations'],'track_width',['four-'+layer]), (vendor,layer)
+            assert any(v['type']=='track_width' and fab_uid('four-'+layer) in v['uuids']
+                       for v in check['violations']), ('report track missing',vendor,layer)
+    sample=pathlib.Path('ui/sample/review-data.js').read_text()
+    data=json.loads(sample.split('=',1)[1].strip().rstrip(';'))
+    project=next(p for p in data['projects'] if p.get('board',{}).get('layers'))
+    data['projects']=[project]
+    project['name']='Four'; project['checks']=checks
+    data['fabFourLayerFixture']=True
+    kr.assign_ids(data['projects'])
+    payload='window.REVIEW_DATA = '+json.dumps(data).replace('<','\\u003c')+';'
+    (root/'four-layer.html').write_text(kr.inline_page(payload),encoding='utf-8')
+    print('ok FAB-04 real four-layer report: both vendors, outer/inner tracks and closed outline')
+
+
+if os.environ.get('KICAD_FAB_FOUR_REPORT'):
+    fab_four_report(pathlib.Path(os.environ['KICAD_FAB_FOUR_REPORT']),
+                    pathlib.Path(os.environ['KICAD_FAB_BOARD']))
+
+if os.environ.get('KICAD_FAB_VERIFY') == '1':
+    fab_capability_probe(pathlib.Path(os.environ['KICAD_FAB_OUT']))
+
+# BR03 Task 6.2: unreadable optional rules keep symbols, drop unknown metadata on both sides, and warn.
+import contextlib, hashlib
+from kicad_review import project_pair
+DRU = b'(rule "wide" (constraint clearance (min 0.2mm)))\xff'  # non-UTF-8 bytes: the .dru hash is byte-based
+def pair_with_warnings():
+    with contextlib.redirect_stderr(io.StringIO()) as log:
+        objs, issues = project_pair({"dir": "p", "name": "p"})
+    return objs, issues, log.getvalue()
+def assert_symbols_kept(objs):
+    assert all(any(o["kind"] == "symbol" for o in x.values()) for x in objs.values())
+with tempfile.TemporaryDirectory() as td:
+    old = os.getcwd(); os.chdir(td)
+    try:
+        for side in ("base", "head"):
+            write(side, {"p/p.kicad_sch": '(kicad_sch (symbol (uuid s) (at 1 2 0) (property "Reference" "R1")))',
+                         "p/p.kicad_pro": '{"board":{"design_settings":{"rules":{"min_clearance":0.2}}}}'})
+            pathlib.Path(side, "p/p.kicad_dru").write_bytes(DRU)
+        objs, issues, warnings = pair_with_warnings()
+        assert not issues and not warnings and all("meta:pro" in x and "meta:dru" in x for x in objs.values())
+        assert all(x["meta:dru"]["props"]["custom rules"] == hashlib.sha1(DRU).hexdigest()[:10] for x in objs.values())
+        # Malformed .pro on each side in turn.
+        for side in ("base", "head"):
+            file = pathlib.Path(side) / "p/p.kicad_pro"; valid = file.read_text(); file.write_text('{broken')
+            objs, issues, warnings = pair_with_warnings()
+            assert issues and issues[0]["channel"] == "rules" and issues[0]["unknownMeta"] == "meta:pro"
+            assert_symbols_kept(objs)
+            assert all("meta:pro" not in x for x in objs.values()), "BR03 unknown metadata became removal"
+            assert all("meta:dru" in x for x in objs.values()), "valid .dru must survive a bad .pro"
+            assert f"{side}/p/p.kicad_pro: optional rules unavailable" in warnings
+            file.write_text(valid)
+        # Unreadable .dru on head only (a directory makes read_bytes raise IsADirectoryError).
+        dru = pathlib.Path("head/p/p.kicad_dru"); dru.unlink(); dru.mkdir()
+        objs, issues, warnings = pair_with_warnings()
+        assert issues and issues[0]["channel"] == "rules" and issues[0]["unknownMeta"] == "meta:dru"
+        assert_symbols_kept(objs)
+        assert all("meta:dru" not in x for x in objs.values()), "one-sided unreadable .dru must not show as removal"
+        assert all("meta:pro" in x for x in objs.values()), "valid .pro must survive a bad .dru"
+        assert "head/p/p.kicad_dru: optional rules unavailable" in warnings
+        # Unreadable .dru on both sides: still symmetric suppression.
+        pathlib.Path("base/p/p.kicad_dru").unlink(); pathlib.Path("base/p/p.kicad_dru").mkdir()
+        objs, issues, warnings = pair_with_warnings()
+        assert issues and all("meta:dru" not in x for x in objs.values()) and all("meta:pro" in x for x in objs.values())
+        dru.rmdir(); pathlib.Path("base/p/p.kicad_dru").rmdir()
+        # Recovery: both files readable again, no issues, nothing suppressed.
+        for side in ("base", "head"): pathlib.Path(side, "p/p.kicad_dru").write_bytes(DRU)
+        objs, issues, warnings = pair_with_warnings()
+        assert not issues and not warnings and all("meta:pro" in x and "meta:dru" in x for x in objs.values())
+    finally: os.chdir(old)
+print('ok BR03 project_pair guards optional rules')
+
+
+def test_br03_summary():
+    from kicad_review import electrical_summary, classify_change
+    rows=[kr.electrical_row("net-added","X","added"),kr.electrical_row("net-joined","Y")]
+    s=electrical_summary(rows,[{"channel":"routing","reason":"pcbnew unavailable"}])
+    assert s["headline"]=="1 nets added · 1 net joins"
+    assert next(c for c in s["channels"] if c["channel"]=="routing")["status"]=="incomplete"
+    metadata=[classify_change({"kind":"design rules","ref":key,"uuid":key,"where":None,
+        "action":"modified","changes":[["unrelated","a","b"]]}) for key in ("meta:setup","meta:pro","meta:dru","meta:title_block:board")]
+    assert all(r["document"]=="board" for r in metadata)
+    s=electrical_summary(metadata,[],{"board"})
+    assert len(s["documents"])==1 and s["documents"][0]["document"]=="board"
+    assert sum(c["total"] for c in s["documents"][0]["channels"])==4
+    assert next(c for c in s["channels"] if c["channel"]=="wiring")["status"]=="complete"
+    assert next(c for c in electrical_summary([],[],set())["channels"] if c["channel"]=="wiring")["status"]=="not_applicable"
+    assert next(c for c in electrical_summary([],[{"document":"schematic","channel":"wiring","reason":"head netlist unavailable"}],{"schematic"})["channels"] if c["channel"]=="wiring")["status"]=="incomplete"
+    assert classify_change({"kind":"footprint","action":"modified","changes":[["footprint","a","b"]]})["weight"]=="heavy"
+    assert classify_change({"kind":"symbol","action":"modified","changes":[["position","a","b"]]})["weight"]=="light"
+    pad={**kr.electrical_row("board-pad-net","D1.C",channel="wiring",weight="heavy"),"document":"board"}
+    def status(summary,channel):
+        return next(c for c in summary["channels"] if c["channel"]==channel)
+    s=electrical_summary([pad],[],{"board"})
+    assert status(s,"wiring")=={"channel":"wiring","total":1,"heavy":1,"status":"complete"}
+    zero=electrical_summary([],[],{"board"})
+    assert status(zero,"wiring")=={"channel":"wiring","total":0,"heavy":0,"status":"complete"}
+    assert status(s["documents"][0],"wiring")["status"]=="complete"
+    sch={**kr.electrical_row("net-added","A",channel="wiring"),"document":"schematic"}
+    s=electrical_summary([sch,pad],[{"document":"board","channel":"routing","reason":"pcbnew unavailable"}],{"board","schematic"})
+    docs={d["document"]:d for d in s["documents"]}
+    assert status(s,"routing")["status"]=="incomplete"
+    assert status(docs["schematic"],"wiring")["status"]=="complete"
+    assert status(docs["schematic"],"routing")["status"]=="not_applicable"
+    assert docs["schematic"]["incomplete"]==[]
+    assert status(docs["board"],"wiring")["total"]==1
+    assert status(docs["board"],"routing")["status"]=="incomplete"
+    # tracks never count as components in the headline
+    t=classify_change({"kind":"track","action":"added","changes":[]})
+    assert electrical_summary([t],[],{"board"})["headline"]=="No headline changes"
+    # position detail computation and case-insensitive headline check
+    moved=classify_change({"kind":"symbol","action":"modified","changes":[["Position","a","b"]],
+                           "pos":[10,20],"pos_before":[7,16]})
+    assert moved["detail"]=={"kind":"position","before":[7,16],"after":[10,20],"distanceMm":5.0}
+    assert electrical_summary([moved],[])["headline"]=="1 moved"
+    # caller-supplied document overrides row key
+    assert classify_change({"kind":"symbol","action":"modified","document":"schematic"},document="board")["document"]=="board"
+test_br03_summary()
+print('ok BR03 classification and summary')
+
+
+def test_br03_build_integration():
+    from kicad_review import dedupe_electrical
+    import base64, gzip
+    assert kr.flatten({"net_settings":{"netclass_patterns":[{"pattern":"X","netclass":"D"}]}}).keys() == {
+        "net_settings.netclass_patterns.0.pattern","net_settings.netclass_patterns.0.netclass"}
+    typed=[{"kind":"rule","ref":"rules.min_clearance"},{"kind":"rule","ref":"net_settings.classes.Default.clearance"},
+           {"kind":"rule","ref":"net_settings.netclass_patterns"},{"kind":"rule","ref":"custom rules"},
+           {"kind":"stackup","ref":"stackup"}]
+    generic=[{"uuid":"meta:pro","kind":"design rules","changes":[[k,"a","b"] for k in (
+                "board.rules.min_clearance","board.rules.min_clearance_extra","net_settings.classes.Default.clearance",
+                "net_settings.classes.Default.track_width","net_settings.netclass_patterns.0.pattern",
+                "net_settings.netclass_patterns.0.netclass","erc.pin_not_connected")]},
+             {"uuid":"meta:setup","kind":"design rules","changes":[["stackup.layer[F.Cu].thickness","a","b"],["pad_to_mask_clearance","a","b"]]},
+             {"uuid":"meta:dru","kind":"design rules","changes":[["custom rules","a","b"]]},
+             {"uuid":"meta:pro","kind":"design rules","action":"added","props":{"board.rules.min_clearance":"0.2"}},
+             {"uuid":"fp","kind":"footprint","changes":[["board.rules.min_clearance","a","b"]]}]
+    kept=dedupe_electrical(generic,typed)
+    assert [x[0] for x in kept[0]["changes"]]==["board.rules.min_clearance_extra","net_settings.classes.Default.track_width",
+                                                 "erc.pin_not_connected"], kept
+    assert [x[0] for x in kept[1]["changes"]]==["pad_to_mask_clearance"] and len(kept)==3 and kept[2]["uuid"]=="fp"
+    assert len(generic[0]["changes"])==7, "dedupe_electrical must not mutate its input rows"
+    assert dedupe_electrical(generic,[])==generic
+    with tempfile.TemporaryDirectory() as td:
+        old=os.getcwd(); os.chdir(td)
+        try:
+            p={"dir":"p","name":"p","status":"modified"}
+            settings=kr.load_settings()
+            for side,clearance in (("base",0.2),("head",0.25)):
+                write(side,{"p/p.kicad_sch":'(kicad_sch (uuid root) (symbol (uuid r) (at 1 2 0) (property "Reference" "R1")))',
+                    "p/p.kicad_pro":json.dumps({"board":{"design_settings":{"rules":{"min_clearance":clearance},"unrelated":side}},
+                      "net_settings":{"netclass_patterns":[{"pattern":"X*","netclass":side}]}})})
+                write('review/p/'+side,{"sch/p.svg":'<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',
+                    "netlist.net":'(export (nets))',"erc.json":'{"sheets":[]}'})
+            write('review',{"detect.json":json.dumps({"base":"b"*40,"head":"h"*40})})
+            project=kr.build_project(p,{},settings)
+            assert 'summary' in project and 'electrical_summary' not in project, 'BR03 summary wire field renamed'
+            wiring=next(c for c in project['summary']['channels'] if c['channel']=='wiring')
+            assert wiring=={'channel':'wiring','total':0,'heavy':0,'status':'complete'}, 'BR03 zero-row wiring unavailable'
+            assert sum(r["kind"]=="rule" and r["ref"]=="rules.min_clearance" for r in project["changes"])==1
+            generic=[x[0] for r in project["changes"] if r.get("uuid")=="meta:pro" for x in r.get("changes",[])]
+            assert "board.unrelated" in generic
+            assert not any(k.startswith("board.rules.") or k.startswith("net_settings.netclass_patterns") for k in generic)
+            for side in ("base","head"):
+                f=pathlib.Path(side)/"p/p.kicad_pro"; saved=f.read_text(); f.write_text('{broken')
+                with contextlib.redirect_stderr(io.StringIO()):
+                    incomplete=kr.build_project(p,{},settings)
+                assert incomplete["sheets"] and any(i["channel"]=="rules" for i in incomplete["summary"]["incomplete"])
+                assert not any(r["kind"]=="rule" or r.get("uuid")=="meta:pro" for r in incomplete["changes"])
+                f.write_text(saved)
+            other=kr.build_project(p,{},settings,change_offset=len(project["changes"]))
+            kr.assign_ids([project,other])
+            ids=[r["id"] for proj in (project,other) for r in proj["changes"]]
+            assert len(ids)==len(set(ids))
+            for side,net in (("base","GND"),("head","VCC")):
+                pcb=br03_pcb("fp",[("physical-pad","1",0,net)]).replace('(kicad_pcb ',
+                    '(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) ')
+                write(side,{"p/p.kicad_pcb":pcb})
+                write("review/p/"+side,{"pcb/p-F_Cu.svg":'<svg width="10mm" height="10mm" viewBox="0 0 10 10"/>',"drc.json":'{"violations":[],"unconnected_items":[],"schematic_parity":[]}'})
+            blobs={}; board_project=kr.build_project(p,blobs,settings)
+            owner=next(r for r in board_project["changes"] if r["kind"]=="footprint")
+            derived=next(r for r in board_project["changes"] if r["kind"]=="board-pad-net")
+            assert derived["id"]!=owner["id"] and "uuid" not in derived
+            for side in ("base","head"):
+                blob=board_project["board"]["geometry"][side]
+                scene=json.loads(gzip.decompress(base64.b64decode(blobs[blob])))
+                physical=[o for o in scene["objects"] if o["changeUuid"]=="fp"]
+                assert physical and all(o["changeIds"]==[owner["id"]] for o in physical)
+        finally: os.chdir(old)
+test_br03_build_integration()
+print('ok BR03 build integration, rule dedup and stable IDs')
+
+def test_br03_hotspot_contract():
+    """01's real sheet_hotspots + add_blob output is the literal fixture 03's browser checks consume."""
+    with tempfile.TemporaryDirectory() as td:
+        manifests={}
+        for side in ('base','head'):
+            root=pathlib.Path(td)/side
+            pins='(pin input line (at -5 0 0) (length 2) (name "123") (number "1"))'
+            if side=='base':
+                pins+='(pin input line (at 5 0 180) (length 2) (name "456") (number "12"))'
+            shared=('(kicad_sch (uuid child) (paper A4) '
+                '(lib_symbols (symbol "Test:Pair" (symbol "Pair_0_1" '
+                '(rectangle (start -1 -1) (end 1 1))) (symbol "Pair_1_1" '+pins+'))) '
+                '(symbol (uuid placed) (lib_id "Test:Pair") (unit 1) (at 100 50 0) '
+                '(property "Reference" "U?") (property "Value" "Pair") '
+                '(instances (project "P" (path "/root/left" (reference "U1") (unit 1)) '
+                '(path "/root/right" (reference "U2") (unit 1))))))')
+            write(str(root),{'P.kicad_sch':'(kicad_sch (uuid root) (paper A4) '+
+                  sheet('Left','shared.kicad_sch','left')+sheet('Right','shared.kicad_sch','right')+')',
+                  'shared.kicad_sch':shared})
+            manifests[side]=kr.sheet_hotspots(str(root),'P')
+            views={v['sheet']:v for v in manifests[side]['views']}
+            left,right=(views[s]['elements'][0] for s in ('/left/','/right/'))
+            assert left['uuid']==right['uuid']=='placed' and (left['ref'],right['ref'])==('U1','U2')
+            assert [(p['number'],p['name']) for p in left['pins']]==(
+                [('1','123'),('12','456')] if side=='base' else [('1','123')])
+        blobs={}
+        ids={s:kr.add_blob(blobs,json.dumps(m,sort_keys=True)) for s,m in manifests.items()}
+        contract={'sheets':[{'path':path,'hotspots':dict(ids)} for path in ('/left/','/right/')],
+                  'blobs':blobs}
+        fixture=pathlib.Path('ui/fixtures/br03-hotspot-contract.json')
+        if os.environ.get('BR03_WRITE_FIXTURES')=='1':
+            fixture.write_text(json.dumps(contract,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+        # gzip headers record the host OS (macOS ff, Linux 03), so compare decoded blob content.
+        decoded=lambda c:{**c,'blobs':{k:gzip.decompress(base64.b64decode(v)) for k,v in c['blobs'].items()}}
+        assert decoded(json.loads(fixture.read_text(encoding='utf-8')))==decoded(contract), 'BR03 hotspot producer contract drift'
+test_br03_hotspot_contract()
+print('ok BR03 hotspot producer contract')
+
+
+def test_br03_connectivity_markdown():
+    from kicad_review import connectivity_markdown
+    p = {"changes":[kr.electrical_row("net-added",f"N{i}","added",detail={"kind":"members","added":["U1.1"],"removed":[],"beforeNets":[],"afterNets":[f"N{i}"]}) for i in range(21)]}
+    table = '\n'.join(connectivity_markdown(p))
+    assert 'Connectivity' in table and 'N19' in table and 'N20' not in table
+    assert 'and 1 more in the report' in table
+    p["changes"][0]["ref"] = 'pipe|line\n<script>'
+    assert '<script>' not in '\n'.join(connectivity_markdown(p))
+    p['changes'] = kr.diff_nets({'A':{'a','b'},'B':{'c','d'}},{'C':{'a','c'},'D':{'b','d'}})
+    table = '\n'.join(connectivity_markdown(p))
+    assert all(t in table for t in ('a: A → C','b: A → D','c: B → C','d: B → D'))
+
+    for count in (0,20,21):
+        project={"changes":[kr.electrical_row("net-added",f"N{i}","added",detail={"kind":"members","added":["U1.1"]}) for i in range(count)]}
+        table='\n'.join(connectivity_markdown(project))
+        assert bool(table)==bool(count)
+        if count: assert table.count('| net-added |')==min(count,20)
+        assert ('and 1 more in the report' in table)==(count==21)
+    joined=kr.electrical_row("net-joined","C",detail={"kind":"members","added":[],"removed":[],"beforeNets":["A","B"],"afterNets":["C"]})
+    assert 'A + B → C' in '\n'.join(connectivity_markdown({"changes":[joined]}))
+    assert connectivity_markdown({"changes":[]})==[]
+    # Malformed or missing detail does not raise KeyError
+    malformed = [
+        {"kind": "net-members", "ref": "N1", "detail": {"transitions": [{"pin": "P1"}]}},
+        {"kind": "net-members", "ref": "N2", "detail": {"transitions": [{"before": ["A"], "after": ["B"]}]}},
+        {"kind": "net-members", "ref": "N3", "detail": {"transitions": ["not-a-dict"]}},
+        {"kind": "net-members", "ref": "N4", "detail": {}},
+        {"kind": "net-members", "ref": "N5"},
+    ]
+    malformed_table = '\n'.join(connectivity_markdown({"changes": malformed}))
+    assert 'P1: \\(unconnected\\) → \\(unconnected\\)' in malformed_table
+    assert ': A → B' in malformed_table
+
+    project={**ld['projects'][0],"summary":{"headline":"rule|changed\n<script>","incomplete":[{"channel":"routing","reason":"<script>"}]}}
+    data={**ld,"projects":[project]}
+    row=log_row(data,"2026-10-12 10:04")
+    assert 'rule\\|changed' in row, 'BR03 log headline absent'
+    assert '<script>' not in row and extract_log(merge_log([],row))==[row]
+    body=comment_markdown(data,[],"")
+    assert 'routing' in body and '<script>' not in body
+    assert '\n\nrule\\|changed\n&lt;script&gt;\n\nrouting: &lt;script&gt;' in body, 'Headline and incomplete notes must be separate paragraphs'
+    assert comment_markdown({**ld,"projects":[ld['projects'][0]]},[],"")
+    large_project={**project,"summary":{"headline":"x"*70000,"incomplete":[]}}
+    body=comment_markdown({**ld,"projects":[large_project]},[],"")
+    assert len(body)<=65536, 'BR03 electrical headline bypassed body budget'
+    assert 'x'*201 not in body, 'Comment headline must be capped'
+    long_incomplete_proj = {**project, "summary": {"headline": "rule", "incomplete": [{"channel": "routing", "reason": "z" * 300}]}}
+    long_incomplete_body = comment_markdown({**ld, "projects": [long_incomplete_proj]}, [], "")
+    assert "routing: " + "z" * 190 + "…" in long_incomplete_body, "Incomplete reason over 200 chars must be truncated with ellipsis"
+    assert "z" * 192 not in long_incomplete_body
+    readme=pathlib.Path('README.md').read_text()
+    assert all(token in readme for token in ('0.05','0.005','120'))
+    assert 'no new setting' in readme.lower()
+
+test_br03_connectivity_markdown()
+print('ok BR03 connectivity markdown and documentation')
+

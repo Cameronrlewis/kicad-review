@@ -1,0 +1,4 @@
+Task 4.1 RED/GREEN evidence (retrospective isolated sensitivity runs)
+Source evidence: /Users/cameron/Code/kicad-review-study/tmp/03-net-and-copper-changes/task4.1/sensitivity.log
+Command: python3 /Users/cameron/Code/kicad-review-study/tmp/03-net-and-copper-changes/task4.1/sensitivity.py
+Result: 14 isolated regressions failed under their respective behavior-disabling mutation (RED); pristine source reran all 14 successfully (GREEN). Source SHA256 remained 363bc1c460c9ad51b83c37ab3d8bd04a6089debe83397d06cbeb9eb766095e24.

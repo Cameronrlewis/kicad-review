@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {CHECKS} from './checks.mjs';
 const context = vm.createContext({window: {}, console});
 vm.runInContext(readFileSync(new URL('./board-marks.js', import.meta.url), 'utf8'), context);
 vm.runInContext(readFileSync(new URL('./board-diff.js', import.meta.url), 'utf8'), context);
@@ -70,3 +71,87 @@ test('pane point uses renderer inverse and CSS fraction, not DPR', () => {
   const p=B.panePoint(pane,{clientX:150,clientY:50});
   assert.equal(JSON.stringify(p.point),'[-25,10]'); assert.equal(p.fraction,.25);
 });
+
+test('BR03 net selection check restores scene and object fixture on failure path', async () => {
+  const check = CHECKS.find(([name]) => name === 'BR03 net selection masks');
+  assert.ok(check, 'BR03 net selection masks check exists');
+  const code = check[2];
+
+  // 1. Early failure return path (e.g. net selection did not reach neutral mask)
+  {
+    const p = { changes: ['orig-change'] };
+    const S = { s: null };
+    const boardView = {};
+    const testContext = {
+      proj: () => p,
+      REVIEW_DATA: { base: "base-commit", head: "head-commit" },
+      document: { querySelector: () => ({ replaceChildren: () => {} }) },
+      disposeBoardRenderers: () => {},
+      BoardDiff: {
+        mount: () => ({
+          panes: [{ renderer: { draw: (opts) => opts } }],
+          render: () => {}
+        })
+      },
+      glAppearance: {},
+      Appearance: { get: () => ({ markStyle: 'outline' }) },
+      trackAppearanceBoard: () => {},
+      syncMarkStyles: () => {},
+      draw: async () => {},
+      S,
+      boardView
+    };
+
+    const result = await vm.runInNewContext('(async () => {' + code + '})()', testContext);
+    assert.equal(result, 'net selection did not reach neutral mask');
+    assert.equal(JSON.stringify(testContext.boardView.scenes[0].nets), JSON.stringify([{ id: 0, name: '' }]));
+    const obj = testContext.boardView.scenes[0].objects[0];
+    assert.equal(obj.reference, undefined);
+    assert.equal(obj.number, undefined);
+    assert.equal(obj.net, 0);
+    assert.deepEqual(testContext.proj().changes, ['orig-change']);
+    assert.equal(testContext.S.s, null);
+  }
+
+  // 2. Thrown error failure path
+  {
+    const p = { changes: ['orig'] };
+    const S = { s: 'initial' };
+    const boardView = {};
+    let count = 0;
+    const testContext = {
+      proj: () => p,
+      REVIEW_DATA: { base: "base-commit", head: "head-commit" },
+      document: { querySelector: () => ({ replaceChildren: () => {} }) },
+      disposeBoardRenderers: () => {},
+      BoardDiff: {
+        mount: () => ({
+          panes: [{ renderer: { draw: (opts) => opts } }],
+          render: () => {
+            if (++count === 2) throw new Error('render error');
+          }
+        })
+      },
+      glAppearance: {},
+      Appearance: { get: () => ({}) },
+      trackAppearanceBoard: () => {},
+      syncMarkStyles: () => {},
+      draw: async () => {},
+      S,
+      boardView
+    };
+
+    await assert.rejects(
+      () => vm.runInNewContext('(async () => {' + code + '})()', testContext),
+      { message: 'render error' }
+    );
+    assert.equal(JSON.stringify(testContext.boardView.scenes[0].nets), JSON.stringify([{ id: 0, name: '' }]));
+    const obj = testContext.boardView.scenes[0].objects[0];
+    assert.equal(obj.reference, undefined);
+    assert.equal(obj.number, undefined);
+    assert.equal(obj.net, 0);
+    assert.deepEqual(testContext.proj().changes, ['orig']);
+    assert.equal(testContext.S.s, null);
+  }
+});
+
