@@ -5124,3 +5124,110 @@ test('zip reader caps central-directory allocation before fetching it', async ()
   await assert.rejects(zipEntries(range, total), /central directory exceeds 16 MiB limit/);
   assert.equal(calls, 1);
 });
+
+function downloadFetch({ zip, rangeOk = true, badRange = false, forbidden = false, shortPayload = false, bundles, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }) {
+  return mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return forbidden ? new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}})) : accessibleRepo();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123') return new Response(JSON.stringify(report));
+    const pageMatch = /^https:\/\/api\.github\.com\/repos\/Cameronrlewis\/repo\/actions\/runs\/9\/artifacts\?per_page=100&page=(\d+)$/.exec(url);
+    if (pageMatch) { const rows = bundles || (bundle ? [bundle] : []), page = +pageMatch[1]; return new Response(JSON.stringify({ artifacts: rows.slice((page - 1) * 100, page * 100) })); }
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/124/zip') {
+      assert.equal(options.redirect, 'manual', 'GitHub redirect must not forward the token');
+      assert.ok(new Headers(options.headers).has('Authorization'), 'GitHub API request stays authenticated');
+      return new Response(null, { status: 302, headers: { Location: 'https://blob.example/z' } });
+    }
+    assert.equal(url, 'https://blob.example/z');
+    const blobHeaders = new Headers(options.headers);
+    assert.equal(blobHeaders.get('Authorization'), null, 'never send the GitHub token to the redirected host');
+    assert.deepEqual([...blobHeaders.keys()], ['range'], 'probe and all ZIP ranges send only Range');
+    // workerd rejects redirect 'error'; 'manual' plus the 206 check refuses any further redirect.
+    assert.equal(options.redirect, 'manual', 'signed-URL fetch must not follow further redirects');
+    const m = /^bytes=(\d+)-(\d+)$/.exec(blobHeaders.get('Range') || '');
+    if (!m || !rangeOk) return new Response(zip, { status: 200 });
+    const payloadStart = 30 + Buffer.byteLength('0/fab-P-bbbbbbb.zip') + 4;
+    const bodyEnd = shortPayload && +m[1] === payloadStart ? +m[2] : +m[2] + 1;
+    return new Response(zip.subarray(+m[1], bodyEnd), { status: 206, headers: { 'Content-Range': badRange ? `bytes 1-1/${zip.length}` : `bytes ${m[1]}-${Math.min(+m[2], zip.length - 1)}/${zip.length}` } });
+  });
+}
+const downloadEnvelope = (head = 'b'.repeat(40)) => Buffer.from(JSON.stringify({ files: [], head }));
+const downloadZip = (head) => makeZip([{ name: '0/fab-P-bbbbbbb.zip', data: Buffer.from('PK-fab') }, { name: '0/P-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-1.7'), deflate: true },
+  { name: '0/P-bbbbbbb-board.step', data: Buffer.from('ISO-10303') }, { name: '0/P-bbbbbbb-board.glb', data: Buffer.from('glTF') }, { name: '1/Q-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-Q') },
+  { name: '0/downloads.json', data: downloadEnvelope(head) }, { name: '1/downloads.json', data: downloadEnvelope(head) }]);  // envelopes last, so the first-entry offsets above stay valid
+
+test('download route streams attachments without sending the GitHub token to the redirected host', async () => {
+  const sealed = await signedIn(), restore = downloadFetch({ zip: downloadZip() });
+  try {
+    for (const [path, type, name, body] of [['0/fab', 'application/zip', 'fab-P-bbbbbbb.zip', 'PK-fab'], ['0/pdf', 'application/pdf', 'P-bbbbbbb-schematic.pdf', '%PDF-1.7'],
+      ['0/step', 'model/step', 'P-bbbbbbb-board.step', 'ISO-10303'], ['0/glb', 'model/gltf-binary', 'P-bbbbbbb-board.glb', 'glTF'], ['1/pdf', 'application/pdf', 'Q-bbbbbbb-schematic.pdf', '%PDF-Q']]) {
+      const response = await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200, path); assert.equal(response.headers.get('Content-Type'), type);
+      assert.equal(response.headers.get('Content-Disposition'), `attachment; filename="${name}"`);
+      assert.equal(await response.text(), body);
+    }
+  } finally { restore(); }
+});
+
+test('download route answers 404 JSON for every unavailable case', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}` };
+  for (const [label, settings, path] of [
+    ['no bundle', { zip: downloadZip(), bundle: null }, '0/fab'], ['expired bundle', { zip: downloadZip(), bundle: { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: true, workflow_run: { id: 9 } } }, '0/fab'],
+    ['wrong bundle name', { zip: downloadZip(), bundle: { id: 124, name: 'other', expired: false } }, '0/fab'], ['no such project folder', { zip: downloadZip() }, '2/fab'],
+    ['no such kind in folder', { zip: downloadZip() }, '1/glb'], ['range ignored', { zip: downloadZip(), rangeOk: false }, '0/fab'],
+    ['mismatched range', { zip: downloadZip(), badRange: true }, '0/fab'],
+    ['wrong head only', { zip: downloadZip(), bundle: {id:125,name:'kicad-review-downloads-ccccccc',expired:false,workflow_run:{id:9}} }, '0/fab'],
+    ['another run', { zip: downloadZip(), bundle: {id:124,name:'kicad-review-downloads-bbbbbbb',expired:false,workflow_run:{id:10}} }, '0/fab'],
+    ['not a zip', { zip: Buffer.from('this is not a zip archive but is long enough') }, '0/fab'],
+    ['report is not a review', { zip: downloadZip(), report: { name: 'evil.html', workflow_run: { id: 9 } } }, '0/fab'],
+    ['report name head differs from its run head', { zip: downloadZip(), report: { name: 'kicad-review-aaaaaaa-ccccccc-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, '0/fab'],
+    ['design context is not a report', { zip: downloadZip(), report: { name: 'kicad-design-bbbbbbb.context.json', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, '0/fab'],
+    ['envelope head differs', { zip: downloadZip('b'.repeat(39) + 'c') }, '0/fab']]) {
+    const restore = downloadFetch(settings);
+    try {
+      const response = await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers });
+      assert.equal(response.status, 404, label); assert.deepEqual(await response.json(), { error: 'Download unavailable' }, label);
+    } finally { restore(); }
+  }
+});
+
+test('download route matches exact head, refuses repository denial and errors short payload streams', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}` };
+  const exact = {id:124,name:'kicad-review-downloads-bbbbbbb',expired:false,workflow_run:{id:9,head_sha:'b'.repeat(40)}};
+  let restore = downloadFetch({zip:downloadZip(),bundles:[{...exact,id:125,name:'kicad-review-downloads-ccccccc'}, exact]});
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab',{headers})).status,200); } finally {restore();}
+  // downloadFetch asserts every upstream URL; any artifact call following denial fails this test.
+  restore = mockFetch(async url => {
+    assert.equal(url,'https://api.github.com/repos/Cameronrlewis/repo');
+    return new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}}));
+  });
+  try { const denied=await call('/r/Cameronrlewis/repo/a/123/download/0/fab',{headers}); assert.equal(denied.status,404); assert.match(await denied.text(), /Can&#39;t open this page/); } finally {restore();}
+  restore=downloadFetch({zip:downloadZip(),shortPayload:true});
+  try { const response=await call('/r/Cameronrlewis/repo/a/123/download/0/fab',{headers}); assert.equal(response.status,200); await assert.rejects(response.arrayBuffer(), /bad range length/); } finally {restore();}
+});
+
+test('download bundle is chosen exactly across pages and must match the full head', async () => {
+  const siblings = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, name: `kicad-review-downloads-ccc${String(i).padStart(4, '0')}`, expired: false, workflow_run: { id: 9, head_sha: 'c'.repeat(40) } }));
+  const exact = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } };
+  const headers = { Cookie: `s=${await signedIn()}` };
+  // The matching bundle sits on page two behind 100 sibling artifacts.
+  let restore = downloadFetch({ zip: downloadZip(), bundles: [...siblings, exact] });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 200); } finally { restore(); }
+  // Two matching bundles in one run: refused rather than guessed.
+  restore = downloadFetch({ zip: downloadZip(), bundles: [exact, { ...exact, id: 125 }] });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404); } finally { restore(); }
+  // The same 7-character head with a different full commit: refused.
+  restore = downloadFetch({ zip: downloadZip(), bundle: { ...exact, workflow_run: { id: 9, head_sha: 'b'.repeat(39) + 'c' } } });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404); } finally { restore(); }
+  // A design snapshot selects only the design bundle family, never a review bundle with the same head7.
+  restore = downloadFetch({ zip: downloadZip(), report: { name: 'kicad-design-bbbbbbb.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } });
+  try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404); } finally { restore(); }
+});
+
+test('download route requires sign-in and a numeric index and known kind', async () => {
+  const restore = downloadFetch({ zip: downloadZip() });
+  try {
+    const anonymous = await call('/r/Cameronrlewis/repo/a/123/download/0/fab');
+    assert.equal(anonymous.status, 302); assert.match(anonymous.headers.get('Location'), /^\/login\?next=/);
+    const sealed = await signedIn();
+    for (const path of ['0/exe', '../fab', 'x/fab', '0/fab/extra']) assert.equal((await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers: { Cookie: `s=${sealed}` } })).status, 404, path);
+  } finally { restore(); }
+});
