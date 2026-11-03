@@ -9,6 +9,7 @@ import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, s
 
 import { historyEvents, HISTORY_QUERY } from './history.js';
 import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
+import { mcpResponse, TOOLS, validateTool } from './mcp.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -5066,7 +5067,6 @@ test('ask client: CRLF frames split across chunks are parsed', async () => {
   assert.deepEqual(page.posts[0].kicadReviewAskEvent.data, { text: 'Hi' });
 });
 
-import { mcpResponse, TOOLS, validateTool } from './mcp.js';
 const rpcRequest = (method, params = {}, id = 1) => new Request('https://site.example/mcp', {
   method: 'POST', headers: {'Content-Type':'application/json', Accept:'application/json, text/event-stream', 'MCP-Protocol-Version':'2025-03-26'},
   body: JSON.stringify({jsonrpc:'2.0', id, method, params}),
