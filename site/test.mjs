@@ -6063,3 +6063,137 @@ test('MCP entry honors injected deps.open in consent and suppresses default erro
     console.warn=originalWarn;
   }
 });
+
+import {discoverOAuthProtectedResourceMetadata,discoverAuthorizationServerMetadata} from '@modelcontextprotocol/sdk/client/auth.js';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+// Test-only OAuth protocol storage and GitHub boundary; the real provider and consent code run unmocked.
+class MCPMemoryKV {
+  data=new Map();
+  async get(key,options){
+    const item=this.data.get(key);if(!item||item.exp&&item.exp<=Date.now())return null;
+    const type=typeof options==='string'?options:options?.type;
+    return type==='json'?JSON.parse(item.value):type==='arrayBuffer'?new TextEncoder().encode(item.value).buffer:item.value;
+  }
+  async put(key,value,options={}){
+    const text=typeof value==='string'?value:await new Response(value).text();
+    this.data.set(key,{value:text,exp:options.expiration?options.expiration*1000:options.expirationTtl?Date.now()+options.expirationTtl*1000:null});
+  }
+  async delete(key){this.data.delete(key);}
+  async list({prefix='',limit=1000}={}){return {keys:[...this.data.keys()].filter(k=>k.startsWith(prefix)).slice(0,limit).map(name=>({name})),list_complete:true,cursor:''};}
+}
+function mcpSecurityHarness(){
+  let readable=true,artifactReads=0,providerHelpers;
+  const mcpWorker=makeMcpWorker({onProvider:helpers=>{providerHelpers=helpers;},loadContext:async()=>({doc:mcpDoc(),key:'d'}),gh:async(path,token,init={})=>{
+    assert.equal(token,'user-token');
+    if(path==='/user')return new Response(JSON.stringify({login:'cam'}));
+    if(path==='/repos/Cameronrlewis/repo')return new Response(JSON.stringify({full_name:'Cameronrlewis/repo',owner:{login:'Cameronrlewis'},name:'repo',default_branch:'main',permissions:{pull:true}}),{status:readable?200:404});
+    if(path.includes('/commits/'))return new Response(JSON.stringify({sha:SHA}));
+    if(path.includes('/actions/artifacts')){artifactReads++;return new Response(JSON.stringify(artifactsFixture()));}
+    assert.fail('Unexpected GitHub endpoint '+path);
+  }});
+  const local={...env,OAUTH_KV:new MCPMemoryKV()},ctx={waitUntil:p=>p.catch(()=>{})};
+  const send=(path,init={})=>mcpWorker.fetch(new Request('https://site.example'+path,init),local,ctx);
+  const revokeGrant=async accessToken=>{
+    // Authenticate through the real provider before invoking its administrative helper.
+    const authenticated=rpcRequest('tools/list');
+    authenticated.headers.set('Authorization','Bearer '+accessToken);
+    const response=await mcpWorker.fetch(authenticated,local,ctx);
+    if(response.status!==200)return new Response(null,{status:401});
+    assert.ok(providerHelpers,'authenticated apiHandler must expose provider helpers to test observer');
+    // Task 1 verifies this exact installed helper contract before Task 11/12 depend on it.
+    const grants=await providerHelpers.listUserGrants('cam');
+    assert.ok(Array.isArray(grants.items));assert.equal(grants.items.length,1,'isolated test account has one grant');
+    await providerHelpers.revokeGrant(grants.items[0].id,'cam');
+    return new Response(null,{status:200});
+  };
+  return {mcpWorker,local,ctx,send,revokeGrant,revoke:()=>{readable=false;},artifactReads:()=>artifactReads};
+}
+test('MCP OAuth binding and replay matrix',async(t)=>{
+  const harness=mcpSecurityHarness(),{mcpWorker,local,ctx,send}=harness;
+  const register=async()=>{
+    const r=await send('/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'MCP test',redirect_uris:['https://client.example/cb'],grant_types:['authorization_code'],response_types:['code'],token_endpoint_auth_method:'none'})});
+    assert.equal(r.status,201);return r.json();
+  };
+  const client=await register(),other=await register();
+  const verifier='A'.repeat(64),challenge=createHash('sha256').update(verifier).digest('base64url');
+  const signed=await signedIn({u:'cam',t:'user-token'});
+  const makeCode=async(changes={},consent={})=>{
+    const params=new URLSearchParams({client_id:client.client_id,redirect_uri:'https://client.example/cb',response_type:'code',scope:'read:design',resource:'https://site.example/mcp',code_challenge:challenge,code_challenge_method:'S256',state:'state',...changes});
+    const screen=await send('/authorize?'+params,{headers:{Cookie:'s='+signed}});
+    if(screen.status!==200)return {screen};
+    const html=await screen.text(),pending=/name="pending" value="([^"]+)"/.exec(html)?.[1];
+    assert.ok(pending);const mc=cookieValue(screen,'mc');assert.ok(mc);
+    let postedPending=pending,postedCookie=mc;
+    if(consent.missingNonce){const saved=await open(pending,local);delete saved.nonce;postedPending=postedCookie=await seal(saved,local);}
+    if(consent.expired){t.mock.timers.enable({apis:['Date'],now:Date.now()});t.mock.timers.tick(600001);}
+    const approved=await send('/authorize',{method:'POST',headers:{Origin:'https://site.example',Cookie:`s=${consent.session||signed}; mc=${consent.cookie??postedCookie}`,'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending:consent.pending??postedPending,decision:consent.decision||'allow'})});
+    if(consent.expired)t.mock.timers.reset();
+    if(Object.keys(consent).length)return {screen:approved};
+    assert.equal(approved.status,302);return {code:new URL(approved.headers.get('Location')).searchParams.get('code')};
+  };
+  const token=(code,changes={})=>send('/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client.client_id,redirect_uri:'https://client.example/cb',code_verifier:verifier,resource:'https://site.example/mcp',code,...changes})});
+  for(const changes of [{redirect_uri:'https://evil.example/cb'},{client_id:other.client_id},{code_verifier:''},{code_verifier:'B'.repeat(64)},{resource:'https://evil.example/mcp'}]){
+    const {code}=await makeCode();assert.ok(code);const r=await token(code,changes);assert.ok(r.status>=400,JSON.stringify(changes));
+  }
+  assert.equal((await makeCode({scope:'write:design'})).screen.status,400);
+  assert.equal((await makeCode({code_challenge_method:'plain'})).screen.status,400);
+  assert.equal((await makeCode({redirect_uri:'https://evil.example/cb'})).screen.status,400);
+  for(const consent of [{pending:''},{pending:'forged'},{cookie:'mismatch'},{missingNonce:true},{expired:true},{session:await signedIn({u:'other',t:'other-token'})},{decision:'deny'}]){
+    const before=JSON.stringify([...local.OAUTH_KV.data]);
+    const {screen}=await makeCode({},consent);
+    assert.equal(screen.status,consent.decision==='deny'?302:403);
+    const loc=screen.headers.get('Location');assert.ok(!loc||!new URL(loc).searchParams.has('code'));
+    assert.equal(JSON.stringify([...local.OAUTH_KV.data]),before,'rejected consent issues no grant/code');
+    assert.doesNotMatch(await screen.text(),/access_token|refresh_token/);
+    const probe=await token('not-issued');assert.ok(probe.status>=400);
+    assert.equal((await probe.json()).access_token,undefined,'rejection cannot redeem a usable token');
+  }
+  const expired=await makeCode();
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  try {t.mock.timers.tick(24*3600000);assert.ok((await token(expired.code)).status>=400,'expired code');}
+  finally {t.mock.timers.reset();}
+  const bearer=accessToken=>{const r=rpcRequest('tools/list');r.headers.set('Authorization','Bearer '+accessToken);return mcpWorker.fetch(r,local,ctx);};
+  const replayed=await makeCode(),first=await (await token(replayed.code)).json();assert.ok(first.access_token);
+  assert.ok((await token(replayed.code)).status>=400,'single-use authorization code');
+  // The provider revokes the whole grant on code replay, so the token issued from that code stops working too.
+  assert.equal((await bearer(first.access_token)).status,401,'code replay revokes the issued token');
+  const {code}=await makeCode();const good=await token(code);assert.equal(good.status,200);
+  const grant=await good.json();assert.ok(grant.access_token);assert.equal(grant.refresh_token,undefined);
+  const tools=await bearer(grant.access_token);assert.equal(tools.status,200);
+  assert.equal((await tools.json()).result.tools.length,6);
+  const cookieOnly=rpcRequest('tools/list');cookieOnly.headers.set('Cookie','s='+signed);
+  assert.equal((await mcpWorker.fetch(cookieOnly,local,ctx)).status,401);
+  assert.equal((await send('/mcp?access_token='+grant.access_token,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
+  const fetchFn=async(input,init)=>mcpWorker.fetch(input instanceof Request?new Request(input,init):new Request(input,init),local,ctx);
+  const unauth=await send('/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert.equal(unauth.status,401);
+  assert.match(unauth.headers.get('WWW-Authenticate'),/resource_metadata=/);
+  const prm=await (await send('/.well-known/oauth-protected-resource/mcp')).json();
+  assert.equal(prm.resource,'https://site.example/mcp');
+  const as=await (await send('/.well-known/oauth-authorization-server')).json();
+  assert.equal(as.registration_endpoint,'https://site.example/register');
+  assert.ok(as.code_challenge_methods_supported.includes('S256'));
+  // Installed SDK 1.32.2 takes fetchFn as the third positional argument here (opts carries only protocolVersion/resourceMetadataUrl).
+  const metadata=await discoverOAuthProtectedResourceMetadata(new URL('https://site.example/mcp'),{},fetchFn);
+  assert.equal(metadata.resource,prm.resource);
+  const authMetadata=await discoverAuthorizationServerMetadata(new URL(prm.authorization_servers[0]),{fetchFn});
+  assert.equal(authMetadata.token_endpoint,as.token_endpoint);
+  const sdk=new Client({name:'mcp-acceptance',version:'1'},{capabilities:{}});
+  const transport=new StreamableHTTPClientTransport(new URL('https://site.example/mcp'),{fetch:fetchFn,requestInit:{headers:{Authorization:'Bearer '+grant.access_token}}});
+  await sdk.connect(transport); // official SDK initialize, not merely tools/list JSON-RPC
+  assert.equal((await sdk.listTools()).tools.length,6);
+  const design=await sdk.callTool({name:'get_design',arguments:{repo:'Cameronrlewis/repo'}});
+  assert.equal(JSON.parse(design.content[0].text).provenance.commit,SHA);
+  const before=harness.artifactReads();harness.revoke();
+  const denied=await sdk.callTool({name:'get_design',arguments:{repo:'Cameronrlewis/repo'}});
+  assert.equal(denied.isError,true);assert.equal(JSON.parse(denied.content[0].text).error.code,'UNAVAILABLE');
+  assert.equal(harness.artifactReads(),before,'authenticated revoked call cannot reach artifacts');
+  // Task 1 records the selected provider's exact authenticated revocation contract; this adapter exercises it without logging token or response bodies.
+  assert.equal((await harness.revokeGrant('invalid-test-bearer')).status,401,'unauthenticated invocation cannot revoke a grant');
+  const revoked=await harness.revokeGrant(grant.access_token);
+  assert.equal(revoked.status,200);
+  assert.equal((await bearer(grant.access_token)).status,401,'revoked OAuth bearer token cannot access /mcp');
+  await sdk.close();
+  for(const {value} of local.OAUTH_KV.data.values())assert.ok(!value.includes('refresh-token')&&!value.includes('user-token'),'no plaintext GitHub credentials');
+});
