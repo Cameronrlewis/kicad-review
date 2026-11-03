@@ -6936,4 +6936,12 @@ assert "archive: false" not in upload, "several files need an archived artifact"
 assert wf.index("- name: Upload report") < wf.index("- name: Upload downloads") < wf.index("- name: Screenshots of changed drawings")
 print("ok review.yml uploads the downloads artifact")
 
+readme = pathlib.Path("README.md").read_text(encoding="utf-8"); example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
+for needle in ("| `downloads.enabled` | `false` |", "| `downloads.step` | `true` |", "## Downloads (optional)", "projects[].downloads[]", "kicad-review-downloads-", "<name>.cpl-overrides.csv", "kibot_templates/v1.9.1", "cpl_rotations"):
+    assert needle in readme, needle
+assert "[downloads]\nenabled = false" in example and "step = true" in example
+assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
+print("ok downloads documented")
+
+
 
