@@ -3953,7 +3953,7 @@ test('hosted stripping preserves GLB, Three bundle and unknown fields with scrip
 });
 test('guest raw delivery retains image blobs and never installs hosted asset descriptors', async () => {
   const token = await guestToken(), restore = guestFetch(), originalMock = globalThis.fetch;
-  globalThis.fetch = (url, options) => url === shareBlob ? Promise.resolve(new Response(storedImageReport())) : originalMock(url, options);
+  mockFetch((url, options) => url === shareBlob ? Promise.resolve(new Response(storedImageReport())) : originalMock(url, options));
   try {
     const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
     assert.equal(raw.status, 200); guestSecurity(raw);
@@ -4983,7 +4983,7 @@ test('BR02 guest shares keep embedded 3D blobs and never install the model broke
     assets3d: { head: { model: { digest, artifactName: `kicad-3d-${digest}-board.glb.gz`, bytes: 40 } } } } }] };
   assert.doesNotMatch(sharedPage({ token: 'a.b', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' }), /threeClient|kicad3d/);
   const token = await guestToken(), restore = guestFetch(), originalMock = globalThis.fetch;
-  globalThis.fetch = (url, options) => url === shareBlob ? Promise.resolve(new Response(`<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`)) : originalMock(url, options);
+  mockFetch((url, options) => url === shareBlob ? Promise.resolve(new Response(`<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`)) : originalMock(url, options));
   try {
     const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
     assert.equal(raw.status, 200); assert.equal(readStoredData(await raw.text()).blobs.model, 'embedded-glb');
