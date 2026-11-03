@@ -5066,7 +5066,7 @@ test('ask client: CRLF frames split across chunks are parsed', async () => {
   assert.deepEqual(page.posts[0].kicadReviewAskEvent.data, { text: 'Hi' });
 });
 
-import { mcpResponse } from './mcp.js';
+import { mcpResponse, TOOLS, validateTool } from './mcp.js';
 const rpcRequest = (method, params = {}, id = 1) => new Request('https://site.example/mcp', {
   method: 'POST', headers: {'Content-Type':'application/json', Accept:'application/json, text/event-stream', 'MCP-Protocol-Version':'2025-03-26'},
   body: JSON.stringify({jsonrpc:'2.0', id, method, params}),
@@ -5098,20 +5098,20 @@ test('MCP stateless transport handles origin check, payload limit, tool calls, a
   assert.equal(await large.text(), 'Request too large or invalid UTF-8');
 
   const callRes = await mcpResponse(
-    rpcRequest('tools/call', { name: 'find_parts', arguments: { query: 'R1' } }),
-    [{ name: 'find_parts' }],
+    rpcRequest('tools/call', { name: 'find_parts', arguments: { repo: 'Cameronrlewis/repo', query: 'R1' } }),
+    TOOLS,
     async (name, args) => ({ tool: name, args, parts: ['R1'] })
   );
   assert.equal(callRes.status, 200);
   const callBody = await callRes.json();
   assert.deepEqual(callBody.result.content, [
-    { type: 'text', text: JSON.stringify({ tool: 'find_parts', args: { query: 'R1' }, parts: ['R1'] }) },
+    { type: 'text', text: JSON.stringify({ tool: 'find_parts', args: { repo: 'Cameronrlewis/repo', query: 'R1', limit: 15 }, parts: ['R1'] }) },
   ]);
   assert.equal(callBody.result.isError, undefined);
 
   const errRes = await mcpResponse(
-    rpcRequest('tools/call', { name: 'get_net', arguments: { net: 'GND' } }),
-    [{ name: 'get_net' }],
+    rpcRequest('tools/call', { name: 'get_net', arguments: { repo: 'Cameronrlewis/repo', net: 'GND' } }),
+    TOOLS,
     async () => ({ error: 'Not found' })
   );
   assert.equal(errRes.status, 200);
@@ -5150,7 +5150,7 @@ test('MCP byte bounds and unknown totals are truthful', async () => {
 test('MCP transport rejects invalid UTF-8, bounds tool results, and refuses unexpiring credentials', async () => {
   const bad = await mcpResponse(new Request('https://site.example/mcp', { method: 'POST', body: new Uint8Array([0xff, 0xfe]) }), [], async () => ({}));
   assert.equal(bad.status, 413);
-  const big = await mcpResponse(rpcRequest('tools/call', { name: 'get_bom', arguments: {} }), [{ name: 'get_bom' }],
+  const big = await mcpResponse(rpcRequest('tools/call', { name: 'get_bom', arguments: { repo: 'Cameronrlewis/repo' } }), TOOLS,
     async () => ({ text: 'x'.repeat(40000) }));
   const result = (await big.json()).result;
   assert.equal(result.isError, true);
@@ -5329,7 +5329,6 @@ test('MCP PR review rejects a non-positive or non-integer number before any requ
   for(const pr of [0,-1,1.5,'7'])await assert.rejects(loadPrReview(mcpAccessFixture(),pr,{gh:async()=>assert.fail('no request')}),e=>e.code==='INVALID_REF');
 });
 
-import {TOOLS,validateTool} from './mcp.js';
 test('MCP six schemas are strict and have read-only annotations',()=>{
   assert.deepEqual(TOOLS.map(t=>t.name),['list_projects','get_design','find_parts','get_net','get_review','get_bom']);
   for(const tool of TOOLS){assert.equal(tool.inputSchema.additionalProperties,false);assert.deepEqual(tool.annotations,
@@ -5356,12 +5355,27 @@ test('MCP inherited keys fail before the call boundary',async()=>{
     {name:'unknown_tool',args:{repo:'Cameronrlewis/repo'}},
     {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:51}},
     {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:1.5}},
+    {name:'list_projects',args:{repo:'Cameronrlewis/repo',limit:'15'}},
+    {name:'get_net',args:{repo:'Cameronrlewis/repo'}},
   ]){
     const response=await mcpResponse(rpcRequest('tools/call',{name:testCase.name,arguments:testCase.args}),TOOLS,async()=>{calls++;return {};});
     const result=(await response.json()).result;
     assert.equal(result.isError,true);assert.equal(JSON.parse(result.content[0].text).error.code,'INVALID_ARGUMENT');
   }
+  const batchReq=new Request('https://site.example/mcp',{
+    method:'POST',
+    headers:{'Content-Type':'application/json',Accept:'application/json, text/event-stream'},
+    body:JSON.stringify([
+      {jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'list_projects',arguments:JSON.parse('{"repo":"Cameronrlewis/repo","__proto__":true}')}},
+      {jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'get_net',arguments:{repo:'Cameronrlewis/repo'}}},
+    ])
+  });
+  const batchRes=await mcpResponse(batchReq,TOOLS,async()=>{calls++;return {};});
+  const batchBody=await batchRes.json();
+  assert.equal(Array.isArray(batchBody),true);
+  assert.equal(batchBody[0].result.isError,true);
+  assert.equal(JSON.parse(batchBody[0].result.content[0].text).error.code,'INVALID_ARGUMENT');
+  assert.equal(batchBody[1].result.isError,true);
+  assert.equal(JSON.parse(batchBody[1].result.content[0].text).error.code,'INVALID_ARGUMENT');
   assert.equal(calls,0,'invalid arguments never reach authorization or GitHub');
 });
-
-

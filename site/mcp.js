@@ -23,7 +23,6 @@ export function validateTool(name, args) {
   for (const [key, value] of Object.entries(args)) {
     if (!Object.hasOwn(schema.properties, key)) throw new Error('Invalid tool arguments: unknown field');
     const rule = schema.properties[key];
-    if (!rule) throw new Error('Invalid tool arguments: unknown field');
     if (rule.type === 'integer' && (!Number.isSafeInteger(value) || value < rule.minimum || value > rule.maximum)) throw new Error('Invalid integer');
     if (rule.type === 'string' && (typeof value !== 'string' || (rule.minLength && value.length < rule.minLength) || (rule.maxLength && value.length > rule.maxLength) || (rule.pattern && !new RegExp(rule.pattern).test(value)) || (rule.enum && !rule.enum.includes(value)))) throw new Error('Invalid string');
   }
@@ -31,7 +30,7 @@ export function validateTool(name, args) {
 }
 
 // Stateless Streamable HTTP: one Server and transport per POST, JSON responses only, no session id or GET stream.
-export async function mcpResponse(request, tools = TOOLS, call) {
+export async function mcpResponse(request, tools, call) {
   if (request.method !== 'POST') return new Response(null, { status: 405, headers: { Allow: 'POST' } });
   const origin = request.headers.get('Origin');
   if (origin && origin !== new URL(request.url).origin) return new Response('Forbidden', { status: 403 });
@@ -40,14 +39,14 @@ export async function mcpResponse(request, tools = TOOLS, call) {
   try { raw = JSON.parse(text); } catch {}
   const server = new Server({ name: 'kicad-review', version: '1.0.0' }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
-    let args = raw?.params?.arguments ?? params.arguments ?? {};
-    if (tools === TOOLS || tools.some(t => t.inputSchema)) {
-      try {
-        args = validateTool(params.name, args);
-      } catch {
-        return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: { code: 'INVALID_ARGUMENT', message: 'Invalid tool arguments' } }) }] };
-      }
+  // Re-parse raw JSON body to preserve '__proto__' and other prototype keys that the SDK's schema parser drops.
+  server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
+    const rawMsg = Array.isArray(raw) ? raw.find(r => r?.id === extra?.requestId) : raw;
+    let args = rawMsg?.params?.arguments ?? params.arguments ?? {};
+    try {
+      args = validateTool(params.name, args);
+    } catch {
+      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: { code: 'INVALID_ARGUMENT', message: 'Invalid tool arguments' } }) }] };
     }
     const payload = bounded(await call(params.name, args));
     return { content: [{ type: 'text', text: JSON.stringify(payload) }], ...(payload.error ? { isError: true } : {}) };
@@ -61,4 +60,3 @@ export async function mcpResponse(request, tools = TOOLS, call) {
     return new Response(body, { status: result.status, headers: result.headers });
   } finally { await server.close(); }
 }
-
