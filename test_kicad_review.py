@@ -1690,7 +1690,7 @@ print('ok BR02 synthetic four-layer 3D fixture')
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
-for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
+for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
@@ -6766,6 +6766,12 @@ with tempfile.TemporaryDirectory() as d:
         assert legacy_subset(legacy, integrated), "opted-out report lost or changed a 335db72 field"
         assert "downloads" not in integrated["settings"] and all("downloads" not in p for p in integrated["projects"]), "opted-out report carries download data"
         after_html = pathlib.Path("review/kicad-review.html").read_bytes()
+        assert b'id="downloads-open"' not in before_html, "335db72 must not contain the Download button"
+        assert b'id="downloads-open"' in after_html, "Download button missing from new report"
+        # 10ffebe (origin/main merged at 46e6f1a) added 75,872 B of 3D viewer assets to the report HTML.
+        # The always-on Download UI overhead itself is bounded under 12 KB uncompressed.
+        ui_overhead = len(after_html) - len(before_html) - 75872
+        assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
 
         shown = {"name": "b", "dir": "p", "status": "modified", "sheets": [], "board": {}, "changes": [], "checks": []}
         on = copy.deepcopy(DEFAULT_SETTINGS); on["downloads"]["enabled"] = True

@@ -70,6 +70,7 @@ jobs:
       - run: node ui/check.mjs --no-skip "selection-only address"
       - run: node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"
       - run: node ui/check.mjs --no-skip "passing checks with baseline findings"
+      - run: node ui/check.mjs --no-skip "Download dialog"
       - run: node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"
       - run: node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"
       - run: node ui/check.mjs --no-skip "BR02 single renderer head only" --page "$PAGES/single.html"

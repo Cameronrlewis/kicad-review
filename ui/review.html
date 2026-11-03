@@ -18,6 +18,7 @@
   <div class="tb-grp mark-styles" role="radiogroup" aria-label="Change mark style"><span class="cap">Marks</span>
     <button type="button" id="mark-style" data-mark-style="outline" role="radio" aria-checked="true" title="Outline: box each change with shape and glyph" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-outline"></use></svg><span>Outline</span></button><button type="button" data-mark-style="recolour" role="radio" aria-checked="false" tabindex="-1" title="Recolour: repaint changed objects in diff colours" disabled><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-recolour"></use></svg><span>Recolour</span></button>
   </div>
+  <div class="tb-grp" role="group" aria-label="Downloads"><button type="button" id="downloads-open" aria-haspopup="dialog" title="Download this review's files">Download</button></div>
   <span class="tb-spacer"></span>
   <div class="tb-grp tb-docks">
     <button type="button" data-dock="nav" aria-controls="nav" aria-expanded="false" aria-label="Toggle left dock" title="Left dock: projects, sheets and layers"><svg class="i" aria-hidden="true" focusable="false"><use href="#kr-i-dockl"></use></svg></button>
@@ -37,6 +38,7 @@
   <section id="inspector" aria-label="Inspector"></section></div>
   <aside id="panel" aria-label="Review inspector"></aside>
 </div>
+<dialog id="downloads" aria-labelledby="downloads-title"><header><h2 id="downloads-title">Download</h2><button type="button" data-close autofocus aria-label="Close downloads">Close · Esc</button></header><div id="downloads-body"></div></dialog>
 <!-- bench-t7: instrument readouts and help module -->
 <dialog id="shortcuts" aria-labelledby="shortcuts-title"><header><h2 id="shortcuts-title">Bench / Keyboard reference</h2><button type="button" data-close autofocus aria-label="Close keyboard reference">Close · Esc</button></header><div class="shortcut-modules">
 <section><h3>View & navigation</h3><dl><dt>Home / Ctrl+0 / f</dt><dd>Fit drawing, keep selection</dd><dt>F1 / Ctrl+= / Ctrl+Shift+=</dt><dd>Zoom in at cursor (board)</dd><dt>F2 / Ctrl+−</dt><dd>Zoom out at cursor (board)</dd><dt>F4</dt><dd>Center on cursor (board)</dd><dt>Left / middle / right drag</dt><dd>Pan linked views</dd><dt>Wheel</dt><dd>Zoom at cursor</dd><dt>PageUp / PageDown</dt><dd>Front / back copper; previous / next sheet</dd><dt>Alt+↑</dt><dd>Parent schematic sheet</dd><dt>b</dt><dd>Toggle 3D blend</dd></dl></section>
