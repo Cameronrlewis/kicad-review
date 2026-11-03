@@ -295,21 +295,33 @@ export function netProjection(name, args, loaded, origin) {
       const near = nets.filter(n => n.id.toLowerCase().includes(args.net.toLowerCase())).map(n => ({ id: n.id, link: objectLink(origin, loaded, 'net', n.id) }));
       return { ...out, found: false, nearby: page(near, limit, incomplete ? null : near.length, incomplete), incomplete };
     }
-    const structured = Array.isArray(net.pin_records) ? net.pin_records : null;
-    const rows = (net.pins || []).map((id, index) => {
-      let member = structured?.[index];
-      if (!member) {
-        const matches = [];
+    const ids = net.pins || [], total = net.pin_count ?? ids.length;
+    const structured = new Map(); // keyed by ref.pin, never by position, so pin_records order or length cannot misattribute
+    for (const rec of net.pin_records || []) if (!structured.has(`${rec.ref}.${rec.pin}`)) structured.set(`${rec.ref}.${rec.pin}`, rec);
+    let reverse = null; // ref.pin -> matching parts' pins, built once per call and only if a row needs it
+    const reverseMatches = id => {
+      if (!reverse) {
+        reverse = new Map();
         for (const p of parts)
-          for (const entry of p.pins || [])
-            if (`${p.ref}.${entry.pin}` === id) matches.push({ ref: p.ref, pin: entry.pin });
+          for (const entry of p.pins || []) {
+            const key = `${p.ref}.${entry.pin}`, match = { ref: p.ref, pin: entry.pin };
+            if (reverse.has(key)) reverse.get(key).push(match); else reverse.set(key, [match]);
+          }
+      }
+      return reverse.get(id) || [];
+    };
+    // Only the requested page is projected.
+    const rows = ids.slice(0, limit).map(id => {
+      let member = structured.get(id);
+      if (!member) {
+        const matches = reverseMatches(id);
         if (matches.length === 1) member = matches[0];
       }
       if (!member) return { memberAvailable: false };
       const p = parts.find(p => p.ref === member.ref && (!p.pins?.length || p.pins.some(entry => entry.pin === member.pin)));
       return { ref: member.ref, pin: member.pin, value: p?.value ?? null, partId: p?.uuid || null, memberAvailable: !!p };
     });
-    return { ...out, found: true, id: net.id, link: objectLink(origin, loaded, 'net', net.id), pins: page(rows, limit, net.pin_count ?? rows.length, !!net.more || incomplete) };
+    return { ...out, found: true, id: net.id, link: objectLink(origin, loaded, 'net', net.id), pins: page(rows, limit, total, !!net.more || incomplete) };
   }
   throw new McpError('UNKNOWN_TOOL', 'Unknown net projection');
 }
