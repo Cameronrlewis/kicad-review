@@ -5688,3 +5688,29 @@ test('MCP BOM replays the shared 08 fixture cases',async()=>{
    assert.deepEqual(got,c.expect.lines.map(l=>({key:l.key,quantity:l.quantity,refs:l.refs})),c.name);
  }
 });
+
+import {reviewProjects,reviewLive} from './mcp-data.js';
+test('MCP live review uses wiring support, zero changes and removed projects',async()=>{
+  const doc=mcpDoc(),p=doc.projects[0];
+  p.changes={total:1,rows:[{id:'c1',kind:'net-members',channel:'wiring',detail:{kind:'members',added:['R1.1'],removed:[],beforeNets:['12'],afterNets:['12'],transitions:[{pin:'R1.1',before:[],after:['12']}]}}]};
+  p.net_changes={available:true,complete:true};
+  p.checks=[{name:'drc',findings:[{items:['U1.1','R1.1']}]}];
+  let review=reviewProjects(doc,1)[0];
+  assert.equal(review.netChangesAvailable,true);assert.equal(review.netChangesComplete,true);
+  assert.equal(review.changes.items[0].detail.transitions.items[0].before.returned,0);
+  assert.equal(review.changes.items[0].detail.added.returned,1);
+  assert.equal(review.checks.items[0].findings.items[0].items.total,null);
+  assertMcpLists(review);
+  p.changes={total:0,rows:[]};assert.equal(reviewProjects(doc)[0].netChangesComplete,true);
+  p.changes={total:1,rows:[{id:'c2',kind:'copper',detail_truncated:true,detail:{kind:'copper',omitted_counts:{addedContours:40}}}],detail_truncated:1};
+  let marked=reviewProjects(doc)[0];assert.equal(marked.changesDetailTruncated,1);assert.equal(marked.changes.items[0].detailTruncated,true);assert.equal(marked.changes.truncated,true);assert.equal(marked.netChangesComplete,false);
+  const partsBefore=reviewProjects(doc)[0].partsIncomplete;p.revisions.head.parts=[{ref:'R1',properties:{Note:'x'},properties_truncated:true,incomplete_fields:['properties.Note']},{ref:'R2',properties:{},incomplete_fields:[]}];assert.equal(reviewProjects(doc)[0].partsIncomplete-partsBefore,1);
+  p.changes={total:200,rows:[],more:200};assert.equal(reviewProjects(doc)[0].netChangesComplete,false);
+  p.changes={total:0,rows:[]};doc.truncated=true;assert.equal(reviewProjects(doc)[0].netChangesComplete,false);doc.truncated=false;
+  delete p.net_changes;assert.equal(reviewProjects(doc)[0].netChangesAvailable,false);
+  doc.projects.push({...structuredClone(p),dir:'gone',status:'removed',revisions:{base:p.revisions.base,head:null}});
+  assert.equal(reviewProjects(doc)[1].revision,null);assert.equal(reviewProjects(doc)[1].baseRevision,doc.base);
+  const access={...mcpAccessFixture(),repository:{owner:{login:'Cameronrlewis'},name:'repo'}};
+  const gh=async path=>new Response(JSON.stringify(path==='/graphql'?{data:{repository:{pullRequest:{headRefOid:SHA,reviewThreads:{totalCount:0,nodes:[]}}}}}:[]));
+  assert.equal((await reviewLive(access,7,SHA,15,gh)).readiness.state,'review_evidence_only');
+});

@@ -1,3 +1,6 @@
+import { LIST_QUERY, parseThreads } from './threads.js';
+import { latestDecisions } from './readiness.js';
+
 // MCP trust boundaries: live GitHub authorization per call and byte-bounded input/output.
 export class McpError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -357,3 +360,45 @@ export function bomProjection(name, args, loaded, origin) {
   }
   throw new McpError('UNKNOWN_TOOL', 'Unknown BOM projection');
 }
+
+export function reviewProjects(doc, limit = 15) {
+  return doc.projects.map(p => ({
+    id: p.dir,
+    status: p.status || (p.revisions?.head ? 'present' : 'removed'),
+    revision: p.revisions?.head ? doc.head : null,
+    baseRevision: p.revisions?.base ? doc.base : null,
+    headline: typeof p.headline === 'string' ? p.headline : null,
+    changes: page((p.changes?.rows || []).map(r => ({ ...projectLists(r, limit, '', !!p.changes?.more || !!doc.truncated || r.detail_truncated === true), detailTruncated: r.detail_truncated === true })), limit, p.changes?.total, !!p.changes?.more || (p.changes?.detail_truncated ?? 0) > 0),
+    changesDetailTruncated: p.changes?.detail_truncated ?? 0,
+    partsIncomplete: [p.revisions?.base, p.revisions?.head].flatMap(rev => rev?.parts || []).filter(x => !x.properties || x.properties_truncated === true || !Array.isArray(x.incomplete_fields) || x.incomplete_fields.length > 0).length,
+    netChangesAvailable: p.net_changes?.available === true,
+    netChangesComplete: p.net_changes?.available === true && p.net_changes.complete === true && !p.changes?.more && !doc.truncated && (p.changes?.detail_truncated ?? 0) === 0 && !(p.changes?.rows || []).some(r => r.detail_truncated === true),
+    checks: page((p.checks || []).map(({ findings, more, ...check }) => ({ ...check, findings: page((findings || []).map(f => projectLists(f, limit)), limit, (findings || []).length + (more || 0), !!more) })), limit),
+  }));
+}
+
+export async function reviewLive(access, pr, sha, limit = 15, gh) {
+  const query = { query: LIST_QUERY, variables: { owner: access.repository.owner.login, name: access.repository.name, number: pr } };
+  const [reviews, threads] = await Promise.all([
+    gh(`${access.root}/pulls/${pr}/reviews?per_page=100`, access.token),
+    gh('/graphql', access.token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query) }),
+  ]);
+  const body = threads.ok ? await threads.json().catch(() => null) : null;
+  const raw = body?.data?.repository?.pullRequest, rt = raw?.reviewThreads;
+  const complete = !!rt && !body.errors?.length && rt.totalCount <= rt.nodes.length && raw.headRefOid === sha;
+  const open = complete ? parseThreads(body).filter(t => !t.resolved) : null;
+  const reviewRows = reviews.ok ? await reviews.json().catch(() => null) : null;
+  const decisions = Array.isArray(reviewRows) && reviewRows.length < 100 ? latestDecisions(reviewRows, sha) : null;
+  return {
+    head: sha,
+    openThreads: page((open || []).map(t => ({ id: t.id, anchor: projectLists(t.anchor, limit), comments: page(t.comments.map(c => ({ ...projectLists(c, limit), body: String(c.body).slice(0, 1000) })), limit, null, true) })), limit, open ? open.length : null, !complete),
+    readiness: {
+      head: sha,
+      decisions: page((decisions || []).map(d => projectLists(d, limit)), limit, decisions ? decisions.length : null, !decisions),
+      blocking: open ? open.filter(t => t.anchor.severity === 'blocking').length : null,
+      open: open ? open.length : null,
+      state: !complete || !decisions ? 'unknown' : decisions.some(d => !d.stale && d.state === 'CHANGES_REQUESTED') || open.some(t => t.anchor.severity === 'blocking') ? 'needs_work' : 'review_evidence_only',
+    },
+  };
+}
+
