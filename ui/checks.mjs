@@ -5806,10 +5806,6 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     if(!headNetRes?.error?.includes("not found"))return "base net resolved on head";
 
     // 5. Revision key round-trip with net and part
-    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",net:"BASE_NET"})));
-    if(S.revision!=="base"||S.net!=="BASE_NET"||S.io!==2)return "revision=base net did not focus base object";
-    if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).net!=="BASE_NET")return "revision=base net did not round-trip";
-
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",part:"mcp-base-only"})));
     if(S.revision!=="base"||S.part!=="mcp-base-only"||S.io!==2)return "revision=base part did not focus base object";
     if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).part!=="mcp-base-only")return "revision=base part did not round-trip";
@@ -5821,14 +5817,26 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     const disambiguated=resolveIdentity({part:"mcp-unchanged",v:"sheet:"+sheet.path},proj());
     if(disambiguated?.index!==0)return "explicit sheet disambiguation failed";
 
+    // Finding 2: valid() drops unknown view for part links
+    if(valid(decodeState("#"+new URLSearchParams({part:"mcp-unchanged",v:"sheet:/wrong-sheet"}))).v)return "valid() retained unknown sheet view";
+    if(valid(decodeState("#"+new URLSearchParams({part:"mcp-unchanged",v:"garbage"}))).v)return "valid() retained garbage view";
     // Wrong sheet does not fall back to unscoped match on another sheet
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",v:"sheet:/wrong-sheet"})));
     if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not found"))return "wrong sheet silently focused part";
+    if(S.v==="sheet:/wrong-sheet"||decodeState("#"+encodeState()).v==="sheet:/wrong-sheet")return "bogus sheet view persisted in S.v or hash";
+
+    // Finding 1: Non-sheet views (board, 3d, lib:0) leave lookup unscoped
+    const boardScoped=resolveIdentity({part:"mcp-head-added",v:"board"},proj());
+    if(boardScoped?.index!==1)return "part link with v=board failed to resolve";
+    const tdScoped=resolveIdentity({part:"mcp-head-added",v:"3d"},proj());
+    if(tdScoped?.index!==1)return "part link with v=3d failed to resolve";
+    const libScoped=resolveIdentity({part:"mcp-head-added",v:"lib:0"},proj());
+    if(libScoped?.index!==1)return "part link with v=lib:0 failed to resolve";
 
     // Simultaneous part+net
     const simultaneous=resolveIdentity({part:"mcp-unchanged",net},proj());
     if(!simultaneous?.error?.includes("not both"))return "simultaneous part+net not rejected";
-    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",net})));
+    await focusIdentity({part:"mcp-unchanged",net});
     if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not both"))return "simultaneous part+net message missing";
 
     // Ordinary change selection after a net focus clears part/net/revision

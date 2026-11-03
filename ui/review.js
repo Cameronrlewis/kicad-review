@@ -235,7 +235,7 @@ function resolveIdentity(st, p) {
   if (!st.part && !st.net) return null;
   if (st.part && st.net) return { error: 'Choose a part or a net, not both' };
   const side = st.revision === 'base' ? 'base' : 'head';
-  const target = st.part ? { uuid: st.part, sheet: String(st.v || '').startsWith('sheet:') ? st.v.slice(6) : (st.sheet || (st.v ? String(st.v) : undefined)) } : p.identity?.[side]?.nets?.[st.net];
+  const target = st.part ? { uuid: st.part, sheet: String(st.v || '').startsWith('sheet:') ? st.v.slice(6) : undefined } : p.identity?.[side]?.nets?.[st.net];
   if (!target) return { error: 'Object or net not found in this report' };
   const matches = (p.objects || []).map((o, index) => ({ o, index })).filter(({ o }) => (o.side === side || (side === 'base' && o.side === 'head' && !o.added)) && o.uuid === target.uuid && (target.sheet === undefined || o.sheet === target.sheet));
   if (matches.length !== 1) return { error: matches.length ? 'Object identity is ambiguous; include its sheet view' : 'Object or net not found in this report' };
@@ -266,7 +266,6 @@ function decodeState(hash) {
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
-  else if (st.part && st.v === String(st.v)) out.v = st.v;
   if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
@@ -297,7 +296,7 @@ function applyState(st) {
   renderPanel();
   renderZoombar();
   return draw().then(async () => {
-    if (v.part || v.net) { await focusIdentity(v); return; }
+    if (v.part || v.net) { await focusIdentity({ ...v, v: st.v }); return; }
     if (S.s && !hasPos && !v.v) goTo(S.s);
   });
 }
