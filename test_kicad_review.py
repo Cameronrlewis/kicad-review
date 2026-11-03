@@ -1727,7 +1727,7 @@ runner = pathlib.Path('ui/check.mjs').read_text()
 for command in (
     'node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"',
     'node ui/check.mjs --no-skip "BR02 processed" --dark --page "$PAGES/processed.html"',
-    'node --test ui/*.test.mjs',
+    'node --import ./site/css-loader.mjs --test ui/*.test.mjs',
     'node ui/board-test.mjs'):
     assert '      - run: ' + command in test_wf.splitlines(), 'TS-S1 CI missing ' + command
 # Image and supplemental fixture commands stay literal: CI and this contract change together.
