@@ -445,9 +445,8 @@ export async function runTool(name, args, request, deps) {
       error: {
         code: error instanceof McpError ? error.code : 'UNAVAILABLE',
         message: error instanceof McpError ? error.message : 'Data unavailable; retry later',
-        ...(error.canRender ? { canRender: true, renderPath: error.renderPath } : {}),
+        ...(error?.canRender ? { canRender: true, renderPath: error.renderPath } : {}),
       },
     };
   }
 }
-

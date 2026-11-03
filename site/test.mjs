@@ -5837,4 +5837,6 @@ test('MCP six tools preserve provenance and never write GitHub',async()=>{
   assert.match((await invoke('get_bom',{format:'csv'})).csv,/"10k,é"/);
   const nearby=await invoke('get_net',{net:'1'});assert.equal(nearby.found,false);assert.equal(nearby.nearby.items[0].id,'12');
   for(const name of ['list_projects','get_design','get_bom'])assert.ok(new TextEncoder().encode(JSON.stringify(await invoke(name))).length<=32768);
+  const nonObjectErr = await runTool('list_projects', { repo: 'Cameronrlewis/repo' }, request, { ...deps, open: async () => { throw null; } });
+  assert.deepEqual(nonObjectErr, { error: { code: 'UNAVAILABLE', message: 'Data unavailable; retry later' } });
 });
