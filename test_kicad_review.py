@@ -6601,13 +6601,42 @@ for initial in (DEFAULT_SETTINGS, enabled):
         finally: os.chdir(cwd)
 # Release-only runs stage/upload their already-built fabrication package; no PDF/STEP/GLB.
 release_only = copy.deepcopy(DEFAULT_SETTINGS); release_only["checks"]["release"] = "informational"
+assert kr.render_cache(p, "head", det, release_only) != kr.render_cache(p, "base", det, release_only), "release-only base/head cache collision"
+assert kr.render_cache(p, "head", det, release_only) != kr.render_cache(p, "head", det, DEFAULT_SETTINGS), "release-only off/on cache collision"
 with tempfile.TemporaryDirectory() as d:
     source = dl_project(d, "P"); dl_calls.clear(); dl_mode.clear()
     with patch("kicad_review.subprocess.run", side_effect=dl_fake):
         entries = kr.export_downloads({"name":"P","dir":""}, source, f"{d}/out", release_only, "b"*40)
     assert [e["kind"] for e in entries] == ["fab"] and not entries[0]["error"], entries
     assert [c[0][3] for c in dl_calls] == ["gerbers", "drill", "pos", "bom"], dl_calls
+# release_project exception boundary: warning logged and export_downloads continues
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        pathlib.Path("head/p/b.kicad_pro").write_text("")
+        json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+        pathlib.Path("base/kicad-review.toml").write_text("[checks]\nrelease = 'informational'\n")
+        download_calls = []
+        warning_printed = []
+        real_print = print
+        def capture_print(*args, **kw):
+            msg = " ".join(str(a) for a in args)
+            if "release outputs incomplete; continuing other exports" in msg:
+                warning_printed.append(msg)
+            real_print(*args, **kw)
+        with patch("kicad_review.render_side"), \
+             patch("kicad_review.release_project", side_effect=ValueError("corrupt release")), \
+             patch("kicad_review.export_downloads", side_effect=lambda *a: download_calls.append(a)), \
+             patch("builtins.print", side_effect=capture_print):
+            kr.cmd_render(None)
+        assert len(warning_printed) == 1, f"warning not printed: {warning_printed}"
+        assert "::warning::b: release outputs incomplete; continuing other exports" in warning_printed[0]
+        assert len(download_calls) == 1 and download_calls[0][0]["name"] == "b" and download_calls[0][2] == "review/p/head", download_calls
+    finally:
+        os.chdir(cwd)
 # The head requests 02's raw GLB even with the 3D viewer off; the base never does so for downloads (needs 02's cmd_render gate).
+# Head download GLB export gates poster and viewer copies: only raw GLB is requested when 3D is off.
 with tempfile.TemporaryDirectory() as d:
     os.chdir(d)
     try:
@@ -6615,10 +6644,24 @@ with tempfile.TemporaryDirectory() as d:
         json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
         pathlib.Path("base/kicad-review.toml").write_text("[downloads]\nenabled = true\n[3d]\nenabled = false\n")
         glb_calls = []
-        with patch("kicad_review.render_side"), patch("kicad_review.export_downloads"), patch("kicad_review.export_glb", side_effect=lambda p, side, out, **kw: glb_calls.append((side, kw.get("model")))):
+        with patch("kicad_review.render_side"), patch("kicad_review.export_downloads"), \
+             patch("kicad_review.export_glb", side_effect=lambda p, side, out, **kw: glb_calls.append((side, kw.get("model"), kw.get("poster"), kw.get("viewer")))):
             kr.cmd_render(None)
-        assert ("head", True) in glb_calls and not any(side == "base" and model for side, model in glb_calls), glb_calls
+        assert ("head", True, False, False) in glb_calls, glb_calls
+        assert not any(side == "base" and model for side, model, *rest in glb_calls), glb_calls
     finally:
         os.chdir(cwd)
+# Calling export_glb with poster=False and viewer=False creates only raw GLB, neither board.glb nor poster.png
+with tempfile.TemporaryDirectory() as d:
+    folder = pathlib.Path(d) / "out"
+    def fake_glb_subproc(argv, **kw):
+        dest = pathlib.Path(argv[argv.index("-o") + 1])
+        dest.write_bytes(b"glTF raw")
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    with patch("kicad_review.subprocess.run", side_effect=fake_glb_subproc):
+        kr.export_glb({"dir": "p", "name": "p"}, "head", str(folder), model=True, poster=False, viewer=False)
+    assert (folder / "board.raw.glb").is_file(), "board.raw.glb missing"
+    assert not (folder / "board.glb").exists(), "board.glb should not exist when viewer is off"
+    assert not (folder / "poster.png").exists(), "poster.png should not exist when poster is off"
 print("ok render head gating, release-only staging and role/opt-in cache isolation")
 

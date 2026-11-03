@@ -611,7 +611,7 @@ def normalize_poster(path):
     path.write_bytes(png[:8] + chunk(b'IHDR', header) + metadata + chunk(b'IDAT', zlib.compress(output)) + chunk(b'IEND', b''))
 
 
-def export_glb(p, side, out, *, model=True):
+def export_glb(p, side, out, *, model=True, poster=True, viewer=True):
     """Best-effort raw/fallback model and shared still; render warnings never affect coverage."""
     pcb = board_path(p, side)
     folder = pathlib.Path(out)
@@ -636,17 +636,23 @@ def export_glb(p, side, out, *, model=True):
     if model:
         if run(glb_argv(pcb, folder), "board.raw.glb", "glb.log"):
             normalize_glb(folder / "board.raw.glb")
-            shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+            if viewer:
+                shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+            else:
+                (folder / "board.glb").unlink(missing_ok=True)
         else:
             (folder / "board.glb").unlink(missing_ok=True)
-    if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
-        try:
-            normalize_poster(folder / "poster.png")
-        except (OSError, ValueError, zlib.error) as error:
-            (folder / "poster.png").unlink(missing_ok=True)
-            (folder / "poster.png.failed").write_text("normalization attempted and failed")
-            with (folder / "poster.log").open('a', encoding='utf-8') as log:
-                log.write(f'\nPoster normalization failed: {error}\n')
+    if poster:
+        if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
+            try:
+                normalize_poster(folder / "poster.png")
+            except (OSError, ValueError, zlib.error) as error:
+                (folder / "poster.png").unlink(missing_ok=True)
+                (folder / "poster.png.failed").write_text("normalization attempted and failed")
+                with (folder / "poster.log").open('a', encoding='utf-8') as log:
+                    log.write(f'\nPoster normalization failed: {error}\n')
+    else:
+        (folder / "poster.png").unlink(missing_ok=True)
 
 
 def render_tool_identity():
@@ -775,7 +781,7 @@ def cmd_render(args):
                 continue
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
             if side == "head" and settings["downloads"]["enabled"]:
-                export_glb(p, side, out, model=True)
+                export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
             elif need_still and pathlib.Path(board_path(p, side)).is_file():
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
