@@ -8,7 +8,7 @@ import { runTool } from './mcp-data.js';
 // Wrangler entry point: OAuth provider around POST /mcp; every other route falls through to the existing site.
 // Overrides are test-only code injection, never request parameters.
 export function makeMcpWorker(overrides = {}) {
-  const { onProvider, ...dataOverrides } = overrides;
+  const { onProvider, onError = () => {}, ...dataOverrides } = overrides;
   const deps = { gh, open, allowedOwners, loadContext, ...dataOverrides };
   const options = {
     apiRoute: '/mcp',
@@ -17,9 +17,10 @@ export function makeMcpWorker(overrides = {}) {
       onProvider?.(env.OAUTH_PROVIDER);
       return mcpResponse(request, TOOLS, (name, args) => runTool(name, validateTool(name, args), { env, props: ctx.props, origin: new URL(request.url).origin }, deps));
     } },
-    defaultHandler: { fetch: async (request, env, ctx) => (await consentRoute(request, env, { session, open, seal })) || legacy.fetch(request, env, ctx) },
+    defaultHandler: { fetch: async (request, env, ctx) => (await consentRoute(request, env, { session, open: deps.open, seal })) || legacy.fetch(request, env, ctx) },
     authorizeEndpoint: '/authorize', tokenEndpoint: '/token', clientRegistrationEndpoint: '/register',
     accessTokenTTL: 3600, refreshTokenTTL: 0, scopesSupported: ['read:design'],
+    onError,
   };
   // The provider binds tokens to one absolute resource URL, so it is built for the request's own origin.
   // A per-request env copy keeps env.OAUTH_PROVIDER helpers from leaking across origins or requests.

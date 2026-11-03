@@ -6003,6 +6003,7 @@ test('MCP provider integration publishes read-only discovery',async()=>{
   for(const path of ['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp']){
     const response=await worker.fetch(new Request('https://site.example'+path),local,ctx);
     assert.equal(response.status,200);
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'),'*');
     const metadata=await response.json();assert.equal(metadata.resource,'https://site.example/mcp');
     assert.deepEqual(metadata.scopes_supported,['read:design']);
   }
@@ -6017,4 +6018,28 @@ test('MCP provider integration publishes read-only discovery',async()=>{
 test('MCP authorization metadata HEAD has no body to rewrite',async()=>{
   const response=await makeMcpWorker().fetch(new Request('https://site.example/.well-known/oauth-authorization-server',{method:'HEAD'}),{...env,OAUTH_KV:{}},{waitUntil:()=>{}});
   assert.equal(response.status,200);
+});
+test('MCP entry honors injected deps.open in consent and suppresses default error warnings',async()=>{
+  let openCalled=false,errorCaptured=null;
+  const sealed=await signedIn();
+  const worker=makeMcpWorker({
+    open:async(val,e)=>{openCalled=true;return {auth:{redirectUri:'https://client.example/cb',state:'st'},nonce:'n',exp:Date.now()+60000,login:'Cameronrlewis'};},
+    onError:(err)=>{errorCaptured=err;},
+  });
+  const local={...env,OAUTH_KV:{}},ctx={waitUntil:()=>{}};
+  const consentReq=new Request('https://site.example/authorize',{
+    method:'POST',
+    headers:{Origin:'https://site.example','Content-Type':'application/x-www-form-urlencoded',Cookie:`s=${sealed}; mc=pending-val`},
+    body:'pending=pending-val&decision=deny',
+  });
+  await worker.fetch(consentReq,local,ctx);
+  assert.equal(openCalled,true);
+  const invalidTokenReq=new Request('https://site.example/token',{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'grant_type=authorization_code&code=invalid',
+  });
+  await worker.fetch(invalidTokenReq,local,ctx);
+  assert.ok(errorCaptured);
+  assert.equal(errorCaptured.code,'invalid_client');
 });

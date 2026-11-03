@@ -58,7 +58,7 @@ const rejson = (response, body) => { const headers = new Headers(response.header
 export async function oauthFetch(request, env, ctx, provider, legacy) {
   const url = new URL(request.url);
   if (!env.OAUTH_KV) return OAUTH_PATHS.includes(url.pathname) || url.pathname.startsWith('/.well-known/') ? json({ error: 'MCP is not configured' }, 503) : legacy.fetch(request, env, ctx);
-  if (['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) return json({ resource: url.origin + '/mcp', authorization_servers: [url.origin], scopes_supported: ['read:design'], bearer_methods_supported: ['header'] });
+  if (['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) return json({ resource: url.origin + '/mcp', authorization_servers: [url.origin], scopes_supported: ['read:design'], bearer_methods_supported: ['header'] }, 200, { 'Access-Control-Allow-Origin': '*' });
   if (url.pathname === '/token' && request.method === 'POST') {
     let body;
     try { body = await readBounded(request, 16384); } catch (error) { return error.code === 'TOO_LARGE' ? json({ error: 'invalid_request', error_description: 'Request too large' }, 413) : json({ error: 'invalid_request' }, 400); }
