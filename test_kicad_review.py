@@ -1774,11 +1774,15 @@ print("ok TS-S1 CI browser matrix")
 wf = pathlib.Path('.github/workflows/test.yml').read_text()
 deploy = pathlib.Path('.github/workflows/site-deploy.yml').read_text()
 site_docs = pathlib.Path('site/README.md').read_text()
-assert 'npm ci --prefix site' in wf and wf.index('npm ci --prefix site') < wf.index('node --import ./site/css-loader.mjs --test site/test.mjs')
-assert 'npm ci --prefix site' in deploy and deploy.index('npm ci --prefix site') < deploy.index('node --import ./site/css-loader.mjs --test site/test.mjs')
-assert 'node ui/check.mjs --no-skip "MCP unchanged identity links"' in wf
-assert 'OAUTH_KV' in site_docs and 'read:design' in site_docs
-assert 'No model-provider request' in site_docs and 'one hour' in site_docs
+root_docs = pathlib.Path('README.md').read_text()
+assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in deploy and "node-version: 22" in deploy and deploy.index("actions/setup-node@") < deploy.index("- run: npm ci --prefix site") < deploy.index("- run: node --import ./site/css-loader.mjs --test site/test.mjs"), "deploy pinned setup-node Node 22 before locked install and site test"
+assert 'npm ci --prefix site' in wf and wf.index('npm ci --prefix site') < wf.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP test.yml locked site install before site test"
+assert 'npm ci --prefix site' in deploy and deploy.index('npm ci --prefix site') < deploy.index('node --import ./site/css-loader.mjs --test site/test.mjs'), "MCP site-deploy.yml locked site install before site test"
+assert 'node ui/check.mjs --no-skip "MCP unchanged identity links"' in wf, "MCP browser check in test.yml"
+assert 'OAUTH_KV' in site_docs and 'read:design' in site_docs, "MCP OAUTH_KV and read:design documented in site/README.md"
+assert 'No model-provider request' in site_docs and 'one hour' in site_docs, "MCP no model request and one hour TTL documented in site/README.md"
+assert 'Connect panel' in site_docs and 'no Connect panel is shown' in site_docs, "MCP Connect panel wording and absence documented in site/README.md"
+assert '32 properties' in root_docs and '200 code points' in root_docs and 'searchFieldsComplete:false' in root_docs, "MCP property limits and searchFieldsComplete documented in README.md"
 print('ok MCP locked installation and settings docs')
 print("ok")
 
