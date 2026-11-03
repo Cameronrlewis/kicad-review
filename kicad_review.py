@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import base64
+import contextlib
 import csv
 import datetime
 import gzip
@@ -498,7 +499,8 @@ def normalize_glb(path):
                            + struct.pack('<I', len(chunk)) + b'JSON' + chunk + rest)
         os.replace(staged, path)
     except OSError:
-        staged.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            staged.unlink(missing_ok=True)
 
 
 def poster_argv(pcb, folder):
