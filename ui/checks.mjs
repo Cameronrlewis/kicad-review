@@ -2761,6 +2761,22 @@ return true;
     const { THREE } = window.THREE3D, st = window.Review3D.state, b = st.blocks.find(x => x.ref === "U3" && x.side === "head"), c = new THREE.Box3().setFromObject(b.object).getCenter(new THREE.Vector3()).project(st.cameras[0]);
     if (!(Math.abs(c.x) < .15 && Math.abs(c.y) < .15)) return "U3 not framed " + c.x.toFixed(3) + "," + c.y.toFixed(3);
     return /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "") || "no 3D model tip missing";`],
+  ["3D no-model chips keep text contrast in both themes", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const lum = c => { const [r, g, b] = c.match(/\\d+/g).map(Number).map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
+    const ratio = (f, b) => (Math.max(lum(f), lum(b)) + .05) / (Math.min(lum(f), lum(b)) + .05);
+    const start = KRTheme.get(), res = {};
+    try {
+      for (const theme of ["dark", "light"]) {
+        KRTheme.set(theme, {persist:false});
+        const btn = document.querySelector("[data-no-model]");
+        if (!btn) return "no chip";
+        const bg = getComputedStyle(btn).backgroundColor, ref = ratio(getComputedStyle(btn.querySelector("b")).color, bg), note = ratio(getComputedStyle(btn.querySelector(".muted")).color, bg);
+        res[theme] = {bg, ref:+ref.toFixed(2), note:+note.toFixed(2)};
+        if (!(ref >= 4.5 && note >= 4.5)) return JSON.stringify(res);
+      }
+      return true;
+    } finally { KRTheme.set(start, {persist:false}); }`],
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
