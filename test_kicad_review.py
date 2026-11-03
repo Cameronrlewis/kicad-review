@@ -6941,7 +6941,6 @@ for needle in ("| `downloads.enabled` | `false` |", "| `downloads.step` | `true`
     assert needle in readme, needle
 assert "[downloads]\nenabled = false" in example and "step = true" in example
 assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
+assert "02's" not in readme, "plan numbers stay out of shipped assets"
 print("ok downloads documented")
-
-
 
