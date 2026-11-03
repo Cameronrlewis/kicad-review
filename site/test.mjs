@@ -5079,3 +5079,44 @@ test('MCP stateless transport lists tools and rejects event-stream GET', async (
   assert.deepEqual((await list.json()).result.tools, []);
   assert.equal((await mcpResponse(new Request('https://site.example/mcp'), [], async () => ({}))).status, 405);
 });
+
+test('MCP stateless transport handles origin check, payload limit, tool calls, and errors', async () => {
+  const foreign = await mcpResponse(new Request('https://site.example/mcp', {
+    method: 'POST',
+    headers: { Origin: 'https://attacker.example' },
+    body: '{}',
+  }), [], async () => ({}));
+  assert.equal(foreign.status, 403);
+  assert.equal(await foreign.text(), 'Forbidden');
+
+  const large = await mcpResponse(new Request('https://site.example/mcp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: 'x'.repeat(16385),
+  }), [], async () => ({}));
+  assert.equal(large.status, 413);
+  assert.equal(await large.text(), 'Request too large');
+
+  const callRes = await mcpResponse(
+    rpcRequest('tools/call', { name: 'find_parts', arguments: { query: 'R1' } }),
+    [{ name: 'find_parts' }],
+    async (name, args) => ({ tool: name, args, parts: ['R1'] })
+  );
+  assert.equal(callRes.status, 200);
+  const callBody = await callRes.json();
+  assert.deepEqual(callBody.result.content, [
+    { type: 'text', text: JSON.stringify({ tool: 'find_parts', args: { query: 'R1' }, parts: ['R1'] }) },
+  ]);
+  assert.equal(callBody.result.isError, undefined);
+
+  const errRes = await mcpResponse(
+    rpcRequest('tools/call', { name: 'get_net', arguments: { net: 'GND' } }),
+    [{ name: 'get_net' }],
+    async () => ({ error: 'Not found' })
+  );
+  assert.equal(errRes.status, 200);
+  const errBody = await errRes.json();
+  assert.deepEqual(errBody.result.content, [{ type: 'text', text: JSON.stringify({ error: 'Not found' }) }]);
+  assert.equal(errBody.result.isError, true);
+});
+

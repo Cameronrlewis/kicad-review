@@ -94,7 +94,7 @@ Optional variables under `[vars]`: `ASK_DAILY_LIMIT` (questions per user per day
 
 ## MCP dependencies (verified 2026-11-02)
 
-`site/package.json` pins `@cloudflare/workers-oauth-provider` 1.2.4 and `@modelcontextprotocol/sdk` 1.32.2 exactly; `site/package-lock.json` locks the rest. The SDK's `WebStandardStreamableHTTPServerTransport` runs stateless (`sessionIdGenerator: undefined`, `enableJsonResponse: true`) in workerd and Node and negotiates protocol `2025-03-26`. Discovery in this SDK is `discoverOAuthProtectedResourceMetadata(url, opts, fetchFn)` (fetch is the third argument) and `discoverAuthorizationServerMetadata(url, {fetchFn})`.
+`site/package.json` pins `@cloudflare/workers-oauth-provider` 1.2.4 and `@modelcontextprotocol/sdk` 1.32.2 exactly; `site/package-lock.json` locks the rest. The SDK's `WebStandardStreamableHTTPServerTransport` runs stateless (`sessionIdGenerator: undefined`, `enableJsonResponse: true`) in workerd and Node and negotiates protocol `2025-03-26`. Discovery in this SDK is `discoverOAuthProtectedResourceMetadata(url, opts, fetchFn)` (fetch is the third argument, differing from the 2-argument signature in the plan text; Tasks 10–12 must use this 3-argument form) and `discoverAuthorizationServerMetadata(url, {fetchFn})`.
 
 OAuth provider facts the MCP code relies on, checked against the installed types and source:
 
