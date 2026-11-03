@@ -6355,9 +6355,14 @@ wdoc = kr.fit_context(lambda nc, pc: {"version": 1, "kind": "kicad-review-design
 wp = wdoc["projects"][0]["revisions"]["head"]["parts"][0]
 assert wdoc["truncated"] is True and wp["properties_truncated"] is True and wp["properties_omitted"] == 1
 assert "properties" in wp["incomplete_fields"] and "properties.Note" in wp["incomplete_fields"] and len(wp["properties"]["Note"]) == 200
-os.makedirs("site/fixtures", exist_ok=True)
-with open("site/fixtures/producer-truncated-context.json", "w", encoding="utf-8") as fh:
-    json.dump(wdoc, fh, separators=(",", ":"), ensure_ascii=False)
+fixture_path = pathlib.Path(__file__).parent / "site" / "fixtures" / "producer-truncated-context.json"
+if os.environ.get("REGENERATE_FIXTURES") == "1":
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(fixture_path, "w", encoding="utf-8") as fh:
+        json.dump(wdoc, fh, separators=(",", ":"), ensure_ascii=False)
+with open(fixture_path, "r", encoding="utf-8") as fh:
+    committed_doc = json.load(fh)
+assert committed_doc == wdoc, f"{fixture_path} drift; run REGENERATE_FIXTURES=1 python3 test_kicad_review.py"
 clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
 assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
 # 09 owns net_changes: 03's wiring status decides availability; a missing summary is unavailable, zero complete rows are available.
