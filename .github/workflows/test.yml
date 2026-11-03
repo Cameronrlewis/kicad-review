@@ -38,7 +38,6 @@ jobs:
           node-version: 22
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
       - run: node --test ui/*.test.mjs
-      - run: node --test ui/ask.test.mjs
       - run: node ui/board-test.mjs
       - name: Run 3D processor integration tests
         shell: bash
