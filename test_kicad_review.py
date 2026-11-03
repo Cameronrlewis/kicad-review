@@ -6770,40 +6770,49 @@ with tempfile.TemporaryDirectory() as d:
         assert b'id="downloads-open"' in after_html, "Download button missing from new report"
 
         # 10ffebe (origin/main merged at 46e6f1a) grew review.js and added 3D viewer and image-view assets
-        # after 335db72. Compare against a current-main report built without the Download UI to bound the
-        # always-on Download UI overhead under 12 KB uncompressed without hardcoded constants.
+        # after 335db72. Compare against a pinned-main report built without the Download UI to bound the
+        # always-on Download UI overhead under 12 KB uncompressed without relying on origin/main ref.
         repo_dir = pathlib.Path(kr.__file__).resolve().parent
-        try:
-            main_commit = kr.subprocess.run(
-                ["git", "-C", str(repo_dir), "merge-base", "HEAD", "origin/main"],
-                capture_output=True, text=True, check=True
-            ).stdout.strip()
-        except Exception:
-            main_commit = "10ffebe"
-        if not main_commit:
-            main_commit = "10ffebe"
-        with tempfile.TemporaryDirectory(prefix="downloads-main-") as main_dir:
-            main_archive = kr.subprocess.run(
-                ["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"],
-                check=True, capture_output=True
-            ).stdout
-            with tarfile.open(fileobj=io.BytesIO(main_archive)) as tar:
-                if hasattr(tarfile, "data_filter"):
-                    tar.extractall(main_dir, filter="data")
+        main_commit = "10ffebe"
+        main_archive = None
+        main_override = os.environ.get("DOWNLOADS_MAIN_BASELINE")
+        if not (main_override and pathlib.Path(main_override, "kicad_review.py").is_file()):
+            try:
+                main_archive = subprocess.run(
+                    ["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"],
+                    check=True, capture_output=True
+                ).stdout
+            except (subprocess.CalledProcessError, subprocess.SubprocessError, OSError):
+                main_archive = None
+
+        if main_archive is not None or (main_override and pathlib.Path(main_override, "kicad_review.py").is_file()):
+            with tempfile.TemporaryDirectory(prefix="downloads-main-") as main_dir:
+                if main_override and pathlib.Path(main_override, "kicad_review.py").is_file():
+                    main_dir_path = main_override
                 else:
-                    tar.extractall(main_dir)
-            main_spec = importlib.util.spec_from_file_location("downloads_main", os.path.join(main_dir, "kicad_review.py"))
-            main_mod = importlib.util.module_from_spec(main_spec)
-            main_spec.loader.exec_module(main_mod)
-            with patch.object(main_mod, "load_settings", return_value=copy.deepcopy(main_mod.DEFAULT_SETTINGS)):
-                main_mod.cmd_report(None)
-            main_html = pathlib.Path("review/kicad-review.html").read_bytes()
-            assert b'id="downloads-open"' not in main_html, "current-main report must not contain the Download button"
-            # Rebuild after_html to restore current report state after main_mod.cmd_report
-            with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
-                kr.cmd_report(None)
-            after_html = pathlib.Path("review/kicad-review.html").read_bytes()
-            ui_overhead = len(after_html) - len(main_html)
+                    with tarfile.open(fileobj=io.BytesIO(main_archive)) as tar:
+                        if hasattr(tarfile, "data_filter"):
+                            tar.extractall(main_dir, filter="data")
+                        else:
+                            tar.extractall(main_dir)
+                    main_dir_path = main_dir
+                main_spec = importlib.util.spec_from_file_location("downloads_main", os.path.join(main_dir_path, "kicad_review.py"))
+                main_mod = importlib.util.module_from_spec(main_spec)
+                main_spec.loader.exec_module(main_mod)
+                with patch.object(main_mod, "load_settings", return_value=copy.deepcopy(main_mod.DEFAULT_SETTINGS)):
+                    main_mod.cmd_report(None)
+                main_html = pathlib.Path("review/kicad-review.html").read_bytes()
+                assert b'id="downloads-open"' not in main_html, "current-main report must not contain the Download button"
+                # Rebuild after_html to restore current report state after main_mod.cmd_report
+                with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
+                    kr.cmd_report(None)
+                after_html = pathlib.Path("review/kicad-review.html").read_bytes()
+                ui_overhead = len(after_html) - len(main_html)
+                assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
+        else:
+            # Shallow clone fallback when 10ffebe history is absent:
+            # 10ffebe added 75,872 B of 3D viewer and image assets over 335db72 (before_html).
+            ui_overhead = len(after_html) - len(before_html) - 75872
             assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
 
         shown = {"name": "b", "dir": "p", "status": "modified", "sheets": [], "board": {}, "changes": [], "checks": []}
