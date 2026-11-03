@@ -12,6 +12,7 @@ import { historyEvents, HISTORY_QUERY } from './history.js';
 import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
 import { mcpResponse, TOOLS, validateTool } from './mcp.js';
 import { designParts, projectLists, objectLink, netProjection, bomProjection, bomLines } from './mcp-data.js';
+import { consentRoute } from './mcp-auth.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -5839,4 +5840,39 @@ test('MCP six tools preserve provenance and never write GitHub',async()=>{
   for(const name of ['list_projects','get_design','get_bom'])assert.ok(new TextEncoder().encode(JSON.stringify(await invoke(name))).length<=32768);
   const nonObjectErr = await runTool('list_projects', { repo: 'Cameronrlewis/repo' }, request, { ...deps, open: async () => { throw null; } });
   assert.deepEqual(nonObjectErr, { error: { code: 'UNAVAILABLE', message: 'Data unavailable; retry later' } });
+});
+
+test('MCP consent needs same-origin nonce',async()=>{
+  const now=Date.now();
+  const valid={auth:{redirectUri:'https://client.example/cb',state:'state'},login:'cam',nonce:'n',exp:now+600000};
+  for(const kind of ['evil-origin','missing-pending','forged-pending','mismatched-cookie','missing-nonce','account-mismatch','expired','denied']){
+    let grants=0;
+    const env={OAUTH_PROVIDER:{completeAuthorization:async()=>{grants++;return {redirectTo:'https://client.example/cb?code=usable'};}}};
+    const saved=structuredClone(valid);
+    if(kind==='missing-nonce')delete saved.nonce;
+    if(kind==='account-mismatch')saved.login='other';
+    if(kind==='expired')saved.exp=now-1;
+    const deps={session:async()=>({login:'cam',token:'secret'}),open:async value=>value==='sealed'?saved:null,seal:async()=> 'credential'};
+    const pending=kind==='missing-pending'?'':kind==='forged-pending'?'forged':'sealed';
+    const req=new Request('https://site.example/authorize',{method:'POST',headers:{Origin:kind==='evil-origin'?'https://evil.example':'https://site.example',Cookie:'mc='+(kind==='mismatched-cookie'?'other':'sealed'),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending,decision:kind==='denied'?'deny':'allow'})});
+    const result=await consentRoute(req,env,deps);
+    assert.equal(grants,0,kind);
+    assert.equal(result.status,kind==='denied'?302:403,kind);
+    if(kind==='denied')assert.equal(new URL(result.headers.get('Location')).searchParams.get('error'),'access_denied');
+    assert.ok(!/access_token|[?&]code=/.test(result.headers.get('Location')||''),kind);
+    assert.doesNotMatch(await result.text(),/access_token|usable/);
+  }
+});
+
+test('MCP consent rejects missing expiry, oversize forms and unparseable requests without granting',async()=>{
+  let grants=0;
+  const env={OAUTH_PROVIDER:{completeAuthorization:async()=>{grants++;return {redirectTo:'https://client.example/cb?code=usable'};},parseAuthRequest:async()=>{throw new Error('unregistered redirect');}}};
+  const saved={auth:{redirectUri:'https://client.example/cb',state:'state'},login:'cam',nonce:'n'};
+  const deps={session:async()=>({login:'cam',token:'secret'}),open:async value=>value==='sealed'?saved:null,seal:async()=>'credential'};
+  const post=pending=>new Request('https://site.example/authorize',{method:'POST',headers:{Origin:'https://site.example',Cookie:'mc=sealed','Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({pending,decision:'allow'})});
+  assert.equal((await consentRoute(post('sealed'),env,deps)).status,403);
+  assert.equal((await consentRoute(post('x'.repeat(16385)),env,deps)).status,413);
+  const get=await consentRoute(new Request('https://site.example/authorize?response_type=code&code_challenge_method=S256&code_challenge='+'a'.repeat(43)+'&redirect_uri=https://evil.example/cb'),env,deps);
+  assert.equal(get.status,400);assert.equal(get.headers.get('Location'),null);
+  assert.equal(grants,0);
 });
