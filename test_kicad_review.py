@@ -1740,10 +1740,12 @@ print("ok TS-S2 release zip and CSV contents")
 test_wf = pathlib.Path(".github/workflows/test.yml").read_text(encoding="utf-8")
 assert "uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0" in test_wf and "node-version: 22" in test_wf and test_wf.index("actions/setup-node@") < test_wf.index("- run: node"), "TS-S1 Node 22 before browser tests"
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
-for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node --test ui/ask.test.mjs', 'node ui/check.mjs --no-skip "Ask"', 'node ui/check.mjs --no-skip "Ask" --dark', 'python3 ui/ask-fixture.py "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"'):
+for command in ('node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"', 'node --test ui/ask.test.mjs', 'node ui/check.mjs --no-skip "Ask"', 'node ui/check.mjs --no-skip "Ask" --dark', 'python3 ui/ask-fixture.py "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "BR09 fixture" --dark --page "$PAGES/ask-four.html"', 'node ui/check.mjs --no-skip "MCP unchanged identity links"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "npm install" not in test_wf and "apt-get" not in test_wf, "TS-S1 no extra installs"
+assert test_wf.count("      - run: npm ci --prefix site") == 1, "TS-S1 exactly one locked site install"
+assert test_wf.index("actions/setup-node@") < test_wf.index("- run: npm ci --prefix site") < test_wf.index("- run: node --import ./site/css-loader.mjs --test site/test.mjs"), "TS-S1 locked site install follows setup-node"
 # Image and supplemental fixture commands stay literal: CI and this contract change together.
 for command in (
     'node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"',
@@ -1767,6 +1769,17 @@ for command in (
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"
 print("ok TS-S1 CI browser matrix")
+
+# MCP deployment must install the same locked site dependencies as tests.
+wf = pathlib.Path('.github/workflows/test.yml').read_text()
+deploy = pathlib.Path('.github/workflows/site-deploy.yml').read_text()
+site_docs = pathlib.Path('site/README.md').read_text()
+assert 'npm ci --prefix site' in wf and wf.index('npm ci --prefix site') < wf.index('node --import ./site/css-loader.mjs --test site/test.mjs')
+assert 'npm ci --prefix site' in deploy and deploy.index('npm ci --prefix site') < deploy.index('node --import ./site/css-loader.mjs --test site/test.mjs')
+assert 'node ui/check.mjs --no-skip "MCP unchanged identity links"' in wf
+assert 'OAUTH_KV' in site_docs and 'read:design' in site_docs
+assert 'No model-provider request' in site_docs and 'one hour' in site_docs
+print('ok MCP locked installation and settings docs')
 print("ok")
 
 # Parts lines: group by value+footprint+LCSC, normalise LCSC, flag missing numbers and conflicts.
