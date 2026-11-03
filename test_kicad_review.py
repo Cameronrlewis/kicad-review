@@ -5815,3 +5815,21 @@ for kind, cap in [('svg', 8 * 1024 * 1024), ('json', 4 * 1024 * 1024)]:
         warning = ''.join(str(call.args[0]) for call in log.write.call_args_list)
         assert oversized in warning and kind in warning and str(cap) in warning and 'inline' in warning
 print('ok oversized SVG and JSON stay inline with decoded-byte warning; exact caps remain lazy')
+
+# BR02: KiCad stamps export time into the GLB; identical boards must keep identical raw bytes and cache keys.
+import json, pathlib, struct, tempfile, kicad_review
+def _glb(stamp):
+    doc = json.dumps({"asset": {"version": "2.0", "extras": {"pcb_name": "board.raw", "generated_at": stamp}}}).encode()
+    doc += b" " * (-len(doc) % 4)
+    binary = struct.pack("<I", 4) + b"BIN\0" + b"\1\2\3\4"
+    return b"glTF" + struct.pack("<II", 2, 20 + len(doc) + len(binary)) + struct.pack("<I", len(doc)) + b"JSON" + doc + binary
+with tempfile.TemporaryDirectory() as tmp:
+    a, b, other = (pathlib.Path(tmp, n) for n in ("a.glb", "b.glb", "other.bin"))
+    a.write_bytes(_glb("2026-11-02T23:47:26")); b.write_bytes(_glb("2026-11-02T23:47:33")); other.write_bytes(b"not a glb")
+    for f in (a, b, other): kicad_review.normalize_glb(f)
+    out = a.read_bytes()
+    assert out == b.read_bytes() and b"generated_at" not in out and b"pcb_name" in out
+    assert struct.unpack("<I", out[8:12])[0] == len(out) and out.endswith(b"BIN\0\1\2\3\4")
+    size = struct.unpack("<I", out[12:16])[0]
+    assert size % 4 == 0 and json.loads(out[20:20 + size])["asset"]["extras"] == {"pcb_name": "board.raw"}
+    assert other.read_bytes() == b"not a glb"

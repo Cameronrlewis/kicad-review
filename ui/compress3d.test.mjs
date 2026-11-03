@@ -261,24 +261,6 @@ test('BR02 KiCad via meshes classify, color and batch as board copper', integrat
   for (const p of prims) assert.deepEqual(p.getMaterial().getBaseColorFactor(), [.78, .63, .39, 1]);
 });
 
-test('BR02 identical boards exported at different times keep one processed digest', integration, async () => {
-  const {NodeIO} = require('@gltf-transform/core');
-  const dir = mkdtempSync(pathJoin(process.env.OUT, 'export-time-'));
-  try {
-    const bytes = [];
-    for (const stamp of ['2026-11-02T23:47:26', '2026-11-02T23:47:33']) {
-      const {d, metadata} = makeDocument(['R1']);
-      d.getRoot().getAsset().extras = {generator: 'KiCad 10.0.0', generated_at: stamp};
-      const input = pathJoin(dir, 'in.glb'), output = pathJoin(dir, stamp + '.glb');
-      await new NodeIO().write(input, d);
-      await P.compress(input, output, metadata, pathJoin(dir, 'p.json'), pathJoin(dir, 's.json'));
-      bytes.push(readFileSync(output));
-    }
-    assert.ok(bytes[0].equals(bytes[1]), 'export timestamp leaked into processed bytes');
-    assert.doesNotMatch(bytes[0].toString('latin1'), /generated_at/);
-  } finally {rmSync(dir, {recursive: true, force: true});}
-});
-
 test('BR02 240 compatible changed primitives fit the hard changed-part budget', integration, async () => {
   const {d, metadata} = makeDocument(['R12', 'R2', 'R3'], 240);
   d.getRoot().listNodes().find(n => n.getName() === 'R12').setTranslation([.017, .002, -.013]);

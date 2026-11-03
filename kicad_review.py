@@ -471,6 +471,25 @@ def glb_argv(pcb, folder):
             "--subst-models", "-f", "-o", str(folder / "board.raw.glb"), pcb]
 
 
+def normalize_glb(path):
+    """Drop KiCad's export timestamp so identical boards keep identical bytes and cache keys."""
+    path = pathlib.Path(path)
+    data = path.read_bytes()
+    if len(data) < 20 or data[:4] != b'glTF' or data[16:20] != b'JSON':
+        return
+    size = struct.unpack('<I', data[12:16])[0]
+    doc = json.loads(data[20:20 + size])
+    extras = doc.get('asset', {}).get('extras')
+    if not isinstance(extras, dict) or 'generated_at' not in extras:
+        return
+    del extras['generated_at']
+    chunk = json.dumps(doc, separators=(',', ':')).encode('utf-8')
+    chunk += b' ' * (-len(chunk) % 4)
+    rest = data[20 + size:]
+    path.write_bytes(b'glTF' + data[4:8] + struct.pack('<I', 20 + len(chunk) + len(rest))
+                     + struct.pack('<I', len(chunk)) + b'JSON' + chunk + rest)
+
+
 def poster_argv(pcb, folder):
     return ["kicad-cli", "pcb", "render", "--quality", "basic", "--perspective",
             "--rotate", "-45,0,45", "-w", "1600", "-h", "1000", "-o", str(folder / "poster.png"), pcb]
@@ -597,6 +616,7 @@ def export_glb(p, side, out, *, model=True):
 
     if model:
         if run(glb_argv(pcb, folder), "board.raw.glb", "glb.log"):
+            normalize_glb(folder / "board.raw.glb")
             shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
         else:
             (folder / "board.glb").unlink(missing_ok=True)

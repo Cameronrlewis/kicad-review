@@ -191,8 +191,6 @@ async function compress(input,output,metadata,partsPath,statsPath) {
   const io=new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({
     'meshopt.encoder':MeshoptEncoder,'meshopt.decoder':MeshoptDecoder});
   const document=await io.read(input);
-  // KiCad stamps export time; drop it so identical boards keep one content digest.
-  delete document.getRoot().getAsset().extras?.generated_at;
   if(!metadata) {
     // Quantization changes mesh-node transforms. Keep component names and original
     // pivots on parents, so top/bottom classification and old-position ghosts agree.
