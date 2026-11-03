@@ -5806,6 +5806,10 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     if(!headNetRes?.error?.includes("not found"))return "base net resolved on head";
 
     // 5. Revision key round-trip with net and part
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",net:"BASE_NET"})));
+    if(S.revision!=="base"||S.net!=="BASE_NET"||S.io!==2)return "revision=base net did not focus base object";
+    if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).net!=="BASE_NET")return "revision=base net did not round-trip";
+
     await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),revision:"base",part:"mcp-base-only"})));
     if(S.revision!=="base"||S.part!=="mcp-base-only"||S.io!==2)return "revision=base part did not focus base object";
     if(decodeState("#"+encodeState()).revision!=="base"||decodeState("#"+encodeState()).part!=="mcp-base-only")return "revision=base part did not round-trip";
@@ -5836,7 +5840,7 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     // Simultaneous part+net
     const simultaneous=resolveIdentity({part:"mcp-unchanged",net},proj());
     if(!simultaneous?.error?.includes("not both"))return "simultaneous part+net not rejected";
-    await focusIdentity({part:"mcp-unchanged",net});
+    await applyState(decodeState("#"+new URLSearchParams({p:String(S.p),part:"mcp-unchanged",net})));
     if(!document.querySelector("#statusbar .status-message")?.textContent.includes("not both"))return "simultaneous part+net message missing";
 
     // Ordinary change selection after a net focus clears part/net/revision
