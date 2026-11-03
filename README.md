@@ -64,7 +64,7 @@ The site's re-run feature expects the caller workflow to be named `kicad-review.
 | `bom.order_ready_fields` | preset's fields | fields every part needs to count as order-ready (JLCPCB: Value, Footprint, LCSC; PCBWay: Value, Footprint, MPN) |
 | `fabrication.preset` | `"jlcpcb"` | `jlcpcb` or `pcbway` |
 | `fabrication.part_field` | `LCSC` / `MPN` | symbol field holding the supplier part number |
-| `3d.enabled` | `false` | export each changed board revision as a GLB and record footprints with missing 3D models; failed exports are recorded without failing the review |
+| `3d.enabled` | `false` | export every available board revision (including unchanged boards) as a realistic GLB with copper, soldermask, silkscreen, and still poster; viewer provides Assembled/Bare board toggling, studio lighting presets (Bench, Low sun, Photo); footprints with missing 3D models show placeholder boxes and coverage limitations; ruler/two-point measurement is deferred; failed exports are recorded without failing the review |
 | `parts.enabled` | `false` | show the parts list and its changes in the Parts tab and pull request comment |
 | `release.review` | `false` | on a `v*` tag, review changes since the previous `v*` tag and add a "KiCad review" section to the release notes |
 | `digikey.enabled` | `false` | look up stock and price by MPN; requires `parts.enabled = true` and the credentials below |
@@ -251,7 +251,10 @@ Ctrl+U toggles schematic coordinates between mm and mil without moving the view.
 PageUp/PageDown visit the previous/next sheet by page number; Alt+Up visits the
 parent. The hierarchy shows Name (page n), with the active sheet in bold.
 
-Schematic colours use an exact-value map from KiCad's default SVG palette.
+Schematic artwork is decoded SVG **images**, not thousands of live SVG paths.
+Light and dark exports retain KiCad colours. Custom paints rewrite exact palette
+values once per appearance change, never per camera frame.
+Schematic colours use an exact-value map from KiCad's exported SVG palette.
 Roles with the same exported RGB value stay linked. Unknown/custom export
 colours are preserved. Schematic diff outlines and recolour/hatch marks use
 changed bounding regions because CLI SVG paths do not carry object UUIDs.
@@ -314,7 +317,9 @@ A current browser needs WebGL2 with stencil support plus the native gzip
 `DecompressionStream` API for geometry. Unsupported drawable types make that revision
 incomplete: the **authoritative KiCad-exported SVG** is retained, not a partially drawn
 WebGL board. Old reports, invalid scenes, unavailable WebGL2 and context loss also use
-SVG with a diagnostic and reduced Appearance controls. Existing SVG Side, Overlay,
+stacked SVG images with a diagnostic and reduced Appearance controls. Each layer
+receives opacity once, preserving overlap, all four copper layers and physical
+order (reversed when flipped). Existing SVG Side, Overlay,
 Wipe, Blend and Semantic comparisons remain available. Stage 4 supplies geometry and
 Appearance; Stage 5 enables the new WebGL diff compositor (already integrated in this
 branch). This does not claim the later change-mark styling is complete.
@@ -347,6 +352,30 @@ The added offline payload target is at most 1,500,000 raw HTML bytes versus the
 pre-renderer report for identical inputs/settings, including base64 scenes and assets;
 compressed geometry size alone is not the budget.
 
+## 3D viewer
+
+When `3d.enabled = true`, reports provide realistic, selectable 3D views for every available
+board revision, including unchanged boards. A single WebGL renderer serves all comparison
+modes: Side by side renders both revisions using synchronized viewports and cameras.
+
+KiCad board materials are preserved with physical fidelity:
+- **Copper**: realistic metallic reflection and roughness across tracks, pads, and zones.
+- **Soldermask**: semi-translucent green with clearcoat and subtle roughness, preserving non-default mask colours (red, blue, black, white).
+- **FR4 core**: realistic substrate dielectric colour and matte finish.
+- **Pads**: ENIG/ENEPIG gold finish when configured in the stackup copper finish; silver otherwise.
+- **Simplification ceiling**: component bodies are simplified only above **600,000** triangles (50% decimation, 0.0005 error tolerance) to protect frame rates on large boards; copper, pads, soldermask, silkscreen, and the board substrate body are never decimated.
+
+A 1600×1000 still **poster** rendered with KiCad CLI appears immediately while the model loads,
+and remains as the fallback when WebGL is unavailable.
+
+### 3D controls and tools
+
+- **Assembled / Bare**: toggle component meshes to inspect bare board routing and copper without a separate model download.
+- **Lighting**: generated studio environment with three presets (**Bench**, **Low sun**, **Photo**), bearing rotation in 30° steps, and exposure adjustment from 0.4 to 3.0 in steps of 0.05.
+- **Picking and highlights**: changed components remain isolated meshes, preserving per-part revision highlights, diff tinting, and selection. Unchanged parts are batched by material, with pointer hover and click resolved against a world-space bounding box index in **world metres**.
+- **3D coverage and placeholders**: footprints lacking a 3D model render hatched placeholder boxes, and the view summarizes honest **3D coverage** (footprints, with-model, placeholders, triangles, and primitives). Missing models are also catalogued in the missing models table.
+- **Deferred measurements**: ruler and two-point measurement tools are deferred; standard camera orientation and Fit actions are provided.
+
 ## Developing the review page
 
 Open `ui/review.html` in a browser: it loads real data from `ui/sample/review-data.js`.
@@ -360,6 +389,28 @@ To refresh the sample, take the data out of any generated report (a CI artifact 
 python3 -c "import re; h = open('kicad-review.html', encoding='utf-8').read(); open('ui/sample/review-data.js', 'w', encoding='utf-8').write(re.search(r'(window\.REVIEW_DATA = .*?;)\s*</script>', h, re.S).group(1) + '\n')"
 ```
 
+### Image regression checks
+
+Images require **no new TOML setting** and no opt-in. The single downloaded HTML
+still embeds compressed artwork and data and works offline without external
+requests. Component/net search and identity-based inspection use sheet hotspots
+and board inspection graphs; older reports remain viewable but inspection may be
+unavailable when these optional manifests are absent.
+
+CI generates `images.html` from `ui/sample/review-data-images.js` through
+`inline_page`, alongside the legacy, 3D, Parts and unchanged-project fixtures.
+Run `node ui/check.mjs --no-skip "images screen and legacy appearance" --page
+/path/to/images.html --width 1440 --height 900 --dpr 2` for the desktop profile;
+repeat with `--dark`. Checks run sequentially.
+Use `--offline` against the inline page to block and detect external requests.
+
+The mandatory image matrix also covers comparisons, four copper layers, gesture
+pixels/lifecycle, fallback appearance, manifests/Home, added/removed revisions,
+inspection/search/anchors, and persisted themes in GL and fallback modes.
+Keep complete-screen captures for comparisons and inspection in both desktop themes. Review navigation, toolbar, stage, inspector, status, keyboard focus and
+search wrapping together; compare the whole four-layer board with KiCad 10, not
+just colour swatches.
+
 ### Data format
 
 The workflow and the page share one contract, `window.REVIEW_DATA` (`version: 1`): `repo`; `links`
@@ -372,6 +423,33 @@ and `changes` or `props`) and `checks[]` (counts and `violations[]` with `id`, `
 on every review, `board.model3d` has base/head GLB blob ids (or `null`), `enabled`, `changed`, and
 an `errors` map for unavailable exports, and `board.no_model` lists `{ref, side, reason}` entries (`file not found` or `no model in
 footprint`). Positions and boxes are drawing millimetres.
+
+Image fields grow format v1 **additively**: sheets may add `svgThemes` and
+`hotspots` with base/head blob ids; board layers may add `svgThemes`, and the board
+may add `inspect` with base/head JSON blob ids. Existing `svg` fields remain the
+compatibility/default image. Missing revisions remain absent, not fabricated.
+Top-level `assets` declares digest-addressed SVG/JSON companions. Rendering writes
+these deterministic gzip sidecars alongside the offline HTML; CI uploads them in
+a separate archived `kicad-review-image-assets-<run_id>-<run_attempt>` artifact
+with 90-day retention, leaving the HTML artifact unchanged. Hosted delivery
+lazily requests only declared assets through the authenticated parent bridge.
+The sandbox remains network-isolated. Each asset reuse revalidates repository
+access and artifact expiry before a conditional 304 (`private,no-cache`, quoted
+ETag, `Vary: Cookie`).
+
+The current Worker reads the **entire stored HTML envelope for each asset**,
+then parses its data; it does not yet use indexed/range sidecar reads. There is
+no explicit envelope byte ceiling in this reader: available Worker memory/CPU
+bounds it, so lazy delivery does not promise unbounded report size or bounded
+server memory. The bridge separately caps decoded SVG at 8 MiB and JSON at 4 MiB.
+
+3D fields grow format v1 **additively**: `board.parts3d` provides base/head part index blob IDs (or `null`), mapping footprint references to world-space bounding boxes in **world metres** (`[minX, minY, minZ, maxX, maxY, maxZ]`), in contrast to board anchors, schematic coordinates, and change boxes which remain in board drawing millimetres. `board.poster3d` provides base/head PNG blob IDs (or `null`) for the 1600×1000 still preview. `board.coverage3d` (and revision-specific `board.coverage3dBySide`) records honest 3D coverage facts:
+
+```json
+{"parts3d":{"base":"indexBlobA","head":"indexBlobB"},"poster3d":{"base":"pngBlobA","head":"pngBlobB"},"coverage3d":{"footprints":56,"withModel":52,"placeholders":4,"triangles":42998,"primitives":60}}
+```
+
+The example blob names above are illustrative. Compatibility is preserved: `board.model3d.{base,head}` remains backward compatible for older consumers expecting raw or viewer GLB blob IDs. Top-level `assets` (with optional `assets3d`) declares digest-addressed 3D GLB and part index sidecars. In offline single-file reports and unauthenticated guest views, models, posters, and part indexes are embedded directly as gzip+base64 entries in `blobs`, keeping the report completely offline. In authenticated hosted reports, lazy delivery streams 3D assets through the parent broker only when the 3D view opens. GLB processing is cached per comparison pair by raw export digest, sorted kept-reference list, processor version, and options so unchanged models are reused while comparisons with differing change sets retain distinct identities.
 
 Unchanged sheets, board layers (including blank layers), board geometry, and enabled 3D views remain
 available at both revisions. The viewer labels these views “No layout changes”, “No schematic changes

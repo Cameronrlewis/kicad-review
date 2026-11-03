@@ -134,7 +134,7 @@ function guestResponse(deps, body, init = {}) {
   result.headers.set('Referrer-Policy', 'no-referrer');
   return result;
 }
-function downloadUrl(value) {
+export function downloadUrl(value) {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && !url.username && !url.password && !url.port
