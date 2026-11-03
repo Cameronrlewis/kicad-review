@@ -121,6 +121,26 @@ const MARK_STYLE_FIXTURE = `
     for(const p of boardDiff.panes) trackAppearanceBoard(p.renderer,p.canvas);
     syncMarkStyles();
 `;
+// Mesh-miss setup runs once, before real CDP input; assertions never mutate the scene.
+export const BR02_MESH_MISS_PREPARE = `
+ if(!proj().board.parts3d)return null;
+ const st=Review3D.state,{THREE:T}=THREE3D,v=st.views.find(v=>v.visible&&(!v.side||v.side==='head'));
+ if(!v)return 'missing head viewport';
+ const root=st.roots[1],changed=st.parts.head.find(p=>p.ref==='R12'),unchanged=st.parts.head.find(p=>p.ref==='R2');
+ root.traverse(n=>{if(n.isMesh)n.visible=false});
+ const center=unchanged.bounds.getCenter(new T.Vector3());
+ v.controls.target.copy(center);v.camera.position.copy(center).add(new T.Vector3(0,.1,0));
+ v.camera.up.set(0,0,-1);v.camera.lookAt(center);v.camera.updateMatrixWorld(true);
+ changed.bounds=unchanged.bounds.clone().expandByScalar(.001);
+ // Triangle is inside the overlapping changed AABB but away from the centre ray.
+ const size=unchanged.bounds.getSize(new T.Vector3()),x=center.x+size.x*.4,z=center.z;
+ const g=new T.BufferGeometry().setAttribute('position',new T.Float32BufferAttribute([
+   x,center.y+.001,z,x+size.x*.05,center.y+.001,z,x,center.y+.001,z+size.z*.05],3));
+ const mesh=new T.Mesh(g,new T.MeshBasicMaterial({side:T.DoubleSide}));
+ mesh.userData={role:'body',side:changed.side,ref:'R12'};root.add(mesh);window.__br02MeshMissMesh=mesh;
+ // Named \`BR02 processed mesh miss\` branch in ui/check.mjs sends a real CDP mouse press/release here.
+`;
+
 // [name, url hash, body of an async function that returns true when the check passes]
 const gestureLifecycleCheck=['images gesture lifecycle','',`
   if(D.repo!=='fixture/images')return 'skip';
@@ -195,6 +215,201 @@ const askOpen = `
   if (!visibleAsk || visibleAsk.width <= 0 || visibleAsk.height <= 0) return 'Ask is not visibly open';`;
 
 export const CHECKS = [
+["BR02 processed unchanged focus and missing batch", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,p=st.parts.head.find(p=>p.ref==='R2');
+ if(!p?.hasModel)return 'missing unchanged R2 index';
+ if(st.roots[1].getObjectByName('R2'))return 'unchanged part was not merged';
+ Review3D.focusPart('R2','head',false);
+ if(!Review3D.state.selected.length)return 'unchanged focus has no outline';
+ for(const side of ['base','head']) {
+   const missing=st.parts[side].filter(p=>!p.hasModel),mesh=st.placeholderMeshBySide[side];
+   if(missing.length&&(!mesh?.isMesh||mesh.geometry.index.count!==missing.length*36))
+     return 'missing models not in one indexed box batch';
+ }
+ return true;
+`],
+["BR02 processed bare parts cannot be picked", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ Review3D.setAssembled(false);
+ Review3D.focusPart('R2','head',false);
+ if(Review3D.state.selected.length)return 'hidden body remains selectable';
+ Review3D.setAssembled(true);Review3D.focusPart('R2','head',false);
+ return Review3D.state.selected.length>0||'assembled focus failed';
+`],
+
+...[...['R2','J1','U3','U4'].flatMap(ref=>['base','head'].map(side=>[ref,side])),['R1','base'],['R12','head']].map(([ref,side])=>[
+ 'BR02 processed pointer '+side+' '+ref,'v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const side=${JSON.stringify(side)},ref=${JSON.stringify(ref)},st=Review3D.state;
+ Review3D.setRevision(side);
+ const v=st.views.find(v=>v.visible&&(!v.side||v.side===side));if(!v)return 'missing own viewport';
+ const p=st.parts[side].find(p=>p.ref===ref),{THREE:T}=THREE3D;
+ if(!p)return 'missing indexed target';
+ const point=p.bounds.getCenter(new T.Vector3());v.camera.updateMatrixWorld(true);point.project(v.camera);
+ const b=v.host.getBoundingClientRect(),xy={clientX:b.left+(point.x+1)*b.width/2,
+   clientY:b.top+(1-point.y)*b.height/2,bubbles:true,pointerId:1,pointerType:'mouse'};
+ if(Math.abs(point.x)>1||Math.abs(point.y)>1)return 'target outside viewport';
+ // ui/check.mjs named BR02 processed pointer preparation computes these projected host coordinates before this assertion body runs.
+ if(window.__br02PointerResult?.side!==side||window.__br02PointerResult?.ref!==ref)return 'CDP pointer input was not prepared';
+ const changed=proj().changes.find(c=>c.kind==='footprint'&&(c.uuid===p.uuid||c.uuid_before===p.uuid));
+ if(changed) {
+   if(S.s!==changed.id)return 'changed footprint bypassed change selection: '+JSON.stringify({expected:changed.id,selected:S.s,part:S.part3d?.uuid});
+   if(!Review3D.state.selected.some(x=>x.ref===ref&&x.side===side))return 'changed footprint did not select its revision-local outline';
+   if(S.part3d)return 'changed selection incorrectly entered part inspector';
+ } else {
+   if(S.part3d?.uuid!==p.uuid||S.part3d?.side!==side)return 'indexed pointer selected wrong UUID/revision';
+   const inspector=document.querySelector('[data-part3d-inspector]');
+   if(!inspector||![ref,p.uuid,side].every(x=>inspector.textContent.includes(x)))return 'inspector identity missing';
+ }
+ if(!window.__br02PointerResult.tip.includes(ref))return 'indexed hover absent';
+ for(const hidden of [[p.side],['bodies']]) {
+   Review3D.setHidden(hidden);
+   if(v.host.querySelector('.tip3d'))return 'hidden body tooltip remains visible';
+   const mesh=st.placeholderMeshBySide[side];
+   if(mesh&&hidden[0]===p.side) {
+     const own=mesh.userData.placeholderSides.indexOf(p.side),other=1-own;
+     if(mesh.material[own].visible||!mesh.material[other].visible)return 'placeholder side visibility not independent';
+   }
+   Review3D.setAssembled(false);Review3D.setAssembled(true);
+   if(Review3D.state.selected.length)return 'assembly reset hidden selection';Review3D.setHidden([]);
+ }
+ Review3D.setAssembled(false);
+ if(Review3D.state.selected.length)return 'bare board retained outlines';
+ Review3D.setAssembled(true);return true;
+ `]),
+
+["BR02 processed overlapping box misses changed mesh", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const unchanged=Review3D.state.parts.head.find(p=>p.ref==='R2');
+ if(!window.__br02MeshMissMesh?.visible)return 'mesh-miss triangle hidden or not prepared';
+ if(!window.__br02MeshMissInput)return 'CDP mesh-miss input was not prepared';
+ return S.part3d?.uuid===unchanged.uuid||'changed AABB stole mesh-miss ray';
+`],
+["BR02 processed moved renamed own pane outlines", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const c=proj().changes.find(c=>c.kind==='footprint'&&c.ref==='R12');if(!c)return 'renamed change absent';
+ Review3D.focus(c,false);const st=Review3D.state;
+ for(const side of st.visibleSides) {
+   const p=st.parts[side].find(p=>p.uuid===(side==='base'?(c.uuid_before||c.uuid):c.uuid));
+   const outlines=st.selected.filter(o=>o.userData.revision===side);
+   if(outlines.length!==1||outlines[0].userData.uuid!==p.uuid)return 'lost revision-local outline';
+   const b=new THREE3D.THREE.Box3().setFromObject(outlines[0]);
+   if(b.min.distanceTo(p.bounds.min)>1e-6||b.max.distanceTo(p.bounds.max)>1e-6)return 'outline uses other revision box';
+ }
+ return st.selected.length===2||'changed focus cleared base outline';
+`],
+
+  ["BR02 processed missing list keeps revision identity", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    for(const side of ['base','head']) {
+      Review3D.setRevision(side);
+      // Verified indexes list each revision's missing parts separately; click this revision's row.
+      const row=ref=>document.querySelector('[data-no-model="'+ref+'"][data-no-model-side="'+side+'"]');
+      if(!row('U3')||!row('U4'))return 'missing list lacks a row for '+side;
+      if(!row('U4').textContent.includes(side==='base'?'Base':'Head'))return 'missing list row hides its revision';
+      row('U3').click();
+      const c=proj().changes.find(c=>c.ref==='U3');
+      if(S.s!==c.id||S.part3d)return 'changed missing part bypassed change selection';
+      const st=Review3D.state,p=st.parts[side].find(p=>p.ref==='U3');
+      if(!st.selected.some(o=>o.userData.uuid===p.uuid&&o.side===side))return 'changed missing list lost own revision';
+      row('U4').click();
+      if(S.s||S.part3d?.side!==side||S.part3d?.ref!=='U4')return 'unchanged missing list fabricated a change';
+    }
+    return true;
+  `],
+  ["BR02 processed rejected peer index retains own focus", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),expected=Review3D.state.parts.head.find(p=>p.ref==='R12').bounds.clone();
+    p.board.parts3d.head='br02-invalid-index';REVIEW_DATA.blobs['br02-invalid-index']='not base64!';
+    await Review3D.show(document.querySelector('#stage'),p,S);
+    const c=p.changes.find(c=>c.ref==='R12');Review3D.focus(c,false);
+    const st=Review3D.state;
+    if(!st.errorsBySide.head)return 'invalid index not diagnosed';
+    const own=st.selected.find(o=>o.side==='head');
+    if(!own&&st.visibleSides.includes('head'))return 'valid peer suppressed legacy own focus';
+    if(own) {
+      const box=new THREE3D.THREE.Box3().setFromObject(own);
+      if(box.min.distanceTo(expected.min)>1e-6||box.max.distanceTo(expected.max)>1e-6)return 'rejected index borrowed peer bounds';
+    }
+    return true;
+  `],
+  ...['bare','bodies','own side','other side','redraw'].map(action=>[
+    'BR02 processed inspector visibility '+action,'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const part=Review3D.state.parts.head.find(p=>p.ref==='U4');
+    Review3D.setRevision('head');Review3D.onPartPick({...part,side:'head'});Review3D.focusPart(part.ref,'head',false);
+    if('${action}'==='bare')Review3D.setAssembled(false);
+    if('${action}'==='bodies')Review3D.setHidden(['bodies']);
+    if('${action}'==='own side')Review3D.setHidden([part.side]);
+    if('${action}'==='other side')Review3D.setHidden([part.side==='top'?'bottom':'top']);
+    if('${action}'==='redraw'){S.m='overlay';await draw();}
+    const selected=Review3D.state.selected,inspector=document.querySelector('[data-part3d-inspector]');
+    if('${action}'==='other side')return selected.length>0&&S.part3d?.uuid===part.uuid&&!!inspector||'visible opposite-side selection cleared';
+    return !selected.length&&!S.part3d&&!inspector||'invisible part retained inspector or outline';
+  `]),
+  ["BR02 processed change ownership uses revision-local references", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),parts=Review3D.state.parts;
+    p.changes.push({id:'added-u4',kind:'footprint',action:'added',ref:'U4',uuid:parts.head.find(p=>p.ref==='U4').uuid},
+      {id:'removed-r2',kind:'footprint',action:'removed',ref:'R2',uuid:parts.base.find(p=>p.ref==='R2').uuid});
+    await Review3D.show(document.querySelector('#stage'),p,S);
+    for(const [ref,side,id] of [['R1','base','c1'],['R12','head','c1'],['R12','base',null],['R1','head',null],
+      ['U4','head','added-u4'],['U4','base',null],['R2','base','removed-r2'],['R2','head',null]]) {
+      if((Review3D.changeForPart(ref,side)?.id||null)!==id)return 'wrong change owner: '+side+' '+ref;
+    }
+    return true;
+  `],
+  ["BR02 processed indexed missing focus tooltip", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const change=proj().changes.find(c=>c.ref==='U3');Review3D.focus(change,false);
+    for(const side of Review3D.state.visibleSides) {
+      const v=Review3D.state.views.find(v=>v.visible&&(!v.side||v.side===side));
+      if(!v.host.querySelector('.tip3d')?.textContent.includes('U3 · no 3D model'))return 'indexed missing focus lost tooltip';
+    }
+    Review3D.setAssembled(false);
+    return !document.querySelector('.tip3d')||'hidden missing focus retained tooltip';
+  `],
+  ["BR02 processed resize does not rescan body visibility", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    let visits=0;const st=Review3D.state,restore=[];
+    for(const root of st.roots.filter(Boolean)) {
+      const traverse=root.traverse;restore.push(()=>root.traverse=traverse);
+      root.traverse=function(...args){visits++;return traverse.apply(this,args)};
+    }
+    try {Review3D.resize();return visits===0||'resize rescanned body groups';}
+    finally {restore.forEach(f=>f());}
+  `],
+  ["BR02 processed inspector identity is text and clears on navigation", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const part=Review3D.state.parts.head.find(p=>p.ref==='R2');
+    const ref='<img src=x onerror=alert(1)>';
+    Review3D.onPartPick({...part,ref,side:'head'});
+    const inspector=document.querySelector('[data-part3d-inspector]');
+    if(inspector.querySelector('img')||!inspector.textContent.includes(ref))return 'index text interpreted as markup';
+    const expected=part.box.map(n=>round3(n*1000));
+    if(!inspector.textContent.includes('X bounds (mm)')||!inspector.textContent.includes(expected[0]+' … '+expected[3]))return 'world bounds not shown in board mm';
+    await goTo(proj().changes[0].id);
+    if(S.part3d||document.querySelector('[data-part3d-inspector]'))return 'changed selection retained part identity';
+    Review3D.onPartPick({...part,side:'head'});
+    await applyState({...S,s:proj().changes[0].id});
+    if(S.part3d||document.querySelector('[data-part3d-inspector]'))return '3D hash navigation retained stale part identity';
+    Review3D.onPartPick({...part,side:'head'});S.v='board';await draw();
+    return !S.part3d&&!document.querySelector('[data-part3d-inspector]')||'navigation retained stale 3D identity';
+  `],
+  ["BR02 processed inspector whole screen", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state,part=st.parts.head.find(p=>p.ref==='R2'),widthBefore=document.documentElement.scrollWidth;
+    Review3D.setRevision('head');Review3D.onPartPick({...part,side:'head'});Review3D.focusPart(part.ref,'head',false);
+    // The shared shell belongs to 05: record its existing overflow, reject any added by this inspector.
+    // Fix-round acceptance also requires the whole shell to fit; no baseline overflow exemption.
+    console.log('BOARD_PROOF part inspector '+JSON.stringify({width:innerWidth,before:widthBefore,after:document.documentElement.scrollWidth}));
+    if(document.documentElement.scrollWidth>innerWidth)return 'part inspector whole screen overflow';
+    const inspector=document.querySelector('[data-part3d-inspector]'),r=inspector.getBoundingClientRect();
+    if(r.left<0||r.right>innerWidth||r.bottom>innerHeight||inspector.scrollWidth>inspector.clientWidth)return 'part inspector outside screen';
+    const toggle=document.querySelector('#insp-toggle');toggle.focus();
+    return document.activeElement===toggle&&inspector.textContent.includes(part.uuid)||'part identity or keyboard focus absent';
+  `],
   ['images search pointer activation without button focus','',`
     if(D.repo!=='fixture/images')return 'skip';
     await applyState({...S,v:'sheet:/right/',m:'side'});
@@ -1518,7 +1733,7 @@ return true;
     };
     try {
       const cancelled = Review3D.show(stage, p, {...S, s:null});
-      while (parsed < Object.values(p.board.model3d).filter(Boolean).length) await new Promise(r => setTimeout(r, 20));
+      while (parsed < new Set(['base','head'].filter(side=>p.board.model3d[side]).map(side=>p.board.assets3d?.[side]?.model?.digest||p.board.model3d[side])).size) await new Promise(r => setTimeout(r, 20));
       await Review3D.show(stage, {...p, board:{...p.board, model3d:{}, no_model:[]}}, {...S, m:"overlay", s:null});
       release(); await cancelled;
       return resources.size > 0 && disposed.size === resources.size || JSON.stringify({parsed, resources:resources.size, disposed:disposed.size});
@@ -1557,6 +1772,259 @@ return true;
       facts.push(ticks.length > 0 && !error && updates === 0 && JSON.stringify(camera) === JSON.stringify(Review3D.cameraState()));
     }
     return facts.every(Boolean) || JSON.stringify(facts);`],
+  ...["worker-start","worker-postMessage-throws","worker-messageerror","worker-error","corrupt-model","context-loss","late-parse"].map(fault=>[
+ "BR02 processed session fault "+fault,"v=3d&m=side",`
+ if(!proj().board.parts3d)return 'skip';
+ const fault=${JSON.stringify(fault)}, p=structuredClone(proj()), stage=document.querySelector('#stage');
+ const NativeWorker=window.Worker, Loader=window.THREE3D.GLTFLoader;
+ const parse=Loader.prototype.parseAsync;let release;
+ const createURL=URL.createObjectURL,revokeURL=URL.revokeObjectURL,liveURLs=new Set();
+ URL.createObjectURL=function(...args){const url=createURL.apply(this,args);liveURLs.add(url);return url;};
+ URL.revokeObjectURL=function(url){liveURLs.delete(url);return revokeURL.call(this,url);};
+ try {
+   if(fault==='worker-start')window.Worker=class {constructor(){throw Error('BR02 injected worker failure')}};
+   if(fault==='worker-postMessage-throws')window.Worker=class {
+     constructor(...args){const worker=new NativeWorker(...args);worker.postMessage=()=>{throw Error('BR02 injected postMessage failure')};return worker;}
+   };
+   if(fault==='worker-error'||fault==='worker-messageerror')window.Worker=class {
+     constructor(...args){const worker=new NativeWorker(...args);
+       queueMicrotask(()=>worker.dispatchEvent(new Event(fault==='worker-error'?'error':'messageerror')));
+       return worker;}
+   };
+   if(fault==='corrupt-model') {
+     p.board.model3d.head='br02-corrupt';REVIEW_DATA.blobs['br02-corrupt']='not base64!';
+   }
+   if(fault==='late-parse') {
+     let first=true;
+     Loader.prototype.parseAsync=async function(...args) {
+       const model=await parse.apply(this,args);
+       if(first){first=false;await new Promise(r=>release=r)}return model;
+     };
+     const old=Review3D.show(stage,p,S);
+     for(let i=0;i<200&&!release;i++)await new Promise(r=>setTimeout(r,10));
+     if(!release)return 'injected parse was never reached';
+     Review3D.dispose();Loader.prototype.parseAsync=parse;
+     await Review3D.show(stage,p,S);const current=Review3D.state, canvases=[...stage.querySelectorAll('canvas')];
+     // Assert ownership, not a per-side renderer count: shared rendering uses the same contract.
+     const ownedCanvases=new Set(current.renderers.map(renderer=>renderer.domElement));
+     if(!current.firstFrame||!canvases.length||canvases.length!==ownedCanvases.size||canvases.some(canvas=>!ownedCanvases.has(canvas)))return 'new session canvas ownership mismatch';
+     release();await old;
+     if(Review3D.state!==current)return 'late parse replaced newer session';
+     const settledCanvases=[...stage.querySelectorAll('canvas')];
+     if(settledCanvases.length!==canvases.length||settledCanvases.some((canvas,i)=>canvas!==canvases[i]))return 'late parse resurrected canvas';
+     if(current.loading)return 'new session still loading';
+     Review3D.dispose();
+     return Object.values(current.resourceCounts).every(n=>n===0)||'late parse session leaked owned resources';
+   }
+   await Review3D.show(stage,p,S);
+   if(fault==='context-loss') {
+     const canvas=document.querySelector('#stage canvas');if(!canvas)return 'no model canvas';
+     canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+   }
+   const st=Review3D.state;
+   if(fault==='worker-postMessage-throws'&&st.resourceCounts.pending!==0)return 'postMessage leaked pending job';
+   if(['worker-start','worker-error','worker-messageerror'].includes(fault)&&
+      (st.resourceCounts.urls!==liveURLs.size||liveURLs.size!==2))return 'failed worker retained blob URL: '+JSON.stringify({counts:st.resourceCounts,live:liveURLs.size});
+   if(st.loading)return 'failure left loading unsettled';
+   if(!st.errorsBySide.head)return 'head error not recorded';
+   if(fault!=='corrupt-model'&&st.firstFrame)return 'failure reported a genuine first frame';
+   if(!document.querySelector('#stage [data-poster="head"]:not([hidden])'))return 'head poster lost';
+   if(fault==='corrupt-model'&&!st.roots[0])return 'valid base lost';
+   if(!document.querySelector('#stage [data-3d-retry]'))return 'no accessible retry';
+   if(fault==='worker-start'||fault==='context-loss') {
+     window.Worker=NativeWorker;
+     const oldCanvas=stage.querySelector('canvas');
+     stage.querySelector('[data-3d-retry]').click();
+     for(let i=0;i<300&&!Review3D.state.firstFrame;i++)await new Promise(r=>setTimeout(r,10));
+     if(!Review3D.state.firstFrame)return 'retry did not restore model';
+     if(fault==='context-loss'&&stage.querySelector('canvas')===oldCanvas)return 'retry kept lost context';
+   }
+   Review3D.dispose();
+   const counts=Review3D.state.resourceCounts;
+   return counts.workers===0&&counts.urls===0&&counts.pending===0||'session leaked owned resources';
+ } finally {
+   release?.();window.Worker=NativeWorker;Loader.prototype.parseAsync=parse;
+   delete REVIEW_DATA.blobs['br02-corrupt'];
+   Review3D.dispose();URL.createObjectURL=createURL;URL.revokeObjectURL=revokeURL;
+ }
+ `]),
+  ["BR02 processed poster errors preserve model and explain missing fallback", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),stage=document.querySelector('#stage');
+    REVIEW_DATA.blobs['br02-bad-poster']='not base64!';
+    try {
+      p.board.poster3d.head='br02-bad-poster';
+      await Review3D.show(stage,p,S);
+      const st=Review3D.state;
+      if(!st.posterErrorsBySide.head||st.posterBySide.head||st.errorsBySide.head||!st.firstFrame||!st.roots[1])return 'poster failure killed usable model or lost diagnostic';
+      p.board.model3d.head='br02-bad-poster';
+      await Review3D.show(stage,p,S);
+      const current=Review3D.state,notice=[...stage.querySelectorAll('.error3d')].find(n=>n.textContent.includes(current.posterErrorsBySide.head));
+      if(!notice||!notice.querySelector('[data-3d-retry]')||!current.roots[0]||current.loading)return 'missing poster fallback not explained';
+      return true;
+    } finally { Review3D.dispose();delete REVIEW_DATA.blobs['br02-bad-poster']; }
+  `],
+  ["BR02 processed corrupt part index keeps the model and warns for its side", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj()),stage=document.querySelector('#stage');
+    try {
+      await Review3D.show(stage,p,S);
+      const ok=Review3D.state.parts;
+      if(!ok.base.length||!ok.head.length||!ok.head.every(x=>x.bounds?.isBox3&&!x.bounds.isEmpty()))return 'valid indexes not installed with bounds';
+      if(Object.keys(Review3D.state.errorsBySide).length)return 'valid indexes warned';
+      Review3D.dispose();
+      p.board.parts3d={...p.board.parts3d,head:'br02-corrupt'};REVIEW_DATA.blobs['br02-corrupt']='not base64!';
+      await Review3D.show(stage,p,S);
+      const st=Review3D.state;
+      if(st.parts.head.length!==0)return 'corrupt index installed parts';
+      if(st.firstFrame!==true)return 'corrupt optional index killed the model';
+      const head=st.roots[1],view=st.views.find(v=>v.side==='head');
+      let renderable=false;head?.traverse(n=>{if(n.isMesh&&n.visible&&n.geometry?.getAttribute('position')?.count)renderable=true;});
+      if(!head||!renderable||!view||!view.visible||view.failed||view.host.hidden||!view.scene.getObjectById(head.id)||!(view.calls>0))return 'corrupt index lost renderable Head view';
+      if(st.errorsBySide.base)return 'corrupt Head index warned for Base';
+      if(!/Part inspection unavailable/.test(st.errorsBySide.head||''))return 'no side-specific warning';
+      return true;
+    } finally { Review3D.dispose();delete REVIEW_DATA.blobs['br02-corrupt']; }
+  `],
+  ...['model-first','index-first'].map(order=>[
+    'BR02 processed model and index failure order '+order, 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const NativeWorker=window.Worker,stage=document.querySelector('#stage'),gates={};
+    const wait=async predicate=>{for(let i=0;i<300&&!predicate();i++)await new Promise(r=>setTimeout(r,10));if(!predicate())throw Error('failure gate timeout');};
+    let opening;
+    try {
+      window.Worker=class extends NativeWorker {
+        postMessage(data,...args) {
+          if(data.b64==='br02-model-failure'||data.b64==='br02-index-failure') {
+            gates[data.b64]=()=>this.onmessage({data:{id:data.id,error:data.b64}});return;
+          }
+          return super.postMessage(data,...args);
+        }
+      };
+      REVIEW_DATA.blobs['br02-model-failure']='br02-model-failure';
+      REVIEW_DATA.blobs['br02-index-failure']='br02-index-failure';
+      for(const mode of ['overlay','blend','semantic']) {
+        const p=structuredClone(proj());
+        p.board.model3d.head='br02-model-failure';p.board.parts3d.head='br02-index-failure';
+        delete gates['br02-model-failure'];delete gates['br02-index-failure'];
+        opening=Review3D.show(stage,p,{...S,m:mode,revision:'head'});
+        await wait(()=>gates['br02-model-failure']&&gates['br02-index-failure']);
+        const first='${order}'==='model-first'?'br02-model-failure':'br02-index-failure';
+        gates[first]();
+        await wait(()=>Review3D.state.errorsBySide.head);
+        if(first==='br02-index-failure'&&!/^Part inspection unavailable:/.test(Review3D.state.errorsBySide.head))return 'index did not fail first';
+        if(first==='br02-model-failure'&&Review3D.state.errorsBySide.head!=='br02-model-failure')return 'model did not fail first';
+        gates[first==='br02-model-failure'?'br02-index-failure':'br02-model-failure']();
+        await opening;opening=null;
+        const st=Review3D.state,poster=st.posterBySide.head,host=poster?.closest('.view3d'),notice=host?.querySelector('.error3d');
+        if(st.errorsBySide.head!=='br02-model-failure'||st.errorsBySide.base)return mode+': model diagnostic replaced or Base warned';
+        if(!st.roots[0]||st.roots[1]||!st.firstFrame||st.loading||st.parts.head.length)return mode+': valid Base or settled state lost';
+        if(!host||host.hidden||getComputedStyle(host).display==='none'||poster.hidden||!notice?.textContent.includes('br02-model-failure')||!notice.querySelector('[data-3d-retry]'))return mode+': failed Head fallback hidden';
+        Review3D.dispose();
+      }
+      return true;
+    } finally {
+      Object.values(gates).forEach(release=>release());if(opening)await opening;
+      Review3D.dispose();window.Worker=NativeWorker;
+      delete REVIEW_DATA.blobs['br02-model-failure'];delete REVIEW_DATA.blobs['br02-index-failure'];
+    }
+  `]),
+  ["BR02 processed loading aggregates outstanding sides", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ const Loader=THREE3D.GLTFLoader,original=Loader.prototype.parseAsync,releases=[];
+ let opening;
+ try {
+   Loader.prototype.parseAsync=async function(...args){await new Promise(r=>releases.push(r));return original.apply(this,args);};
+   opening=Review3D.show(document.querySelector('#stage'),proj(),S);
+   for(let i=0;i<300&&releases.length<2;i++)await new Promise(r=>setTimeout(r,10));
+   const st=Review3D.state;
+   if(releases.length!==2)return 'both revision parse gates not reached';
+   if(st.firstFrame||!['base','head'].every(side=>st.posterBySide[side]&&!st.posterBySide[side].hidden))return 'poster missing before a real model frame';
+   if(st.changedParts!==new Set(proj().changes.filter(c=>c.kind==='footprint').map(c=>c.uuid||c.ref)).size)return 'changed footprint identity count incorrect';
+   if(!st.loadingBySide.base||!st.loadingBySide.head||!st.loading)return 'aggregate loading false while requests outstanding';
+   releases.shift()();
+   for(let i=0;i<300&&st.loadingBySide.base&&st.loadingBySide.head;i++)await new Promise(r=>setTimeout(r,10));
+   if(!st.loading||!Object.values(st.loadingBySide).some(Boolean)||Object.values(st.loadingBySide).every(Boolean))return 'aggregate did not retain the outstanding side';
+   releases.shift()();await opening;
+   return !st.loading&&!st.loadingBySide.base&&!st.loadingBySide.head||'aggregate failed to settle';
+ } finally {
+   Loader.prototype.parseAsync=original;releases.forEach(r=>r());if(opening)await opening;
+ }
+`],
+  ["BR02 processed empty model cannot fake a first frame", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj());
+    const data=JSON.stringify({asset:{version:'2.0'},scenes:[{nodes:[]}],scene:0,nodes:[]});
+    const bytes=new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    REVIEW_DATA.blobs['br02-empty']=btoa(String.fromCharCode(...bytes));
+    try {
+      p.board.model3d.base=p.board.model3d.head='br02-empty';
+      await Review3D.show(document.querySelector('#stage'),p,S);
+      const st=Review3D.state;
+      return !st.firstFrame&&!st.loading&&['base','head'].every(side=>st.posterBySide[side]&&!st.posterBySide[side].hidden&&st.errorsBySide[side])||'empty model/placeholder reported first frame';
+    } finally {delete REVIEW_DATA.blobs['br02-empty'];Review3D.dispose();}
+  `],
+  ["BR02 processed WebGL unavailable retains posters", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const proto=HTMLCanvasElement.prototype, get=proto.getContext;
+    try {
+      proto.getContext=function(type,...args){return /webgl/.test(type)?null:get.call(this,type,...args)};
+      await Review3D.show(document.querySelector('#stage'),proj(),S);
+      const st=Review3D.state;
+      return !st.loading&&!st.firstFrame&&['base','head'].every(side=>st.posterBySide[side]&&!st.posterBySide[side].hidden&&st.errorsBySide[side])&&!!document.querySelector('[data-3d-retry]')||'WebGL fallback lost poster/state';
+    } finally {proto.getContext=get;Review3D.dispose();}
+  `],
+  ["BR02 processed absent revision never borrows poster", "v=3d&m=side", `
+    if(!proj().board.parts3d)return 'skip';
+    const p=structuredClone(proj());delete p.board.model3d.head;delete p.board.poster3d.head;
+    delete p.board.parts3d.head;delete p.board.assets3d;
+    await Review3D.show(document.querySelector('#stage'),p,S);
+    const hosts=document.querySelectorAll('#stage .view3d'),st=Review3D.state;
+    if(st.loading||st.roots[1]||!st.roots[0]||!hosts[1].textContent.includes('Board not in this revision')||hosts[1].querySelector('img'))return 'absent revision borrowed model/poster';
+    return st.firstFrame&&st.posterBySide.base.hidden||'available Base never drew a genuine frame';
+  `],
+  ["BR02 processed cancelled vendor decode cannot revive session", "", `
+    if(!proj().board.parts3d)return 'skip';
+    const NativeWorker=window.Worker;let blocked=false,opening;
+    try {
+      window.Worker=class {constructor(...args){const worker=new NativeWorker(...args);worker.postMessage=()=>{blocked=true};return worker;}};
+      opening=Review3D.show(document.querySelector('#stage'),proj(),{...S,m:'side'});
+      for(let i=0;i<300&&!blocked;i++)await new Promise(r=>setTimeout(r,10));
+      const old=Review3D.state;
+      if(!blocked||old.resourceCounts.pending!==1)return 'vendor decode was not gated';
+      Review3D.dispose();window.Worker=NativeWorker;
+      await Review3D.show(document.querySelector('#stage'),proj(),{...S,m:'side'});
+      const current=Review3D.state;await opening;
+      return Review3D.state===current&&current.firstFrame&&!current.loading&&Object.values(old.resourceCounts).every(n=>n===0)||'cancelled vendor decode revived/leaked session';
+    } finally {window.Worker=NativeWorker;Review3D.dispose();if(opening)await opening;}
+  `],
+  ["BR02 processed bundle failure retries without cached rejection", "", `
+    if(!proj().board.parts3d)return 'skip';
+    const tag=document.querySelector('#three-bundle'),source=tag.textContent;
+    try {
+      tag.textContent=btoa('not gzip');
+      await Review3D.show(document.querySelector('#stage'),proj(),{...S,m:'side'});
+      const st=Review3D.state;
+      if(st.loading||st.firstFrame||!st.posterBySide.head||st.posterBySide.head.hidden)return 'bundle failure lost fallback';
+      tag.textContent=source;document.querySelector('[data-3d-retry]').click();
+      for(let i=0;i<300&&!Review3D.state.firstFrame;i++)await new Promise(r=>setTimeout(r,10));
+      return Review3D.state.firstFrame&&!Review3D.state.loading||'bundle rejection was cached';
+    } finally {tag.textContent=source;Review3D.dispose();}
+  `],
+  ...['worker-start','context-loss'].map(fault=>[
+    'BR02 processed fallback whole screen '+fault,'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    // The shared shell is owned by 05; require the whole viewport to fit.
+    const Worker=window.Worker;
+    try {
+      if('${fault}'==='worker-start')window.Worker=class {constructor(){throw Error('3D worker unavailable. Retry.')}};
+      await Review3D.show(document.querySelector('#stage'),proj(),S);
+      if('${fault}'==='context-loss')document.querySelector('#stage canvas').dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+      const button=[...document.querySelectorAll('[data-3d-retry]')].find(b=>b.getClientRects().length);button?.focus();
+      const rect=button?.getBoundingClientRect();
+      return document.documentElement.scrollWidth<=innerWidth&&rect&&rect.width>0&&rect.left>=0&&rect.right<=innerWidth&&rect.top>=0&&rect.bottom<=innerHeight&&document.activeElement===button&&!!document.querySelector('[role="alert"]')||JSON.stringify({scrollWidth:document.documentElement.scrollWidth,width:innerWidth,height:innerHeight,rect:rect?.toJSON(),focused:document.activeElement===button,alert:!!document.querySelector('[role="alert"]'),overflow:[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,12).map(e=>({tag:e.tagName,id:e.id,class:e.className,right:e.getBoundingClientRect().right}))});
+    } finally {window.Worker=Worker;}
+  `]),
   ["3D bad model data settles and keeps the valid side", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     const p = REVIEW_DATA.projects[0], stage = document.querySelector("#stage"), good = p.board.model3d.head;
@@ -1581,16 +2049,16 @@ return true;
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50));
     await new Promise(r => setTimeout(r, 800));
-    const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:st.renderers[0].getClearColor(new THREE.Color()).getHexString()}, dark = KRTheme.get() === "light";
+    const st = Review3D.state, {THREE} = THREE3D, h = st.highlights.find(x => x.ref === "J2" && x.side === "head"), before = {camera:st.cameras.map(c => c.position.toArray()), parses:st.parseCount, highlight:h.materials[0].color.getHexString(), outline:st.selected[0].material.color.getHexString(), clear:getComputedStyle(document.querySelector('#stage')).backgroundColor}, dark = KRTheme.get() === "light";
     await new Promise(r => { window.__themeFlipped = r; window.__flipTheme(dark ? "dark" : "light"); });
     const until = performance.now() + 3000;
-    while (st.renderers[0].getClearColor(new THREE.Color()).getHexString() === before.clear && performance.now() < until) await new Promise(r => setTimeout(r, 25));
+    while (getComputedStyle(document.querySelector('#stage')).backgroundColor === before.clear && performance.now() < until) await new Promise(r => setTimeout(r, 25));
     const css = getComputedStyle(document.documentElement), token = n => new THREE.Color(css.getPropertyValue(n).trim()), facts = {
-      clear:st.renderers.every(r => r.getClearColor(new THREE.Color()).equals(token(dark ? "--bg" : "--paper"))),
+      clear:st.renderers.every(r => r.getClearAlpha() === 0) && new THREE.Color(getComputedStyle(document.querySelector("#stage")).backgroundColor).equals(token(dark ? "--bg" : "--paper")),
       highlight:h.materials.every((m,i) => m.color.equals(h.original[i].color.clone().lerp(token("--modified"), .7)) && (!m.emissive || m.emissive.equals(token("--modified")))),
       outline:st.selected.every(o => o.material.color.equals(token("--accent"))),
-      changed:before.highlight !== h.materials[0].color.getHexString() && before.outline !== st.selected[0].material.color.getHexString() && before.clear !== st.renderers[0].getClearColor(new THREE.Color()).getHexString(),
-      camera:JSON.stringify(before.camera) === JSON.stringify(st.cameras.map(c => c.position.toArray())), parses:before.parses === st.parseCount && st.parseCount === 2, selection:S.s === "c2", same:st === Review3D.state,
+      changed:before.highlight !== h.materials[0].color.getHexString() && before.outline !== st.selected[0].material.color.getHexString() && before.clear !== getComputedStyle(document.querySelector("#stage")).backgroundColor,
+      camera:JSON.stringify(before.camera) === JSON.stringify(st.cameras.map(c => c.position.toArray())), parses:before.parses === st.parseCount && st.parseCount === new Set(Object.values(st.modelDigests)).size, selection:S.s === "c2", same:st === Review3D.state,
       marker:getComputedStyle(h.marker.el).color === (() => { const e=document.createElement("span");e.style.color="var(--modified)";document.body.append(e);const c=getComputedStyle(e).color;e.remove();return c; })(),
       ghosts:true
     };
@@ -1603,7 +2071,7 @@ return true;
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const n = window.Review3D.state.nodes || [];
-    return document.querySelectorAll('#stage canvas').length >= 2 && n.includes("J2") && n.includes("C20");`],
+    return document.querySelectorAll('#stage canvas').length === 1 && window.Review3D.state.roots.filter(Boolean).length === 2 && n.includes("J2") && n.includes("C20");`],
   ["3D camera buttons change the camera", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
@@ -1630,13 +2098,18 @@ return true;
   ["3D glyph marker labels are visible over their canvas", "v=3d&m=side", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
-    const l = document.querySelector('.marker3d[data-ref="J2"]'), c = l?.parentElement.querySelector("canvas"), a = l?.getBoundingClientRect(), b = c?.getBoundingClientRect();
+    const l = document.querySelector('.marker3d[data-ref="J2"]'), c = l?.closest(".view3d"), a = l?.getBoundingClientRect(), b = c?.getBoundingClientRect();
     return !!l && l.textContent.includes("≡ J2") && a.left >= b.left && a.right <= b.right && a.top >= b.top && a.bottom <= b.bottom;`],
   ["3D Overlay shows old-position ghosts", "v=3d&m=overlay", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
     const d = window.Review3D.state, g = d.ghosts.find(x => x.ref === "J2"), h = d.highlights.find(x => x.ref === "J2" && x.side === "head");
-    return !!g && !!h && Math.hypot(...g.translation.map((v, i) => v - h.marker.position.toArray()[i])) > .001;`],
+    if(!g||!h)return 'ghost or head marker absent';
+    const base=d.roots[0].getObjectByName('J2'),head=d.roots[1].getObjectByName('J2');
+    d.roots.forEach(r=>r.updateMatrixWorld(true));g.object.updateMatrixWorld(true);
+    const same=base.matrixWorld.elements.every((v,i)=>Math.abs(v-g.object.matrixWorld.elements[i])<1e-7);
+    const box=new THREE3D.THREE.Box3().setFromObject(head),position=box.getCenter(new THREE3D.THREE.Vector3());position.y=box.max.y+.004;
+    return same&&position.distanceTo(h.marker.position)<1e-7||'ghost offset or head marker moved';`],
   ["3D Blend slider and B switch cross-fade without moving camera", "v=3d&m=blend", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
@@ -1646,7 +2119,8 @@ return true;
   ["3D Changes only fades unchanged components and disables Wipe", "v=3d&m=semantic", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     await new Promise(r => setTimeout(r, 5000));
-    const u = (window.Review3D.state.faded || []).find(x => x.ref === "U4"), faded = u?.materials.some(m => m.opacity === .12);
+    const u = window.Review3D.state.roots[1]?.getObjectByName('U4'), m=[];
+    u?.traverse(n=>{if(n.isMesh)m.push(...[n.material].flat());});const faded=m.length&&m.every(m=>m.opacity===.12);
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
@@ -2264,7 +2738,7 @@ return true;
     history.replaceState(null, "", saved); S.s = null; S.camera3d = null; await start();
     await new Promise(r => setTimeout(r, 700));
     const actual = Review3D.cameraState(), st = Review3D.state, {THREE} = THREE3D;
-    const outlined = st.selected?.length === 2 && st.selected.every((o, i) => o.position.distanceTo(new THREE.Box3().setFromObject(st.roots[i].getObjectByName(row.ref)).getCenter(new THREE.Vector3())) < 1e-4);
+    const outlined = st.selected?.length === st.visibleSides.length && st.selected.every(o => o.position.distanceTo(new THREE.Box3().setFromObject(st.roots[o.side==='base'?0:1].getObjectByName(row.ref)).getCenter(new THREE.Vector3())) < 1e-4);
     return S.s === row.id && outlined && camera.every((n, i) => Math.abs(n - actual[i]) < .2) || JSON.stringify({saved, camera, actual, outlined, selection:S.s});
   `],
   ["3D change card keeps 3D and frames J2", "v=3d", `
@@ -2280,7 +2754,7 @@ return true;
     document.querySelector('#panel [data-id="c2"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, sel = st.selected || [];
     const j2 = r => { let f; r.traverse(o => { if (!f && o.name === "J2") f = o; }); return new THREE.Box3().setFromObject(f).getCenter(new THREE.Vector3()); };
-    return sel.length === 2 && [0, 1].every(i => sel[i].position.distanceTo(j2(st.roots[i])) < 1e-4);`],
+    return sel.length === st.visibleSides.length && sel.every(o => o.position.distanceTo(j2(st.roots[o.side==='base'?0:1])) < 1e-4);`],
   ["3D no-model U3 block sits on the board, overlaps its footprint and is not hidden by silkscreen", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
@@ -2304,7 +2778,27 @@ return true;
     while (!window.Review3D.state.firstFrame) await new Promise(r => setTimeout(r, 50));
     document.querySelector('[data-no-model="U3"]').click(); await new Promise(r => setTimeout(r, 600));
     const { THREE } = window.THREE3D, st = window.Review3D.state, b = st.blocks.find(x => x.ref === "U3" && x.side === "head"), c = new THREE.Box3().setFromObject(b.object).getCenter(new THREE.Vector3()).project(st.cameras[0]);
-    return Math.abs(c.x) < .15 && Math.abs(c.y) < .15 && /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "");`],
+    if (!(Math.abs(c.x) < .15 && Math.abs(c.y) < .15)) return "U3 not framed " + c.x.toFixed(3) + "," + c.y.toFixed(3);
+    return /no 3D model/.test(document.querySelector(".tip3d")?.textContent || "") || "no 3D model tip missing";`],
+  ["3D no-model chips keep text contrast in both themes", "v=3d", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    const lum = c => { const [r, g, b] = c.match(/\\d+/g).map(Number).map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
+    const ratio = (f, b) => (Math.max(lum(f), lum(b)) + .05) / (Math.min(lum(f), lum(b)) + .05);
+    const start = KRTheme.get(), res = {};
+    try {
+      for (const theme of ["dark", "light"]) {
+        KRTheme.set(theme, {persist:false});
+        const btn = document.querySelector("[data-no-model]");
+        if (!btn) return "no chip";
+        const bg = getComputedStyle(btn).backgroundColor;
+        // Contrast is only meaningful against an opaque chip; a translucent one would read as black here.
+        if (/rgba\\(.*,\\s*0?\\.\\d+\\)|rgba\\(.*,\\s*0\\)/.test(bg)) return theme + " chip background is translucent: " + bg;
+        const ref = ratio(getComputedStyle(btn.querySelector("b")).color, bg), note = ratio(getComputedStyle(btn.querySelector(".muted")).color, bg);
+        res[theme] = {bg, ref:+ref.toFixed(2), note:+note.toFixed(2)};
+        if (!(ref >= 4.5 && note >= 4.5)) return JSON.stringify(res);
+      }
+      return true;
+    } finally { KRTheme.set(start, {persist:false}); }`],
   ["3D canvas click via mouse input selects J2 row", "v=3d", `
     if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
     return S.s === "c2" && S.v === "3d";`],
@@ -4956,16 +5450,19 @@ return true;
   return (innerWidth<900 || off && !document.querySelector('#nav').classList.contains('left-collapsed')) || 'dock toggle';`],
   ["bench toolbar 3D camera presets fit all modes", "v=3d", `
     if (!window.Review3D) return 'skip';
-    const t=document.querySelector('#toolbar');
+    const t=document.querySelector('#toolbar'), started=performance.now();
+    const trace=phase=>{if(window.__CHECK_PERF)console.log('BOARD_PROOF toolbar '+phase+' '+(performance.now()-started).toFixed(1)+'ms firstFrame='+!!Review3D.state?.firstFrame);};
+    trace('start');
     for(const mode of ['side','overlay','blend','semantic']) {
       S.m=mode;renderModes();renderZoombar();
+      trace(mode);
       if(innerWidth>=1400 && t.scrollWidth>t.clientWidth) return mode+' overflow '+t.scrollWidth+'>'+t.clientWidth;
     }
     const menu=t.querySelector('.camera-presets'); menu.open=true;
     await new Promise(r=>setTimeout(r,50));
     const popup=menu.querySelector('.camera-menu').getBoundingClientRect();
     if(popup.top<t.getBoundingClientRect().bottom || popup.right>innerWidth) return 'clipped camera menu';
-    menu.querySelector('[data-3d-camera=top]').click();
+    trace('before-camera');menu.querySelector('[data-3d-camera=top]').click();trace('after-camera');
     return !menu.open && document.activeElement===menu.querySelector('summary');`],
   ["bench-t2 single offline chrome and framed suppression", "#v=board", `
     const visible = selector => [...document.querySelectorAll(selector)].filter(n => n.getBoundingClientRect().height > 0);
@@ -5459,7 +5956,7 @@ CHECKS.push(['vf-avail unchanged 3D both revisions', 'v=3d&m=side', `
   const model=proj().board.model3d;
   if(!model.base||!model.head)throw Error('missing model revision');
   if(!document.querySelector('[data-view="3d"]'))throw Error('3D navigator unavailable');
-  if(!window.Review3D.state.firstFrame||window.Review3D.state.roots.filter(Boolean).length!==2||document.querySelectorAll('#stage canvas').length!==2)throw Error('both revisions must draw');
+  if(!window.Review3D.state.firstFrame||window.Review3D.state.roots.filter(Boolean).length!==2||document.querySelectorAll('#stage canvas').length!==1||window.Review3D.state.renderers.length!==1)throw Error('both revisions must draw');
   if(model.base===model.head&&!document.querySelector('#stage').textContent.includes('No 3D changes'))throw Error('missing 3D no-change notice');
   console.log('BOARD_PROOF '+JSON.stringify({task:'vf-avail',view:'3d',sameBlob:model.base===model.head,roots:window.Review3D.state.roots.length,theme:KRTheme.get()}));return true;
 `]);
@@ -5630,6 +6127,764 @@ CHECKS.push(['simplify largest sheet few elements, near-same pixels', 'p=1&v=she
   return true;
 `]);
 
+CHECKS.push(
+  ['BR02 processed single renderer scissored sides', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state;
+    if(!st?.firstFrame)return '3D fixture has no first frame';
+    if(document.querySelectorAll('#stage canvas').length!==1)return 'expected one shared canvas';
+    if(st.renderers.length!==1||st.cameras.length!==2)return 'renderer/camera ownership';
+    if(st.visibleSides.join(',')!=='base,head')return 'revision viewport routing';
+    if(st.views!==Review3D.testSeam.session().views||st.views.some(v=>!v.host||!v.camera||!v.scene))return 'view diagnostics';
+    return st.drawCallsByViewport.length===2||'missing viewport counters';
+  `],
+  ['BR02 single renderer head only', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state;
+    if(REVIEW_DATA.mode!=='single')return 'fixture is not single mode';
+    if(proj().board.model3d?.base||proj().board.poster3d?.base)return 'base blob present in fixture';
+    if(!st?.firstFrame)return 'head model has no first frame';
+    if(st.renderers.length!==1||st.roots.length!==1)return 'single renderer or single root';
+    if(st.visibleSides.join(',')!=='head')return 'single mode must draw head only';
+    if(st.views.length!==1||st.views[0].side!=='head')return 'single mode view list';
+    if(!document.querySelector('#stage .vp.view3d.one'))return 'missing single viewport class';
+    if(document.querySelector('#stage .tag')?.textContent!=='Design')return 'single label';
+    if(window.__baseBlobReads?.length)return 'base blob decoded in single mode';
+    return (Review3D.testSeam.session()?.revision==='head'&&typeof Review3D.testSeam.poster3d==='function')||'session accessor or poster3d export';
+  `],
+  ['BR02 processed digest parses and shared resources dispose once', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const stage=document.querySelector('#stage'), p=structuredClone(proj());
+    for(const equal of [true,false]) {
+      if(equal){p.board.model3d.head=p.board.model3d.base;p.board.assets3d.head=p.board.assets3d.base;}
+      else {p.board.model3d=proj().board.model3d;p.board.assets3d=proj().board.assets3d;}
+      const reopening=Review3D.show(stage,p,S), st=Review3D.state, parses=st.parseCount;
+      await reopening;
+      const [base,head]=st.roots, bg=base.getObjectByProperty('isMesh',true)?.geometry,hg=head.getObjectByProperty('isMesh',true)?.geometry;
+      const same=st.modelDigests.base===st.modelDigests.head;
+      if(same!==equal)return 'fixture must exercise both equal and distinct digests';
+      if(st.parseCount-parses!==(same?1:2))return 'digest parse count';
+      if(!bg||!hg||(bg===hg)!==same)return 'digest geometry sharing';
+      if(base===head)return 'logical roots not cloned';
+      const counts=new Map(), originals=new Map();
+      const watch=o=>{if(!o?.dispose||originals.has(o))return;const fn=o.dispose;originals.set(o,fn);o.dispose=function(){counts.set(o,(counts.get(o)||0)+1);return fn.call(this);};};
+      for(const root of [...st.roots,...st.decodedScenes])root?.traverse(n=>{
+        watch(n.geometry);for(const m of [n.material].flat().filter(Boolean)){watch(m);for(const t of Object.values(m))if(t?.isTexture)watch(t);}
+      });
+      watch(st.renderers[0]);
+      try{Review3D.dispose();if([...originals.keys()].some(o=>counts.get(o)!==1))return 'shared GPU resource disposed zero or multiple times';}
+      finally{for(const [o,fn]of originals)o.dispose=fn;}
+      if(Review3D.testSeam.session()!==null)return 'disposed session still published';
+    }
+    return true;
+  `],
+  ['BR02 processed shared resources dispose once', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const counts=new Map(),originals=new Map();
+    const watch=o=>{if(!o?.dispose||originals.has(o))return;const original=o.dispose;originals.set(o,original);o.dispose=function(){counts.set(o,(counts.get(o)||0)+1);return original.call(this);};};
+    for(const root of Review3D.state.roots)root?.traverse(n=>{watch(n.geometry);for(const m of [n.material].flat().filter(Boolean)){watch(m);for(const value of Object.values(m))if(value?.isTexture)watch(value);}});
+    try{Review3D.dispose();return [...originals.keys()].every(o=>counts.get(o)===1)||'shared GPU resource disposed zero or multiple times';}
+    finally{for(const [o,fn]of originals)o.dispose=fn;}
+  `],
+  ['BR02 processed no WebGL retains poster and retries', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const original=HTMLCanvasElement.prototype.getContext,stage=document.querySelector('#stage');
+    try{
+      HTMLCanvasElement.prototype.getContext=function(type,...args){return /^webgl/.test(type)?null:original.call(this,type,...args);};
+      await Review3D.show(stage,proj(),S);
+      if(Review3D.state.firstFrame||Review3D.state.loading)return 'failed renderer claims ready';
+      if(!stage.querySelector('[data-poster]:not([hidden])'))return 'WebGL failure lost poster';
+      if(!stage.querySelector('[data-3d-retry]'))return 'WebGL failure has no retry';
+    }finally{HTMLCanvasElement.prototype.getContext=original;}
+    await Review3D.show(stage,proj(),S);return Review3D.state.firstFrame||'retry failed to render';
+  `],
+  ['BR02 processed visible model is not covered', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state,host=[...document.querySelectorAll('#stage .view3d')].find(e=>e.getBoundingClientRect().width>0);
+    if(!st.firstFrame||!host)return 'no visible model frame';
+    if(!document.querySelector('#stage > canvas'))return 'shared canvas missing';
+    if(getComputedStyle(document.querySelector('#stage')).backgroundColor==='rgba(0, 0, 0, 0)')return 'stage has no theme background';
+    for(const e of document.querySelectorAll('#stage .view3d'))if(getComputedStyle(e).backgroundColor!=='rgba(0, 0, 0, 0)')return 'opaque input host covers model';
+    if([...document.querySelectorAll('#stage [data-poster]')].some(e=>!e.hidden&&e.closest('.view3d')===host))return 'poster still covers loaded model';
+    if((await Review3D.testSeam.sampleFrame()).opaquePixels<100)return 'actual model pixels absent';
+    const b=host.getBoundingClientRect();if(!document.elementsFromPoint(b.x+b.width/2,b.y+b.height/2).includes(host))return 'viewport occluded';
+    return st.drawCallsByViewport.every(n=>n>0)||'real model submitted no primitives';
+  `]
+);
+
+CHECKS.push(
+ ['BR02 processed equal digest materials stay immutable across roles', 'v=3d&m=side', `
+   if(!proj().board.parts3d)return 'skip';
+   const p=structuredClone(proj()), stage=document.querySelector('#stage');
+   p.board.model3d.head=p.board.model3d.base;p.board.assets3d.head=p.board.assets3d.base;
+   await Review3D.show(stage,p,{...S,m:'blend',s:null});
+   const st=Review3D.state, source=st.decodedScenes[0], original=new Map();
+   source.traverse(n=>{for(const m of [n.material].flat().filter(Boolean))original.set(m,{opacity:m.opacity,transparent:m.transparent});});
+   const [base,head]=st.roots, bm=base.getObjectByProperty('isMesh',true).material,hm=head.getObjectByProperty('isMesh',true).material;
+   if(bm===hm||original.has(bm)||original.has(hm))return 'blend mutates shared source or shares roles';
+   Review3D.setBlend(.2);
+   if(bm.opacity!==.8||hm.opacity!==.2)return 'blend roles not independent';
+   if([...original].some(([m,v])=>m.opacity!==v.opacity||m.transparent!==v.transparent))return 'source material mutated';
+   const sourceMeshes=[],cloneMeshes=[];
+   source.traverse(n=>{if(n.isMesh)sourceMeshes.push(n);});base.traverse(n=>{if(n.isMesh)cloneMeshes.push(n);});
+   const roleMaterials=new Map();let mismatch=false;
+   sourceMeshes.forEach((n,i)=>[n.material].flat().forEach((sourceMaterial,j)=>{
+     const m=[cloneMeshes[i].material].flat()[j], prior=roleMaterials.get(sourceMaterial);
+     if(prior&&prior!==m)mismatch=true;roleMaterials.set(sourceMaterial,m);
+   }));
+   return !mismatch||'material cloned per mesh instead of distinct source and role';
+ `]
+);
+
+CHECKS.push(
+  ...['side-base', 'side-head', 'side-highlight', 'overlay', 'blend', 'semantic'].map(fault => [
+    'BR02 processed view build failure ' + fault, 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const stage=document.querySelector('#stage'), T=THREE3D.THREE;
+    const controls=THREE3D.OrbitControls, clone=T.Material.prototype.clone;
+    const mode='${fault}'.startsWith('side-')?'side':'${fault}', side=['side-base','side-highlight'].includes('${fault}')?'base':'head';
+    let calls=0, clones=0;
+    try {
+      THREE3D.OrbitControls=class extends controls {
+        constructor(...args){
+          if(++calls===('${fault}'==='side-base'?1:2)&&mode==='side'&&'${fault}'!=='side-highlight')throw Error('injected view build');
+          super(...args);
+          // Inject only after renderer construction and GLTF parsing complete.
+          if(mode!=='side'||'${fault}'==='side-highlight')T.Material.prototype.clone=function(){
+            if('${fault}'!=='side-highlight'||++clones===1)throw Error('injected view build');
+            return clone.call(this);
+          };
+        }
+      };
+      await Review3D.show(stage,proj(),{...S,m:mode,s:null});
+      const st=Review3D.state, host=Review3D.testSeam.session().hostsBySide[side];
+      if(st.renderers.length!==1||!st.decodedScenes.length||!calls)return 'fault injected before view construction';
+      if(!st.errorsBySide[side]?.includes('injected view build'))return 'build error not reported';
+      if(st.loading||host.querySelector('.loading'))return 'build failure left loading';
+      if(!host.querySelector('[data-3d-retry]')||!host.querySelector('[data-poster]:not([hidden])'))return 'build failure lost fallback or retry';
+      if(mode==='side'&&!st.firstFrame)return 'healthy peer did not render: '+JSON.stringify({errors:st.errorsBySide,views:st.views.map(v=>({side:v.side,failed:v.failed,visible:v.visible,calls:v.calls}))});
+      if(mode!=='side'&&st.firstFrame)return 'failed combined view claims ready';
+    } finally {THREE3D.OrbitControls=controls;T.Material.prototype.clone=clone;}
+    await Review3D.show(stage,proj(),{...S,m:mode,s:null});
+    return Review3D.state.firstFrame&&!Object.keys(Review3D.state.errorsBySide).length||'build retry failed';
+  `]),
+  ['BR02 processed stage observer owns viewer resize', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const add=window.addEventListener, stage=document.querySelector('#stage');let registrations=0;
+    try {
+      window.addEventListener=function(type,...args){if(type==='resize')registrations++;return add.call(this,type,...args);};
+      await Review3D.show(stage,proj(),S);
+      if(registrations)return 'viewer registered redundant window resize';
+      if(!Review3D.testSeam.session().resizeObserver)return 'stage observer missing';
+      const width=stage.style.width;
+      try {
+        stage.style.width='500px';
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        const canvas=stage.querySelector('canvas');
+        return canvas.width===Math.floor(500*Math.min(devicePixelRatio,2))||'stage layout change missed without window resize';
+      } finally {stage.style.width=width;}
+    } finally {window.addEventListener=add;}
+  `],
+  ['BR02 processed collapsed pane resets draw counters', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, v=st.views.find(v=>v.visible&&v.calls>0);
+    if(!v)return 'fixture has no drawn viewport';
+    const rect=v.host.getBoundingClientRect;
+    try {
+      v.host.getBoundingClientRect=()=>({left:0,bottom:0,width:0,height:0});
+      await Review3D.testSeam.sampleFrame();
+      const i=st.views.filter(v=>v.visible).indexOf(v);
+      if(v.calls!==0||st.drawCallsByViewport[i]!==0)return 'collapsed pane retained stale calls';
+      return st.drawCalls===st.views.filter(other=>other.visible&&other!==v).reduce((n,other)=>n+other.calls,0)||'frame total includes collapsed pane';
+    } finally {v.host.getBoundingClientRect=rect;}
+  `],
+  ['BR02 processed overlay ghosts retain flat unlit tint', 'v=3d&m=overlay', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, source=new Set(), ghosts=[];
+    st.decodedScenes.forEach(root=>root.traverse(n=>{for(const m of [n.material].flat().filter(Boolean))source.add(m);}));
+    st.ghosts.forEach(g=>g.object.traverse(n=>{if(n.isMesh)ghosts.push(...[n.material].flat());}));
+    if(!ghosts.length)return 'fixture has no ghosts';
+    const tint=new THREE3D.THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--removed').trim());
+    for(const g of st.ghosts) {
+      const node=st.roots[0].getObjectByName(g.ref),before=[],after=[];
+      node.traverse(n=>{if(n.isMesh)before.push(...[n.material].flat());});
+      g.object.traverse(n=>{if(n.isMesh)after.push(...[n.material].flat());});
+      if(after.some((m,i)=>Math.abs(m.opacity-before[i].opacity*.45)>1e-7))return 'ghost alpha replaced';
+      if(new Set(after).size!==new Set(before).size)return 'ghost material partition lost';
+    }
+    return ghosts.every(m=>m.isMeshBasicMaterial&&!m.map&&m.color.equals(tint)&&m.transparent&&!m.depthTest&&!source.has(m))||'ghost appearance changed or source mutated';
+  `],
+  ['BR02 processed default revision omitted from share hash', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    for(const v of ['board','3d',...proj().sheets.map(s=>'sheet:'+s.path)]) {
+      if(new URLSearchParams(encodeState({...S,v,revision:'head'})).has('revision'))return 'default Head persisted in '+v;
+    }
+    const base=decodeState(encodeState({...S,revision:'base'}));
+    return base.revision==='base'||'explicit revision state lost';
+  `]
+);
+
+CHECKS.push(
+  ['BR02 processed studio environment, tone mapping and no direct lights', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, s=Review3D.testSeam.session(), T=THREE3D.THREE, r=st.renderers[0];
+    if(!st.firstFrame)return 'no first frame';
+    if(r.toneMapping!==T.NeutralToneMapping||r.outputColorSpace!==T.SRGBColorSpace||r.toneMappingExposure!==1.35)return 'renderer tone mapping or exposure';
+    if(JSON.stringify(st.lighting)!=='{"rig":"bench","bearing":60,"exposure":1.35}')return 'default lighting '+JSON.stringify(st.lighting);
+    const lights=[];
+    for(const v of st.views){ if(!v.scene.environment)return 'view without environment'; v.scene.traverse(o=>{if(o.isLight)lights.push(o.type);}); }
+    if(lights.length)return 'direct lights '+lights;
+    if(s.environments.size!==1)return 'environment cache size '+s.environments.size;
+    const first=st.views[0].scene.environment;
+    Review3D.setLighting({rig:'photo',bearing:100,exposure:9});
+    if(JSON.stringify(st.lighting)!=='{"rig":"photo","bearing":90,"exposure":3}')return 'clamp/snap '+JSON.stringify(st.lighting);
+    if(r.toneMappingExposure!==3||st.views.some(v=>v.scene.environment===first)||s.environments.size!==2)return 'rig change did not swap environment';
+    Review3D.setLighting({rig:'photo',bearing:90,exposure:.1});
+    if(r.toneMappingExposure!==.4||s.environments.size!==2)return 'exposure rebuilt the environment';
+    Review3D.setLighting({rig:'photo',bearing:90,exposure:1});
+    if(s.environments.size!==2)return 'revisiting a rig/bearing rebuilt its environment';
+    Review3D.setLighting({rig:'bench',bearing:70,exposure:1});
+    if(s.environments.size!==2||st.lighting.bearing!==60)return 'bearing not snapped to the 30 degree grid: '+s.environments.size;
+    Review3D.setLighting({rig:'nope',bearing:'x',exposure:NaN});
+    if(JSON.stringify(st.lighting)!=='{"rig":"bench","bearing":60,"exposure":1.35}')return 'invalid lighting not defaulted';
+    const px=await Review3D.testSeam.sampleFrame();
+    return px.opaquePixels>0||'lit board draws nothing';
+  `],
+  ['BR02 processed lighting and assembled state survive the share hash', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    if(/(^|&)(lt|asm)=/.test(encodeState({...S})))return 'defaults persisted';
+    const hash=encodeState({...S,assembled3d:false,lighting3d:{rig:'lowsun',bearing:120,exposure:1.6},hidden3d:['silk'],camera3d:[1,2,3,4,5,6]});
+    const d=valid(decodeState(hash));
+    if(d.assembled3d!==false||d.lighting3d.rig!=='lowsun'||d.lighting3d.bearing!==120||d.lighting3d.exposure!==1.6)return 'round trip '+hash;
+    if(d.hidden3d.join()!=='silk'||d.camera3d.join()!=='1,2,3,4,5,6')return 'old camera/hidden hash lost';
+    const bad=valid(decodeState('p=0&lt=laser,x,y&asm=1'));
+    if(bad.lighting3d||bad.assembled3d!==undefined)return 'invalid lighting accepted';
+    const old=valid(decodeState('p=0&v=3d&m=side&c=1,2,3,4,5,6&h=silk'));
+    return (old.camera3d&&old.hidden3d.join()==='silk'&&!old.lighting3d)||'old hash broke';
+  `],
+  ['BR02 processed bare board hides components and restores them', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const st=Review3D.state, s=Review3D.testSeam.session(), seen=[];
+    const meshes=g=>s.groups.filter(x=>x.groups.includes(g));
+    if(!meshes('bodies').length)return 'fixture has no component bodies';
+    const change=s.changes.find(c=>c.ref&&st.roots.some(r=>r?.getObjectByName(c.ref)));
+    if(!change)return 'fixture has no focusable changed component';
+    Review3D.focus(change,false);
+    if(!st.selected.length||st.selected.some(o=>!o.visible))return 'selection outline missing before bare';
+    Review3D.onStateChange=e=>seen.push(e);
+    document.querySelector('[data-3d-bare]').click();
+    if(st.selected.some(o=>o.visible))return 'selection outline remains in bare mode';
+    Review3D.focus(change,false);
+    if(st.selected.length)return 'focus recreated bare outline';
+    if(st.assembled!==false||document.querySelector('[data-3d-assembled]').getAttribute('aria-pressed')!=='false')return 'toggle state';
+    if(meshes('bodies').some(x=>x.object.visible))return 'bodies still visible when bare';
+    if(!meshes('board').every(x=>x.object.visible))return 'board hidden when bare';
+    if(st.blocks.some(b=>b.object.visible)||st.views.some(v=>(v.labels||[]).some(m=>!m.el.hidden)))return 'blocks or markers still visible';
+    if(seen[0]?.assembled3d!==false)return 'no state event';
+    Review3D.setHidden(['silk']);
+    if(meshes('bodies').some(x=>x.object.visible))return 'hidden groups re-showed bodies';
+    Review3D.setAssembled(true);
+    return (st.selected.length===0&&meshes('bodies').every(x=>x.object.visible)&&meshes('silk').every(x=>!x.object.visible))||'assemble did not restore';
+  `],
+  ['BR02 processed 3D tools whole screen reachable', 'v=3d&m=side', `
+    if(!proj().board.model3d?.head)return 'skip';
+    const tools=document.querySelector('#zoombar .tools3d');
+    if(!tools)return 'missing .tools3d';
+    // Page-level overflow at 412 px belongs to 05's shell (bench-menu popover); the 3D tools must be reachable by scrolling the toolbar.
+    tools.scrollIntoView({inline:'center',block:'nearest'});
+    { const r=tools.getBoundingClientRect(); if(r.left<0||r.right>innerWidth)return 'tools unreachable '+JSON.stringify(r); }
+    for(const el of tools.querySelectorAll('button,summary,select,input')){
+      const name=el.getAttribute('aria-label')||el.title||el.closest('label')?.textContent||el.textContent;
+      if(!name.trim())return 'unnamed control '+el.outerHTML.slice(0,60);
+    }
+    const light=tools; light.open=true; await new Promise(r=>setTimeout(r,50));
+    tools.scrollIntoView({inline:'center',block:'nearest'});const m=light.querySelector('.light-menu').getBoundingClientRect(), tb=document.querySelector('#toolbar').getBoundingClientRect();
+    if(m.left<0||m.right>innerWidth||m.top<tb.bottom||m.bottom>innerHeight)return 'light menu clipped '+JSON.stringify(m);
+    const ex=light.querySelector('[data-3d-exposure]'); ex.value='2'; ex.dispatchEvent(new Event('input',{bubbles:true}));
+    if(Review3D.state.lighting.exposure!==2)return 'exposure slider not wired';
+    light.querySelector('[data-3d-rig]').value='photo'; light.querySelector('[data-3d-rig]').dispatchEvent(new Event('change',{bubbles:true}));
+    if(Review3D.state.lighting.rig!=='photo'||Review3D.state.lighting.exposure!==1.2)return 'preset did not apply its exposure';
+    light.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    if(light.open||document.activeElement!==light.querySelector('summary'))return 'Escape did not close and refocus';
+    return true;
+  `]
+);
+
+CHECKS.push(
+  ['BR02 processed rendered top lamp orientation', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    const T=THREE3D.THREE, st=Review3D.state, r=st.renderers[0];
+    const scene=new T.Scene();scene.environment=st.views[0].scene.environment;
+    const material=new T.MeshStandardMaterial({color:0x808080,metalness:0,roughness:1});
+    const geometry=new T.BoxGeometry(2,.05,2);scene.add(new T.Mesh(geometry,material));
+    const camera=new T.OrthographicCamera(-1.1,1.1,1.1,-1.1,.1,10), target=new T.WebGLRenderTarget(64,64);
+    const previous=r.getRenderTarget(), viewport=r.getViewport(new T.Vector4()), scissor=r.getScissor(new T.Vector4()), scissorTest=r.getScissorTest();
+    const clearColor=r.getClearColor(new T.Color()), clearAlpha=r.getClearAlpha(), autoClear=r.autoClear;
+    const sample=side=>{
+      camera.position.set(0,side*3,0);camera.up.set(0,0,-side);camera.lookAt(0,0,0);camera.updateMatrixWorld();
+      r.setRenderTarget(target);r.setViewport(0,0,64,64);r.setScissorTest(false);r.autoClear=true;r.setClearColor(0x000000,0);r.clear();r.render(scene,camera);
+      const pixels=new Uint8Array(64*64*4);r.readRenderTargetPixels(target,0,0,64,64,pixels);
+      let sum=0;for(let y=16;y<48;y++)for(let x=16;x<48;x++){const i=(y*64+x)*4;sum+=.2126*pixels[i]+.7152*pixels[i+1]+.0722*pixels[i+2];}
+      return sum/1024;
+    };
+    let top,bottom;
+    try{top=sample(1);bottom=sample(-1);}finally{
+      r.setRenderTarget(previous);r.setViewport(viewport);r.setScissor(scissor);r.setScissorTest(scissorTest);
+      r.setClearColor(clearColor,clearAlpha);r.autoClear=autoClear;
+      target.dispose();material.dispose();geometry.dispose();
+    }
+    console.log('BOARD_PROOF rendered studio top='+top.toFixed(2)+' bottom='+bottom.toFixed(2));
+    if(!(top>bottom*1.2))return 'top lamp became underlighting: '+top+' vs '+bottom;
+    Review3D.frame('top');await new Promise(resolve=>setTimeout(resolve,350));
+    const pixels=await Review3D.testSeam.sampleFrame();return pixels.opaquePixels>0||'top board frame empty';
+  `],
+  ['BR02 processed rendered bottom board comparison', 'v=3d&m=side', `
+    if(!proj().board.parts3d)return 'skip';
+    Review3D.frame('bottom');await new Promise(resolve=>setTimeout(resolve,350));
+    const pixels=await Review3D.testSeam.sampleFrame();return pixels.opaquePixels>0||'bottom board frame empty';
+  `]
+);
+
+CHECKS.push(['BR02 processed lighting failure rolls back controls and recovers', 'v=3d&m=side', `
+  if(!proj().board.parts3d)return 'skip';
+  const T=THREE3D.THREE, s=Review3D.testSeam.session(), st=Review3D.state, r=st.renderers[0], before=st.lighting;
+  const environments=st.views.map(v=>v.scene.environment), count=s.environments.size, events=[];
+  const original=T.PMREMGenerator.prototype.fromEquirectangular, onStateChange=Review3D.onStateChange;
+  const menu=document.querySelector('.light3d');menu.open=true;
+  menu.scrollIntoView({inline:'center',block:'nearest'});
+  await new Promise(resolve=>setTimeout(resolve,50));
+  try{
+    Review3D.onStateChange=e=>events.push(e);
+    T.PMREMGenerator.prototype.fromEquirectangular=()=>{throw Error('Synthetic PMREM failure');};
+    const select=menu.querySelector('[data-3d-rig]');select.value='photo';select.dispatchEvent(new Event('change',{bubbles:true}));
+    if(st.lighting!==before||s.lighting!==before||r.toneMappingExposure!==before.exposure||events.length)return 'failed lighting published success';
+    if(st.views.some((v,i)=>v.scene.environment!==environments[i])||s.environments.size!==count)return 'failed lighting changed environment';
+    const notice=menu.querySelector('[data-3d-light-error]');
+    if(!st.lightingError||notice.hidden||notice.getAttribute('role')!=='alert'||!notice.textContent.includes('Synthetic PMREM failure'))return 'failure not announced';
+    if(select.value!==before.rig||+menu.querySelector('[data-3d-exposure]').value!==before.exposure)return 'failed controls not rolled back';
+    T.PMREMGenerator.prototype.fromEquirectangular=original;
+    select.value='photo';select.dispatchEvent(new Event('change',{bubbles:true}));
+    if(st.lighting.rig!=='photo'||r.toneMappingExposure!==1.2||events.length!==1||st.lightingError||!notice.hidden)return 'lighting recovery retained stale error';
+    if(st.views.some((v,i)=>v.scene.environment===environments[i]))return 'recovery did not replace environment';
+    return (await Review3D.testSeam.sampleFrame()).opaquePixels>0||'recovered frame empty';
+  }finally{T.PMREMGenerator.prototype.fromEquirectangular=original;Review3D.onStateChange=onStateChange;}
+`]);
+
+CHECKS.push(
+["BR02 processed semantic partitions", "v=3d&m=semantic", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state;
+ if(!st.faded?.some(x=>x.materials.some(m=>m.opacity===.12)))return 'merged semantic fade absent';
+ const bodies=[];st.roots[1].traverse(n=>{if(n.isMesh&&n.userData.role==='body'&&!n.userData.ref)
+   bodies.push(...(Array.isArray(n.material)?n.material:[n.material]));});
+ if(!bodies.length||!bodies.every(m=>m.opacity===.12))return 'unchanged material partition not faded';
+ if(st.faded.length!==2||st.faded.some(p=>new Set(p.materials).size!==p.materials.length))return 'revision partition clone ownership lost';
+ const base=st.highlights.filter(h=>h.side==='base'),head=st.highlights.filter(h=>h.side==='head');
+ if(!base.length||base.some(h=>!h.marker.el.hidden)||!head.some(h=>!h.marker.el.hidden))return 'detached semantic markers visible';
+ if(st.highlights.some(h=>h.marker.side!==h.side))return 'marker revision missing';
+ return st.highlights.some(h=>h.ref==='R12'&&h.materials.every(m=>m.opacity===1))||'changed highlight lost';
+`],
+["BR02 processed blend preserves mask alpha", "v=3d&m=blend", `
+ if(!proj().board.parts3d)return 'skip';
+ Review3D.setBlend(.25);
+ for(const [i,weight] of [[0,.75],[1,.25]]) {
+   const masks=[];Review3D.state.roots[i].traverse(n=>{if(n.isMesh&&n.userData.role==='mask')
+     masks.push(...(Array.isArray(n.material)?n.material:[n.material]));});
+   if(!masks.length||!masks.every(m=>Math.abs(m.opacity-.72*weight)<1e-6))return 'mask alpha replaced';
+ }
+ Review3D.setBlend(.75);Review3D.setBlend(.25);
+ for(const [i,weight] of [[0,.75],[1,.25]]) {
+   let bad=false;Review3D.state.roots[i].traverse(n=>{if(n.isMesh&&n.userData.role==='mask')
+     bad||=[n.material].flat().some(m=>Math.abs(m.opacity-.72*weight)>1e-6);});
+   if(bad)return 'blend compounded saved alpha';
+ }
+ return true;
+`],
+["BR02 processed overlay preserves base world matrix", "v=3d&m=overlay", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,g=st.ghosts.find(g=>g.ref==='R1');if(!g)return 'changed ghost missing';
+ st.roots[0].updateMatrixWorld(true);
+ const n=st.roots[0].getObjectByName('R1');g.object.updateMatrixWorld(true);
+ return n.matrixWorld.elements.every((v,i)=>Math.abs(v-g.object.matrixWorld.elements[i])<1e-7)
+   ||'ghost lost base world transform';
+`]
+
+);
+
+CHECKS.push(["BR02 processed overlay bare board hides ghosts and markers", "v=3d&m=overlay", `
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,g=st.ghosts[0],h=st.highlights.find(h=>h.marker&&!h.marker.el.hidden);
+ if(!g?.object.parent||!h)return 'initial ghost or marker absent';
+ let ghostMeshes=[];g.object.traverse(n=>{if(n.isMesh)ghostMeshes.push(n);});
+ if(!ghostMeshes.length||ghostMeshes.some(n=>!n.visible))return 'initial ghost meshes hidden';
+ Review3D.resize();
+ const routedGhost=st.ghosts.find(x=>x.ref==='R1');
+ const routedMarker=st.highlights.find(x=>x.marker&&x.side==='head');
+ if(!routedGhost?.object.parent||!routedMarker||routedMarker.marker.el.hidden)return 'overlay representation hidden after resize';
+ Review3D.setAssembled(false);
+ if(st.ghosts.some(g=>g.object.parent&&(()=>{let visible=false;g.object.traverse(n=>{if(n.isMesh&&n.visible)visible=true;});return visible;})()))return 'bare ghost visible';
+ if(st.highlights.some(h=>h.marker&&!h.marker.el.hidden))return 'bare marker visible';
+ const bodies=[];st.roots.forEach(r=>r?.traverse(n=>{if(n.isMesh&&n.userData.role==='body')bodies.push(n);}));
+ if(!bodies.length||bodies.some(n=>n.visible))return 'bare body visible';
+ Review3D.setAssembled(true);
+ if(!g.object.parent||!g.object.visible||h.marker.el.hidden)return 'overlay representation not restored';
+ Review3D.focus(proj().changes.find(c=>c.ref==='R12'),false);await Review3D.testSeam.sampleFrame();
+ console.log('BOARD_PROOF '+JSON.stringify({mode:'overlay',calls:st.drawCallsByViewport,changedParts:st.changedParts}));
+ return st.drawCallsByViewport.every(n=>n<100+st.changedParts)||'comparison call budget exceeded';
+`]);
+
+CHECKS.push(...['removed','base-only'].map(input=>[
+ 'BR02 processed overlay world ghosts '+input,'v=3d&m=overlay', `
+ if(!proj().board.parts3d)return 'skip';
+ const p=structuredClone(proj()),c=p.changes.find(c=>c.ref==='R12');
+ if('${input}'==='removed')c.action='removed';
+ else for(const key of ['model3d','parts3d','assets3d','poster3d','coverage3dBySide'])delete p.board[key]?.head;
+ await Review3D.show(document.querySelector('#stage'),p,{...S,m:'overlay',s:null});
+ const st=Review3D.state,g=st.ghosts.find(g=>g.ref==='R1');if(!g?.object.parent)return 'base ghost absent';
+ const n=st.roots[0].getObjectByName('R1');st.roots[0].updateMatrixWorld(true);g.object.updateMatrixWorld(true);
+ if(!n.matrixWorld.elements.every((v,i)=>Math.abs(v-g.object.matrixWorld.elements[i])<1e-7))return 'base ghost misplaced';
+ if('${input}'==='base-only'&&!st.highlights.some(h=>h.side==='base'&&!h.marker.el.hidden))return 'base-only marker hidden';
+ Review3D.setAssembled(false);if(g.object.parent||st.highlights.some(h=>!h.marker.el.hidden))return 'base ghost or marker survived bare';
+ Review3D.setAssembled(true);return !!g.object.parent||'base ghost not restored';
+ `]));
+
+CHECKS.push(
+  ["BR02 processed idle and offscreen stop drawing", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ await new Promise(r=>setTimeout(r,2600));const a=Review3D.state.drawCount;
+ await new Promise(r=>setTimeout(r,250));
+ if(Review3D.state.drawCount!==a)return 'settled idle still drawing';
+ const stage=document.querySelector('#stage'),before=stage.style.transform;
+ try {
+   stage.style.transform='translateX(-200vw)';await new Promise(r=>setTimeout(r,100));
+   const b=Review3D.state.drawCount;Review3D.frame('top');await new Promise(r=>setTimeout(r,200));
+   if(Review3D.state.drawCount!==b)return 'offscreen viewer still drawing';
+ } finally {stage.style.transform=before;}
+ await new Promise(r=>setTimeout(r,150));
+ return Review3D.state.drawCount>a||'onscreen viewer did not resume';
+ `],
+  ['BR02 processed rotation damping moves then settles', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const s=Review3D.testSeam.session(),v=s.views.find(v=>v.visible),h=v.host,b=h.getBoundingClientRect();
+ const start=v.camera.position.clone(),capture=h.setPointerCapture,release=h.releasePointerCapture;
+ // Shorten the test's settling tail on software WebGL; this is not a timing benchmark.
+ const damping=v.controls.dampingFactor;v.controls.dampingFactor=.2;
+ // Synthetic pointer events exercise OrbitControls without claiming trusted-input performance.
+ h.setPointerCapture=()=>{};h.releasePointerCapture=()=>{};
+ try {
+   const event=(type,x)=>h.dispatchEvent(new PointerEvent(type,{pointerId:1,pointerType:'mouse',button:0,buttons:type==='pointerup'?0:1,clientX:x,clientY:b.top+b.height/2,bubbles:true}));
+   event('pointerdown',b.left+b.width/2);event('pointermove',b.left+b.width/2+40);event('pointerup',b.left+b.width/2+40);
+   const released=v.camera.position.clone();
+   if(start.distanceTo(released)<1e-7)return 'rotation did not move camera';
+   // Wait for the next tick itself: software WebGL can take far longer than a fixed sleep to deliver it.
+   if(v.controls.enableDamping){
+     if(!s.raf)return 'release did not schedule a damping frame';
+     await new Promise(r=>{s.frameReady=r;});
+     if(released.distanceTo(v.camera.position)<1e-7)return 'damping did not move camera after release';
+   }
+   for(let i=0;i<300&&s.raf;i++)await new Promise(r=>setTimeout(r,100));
+   const count=s.state.drawCount;
+   await new Promise(r=>setTimeout(r,250));
+   if(count!==s.state.drawCount||s.raf)return 'damping never settled '+JSON.stringify({count,draws:s.state.drawCount,raf:s.raf,camera:v.camera.position.toArray(),delta:v.controls._sphericalDelta});
+   const before=s.state.drawCount;const pixels=await Review3D.testSeam.sampleFrame();
+   if(s.state.drawCount<=before||!pixels.opaquePixels)return 'pixel sample did not draw a fresh frame';
+   return true;
+ } finally {v.controls.dampingFactor=damping;h.setPointerCapture=capture;h.releasePointerCapture=release;}
+ `]
+);
+
+CHECKS.push(
+  ['BR02 processed adaptive DPR restores once then stays idle', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const s=Review3D.testSeam.session(),r=s.renderer,cap=Math.min(devicePixelRatio,2),ratios=[],original=r.setPixelRatio;
+ await new Promise(r=>setTimeout(r,100));
+ r.setPixelRatio=function(n){ratios.push(n);return original.call(this,n);};
+ try {
+   for(let i=0;i<9;i++)s.policy.rotating(34);
+   if(ratios.length)return 'DPR changed before tenth slow frame';
+   s.policy.rotating(34);
+   if(JSON.stringify(ratios)!==JSON.stringify(cap>1.5?[1.5]:[]))return 'tenth-frame DPR';
+   await new Promise(r=>setTimeout(r,2600));
+   if(JSON.stringify(ratios)!==JSON.stringify(cap>1.5?[1.5,cap]:[]))return 'idle DPR restore count '+JSON.stringify(ratios);
+   const a=s.state.drawCount;await new Promise(r=>setTimeout(r,250));
+   return s.state.drawCount===a||'restore kept drawing';
+ } finally {r.setPixelRatio=original;}
+ `],
+  ['BR02 processed hidden document pauses and disposal cancels scheduler', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const s=Review3D.testSeam.session(),descriptor=Object.getOwnPropertyDescriptor(document,'hidden');
+ try {
+   Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'));
+   const count=s.state.drawCount;Review3D.frame('top');await new Promise(r=>setTimeout(r,150));
+   if(s.raf||s.state.drawCount!==count)return 'hidden document kept drawing';
+   Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));
+   // Wait for the resumed tick itself: software WebGL can take far longer than a fixed sleep to deliver it.
+   if(!s.raf)return 'visible document did not schedule a frame';
+   await new Promise(r=>{s.frameReady=r;});
+   if(s.state.drawCount===count)return 'visible document did not resume';
+   Review3D.frame('bottom');Review3D.dispose();const closed=s.state.drawCount;
+   await new Promise(r=>setTimeout(r,150));
+   return s.state.drawCount===closed&&s.animationFrames.size===0||'disposed scheduler still active';
+ } finally {if(descriptor)Object.defineProperty(document,'hidden',descriptor);else delete document.hidden;}
+ `],
+  ['BR02 processed reduced motion disables damping', 'v=3d&m=side', `
+ if(!proj().board.parts3d)return 'skip';
+ const original=window.matchMedia;
+ try {
+   window.matchMedia=query=>query==='(prefers-reduced-motion: reduce)'?{matches:true}:original.call(window,query);
+   await Review3D.show(document.querySelector('#stage'),proj(),S);
+   return Review3D.state.controls.every(c=>!c.enableDamping)||'reduced motion still damps';
+ } finally {window.matchMedia=original;}
+ `]
+);
+
+CHECKS.push(
+ ['BR02 processed whole screen tools and revisions','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const tools=document.querySelector('details.tools3d');if(!tools)return '3D tools missing';
+ tools.open=true;await new Promise(r=>setTimeout(r,50));
+ if(document.documentElement.scrollWidth>innerWidth)return 'horizontal overflow';
+ if(!document.querySelector('[data-3d-camera="reset"]'))return 'Camera reset lost';
+ for(const e of tools.querySelectorAll('button,select,input')) {
+   const r=e.getBoundingClientRect();
+   if(!r.width||!r.height||r.left<0||r.right>innerWidth||r.bottom>innerHeight)return 'unreachable 3D tool';
+   if(!(e.getAttribute('aria-label')||e.closest('label')?.textContent||e.textContent.trim()))return 'unnamed 3D tool';
+   if(!e.disabled){e.focus();if(document.activeElement!==e)return 'tool cannot receive focus';}
+ }
+ for(const side of ['base','head']) {
+   Review3D.setRevision(side);
+   const stats=proj().board.coverage3dBySide?.[side];
+   const expected=stats?'3D coverage: '+stats.withModel+' of '+stats.footprints+' parts have models':'3D coverage unavailable';
+   if(tools.querySelector('.coverage3d')?.textContent!==expected)return 'coverage not synchronized';
+ }
+ if(tools.querySelector('[data-revision]'))return 'duplicate revision control';
+ Review3D.setLighting({rig:'invalid',bearing:-30,exposure:99});
+ const light=Review3D.state.lighting;
+ if(light.rig!=='bench'||light.bearing!==330||light.exposure!==3)return 'lighting validation';
+ Review3D.setLighting(ThreeStudio.PRESETS.bench);
+ tools.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+ if(tools.open||document.activeElement!==tools.querySelector('summary'))return 'Escape focus';
+ tools.open=true;
+ return Review3D.state.visibleSides.join(',')==='base,head'||'desktop lost a revision';
+ `],
+ ['BR02 processed desktop canonical state round trip','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const saved={...S},stage=document.querySelector('#stage'),p=proj();
+ try {
+   const part=Review3D.state.parts.head.find(p=>p.hasModel);
+   if(!part)return 'fixture lacks selectable model';
+   S.part3d={...part,box:part.box.slice()};Review3D.focusPart(part.ref,'head',false);
+   Review3D.setRevision('head');
+   if(!S.part3d)return 'same revision cleared selection';
+   Review3D.setRevision('base');
+   if(S.part3d||Review3D.state.selected.length)return 'revision change retained stale selection';
+   Review3D.setAssembled(false);
+   Review3D.setLighting({rig:'photo',bearing:90,exposure:1.5});
+   Review3D.setHidden(['silk']);S.hidden3d=['silk'];
+   const camera=Review3D.cameraState();S.camera3d=camera;
+   await new Promise(r=>setTimeout(r,250));
+   const decoded=valid(decodeState(location.hash));
+   if(decoded.revision!=='base'||decoded.assembled3d!==false||decoded.lighting3d.rig!=='photo')return 'callback hash lost state';
+   select('board');select('3d');await draw();
+   if(S.revision!=='base'||S.assembled3d!==false||Review3D.state.lighting.rig!=='photo')return 'navigation lost state';
+   if(S.hidden3d.join()!=='silk'||JSON.stringify(Review3D.cameraState())!==JSON.stringify(camera))return 'navigation lost camera/hidden';
+   const absent=structuredClone(p);
+   for(const key of ['model3d','poster3d','parts3d','coverage3dBySide','assets3d'])if(absent.board[key])absent.board[key].head=null;
+   S.revision='head';await Review3D.show(stage,absent,S);
+   if(Review3D.state.revision!=='head')return 'absent head silently replaced';
+   const host=Review3D.testSeam.session().hostsBySide.head;
+   if(!host.textContent.includes('Board not in this revision')||host.querySelector('[data-poster]:not([hidden])'))return 'absent Head fallback';
+   return true;
+ } finally {Object.assign(S,saved);await Review3D.show(stage,p,S);}
+ `],
+ ...['overlay','semantic','blend'].map(mode=>[
+ 'BR02 processed desktop composite revision semantics '+mode,'v=3d&m='+mode,`
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,parses=st.parseCount;
+ for(const side of ['base','head','base','head']) {
+   Review3D.setRevision(side);const v=st.views.find(v=>v.visible);
+   if(st.roots[1].parent!==v.scene)return 'composite lost head';
+   if((st.roots[0].parent===v.scene)!==(S.m==='blend'))return 'composite base membership changed';
+   if(S.m==='overlay'&&st.ghosts.some(g=>g.object.parent!==v.scene))return 'overlay lost ghosts';
+   if(S.m==='blend')for(const [revision,weight] of [['base',1-st.blend],['head',st.blend]]) {
+     const root=st.roots[revision==='head'?1:0],materials=[];
+     root.traverse(n=>{if(n.isMesh)materials.push(...(Array.isArray(n.material)?n.material:[n.material]))});
+     if(materials.some(m=>m.userData.alpha3d!=null&&Math.abs(m.opacity-m.userData.alpha3d*weight)>1e-6))return 'blend weights changed';
+   }
+   if((await Review3D.testSeam.sampleFrame()).opaquePixels<100)return 'composite not drawn';
+ }
+ return st.parseCount===parses||'revision switch decoded again';
+ `])
+);
+
+CHECKS.push(
+ ...['overlay','semantic','blend'].map(mode=>[
+ 'BR02 processed desktop composite context posters '+mode,'v=3d&m='+mode,`
+ if(!proj().board.parts3d)return 'skip';
+ const stage=document.querySelector('#stage'),st=Review3D.state,s=Review3D.testSeam.session();
+ s.canvas.dispatchEvent(new Event('webglcontextlost',{cancelable:true}));
+ Review3D.resize();Review3D.setRevision('base');
+ for(const side of ['base','head']) {
+   const poster=st.posterBySide[side],host=poster?.closest('.view3d');
+   if(st.readyBySide[side].frame||!poster||poster.hidden||host.hidden)return 'context loss hid '+side+' poster';
+ }
+ const prototype=THREE3D.GLTFLoader.prototype,native=prototype.parseAsync,releases=[],frames=[];
+ let opening;
+ try {
+   prototype.parseAsync=async function(...args){await new Promise(r=>releases.push(r));return native.apply(this,args)};
+   opening=Review3D.show(stage,proj(),S);
+   for(let i=0;i<300&&releases.length<2;i++)await new Promise(r=>setTimeout(r,10));
+   if(releases.length!==2)return 'parse gates not reached';
+   const next=Review3D.state,renderer=next.renderers[0],draw=renderer.render;
+   renderer.render=function(scene,...args) {
+     if(next.views.some(v=>v.scene===scene)) {
+       for(const side of ['base','head'])if(!next.readyBySide[side].frame&&next.posterBySide[side]?.hidden&&scene.children.includes(next.roots[side==='head'?1:0]))throw Error('poster hidden before '+side+' draw');
+       frames.push(scene);
+     }
+     return draw.call(this,scene,...args);
+   };
+   releases.forEach(r=>r());await opening;opening=null;
+   if(!frames.length||!next.firstFrame)return 'retry did not draw';
+   for(const side of S.m==='blend'?['base','head']:['head'])if(!next.readyBySide[side].frame||!next.posterBySide[side].hidden)return 'retry not ready '+side;
+   return true;
+ } finally {prototype.parseAsync=native;releases.forEach(r=>r());if(opening)await opening;}
+
+ `]),
+ ['BR02 processed desktop fallback tools remain accessible','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const original=HTMLCanvasElement.prototype.getContext;
+ try {
+   HTMLCanvasElement.prototype.getContext=function(type,...args){return /webgl/.test(type)?null:original.call(this,type,...args)};
+   await Review3D.show(document.querySelector('#stage'),proj(),S);
+   const tools=document.querySelector('.tools3d');tools.open=true;
+   if([...tools.querySelectorAll('select,input')].some(e=>!e.disabled))return 'renderer-dependent light control enabled';
+   if(tools.querySelector('[data-3d-assembled]').disabled)return 'assembly disabled with renderer';
+   Review3D.setRevision('base');
+   return !!tools.querySelector('.coverage3d').textContent&&!!document.querySelector('[data-3d-retry]')||'fallback tools lost';
+ } finally {HTMLCanvasElement.prototype.getContext=original;}
+ `]
+);
+
+CHECKS.push(['BR02 processed desktop render failure retains only failed poster','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const st=Review3D.state,s=Review3D.testSeam.session(),renderer=s.renderer,native=renderer.render;
+ const base=st.views.find(v=>v.side==='base');
+ try {
+   renderer.render=function(scene,...args){if(scene===base.scene)throw Error('Synthetic revision draw failure');return native.call(this,scene,...args)};
+   try {await Review3D.testSeam.sampleFrame();return 'render error not surfaced';}catch(error){if(!error.message.includes('Synthetic revision draw failure'))throw error;}
+   Review3D.resize();Review3D.setRevision('head');
+   const poster=st.posterBySide.base;
+   if(st.readyBySide.base.frame||!poster||poster.hidden||poster.parentElement!==s.hostsBySide.base)return 'failed Side poster moved or hidden';
+   if(!st.readyBySide.head.frame||!st.posterBySide.head.hidden)return 'valid peer readiness lost';
+   return (await Review3D.testSeam.sampleFrame()).opaquePixels>100||'valid peer not drawn';
+ } finally {renderer.render=native;}
+`]);
+
+CHECKS.push(['BR02 processed desktop Blend requires each source draw','v=3d&m=blend',`
+ if(!proj().board.parts3d)return 'skip';
+ const prototype=THREE3D.GLTFLoader.prototype,native=prototype.parseAsync,releases=[];
+ let opening,renderer,draw;
+ try {
+   prototype.parseAsync=async function(...args){await new Promise(r=>releases.push(r));return native.apply(this,args)};
+   opening=Review3D.show(document.querySelector('#stage'),proj(),S);
+   for(let i=0;i<300&&releases.length<2;i++)await new Promise(r=>setTimeout(r,10));
+   if(releases.length!==2)return 'parse gates not reached';
+   const st=Review3D.state;renderer=st.renderers[0];draw=renderer.render;
+   renderer.render=function(scene,...args){if(st.roots[0])st.roots[0].visible=false;return draw.call(this,scene,...args)};
+   releases.forEach(r=>r());await opening;opening=null;
+   if(st.readyBySide.base.frame||st.posterBySide.base.hidden)return 'Head draw retired undrawn Base poster';
+   if(!st.readyBySide.head.frame||!st.posterBySide.head.hidden)return 'Head draw not ready';
+   Review3D.resize();Review3D.setRevision('base');
+   if(st.posterBySide.base.hidden)return 'routing retired undrawn Base poster';
+   renderer.render=draw;st.roots[0].visible=true;await Review3D.testSeam.sampleFrame();
+   if(!st.readyBySide.base.frame||!st.posterBySide.base.hidden)return 'Base draw did not retire its own poster';
+   const owner=Review3D.testSeam.session();Review3D.dispose();
+   return owner.renderHooks.length===0||'mesh readiness hooks retained after disposal';
+ } finally {prototype.parseAsync=native;if(renderer&&draw)renderer.render=draw;releases.forEach(r=>r());if(opening)await opening;}
+`]);
+
+CHECKS.push(['BR02 optional viewer state validation','v=board',`
+ const viewer=window.Review3D,preset=ThreeStudio.PRESETS.photo;
+ try {
+   window.Review3D=undefined;
+   const light=valid(decodeState('#lt=photo,-30,99')).lighting3d;
+   if(light.rig!=='photo'||light.bearing!==330||light.exposure!==3)return 'lighting validation requires optional viewer';
+   ThreeStudio.PRESETS.photo={...preset,bearing:120,exposure:1.75};
+   const defaults=valid({lighting3d:{rig:'photo'}}).lighting3d;
+   if(defaults.bearing!==120||defaults.exposure!==1.75)return 'hash defaults drifted from studio presets';
+   return S.lighting3d?.rig==='bench'&&S.assembled3d===true||'default state requires optional viewer';
+ } finally {window.Review3D=viewer;ThreeStudio.PRESETS.photo=preset;}
+`]);
+
+CHECKS.push(['BR02 processed assembly buttons are idempotent','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ const assembled=document.querySelector('[data-3d-assembled]'),bare=document.querySelector('[data-3d-bare]');
+ for(const [button,value] of [[assembled,true],[assembled,true],[bare,false],[bare,false],[assembled,true]]) {
+   button.click();
+   if(Review3D.state.assembled!==value||S.assembled3d!==value)return 'assembly button toggled instead of selecting '+value;
+   if(assembled.getAttribute('aria-pressed')!==String(value)||bare.getAttribute('aria-pressed')!==String(!value))return 'assembly pressed state';
+ }
+ return true;
+`]);
+CHECKS.push(['BR02 processed menus restore focus on every close','v=3d&m=side',`
+ if(!proj().board.parts3d)return 'skip';
+ for(const selector of ['.tools3d','.camera-presets']) {
+   const menu=document.querySelector(selector),summary=menu.querySelector('summary');
+   for(const close of ['summary','programmatic','Escape']) {
+     menu.open=true;await new Promise(r=>setTimeout(r,30));
+     menu.querySelector('button').focus();
+     let focusCount=0;const countFocus=()=>focusCount++;
+     if(close==='Escape'){summary.addEventListener('focus',countFocus);menu.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));}
+     else if(close==='summary')summary.click();
+     else menu.open=false;
+     await new Promise(r=>setTimeout(r,30));
+     if(menu.open||document.activeElement!==summary)return selector+' close focus '+close;
+     if(close==='Escape'){summary.removeEventListener('focus',countFocus);if(focusCount!==1)return selector+' Escape focused summary '+focusCount+' times';}
+   }
+ }
+ return true;
+`]);
+
+
+CHECKS.push(['BR02 repeated show releases retired WebGL contexts','v=3d&m=side',`
+ if(!proj().board.model3d?.head)return 'skip';
+ const stage=document.querySelector('#stage'),p=structuredClone(proj()),retired=[];
+ // Renderer churn is the contract; avoid repeatedly compiling the studio environment in software GL.
+ p.board.model3d={base:null,head:null};p.board.poster3d={};p.board.parts3d={};p.board.assets3d={};
+ for(let i=0;i<5;i++) {
+   const renderer=Review3D.testSeam.session()?.renderer;
+   if(renderer)retired.push(renderer.getContext());
+   await Review3D.show(stage,p,S);
+   await new Promise(r=>requestAnimationFrame(r));
+   if(retired.some(context=>!context.isContextLost()))return 'retired WebGL context remains live on show '+i;
+   if(Review3D.testSeam.session().renderer.getContext().isContextLost())return 'active context lost';
+ }
+ return retired.length===5||'missing renderer during repeated show';
+`]);
+
+CHECKS.push(['BR02 coverage exposes per-footprint warnings','v=3d&m=side',`
+ if(!proj().board.coverage3dBySide?.head)return 'skip';
+ const stats=proj().board.coverage3dBySide.head,saved=stats.warnings;
+ try {
+   stats.warnings=['REF** (logo-a): unannotated footprint skipped','REF** (logo-b): unannotated footprint skipped'];
+   Review3D.setRevision('head');
+   const coverage=document.querySelector('.coverage3d').textContent;
+   return stats.warnings.every(w=>coverage.includes(w))||'per-footprint warnings missing from coverage';
+ } finally {stats.warnings=saved;Review3D.setRevision('head');}
+`]);
+
+CHECKS.push(['BR02 lighting defaults derive from studio bench preset','v=board',`
+ const preset=ThreeStudio.PRESETS.bench,saved={...S};
+ try {
+   ThreeStudio.PRESETS.bench={...preset,bearing:120,exposure:1.75};
+   applyState({v:'board'});
+   if(S.lighting3d.bearing!==120||S.lighting3d.exposure!==1.75)return 'app state hard-coded bench defaults';
+   if(new URLSearchParams(encodeState()).has('lt'))return 'canonical lighting default serialized';
+   S.lighting3d={...S.lighting3d,bearing:60};
+   return new URLSearchParams(encodeState()).get('lt')==='bench,60,1.75'||'nondefault lighting omitted';
+ } finally {ThreeStudio.PRESETS.bench=preset;Object.assign(S,saved);}
+`]);
+
 CHECKS.push(['digest assets offline embedded closure', '', `
   const entries=Object.entries(D.assets||{});
   if(!entries.length)return 'skip';
@@ -5741,3 +6996,69 @@ CHECKS.push(['images asset timeout unavailable and retry complete-screen','',`
     return true;
   } finally {assetText=original;window.setTimeout=nativeTimeout;client.dispose();}
 `]);
+
+// BR02 Task 9B: offline reports decode embedded models only; hosted lazy shells ask the parent broker.
+CHECKS.push(["BR02 processed offline has no model fetch", "v=3d&m=side", `
+ if(!proj().board.parts3d)return 'skip';
+ if(!Review3D.state.firstFrame)return 'no genuine model frame';
+ const requests=performance.getEntriesByType('resource').filter(r=>/\\/3d\\//.test(r.name));
+ return requests.length===0||'offline requested hosted models';
+`]);
+// Session fault matrix (Task 5A) for broker replies: the head model blob is stripped as in the
+// hosted lazy shell and a same-origin iframe stands in for the authenticated parent WindowProxy.
+CHECKS.push(...['parent-corrupt-reply','parent-delayed-reply'].map(fault=>["BR02 processed session fault "+fault,"v=3d&m=side",`
+ if(!proj().board.parts3d)return 'skip';
+ const fault=${JSON.stringify(fault)}, p=structuredClone(proj()), stage=document.querySelector('#stage'), head=p.board.assets3d?.head?.model;
+ if(!head)return 'processed fixture has no head model descriptor';
+ const frame=document.createElement('iframe');frame.hidden=true;document.body.appendChild(frame);
+ const fake=frame.contentWindow, requests=[], parentProperty=Object.getOwnPropertyDescriptor(window,'parent');
+ fake.addEventListener('message',e=>{if(e.data?.kicad3d===1)requests.push(e.data);});
+ const reply=data=>window.dispatchEvent(new MessageEvent('message',{source:fake,data}));
+ const wait=async test=>{for(let i=0;i<300&&!test();i++)await new Promise(r=>setTimeout(r,10));return test();};
+ const embedded=Uint8Array.from(atob(REVIEW_DATA.blobs[p.board.model3d.head]),c=>c.charCodeAt(0));
+ const decoded=await new Response(new Blob([embedded]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+ p.board.model3d.head='br02-lazy-head';
+ Object.defineProperty(window,'parent',{value:fake,configurable:true});
+ try {
+   const opened=Review3D.show(stage,p,S);
+   if(!await wait(()=>requests.length))return 'no broker request';
+   const q=requests[0];
+   if(q.kicad3d!==1||q.kind!=='board.glb'||q.digest!==head.digest||!/^[-0-9a-f]{36}$/.test(q.nonce)||q.id!==1)return 'bad broker request '+JSON.stringify(q);
+   if(fault==='parent-corrupt-reply') {
+     const bad=decoded.slice(0);new Uint8Array(bad)[100]^=1;
+     reply({kicad3d:1,nonce:q.nonce,id:q.id,bytes:bad,gzip:false});
+     await opened;
+     const st=Review3D.state;
+     if(st.loading)return 'corrupt reply left loading unsettled';
+     if(!/digest mismatch/.test(st.errorsBySide.head||''))return 'digest mismatch not reported: '+st.errorsBySide.head;
+     if(st.roots[1])return 'corrupt bytes reached the loader';
+     if(!st.roots[0])return 'valid base lost';
+     if(!document.querySelector('#stage [data-poster="head"]:not([hidden])'))return 'head poster lost';
+     const retry=stage.querySelector('[data-3d-retry]');if(!retry)return 'no accessible retry';
+     requests.length=0;retry.click();
+     if(!await wait(()=>requests.length))return 'retry sent no broker request';
+     if(requests[0].nonce===q.nonce)return 'retry reused the old session nonce';
+     reply({kicad3d:1,nonce:requests[0].nonce,id:requests[0].id,bytes:decoded.slice(0),gzip:false});
+     if(!await wait(()=>Review3D.state.firstFrame&&Review3D.state.roots[1]&&!Review3D.state.loading))return 'verified retry did not render head';
+     if(Review3D.state.errorsBySide.head)return 'verified retry kept the error';
+   } else {
+     // Navigation while the broker is still answering: the old session must settle and stay dead.
+     Review3D.dispose();await opened;
+     await Review3D.show(stage,proj(),S);
+     const current=Review3D.state,canvases=[...stage.querySelectorAll('canvas')];
+     reply({kicad3d:1,nonce:q.nonce,id:q.id,bytes:decoded.slice(0),gzip:false});
+     reply({kicad3d:1,nonce:q.nonce,id:q.id,error:'late failure'});
+     await new Promise(r=>setTimeout(r,200));
+     if(Review3D.state!==current)return 'late reply replaced newer session';
+     const settled=[...stage.querySelectorAll('canvas')];
+     if(settled.length!==canvases.length||settled.some((c,i)=>c!==canvases[i]))return 'late reply resurrected canvas';
+     if(!current.firstFrame||current.loading||current.errorsBySide.head)return 'newer session disturbed by late reply';
+   }
+   Review3D.dispose();
+   const counts=Review3D.state.resourceCounts;
+   return counts.workers===0&&counts.urls===0&&counts.pending===0||'session leaked owned resources';
+ } finally {
+   if(parentProperty)Object.defineProperty(window,'parent',parentProperty);else delete window.parent;
+   frame.remove();Review3D.dispose();
+ }
+`]));

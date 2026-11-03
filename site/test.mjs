@@ -1,9 +1,12 @@
 import test from 'node:test';
-import { createHash } from 'node:crypto';
+import {createServer} from 'node:http';
+import {gzipSync, gunzipSync} from 'node:zlib';
+import { createHash, webcrypto } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
+import { threeClient } from './three-client.js';
 import { fixturePages } from './proof.mjs';
 import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
 
@@ -189,7 +192,11 @@ async function callUrl(url, options) {
 }
 function mockFetch(handler) {
   const original = globalThis.fetch;
-  globalThis.fetch = handler;
+  // workerd throws on redirect 'error' (Node accepts it); fail the same way so server code cannot regress.
+  globalThis.fetch = (url, init) => {
+    if (init?.redirect === 'error') throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+    return handler(url, init);
+  };
   return () => { globalThis.fetch = original; };
 }
 function tokenResponse(overrides = {}) {
@@ -532,7 +539,7 @@ test('review route shows the repository after a pull-access check and refreshes 
 });
 
 test('shared CSP module permits report WebAssembly without weakening sandbox or wrapper policies', () => {
-  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-ancestors 'self'");
+  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; worker-src blob:; connect-src 'none'; frame-ancestors 'self'");
   assert.match(reportCsp, /'wasm-unsafe-eval'/);
   assert.doesNotMatch(reportCsp, /'unsafe-eval'/);
   assert.match(reportCsp, /connect-src 'none'/);
@@ -2088,7 +2095,9 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     .replace('<meta name="deploy-sha" content="unknown">', '')
     .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>', '')
     // Shared theme script and toggle (Stage 1) are normalized out of the pinned digest.
-    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '');
+    .replace(/<script>\(\(\) => \{\n  const root[\s\S]*?<\/script>/, '').replace(/<button type="button" class="btn theme-toggle"[\s\S]*?<\/button>/, '').replace(/<svg width="0"[\s\S]*?<\/svg>\s*(?=<header)/, '')
+    // BR02 lazy 3D model broker (authenticated wrapper only) is additive.
+    .replace(/<script>\(function threeClient\([\s\S]*?<\/script>/, '');
   // Fixed digest of Bench frame HTML with styles normalized, not a moving HEAD fixture.
   assert.equal(createHash('sha256').update(current).digest('hex'), '34c84c0ecd44924b5e60d973f98419dfe51b49ce83d31841488613eecab462c7');
   const restore = shareCreationFetch();
@@ -3283,6 +3292,9 @@ test('stored reports are re-dressed exactly as kicad_review.py builds the curren
     // An old report: same data, an outdated interface around it.
     const old = current.replace(/<style>[\s\S]*?<\/style>/, '<style>old</style>').replace('KiCad review', 'Old review');
     assert.equal(currentReport(old), current);
+    assert.equal(current.split('window.ThreeStudio=').length - 1, 1);
+    assert.ok(current.indexOf('window.ThreeStudio=') < current.indexOf('const D = window.REVIEW_DATA'));
+    assert.doesNotMatch(current, /<script[^>]+src=/);
   }
 });
 test('reports without a recognisable data script are served unchanged', () => {
@@ -3294,9 +3306,233 @@ test('data with replacement patterns is inserted literally', () => {
   assert.match(html, /window\.REVIEW_DATA = \{"v":"\$& \$1 \$\$"\};/);
 });
 
+test('BR02 report embeds the decode worker and permits only blob workers', () => {
+  const html = inlinePage(readFileSync(new URL('../ui/sample/review-data-3d.js', import.meta.url), 'utf8'));
+  const dressed = currentReport(html);
+  const tag = dressed.match(/<script type="application\/octet-stream" id="three-decode-worker">([^<]*)<\/script>/);
+  assert.ok(tag);
+  assert.equal(Buffer.from(tag[1], 'base64').toString('utf8'), readFileSync(new URL('../ui/three-decode.js', import.meta.url), 'utf8'));
+  const studio = readFileSync(new URL('../ui/three-studio.js', import.meta.url), 'utf8');
+  assert.ok(dressed.includes(studio) && dressed.indexOf(studio) < dressed.indexOf('window.Review3D'), 'BR02 dressed report carries the studio script before the viewer');
+  assert.match(reportCsp, /(?:^|; )worker-src blob:(?:;|$)/);
+  assert.match(reportCsp, /connect-src 'none'/);
+  assert.doesNotMatch(reportCsp, /allow-same-origin|'unsafe-eval'|https?:|connect-src (?!'none')/);
+});
+
+test('BR02 broker enforces source and names and has a valid positive control',async()=>{
+  const listeners=[],sent=[],fetches=[], digest=createHash('sha256').update(new Uint8Array([103,108,84,70])).digest('hex');
+  const child={postMessage:(message,origin,transfer)=>sent.push({message,origin,transfer})};
+  const window={addEventListener:(name,fn)=>{if(name==='message')listeners.push(fn)}};
+  const document={querySelector:selector=>{assert.equal(selector,'#review-report');return {contentWindow:child};}};
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window,document,crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+    fetch:async(url,options)=>{fetches.push({url,options});return {
+      ok:true,arrayBuffer:async()=>new Uint8Array([103,108,84,70]).buffer};}
+  });
+  const valid={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest,kind:'board.glb'};
+  await listeners[0]({source:{},data:valid,origin:'null'});
+  assert.equal(fetches.length,0,'wrong window with valid asset must not fetch');
+  assert.equal(sent.length,0,'wrong window receives no reply');
+  for(const data of [{...valid,digest:'../secret'},{...valid,kind:'https://evil/model'},
+                     {...valid,id:0},{...valid,digest:'A'.repeat(64)},{...valid,nonce:null},{...valid,nonce:'old'},
+                     {...valid,digest:[digest]},{...valid,id:1.5},{...valid,id:Number.MAX_SAFE_INTEGER+1},
+                     {...valid,kicad3d:0},{...valid,kind:'board.raw.glb'},null])
+    await listeners[0]({source:child,data,origin:'null'});
+  assert.equal(fetches.length,0,'correct child invalid names must not fetch');
+  assert.equal(sent.length,0);
+  await listeners[0]({source:child,data:valid,origin:'null'});
+  assert.equal(fetches.length,1);
+  assert.equal(fetches[0].url,'/r/o/r/a/12/3d/'+digest+'/board.glb');
+  assert.equal(fetches[0].options.credentials,'same-origin');
+  assert.equal(fetches[0].options.redirect,'error');
+  assert.equal(sent.length,1);assert.equal(sent[0].message.id,1);assert.equal(sent[0].message.nonce,valid.nonce);
+  assert.equal(sent[0].message.kicad3d,1);assert.equal(sent[0].message.gzip,false);
+  assert.deepEqual([...new Uint8Array(sent[0].message.bytes)],[103,108,84,70]);
+  assert.equal(sent[0].transfer[0],sent[0].message.bytes);assert.equal(sent[0].origin,'*');
+});
+
+test('BR02 broker deduplicates inflight requests and replies on fetch failure',async()=>{
+  let listener,release,count=0;const replies=[];
+  const child={postMessage:m=>replies.push(m)};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{count++;await gate;return {ok:false}}});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'b'.repeat(64),kind:'board-parts.json'};
+  const a=listener({source:child,data}),b=listener({source:child,data:{...data,id:2}});
+  release();await Promise.all([a,b]);assert.equal(count,1);
+  assert.equal(replies.length,2);assert.ok(replies.every(r=>r.error==='Model unavailable. Retry.'&&!r.bytes&&r.nonce===data.nonce));
+  assert.deepEqual(replies.map(r=>r.id),[1,2]);
+  await listener({source:child,data:{...data,id:3}});
+  assert.equal(count,2,'failed asset can be retried');
+});
+
+test('BR02 broker limits distinct inflight assets and transfers independent deduplicated buffers',async()=>{
+  let listener,release;const fetches=[],sent=[],buffers=[];
+  const payloads=new Map([1,2,3,4].map(i=>{const bytes=new Uint8Array([1,2,3,i]);return [createHash('sha256').update(bytes).digest('hex'),bytes];}));
+  const digests=[...payloads.keys()];
+  const child={postMessage:(message,origin,transfer)=>{
+    assert.equal(origin,'*');
+    if(message.bytes){
+      assert.equal(transfer[0],message.bytes);
+      buffers.push(message.bytes);
+      // A real transfer detaches the sender buffer. The next reply must still work.
+      message=structuredClone(message,{transfer});
+    }
+    sent.push(message);
+  }};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async url=>{
+      fetches.push(url);await gate;
+      return {ok:true,arrayBuffer:async()=>payloads.get(url.split('/').at(-2)).buffer};
+    }});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:digests[0],kind:'board.glb'};
+  const requests=[listener({source:child,data})];
+  for(let i=2;i<=4;i++)requests.push(listener({source:child,data:{...data,id:i,digest:digests[i-1]}}));
+  requests.push(listener({source:child,data:{...data,id:5}}));
+  await listener({source:child,data:{...data,id:6,kind:'board-parts.json'}});
+  assert.equal(fetches.length,4,'duplicate shares a slot; different kind needs its own slot');
+  assert.equal(sent.length,1);assert.equal(sent[0].id,6);
+  assert.equal(sent[0].error,'Too many model requests. Retry.');
+  release();await Promise.all(requests);
+  const replies=sent.filter(m=>m.bytes);
+  assert.equal(replies.length,5);assert.equal(new Set(buffers).size,5);
+  assert.ok(buffers.every(b=>b.byteLength===0),'each reply buffer was transferred');
+  assert.ok(replies.every(m=>m.nonce===data.nonce&&m.gzip===false));
+  for(const reply of replies)assert.deepEqual([...new Uint8Array(reply.bytes)].slice(0,3),[1,2,3]);
+  await listener({source:child,data:{...data,id:7,kind:'board-parts.json'}});
+  assert.equal(fetches.length,5,'settled assets release their slots');
+  assert.equal(sent.at(-1).id,7);assert.ok(sent.at(-1).bytes);
+});
+
+test('BR02 broker drops success and error replies when the report frame changes',async()=>{
+  for(const outcome of ['success','http','network','body']){
+    let listener,release;const sent=[];
+    const child={postMessage:message=>sent.push(message)};
+    let frame={contentWindow:child};
+    const gate=new Promise(r=>release=r);
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>frame},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{
+        await gate;
+        if(outcome==='network')throw Error('network failure');
+        return {ok:outcome!=='http',arrayBuffer:async()=>{
+          if(outcome==='body')throw Error('body failure');
+          return new ArrayBuffer(4);
+        }};
+      }});
+    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:'d'.repeat(64),kind:'board.glb'};
+    const pending=listener({source:child,data});
+    frame={contentWindow:{postMessage:message=>sent.push(message)}};
+    release();await pending;
+    assert.equal(sent.length,0,outcome);
+    frame=null;
+    await listener({source:child,data});
+    assert.equal(sent.length,0,'removed frame ignored');
+  }
+});
+
+test('BR02 broker reports network and body errors and allows retry',async()=>{
+  for(const outcome of ['network','body']){
+    let listener,count=0;const replies=[];
+    const child={postMessage:m=>replies.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{
+        count++;
+        if(count===1&&outcome==='network')throw Error('network failure');
+        return {ok:true,arrayBuffer:async()=>{
+          if(count===1)throw Error('body failure');
+          return new ArrayBuffer(4);
+        }};
+      }});
+    const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:createHash('sha256').update(new Uint8Array(4)).digest('hex'),kind:'board.glb'};
+    await listener({source:child,data});
+    assert.equal(replies[0].error,outcome+' failure');
+    assert.equal(replies[0].nonce,data.nonce);assert.equal(replies[0].id,1);assert.ok(!replies[0].bytes);
+    await listener({source:child,data:{...data,id:2}});
+    assert.equal(count,2);assert.equal(replies[1].id,2);assert.ok(replies[1].bytes);
+  }
+});
+
+test('BR02 broker caps duplicate waiters per asset',async()=>{
+  let listener,release,count=0;const replies=[];
+  const child={postMessage:m=>replies.push(m)};
+  const gate=new Promise(r=>release=r);
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>{count++;await gate;return {ok:true,arrayBuffer:async()=>new ArrayBuffer(4)}}});
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest:createHash('sha256').update(new Uint8Array(4)).digest('hex'),kind:'board.glb'};
+  const requests=[];
+  for(let id=1;id<=17;id++)requests.push(listener({source:child,data:{...data,id}}));
+  assert.equal(replies.length,1);
+  assert.equal(replies[0].error,'Too many requests for this model. Retry.');
+  release();await Promise.all(requests);assert.equal(count,1);
+  assert.equal(replies.length,17);
+});
+
+test('BR02 broker distinguishes authorization denial from retryable unavailability',async()=>{
+  for(const status of [401,403]){
+    let listener;const replies=[];const child={postMessage:m=>replies.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,fetch:async()=>({ok:false,status})});
+    await listener({source:child,data:{kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:status,digest:'9'.repeat(64),kind:'board.glb'}});
+    assert.equal(replies[0].error,'Model access denied. Refresh the review link or sign in, then retry.');
+  }
+});
+
+test('BR02 broker rejects endpoints outside the authenticated model route',()=>{
+  for(const endpoint of ['https://evil/model/','//evil/','/r/o/r/a/12/raw','/r/o/r/a/no/3d/','/s/token/3d/']){
+    assert.throws(()=>runInNewContext(`(${threeClient.toString()})(${JSON.stringify({endpoint})})`,{Error}),/invalid model endpoint/);
+  }
+});
+
+
+test('BR02 broker verifies SHA-256 before transferring models and allows retry',async()=>{
+  let listener;const sent=[],bytes=new Uint8Array([103,108,84,70]);
+  const digest=createHash('sha256').update(bytes).digest('hex');
+  const child={postMessage:message=>sent.push(message)};
+  let corrupt=true;
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+    window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+    crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+    fetch:async()=>({ok:true,arrayBuffer:async()=>corrupt?new ArrayBuffer(4):bytes.buffer})
+  });
+  const data={kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,digest,kind:'board.glb'};
+  await listener({source:child,data});
+  assert.equal(sent[0].error,'Model digest mismatch. Retry.');
+  assert.equal(sent[0].bytes,undefined);
+  corrupt=false;await listener({source:child,data:{...data,id:2}});
+  assert.deepEqual([...new Uint8Array(sent[1].bytes)],[...bytes]);
+});
+
+
+for(const encoded of [true,false])test('BR02 broker gzip transport '+(encoded?'fetch-decodes before hashing':'without Content-Encoding fails closed'),async()=>{
+  const raw=Buffer.from('glTF model payload'),packed=gzipSync(raw);
+  const server=createServer((req,res)=>{
+    res.writeHead(200,{'Content-Type':'model/gltf-binary',...(encoded?{'Content-Encoding':'gzip'}:{})});
+    res.end(packed);
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try {
+    let listener;const sent=[],child={postMessage:m=>sent.push(m)};
+    runInNewContext(`(${threeClient.toString()})({endpoint:'/r/o/r/a/12/3d/'})`,{
+      window:{addEventListener:(_,fn)=>listener=fn},document:{querySelector:()=>({contentWindow:child})},
+      crypto:webcrypto,Map,Number,ArrayBuffer,Uint8Array,Error,
+      fetch:(url,options)=>fetch(`http://127.0.0.1:${server.address().port}${url}`,options)
+    });
+    await listener({source:child,data:{kicad3d:1,nonce:'01234567-89ab-4cde-8fab-0123456789ab',id:1,
+      digest:createHash('sha256').update(raw).digest('hex'),kind:'board.glb'}});
+    if(encoded){assert.deepEqual(Buffer.from(sent[0].bytes),raw);assert.equal(sent[0].gzip,false);}
+    else {assert.equal(sent[0].error,'Model digest mismatch. Retry.');assert.equal(sent[0].bytes,undefined);}
+  } finally {await new Promise(resolve=>server.close(resolve));}
+});
+
 // Task 9.1: authenticated image delivery and the opaque-frame bridge.
 import { assetFromReport, readStoredData, privateAsset } from './worker.js';
-import { gzipSync, gunzipSync } from 'node:zlib';
 const imageId = 'abcdef123456';
 const imageText = '<svg xmlns="http://www.w3.org/2000/svg"/>';
 const imageData = () => ({ version: 1, assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
@@ -3717,7 +3953,7 @@ test('hosted stripping preserves GLB, Three bundle and unknown fields with scrip
 });
 test('guest raw delivery retains image blobs and never installs hosted asset descriptors', async () => {
   const token = await guestToken(), restore = guestFetch(), originalMock = globalThis.fetch;
-  globalThis.fetch = (url, options) => url === shareBlob ? Promise.resolve(new Response(storedImageReport())) : originalMock(url, options);
+  mockFetch((url, options) => url === shareBlob ? Promise.resolve(new Response(storedImageReport())) : originalMock(url, options));
   try {
     const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
     assert.equal(raw.status, 200); guestSecurity(raw);
@@ -4257,7 +4493,7 @@ test('desktop dock toggles remain independent without viewport queries', () => {
 
 test('3D camera retains desktop OrbitControls with direct-touch mappings disabled', () => {
   const source=readFileSync(new URL('../ui/review3d.js',import.meta.url),'utf8');
-  assert.match(source,/controls\.touches\s*=\s*\{ONE:null,TWO:null\}/);
+  assert.match(source,/controls\.touches\s*=\s*\{ONE:null,\s*TWO:null\}/);
 });
 
 // Warm isolate cache must never become an authorization or artifact-liveness cache.
@@ -4423,6 +4659,347 @@ test('legacy metadata shares in-flight builds but is never cached', async () => 
     h.want = -1; await h.get('765451');
     assert.equal(h.downloads, 2);
   } finally { h.done(); }
+});
+
+test('BR02 report family binds design names to the full head SHA', () => {
+  const head = 'b'.repeat(40);
+  assert.ok(verifyReportFamily('comparison', 'kicad-review-aaaaaaa-bbbbbbb-pass.html'));
+  assert.ok(verifyReportFamily('comparison', 'kicad-review-none-bbbbbbb-fail.html'));
+  assert.ok(!verifyReportFamily('comparison', 'kicad-design-bbbbbbb.html', head));
+  for (const name of ['kicad-design-bbbbbbb.html', 'kicad-design-bbbbbbb.context.json', 'kicad-design-downloads-bbbbbbb'])
+    assert.ok(verifyReportFamily('design', name, head), name);
+  for (const [name, sha] of [['kicad-design-bbbbbbb.html', 'd'.repeat(40)], ['kicad-design-bbbbbbb.html', 'bbbbbbb'],
+    ['kicad-design-bbbbbbb.html', 'B'.repeat(40)], ['kicad-design-bbbbbbb.html', undefined], ['kicad-review-aaaaaaa-bbbbbbb-pass.html', head],
+    ['kicad-design-bbbbbbb.htm', head], ['kicad-design-downloads-bbbbbbb.html', head], ['kicad-design-bbbbbbb', head], ['x/kicad-design-bbbbbbb.html', head]])
+    assert.ok(!verifyReportFamily('design', name, sha), name + ' ' + sha);
+  assert.ok(!verifyReportFamily('other', 'kicad-design-bbbbbbb.html', head));
+});
+for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch', 'design-comparison-name', 'no-session', 'no-pull', 'expired-html',
+  'bad-name', 'foreign-repo', 'wrong-run', 'missing', 'expired-sibling', 'no-descriptor', 'malformed-descriptor', 'unlisted',
+  'invalid-kind', 'invalid-digest', 'short-digest', 'second-page', 'ambiguous', 'corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'identity-length', 'encoded-length', 'bad-host']) {
+  test('BR02 asset route ' + scenario, async () => {
+    const digest = 'c'.repeat(64), kind = scenario === 'valid-parts' ? 'board-parts.json' : 'board.glb';
+    const key = kind === 'board.glb' ? 'model' : 'parts', bytes = gzipSync(kind === 'board.glb' ? 'glTF' : '[]');
+    let downloads = 0, accessChecks = 0, metadataChecks = 0, pulls = 0;
+    let revoked = scenario === 'no-pull', expired = scenario === 'expired-html', siblingExpired = scenario === 'expired-sibling';
+    const sealed = await signedIn();
+    const asset = () => ({ id: 91, name: `kicad-3d-${digest}-${kind}.gz`, expired: siblingExpired, workflow_run: { id: 9 } });
+    const descriptor = { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes: bytes.length };
+    if (scenario === 'malformed-descriptor') descriptor.bytes = 'big';
+    if (scenario === 'unlisted') descriptor.digest = 'e'.repeat(64);
+    if (scenario === 'size-mismatch') descriptor.bytes = bytes.length + 1;
+    if (scenario === 'not-gzip') descriptor.bytes = 'not gzip'.length;
+    const data = { version: 1, blobs: { model: 'embedded-model' }, projects: [{ board: { model3d: { head: 'model' },
+      ...(scenario === 'no-descriptor' ? {} : { assets3d: { base: null, head: { [key]: descriptor } } }) } }] };
+    if (scenario.startsWith('design')) data.report = { kind: 'design', head: (scenario === 'design-head-mismatch' ? 'd' : 'b').repeat(40) };
+    const reportName = scenario.startsWith('design') && scenario !== 'design-comparison-name' ? 'kicad-design-bbbbbbb.html'
+      : scenario === 'bad-name' ? 'other.html' : 'kicad-review-aaaaaaa-bbbbbbb-pass.html';
+    const stored = '<script>window.REVIEW_DATA = ' + JSON.stringify(data) + ';</script>';
+    const restore = mockFetch(async (url) => {
+      url = String(url);
+      if (url.endsWith('/repos/Cameronrlewis/repo')) {
+        accessChecks++;
+        return revoked ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: false } }))
+          : new Response(JSON.stringify({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
+      }
+      if (url.endsWith('/artifacts/12')) {
+        metadataChecks++;
+        return new Response(JSON.stringify({ name: reportName, expired,
+          workflow_run: { id: 9, repository_id: scenario === 'foreign-repo' ? 6 : 5 } }));
+      }
+      if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302,
+        headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
+      if (url === 'https://artifact.actions.githubusercontent.com/report') return new Response(stored);
+      if (url.includes('/runs/9/artifacts?')) {
+        const page = Number(new URL(url).searchParams.get('page') || 1);
+        const artifacts = scenario === 'missing' ? [] : scenario === 'second-page' && page === 1
+          ? Array.from({ length: 100 }, (_, i) => ({ id: 100 + i, name: 'other-' + i }))
+          : scenario === 'wrong-run' ? [{ ...asset(), workflow_run: { id: 10 } }]
+            : scenario === 'ambiguous' ? [asset(), { ...asset(), id: 92 }] : [asset()];
+        return new Response(JSON.stringify({ artifacts }));
+      }
+      if (url.endsWith('/artifacts/91/zip')) return new Response(null, { status: 302,
+        headers: { Location: scenario === 'bad-host' ? 'https://evil.example/model' : 'https://artifact.actions.githubusercontent.com/file' } });
+      if (url === 'https://artifact.actions.githubusercontent.com/file') {
+        downloads++;
+        // Oversized: valid bytes then endless filler; a whole-body read would pull every chunk.
+        if (scenario === 'oversized') return new Response(new ReadableStream({ pull(c) {
+          c.enqueue(pulls++ ? new Uint8Array(65536) : new Uint8Array(bytes)); if (pulls > 64) c.close(); } }));
+        if (scenario === 'declared-length' || scenario === 'identity-length') return new Response(new ReadableStream({ pull(c) {
+          pulls++; c.enqueue(new Uint8Array(bytes)); c.close(); } }, { highWaterMark: 0 }), { headers: { 'Content-Length': String(bytes.length + 5), ...(scenario === 'identity-length' ? { 'Content-Encoding': 'identity' } : {}) } });
+        // Encoded transfer: Content-Length counts encoded bytes, so only the read bound applies.
+        if (scenario === 'encoded-length') return new Response(bytes, { headers: { 'Content-Encoding': 'gzip', 'Content-Length': String(bytes.length + 5) } });
+        return new Response(['corrupt', 'not-gzip'].includes(scenario) ? 'not gzip' : bytes);
+      }
+      throw Error('unexpected URL ' + url);
+    });
+    try {
+      const suffix = scenario === 'invalid-kind' ? digest + '/other' : scenario === 'invalid-digest' ? 'ABC/board.glb'
+        : scenario === 'short-digest' ? digest.slice(0, 12) + '/board.glb' : digest + '/' + kind;
+      const endpoint = '/r/Cameronrlewis/repo/a/12/3d/' + suffix;
+      const response = await call(endpoint, { headers: scenario === 'no-session' ? {} : { Cookie: `s=${sealed}` } });
+      if (['valid', 'valid-parts', 'design', 'second-page', 'encoded-length'].includes(scenario)) {
+        assert.equal(response.status, 200); assert.equal(downloads, 1);
+        assert.equal(response.headers.get('Content-Encoding'), 'gzip');
+        assert.equal(response.headers.get('Content-Type'), kind === 'board.glb' ? 'model/gltf-binary' : 'application/json');
+        assert.equal(response.headers.get('Cache-Control'), 'private,no-cache');
+        assert.equal(response.headers.get('ETag'), '"' + digest + '"');
+        assert.equal(response.headers.get('Vary'), 'Cookie');
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+        if (['valid', 'valid-parts', 'design'].includes(scenario)) {
+          const conditional = { headers: { Cookie: `s=${sealed}`, 'If-None-Match': response.headers.get('ETag') } };
+          const denied = async (label) => {
+            const before = { accessChecks, metadataChecks, downloads };
+            const result = await call(endpoint, conditional);
+            assert.equal(result.status, 404, label); assert.match(result.headers.get('Cache-Control'), /no-store/, label);
+            assert.equal(result.headers.get('ETag'), null, label);
+            assert.ok(accessChecks > before.accessChecks, label);
+            assert.equal(downloads, before.downloads, label);
+            return before;
+          };
+          const before = { accessChecks, metadataChecks };
+          const reused = await call(endpoint, conditional);
+          assert.equal(reused.status, 304);
+          assert.equal(reused.headers.get('Cache-Control'), 'private,no-cache');
+          assert.equal(reused.headers.get('ETag'), '"' + digest + '"');
+          assert.equal(reused.headers.get('Vary'), 'Cookie');
+          assert.equal((await reused.arrayBuffer()).byteLength, 0);
+          assert.ok(accessChecks > before.accessChecks); assert.ok(metadataChecks > before.metadataChecks);
+          revoked = true; await denied('revoked');
+          revoked = false; expired = true;
+          const stale = await denied('expired html');
+          assert.ok(metadataChecks > stale.metadataChecks);
+          expired = false; siblingExpired = true;
+          const sibling = await denied('expired model artifact');
+          assert.ok(metadataChecks > sibling.metadataChecks);
+        }
+      } else {
+        assert.equal(response.status, 404, scenario);
+        assert.match(response.headers.get('Cache-Control') || '', /no-store/, scenario);
+        assert.equal(response.headers.get('ETag'), null, scenario);
+        if (!['corrupt', 'not-gzip', 'size-mismatch', 'oversized', 'declared-length', 'identity-length'].includes(scenario)) assert.equal(downloads, 0, scenario);
+        if (scenario === 'oversized') assert.ok(pulls <= 3, 'read stops past descriptor size: ' + pulls);
+        if (scenario === 'declared-length' || scenario === 'identity-length') assert.equal(pulls, 0, 'declared size checked before reading');
+      }
+    } finally { restore(); }
+  });
+}
+
+test('BR02 image route rejects 64-character 3D model digests', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => { throw Error('unexpected URL ' + url); });
+  try {
+    for (const path of [`/r/Cameronrlewis/repo/a/12/assets/${'c'.repeat(64)}.json`, `/r/Cameronrlewis/repo/a/12/assets/${'c'.repeat(64)}.svg`]) {
+      const result = await call(path, { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(result.status, 404, path); assert.equal(result.headers.get('ETag'), null);
+    }
+  } finally { restore(); }
+});
+
+import { lazy3dData, currentBody } from './report-shell.js';
+import { verifyReportFamily } from './report-kind.js';
+test('BR02 lazy stripping is opt-in and retains blobs used outside 3D',async()=>{
+  const digest='d'.repeat(64);
+  const asset=kind=>({digest,artifactName:`kicad-3d-${digest}-${kind}.gz`,bytes:32});
+  const data={version:1,blobs:{model:'large-base64',parts:'index-base64',poster:'png-base64'},
+    projects:[{board:{model3d:{base:'model',head:'model'},parts3d:{base:'parts',head:'parts'},
+      poster3d:{head:'poster'},assets3d:{base:{model:asset('board.glb'),parts:asset('board-parts.json')},
+        head:{model:asset('board.glb'),parts:asset('board-parts.json')}}}}]};
+  const lazy=lazy3dData(data);
+  assert.equal(lazy.projects[0].board.model3d.head,'model');
+  assert.equal(lazy.blobs.model,undefined);assert.equal(lazy.blobs.parts,undefined);
+  assert.equal(lazy.blobs.poster,'png-base64');assert.equal(data.blobs.model,'large-base64');
+  const shared=structuredClone(data);shared.projects[0].other='model';
+  assert.equal(lazy3dData(shared).blobs.model,'large-base64');
+  const stored='<script>window.REVIEW_DATA = '+JSON.stringify(data)+';</script>';
+  assert.match(currentReport(stored),/large-base64/);
+  assert.doesNotMatch(currentReport(stored,{lazy3d:true}),/large-base64/);
+  assert.match(await currentBody(new Response(stored)),/large-base64/);
+  assert.equal(currentReport('<p>legacy foreign body</p>'),null);
+});
+
+test('BR02 asset nonce rejects late old success and error replies',async()=>{
+  const source=readFileSync(new URL('../ui/review3d.js',import.meta.url),'utf8');
+  const match=source.match(/^([ \t]*)function requestAsset3d\(asset,kind,s\) \{[\s\S]*?^\1\}/m);
+  assert.ok(match,'actual requestAsset3d declaration');
+  const listeners=new Set(),sent=[],parent={postMessage:m=>sent.push(m)};
+  const window={parent,addEventListener:(_,fn)=>listeners.add(fn),removeEventListener:(_,fn)=>listeners.delete(fn)};
+  const request=runInNewContext('('+match[0]+')',{window,Promise,Error,DOMException,ArrayBuffer,Uint8Array,
+    crypto:globalThis.crypto,setTimeout,clearTimeout});
+  const bytes=new TextEncoder().encode('new indexed payload').buffer;
+  const digest=Buffer.from(await crypto.subtle.digest('SHA-256',bytes)).toString('hex');
+  const session=nonce=>({assetId:0,assetNonce:nonce,abort:new AbortController(),dead:false});
+  const old=session('11111111-1111-4111-8111-111111111111');
+  const a=request({digest:'a'.repeat(64)},'board.glb',old).catch(e=>e.name);
+  const oldMessage=sent[0];old.dead=true;old.abort.abort();assert.equal(await a,'AbortError');
+  const current=session('22222222-2222-4222-8222-222222222222');let settled=false;
+  const b=request({digest},'board-parts.json',current).finally(()=>{settled=true});
+  const emit=async data=>{await Promise.all([...listeners].map(fn=>fn({source:parent,data})));};
+  await emit({...oldMessage,error:'old request failed'});
+  await emit({...oldMessage,bytes:new Uint8Array([0]).buffer});
+  assert.equal(settled,false,'old nonce must not settle new id 1');
+  await emit({...sent[1],bytes,gzip:false});assert.deepEqual(await b,bytes);
+  assert.equal(listeners.size,0);
+});
+
+// Authenticated lazy 3D end to end in Node: real Worker dispatch for wrapper, raw report and
+// 3D route; the real parent broker; the real report-side requestAsset3d. Only GitHub is mocked.
+// fetch() in a browser removes HTTP gzip; the broker's fetch adapter does the same here.
+async function lazy3dHarness({ family = 'comparison', scenario = 'valid' } = {}) {
+  const head = 'b'.repeat(40), glb = Buffer.concat([Buffer.from('glTF'), Buffer.from([2, 0, 0, 0]), Buffer.alloc(24, 7)]);
+  const index = Buffer.from(JSON.stringify([{ ref: 'R16', uuid: '0a1b2c3d-0000-4000-8000-000000000001', hasModel: true, box: [0, 0, 0, 1, 1, 1] }]));
+  const files = { model: { kind: 'board.glb', raw: glb, id: 91 }, parts: { kind: 'board-parts.json', raw: index, id: 92 } };
+  for (const f of Object.values(files)) {
+    f.gz = gzipSync(f.raw); f.digest = createHash('sha256').update(f.raw).digest('hex');
+    f.descriptor = { digest: f.digest, artifactName: `kicad-3d-${f.digest}-${f.kind}.gz`, bytes: f.gz.length };
+  }
+  const data = { version: 1, blobs: { model: files.model.gz.toString('base64'), parts: files.parts.gz.toString('base64'), poster: 'png-base64' },
+    projects: [{ dir: 'Thermal_Camera', changes: [], board: { model3d: { base: null, head: 'model', enabled: true }, parts3d: { base: null, head: 'parts' }, poster3d: { head: 'poster' },
+      assets3d: { base: null, head: { model: files.model.descriptor, parts: files.parts.descriptor } } } }] };
+  if (family === 'design') data.report = { kind: 'design', head: scenario === 'head-mismatch' ? 'd'.repeat(40) : head };
+  const name = scenario === 'bad-name' ? 'other.html' : family === 'design' ? `kicad-design-${head.slice(0, 7)}.html` : 'kicad-review-aaaaaaa-bbbbbbb-pass.html';
+  const stored = '<script>window.REVIEW_DATA = ' + JSON.stringify(data) + ';</script>';
+  const h = { files, stored, name, html: 0, model: 0, parts: 0, threeRequests: [], replies: [], revoked: scenario === 'no-pull', expired: scenario === 'expired-html',
+    siblingExpired: scenario === 'expired-sibling', siblingRun: scenario === 'other-run' ? 10 : 9, sealed: await signedIn() };
+  h.restore = mockFetch(async url => {
+    url = String(url);
+    if (url.endsWith('/repos/Cameronrlewis/repo')) return h.revoked
+      ? Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })
+      : Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
+    if (url.endsWith('/actions/runs/9')) return Response.json({ status: 'completed', conclusion: 'success', event: 'push' });
+    if (url.endsWith('/artifacts/12')) return Response.json({ name, expired: h.expired, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
+    if (url === 'https://artifact.actions.githubusercontent.com/report') { h.html++; return new Response(stored); }
+    if (url.includes('/runs/9/artifacts?')) return Response.json({ artifacts: Object.values(files).map(f => ({ id: f.id, name: f.descriptor.artifactName,
+      expired: h.siblingExpired, workflow_run: { id: h.siblingRun } })) });
+    const zip = url.match(/\/artifacts\/(9[12])\/zip$/);
+    if (zip) return new Response(null, { status: 302, headers: { Location: `https://artifact.actions.githubusercontent.com/file${zip[1]}` } });
+    const file = Object.entries(files).find(([, f]) => url === `https://artifact.actions.githubusercontent.com/file${f.id}`);
+    if (file) { h[file[0]]++; return new Response(file[1].gz); }
+    throw Error('unexpected URL ' + url);
+  });
+  const cookie = { Cookie: `s=${h.sealed}` };
+  h.wrapper = async () => call('/r/Cameronrlewis/repo/a/12', { headers: cookie });
+  h.raw = async () => call('/r/Cameronrlewis/repo/a/12/raw', { headers: { ...cookie, 'Sec-Fetch-Dest': 'iframe' } });
+  h.route = async (kind, etag) => call(`/r/Cameronrlewis/repo/a/12/3d/${files[kind].digest}/${files[kind].kind}`,
+    { headers: etag ? { ...cookie, 'If-None-Match': etag } : cookie });
+  // Wire the real broker (parent) and real report-side request (child) through fake WindowProxies.
+  const childListeners = new Set(); let brokerListener;
+  const child = { postMessage: (message, origin, transfer) => { h.replies.push({ message, origin, transfer }); for (const fn of [...childListeners]) fn({ source: parentWindow, data: message }); } };
+  const parentWindow = { postMessage: message => brokerListener({ source: child, data: message, origin: 'null' }) };
+  runInNewContext(`(${threeClient.toString()})({endpoint:'/r/Cameronrlewis/repo/a/12/3d/'})`, {
+    window: { addEventListener: (_, fn) => { brokerListener = fn; } }, document: { querySelector: () => ({ contentWindow: child }) },
+    Map, Number, ArrayBuffer, Uint8Array, Array, Error, String, crypto: globalThis.crypto,
+    fetch: async (url, options) => {
+      assert.equal(options.credentials, 'same-origin'); assert.equal(options.redirect, 'error');
+      const response = await call(url, { headers: cookie }); h.threeRequests.push({ url, status: response.status, headers: response.headers });
+      return response.ok && response.headers.get('Content-Encoding') === 'gzip'
+        ? new Response(gunzipSync(Buffer.from(await response.arrayBuffer()))) : response;
+    },
+  });
+  const source = readFileSync(new URL('../ui/review3d.js', import.meta.url), 'utf8');
+  const fn = source.match(/^([ \t]*)function requestAsset3d\(asset,kind,s\) \{[\s\S]*?^\1\}/m)[0];
+  const request = runInNewContext('(' + fn + ')', { window: { parent: parentWindow, addEventListener: (_, f) => childListeners.add(f),
+    removeEventListener: (_, f) => childListeners.delete(f) }, Promise, Error, DOMException, ArrayBuffer, Uint8Array, crypto: globalThis.crypto, setTimeout, clearTimeout });
+  const session = { assetId: 0, assetNonce: crypto.randomUUID(), abort: new AbortController(), dead: false };
+  h.open = key => request(files[key].descriptor, files[key].kind, session);
+  return h;
+}
+
+async function assertStrippedShell(h) {
+  const wrapper = await h.wrapper(), page = await wrapper.text();
+  assert.equal(wrapper.status, 200);
+  assert.ok(page.includes('{"endpoint":"/r/Cameronrlewis/repo/a/12/3d/"}'), 'wrapper installs the broker for this artifact id');
+  assert.match(wrapper.headers.get('Content-Security-Policy'), /connect-src 'self'/);
+  const raw = await h.raw(), served = readStoredData(await raw.text()), board = served.projects[0].board;
+  assert.equal(raw.status, 200);
+  assert.match(raw.headers.get('Content-Security-Policy'), /connect-src 'none'/);
+  assert.doesNotMatch(raw.headers.get('Content-Security-Policy'), /allow-same-origin/);
+  assert.equal(board.model3d.head, 'model'); assert.equal(board.parts3d.head, 'parts');
+  assert.deepEqual(board.assets3d.head, { model: h.files.model.descriptor, parts: h.files.parts.descriptor });
+  assert.equal(served.blobs.model, undefined); assert.equal(served.blobs.parts, undefined); assert.equal(served.blobs.poster, 'png-base64');
+  const original = readStoredData(h.stored);
+  assert.equal(original.blobs.model, h.files.model.gz.toString('base64')); assert.equal(original.blobs.parts, h.files.parts.gz.toString('base64'));
+  // Opening the report is not opening 3D: no route request and no model/index sibling download.
+  assert.equal(h.threeRequests.length, 0); assert.equal(h.model + h.parts, 0); assert.ok(h.html > 0);
+}
+
+// Reports the 3D route cannot serve keep their embedded models, so the authenticated view still renders 3D.
+async function assertEmbeddedShell(h) {
+  const raw = await h.raw(), served = readStoredData(await raw.text());
+  assert.equal(raw.status, 200);
+  assert.equal(served.blobs.model, h.files.model.gz.toString('base64')); assert.equal(served.blobs.parts, h.files.parts.gz.toString('base64'));
+  assert.equal(h.threeRequests.length, 0); assert.equal(h.model + h.parts, 0);
+}
+
+for (const [family, title] of [['comparison', 'BR02 authenticated comparison report opens lazy 3D through the broker after stripping'],
+  ['design', 'BR02 authenticated design snapshot opens 3D after stripping']]) test(title, async () => {
+  const h = await lazy3dHarness({ family });
+  try {
+    await assertStrippedShell(h);
+    const glb = await h.open('model'), parts = await h.open('parts');
+    assert.equal(h.model, 1); assert.equal(h.parts, 1);
+    assert.deepEqual(h.threeRequests.map(r => r.url), ['model', 'parts'].map(k => `/r/Cameronrlewis/repo/a/12/3d/${h.files[k].digest}/${h.files[k].kind}`));
+    for (const [i, key] of ['model', 'parts'].entries()) {
+      const { status, headers } = h.threeRequests[i];
+      assert.equal(status, 200); assert.equal(headers.get('Content-Encoding'), 'gzip'); assert.equal(headers.get('Cache-Control'), 'private,no-cache');
+      assert.equal(headers.get('ETag'), `"${h.files[key].digest}"`); assert.equal(headers.get('Vary'), 'Cookie');
+    }
+    assert.equal(createHash('sha256').update(new Uint8Array(glb)).digest('hex'), h.files.model.digest);
+    assert.equal(new DataView(glb).getUint32(0, true), 0x46546c67, 'GLB magic, decoded exactly once');
+    assert.equal(JSON.parse(new TextDecoder().decode(parts))[0].ref, 'R16');
+    assert.ok(h.replies.every(r => r.message.gzip === false && r.transfer[0] === r.message.bytes && r.origin === '*'));
+  } finally { h.restore(); }
+});
+
+for (const family of ['comparison', 'design']) for (const scenario of ['bad-name', ...(family === 'design' ? ['head-mismatch'] : []), 'no-pull', 'expired-html', 'expired-sibling', 'other-run']) {
+  test(`BR02 authenticated lazy 3D fails closed: ${family} ${scenario}`, async () => {
+    const h = await lazy3dHarness({ family, scenario: scenario === 'no-pull' || scenario === 'expired-html' ? 'valid' : scenario });
+    try {
+      // Unverifiable names keep their embedded models: never stripped, never silently served.
+      if (scenario === 'bad-name' || scenario === 'head-mismatch') await assertEmbeddedShell(h);
+      else if (scenario !== 'no-pull' && scenario !== 'expired-html') await assertStrippedShell(h);
+      // A previously issued ETag must never turn a denial into 304.
+      const etags = { model: `"${h.files.model.digest}"`, parts: `"${h.files.parts.digest}"` };
+      if (scenario === 'no-pull' || scenario === 'expired-html') {
+        await assertStrippedShell(h); assert.equal((await h.route('model')).status, 200); h.threeRequests.length = 0;
+        if (scenario === 'no-pull') h.revoked = true; else h.expired = true;
+      }
+      const before = h.model + h.parts;
+      for (const key of ['model', 'parts']) {
+        await assert.rejects(h.open(key), /Model (unavailable|access denied)/);
+        const direct = await h.route(key, etags[key]);
+        assert.equal(direct.status, 404, key); assert.match(direct.headers.get('Cache-Control'), /no-store/); assert.equal(direct.headers.get('ETag'), null);
+      }
+      assert.ok(h.threeRequests.every(r => r.status === 404), 'broker saw only denials');
+      if (scenario !== 'expired-sibling' && scenario !== 'other-run') assert.equal(h.model + h.parts, before, 'no asset body download');
+      assert.ok(h.replies.every(r => r.message.error && !r.message.bytes), 'no silent fallback bytes');
+    } finally { h.restore(); }
+  });
+}
+
+test('BR02 guest shares keep embedded 3D blobs and never install the model broker', async () => {
+  const digest = 'e'.repeat(64), data = { version: 1, blobs: { model: 'embedded-glb' }, projects: [{ board: { model3d: { head: 'model' },
+    assets3d: { head: { model: { digest, artifactName: `kicad-3d-${digest}-board.glb.gz`, bytes: 40 } } } } }] };
+  assert.doesNotMatch(sharedPage({ token: 'a.b', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' }), /threeClient|kicad3d/);
+  const token = await guestToken(), restore = guestFetch(), originalMock = globalThis.fetch;
+  mockFetch((url, options) => url === shareBlob ? Promise.resolve(new Response(`<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`)) : originalMock(url, options));
+  try {
+    const raw = await worker.fetch(request(`/s/${token}/raw`, { headers: { 'Sec-Fetch-Dest': 'iframe' } }), appEnv);
+    assert.equal(raw.status, 200); assert.equal(readStoredData(await raw.text()).blobs.model, 'embedded-glb');
+  } finally { restore(); }
+});
+
+test('BR02 measurement wrapper fixture keeps one opaque report frame that receives the deep link', () => {
+  // ui/measure3d.mjs --report-frame '#review-report' measures this exact page (Task 10A scratch wrapper).
+  const html = reviewPage({ user: 'test', owner: 'o', repo: 'r', id: 12, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflowRunId: 9 });
+  const frames = [...html.matchAll(/<iframe\b[^>]*>/g)].map(m => m[0]);
+  assert.equal(frames.length, 1);
+  assert.match(frames[0], /id="review-report"/); assert.match(frames[0], /src="\/r\/o\/r\/a\/12\/raw"/);
+  assert.match(frames[0], /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(html, /const raw = "\/r\/o\/r\/a\/12\/raw";[\s\S]*iframe\.src = raw \+ location\.hash/);
+  assert.match(html, /"endpoint":"\/r\/o\/r\/a\/12\/3d\/"/);
+  assert.doesNotMatch(html, /Review3D|review3d\.js/, 'viewer runs only inside the report frame');
 });
 
 import { validateAsk, askOptedIn, systemBlocks, followupSplitter, sseEvents, answerEvents, frame as askFrame, LIMITS } from './ask.js';

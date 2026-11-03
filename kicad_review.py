@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import base64
+import contextlib
 import csv
 import datetime
 import gzip
@@ -23,7 +24,9 @@ import os
 import pathlib
 import posixpath
 import re
+import struct
 import subprocess
+import zlib
 import sys
 import tempfile
 import tomllib
@@ -403,21 +406,319 @@ def glb_inputs(p, side):
     return (pcb.read_bytes(), [(str(path.relative_to(side)), path.read_bytes()) for path in models])
 
 
-def export_glb(p, side, out):
-    """Best-effort 3D export. Its output is useful evidence when a footprint model is absent."""
-    pcb, log = board_path(p, side), f"{out}/glb.log"
-    if not os.path.exists(pcb):
-        return
+def kept_refs(base, head):
+    """References of footprints changed between revisions, including UUID renames and deletions."""
+    rows = diff_objects(base, head)
+    ids = {r["uuid"] for r in rows if r["kind"] == "footprint"}
+    ids |= {r["uuid_before"] for r in rows if r["kind"] == "footprint" and r.get("uuid_before")}
+    return sorted({o["ref"] for objects in (base, head) for uid, o in objects.items()
+                   if uid in ids and o["kind"] == "footprint"})
+
+
+def metadata3d(side, objects, keep, finish, missing):
+    """One revision's footprint identity, placement and model coverage, in board millimetres."""
+    reasons = {r["ref"]: r["reason"] for r in missing if r["side"] in (side, "both")}
+    footprints, warnings, skipped = [], [], set()
+    counts = {}
+    for obj in objects.values():
+        if obj['kind'] == 'footprint':
+            counts[obj['ref']] = counts.get(obj['ref'], 0) + 1
+    for uid, obj in sorted(objects.items()):
+        if obj["kind"] != "footprint":
+            continue
+        ref = obj["ref"]
+        if not ref or '*' in ref or counts[ref] > 1:
+            reason = 'unannotated footprint' if not ref or '*' in ref else 'duplicate reference'
+            warning = f"{ref or '(empty reference)'} ({uid}): {reason} skipped"
+            warnings.append(warning)
+            skipped.add(ref)
+            print(f"::warning::{warning}")
+            continue
+        reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
+        box, pos = obj.get("box"), obj.get("pos")
+        valid_pos = (isinstance(pos, (list, tuple)) and len(pos) >= 2
+                     and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in pos))
+        if not valid_pos:
+            raise ValueError("footprint has no finite position: " + ref)
+        valid_box = (isinstance(box, (list, tuple)) and len(box) == 4
+                     and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in box))
+        if not valid_box:
+            if box is not None:
+                print(f"::warning::{ref}: malformed bounding box {box!r}, using estimated bounds")
+            # Padless graphics get a 2 mm estimated box; it is not enclosure clearance.
+            box = [pos[0] - 1, pos[1] - 1, pos[0] + 1, pos[1] + 1]
+        layer = (obj.get("props") or {}).get("layer") or ""
+        footprints.append({"uuid": uid, "ref": ref, "side": "bottom" if layer.startswith("B.") else "top",
+                           "pos": list(pos), "box": box,
+                           "hasModel": bool(obj.get("has_model")) and reason is None, "reason": reason})
+    return {"version": 1, "side": side, "keep": sorted(set(keep)), "finish": finish, "footprints": footprints, "warnings": warnings, "skippedRefs": sorted(skipped)}
+
+
+def prepare3d(p):
+    """Write revision-local processor inputs. One shared keep set serves both revisions of a comparison.
+
+    When both revision boards are present, a parsing failure on either side prevents computing
+    the true comparison diff and shared keep set; in this case both sides are marked unavailable
+    to avoid writing a degenerate keep set. When an absent revision is genuinely missing (e.g. initial
+    revision or single mode), head footprints are treated as additions. When a side has metadata
+    errors after successful comparison diff, only the failing side's input is unlinked.
+    """
+    paths = {side: pathlib.Path(board_path(p, side)) for side in ("base", "head")}
+    out = pathlib.Path("review", project_id(p["dir"]))
+    targets = {side: out / side / "board-3d-input.json" for side in paths}
+    for side, path in paths.items():
+        if not path.is_file():
+            # Never create the side folder here: build_project treats an existing folder as a present revision.
+            targets[side].unlink(missing_ok=True)
     try:
-        r = subprocess.run(["kicad-cli", "pcb", "export", "glb", "--include-silkscreen", "--include-soldermask",
-                            "--output", f"{out}/board.glb", pcb], capture_output=True, text=True)
-        output = r.stdout + r.stderr  # KiCad 10.0.0 writes missing-model warnings to stdout.
-    except OSError as e:
-        r, output = None, str(e)
-    with open(log, "w", encoding="utf-8") as fh:
-        fh.write(output)
-    if r is None or r.returncode:
-        print(f"{p['name']}: 3D export failed for {side}; see {log}")
+        objects = {side: pcb_objects(path) if path.is_file() else {} for side, path in paths.items()}
+        keep = kept_refs(objects["base"], objects["head"])
+        missing = model3d_missing(str(out), objects)
+    except Exception as error:
+        # A malformed board file prevents computing the comparison's shared keep set; both sides are unavailable.
+        for target in targets.values():
+            target.unlink(missing_ok=True)
+        print(f"{p['name']}: 3D processing unavailable: {error}")
+        return
+    for side, path in paths.items():
+        target = targets[side]
+        if not path.is_file():
+            continue
+        try:
+            root = parse_sexpr(path.read_text(encoding="utf-8"))
+            stackup = find(find(root, "setup") or [], "stackup") or []
+            finish = val(stackup, "copper_finish") or ""
+            metadata = metadata3d(side, objects[side], keep, finish, missing)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+        except Exception as error:
+            target.unlink(missing_ok=True)
+            print(f"{p['name']}: 3D processing unavailable: {error}")
+
+
+def cmd_prepare3d(args):
+    det = json.loads(pathlib.Path("review/detect.json").read_text(encoding="utf-8"))
+    for p in det["projects"]:
+        try:
+            prepare3d(p)
+        except Exception as error:
+            print(f"{p.get('name', 'project')}: 3D processing unavailable: {error}")
+
+
+def glb_argv(pcb, folder):
+    return ["kicad-cli", "pcb", "export", "glb", "--include-tracks", "--include-pads",
+            "--include-zones", "--include-silkscreen", "--include-soldermask",
+            "--subst-models", "-f", "-o", str(folder / "board.raw.glb"), pcb]
+
+
+def normalize_glb(path):
+    """Drop KiCad's export timestamp so identical boards keep identical bytes and cache keys.
+
+    Only cache stability depends on this, so anything unexpected leaves KiCad's file as written."""
+    path = pathlib.Path(path)
+    try:
+        data = path.read_bytes()
+        if len(data) < 20 or data[:4] != b'glTF' or data[16:20] != b'JSON':
+            return
+        size = struct.unpack('<I', data[12:16])[0]
+        doc = json.loads(data[20:20 + size])
+    except (OSError, ValueError):
+        return
+    asset = doc.get('asset') if isinstance(doc, dict) else None
+    extras = asset.get('extras') if isinstance(asset, dict) else None
+    if not isinstance(extras, dict) or 'generated_at' not in extras:
+        return
+    del extras['generated_at']
+    chunk = json.dumps(doc, separators=(',', ':')).encode('utf-8')
+    chunk += b' ' * (-len(chunk) % 4)
+    rest = data[20 + size:]
+    staged = path.with_name(path.name + '.tmp')
+    try:
+        staged.write_bytes(b'glTF' + data[4:8] + struct.pack('<I', 20 + len(chunk) + len(rest))
+                           + struct.pack('<I', len(chunk)) + b'JSON' + chunk + rest)
+        os.replace(staged, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            staged.unlink(missing_ok=True)
+
+
+def poster_argv(pcb, folder):
+    return ["kicad-cli", "pcb", "render", "--quality", "basic", "--perspective",
+            "--rotate", "-45,0,45", "-w", "1600", "-h", "1000", "-o", str(folder / "poster.png"), pcb]
+
+
+def poster_size(path):
+    """Read a PNG's actual canvas size, including when checking cached stills."""
+    try:
+        with pathlib.Path(path).open('rb') as stream:
+            header = stream.read(24)
+        if len(header) == 24 and header[:16] == b'\x89PNG\r\n\x1a\n\0\0\0\rIHDR':
+            return struct.unpack('>II', header[16:24])
+    except OSError:
+        pass
+    return None
+
+
+def normalize_poster(path):
+    """Losslessly center KiCad's smaller drawable area on the shared 1600x1000 canvas.
+
+    KiCad 10 on macOS can return a smaller drawable area than the requested size.
+    Keep the prescribed argv and pixels; transparent padding avoids distortion.
+    Normal-sized PNGs validate chunks and inflate only; smaller local exports need unfiltering.
+    KiCad emits non-interlaced 8-bit RGB(A). Reject other/corrupt output rather
+    than advertising a nonconforming successful still. No image dependency.
+    """
+    png = path.read_bytes()
+    if png[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError('not a PNG')
+    offset, chunks, compressed = 8, [], bytearray()
+    while offset < len(png):
+        if offset + 12 > len(png):
+            raise ValueError('truncated PNG chunk')
+        size = struct.unpack('>I', png[offset:offset+4])[0]
+        end = offset + 12 + size
+        if end > len(png):
+            raise ValueError('truncated PNG payload')
+        kind, data = png[offset+4:offset+8], png[offset+8:end-4]
+        if zlib.crc32(kind + data) != struct.unpack('>I', png[end-4:end])[0]:
+            raise ValueError('invalid PNG checksum')
+        chunks.append((kind, data))
+        if kind == b'IDAT':
+            compressed.extend(data)
+        offset = end
+    if not chunks or chunks[0][0] != b'IHDR' or len(chunks[0][1]) != 13 or chunks[-1] != (b'IEND', b''):
+        raise ValueError('missing PNG header/end')
+    width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', chunks[0][1])
+    if not (0 < width <= 1600 and 0 < height <= 1000):
+        raise ValueError(f'unsupported poster size {width}x{height}')
+    if depth != 8 or color not in (2, 6) or (compression, filtering, interlace) != (0, 0, 0):
+        raise ValueError('unsupported poster PNG format')
+    channels = 4 if color == 6 else 3
+    stride = width * channels
+    decoder = zlib.decompressobj()
+    raw = decoder.decompress(compressed, (stride+1)*height+1)
+    if len(raw) != (stride+1)*height or not decoder.eof or decoder.unused_data:
+        raise ValueError('invalid PNG image data')
+    # Fast path: validated normal exports need no row unfiltering or pixel rewriting.
+    if (width, height) == (1600, 1000):
+        return
+    previous = bytearray(stride)
+    output = bytearray((1+1600*4)*1000)  # filter 0, transparent RGBA border
+    left, top = (1600-width)//2, (1000-height)//2
+    for y in range(height):
+        start = y*(stride+1)
+        filter_type = raw[start]
+        row = bytearray(raw[start+1:start+1+stride])
+        if filter_type not in range(5):
+            raise ValueError('invalid PNG row filter')
+        if filter_type:
+            for i in range(stride):
+                a = row[i-channels] if i >= channels else 0
+                b = previous[i]
+                c = previous[i-channels] if i >= channels else 0
+                if filter_type == 1:
+                    predictor = a
+                elif filter_type == 2:
+                    predictor = b
+                elif filter_type == 3:
+                    predictor = (a+b)//2
+                else:
+                    p = a+b-c
+                    pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
+                    predictor = a if pa <= pb and pa <= pc else b if pb <= pc else c
+                row[i] = (row[i]+predictor) & 255
+        previous = row
+        if channels == 3:
+            rgba = bytearray(b'\xff'*(width*4))
+            for channel in range(3):
+                rgba[channel::4] = row[channel::3]
+        else:
+            rgba = row
+        dest = (top+y)*(1+1600*4)+1+left*4
+        output[dest:dest+width*4] = rgba
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind+data))
+    header = struct.pack('>IIBBBBB', 1600, 1000, 8, 6, 0, 0, 0)
+    # Retain colour-space metadata, not offsets/backgrounds tied to the old canvas.
+    metadata = b''.join(chunk(kind, data) for kind, data in chunks if kind in (b'sRGB', b'gAMA', b'cHRM', b'iCCP'))
+    path.write_bytes(png[:8] + chunk(b'IHDR', header) + metadata + chunk(b'IDAT', zlib.compress(output)) + chunk(b'IEND', b''))
+
+
+def export_glb(p, side, out, *, model=True):
+    """Best-effort raw/fallback model and shared still; render warnings never affect coverage."""
+    pcb = board_path(p, side)
+    folder = pathlib.Path(out)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def run(argv, name, log):
+        dest = folder / name
+        dest.unlink(missing_ok=True)
+        marker = folder / (name + ".failed")
+        marker.unlink(missing_ok=True)
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True)
+            (folder / log).write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+            if proc.returncode == 0 and dest.is_file() and dest.stat().st_size:
+                return True
+        except OSError as error:
+            (folder / log).write_text(str(error), encoding="utf-8")
+        dest.unlink(missing_ok=True)
+        marker.write_text("export attempted and failed")
+        return False
+
+    if model:
+        if run(glb_argv(pcb, folder), "board.raw.glb", "glb.log"):
+            normalize_glb(folder / "board.raw.glb")
+            shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+        else:
+            (folder / "board.glb").unlink(missing_ok=True)
+    if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
+        try:
+            normalize_poster(folder / "poster.png")
+        except (OSError, ValueError, zlib.error) as error:
+            (folder / "poster.png").unlink(missing_ok=True)
+            (folder / "poster.png.failed").write_text("normalization attempted and failed")
+            with (folder / "poster.log").open('a', encoding='utf-8') as log:
+                log.write(f'\nPoster normalization failed: {error}\n')
+
+
+def render_tool_identity():
+    """The pinned image identifies CI's KiCad, including on the host before it is pulled."""
+    if os.environ.get("KICAD_IMAGE"):
+        return os.environ["KICAD_IMAGE"]
+    try:
+        proc = subprocess.run(["kicad-cli", "--version"], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip()
+    except OSError:
+        pass
+    return "local-kicad-unavailable"
+
+
+def render_cache_complete(cache, p, side, settings):
+    if not cache or not image_cache_complete(cache, p, side):
+        return False
+    need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
+    if need_still and pathlib.Path(board_path(p, side)).is_file():
+        if settings["3d"]["enabled"]:
+            raw = cache / "board.raw.glb"
+            if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
+                return False
+        poster = cache / "poster.png"
+        return poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()
+    return True
+
+
+def glb_input_digest(p, side):
+    """Hash framed paths and bytes directly, without expanding binary data into repr strings."""
+    digest = hashlib.sha256()
+    inputs = glb_inputs(p, side)
+    if inputs is not None:
+        board, models = inputs
+        for value in (board, *(value for name, data in models for value in (name.encode(), data))):
+            digest.update(len(value).to_bytes(8, 'big'))
+            digest.update(value)
+    return digest.hexdigest()
 
 
 def image_export_identity(p, side):
@@ -442,7 +743,11 @@ def render_cache(p, side, det, settings):
     revision = det.get(side) or ""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         return None
-    identity = pathlib.Path(__file__).read_bytes() + json.dumps(settings, sort_keys=True).encode() + os.environ.get("KICAD_IMAGE", "local").encode()
+    # Normalize only input/output locations so the same revision can move from Head to Base.
+    inputs = {"settings": settings, "tool": render_tool_identity(),
+              "glb": glb_argv("PCB", pathlib.Path(".")), "poster": poster_argv("PCB", pathlib.Path(".")),
+              "board_models": glb_input_digest(p, side)}
+    identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
     identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
@@ -457,7 +762,7 @@ def restore_renders(args=None):
     entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
                for side in ("base", "head")
                if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
-    if any(not cache or not image_cache_complete(cache, p, side) for p, side, cache in entries):
+    if any(not render_cache_complete(cache, p, side, settings) for p, side, cache in entries):
         raise SystemExit(1)
     for p, side, cache in entries:
         shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
@@ -506,27 +811,30 @@ def cmd_render(args):
     settings = load_settings()
     for p in det["projects"]:
         export_3d = settings["3d"]["enabled"]
-        shared_3d = export_3d and glb_inputs(p, "base") == glb_inputs(p, "head")
+        need_still = export_3d or settings.get("design", {}).get("enabled", False)
+        shared_3d = need_still and glb_inputs(p, "base") == glb_inputs(p, "head")
         for side in ("base", "head"):
             if (side == "base" and p["status"] == "added") or (side == "head" and p["status"] == "removed"):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
             cache = render_cache(p, side, det, settings)
-            if cache and image_cache_complete(cache, p, side):
+            if render_cache_complete(cache, p, side, settings):
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
             # Connectivity evidence for every present schematic, whatever the check settings.
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True, ask=bool(settings.get("ask", {}).get("enabled")))
-            if export_3d:
+            if need_still and pathlib.Path(board_path(p, side)).is_file():
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
-                    for name in ("board.glb", "glb.log"):
-                        source = f"review/{project_id(p['dir'])}/base/{name}"
-                        if os.path.isfile(source):
-                            shutil.copyfile(source, f"{out}/{name}")
+                    for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
+                        source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
+                        dest = pathlib.Path(out) / name
+                        dest.unlink(missing_ok=True)
+                        if source.is_file():
+                            shutil.copyfile(source, dest)
                 else:
-                    export_glb(p, side, out)
+                    export_glb(p, side, out, model=export_3d)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
@@ -4115,6 +4423,68 @@ def add_blob(blobs, content):
     return key
 
 
+def artifact3d(raw, suffix, root=pathlib.Path('review/3d')):
+    """Write a deterministic gzip asset keyed by its uncompressed SHA-256 digest."""
+    digest = hashlib.sha256(raw).hexdigest()
+    name = f'kicad-3d-{digest}-{suffix}.gz'
+    root.mkdir(parents=True, exist_ok=True)
+    packed = gzip.compress(raw, mtime=0)
+    (root / name).write_bytes(packed)
+    return {'digest': digest, 'artifactName': name, 'bytes': len(packed)}
+
+def attach3d(board, out, blobs):
+    """Attach stills independently, and coverage/index/assets only for verified processed sets."""
+    board.pop('coverage3d', None)
+    board.update({key:{side:None for side in ('base','head')}
+                  for key in ('parts3d','poster3d','coverage3dBySide','assets3d')})
+    for side in ("base", "head"):
+        folder = pathlib.Path(out,side)
+        poster = folder / 'poster.png'
+        try:
+            poster_raw = poster.read_bytes()
+            if poster_raw.startswith(b'\x89PNG\r\n\x1a\n'):
+                board['poster3d'][side] = add_blob(blobs, poster_raw)
+        except OSError:
+            pass
+        try:
+            manifest = json.loads((folder/'board-processed.json').read_text())
+            files = {'board.glb':folder/'board.glb','parts.json':folder/'board-parts.json',
+                     'stats.json':folder/'board-stats.json'}
+            raw = {name:path.read_bytes() for name,path in files.items()}
+            if any(hashlib.sha256(value).hexdigest()!=manifest['hashes'][name]
+                   for name,value in raw.items()):
+                raise ValueError('processed output hash mismatch')
+            parts = json.loads(raw['parts.json'])
+            stats = json.loads(raw['stats.json'])
+            fields = ('footprints','withModel','placeholders','triangles','primitives')
+            if not isinstance(parts,list) or any(not isinstance(part,dict) for part in parts) or not isinstance(stats,dict) or any(
+                    type(stats.get(k)) is not int or stats[k]<0 for k in fields):
+                raise ValueError('invalid coverage')
+            warnings = stats.get('warnings', [])
+            if not isinstance(warnings, list) or any(not isinstance(item, str) for item in warnings):
+                raise ValueError('invalid coverage warnings')
+            stats['warnings'] = warnings
+            if stats['footprints']!=len(parts) or stats['withModel']+stats['placeholders']!=len(parts):
+                raise ValueError('inconsistent coverage')
+            stats = {key: stats[key] for key in (*fields, 'warnings') if key in stats}
+            # The verified part index owns coverage; legacy log rows serve only unprocessed sides.
+            board['no_model'] = [row for row in board.get('no_model', []) if row['side'] != side and row['side'] != 'both'] + [
+                {**row, 'side': 'head' if side == 'base' else 'base'}
+                for row in board.get('no_model', []) if row['side'] == 'both'
+            ] + [{'ref':part['ref'], 'side':side, 'reason':part.get('reason') or 'no model in footprint',
+                  'uuid':part['uuid']} for part in parts if not part['hasModel']]
+            board['parts3d'][side] = add_blob(blobs,raw['parts.json'])
+            board['coverage3dBySide'][side] = stats
+            board['assets3d'][side] = {'model':artifact3d(raw['board.glb'],'board.glb'),
+                                      'parts':artifact3d(raw['parts.json'],'board-parts.json')}
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            if (folder/'board.glb').exists():
+                print(f'{side}: optimized 3D coverage unavailable: {error}')
+    coverage = board['coverage3dBySide']['head'] or board['coverage3dBySide']['base']
+    if coverage is not None:
+        board['coverage3d'] = coverage
+
+
 def image_pair(base, head):
     return {'base': base, 'head': head}
 
@@ -4152,7 +4522,7 @@ def model3d_missing(out, objs):
     for (ref, reason), sides in sorted(missing.items(), key=lambda e: (natural(e[0][0]), e[0][1])):
         side = "both" if sides == {"base", "head"} else next(iter(sides))
         # The block is rendered from the footprint's board-space data, including unchanged parts.
-        obj = next((o for s in ("head", "base") for o in objs[s].values()
+        obj = next((o for s in ("base", "head") for o in objs[s].values()
                     if o["kind"] == "footprint" and o["ref"] == ref and s in sides), None)
         row = {"ref": ref, "side": side, "reason": reason}
         if obj:
@@ -4304,14 +4674,15 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, context=
                  "field_changes": field_changes(objs["base"], objs["head"]), "dnp_mismatch": dnp_mismatches(objs["head"])}
     if settings["3d"]["enabled"]:
         models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
-        logs = {side: f"{out}/{side}/glb.log" for side in ("base", "head")}
         board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes()) if os.path.exists(path) else None
                             for side, path in models.items()}
         board["model3d"].update({"enabled": True,
-                                 "changed": board["model3d"]["base"] != board["model3d"]["head"],
+                                 "changed": board["model3d"].get("base") != board["model3d"].get("head"),
                                  "errors": {side: "3D export unavailable" for side in ("base", "head")
-                                            if has[side] and not board["model3d"][side]}})
+                                            if has[side] and not board["model3d"].get(side)}})
         board["no_model"] = model3d_missing(out, objs)
+    if settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False):
+        attach3d(board, out, blobs)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings.get(name, {}).get("enabled") for name in ("threads", "issues", "inventory", "libraries", "ask")) else None
     libraries = None
@@ -4426,11 +4797,13 @@ def inline_page(data_js):
     prefix = ""
     if has_3d:
         bundle = base64.b64encode(gzip.compress(open(posixpath.join(UI_DIR, "vendor/three-viewer.min.js"), "rb").read(), mtime=0)).decode()
-        prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script><script>\n{read("review3d.js")}</script>'
+        worker = base64.b64encode(open(posixpath.join(UI_DIR, "three-decode.js"), "rb").read()).decode()
+        worker_tag = f'<script type="application/octet-stream" id="three-decode-worker">{worker}</script>'
+        prefix = f'<script type="application/octet-stream" id="three-bundle">{bundle}</script>{worker_tag}<script>\n{read("three-parts.js")}</script><script>\n{read("review3d.js")}</script>'
     page = page.replace('<script src="review.js"></script>', f"{prefix}<script>\n{read('review.js')}</script>")
-    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js", "image-view.js", "ask.js"):
+    for asset in ("kicad-colors.js", "appearance-state.js", "board-gl.js", "appearance.js", "board-marks.js", "board-diff.js", "three-studio.js", "image-view.js", "ask.js"):
         page = page.replace(f'<script src="{asset}"></script>', f'<script>\n{read(asset)}</script>')
-    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-marks\.js|board-diff\.js|image-view\.js|ask\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
+    if re.search(r'''(?:href|src)=(["'])(?:theme\.js|tokens\.css|review\.css|sample/review-data\.js|review\.js|kicad-colors\.js|board-gl\.js|appearance-state\.js|appearance\.js|board-marks\.js|board-diff\.js|three-studio\.js|image-view\.js|ask\.js)\1''', page): raise RuntimeError("external report assets remain: template did not match")
     return page
 
 
@@ -5188,6 +5561,8 @@ def main():
     p.set_defaults(func=cache_renders)
     p = sub.add_parser("render", help="SVG renders, ERC and DRC of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_render)
+    p = sub.add_parser("prepare-3d", help="write revision-scoped metadata for the 3D processor")
+    p.set_defaults(func=cmd_prepare3d)
     p = sub.add_parser("copper", help="refilled copper differences of both revisions (run inside the KiCad container)")
     p.set_defaults(func=cmd_copper)
     p = sub.add_parser("release", help="fabrication outputs for a version tag (run inside the KiCad container)")
