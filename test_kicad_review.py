@@ -6350,10 +6350,14 @@ assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"checks": kr.c
 wide = {"/uuid-w": {"kind": "symbol", "ref": "R9", "where": {"sheet": "/"}, "props": {"reference": "R9", "Value": "1k", "Note": "n" * 300, **{f"K{i}": "1" for i in range(30)}}}}
 assert len(wide["/uuid-w"]["props"]) == 33
 wide_parts = list(kr.context_parts(wide).values())
-wdoc = kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": wide_parts, "nets": []}}}]})
+wdoc = kr.fit_context(lambda nc, pc: {"version": 1, "kind": "kicad-review-design-context", "repo": "Cameronrlewis/repo", "base": "0" * 40, "head": "a" * 40, "reason": "push",
+                                      "projects": [{"dir": "", "name": "test", "revisions": {"head": {"parts": wide_parts, "nets": []}}}]})
 wp = wdoc["projects"][0]["revisions"]["head"]["parts"][0]
 assert wdoc["truncated"] is True and wp["properties_truncated"] is True and wp["properties_omitted"] == 1
 assert "properties" in wp["incomplete_fields"] and "properties.Note" in wp["incomplete_fields"] and len(wp["properties"]["Note"]) == 200
+os.makedirs("site/fixtures", exist_ok=True)
+with open("site/fixtures/producer-truncated-context.json", "w", encoding="utf-8") as fh:
+    json.dump(wdoc, fh, separators=(",", ":"), ensure_ascii=False)
 clean_part = list(kr.context_parts({"/uuid-3": objs["/uuid-3"]}).values())
 assert kr.fit_context(lambda nc, pc: {"version": 1, "projects": [{"revisions": {"head": {"parts": clean_part, "nets": []}}}]})["truncated"] is False
 # 09 owns net_changes: 03's wiring status decides availability; a missing summary is unavailable, zero complete rows are available.

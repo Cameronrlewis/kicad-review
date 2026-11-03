@@ -10,6 +10,7 @@ import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, s
 import { historyEvents, HISTORY_QUERY } from './history.js';
 import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
 import { mcpResponse, TOOLS, validateTool } from './mcp.js';
+import { designParts, projectLists, objectLink } from './mcp-data.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -5380,7 +5381,6 @@ test('MCP inherited keys fail before the call boundary',async()=>{
   assert.equal(calls,0,'invalid arguments never reach authorization or GitHub');
 });
 
-import {designParts,projectLists} from './mcp-data.js';
 const projectionLoaded=()=>{const doc=mcpDoc();return {doc,project:doc.projects[0],revision:doc.projects[0].revisions.head,projectIndex:0,reportId:'90',provenance:{repo:doc.repo,commit:doc.head}};};
 function assertMcpLists(v,key=''){
   if(Array.isArray(v)){
@@ -5442,4 +5442,127 @@ test('MCP recursive lists retain tuples and source incompleteness',()=>{
   assert.equal(projectLists({layers:['F.Cu']},2,'',true).layers.total,null);
   const stored={items:['F.Cu'],limit:8,returned:1,total:null,truncated:true};
   assert.deepEqual(projectLists(stored,2),{items:['F.Cu'],limit:2,returned:1,total:null,truncated:true});
+});
+test('MCP objectLink output format produces report viewer hash link', () => {
+  const loaded = projectionLoaded();
+  const link = objectLink('https://site.example', loaded, 'part', 'test-uuid-123');
+  assert.equal(link, 'https://site.example/r/Cameronrlewis/repo/a/90#p=0&part=test-uuid-123');
+  const netLink = objectLink('https://site.example', loaded, 'net', 'GND');
+  assert.equal(netLink, 'https://site.example/r/Cameronrlewis/repo/a/90#p=0&net=GND');
+});
+test('MCP check summaries, reasons and messages are display-clipped at 2000 code points', () => {
+  const loaded = projectionLoaded();
+  loaded.project.checks = [
+    {
+      name: 'erc',
+      status: 'fail',
+      reason: 'r'.repeat(2005),
+      message: 'm'.repeat(2005),
+      summary: 's'.repeat(2005),
+      findings: []
+    }
+  ];
+  const out = designParts('get_design', {}, loaded, 'https://site.example');
+  const check = out.checks.items[0];
+  assert.equal([...check.reason].length, 2000);
+  assert.equal([...check.message].length, 2000);
+  assert.equal([...check.summary].length, 2000);
+  assert.ok(out.incompleteFields.items.includes('checks.erc.reason'));
+  assert.ok(out.incompleteFields.items.includes('checks.erc.message'));
+  assert.ok(out.incompleteFields.items.includes('checks.erc.summary'));
+});
+test('MCP find_parts slices before projection so incompleteFields excludes non-returned parts', () => {
+  const loaded = projectionLoaded();
+  loaded.revision.parts = [
+    { uuid: 'u1', ref: 'R1', value: 'resistor', properties: {}, pins: [], pin_count: 0 },
+    { uuid: 'u2', ref: 'R2', value: 'r' + 'é'.repeat(2001), properties: {}, pins: [], pin_count: 0 }
+  ];
+  const out = designParts('find_parts', { query: 'r', limit: 1 }, loaded, 'https://site.example');
+  assert.equal(out.parts.returned, 1);
+  assert.equal(out.parts.items[0].ref, 'R1');
+  assert.equal(out.parts.total, 2);
+  assert.equal(out.parts.truncated, true);
+  assert.deepEqual(out.incompleteFields.items, []);
+});
+test('MCP get_design p.sheets fallback and sheetsIncomplete handling', () => {
+  const loaded = projectionLoaded();
+  delete loaded.revision.sheets;
+  loaded.project.sheets = [
+    { path: '/', status: 'unchanged' },
+    { path: '/power', status: 'modified' },
+    { path: '/old', status: 'removed' }
+  ];
+  const out = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(out.sheetsIncomplete, false);
+  assert.equal(out.sheets.returned, 2);
+  assert.equal(out.sheets.total, 2);
+  assert.deepEqual(out.sheets.items.map(s => s.path), ['/', '/power']);
+
+  loaded.project.sheets.push({ path: '/bad', status: 'unknown_status' });
+  const incompleteOut = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(incompleteOut.sheetsIncomplete, true);
+  assert.equal(incompleteOut.sheets.total, null);
+  assert.equal(incompleteOut.sheets.truncated, true);
+
+  delete loaded.project.sheets;
+  const noSheetsOut = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(noSheetsOut.sheetsIncomplete, true);
+  assert.equal(noSheetsOut.sheets.total, null);
+  assert.equal(noSheetsOut.sheets.truncated, true);
+  assert.deepEqual(noSheetsOut.sheets.items, []);
+});
+test('MCP get_design with doc.truncated sets partCount null and marks incomplete', () => {
+  const loaded = projectionLoaded();
+  loaded.revision.parts = [{ uuid: 'u1', ref: 'U1', value: '10k', pins: [], pin_count: 0 }];
+  loaded.doc.truncated = true;
+  const out = designParts('get_design', {}, loaded, 'https://site.example');
+  assert.equal(out.partCount, null);
+  assert.equal(out.storedPartCount, 1);
+  assert.equal(out.incomplete, true);
+  assert.equal(out.sheets.total, null);
+  assert.equal(out.sheets.truncated, true);
+});
+test('MCP find_parts searchFieldsComplete reflects properties, truncation, and incomplete fields', () => {
+  const loaded = projectionLoaded();
+  loaded.revision.parts = [
+    { uuid: 'u1', ref: 'U1', value: '10k', properties: { Tol: '1%' }, pins: [], pin_count: 0 }
+  ];
+  let res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, true);
+
+  delete loaded.revision.parts[0].properties;
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+
+  loaded.revision.parts[0].properties = { Tol: '1%' };
+  loaded.revision.parts[0].properties_truncated = true;
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+
+  loaded.revision.parts[0].properties_truncated = false;
+  loaded.revision.parts[0].incomplete_fields = ['properties'];
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+
+  loaded.revision.parts[0].incomplete_fields = [];
+  loaded.doc.truncated = true;
+  res = designParts('find_parts', { query: '10k' }, loaded, 'https://site.example');
+  assert.equal(res.searchFieldsComplete, false);
+});
+test('MCP producer truncated fixture reports unknown total and incomplete search fields', () => {
+  const fixturePath = new URL('./fixtures/producer-truncated-context.json', import.meta.url);
+  const doc = JSON.parse(readFileSync(fixturePath, 'utf8'));
+  assert.equal(doc.truncated, true);
+  const loaded = {
+    doc,
+    project: doc.projects[0],
+    revision: doc.projects[0].revisions.head,
+    projectIndex: 0,
+    reportId: '90',
+    provenance: { repo: doc.repo, commit: doc.head },
+  };
+  const out = designParts('find_parts', { query: 'nonexistent_part_query_xyz' }, loaded, 'https://site.example');
+  assert.equal(out.parts.total, null);
+  assert.equal(out.parts.truncated, true);
+  assert.equal(out.searchFieldsComplete, false);
 });

@@ -223,12 +223,8 @@ export function designParts(name, args, loaded, origin) {
     datasheet: safeDatasheet(p.datasheet),
   });
   const { revision: r, project: p, doc } = loaded, limit = args.limit ?? 15;
-  const incomplete = !!doc.truncated, unknown = incomplete ? null : undefined;
-  const parts = r.parts || [], nets = r.nets || [];
-  const summaries = (p.checks || []).map(({ findings, more, ...summary }) => ({
-    ...summary,
-    findings: page((findings || []).map(f => projectLists(f, limit)), limit, (findings || []).length + (more || 0), !!more),
-  }));
+  const incomplete = !!doc.truncated;
+  const parts = r.parts || [];
   const out = { provenance: loaded.provenance };
   const part = p => ({
     ...projectLists(displayPart(p), limit, '', incomplete),
@@ -246,6 +242,20 @@ export function designParts(name, args, loaded, origin) {
       sheets = [];
       sheetsIncomplete = true;
     }
+    const checkRows = (p.checks || []).slice(0, limit);
+    const summaries = checkRows.map(({ findings, more, ...summary }) => {
+      const checkName = summary.name || '';
+      const clippedSummary = { ...summary };
+      for (const field of ['reason', 'message', 'summary']) {
+        if (typeof clippedSummary[field] === 'string') {
+          clippedSummary[field] = displayText(clippedSummary[field], `checks.${checkName}.${field}`, clipped);
+        }
+      }
+      return {
+        ...clippedSummary,
+        findings: page((findings || []).map(f => projectLists(f, limit)), limit, (findings || []).length + (more || 0), !!more),
+      };
+    });
     return {
       ...out,
       board: projectLists(r.board, limit, '', incomplete),
@@ -253,7 +263,7 @@ export function designParts(name, args, loaded, origin) {
       storedPartCount: parts.length,
       sheets: page(sheets, limit, incomplete || sheetsIncomplete ? null : sheets.length, incomplete || sheetsIncomplete),
       sheetsIncomplete,
-      checks: page(summaries, limit),
+      checks: page(summaries, limit, (p.checks || []).length),
       incompleteFields: page(clipped, limit),
       netlist_available: r.netlist_available,
       netlist_reason: r.netlist_reason || null,
@@ -263,9 +273,10 @@ export function designParts(name, args, loaded, origin) {
   if (name === 'find_parts') {
     const q = args.query.toLowerCase();
     const rows = parts.filter(p => [p.ref, p.value, p.mpn, ...Object.entries(p.properties || {}).flat()].some(x => String(x ?? '').toLowerCase().includes(q)));
+    const pagedRows = rows.slice(0, limit);
     return {
       ...out,
-      parts: page(rows.map(part), limit, incomplete ? null : rows.length, incomplete),
+      parts: page(pagedRows.map(part), limit, incomplete ? null : rows.length, incomplete),
       incompleteFields: page(clipped, limit),
       searchFieldsComplete: !incomplete && parts.every(p => p.properties && !p.properties_truncated && !(p.incomplete_fields || []).length),
       ...(incomplete ? { reason: 'Source context is truncated; an empty match is not proof of absence.' } : {}),
