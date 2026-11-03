@@ -8,7 +8,7 @@ import { writeFileSync, mkdtempSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname, basename, extname } from "node:path";
 import { createServer } from "node:http";
-import { CHECKS, softnessProbe, softnessCompare } from "./checks.mjs";
+import { CHECKS, BR02_MESH_MISS_PREPARE, softnessProbe, softnessCompare } from "./checks.mjs";
 import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
@@ -93,6 +93,8 @@ const send = (method, params = {}) => Promise.race([new Promise(r => { pend[++id
 const evaluate = async expr => (await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true })).result;
 async function setupTab() {
 await send("Runtime.enable");
+// Headless focus events need virtual focus, not a foreground window.
+await send("Emulation.setFocusEmulationEnabled", { enabled:true });
 await send("Runtime.addBinding", { name:"__flipTheme" });
 await send("Runtime.addBinding", { name:"__checkMouseClick" });
 await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dpr, mobile:false });
@@ -160,8 +162,9 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
   try {
     body = (async () => {
   if (name === "board geometry pin flipped Wipe Thermal") await send("Emulation.setDeviceMetricsOverride", {width,height:1080,deviceScaleFactor:2,mobile:false});
-  // The framing check tests final geometry, not the two-pane camera animation.
-  await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:name === "3D change card keeps 3D and frames J2" ? "reduce" : "no-preference" }] });
+  // Framing checks test final geometry, not the 400 ms camera animation (software GL can overrun a fixed wait).
+  const framing = ["3D change card keeps 3D and frames J2", "3D no-model list item frames its block and labels it"].includes(name);
+  await send("Emulation.setEmulatedMedia", { features:[{ name:"prefers-color-scheme", value:dark ? "dark" : "light" }, { name:"prefers-reduced-motion", value:framing ? "reduce" : "no-preference" }] });
   errors.length = 0;
   if (lifecycle.beforeStartup) startupScript = (await send("Page.addScriptToEvaluateOnNewDocument", {source:lifecycle.beforeStartup})).result.identifier;
   await send("Page.navigate", { url: "about:blank" }); await sleep(100);
@@ -171,15 +174,47 @@ for (const [checkIndex, [name, hash, expr, lifecycle = {}]] of selectedChecks.en
   // The raw dev template has no inlined sprite (inline_page adds it); inject it so icons resolve.
   if (typeof iconSprite === "string") await evaluate(`document.getElementById("kr-icons") || document.body.insertAdjacentHTML("afterbegin", ${JSON.stringify(iconSprite)})`);
   if (name === "3D camera movement is linked and leaving disposes" && await evaluate("!!window.Review3D?.state?.cameras?.length").then(r => r.result?.value)) {
-    const r = (await evaluate(`(()=>{const r=document.querySelector('#stage canvas').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2,before:window.Review3D.state.cameras.map(c=>c.position.toArray())}})()`)).result.value;
+    const r = (await evaluate(`(()=>{const r=window.Review3D.state.views.find(v=>v.visible).host.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2,before:window.Review3D.state.cameras.map(c=>c.position.toArray())}})()`)).result.value;
     await send("Input.dispatchMouseEvent", { type: "mousePressed", x: r.x, y: r.y, button: "left", clickCount: 1 });
     for (let n = 1; n <= 4; n++) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: r.x + n * 20, y: r.y + n * 8, button: "left", buttons: 1 });
     await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: r.x + 80, y: r.y + 32, button: "left", buttons: 0 });
     await sleep(100);
     await evaluate(`window.__3dInputResult = ${JSON.stringify({ before: r.before })}; window.__3dInputResult.after = window.Review3D.state.cameras.map(c => c.position.toArray())`);
   }
+  if (name.startsWith("BR02 processed pointer ")) {
+    const [, side, ref] = name.match(/^BR02 processed pointer (base|head) (\w+)$/);
+    const prepared = await evaluate(`(()=>{
+      if(!proj().board.parts3d)return null;
+      Review3D.setRevision(${JSON.stringify(side)});
+      const st=Review3D.state,p=st.parts[${JSON.stringify(side)}].find(p=>p.ref===${JSON.stringify(ref)});
+      const v=st.views.find(v=>v.visible&&(!v.side||v.side===${JSON.stringify(side)}));
+      if(!v||!p)throw Error('missing indexed pointer target');
+      const point=p.bounds.getCenter(new THREE3D.THREE.Vector3());v.camera.updateMatrixWorld(true);point.project(v.camera);
+      const b=v.host.getBoundingClientRect();
+      if(Math.abs(point.x)>1||Math.abs(point.y)>1)throw Error('target outside viewport');
+      // The pick tooltip lives 1200 ms; record it at pointerup (after the viewer's own listener) so slow software GL cannot expire it first.
+      window.__br02PointerUp=new Promise(resolve=>v.host.addEventListener('pointerup',()=>resolve(v.host.querySelector('.tip3d')?.textContent||''),{once:true}));
+      return {x:b.left+(point.x+1)*b.width/2,y:b.top+(1-point.y)*b.height/2};
+    })()`);
+    if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception?.description);
+    const q=prepared.result?.value;
+    if(q) {
+      for(const type of ['mouseMoved','mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent', {type,x:q.x,y:q.y,button:type==='mouseMoved'?'none':'left',buttons:type==='mousePressed'?1:0,clickCount:1});
+      await evaluate(`window.__br02PointerUp.then(tip=>{window.__br02PointerResult={...${JSON.stringify({side,ref})},tip};return true})`);
+    }
+  }
+  // BR02 processed mesh miss: prepare the overlapping geometry before real host-centre input.
+  if (name === "BR02 processed overlapping box misses changed mesh") {
+    const prepared=await evaluate(`(async()=>{${BR02_MESH_MISS_PREPARE}})()`);
+    if(prepared.exceptionDetails)throw Error(prepared.exceptionDetails.exception?.description);
+    const q=(await evaluate(`(()=>{if(!proj().board.parts3d)return null;const v=Review3D.state.views.find(v=>v.visible&&(!v.side||v.side==='head')),b=v.host.getBoundingClientRect();window.__br02PointerUp=new Promise(resolve=>v.host.addEventListener('pointerup',()=>resolve(true),{once:true}));return {x:b.left+b.width/2,y:b.top+b.height/2}})()`)).result?.value;
+    if(q) {
+      for(const type of ['mouseMoved','mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent',{type,x:q.x,y:q.y,button:type==='mouseMoved'?'none':'left',buttons:type==='mousePressed'?1:0,clickCount:1});
+      await evaluate(`window.__br02PointerUp.then(()=>{window.__br02MeshMissInput=true;window.__br02PointerResult={side:'head',ref:'R2'};return true})`);
+    }
+  }
   if (name === "3D canvas click via mouse input selects J2 row") {
-    const q = (await evaluate(`(async()=>{ if(!REVIEW_DATA.projects[0].board.model3d) return null; while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50)); const {THREE}=window.THREE3D, st=window.Review3D.state; let n; st.roots[1].traverse(o=>{ if(!n&&o.name==="J2") n=o; }); const p=new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[1]), r=document.querySelectorAll('#stage canvas')[1].getBoundingClientRect(); return {x:r.left+(p.x*.5+.5)*r.width,y:r.top+(-p.y*.5+.5)*r.height}; })()`)).result.value;
+    const q = (await evaluate(`(async()=>{ if(!REVIEW_DATA.projects[0].board.model3d) return null; while (!window.Review3D?.state?.firstFrame) await new Promise(r => setTimeout(r, 50)); const {THREE}=window.THREE3D, st=window.Review3D.state; let n; st.roots[1].traverse(o=>{ if(!n&&o.name==="J2") n=o; }); const p=new THREE.Box3().setFromObject(n).getCenter(new THREE.Vector3()).project(st.cameras[1]), r=st.views.find(v=>v.side==='head').host.getBoundingClientRect(); return {x:r.left+(p.x*.5+.5)*r.width,y:r.top+(-p.y*.5+.5)*r.height}; })()`)).result.value;
     if (q) for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: q.x, y: q.y, button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
     await sleep(300);
   }

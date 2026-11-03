@@ -37,13 +37,32 @@ jobs:
         with:
           node-version: 22
       - run: node --import ./site/css-loader.mjs --test site/test.mjs
-      - run: node --test ui/image-view.test.mjs
+      - run: node --test ui/*.test.mjs
+      - run: node ui/board-test.mjs
+      - name: Run 3D processor integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPS="$RUNNER_TEMP/meshopt"; OUT="$RUNNER_TEMP/br02"; export OUT
+          mkdir -p "$OUT"
+          npm install --prefix "$DEPS" --no-save --package-lock=false @gltf-transform/core@4.2.1 @gltf-transform/extensions@4.2.1 @gltf-transform/functions@4.2.1 meshoptimizer@0.22.0
+          PROCESS3D_INTEGRATION=1 NODE_PATH="$DEPS/node_modules" node --test ui/compress3d.test.mjs
       - name: Build browser fixtures
         run: |
           echo "CHROME=google-chrome" >> "$GITHUB_ENV"
           export PAGES=$(mktemp -d)
           echo "PAGES=$PAGES" >> "$GITHUB_ENV"
-          python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js"), ("images", "review-data-images.js")]]'
+          python3 -c 'import os, pathlib, kicad_review as k; [pathlib.Path(os.environ["PAGES"], name + ".html").write_text(k.inline_page(pathlib.Path("ui/sample/" + data).read_text(encoding="utf-8")), encoding="utf-8") for name, data in [("3d", "review-data-3d.js"), ("two", "review-data-2.js"), ("parts", "review-data-parts.js"), ("images", "review-data-images.js"), ("processed", "review-data-3d-processed.js")]]'
+          python3 - <<'PYFIXTURE'
+          import json, os, pathlib, kicad_review as k
+          source = pathlib.Path('ui/sample/review-data-3d-processed.js').read_text()
+          data = json.loads(source.split('=', 1)[1].strip().removesuffix(';'))
+          data['mode'] = 'single'
+          for project in data['projects']:
+              for key in ('model3d', 'poster3d', 'parts3d', 'assets3d', 'coverage3dBySide'):
+                  project['board'][key]['base'] = None
+          pathlib.Path(os.environ['PAGES'], 'single.html').write_text(k.inline_page('window.REVIEW_DATA = ' + json.dumps(data) + ';'))
+          PYFIXTURE
       - run: node ui/check.mjs
       - run: node ui/check.mjs --no-skip "Waivers"
       - run: node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"
@@ -52,6 +71,10 @@ jobs:
       - run: node ui/check.mjs --no-skip "passing checks with baseline findings"
       - run: node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"
       - run: node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"
+      - run: node ui/check.mjs --no-skip "BR02 single renderer head only" --page "$PAGES/single.html"
+      - run: node ui/check.mjs --no-skip "BR02 single renderer head only" --dark --page "$PAGES/single.html"
+      - run: node ui/check.mjs --no-skip "BR02 processed" --page "$PAGES/processed.html"
+      - run: node ui/check.mjs --no-skip "BR02 processed" --dark --page "$PAGES/processed.html"
       - run: node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"
       - run: node ui/check.mjs --no-skip "bench-t2 single offline chrome" --page "$PAGES/two.html"
