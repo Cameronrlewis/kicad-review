@@ -325,3 +325,33 @@ export function netProjection(name, args, loaded, origin) {
   }
   throw new McpError('UNKNOWN_TOOL', 'Unknown net projection');
 }
+
+// Legacy fallback only for contexts without parts[].bom: DNP-only, no canonical key; the result is marked bom.complete:false.
+const legacyBom = p => ({ included: !p.dnp, excludedReason: p.dnp ? 'dnp' : null, ref: p.ref, value: p.value || '', footprint: p.footprint || '', lcsc: p.lcsc || '', mpn: p.mpn || '', category: '', key: JSON.stringify([p.value || '', p.footprint || '', p.lcsc || '', p.mpn || '']) });
+export function bomLines(parts) {
+  const groups = new Map();
+  for (const p of parts) {
+    const bom = p.bom ?? legacyBom(p);
+    if (!bom.included) continue;
+    if (!groups.has(bom.key)) groups.set(bom.key, { key: bom.key, value: bom.value, footprint: bom.footprint, mpn: bom.mpn, lcsc: bom.lcsc, category: bom.category, refs: [] });
+    groups.get(bom.key).refs.push(bom.ref ?? p.ref);
+  }
+  return [...groups.values()].map(g => ({ ...g, quantity: g.refs.length, refs: g.refs.sort((a, b) => a.localeCompare(b, 'en', { numeric: true })) }));
+}
+const csvCell = value => '"' + String(value ?? '').replaceAll('"', '""') + '"';
+export function bomProjection(name, args, loaded, origin) {
+  const { revision: r, doc } = loaded, limit = args.limit ?? 15;
+  const parts = r.parts || [], legacy = parts.some(p => !p.bom);
+  const incomplete = !!doc.truncated || legacy, out = { provenance: loaded.provenance, bom: { complete: !legacy } };
+  if (name === 'get_bom') {
+    const groups = bomLines(parts), rows = groups.map(g => ({ ...g, refs: page(g.refs, limit) }));
+    const lines = page(rows, limit, incomplete ? null : rows.length, incomplete);
+    if (args.format === 'csv') {
+      const header = ['References', 'Value', 'Footprint', 'MPN', 'LCSC', 'Quantity'];
+      const csv = [header, ...groups.slice(0, limit).map(g => [g.refs.join(' '), g.value, g.footprint, g.mpn, g.lcsc, g.quantity])].map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+      return { ...out, format: 'csv', csv, incomplete, lines: { limit, returned: lines.returned, total: lines.total, truncated: lines.truncated } };
+    }
+    return { ...out, lines, incomplete };
+  }
+  throw new McpError('UNKNOWN_TOOL', 'Unknown BOM projection');
+}

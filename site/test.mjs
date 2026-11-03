@@ -2,6 +2,7 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
+import { readFile } from 'node:fs/promises';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
 import { fixturePages } from './proof.mjs';
@@ -10,7 +11,7 @@ import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, s
 import { historyEvents, HISTORY_QUERY } from './history.js';
 import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
 import { mcpResponse, TOOLS, validateTool } from './mcp.js';
-import { designParts, projectLists, objectLink, netProjection } from './mcp-data.js';
+import { designParts, projectLists, objectLink, netProjection, bomProjection, bomLines } from './mcp-data.js';
 
 const historyArtifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_Camera.kicad_pcb', sheet: null, layer: 'F.Cu',
@@ -5645,4 +5646,31 @@ test('MCP net projection nearby suggestions, link, paging and unknown tool', () 
   assert.equal(found.found, true);
   assert.equal(found.link, 'https://site.example/r/Cameronrlewis/repo/a/90#p=0&net=GND');
   assert.throws(() => netProjection('unknown_net_tool', {}, loaded, 'https://site.example'), /Unknown net projection/);
+});
+test('MCP grouped BOM follows 08 included flags and key',()=>{
+ const loaded=projectionLoaded();
+ const key=JSON.stringify(['10k,é','','','M']);const bom=(ref,included,excludedReason=null)=>({included,excludedReason,ref,value:'10k,é',footprint:'',lcsc:'',mpn:'M',manufacturer:null,datasheet:null,category:'Resistors',key});
+ loaded.revision.parts=[{ref:'R1',value:'10k,é',mpn:'M',bom:bom('R1',true)},{ref:'R2',value:'10k,é',mpn:'M',bom:bom('R2',true)},{ref:'R3',value:'10k,é',mpn:'M',dnp:true,bom:bom('R3',false,'dnp')},{ref:'U?',value:'10k,é',mpn:'M',bom:bom('U?',false,'unannotated')}];
+ const json=bomProjection('get_bom',{limit:1},loaded,'https://site.example');
+ assert.equal(json.lines.items[0].quantity,2);assert.equal(json.lines.items[0].refs.total,2);assert.equal(json.lines.items[0].refs.truncated,true);
+ const csv=bomProjection('get_bom',{format:'csv'},loaded,'https://site.example');
+ assert.match(csv.csv,/"R1 R2","10k,é"/);assert.doesNotMatch(csv.csv,/R3/);
+ loaded.doc.truncated=true;assert.equal(bomProjection('get_bom',{},loaded,'https://site.example').lines.total,null);
+ const legacy=structuredClone(loaded);legacy.revision.parts.forEach(p=>delete p.bom);
+ assert.equal(bomProjection('get_bom',{},legacy,'https://site.example').bom.complete,false);
+ assert.throws(() => bomProjection('unknown_bom_tool', {}, loaded, 'https://site.example'), /Unknown BOM projection/);
+});
+test('MCP BOM replays the shared 08 fixture cases',async()=>{
+ const cases=JSON.parse(await readFile(new URL('../ui/fixtures/bom-cases.json',import.meta.url),'utf8'));
+ for(const c of cases){
+   const keyOf=ref=>c.expect.lines.find(l=>l.refs.includes(ref))?.key??null,seen=new Set(),parts=[];
+   // 09 keys parts by base reference: one record per reference, with an included unit ordered before any excluded one. Excluded records must not reach a line.
+   for(const [id,obj] of Object.entries(c.objects).sort(([a],[b])=>Number(c.expect.included[b])-Number(c.expect.included[a]))){
+     const ref=obj.ref.split(' unit ')[0];if(seen.has(ref))continue;seen.add(ref);
+     const included=c.expect.included[id];
+     parts.push({ref,value:'',footprint:'',lcsc:'',mpn:'',bom:{included,excludedReason:c.expect.excludedReason[id]??null,ref,key:included?keyOf(ref):null}});
+   }
+   const got=bomLines(parts).map(g=>({key:g.key,quantity:g.quantity,refs:g.refs}));
+   assert.deepEqual(got,c.expect.lines.map(l=>({key:l.key,quantity:l.quantity,refs:l.refs})),c.name);
+ }
 });
