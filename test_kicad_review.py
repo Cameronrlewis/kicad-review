@@ -6774,35 +6774,27 @@ with tempfile.TemporaryDirectory() as d:
         # always-on Download UI overhead under 12 KB uncompressed without relying on origin/main ref.
         repo_dir = pathlib.Path(kr.__file__).resolve().parent
         main_commit = "10ffebe"
+        archive_cmd = ["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"]
+        probe_cmd = ["git", "-C", str(repo_dir), "cat-file", "-e", f"{main_commit}^{{commit}}"]
         @contextlib.contextmanager
         def downloads_main_root():
+            """Yield the extracted 10ffebe tree, or None only when that commit is absent (shallow checkout).
+            Any other failure (git missing, git archive or extraction error) raises."""
             override = os.environ.get("DOWNLOADS_MAIN_BASELINE")
-            temp_dir = None
-            try:
-                if override:
-                    root = pathlib.Path(override)
-                    root.mkdir(parents=True, exist_ok=True)
-                else:
-                    temp_dir = tempfile.TemporaryDirectory(prefix="downloads-main-")
-                    root = pathlib.Path(temp_dir.name)
+            with contextlib.ExitStack() as stack:
+                root = pathlib.Path(override or stack.enter_context(tempfile.TemporaryDirectory(prefix="downloads-main-")))
+                root.mkdir(parents=True, exist_ok=True)
                 if not (root / "kicad_review.py").is_file():
-                    try:
-                        archive = subprocess.run(
-                            ["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"],
-                            check=True, capture_output=True
-                        ).stdout
-                        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-                            if hasattr(tarfile, "data_filter"):
-                                tar.extractall(root, filter="data")
-                            else:
-                                tar.extractall(root)
-                    except (subprocess.CalledProcessError, subprocess.SubprocessError, OSError):
+                    if subprocess.run(probe_cmd, capture_output=True).returncode != 0:
                         yield None
                         return
+                    archive = subprocess.run(archive_cmd, check=True, capture_output=True).stdout
+                    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                        if hasattr(tarfile, "data_filter"):
+                            tar.extractall(root, filter="data")
+                        else:
+                            tar.extractall(root)
                 yield root
-            finally:
-                if temp_dir is not None:
-                    temp_dir.cleanup()
 
         # Verify the DOWNLOADS_MAIN_BASELINE override path:
         # A pre-extracted override must not invoke git archive.
@@ -6813,30 +6805,44 @@ with tempfile.TemporaryDirectory() as d:
                 with downloads_main_root() as override_root:
                     assert override_root == pre_root
 
-        # An unextracted override directory is populated via git archive.
-        with tempfile.TemporaryDirectory(prefix="downloads-main-unextracted-") as unextracted_dir:
-            target = os.path.join(unextracted_dir, "baseline")
-            with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": target}), patch("subprocess.run", wraps=subprocess.run) as archive_run:
-                with downloads_main_root() as extracted_root:
-                    archive_run.assert_called_once_with(["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "image-palettes.json"], check=True, capture_output=True)
-                    assert extracted_root == pathlib.Path(target)
-                    assert (extracted_root / "kicad_review.py").is_file()
-
-        # In a shallow clone where 10ffebe is not present, git archive raises CalledProcessError.
-        # downloads_main_root must degrade gracefully (yield None) instead of failing with an uncaught error,
-        # and its temporary directory must be cleaned up without leakage.
-        with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": ""}), patch("subprocess.run", side_effect=subprocess.CalledProcessError(128, ["git", "archive"], stderr=b"fatal: not a tree object")):
+        # In a shallow clone 10ffebe is absent: the commit probe fails, downloads_main_root yields None
+        # and never runs git archive.
+        absent = subprocess.CompletedProcess(probe_cmd, 128, b"", b"fatal: Not a valid object name 10ffebe^{commit}")
+        with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": ""}), patch("subprocess.run", return_value=absent) as probe_run:
             with downloads_main_root() as shallow_root:
                 assert shallow_root is None
+            probe_run.assert_called_once_with(probe_cmd, capture_output=True)
+
+        # Any other failure is real and must raise, never be reported as a shallow checkout:
+        # git not installed, and git archive failing although the commit is present.
+        present = subprocess.CompletedProcess(probe_cmd, 0, b"", b"")
+        for side_effect, error in ((FileNotFoundError("git"), FileNotFoundError),
+                                   ([present, subprocess.CalledProcessError(128, archive_cmd, stderr=b"fatal: disk error")], subprocess.CalledProcessError)):
+            with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": ""}), patch("subprocess.run", side_effect=side_effect):
+                try:
+                    with downloads_main_root():
+                        raise AssertionError(f"{error.__name__} was reported as a shallow checkout")
+                except error:
+                    pass
 
         saved_main_path = None
         with downloads_main_root() as main_root:
             if main_root is None:
-                print("skip always-on Download UI overhead check: commit 10ffebe not present in shallow checkout (set DOWNLOADS_MAIN_BASELINE to enable)")
+                print("skip always-on Download UI overhead check: commit 10ffebe not present in this checkout (shallow clone; set DOWNLOADS_MAIN_BASELINE to enable)")
             else:
                 saved_main_path = main_root
-                for relative in ("kicad_review.py", "image-palettes.json", "ui/review.html", "ui/review.js", "ui/review.css"):
+                baseline_files = ("kicad_review.py", "image-palettes.json", "ui/review.html", "ui/review.js", "ui/review.css")
+                for relative in baseline_files:
                     assert (main_root / relative).is_file(), f"missing extracted baseline file: {relative}"
+                # An unextracted override directory is populated via git archive, byte-identical to the default extraction.
+                with tempfile.TemporaryDirectory(prefix="downloads-main-unextracted-") as unextracted_dir:
+                    target = os.path.join(unextracted_dir, "baseline")
+                    with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": target}), patch("subprocess.run", wraps=subprocess.run) as archive_run:
+                        with downloads_main_root() as extracted_root:
+                            assert archive_run.call_args == ((archive_cmd,), {"check": True, "capture_output": True}), archive_run.call_args_list
+                            assert extracted_root == pathlib.Path(target)
+                            for relative in baseline_files:
+                                assert (extracted_root / relative).read_bytes() == (main_root / relative).read_bytes(), relative
                 main_spec = importlib.util.spec_from_file_location("downloads_main", main_root / "kicad_review.py")
                 main_mod = importlib.util.module_from_spec(main_spec)
                 main_spec.loader.exec_module(main_mod)
