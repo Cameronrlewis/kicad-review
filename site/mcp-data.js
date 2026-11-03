@@ -405,3 +405,49 @@ export async function reviewLive(access, pr, sha, limit = 15, gh) {
     },
   };
 }
+
+export function projectTool(name, args, loaded, origin) {
+  if (name === 'get_design' || name === 'find_parts') return designParts(name, args, loaded, origin);
+  if (name === 'get_net') return netProjection(name, args, loaded, origin);
+  if (name === 'get_bom') return bomProjection(name, args, loaded, origin);
+  throw new McpError('UNKNOWN_TOOL', 'Unknown projection');
+}
+
+export async function runTool(name, args, request, deps) {
+  try {
+    const access = await mcpAccess(request.env, request.props, args.repo, deps);
+    if (name === 'list_projects') {
+      const tip = await resolveRevision(access, undefined, deps.gh), loaded = await selectContext(access, null, deps);
+      return bounded({
+        repo: access.repository.full_name,
+        currentTip: tip.sha,
+        latestReviewedCommit: loaded.doc.head,
+        stale: tip.sha !== loaded.doc.head,
+        projects: page(loaded.doc.projects.map(p => ({
+          id: p.dir,
+          name: p.name,
+          status: p.status || (p.revisions.head ? 'present' : 'removed'),
+          revision: p.revisions.head ? loaded.doc.head : null,
+          baseRevision: p.revisions.base ? loaded.doc.base : null,
+        })), args.limit),
+      });
+    }
+    const loaded = name === 'get_review'
+      ? await loadPrReview(access, args.pr, deps)
+      : await loadDesign(access, args, deps);
+    if (name === 'get_review') {
+      const projects = reviewProjects(loaded.doc, args.limit);
+      return bounded({ provenance: loaded.provenance, projects: page(projects, args.limit), live: await reviewLive(access, args.pr, loaded.resolution.sha, args.limit, deps.gh) });
+    }
+    return bounded(projectTool(name, args, loaded, request.origin));
+  } catch (error) {
+    return {
+      error: {
+        code: error instanceof McpError ? error.code : 'UNAVAILABLE',
+        message: error instanceof McpError ? error.message : 'Data unavailable; retry later',
+        ...(error.canRender ? { canRender: true, renderPath: error.renderPath } : {}),
+      },
+    };
+  }
+}
+

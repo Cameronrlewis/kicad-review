@@ -5768,3 +5768,73 @@ test('MCP live review uses wiring support, zero changes and removed projects',as
     : []));
   assert.equal((await reviewLive(access, 7, SHA, 15, malformedGh)).readiness.state, 'unknown');
 });
+
+import {runTool,projectTool} from './mcp-data.js';
+test('MCP six tools preserve provenance and never write GitHub',async()=>{
+  const doc=mcpDoc(),p=doc.projects[0],r=p.revisions.head;
+  r.parts=[{uuid:'r-uuid',ref:'R1',value:'10k,é',footprint:'R',mpn:'M123',sheet:'/',properties:{Voltage:'50V'},pins:[{pin:'1',net:'12'}],pin_count:1}];
+  r.netlist_available=true;r.netlist_reason=null;
+  r.nets=[{id:'12',pins:['R1.1'],pin_count:1}];
+  p.changes={total:1,rows:[{id:'c1',kind:'net-members',channel:'wiring',weight:'heavy',detail:{kind:'members',added:['R1.1'],removed:[],beforeNets:['12'],afterNets:['12'],transitions:[{pin:'R1.1',before:[],after:['12']}]}}]};
+  p.net_changes={available:true,complete:true};
+  p.checks=[{name:'drc',status:'not_run',reason:'no board',confidence:'deterministic',evidence_source:'kicad-cli pcb drc',findings:[]},
+    ...['jlcpcb','pcbway'].map((vendor,i)=>({name:'fab_limits',vendor,status:i?'pass':'fail',profile:`${vendor}-multilayer`,checkedOn:'2026-10-26',assumedCopperOz:1,baselineAvailable:true,fixed:i+1,confidence:'deterministic',evidence_source:`${vendor} isolated kicad-cli pcb drc`,findings:[{type:'track_width',description:`${vendor} finding`,confidence:'deterministic',evidence_source:`${vendor} isolated kicad-cli pcb drc`}]}))];
+  const deps={open:async()=>({t:'secret',u:'cam',e:Date.now()+600000}),allowedOwners:()=>['cameronrlewis'],loadContext:async()=>({doc,key:'d'}),
+    gh:async(path,token,init={})=>{
+      assert.equal(token,'secret');
+      if(init.method==='POST')assert.ok(path==='/graphql'&&JSON.parse(init.body).query.startsWith('query('),'no GitHub mutation');
+      else assert.ok(!init.method||init.method==='GET','no GitHub write');
+      let body;
+      if(path==='/user')body={login:'cam'};
+      else if(path==='/repos/Cameronrlewis/repo')body={full_name:'Cameronrlewis/repo',name:'repo',owner:{login:'Cameronrlewis'},default_branch:'main',permissions:{pull:true,push:true}};
+      else if(path.includes('/commits/'))body={sha:SHA};
+      else if(path.endsWith('/pulls/7'))body=prFixture();
+      else if(path.endsWith(`/compare/${TARGET_TIP}...${SHA}`))body={merge_base_commit:{sha:MERGE_BASE}};
+      else if(path.endsWith('/actions/runs/77'))body=prRunFixture();
+      else if(path.includes('/actions/artifacts'))body=artifactsFixture();
+      else if(path.includes('/reviews?'))body=[];
+      else if(path==='/graphql')body={data:{repository:{pullRequest:{headRefOid:SHA,reviewThreads:{totalCount:0,nodes:[]}}}}};
+      else assert.fail('Unexpected GitHub endpoint '+path);
+      return new Response(JSON.stringify(body));
+    }};
+  const request={env:{},props:{credential:'opaque'},origin:'https://site.example'};
+  const invoke=(name,args={})=>runTool(name,validateTool(name,{repo:'Cameronrlewis/repo',...args}),request,deps);
+  assert.equal((await invoke('list_projects')).projects.returned,1);
+  const design=await invoke('get_design');assert.equal(design.provenance.commit,SHA);
+  assert.equal(design.sheets.total,1);assert.equal(design.sheets.items[0].path,'/');
+  assert.equal((await invoke('find_parts',{query:'50V'})).parts.total,1);
+  assert.equal((await invoke('find_parts',{query:'M123'})).parts.items[0].id,'r-uuid');
+  assert.equal((await invoke('get_net',{net:'12'})).pins.items[0].value,'10k,é');
+  const review=await invoke('get_review',{pr:7});
+  assert.equal(review.projects.items[0].changes.items[0].weight,'heavy');
+  const fab=review.projects.items[0].checks.items.filter(c=>c.name==='fab_limits');
+  assert.deepEqual(fab.map(c=>({vendor:c.vendor,status:c.status,profile:c.profile,checkedOn:c.checkedOn,assumedCopperOz:c.assumedCopperOz,baselineAvailable:c.baselineAvailable,fixed:c.fixed,confidence:c.confidence,evidence_source:c.evidence_source,findings:c.findings.items})),
+    p.checks.filter(c=>c.name==='fab_limits').map(({name,...c})=>c),
+    'get_review retains both vendors and their distinct results/provenance; never merge by fab_limits name');
+  assert.equal(review.live.readiness.blocking,0);
+  assert.equal(review.projects.items[0].netChangesAvailable,true);
+  p.changes={total:0,rows:[]};
+  assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesComplete,true,'supported zero-change review');
+  doc.truncated=true;assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesComplete,false);doc.truncated=false;
+  p.changes={total:200,rows:[],more:200};
+  assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesComplete,false);
+  delete p.net_changes;assert.equal((await invoke('get_review',{pr:7})).projects.items[0].netChangesAvailable,false);
+  doc.projects.push({...structuredClone(p),dir:'gone',status:'removed',revisions:{base:r,head:null}});
+  assert.equal((await invoke('get_review',{pr:7})).projects.items[1].revision,null);
+  assert.equal((await invoke('list_projects')).projects.items[1].baseRevision,doc.base);
+  assert.equal((await invoke('get_design',{project:'gone'})).error.code,'PROJECT_UNAVAILABLE');
+  assert.equal((await invoke('get_design',{project:'P'})).sheets.returned,1);
+  doc.projects.pop();
+  p.dir='';doc.projects.push({...structuredClone(p),dir:'Nested',name:'Nested'});
+  for(const project of ['', 'Nested']){
+    const selected=await invoke('get_design',{project});
+    assert.equal(selected.provenance.project,project);assert.equal(selected.sheets.items[0].path,'/');
+  }
+  assert.equal((await invoke('get_design')).error.code,'PROJECT_REQUIRED');
+  assert.equal((await invoke('list_projects')).projects.items[0].id,'');
+  doc.projects.pop();p.dir='P';
+  assert.equal((await invoke('get_bom')).lines.items[0].quantity,1);
+  assert.match((await invoke('get_bom',{format:'csv'})).csv,/"10k,é"/);
+  const nearby=await invoke('get_net',{net:'1'});assert.equal(nearby.found,false);assert.equal(nearby.nearby.items[0].id,'12');
+  for(const name of ['list_projects','get_design','get_bom'])assert.ok(new TextEncoder().encode(JSON.stringify(await invoke(name))).length<=32768);
+});
