@@ -539,12 +539,27 @@ test('review route shows the repository after a pull-access check and refreshes 
 });
 
 test('shared CSP module permits report WebAssembly without weakening sandbox or wrapper policies', () => {
-  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; worker-src blob:; connect-src 'none'; frame-ancestors 'self'");
+  assert.equal(reportCsp, "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; worker-src blob:; connect-src 'none'; frame-ancestors 'self'");
   assert.match(reportCsp, /'wasm-unsafe-eval'/);
   assert.doesNotMatch(reportCsp, /'unsafe-eval'/);
   assert.match(reportCsp, /connect-src 'none'/);
   assert.doesNotMatch(reportCsp, /allow-same-origin/);
   assert.equal(frameCsp, "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+});
+
+test('report CSP and both iframe sandboxes allow only the BOM downloads token', () => {
+  const tokens = s => s.trim().split(/\s+/);
+  const expected = ['allow-scripts', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-downloads'];
+  assert.deepEqual(tokens(reportCsp.match(/sandbox ([^;]*)/)[1]), expected);
+  const pages = [reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 9, name: 'kicad-review.html' }), sharedPage({ token: 'body.signature', name: 'kicad-review.html' })];
+  for (const html of pages) {
+    const attrs = [...html.matchAll(/sandbox="([^"]*)"/g)].map(m => m[1]);
+    assert.ok(attrs.length >= 1);
+    for (const attr of attrs) assert.deepEqual(tokens(attr), expected);
+  }
+  assert.ok(!reportCsp.includes('allow-same-origin') && /connect-src 'none'/.test(reportCsp));
+  // Preserve the 02 worker directive.
+  assert.match(reportCsp, /worker-src blob:/);
 });
 
 test('artifact frame and raw route redirect unsigned users without GitHub calls', async () => {
@@ -628,7 +643,7 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
     assert.match(body, /✕ NEEDS WORK/);
     assert.match(body, /https:\/\/github\.com\/Cameronrlewis\/repo\/actions\/runs\/123/);
     assert.match(body, /<iframe[^>]+src="\/r\/Cameronrlewis\/repo\/a\/44\/raw"/);
-    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
     assert.doesNotMatch(body, /allow-same-origin/);
     assert.match(body, /event\.source === iframe\.contentWindow/);
     assert.match(body, /kicadReviewHash/);
@@ -2009,7 +2024,7 @@ test('guest report streams only signed artifact sandboxed without exposing GitHu
     const response = await worker.fetch(request(`/s/${token}`), appEnv); const html = await response.text();
     assert.equal(response.status, 200); guestSecurity(response);
     assert.match(html, /Read-only shared review/); assert.ok(html.includes(`src="/s/${token}/raw"`));
-    assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
     assert.match(html, /referrerpolicy="no-referrer"/);
     assert.doesNotMatch(html, /Sign out|All reviews|href="\/"|thread-composer|installation-secret|user-token|PRIVATE KEY/);
     assert.equal(response.headers.get('Content-Security-Policy'), "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
@@ -2091,6 +2106,8 @@ test('revoke is writer-only, validates POST and persists a fresh repository-scop
 test('missing share secrets keep existing review HTML byte-identical and guest routes inactive', async () => {
   const props = { user: 'octocat', owner: 'Cameronrlewis', repo: 'repo', id: '123', name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' };
   const current = reviewPage({ ...props, share: false }).replace(/<style>[\s\S]*?<\/style>/, '<style>\n</style>')
+    // BOM downloads add only this separately asserted sandbox token to the pinned frame.
+    .replace('allow-popups-to-escape-sandbox allow-downloads', 'allow-popups-to-escape-sandbox')
     // Deployment provenance is additive to the pinned pre-footer shell.
     .replace('<meta name="deploy-sha" content="unknown">', '')
     .replace('<footer class="deployment" aria-label="Deployment">Deployed commit <code>unknown</code></footer>', '')
@@ -3034,7 +3051,7 @@ test('S2 wrapper themes the opaque sandbox without changing raw routes', () => {
   assert.match(html, /attributeFilter: \['data-theme'\]/);
   assert.match(html, /postMessage\(\{ kicadReviewTheme: theme \}, '\*'\)/);
   assert.match(html, /event\.source === iframe\.contentWindow && event\.data\?\.kicadReviewReady === true\) \{ loading\.hidden = true; syncTheme/);
-  assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(html, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
   assert.doesNotMatch(html, /allow-same-origin|contentDocument/);
   assert.match(html, /<nav class="review-bar" aria-label="Review navigation">/);
   assert.match(html, /<\/nav><div class="review-stage">/);
@@ -3257,7 +3274,7 @@ test('bench-t2 review chrome has one header, one bar, one merge badge and menu-o
     assert.match(body, /href="#kr-mark"/);
     assert.match(body, /data-review-copy/);
     assert.match(body, /data-review-goto/);
-    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+    assert.match(body, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
     assert.doesNotMatch(body, /allow-same-origin/);
   }
 });
@@ -4996,7 +5013,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
   const frames = [...html.matchAll(/<iframe\b[^>]*>/g)].map(m => m[0]);
   assert.equal(frames.length, 1);
   assert.match(frames[0], /id="review-report"/); assert.match(frames[0], /src="\/r\/o\/r\/a\/12\/raw"/);
-  assert.match(frames[0], /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(frames[0], /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"/);
   assert.match(html, /const raw = "\/r\/o\/r\/a\/12\/raw";[\s\S]*iframe\.src = raw \+ location\.hash/);
   assert.match(html, /"endpoint":"\/r\/o\/r\/a\/12\/3d\/"/);
   assert.doesNotMatch(html, /Review3D|review3d\.js/, 'viewer runs only inside the report frame');
