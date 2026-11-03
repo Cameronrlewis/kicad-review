@@ -2820,6 +2820,46 @@ def fab_notices(name, settings, parts):
         print("::notice::" + workflow_command_escape(f"{name}: {preset} fabrication differs from KiBot v1.9.1 template: {diff}"))
 
 
+def collect_downloads(p, index, head, *, policy=None, purpose="comparison", report=None):
+    """The project's manifest, with its files copied into the purpose's staging folder for that run's downloads artifact."""
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    if report not in (None, "design") or (report == "design") != (purpose == "snapshot"):
+        raise ValueError("report kind must match purpose: None with comparison, 'design' with snapshot")
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("head must be the full 40-character SHA")
+    snapshot = report == "design"
+    src = f"review/{project_id(p['dir'])}/head/" + ("downloads-snapshot" if snapshot else "downloads")
+    staging = "review/design-downloads" if snapshot else "review/downloads"
+    bundle = f"kicad-{'design' if snapshot else 'review'}-downloads-{head[:7]}"
+    try:
+        envelope = json.loads(pathlib.Path(f"{src}/downloads.json").read_text(encoding="utf-8"))
+        entries = envelope["files"]
+    except (OSError, KeyError, ValueError):
+        return None
+    if snapshot and envelope.get("policy") != download_policy_key(policy):
+        return None  # a comparison-policy package never reaches a trusted snapshot
+    out = []
+    for e in entries:
+        item = {"kind": e["kind"], "label": e["label"]}
+        path = f"{src}/{e['path']}" if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", e.get("path", "")) else ""
+        if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+            os.makedirs(f"{staging}/{index}", exist_ok=True)
+            shutil.copyfile(path, f"{staging}/{index}/{e['path']}")
+            with open(path, "rb") as fh:
+                sha = hashlib.file_digest(fh, "sha256").hexdigest()
+            item.update(bytes=os.path.getsize(path), sha256=sha, path=f"{index}/{e['path']}", artifact=bundle)
+        else:
+            item["error"] = e.get("error") or "not exported"
+        out.append(item)
+    if out:
+        os.makedirs(f"{staging}/{index}", exist_ok=True)
+        pathlib.Path(f"{staging}/{index}/downloads.json").write_text(json.dumps({"files": out, "head": head}), encoding="utf-8")
+    return out
+
+
 def violation(v, scale, where):
     items = v.get("items", [])
     pos = [[round(i["pos"]["x"] * scale, 4), round(i["pos"]["y"] * scale, 4)] for i in items if "pos" in i]
@@ -4053,7 +4093,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "downloads") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
@@ -4070,10 +4110,14 @@ def cmd_report(args):
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
+    shutil.rmtree("review/downloads", ignore_errors=True)
     data["projects"] = []
     change_offset = 0
-    for p in det["projects"]:
+    for i, p in enumerate(det["projects"]):
         project = build_project(p, blobs, settings, waivers, change_offset)
+        downloads = collect_downloads(p, i, det["head"]) if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off" else None
+        if downloads:
+            project["downloads"] = downloads
         data["projects"].append(project)
         change_offset += len(project["changes"])
     if settings.get("digikey", {}).get("enabled"):
@@ -4107,7 +4151,7 @@ def cmd_report(args):
         fh.write(f"name={name}\n")
         fh.write(f"issues={'true' if settings['issues']['enabled'] else 'false'}\n")
         fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
-
+        fh.write(f"downloads={'true' if os.path.isdir('review/downloads') and os.listdir('review/downloads') else 'false'}\ndownloads_name=kicad-review-downloads-{det['head'][:7]}\n")
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
 
 

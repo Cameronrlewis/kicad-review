@@ -3767,7 +3767,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release")} if k == "checks" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release", "downloads")}, "run_id": "", "projects": []}
             legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
@@ -6699,4 +6699,97 @@ with tempfile.TemporaryDirectory() as d, patch.object(kr, "IMAGE_RENDERER", "ver
     finally:
         os.chdir(old_cwd)
 print("ok render head gating, release-only staging and role/opt-in cache isolation")
+
+from kicad_review import collect_downloads
+cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        src = "review/p/head/downloads"; os.makedirs(src); os.makedirs("review/q/head/downloads")
+        pathlib.Path(f"{src}/fab-b-bbbbbbb.zip").write_bytes(b"zipdata")
+        kr.write_download_manifest(src, [{"kind": "fab", "label": "For fabrication", "file": "fab-b-bbbbbbb.zip", "error": None},
+                   {"kind": "step", "label": "3D model (STEP)", "file": None, "error": "skipped: export took longer than 120 s"}])
+        pathlib.Path("review/q/head/downloads/q-bbbbbbb-schematic.pdf").write_bytes(b"%PDF")
+        kr.write_download_manifest("review/q/head/downloads", [{"kind": "pdf", "label": "Schematic PDF", "file": "q-bbbbbbb-schematic.pdf", "error": None}])
+        got = collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40)
+        assert got == [{"kind": "fab", "label": "For fabrication", "bytes": 7, "sha256": hashlib.sha256(b"zipdata").hexdigest(),
+                        "path": "0/fab-b-bbbbbbb.zip", "artifact": "kicad-review-downloads-bbbbbbb"},
+                       {"kind": "step", "label": "3D model (STEP)", "error": "skipped: export took longer than 120 s"}], got
+        assert pathlib.Path("review/downloads/0/fab-b-bbbbbbb.zip").read_bytes() == b"zipdata"
+        second = collect_downloads({"dir": "q", "name": "q"}, 1, "b" * 40)  # index is the project's position, not its folder
+        assert second[0]["path"] == "1/q-bbbbbbb-schematic.pdf" and pathlib.Path("review/downloads/1/q-bbbbbbb-schematic.pdf").is_file()
+        assert collect_downloads({"dir": "missing", "name": "m"}, 2, "b" * 40) is None
+
+        staged = json.loads(pathlib.Path("review/downloads/0/downloads.json").read_text())
+        assert staged == {"files": got, "head": "b" * 40}, staged
+        # Report: compare the actual pre-feature module and assets, not two post-feature templates.
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": []}))
+        assert "fetch-depth: 0" in pathlib.Path(kr.__file__).with_name(".github").joinpath("workflows/test.yml").read_text(), "pinned baseline must be available in CI"
+        import tarfile
+        def downloads_baseline_root():
+            root = pathlib.Path(os.environ.get("DOWNLOADS_BASELINE") or tempfile.mkdtemp(prefix="downloads-baseline-"))
+            if not (root / "kicad_review.py").is_file():
+                archive = kr.subprocess.run(["git", "-C", str(pathlib.Path(kr.__file__).resolve().parent), "archive", "335db72", "kicad_review.py", "ui"], check=True, capture_output=True).stdout
+                with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                    tar.extractall(root)  # trusted, pinned git archive contains only kicad_review.py and ui/
+            return root
+        baseline_root = downloads_baseline_root()
+        # A pre-extracted override must not invoke git or overwrite the original assets.
+        with patch.dict(os.environ, {"DOWNLOADS_BASELINE": str(baseline_root)}), patch("kicad_review.subprocess.run", side_effect=AssertionError("pre-extracted baseline must not invoke git archive")):
+            assert downloads_baseline_root() == baseline_root
+        # Separately exercise the no-override CI fallback into a fresh, empty directory,
+        # while cwd remains outside every Git checkout.
+        with tempfile.TemporaryDirectory(prefix="downloads-fallback-") as fallback:
+            with patch.dict(os.environ, {"DOWNLOADS_BASELINE": ""}), patch("tempfile.mkdtemp", return_value=fallback), patch("kicad_review.subprocess.run", wraps=dl_real) as archive_run:
+                fallback_root = downloads_baseline_root()
+            archive_run.assert_called_once_with(["git", "-C", str(pathlib.Path(kr.__file__).resolve().parent), "archive", "335db72", "kicad_review.py", "ui"], check=True, capture_output=True)
+            assert fallback_root == pathlib.Path(fallback)
+            for relative in ("kicad_review.py", "ui/review.html", "ui/review.js", "ui/review.css"):
+                assert (fallback_root / relative).read_bytes() == (baseline_root / relative).read_bytes(), relative
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("downloads_baseline", baseline_root / "kicad_review.py")
+        baseline = importlib.util.module_from_spec(spec); spec.loader.exec_module(baseline)
+        with patch.object(baseline, "load_settings", return_value=copy.deepcopy(baseline.DEFAULT_SETTINGS)):
+            baseline.cmd_report(None)
+        before_data = pathlib.Path("review/data.json").read_bytes()
+        before_html = pathlib.Path("review/kicad-review.html").read_bytes()
+        with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
+            kr.cmd_report(None)
+        legacy, integrated = json.loads(before_data), json.loads(pathlib.Path("review/data.json").read_bytes())
+        def legacy_subset(old, new):
+            """Every value the 335db72 report holds is present unchanged; additive v1 fields from 01, 03 and 08 may appear."""
+            if isinstance(old, dict):
+                return isinstance(new, dict) and all(k in new and legacy_subset(v, new[k]) for k, v in old.items())
+            if isinstance(old, list):
+                return isinstance(new, list) and len(old) == len(new) and all(legacy_subset(a, b) for a, b in zip(old, new))
+            return old == new
+        assert legacy_subset(legacy, integrated), "opted-out report lost or changed a 335db72 field"
+        assert "downloads" not in integrated["settings"] and all("downloads" not in p for p in integrated["projects"]), "opted-out report carries download data"
+        after_html = pathlib.Path("review/kicad-review.html").read_bytes()
+
+        shown = {"name": "b", "dir": "p", "status": "modified", "sheets": [], "board": {}, "changes": [], "checks": []}
+        on = copy.deepcopy(DEFAULT_SETTINGS); on["downloads"]["enabled"] = True
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}))
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        data = json.loads(pathlib.Path("review/data.json").read_text())
+        assert data["projects"][0]["downloads"] == got and data["settings"]["downloads"] == {"enabled": True, "step": True}
+        gh_out = pathlib.Path("gh-out.txt").read_text()
+        assert "downloads=true\n" in gh_out and "downloads_name=kicad-review-downloads-bbbbbbb\n" in gh_out, gh_out
+        off = copy.deepcopy(DEFAULT_SETTINGS); pathlib.Path("gh-out.txt").unlink()
+        with patch("kicad_review.load_settings", return_value=off), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads" not in json.loads(pathlib.Path("review/data.json").read_text())["projects"][0] and "downloads=false\n" in pathlib.Path("gh-out.txt").read_text()
+        assert not os.path.exists("review/downloads"), "stale download folder removed when disabled"
+        # Release-only outputs reach report and workflow upload even with downloads.enabled false.
+        release_only = copy.deepcopy(DEFAULT_SETTINGS); release_only["checks"]["release"] = "informational"
+        pathlib.Path("gh-out.txt").unlink()
+        with patch("kicad_review.load_settings", return_value=release_only), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT":"gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads=true\n" in pathlib.Path("gh-out.txt").read_text(), "checks.release package was discarded"
+        assert pathlib.Path("review/downloads/0/fab-b-bbbbbbb.zip").is_file()
+    finally:
+        os.chdir(cwd)
+print("ok report manifest, artifact folder, outputs and opt-out byte identity")
+
 
