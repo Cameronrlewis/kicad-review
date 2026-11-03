@@ -2847,16 +2847,24 @@ def collect_downloads(p, index, head, *, policy=None, purpose="comparison", repo
     for e in entries:
         if not isinstance(e, dict):
             continue
-        item = {"kind": e.get("kind"), "label": e.get("label")}
-        path = f"{src}/{e['path']}" if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", e.get("path", "")) else ""
+        kind = e.get("kind")
+        label = e.get("label")
+        if not isinstance(kind, str) or not kind.strip():
+            continue
+        if not isinstance(label, str) or not label.strip():
+            continue
+        item = {"kind": kind, "label": label}
+        epath = e.get("path")
+        path = f"{src}/{epath}" if isinstance(epath, str) and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", epath) else ""
         if path and os.path.isfile(path) and os.path.getsize(path) > 0:
             os.makedirs(f"{staging}/{index}", exist_ok=True)
-            shutil.copyfile(path, f"{staging}/{index}/{e['path']}")
+            shutil.copyfile(path, f"{staging}/{index}/{epath}")
             with open(path, "rb") as fh:
                 sha = hashlib.file_digest(fh, "sha256").hexdigest()
-            item.update(bytes=os.path.getsize(path), sha256=sha, path=f"{index}/{e['path']}", artifact=bundle)
+            item.update(bytes=os.path.getsize(path), sha256=sha, path=f"{index}/{epath}", artifact=bundle)
         else:
-            item["error"] = e.get("error") or "not exported"
+            err = e.get("error")
+            item["error"] = str(err) if err is not None and str(err).strip() else "not exported"
         out.append(item)
     if out:
         os.makedirs(f"{staging}/{index}", exist_ok=True)

@@ -6804,14 +6804,30 @@ with tempfile.TemporaryDirectory() as d:
             kr.cmd_report(None)
         assert "downloads" not in json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]
 
-        # 3. Entry missing kind or label
+        # 3. Entry missing kind or label is skipped rather than emitting null kind/label
         pathlib.Path(f"{src}/downloads.json").write_text(json.dumps({"files": [{"path": "fab-b-bbbbbbb.zip"}]}), encoding="utf-8")
-        missing_entry = collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40)
-        assert missing_entry == [{"kind": None, "label": None, "bytes": 7, "sha256": hashlib.sha256(b"zipdata").hexdigest(),
+        assert collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40) == []
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads" not in json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]
+
+        # 4. Mixed entries: invalid/missing kind/label skipped, valid entries preserved
+        pathlib.Path(f"{src}/downloads.json").write_text(json.dumps({"files": [
+            {"path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "path": "fab-b-bbbbbbb.zip"},
+            {"label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": None, "label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "label": None, "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "   ", "label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "label": "", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+        ]}), encoding="utf-8")
+        mixed_entries = collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40)
+        assert mixed_entries == [{"kind": "fab", "label": "For fabrication", "bytes": 7, "sha256": hashlib.sha256(b"zipdata").hexdigest(),
                                   "path": "0/fab-b-bbbbbbb.zip", "artifact": "kicad-review-downloads-bbbbbbb"}]
         with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
             kr.cmd_report(None)
-        assert json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["downloads"] == missing_entry
+        assert json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["downloads"] == mixed_entries
     finally:
         os.chdir(cwd)
 print("ok report manifest, artifact folder, outputs and opt-out byte identity")
