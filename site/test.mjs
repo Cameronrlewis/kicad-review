@@ -21,6 +21,9 @@ const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_
 
 const repoOk = () => new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true }, default_branch: 'main' }));
 
+// Silence @cloudflare/workers-oauth-provider CIMD warning in Node test environment.
+globalThis.Cloudflare = { compatibilityFlags: { global_fetch_strictly_public: true } };
+
 test('history ignores unrelated artifacts from the same run', () => {
   const artifacts = [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 } }, { id: 901, name: 'build.zip', workflow_run: { id: 77 } }];
   const checks = historyEvents(historyFixture(),artifacts, '/r/o/r', historyArtifactName).filter(e => e.kind === 'checks');

@@ -3,6 +3,9 @@ import { register } from 'node:module';
 
 register(import.meta.url);
 
+// Silence @cloudflare/workers-oauth-provider CIMD warning in Node test environment.
+globalThis.Cloudflare = { compatibilityFlags: { global_fetch_strictly_public: true } };
+
 // Node has no workerd built-ins; the OAuth provider only needs WorkerEntrypoint for an instanceof check.
 export async function resolve(specifier, context, nextResolve) {
   if (specifier === 'cloudflare:workers') return { url: 'data:text/javascript,export class WorkerEntrypoint {}', shortCircuit: true };
