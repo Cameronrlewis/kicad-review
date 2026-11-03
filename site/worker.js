@@ -399,6 +399,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       return sessionResponse(reviewPage({
         user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
         ask: Boolean(env.ANTHROPIC_API_KEY && env.ASK_KV),
+        mcpOrigin: env.OAUTH_KV ? new URL(request.url).origin : null,
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);

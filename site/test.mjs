@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import worker, { open, seal, milestoneGroups } from './worker.js';
 import { reportCsp, frameCsp } from './csp.js';
 import { fixturePages } from './proof.mjs';
-import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage } from './pages.js';
+import { commitsPage, homePage, messagePage, reviewPage, reviewsPage, runPage, signedOutPage, connectPanel } from './pages.js';
 
 import { historyEvents, HISTORY_QUERY } from './history.js';
 import { historyPage, frame, siteBadge, siteTable, sharedPage, sharedNotFoundPage } from './pages.js';
@@ -6196,4 +6196,89 @@ test('MCP OAuth binding and replay matrix',async(t)=>{
   assert.equal((await bearer(grant.access_token)).status,401,'revoked OAuth bearer token cannot access /mcp');
   await sdk.close();
   for(const {value} of local.OAUTH_KV.data.values())assert.ok(!value.includes('refresh-token')&&!value.includes('user-token'),'no plaintext GitHub credentials');
+});
+
+test('MCP Connect panel is escaped, site-specific and absent offline',()=>{
+  assert.equal(connectPanel(), '');
+  const html=connectPanel('https://review.example');
+  assert.match(html,/Connect your AI assistant/);
+  assert.match(html,/claude mcp add --scope user --transport http kicad-review https:\/\/review.example\/mcp/);
+  assert.match(html,/read-only/i);assert.match(html,/\/mcp/);
+  assert.equal(connectPanel('javascript:alert(1)'), '');
+  assert.equal(connectPanel('https://bad.example/" onclick="bad'), '');
+  assert.doesNotMatch(sharedPage({name:'x',raw:'/s/x/raw',expires:'2030-01-01'}),/Connect your AI assistant/);
+});
+
+test('MCP Connect panel route presence, OAUTH_KV dependency and malicious artifact name', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => {
+    if (url.includes('/actions/runs/')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
+      name: 'kicad-review-deadbee-cafebad-pass.html', expired: false,
+      workflow_run: { id: 123 },
+    }));
+    if (url.endsWith('/artifacts/45')) return new Response(JSON.stringify({
+      name: 'kicad-review-deadbee-cafebad-pass"><script>alert(1)</script>.html', expired: false,
+      workflow_run: { id: 123 },
+    }));
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    // 1. Without OAUTH_KV: no Connect panel
+    const withoutKV = await worker.fetch(request('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } }), env);
+    assert.equal(withoutKV.status, 200);
+    const bodyWithout = await withoutKV.text();
+    assert.doesNotMatch(bodyWithout, /Connect your AI assistant/);
+
+    // 2. With OAUTH_KV: Connect panel present with exact request origin
+    const withKV = await worker.fetch(request('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } }), { ...env, OAUTH_KV: new MCPMemoryKV() });
+    assert.equal(withKV.status, 200);
+    const bodyWith = await withKV.text();
+    assert.match(bodyWith, /Connect your AI assistant/);
+    assert.match(bodyWith, /claude mcp add --scope user --transport http kicad-review https:\/\/site\.example\/mcp/);
+    // Panel lives in overflow popover
+    assert.match(bodyWith, /<details class="bench-menu bench-overflow">[\s\S]*?<details class="bench-menu"><summary>Connect your AI assistant<\/summary>/);
+
+    // 3. Malicious artifact name cannot change origin or inject unescaped HTML
+    const malicious = await worker.fetch(request('/r/Cameronrlewis/repo/a/45', { headers: { Cookie: `s=${sealed}` } }), { ...env, OAUTH_KV: new MCPMemoryKV() });
+    assert.equal(malicious.status, 200);
+    const bodyMalicious = await malicious.text();
+    assert.doesNotMatch(bodyMalicious, /<script>alert\(1\)<\/script>/);
+    assert.match(bodyMalicious, /claude mcp add --scope user --transport http kicad-review https:\/\/site\.example\/mcp/);
+  } finally {
+    restore();
+  }
+});
+
+test('MCP Connect panel details retains native keyboard semantics and wraps overflow', () => {
+  const page = reviewPage({
+    user: 'reviewer',
+    owner: 'demo',
+    repo: 'Thermal_Camera',
+    id: 123,
+    name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html',
+    workflowRunId: 99,
+    pull: 7,
+    share: true,
+    pdf: true,
+    mcpOrigin: 'https://review.example',
+  });
+  // Connect panel details inside overflow popover
+  assert.match(page, /<details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••<\/summary><div class="bench-popover">/);
+  assert.match(page, /<details class="bench-menu"><summary>Connect your AI assistant<\/summary><div class="bench-popover">/);
+
+  // Command wraps without overflow
+  assert.match(page, /<code style="white-space:pre-wrap;overflow-wrap:anywhere">claude mcp add --scope user --transport http kicad-review https:\/\/review\.example\/mcp<\/code>/);
+
+  // Native details structure: summary is first child inside details
+  assert.match(page, /<details class="bench-menu"><summary>Connect your AI assistant<\/summary>/);
+
+  // Existing review actions are still reachable within the popover
+  assert.match(page, /History/);
+  assert.match(page, /Share…/);
+  assert.match(page, /Open run/);
+  assert.match(page, /Download PDF/);
+  assert.match(page, /data-review-copy/);
+  assert.match(page, /data-review-goto/);
 });
