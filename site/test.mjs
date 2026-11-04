@@ -5004,7 +5004,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
 
 // ---- Design page: the newest snapshot for a branch, tag or commit ----
 import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery } from './design.js';
-import { designMissingPage, projectsPage } from './pages.js'; // designsPage arrives with Task 8
+import { designMissingPage, projectsPage, designsPage } from './pages.js';
 // The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
 const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
 const tipSha = 'c'.repeat(40);
@@ -5300,4 +5300,127 @@ test('designQuery and folder validation canonicalizes and re-encodes via project
   // designRoute returns 404 for traversal folder key
   const traversalRoute = await designGet('/r/Cameronrlewis/repo/p/%252e%252e/design', twoFolders);
   assert.equal(traversalRoute.status, 404);
+});
+
+// A commit log for the history tests, newest first. A commit with `files` lists the files it changed; a renamed file
+// lists both names (filename and previous_filename). The mock answers the three calls the route makes: the tip, the
+// path-filtered commit list resumed from a sha (GitHub semantics: the listing starts at that sha, which is included),
+// and the commit's files. `calls` records every path so the tests can count requests.
+function historyGh(log, { tree = [{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }], calls = [], thumbs = null } = {}) {
+  const touches = (c, dir) => (c.files || []).some((f) => [f.filename, f.previous_filename].some((p) => p && (dir === '' || p === dir || p.startsWith(`${dir}/`))));
+  return async (path) => {
+    calls.push(path);
+    if (path.includes('/git/trees/')) return json({ tree });
+    if (path.includes('/releases/tags/design-thumbs')) return thumbs ?? new Response('{}', { status: 404 });
+    const u = new URL(`https://x${path}`);
+    const commitMatch = /\/commits\/([0-9a-f]{40})/.exec(u.pathname);
+    if (commitMatch) { const hit = log.find((c) => c.sha === commitMatch[1]); return hit ? json({ sha: hit.sha, files: hit.files || [] }) : json({}, 404); }
+    if (u.pathname.endsWith('/commits')) {
+      const from = u.searchParams.get('sha');
+      const perPage = Number(u.searchParams.get('per_page') || 30);
+      const dir = u.searchParams.get('path') || '';
+      const start = Math.max(0, log.findIndex((c) => c.sha === from));
+      const hits = log.slice(start).filter((c) => !dir || touches(c, dir));
+      const page = hits.slice(0, perPage).map((c) => ({ sha: c.sha, author: { login: 'ada' }, commit: { message: c.message || `Change ${c.sha.slice(0, 7)}\nbody`, author: { date: '2026-10-01T00:00:00Z' } } }));
+      return new Response(JSON.stringify(page), { headers: { 'Content-Type': 'application/json', ...(hits.length > perPage ? { Link: '<x>; rel="next"' } : {}) } });
+    }
+    throw Error('unexpected ' + path);
+  };
+}
+const sha40 = (n) => String(n).padStart(40, '0');
+
+test('a folder page lists only the commits that changed its KiCad files: renames and deletions count, README and other folders do not', async () => {
+  const log = [
+    { sha: sha40(1), files: [{ filename: 'README.md' }] },
+    { sha: sha40(2), files: [{ filename: 'A/A.kicad_sch' }] },
+    { sha: sha40(3), files: [{ filename: 'B/B.kicad_pcb' }] },
+    { sha: sha40(4), files: [{ filename: 'A/notes.md' }] },
+    { sha: sha40(5), files: [{ filename: 'B/x.kicad_sch', previous_filename: 'A/x.kicad_sch', status: 'renamed' }] },
+    { sha: sha40(6), files: [{ filename: 'A/old.kicad_pcb', status: 'removed' }] },
+    { sha: sha40(7), files: [{ filename: 'A/y.kicad_pro' }, { filename: 'B/B.kicad_pcb' }] },
+  ];
+  const gh = historyGh(log);
+  const a = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]])).text();
+  assert.deepEqual([...a.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(2), sha40(5), sha40(6), sha40(7)]);
+  assert.match(a, /KiCad changes/);
+  assert.ok(!a.includes('Repository commit history'), 'the list is never labelled as all commits');
+  const b = await (await designGet('/r/Cameronrlewis/repo/p/B/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]])).text();
+  assert.deepEqual([...b.matchAll(/\/p\/B\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]), [sha40(3), sha40(5), sha40(7)]);
+  assert.match(a, new RegExp(`name="head" value="${sha40(1)}"`), 'Compare with newest targets the default-branch tip');
+  assert.equal((a.match(/Compare with newest/g) || []).length, 4, 'every row except the tip itself');
+});
+
+test('a mixed history pages by cursor: 25 KiCad rows per page, no duplicates, no skipped commit, and the scan limit is shown', async () => {
+  // 150 commits, newest first. Every other commit changes A/A.kicad_sch; the rest change A/notes.md, a file in the folder that is not KiCad.
+  const log = Array.from({ length: 150 }, (_, k) => ({ sha: sha40(150 - k), files: [{ filename: k % 2 === 0 ? 'A/A.kicad_sch' : 'A/notes.md' }] }));
+  const gh = historyGh(log);
+  const route = [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]];
+  const first = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', route)).text();
+  const rows1 = [...first.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.equal(rows1.length, 25);
+  const cursor = /cursor=([0-9a-f]{40})">Older/.exec(first)[1];
+  assert.equal(cursor, rows1[24], 'the Older link resumes after the last row shown');
+  const second = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${cursor}`, route)).text();
+  const rows2 = [...second.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.equal(rows2.length, 25);
+  assert.equal(rows2[0], sha40(150 - 50), 'the commit after the cursor starts the next page');
+  assert.equal(new Set([...rows1, ...rows2]).size, 50, 'no duplicates across pages');
+  assert.ok(second.includes('href="/r/Cameronrlewis/repo/p/A/designs?ref=main">Newest'));
+  const third = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${/cursor=([0-9a-f]{40})">Older/.exec(second)[1]}`, route)).text();
+  const rows3 = [...third.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.equal(rows3.length, 25, 'the 75 KiCad commits come 25 at a time: 25, 25, 25');
+  assert.equal(new Set([...rows1, ...rows2, ...rows3]).size, 75, 'every KiCad commit once, none of the notes commits');
+  // A folder with no KiCad change in the first 60 commits shows the notice and keeps Older.
+  const quiet = Array.from({ length: 200 }, (_, k) => ({ sha: sha40(300 - k), files: [{ filename: 'A/notes.md' }] }));
+  const calls = [];
+  const gh2 = historyGh(quiet, { calls });
+  const notice = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh2(url.replace('https://api.github.com', ''))]])).text();
+  assert.match(notice, /Scanned 60 commits/);
+  assert.equal(calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 60, 'one detail request per scanned commit, never more than 60');
+  assert.match(notice, /cursor=[0-9a-f]{40}">Older/);
+});
+
+test('the list makes one detail request per scanned commit and nothing per row beyond that', async () => {
+  const log = Array.from({ length: 25 }, (_, k) => ({ sha: sha40(k + 1), files: [{ filename: 'A/A.kicad_sch' }] }));
+  const calls = [];
+  const gh = historyGh(log, { calls });
+  await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]]);
+  assert.equal(calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 25);
+  assert.equal(calls.length, 25 + 1 + 1 + 1, 'the tip, the listing, the thumbnail release lookup, plus one detail per scanned row');
+});
+
+test('the repository-level commit list and the Reviews page now point at the project picker', async () => {
+  assert.equal((await designGet('/r/Cameronrlewis/repo/designs?ref=a..b', [])).status, 404, 'the old repository-wide list is gone');
+  assert.match(reviewsPage({ user: 'u', owner: 'o', repo: 'r', items: [], counts: {} }), /<a class="btn" href="\/r\/o\/r\/projects">Latest design/);
+  assert.ok(designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [{ sha: tipSha, message: '<b>', author: 'a', date: '' }], tip: tipSha, next: null, truncated: false, thumbs: new Map(), started: false, first: true }).includes('&lt;b&gt;'));
+});
+
+function renderRequest(body, { sealed, origin = 'https://site.example' } = {}) {
+  return call('/r/Cameronrlewis/repo/design/render', { method: 'POST', headers: { ...(sealed ? { Cookie: `s=${sealed}` } : {}), ...(origin ? { Origin: origin } : {}), 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) });
+}
+
+test('render dispatches a snapshot-only run for one commit and follows the run', async () => {
+  const sealed = await signedIn(); let sent;
+  const restore = mockFetch(async (url, options = {}) => { if (url === API) return accessibleRepo(); sent = [url, options]; return json({ workflow_run_id: 321 }); });
+  try {
+    const response = await renderRequest({ sha: tipSha }, { sealed });
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get('Location'), `/r/Cameronrlewis/repo/run/321?head=${tipSha}`);
+    assert.equal(sent[0], `${API}/actions/workflows/kicad-review.yml/dispatches`);
+    assert.deepEqual(JSON.parse(sent[1].body), { ref: 'main', inputs: { head: tipSha, snapshot_only: 'true' }, return_run_details: true });
+  } finally { restore(); }
+});
+
+test('render refuses a foreign Origin, a bad commit and a caller workflow without the input', async () => {
+  const sealed = await signedIn(); let calls = 0;
+  const restore = mockFetch(async (url) => { calls += 1; return url === API ? accessibleRepo() : json({ message: 'Unexpected inputs provided' }, 422); });
+  try {
+    assert.equal((await renderRequest({ sha: tipSha }, { sealed, origin: 'https://evil.example' })).status, 403);
+    assert.equal((await renderRequest({ sha: tipSha }, { sealed, origin: null })).status, 403);
+    assert.equal(calls, 0);
+    for (const sha of ['', 'main', 'abc', '../../x', 'g'.repeat(40)]) assert.equal((await renderRequest({ sha }, { sealed })).status, 400, sha);
+    const refused = await renderRequest({ sha: tipSha }, { sealed });
+    assert.equal(refused.status, 403);
+    assert.match(await refused.text(), /snapshot_only input/);
+  } finally { restore(); }
 });

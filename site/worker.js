@@ -4,12 +4,12 @@ import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
 import { verifyReportFamily } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
-import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep, designMissingPage, projectsPage } from './pages.js';
+import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep, designMissingPage, projectsPage, designsPage } from './pages.js';
 
 import { threadsRoute } from './threads.js';
 import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
-import { designName, designRoute, designReleaseRoute, projectsRoute, designQuery } from './design.js';
+import { designName, designRoute, designReleaseRoute, projectsRoute, designsRoute, renderRoute, thumbnailsFor, designQuery } from './design.js';
 
 import { readinessRoute, rerunRoute } from './readiness.js';
 
@@ -934,7 +934,11 @@ const routes = {
         const result = await issuesRoute(request, env, { owner, repo, rest }, { access, gh });
         return response(result.body, { status: result.status, headers: result.headers });
       }
-      const designDeps = { access, gh, errorPage, sessionResponse, sessionRedirect, designMissingPage, projectsPage, reviewPage, workflowFile };
+      const designDeps = { access, gh, errorPage, sessionResponse, sessionRedirect, designMissingPage, projectsPage, designsPage, thumbnailsFor, reviewPage, workflowFile };
+      const designRender = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/design\/render$/);
+      if (request.method === 'POST' && designRender) return await renderRoute(request, env, { owner: designRender[1], repo: designRender[2] }, designDeps);
+      const designList = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/p\/([^/]+)\/designs$/);
+      if (request.method === 'GET' && designList) return await designsRoute(request, env, { owner: designList[1], repo: designList[2], key: designList[3] }, designDeps);
       const designScoped = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/p\/([^/]+)\/design(\/.+)?$/);
       const designRepo = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/design(\/.+)?$/);
       const designTag = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/design-release\/([^/]+)(\/raw)?$/);

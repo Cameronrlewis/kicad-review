@@ -6852,6 +6852,13 @@ CHECKS.push(["design site screen: wrapper, missing or history is reachable", "",
     const link=[...root.querySelectorAll('a.design-action')].find(el=>el.textContent===label);
     if(!link || !link.getClientRects().length || getComputedStyle(link).visibility!=='visible' || link.tabIndex<0)return 'missing or hidden wrapper action '+label;
   }
+  if(window.__dpSiteFixture.includes('design-history')){
+    if(root.querySelector('h1')?.textContent!=='KiCad changes')return 'missing KiCad changes heading';
+    if(!root.querySelector('.notice')?.textContent.includes('Scanned 60 commits'))return 'missing scan notice';
+    if(actions.filter(el=>el.textContent==='View').length!==25)return 'expected 25 View actions';
+    if(actions.filter(el=>el.textContent==='Compare with newest').length!==24)return 'expected 24 Compare actions';
+    if(!actions.some(el=>el.textContent==='Older'))return 'missing Older action';
+  }
   for(const el of actions){
     el.scrollIntoView({block:'nearest',inline:'nearest'}); el.focus();
     const r=el.getBoundingClientRect();

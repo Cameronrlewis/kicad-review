@@ -119,7 +119,7 @@ export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'a
       return `<section><h2>${safeUrl ? link(group.url, group.title) : e(group.title)}</h2>${progress}${table(group.items.map(card).join(''))}</section>`;
     }).join('');
   }
-  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page page-wide bench-opening"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
+  return frame({ title: 'Reviews', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Reviews' }], body: `<main class="page page-wide bench-opening"><div class="page-head"><div><h1>Reviews</h1><p class="lead">${e(owner)}/${e(repo)}</p></div><div class="page-actions">${link(`${path}/projects`, 'Latest design', 'btn')}${link(`${path}/commits`, 'Compare commits', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info">Your review has started. It appears here in about two minutes. You can leave this page.</div>' : ''}<nav class="filter-row" aria-label="Review filters">${chips}</nav>${content}</main>` });
 }
 
 export function designMissingPage({ user, owner, repo, key, ref, sha, canRender }) {
@@ -138,6 +138,20 @@ export function projectsPage({ user, owner, repo, projects }) {
   const rows = projects.map((dir) => `<tr><td class="mono">${dir ? e(dir) : '<span class="muted">Repository root</span>'}</td><td><span class="page-actions">${link(`${path}/p/${projectKey(dir)}/design`, 'Latest design', 'btn btn-primary')}${link(`${path}/p/${projectKey(dir)}/designs`, 'Revisions', 'btn')}</span></td></tr>`).join('');
   return frame({ title: 'Projects', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Projects' }],
     body: `<main class="page design-site"><div class="page-head"><div><h1>Projects</h1><p class="lead">The KiCad project folders on the default branch. Each has its own design page.</p></div></div>${projects.length ? siteTable(['Folder', 'Open'], rows, 'Projects') : '<section class="card empty"><h2>No KiCad project</h2><p>This repository has no folder with a .kicad_pro file on its default branch.</p></section>'}</main>` });
+}
+
+// The KiCad-change history of one project folder. thumbs is a Map of sha to a base64 PNG (Task 8A); a missing thumbnail is a
+// plain placeholder. Older resumes after the last row shown (cursor); Newest returns to the first page; a truncated scan says so.
+export function designsPage({ user, owner, repo, key, ref, rows, tip, next, truncated, thumbs, first, started }) {
+  const canonical = canonicalFolder(key);
+  const safeKey = canonical === null ? '' : projectKey(canonical);
+  const path = repoPath(owner, repo), base = safeKey ? `${path}/p/${safeKey}` : `${path}/projects`;
+  const list = (cursor) => `${base}/designs?ref=${encodeURIComponent(ref)}${cursor ? `&cursor=${cursor}` : ''}`;
+  const body = rows.map((r) => `<tr><td class="design-thumb">${thumbs?.has(r.sha) ? `<img alt="" width="200" height="125" src="data:image/png;base64,${thumbs.get(r.sha)}">` : '<span class="design-thumb-missing" aria-hidden="true"></span>'}</td><td><code>${e(r.sha.slice(0, 7))}</code></td><td title="${e(r.message)}">${e(r.message)}</td><td>${e(r.author)}</td><td class="mono" title="${e(r.date)}">${e(relativeTime(r.date))}</td><td class="design-actions">${link(safeKey ? `${base}/design/${r.sha}` : `${path}/projects`, 'View', 'btn')}${tip && r.sha !== tip ? `<form method="post" action="${path}/compare"><input type="hidden" name="base" value="${e(r.sha)}"><input type="hidden" name="head" value="${e(tip)}"><button class="btn" title="Review what changed from this commit to the newest one">Compare with newest</button></form>` : ''}</td></tr>`).join('');
+  const notice = truncated ? `<div class="notice notice-info" role="status">Scanned 60 commits. Older KiCad changes follow with Older.</div>` : '';
+  const nav = `${first ? '' : link(list(''), 'Newest', 'btn')}${next ? link(list(next), 'Older', 'btn') : ''}`;
+  return frame({ title: 'KiCad changes', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { href: `${path}/projects`, label: 'Projects' }, { label: 'KiCad changes' }],
+    body: `<main class="page page-wide design-site"><div class="page-head"><div><h1>KiCad changes</h1><p class="lead">${e(owner)}/${e(repo)} · <code>${e(key)}</code> · <code>${e(ref)}</code></p></div><div class="page-actions">${link(safeKey ? `${base}/design` : `${path}/projects`, 'Latest design', 'btn btn-primary')}</div></div>${started ? '<div class="notice notice-info" role="status">The render has started. It appears in the list in about two minutes.</div>' : ''}<p class="muted">Commits on the default branch that changed a KiCad file in this project folder (schematic, board, symbols, footprints, project, rules, worksheet, 3D models). README and other edits are not listed.</p>${notice}${rows.length ? siteTable(['Snapshot', 'Commit', 'Message', 'Author', 'When', 'Open'], body, 'KiCad changes') : '<p class="muted">No commit in this folder has changed a KiCad file in the range scanned.</p>'}<p class="page-actions">${nav}</p></main>` });
 }
 
 export function commitsPage({ user, owner, repo, branch, branches, tag = '', tags = [], commits, base = '', head = '', notice = null, files = [], swap = false }) {

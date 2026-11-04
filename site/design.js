@@ -243,3 +243,99 @@ export async function designReleaseRoute(request, env, { owner, repo, tag, raw }
     return unavailable(errorPage, allowed.s);
   }
 }
+
+// The KiCad-change history of one project folder (owner decision 2026-10-26, decision 4): default-branch commits whose files
+// include a KiCad input of the folder, renames and deletions included. 25 rows a page. A filtered page cannot be found by
+// page number, so each page resumes from the last commit examined (the cursor). At most MAX_SCAN commits are examined per view.
+const MAX_SCAN = 60; // ponytail: 60 detail requests per view; the Older link resumes the scan, so no commit is skipped
+const PAGE_ROWS = 25;
+export async function scanHistory(gh, token, root, ref, dir, cursor) {
+  const rows = [], pathQuery = dir ? `&path=${enc(dir)}` : '';
+  let from = cursor || ref, skip = Boolean(cursor), scanned = 0, last = cursor || '';
+  for (;;) {
+    const response = await gh(`${root}/commits?sha=${enc(from)}&per_page=100${pathQuery}`, token);
+    if (!response.ok) throw new Error('history unavailable');
+    let items = await response.json();
+    if (skip && items[0]?.sha === from) items = items.slice(1);
+    skip = false;
+    for (const item of items) {
+      if (scanned === MAX_SCAN) return { rows, next: last, truncated: true };
+      scanned += 1; last = item.sha;
+      const commit = await commitDetails(gh, token, root, item.sha);
+      if (changesProject(commit.files, dir)) {
+        rows.push({ sha: item.sha, message: String(item.commit?.message || '').split('\n', 1)[0], author: item.author?.login || item.commit?.author?.name || '?', date: item.commit?.author?.date || '' });
+      }
+      if (rows.length === PAGE_ROWS) return { rows, next: item.sha, truncated: false };
+    }
+    if (!response.headers.get('Link')?.includes('rel="next"') || !items.length) return { rows, next: null, truncated: false };
+    from = last;
+    skip = true;
+  }
+}
+
+// The list's thumbnails: one release asset, read in at most three requests whatever the row count.
+export async function thumbnailsFor(gh, token, root, dir, shas) {
+  const wanted = new Set(shas);
+  try {
+    const release = await gh(`${root}/releases/tags/design-thumbs`, token);                       // request 1
+    if (!release.ok) return new Map();
+    const asset = ((await release.json()).assets || []).find((a) => a.name === 'thumbs.json');
+    if (!asset) return new Map();
+    const index = JSON.parse(await releaseText(gh, token, root, asset));                          // requests 2 & 3
+    if (index.v !== 1) return new Map();
+    return new Map((index.projects?.[dir || '.'] || []).filter((e) => wanted.has(e.sha)).map((e) => [e.sha, e.png]));
+  } catch {
+    return new Map();
+  }
+}
+
+// GET /r/:owner/:repo/p/<key>/designs?ref=&cursor=: the KiCad-change history of one folder.
+export async function designsRoute(request, env, { owner, repo, key }, deps) {
+  const { access, gh, errorPage, sessionResponse, designsPage, thumbnailsFor } = deps;
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  const url = new URL(request.url), path = repoPath(owner, repo);
+  const back = [{ href: `${path}/projects`, label: 'Projects' }];
+  const canonical = canonicalFolder(key);
+  if (canonical === null) return errorPage(404, ...generic, back, allowed.s);
+  const dir = canonical;
+  key = projectKey(dir);
+  const ref = url.searchParams.get('ref') || allowed.repo.default_branch;
+  const cursor = url.searchParams.get('cursor') || '';
+  if (!refOk(ref) || (cursor && !hex40.test(cursor))) return errorPage(404, ...generic, back, allowed.s);
+  const root = `/repos/${enc(owner)}/${enc(repo)}`;
+  try {
+    const first = await gh(`${root}/commits?sha=${enc(ref)}&per_page=1`, allowed.s.token);
+    if (first.status === 404 || first.status === 422) return errorPage(404, ...generic, back, allowed.s);
+    if (!first.ok) return errorPage(502, 'Could not load the history', 'GitHub did not answer. Try again.', back, allowed.s);
+    const tip = (await first.json())[0]?.sha || '';   // every Compare button compares with this commit
+    const { rows, next, truncated } = await scanHistory(gh, allowed.s.token, root, ref, dir, cursor);
+    const thumbs = await thumbnailsFor(gh, allowed.s.token, root, dir, rows.map((r) => r.sha)); // Task 8A: never fails the page
+    return sessionResponse(designsPage({ user: allowed.s.login, owner, repo, key, ref, rows, tip, next, truncated, thumbs,
+      first: !cursor, started: url.searchParams.get('started') === '1' }), { headers: html }, allowed.s);
+  } catch {
+    return errorPage(502, 'Could not load the history', 'GitHub did not answer. Try again.', back, allowed.s);
+  }
+}
+
+// POST /r/:owner/:repo/design/render: a design snapshot of one commit that has none. Needs write access, like Compare.
+export async function renderRoute(request, env, { owner, repo }, { access, gh, errorPage, sessionRedirect, workflowFile }) {
+  const path = `/r/${enc(owner)}/${enc(repo)}`;
+  if (request.headers.get('Origin') !== new URL(request.url).origin) return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${path}/projects`, label: 'Projects' }]);
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  const form = await request.formData();
+  const sha = String(form.get('sha') || ''), key = String(form.get('key') || '');
+  // The folder's history when the form names a valid folder key (letters, digits and the encodeURIComponent set); the picker otherwise.
+  const canonical = key && /^[A-Za-z0-9._~%!*'()-]{1,400}$/.test(key) ? canonicalFolder(key) : null;
+  const back = [{ href: canonical !== null ? `${path}/p/${projectKey(canonical)}/designs` : `${path}/projects`, label: 'Back to revisions' }];
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return errorPage(400, 'Choose a commit', 'Pick a commit from the revision list.', back, allowed.s);
+  try {
+    const dispatch = await gh(`/repos/${enc(owner)}/${enc(repo)}/actions/workflows/${workflowFile}/dispatches`, allowed.s.token, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: allowed.repo.default_branch, inputs: { head: sha, snapshot_only: 'true' }, return_run_details: true }) });
+    if (dispatch.status === 204) return sessionRedirect(`${back[0].href}?started=1`, 303, allowed.s);
+    if (dispatch.status === 200) { const details = await dispatch.json(); if (details.workflow_run_id) return sessionRedirect(`${path}/run/${enc(details.workflow_run_id)}?${new URLSearchParams({ head: sha })}`, 303, allowed.s); }
+    if (dispatch.status === 403 || dispatch.status === 404 || dispatch.status === 422) return errorPage(403, 'Cannot render this revision', 'You need write access, and the caller workflow must accept the snapshot_only input (see the README).', back, allowed.s);
+  } catch { /* the generic upstream error below */ }
+  return errorPage(502, 'Could not start the render', 'The render could not be started. Try again later.', back, allowed.s);
+}
