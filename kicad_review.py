@@ -4072,7 +4072,7 @@ def _png_rgb(width, height, rows):
             + _png_chunk(b"IDAT", zlib.compress(raw, 9)) + _png_chunk(b"IEND", b""))
 
 
-def poster_thumbnail(png, width=200):
+def poster_thumbnail(png, width=200, bg=(19, 22, 27)):
     """Box-averaged RGB thumbnail of a plain 8-bit PNG (the head poster). Pure Python, so it runs in the separate thumbnail job, never in the review job.
     ponytail: a 1600 x 1000 poster takes seconds of Python; the thumbnail job is separate so it never delays a review."""
     if width < 1:
@@ -4090,9 +4090,15 @@ def poster_thumbnail(png, width=200):
             for y in range(y0, y1):
                 for x in range(x0, x1):
                     o = x * bpp
-                    acc[0] += rows[y][o]
-                    acc[1] += rows[y][o + 1]
-                    acc[2] += rows[y][o + 2]
+                    if bpp == 4:
+                        a = rows[y][o + 3]
+                        acc[0] += (rows[y][o] * a + bg[0] * (255 - a)) // 255
+                        acc[1] += (rows[y][o + 1] * a + bg[1] * (255 - a)) // 255
+                        acc[2] += (rows[y][o + 2] * a + bg[2] * (255 - a)) // 255
+                    else:
+                        acc[0] += rows[y][o]
+                        acc[1] += rows[y][o + 1]
+                        acc[2] += rows[y][o + 2]
                     n += 1
             line += bytes(v // n for v in acc)
         out.append(bytes(line))

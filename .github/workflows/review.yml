@@ -290,6 +290,7 @@ jobs:
             review/design/thumbnail-plan.json
             review/design/thumb-src
           retention-days: 1
+          overwrite: true
 
       # Private repositories cannot show artifact images in a comment, so the screenshots go to a separate
       # kicad-review-assets branch (one commit, rewritten each run) and are linked from github.com/<repo>/raw/...,
@@ -480,7 +481,8 @@ jobs:
         run: |
           mkdir -p review/thumbs
           gh release view design-thumbs -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 || gh release create design-thumbs -R "$GITHUB_REPOSITORY" --prerelease --title "Design thumbnails" --notes "Small board previews for the review site, written by the design snapshot job. Not a design."
-          if gh release view design-thumbs -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx thumbs.json; then
+          assets=$(gh release view design-thumbs -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          if echo "$assets" | grep -qx thumbs.json; then
             gh release download design-thumbs -R "$GITHUB_REPOSITORY" --pattern thumbs.json --dir review/thumbs --clobber
           else
             echo '{}' > review/thumbs/thumbs.json

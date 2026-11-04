@@ -6730,6 +6730,18 @@ expected = bytes(sum(p[k] for p in block[:2] + [block[2]]) // 4 for k in range(3
 assert trows[0][0:3] == bytes(((_dp_rows[0][0] + _dp_rows[1][0] + _dp_rows[0][3] + _dp_rows[1][3]) // 4,
                                (_dp_rows[0][1] + _dp_rows[1][1] + _dp_rows[0][4] + _dp_rows[1][4]) // 4,
                                (_dp_rows[0][2] + _dp_rows[1][2] + _dp_rows[0][5] + _dp_rows[1][5]) // 4)), "2 by 2 box average"
+_rgba_rows = [
+    bytes([255, 255, 255, 0, 100, 150, 200, 255]),
+    bytes([50, 60, 70, 255, 0, 0, 0, 0]),
+]
+_rgba_idat = zlib.compress(b"\0" + _rgba_rows[0] + b"\0" + _rgba_rows[1])
+_rgba_png = (b"\x89PNG\r\n\x1a\n" + kr._png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
+             + kr._png_chunk(b"IDAT", _rgba_idat) + kr._png_chunk(b"IEND", b""))
+_rgba_thumb = kr.poster_thumbnail(_rgba_png, width=2)
+_rw, _rh, _rbpp, _rrows = kr._png_decode(_rgba_thumb)
+assert (_rw, _rh, _rbpp) == (2, 2, 3)
+assert _rrows[0][:3] == bytes((19, 22, 27)), "alpha 0 composites to #13161b"
+assert _rrows[0][3:6] == bytes((100, 150, 200)), "alpha 255 preserves RGB"
 for _bad_png in (
     b"\x89PNG\r\n\x1a\nnot really",
     b"\x89PNG\r\n\x1a\n" + kr._png_chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 0, 8, 2, 0, 0, 0)) + kr._png_chunk(b"IDAT", zlib.compress(b"")) + kr._png_chunk(b"IEND", b""),
@@ -6781,8 +6793,10 @@ assert "cancel-in-progress: false" in _thumbs_job.split("steps:")[0]
 assert "timeout-minutes: 10" in _thumbs_job.split("steps:")[0]
 assert "permissions:\n      contents: write" in _thumbs_job.split("steps:")[0]
 assert "path: review/design" in _thumbs_job
-assert "if gh release view design-thumbs -R \"$GITHUB_REPOSITORY\" --json assets -q '.assets[].name' | grep -qx thumbs.json; then" in _thumbs_job
+assert "assets=$(gh release view design-thumbs -R \"$GITHUB_REPOSITORY\" --json assets -q '.assets[].name')" in _thumbs_job
+assert "if echo \"$assets\" | grep -qx thumbs.json; then" in _thumbs_job
 assert "python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --plan review/design/thumbnail-plan.json" in _thumbs_job
 assert "gh release upload design-thumbs -R \"$GITHUB_REPOSITORY\" --clobber review/thumbs/thumbs.json" in _wf_t
+assert "overwrite: true" in _wf_t.split("Upload thumbnail input")[1].split("retention-days: 1")[1][:50]
 assert "--prerelease" in _wf_t and "design-thumbs" in _wf_t
 print("ok DP-T3 thumbnail job wiring")
