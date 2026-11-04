@@ -133,7 +133,7 @@ async function fillDesignCard(p) {   // called by renderNav once the card is in 
   const id = p.board?.poster3d?.head, card = $("#nav [data-design-poster]");
   if (!id || !card) return;
   try {
-    const image = await designPoster(id);   // 02's poster3d('head', id, session): HTMLImageElement | null, owned by 02's session
+    const image = await designPoster(id);   // 02's poster3d("head", id) with no session: HTMLImageElement | null from the page-lifetime cache
     if (image && card.isConnected && !card.contains(image)) {
       image.className = "design-poster";
       image.alt = `${p.name} board, rendered`;
