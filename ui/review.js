@@ -823,6 +823,7 @@ function viewport(stage, label, kind) {
 }
 let gen = 0;
 async function draw() {
+  window.reviewViewReady = null;   // 2D readiness for measurements; 3D uses Review3D.state.firstFrame
   activeBoardGate?.cancel(); activeBoardGate = null;
   delete $("#stage").dataset.boardReady; delete $("#stage").dataset.boardBackend;
   disposeAssets();
@@ -1715,6 +1716,14 @@ function afterDraw(view) {
   drawImageSelection();
   drawPins();
   mountImageSearch();
+  // Stamp readiness two frames later, only if this draw still owns the stage and the selected view.
+  const readyGeneration = gen, readyProject = S.p, readyView = S.v;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (readyGeneration !== gen || readyProject !== S.p || readyView !== S.v) return;
+    const elements = [...$("#stage").querySelectorAll("canvas,svg,img")].filter(el => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+    if (!elements.length || elements.some(el => el.tagName === "IMG" && (!el.complete || !el.naturalWidth))) return;
+    window.reviewViewReady = {project:S.p, dir:proj().dir, view:S.v, renderer:boardView.useGL ? "board-gl" : "svg"};
+  }));
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.

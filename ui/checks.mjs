@@ -7023,3 +7023,16 @@ CHECKS.push(
     return root.querySelectorAll('.parts-row').length===parts.lines.length && document.querySelectorAll('#panel-body .parts-row').length===parts.lines.filter(blocking).length || 'absolute problem filter changed';
   `],
 );
+CHECKS.push(
+  ["design readiness: existing canvas cannot satisfy another view", "", `
+    ${TO_SINGLE}
+    const p=proj(), sheet=p.sheets.find(s=>s.svg?.head); if(!sheet || !boardAvailable(p)) return 'skip';
+    const frames=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    await applyState({p:0,v:'sheet:'+sheet.path}); await frames();
+    const ready=(v)=>window.reviewViewReady?.project===S.p && window.reviewViewReady?.dir===p.dir && window.reviewViewReady?.view===v && S.v===v;
+    if(!ready('sheet:'+sheet.path) || ready('board')) return 'wrong-view readiness accepted';
+    const drawing=draw(); if(ready('board')) return 'old canvas satisfied board readiness'; await drawing;
+    await applyState({p:0,v:'board'}); await frames();
+    return ready('board') && !ready('sheet:'+sheet.path) || 'board renderer never became ready';
+  `],
+);
