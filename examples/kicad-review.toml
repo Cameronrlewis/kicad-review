@@ -67,6 +67,11 @@ enabled = false
 [pdf]
 enabled = false
 
+# Head-revision files in the report's Download dialog: fabrication zip, schematic PDF, STEP and GLB.
+[downloads]
+enabled = false
+step = true            # STEP is skipped, with the reason shown, when it takes over 120 s
+
 [libraries]
 enabled = false
 

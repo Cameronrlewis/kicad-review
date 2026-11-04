@@ -7656,3 +7656,57 @@ CHECKS.push(...['parent-corrupt-reply','parent-delayed-reply'].map(fault=>["BR02
    frame.remove();Review3D.dispose();
  }
 `]));
+
+CHECKS.push(['Download dialog lists GitHub zips, exported files and safe commands', '', `
+  const saved = { links: D.links, run_id: D.run_id, repo: D.repo, downloads: proj().downloads, hosted: window.hostedBase };
+  const sha = c => 'https://github.com/o/r/commit/' + c.repeat(40);
+  const open = () => { document.querySelector('#downloads-open').click(); return document.querySelector('#downloads'); };
+  try {
+    D.links = { ...D.links, head: sha('b'), base: sha('a') }; D.run_id = '77'; D.repo = 'o/r';
+    proj().downloads = [
+      { kind: 'fab', label: 'For fabrication', bytes: 261000, sha256: '0'.repeat(64), path: '0/fab-P-bbbbbbb.zip', artifact: 'kicad-review-downloads-bbbbbbb' },
+      { kind: 'step', label: '3D model (STEP)', error: 'skipped: export took longer than 120 s' }];
+    let dlg = open();
+    if (!dlg.open) return 'dialog did not open';
+    const hrefs = [...dlg.querySelectorAll('a')].map(a => a.getAttribute('href'));
+    if (hrefs.join() !== ['b', 'a'].map(c => 'https://github.com/o/r/archive/' + c.repeat(40) + '.zip').join()) return 'archive links ' + hrefs;
+    const copy = dlg.querySelector('[data-copy]');
+    if (copy?.dataset.copy !== 'gh run download 77 -R o/r -n kicad-review-downloads-bbbbbbb -D kicad-review-downloads') return 'offline command ' + copy?.dataset.copy;
+    if (!dlg.textContent.includes('skipped: export took longer than 120 s') || !dlg.textContent.includes('255 KB')) return 'step reason or size missing';
+    dlg.close();
+    window.hostedBase = () => 'https://site.example/r/o/r/a/9';
+    dlg = open();
+    const hosted = [...dlg.querySelectorAll('a')].map(a => a.getAttribute('href')).filter(h => h.includes('/download/'));
+    if (hosted.join() !== 'https://site.example/r/o/r/a/9/download/0/fab' || dlg.querySelector('[data-copy]')) return 'hosted links ' + hosted;
+    dlg.close();
+    if (saved.hosted('https://site.example/s/guest-token/raw', true) !== '') return 'guest share exposed direct authenticated route';
+    window.hostedBase = () => saved.hosted('https://site.example/s/guest-token/raw', true);
+    dlg = open();
+    if (!dlg.querySelector('[data-copy]') || [...dlg.querySelectorAll('a')].some(a => a.href.includes('/download/'))) return 'guest must use authenticated gh command, never share token for downloads';
+    dlg.close();
+    window.hostedBase = saved.hosted;
+    const valid = {...proj().downloads[0]};
+    for (const [field, value] of [['artifact','x; echo bad'],['artifact','--help'],['path','0/../evil.glb'],['path','0/x;echo.glb']]) {
+      proj().downloads = [{...valid,[field]:value}]; dlg=open();
+      if (dlg.querySelector('[data-copy]')) return 'unsafe '+field+' produced a command';
+      dlg.close();
+    }
+    proj().downloads = [valid]; D.repo='-x/r'; dlg=open();
+    if (dlg.querySelector('[data-copy]')) return 'unsafe repository produced a command';
+    dlg.close(); D.repo='o/r';
+    D.run_id = '1; rm -rf ~'; dlg = open();
+    if (dlg.querySelector('[data-copy]')) return 'unsafe run id produced a command';
+    dlg.close();
+    proj().downloads = [{ kind: 'glb', label: '3D model (GLB)', path: '0/x.glb', artifact: 'a' }]; D.run_id = '77'; dlg = open();
+    if (dlg.textContent.includes('NaN')) return 'missing bytes rendered as NaN';
+    dlg.close();
+    delete proj().downloads; D.links = { ...D.links, head: '', base: '' }; dlg = open();
+    const text = dlg.textContent, anchors = dlg.querySelectorAll('a').length; dlg.close();
+    return text.includes('downloads.enabled = true') && anchors === 0 ? true : 'empty state ' + text;
+  } finally {
+    Object.assign(D, { links: saved.links, run_id: saved.run_id, repo: saved.repo }); window.hostedBase = saved.hosted;
+    if (saved.downloads) proj().downloads = saved.downloads; else delete proj().downloads;
+    document.querySelector('#downloads').close();
+  }
+`]);
+

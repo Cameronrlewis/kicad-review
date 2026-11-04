@@ -1989,7 +1989,7 @@ with tempfile.TemporaryDirectory() as output:
     data = json.loads(text.split("window.REVIEW_DATA = ", 1)[1].split(";</script>", 1)[0])
     assert data["bom"]["summary"]["components"] == 7 and data["bom"]["boards"] == ["Alpha", "Beta"]
 assert "google-chrome" in test_wf and "CHROME" in test_wf and "inline_page" in test_wf, "TS-S1 CI browser setup"
-for command in ('node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
+for command in ('node ui/check.mjs --no-skip "Download dialog"', 'node ui/check.mjs --no-skip "Multi-board BOM" --page "$PAGES/multiboard.html"', 'node ui/check.mjs --no-skip "Fab limits"', 'node ui/check.mjs --no-skip "Fab limits" --dark', 'node ui/check.mjs --no-skip "Fabrication producer contract" --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Fabrication producer contract" --dark --page "$PAGES/fab.html"', 'node ui/check.mjs --no-skip "Waivers"', 'node ui/check.mjs', 'node ui/check.mjs --dark', 'node ui/check.mjs --no-skip "selection-only address"', 'node ui/check.mjs --no-skip "pasted selection address preserves an explicit position"', 'node ui/check.mjs --no-skip "passing checks with baseline findings"', 'node ui/check.mjs --no-skip 3D --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip 3D --dark --page "$PAGES/3d.html"', 'node ui/check.mjs --no-skip "unchanged sheet" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "unchanged project" --page "$PAGES/two.html"', 'node ui/check.mjs --no-skip "Parts fixture" --page "$PAGES/parts.html"', 'node ui/check.mjs --no-skip "Parts fixture" --dark --page "$PAGES/parts.html"'):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert test_wf.count("    runs-on: ubuntu-24.04\n    timeout-minutes: 60\n") == test_wf.count("timeout-minutes:") == test_wf.count("runs-on:") == 2, "TS-S1 each CI job (test, dark) has one timeout"
 assert "apt-get" not in test_wf and test_wf.count("npm install") == 1, "TS-S1 only pinned 3D integration dependencies"
@@ -3102,9 +3102,10 @@ with tempfile.TemporaryDirectory() as d:
     kr.subprocess.run = lambda cmd, **k: seen.append(cmd) or _types.SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
     try:
         os.environ.update(PDF_NAME="kicad-review-aaaaaaa-bbbbbbb-fail.pdf")
-        with patch('sys.stdout', new_callable=io.StringIO) as warnings:
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout, patch("sys.stderr", new_callable=io.StringIO) as stderr:
             cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
-        assert warnings.getvalue() == '::warning::PDF report failed: Chrome unavailable, failed or timed out\n'
+        assert stdout.getvalue() == "::warning::PDF report failed: Chrome unavailable, failed or timed out\n", stdout.getvalue()
+        assert stderr.getvalue() == "", stderr.getvalue()
     finally:
         kr.subprocess.run = saved; os.environ.pop("PDF_NAME")
     assert os.path.exists("review/print.html") and seen and "--print-to-pdf=" + os.path.abspath("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf") in seen[0]
@@ -3154,9 +3155,10 @@ with tempfile.TemporaryDirectory() as d:
         with patch.dict(os.environ, {"PDF_NAME": "kicad-review-aaaaaaa-bbbbbbb-fail.pdf"}):
             expected_warning = "::warning::PDF report failed: Chrome unavailable, failed or timed out\n"
             for failure in (kr.subprocess.TimeoutExpired("chrome", 120), FileNotFoundError("chrome")):
-                with patch("kicad_review.subprocess.run", side_effect=failure), patch('sys.stdout', new_callable=io.StringIO) as warnings:
+                with patch("kicad_review.subprocess.run", side_effect=failure), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch("sys.stderr", new_callable=io.StringIO) as stderr:
                     cmd_pdf(_types.SimpleNamespace(chrome="chrome"))
-                assert warnings.getvalue() == '::warning::PDF report failed: Chrome unavailable, failed or timed out\n'
+                assert stdout.getvalue() == "::warning::PDF report failed: Chrome unavailable, failed or timed out\n", stdout.getvalue()
+                assert stderr.getvalue() == "", stderr.getvalue()
                 assert not pathlib.Path("review/kicad-review-aaaaaaa-bbbbbbb-fail.pdf").exists()
     finally:
         os.chdir(old_cwd)
@@ -4469,7 +4471,7 @@ with tempfile.TemporaryDirectory() as t:
             with patch("kicad_review.inline_page", side_effect=lambda payload: payload), patch("sys.stdout", new_callable=io.StringIO):
                 cmd_report(SimpleNamespace())
             legacy = {"version": 1, "repo": "", "links": review_links(os.environ, det), "base": det["base"], "head": det["head"], "reason": "test",
-                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release")}, "run_id": "", "projects": []}
+                      "settings": {k: ({name: value for name, value in v.items() if name not in ("interfaces", "release", "fab_limits")} if k == "checks" else {name: value for name, value in v.items() if name != "check_limits"} if k == "fabrication" else {"required_fields": v["required_fields"]} if k == "bom" else v) for k, v in DEFAULT_SETTINGS.items() if k not in ("3d", "parts", "digikey", "pdf", "threads", "issues", "waivers", "inventory", "libraries", "github", "interfaces", "release", "downloads")}, "run_id": "", "projects": []}
             legacy["assets"] = {}  # additive image capability does not enable issues
             assert open("review/data.json").read() == _json.dumps(legacy)
             assert open("review/kicad-review.html").read() == "window.REVIEW_DATA = " + _json.dumps({**{k: v for k, v in legacy.items() if k != "assets"}, "blobs": {}, "assets": {}}, separators=(",", ":")) + ";"
@@ -8869,4 +8871,1105 @@ def test_br03_connectivity_markdown():
 
 test_br03_connectivity_markdown()
 print('ok BR03 connectivity markdown and documentation')
+
+
+# ---- Spec 07: revision downloads ----
+import copy, csv, hashlib, io, json, os, pathlib, tempfile, types, zipfile
+from unittest.mock import patch
+import kicad_review as kr
+from kicad_review import DEFAULT_SETTINGS, load_settings
+
+assert DEFAULT_SETTINGS["downloads"] == {"enabled": False, "step": True}
+for text, error in (("downloads = true", "downloads must be a table"),
+                    ("[downloads]\nenabled = 1", "downloads.enabled must be true or false"),
+                    ('[downloads]\nstep = "no"', "downloads.step must be true or false")):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        try:
+            load_settings()
+            raise AssertionError("invalid downloads settings accepted")
+        except SystemExit as e:
+            assert str(e) == "kicad-review.toml: " + error, e
+with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(b"[downloads]\nenabled = true\nstep = false\n"), create=True):
+    assert load_settings()["downloads"] == {"enabled": True, "step": False}
+print("ok downloads settings")
+
+# Partial tables retain defaults, and callers cannot mutate later loads or defaults.
+for text, expected in (("", {"enabled": False, "step": True}),
+                       ("[downloads]", {"enabled": False, "step": True}),
+                       ("[downloads]\nenabled = true", {"enabled": True, "step": True}),
+                       ("[downloads]\nstep = false", {"enabled": False, "step": False})):
+    with patch("kicad_review.os.path.exists", return_value=True), patch("kicad_review.open", return_value=io.BytesIO(text.encode()), create=True):
+        loaded = load_settings()["downloads"]
+        assert loaded == expected, (text, loaded)
+        loaded["enabled"] = not loaded["enabled"]
+        loaded["step"] = not loaded["step"]
+    assert DEFAULT_SETTINGS["downloads"] == {"enabled": False, "step": True}
+with patch("kicad_review.os.path.exists", return_value=False):
+    assert load_settings()["downloads"] == {"enabled": False, "step": True}
+print("ok downloads defaults and load isolation")
+
+# Downloads: one export is recorded, never raised; partial files are removed.
+from kicad_review import export_one, safe_name
+assert safe_name("a b/c") == "a-b-c" and safe_name("...") == "project" and safe_name("Thermal_Camera") == "Thermal_Camera"
+POS = "Ref,Val,Package,PosX,PosY,Rot,Side\nR1,10k,R_0603,10,20,90,top\n"
+BOM = "Comment,Designator,Footprint,LCSC Part #\n10k,R1,R_0603,C123\n"
+dl_real, dl_calls, dl_mode = kr.subprocess.run, [], {}
+def dl_fake(args, **kw):
+    if not args[0].endswith("kicad-cli"):
+        return dl_real(args, **kw)
+    dl_calls.append((args, kw.get("timeout")))
+    kind = args[3]
+    out = pathlib.Path(args[args.index("-o") + 1])
+    mode = dl_mode.get(kind)
+    if mode == "rc":
+        return types.SimpleNamespace(returncode=7, stdout="", stderr="boom")
+    if mode != "nofile":
+        if kind in ("gerbers", "drill"):
+            out = out / ("P.drl" if kind == "drill" else "P-F_Cu.gbr")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "bom":
+            labels = args[args.index("--labels") + 1]
+            out.write_text("" if mode == "empty" else labels + "\n")
+        else:
+            out.write_text("" if mode == "empty" else {"pos": "Ref,Val\nR1,10k\n" if mode == "badheader" else POS}.get(kind, "data"))
+        if kind == "gerbers" and mode != "empty":
+            (out.parent / "P-B_Cu.gbr").write_text("data")
+    if mode == "timeout":
+        raise kr.subprocess.TimeoutExpired(args, kw.get("timeout"))
+    return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+kr.subprocess.run = dl_fake
+try:
+    t = tempfile.mkdtemp()
+    ok = export_one("pdf", ["sch", "export", "pdf", "-o", f"{t}/a.pdf"], f"{t}/a.pdf")
+    assert ok == {"kind": "pdf", "label": "Schematic PDF", "file": "a.pdf", "error": None}, ok
+    dl_mode["pdf"] = "rc"
+    bad = export_one("pdf", ["sch", "export", "pdf", "-o", f"{t}/b.pdf"], f"{t}/b.pdf")
+    assert bad["file"] is None and bad["error"] == "kicad-cli exited 7", bad
+    dl_mode["pdf"] = "nofile"
+    stale = f"{t}/stale.pdf"; pathlib.Path(stale).write_bytes(b"previous success")
+    empty = export_one("pdf", ["sch", "export", "pdf", "-o", stale], stale)
+    assert empty["file"] is None and empty["error"] == "kicad-cli wrote no file" and not pathlib.Path(stale).exists(), empty
+    dl_mode["pdf"] = "empty"
+    zero = export_one("pdf", ["sch", "export", "pdf", "-o", f"{t}/zero.pdf"], f"{t}/zero.pdf")
+    assert zero["file"] is None and zero["error"] == "kicad-cli wrote no file" and not os.path.exists(f"{t}/zero.pdf")
+    dl_mode.pop("pdf")
+    dl_mode["step"] = "timeout"
+    slow = export_one("step", ["pcb", "export", "step", "-o", f"{t}/d.step"], f"{t}/d.step", 120)
+    assert slow["file"] is None and slow["error"] == "skipped: export took longer than 120 s", slow
+    assert dl_calls[-1][1] == 120 and not os.path.exists(f"{t}/d.step"), "partial STEP must be deleted"
+finally:
+    kr.subprocess.run = dl_real
+print("ok export_one records failures instead of raising")
+
+# Operational errors and failed-output cleanup must not abort report generation.
+assert kr.DOWNLOAD_STEP_TIMEOUT == 120
+assert kr.DOWNLOAD_LABELS == {"fab": "For fabrication", "pdf": "Schematic PDF", "step": "3D model (STEP)", "glb": "3D model (GLB)"}
+with tempfile.TemporaryDirectory() as dl_dir:
+    dest = pathlib.Path(dl_dir) / "board.step"
+    args = ["pcb", "export", "step", "-o", str(dest)]
+    with patch("kicad_review.subprocess.run", side_effect=FileNotFoundError("missing kicad-cli")):
+        unavailable = export_one("step", args, str(dest))
+    assert unavailable["file"] is None and unavailable["error"].startswith("kicad-cli unavailable:"), unavailable
+
+    def dl_partial_failure(command, **kw):
+        dest.write_bytes(b"partial STEP")
+        return types.SimpleNamespace(returncode=7)
+
+    with patch("kicad_review.subprocess.run", side_effect=dl_partial_failure):
+        failed = export_one("step", args, str(dest))
+    assert failed["file"] is None and failed["error"] == "kicad-cli exited 7" and not dest.exists(), failed
+    with patch("kicad_review.subprocess.run", side_effect=dl_partial_failure), patch("kicad_review.os.remove", side_effect=PermissionError("output locked")):
+        locked = export_one("step", args, str(dest))
+    assert locked["file"] is None and "cannot remove output:" in locked["error"], locked
+    dest.unlink()
+    # A broken stale symlink must also be removed before exporting.
+    dest.symlink_to(pathlib.Path(dl_dir) / "missing.step")
+    with patch("kicad_review.subprocess.run", return_value=types.SimpleNamespace(returncode=0)):
+        missing = export_one("step", args, str(dest))
+    assert missing["file"] is None and missing["error"] == "kicad-cli wrote no file" and not dest.is_symlink(), missing
+print("ok export_one isolates operational and cleanup errors")
+
+from kicad_review import export_downloads
+import contextlib
+
+def dl_export(*args, **kwargs):
+    """Capture expected synthetic KiBot notices so fixture diagnostics stay quiet."""
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        result = export_downloads(*args, **kwargs)
+    lines = output.getvalue().splitlines()
+    notices = [line for line in lines if line.startswith("::notice::")]
+    assert all("fabrication differs from KiBot v1.9.1 template:" in line or
+               re.fullmatch(r"::notice::.+: JLCPCB CPL rotation rules matched \d+ rows \(JLCKicadTools table, pinned\)", line)
+               for line in notices), lines
+    assert all(line.startswith(("::notice::", "::warning::")) for line in lines), lines
+    for line in lines:
+        if line.startswith("::warning::"):
+            print(line)
+    return result
+PCB = '(kicad_pcb\n(layers\n(0 "F.Cu" signal)\n(31 "B.Cu" signal)\n(44 "Edge.Cuts" user)\n)\n)'
+def dl_project(root, name, sch=True, pcb=True):
+    src = pathlib.Path(root, "src"); src.mkdir(parents=True, exist_ok=True)
+    (src / f"{name}.kicad_pro").write_text("{}")
+    if sch: (src / f"{name}.kicad_sch").write_text("(kicad_sch)")
+    if pcb: (src / f"{name}.kicad_pcb").write_text(PCB)
+    # 02's raw head export, as its render step would leave it beside the project source.
+    pathlib.Path(root, "out").mkdir(parents=True, exist_ok=True)
+    pathlib.Path(root, "out", "board.raw.glb").write_bytes(b"glTF-raw")
+    return str(src)
+dl_settings = copy.deepcopy(DEFAULT_SETTINGS); dl_settings["downloads"]["enabled"] = True
+kr.subprocess.run = dl_fake
+try:
+    t = tempfile.mkdtemp(); src = dl_project(t, "P"); dl_calls.clear(); dl_mode.clear()
+    entries = dl_export({"name": "P", "dir": ""}, src, f"{t}/out", dl_settings, "b" * 40)
+    stem, dl = "P-bbbbbbb", f"{t}/out/downloads"
+    assert [e["kind"] for e in entries] == ["fab", "pdf", "step", "glb"] and all(e["error"] is None for e in entries), entries
+    assert [c[0][3] for c in dl_calls] == ["gerbers", "drill", "pos", "bom", "pdf", "step"], "the GLB is copied from 02's raw product, never exported here"
+    assert [e["file"] for e in entries] == [f"fab-{stem}.zip", f"{stem}-schematic.pdf", f"{stem}-board.step", f"{stem}-board.glb"]
+    assert next(c for c in dl_calls if c[0][3] == "step") == (["kicad-cli", "pcb", "export", "step", "--subst-models", "-f", "-o", f"{dl}/{stem}-board.step", f"{src}/P.kicad_pcb"], 120)
+    assert pathlib.Path(dl, f"{stem}-board.glb").read_bytes() == b"glTF-raw", "download GLB must be 02's raw bytes, unchanged"
+    assert next(c[0] for c in dl_calls if c[0][3] == "pdf") == ["kicad-cli", "sch", "export", "pdf", "-o", f"{dl}/{stem}-schematic.pdf", f"{src}/P.kicad_sch"]
+    with zipfile.ZipFile(f"{dl}/fab-{stem}.zip") as z:
+        assert sorted(z.namelist()) == ["P-review-jlcpcb-bom.csv", "P-review-jlcpcb-gerbers.zip", "P-review-jlcpcb-positions.csv"]
+    manifest = json.loads(pathlib.Path(f"{dl}/downloads.json").read_text())
+    assert set(manifest) == {"files", "purpose", "policy"} and manifest["purpose"] == "comparison", manifest.keys()
+    for internal, item in zip(entries, manifest["files"]):
+        data = pathlib.Path(dl, internal["file"]).read_bytes()
+        assert item == {"kind": internal["kind"], "label": internal["label"], "path": internal["file"], "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    # Downloads alone never create shared release evidence. Seed a real release-check
+    # package explicitly, then prove a valid existing package is reused, not rebuilt.
+    assert not pathlib.Path(t, "out/fab").exists()
+    pathlib.Path(t, "out/fab").mkdir()
+    kr.release_project(f"{src}/P.kicad_pro", "review", dl_settings, f"{t}/out/fab", "P")
+    dl_calls.clear()
+    dl_export({"name": "P", "dir": ""}, src, f"{t}/out", dl_settings, "b" * 40)
+    assert [c[0][3] for c in dl_calls] == ["pdf", "step"], dl_calls
+    # downloads.step = false drops STEP entirely.
+    no_step = copy.deepcopy(dl_settings); no_step["downloads"]["step"] = False
+    dl_calls.clear()
+    assert [e["kind"] for e in dl_export({"name": "P", "dir": ""}, src, f"{t}/out", no_step, "b" * 40)] == ["fab", "pdf", "glb"]
+    assert not pathlib.Path(f"{t}/out/downloads/{stem}-board.step").exists(), "disabled STEP must not remain staged"
+    (pathlib.Path(src) / "P.kicad_sch").unlink()
+    dl_export({"name": "P", "dir": ""}, src, f"{t}/out", no_step, "b" * 40)
+    assert not pathlib.Path(f"{t}/out/downloads/{stem}-schematic.pdf").exists(), "removed schematic must not leave stale PDF"
+    # Failure isolation: fab fails, STEP times out; PDF and GLB still arrive and nothing is left half-written.
+    t2 = tempfile.mkdtemp(); src2 = dl_project(t2, "P"); dl_mode.update({"gerbers": "rc", "step": "timeout"})
+    with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+        bad = dl_export({"name": "P", "dir": ""}, src2, f"{t2}/out", dl_settings, "b" * 40)
+    assert "::warning::P: fabrication export failed" in warnings.getvalue() and "::warning::P: 3D model (STEP): skipped: export took longer than 120 s" in warnings.getvalue(), warnings.getvalue()
+    assert [(e["kind"], e["file"] is None) for e in bad] == [("fab", True), ("pdf", False), ("step", True), ("glb", False)], bad
+    assert bad[0]["error"] == "fabrication export failed" and bad[2]["error"] == "skipped: export took longer than 120 s"
+    assert not os.path.exists(f"{t2}/out/downloads/fab-{stem}.zip") and not os.path.exists(f"{t2}/out/downloads/{stem}-board.step")
+    # A missing 02 raw GLB is recorded as an error and never re-exported; a snapshot call without its trusted policy is refused.
+    os.remove(f"{t2}/out/board.raw.glb")
+    with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+        no_raw = dl_export({"name": "P", "dir": ""}, src2, f"{t2}/out", dl_settings, "b" * 40)
+    assert "::warning::3D model (GLB): board.raw.glb was not produced" in warnings.getvalue() and "::warning::P: 3D model (GLB): GLB export missing" in warnings.getvalue(), warnings.getvalue()
+    assert [e["error"] for e in no_raw if e["kind"] == "glb"] == ["GLB export missing"], no_raw
+    assert not os.path.exists(f"{t2}/out/downloads/P-bbbbbbb-board.glb") and not any(c[0][3] == "glb" for c in dl_calls)
+    try:
+        dl_export({"name": "P", "dir": ""}, src2, f"{t2}/out", dl_settings, "b" * 40, purpose="snapshot")
+        raise AssertionError("snapshot downloads accepted comparison settings")
+    except ValueError:
+        pass
+    # No schematic: no PDF. No board: PDF only. A name with spaces is made file-safe.
+    dl_mode.clear(); t3 = tempfile.mkdtemp()
+    only_board = dl_export({"name": "My Board", "dir": ""}, dl_project(t3, "My Board", sch=False), f"{t3}/out", dl_settings, "b" * 40)
+    assert [e["kind"] for e in only_board] == ["fab", "step", "glb"] and only_board[0]["file"] == "fab-My-Board-bbbbbbb.zip", only_board
+    t4 = tempfile.mkdtemp()
+    only_sch = dl_export({"name": "S", "dir": ""}, dl_project(t4, "S", pcb=False), f"{t4}/out", dl_settings, "b" * 40)
+    assert [e["kind"] for e in only_sch] == ["pdf"], only_sch
+    # Preset-specific output and header assertions. The KiBot template checks are in the Task 3A block.
+    for preset in ("jlcpcb", "pcbway"):
+        case = tempfile.mkdtemp(); source = dl_project(case, "P")
+        cfg = copy.deepcopy(dl_settings); cfg["fabrication"]["preset"] = preset
+        dl_calls.clear()
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", cfg, "b"*40)
+        assert not made[0]["error"], made
+        with zipfile.ZipFile(f"{case}/out/downloads/fab-P-bbbbbbb.zip") as z:
+            assert set(z.namelist()) == {f"P-review-{preset}-{suffix}" for suffix in ("gerbers.zip", "positions.csv", "bom.csv")}
+            assert next(csv.reader(io.StringIO(z.read(f"P-review-{preset}-bom.csv").decode()))) == [label for _, label in kr.PRESETS[preset]["bom"]]
+        gerber_call = next(c[0] for c in dl_calls if c[0][3] == "gerbers")
+        assert ("--subtract-soldermask" in gerber_call) == (preset == "jlcpcb")
+    # Incomplete cached Gerber-only package is rebuilt, not published as-is.
+    dl_mode.clear(); case = tempfile.mkdtemp(); source = dl_project(case, "P")
+    cached = pathlib.Path(case, "out/fab"); cached.mkdir(parents=True)
+    with zipfile.ZipFile(cached / "P-review-jlcpcb-gerbers.zip", "w") as z: z.writestr("old.gbr", "old")
+    dl_calls.clear()
+    assert dl_export({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)[0]["error"] is None
+    assert "gerbers" in [c[0][3] for c in dl_calls]
+    # Every empty cached output independently invalidates reuse. Rebuilds must not repair
+    # or replace the release-check evidence: only the download zip gets the new outputs.
+    for filename in ("P-review-jlcpcb-positions.csv", "P-review-jlcpcb-bom.csv", "P-review-jlcpcb-gerbers.zip"):
+        kr.release_project(f"{source}/P.kicad_pro", "review", dl_settings, str(cached), "P")
+        (cached / filename).write_bytes(b"")
+        original = {p.name: p.read_bytes() for p in cached.iterdir()}
+        dl_calls.clear()
+        rebuilt = dl_export({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)
+        assert rebuilt[0]["error"] is None and any(c[0][3] == "gerbers" for c in dl_calls), (filename, rebuilt)
+        assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "download rebuild changed release evidence"
+    # checks.release-enabled runs preserve malformed/incomplete evidence, summary hashes,
+    # and specific release findings whether optional download rebuilding succeeds or fails.
+    release_enabled = copy.deepcopy(dl_settings); release_enabled["checks"]["release"] = "informational"
+    for damage in ("incomplete_gerbers", "malformed_positions"):
+        for rebuild_mode in (None, "rc"):
+            case = tempfile.mkdtemp(); source = dl_project(case, "P"); dl_mode.clear()
+            cached = pathlib.Path(case, "out/fab"); cached.mkdir(parents=True)
+            kr.release_project(f"{source}/P.kicad_pro", "review", release_enabled, str(cached), "P")
+            if damage == "incomplete_gerbers":
+                with zipfile.ZipFile(cached / "P-review-jlcpcb-gerbers.zip", "w") as z:
+                    z.writestr("P-F_Cu.gbr", "data"); z.writestr("P.drl", "data")
+            else:
+                (cached / "P-review-jlcpcb-positions.csv").write_text("Designator,Wrong\nR1,10k\n")
+            original = {p.name: p.read_bytes() for p in cached.iterdir()}
+            before_summary = kr.package_summary(str(cached))
+            before_findings = kr.release_findings(str(cached), "P", "jlcpcb", f"{source}/P.kicad_pcb", {})
+            assert "missing_layer" in {v["type"] for v in before_findings}, before_findings
+            assert "missing_package" not in {v["type"] for v in before_findings}, before_findings
+            if rebuild_mode: dl_mode["gerbers"] = rebuild_mode
+            with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+                rebuilt = dl_export({"name":"P","dir":""}, source, f"{case}/out", release_enabled, "b"*40)
+            assert ("::warning::P: fabrication export failed" in warnings.getvalue()) == (rebuild_mode == "rc"), warnings.getvalue()
+            assert bool(rebuilt[0]["error"]) == (rebuild_mode == "rc"), rebuilt
+            assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "download rebuild changed release evidence"
+            assert kr.package_summary(str(cached)) == before_summary
+            assert kr.release_findings(str(cached), "P", "jlcpcb", f"{source}/P.kicad_pcb", {}) == before_findings
+            assert not list(pathlib.Path(case, "out/downloads").glob(".fab-*")), "download staging leaked"
+    # rc=0/no Gerbers, no drills, empty BOM, empty positions and missing Side header are nonfatal.
+    for kind, mode in (("gerbers", "nofile"), ("gerbers", "empty"), ("drill", "nofile"), ("bom", "empty"), ("pos", "empty"), ("pos", "badheader")):
+        case = tempfile.mkdtemp(); source = dl_project(case, "P"); dl_mode.clear(); dl_mode[kind] = mode
+        with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+            failed = dl_export({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)
+        assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+        assert failed[0]["file"] is None and failed[0]["error"] == "fabrication export failed", (kind, failed)
+        assert all(e["file"] for e in failed if e["kind"] in ("pdf", "glb")), failed
+        assert not pathlib.Path(case, "out/downloads/fab-P-bbbbbbb.zip").exists()
+    dl_mode.clear()
+    with patch("kicad_review.release_project", side_effect=ValueError("'Side' is not in list")):
+        case = tempfile.mkdtemp(); source = dl_project(case, "P")
+        with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+            failed = dl_export({"name":"P","dir":""}, source, f"{case}/out", dl_settings, "b"*40)
+        assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+        assert failed[0]["error"] and all(e["file"] for e in failed if e["kind"] in ("pdf", "glb"))
+    # Snapshot policy isolation, 4-layer Protel Gerber checks, and zero-byte raw GLB handling.
+    case = tempfile.mkdtemp(); source = dl_project(case, "P")
+    (pathlib.Path(source) / "P.kicad_pcb").write_text('(kicad_pcb\n(layers\n(0 "F.Cu" signal)\n(1 "In1.Cu" signal)\n(2 "In2.Cu" signal)\n(31 "B.Cu" signal)\n(44 "Edge.Cuts" user)\n)\n)')
+    snap_policy = copy.deepcopy(dl_settings); snap_policy["fabrication"]["preset"] = "pcbway"
+    snap_fab = pathlib.Path(case, "out/fab-snapshot"); snap_fab.mkdir(parents=True)
+    with zipfile.ZipFile(snap_fab / "P-review-pcbway-gerbers.zip", "w") as z:
+        for member in ("P-F_Cu.gtl", "P-In1_Cu.g1", "P-In2_Cu.g2", "P-B_Cu.gbl", "P.drl"):
+            z.writestr(member, "G04*\n")
+    (snap_fab / "P-review-pcbway-positions.csv").write_text("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n")
+    (snap_fab / "P-review-pcbway-bom.csv").write_text(",".join(label for _, label in kr.PRESETS["pcbway"]["bom"]) + "\n")
+    dl_calls.clear()
+    pathlib.Path(case, "out/board.raw.glb.revision").write_text("b" * 40 + "\n")
+    snap_entries = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40, policy=snap_policy, purpose="snapshot")
+    assert all(e["error"] is None for e in snap_entries) and [c[0][3] for c in dl_calls] == ["pdf", "step"], (snap_entries, dl_calls)
+    snap_manifest = json.loads(pathlib.Path(case, "out/downloads-snapshot/downloads.json").read_text())
+    assert snap_manifest["purpose"] == "snapshot" and snap_manifest["policy"] == kr.download_policy_key(snap_policy) != kr.download_policy_key(dl_settings)
+    # Missing inner copper layer In2.Cu in cached Gerbers invalidates fab_parts.
+    with zipfile.ZipFile(snap_fab / "P-review-pcbway-gerbers.zip", "w") as z:
+        for member in ("P-F_Cu.gtl", "P-In1_Cu.g1", "P-B_Cu.gbl", "P.drl"):
+            z.writestr(member, "G04*\n")
+    try:
+        kr.fab_parts(f"{source}/P.kicad_pro", "P", snap_policy, str(snap_fab))
+        raise AssertionError("missing In2.Cu Gerber accepted")
+    except ValueError as e:
+        assert "In2.Cu" in str(e), e
+    # Zero-byte board.raw.glb is rejected by glb_entry without invoking kicad-cli.
+    zero_raw = pathlib.Path(case, "out/board.raw.glb"); zero_raw.write_bytes(b"")
+    stale_glb = pathlib.Path(case, "out/downloads-snapshot/P-bbbbbbb-board.glb")
+    assert stale_glb.exists()
+    with patch("sys.stdout", new_callable=io.StringIO) as warnings:
+        glb_bad = kr.glb_entry(str(zero_raw), str(stale_glb))
+    assert glb_bad["file"] is None and glb_bad["error"] == "GLB export missing" and not stale_glb.exists(), glb_bad
+    assert "::warning::3D model (GLB): board.raw.glb was not produced" in warnings.getvalue()
+finally:
+    kr.subprocess.run = dl_real
+print("ok export_downloads commands, reuse, isolation and awkward projects")
+
+# ---- Task 3A: pinned KiBot v1.9.1 templates ----
+TEMPLATES = pathlib.Path(kr.__file__).with_name("kibot_templates") / "v1.9.1"
+PINS = {"JLCPCB.kibot.yaml": "9dcc65bf1fa6e8a7e54e708088e37a9a312b06eb01dbfacdf3d19a4a433f8ca6",
+        "PCBWay.kibot.yaml": "6b908fe676409b032004e4d31b421a1772788a310b5365125442bbd505e6b12c"}
+for name, digest in PINS.items():
+    assert hashlib.sha256((TEMPLATES / name).read_bytes()).hexdigest() == digest, name
+assert (TEMPLATES / "SOURCE.md").exists()
+CITED = {"JLCPCB.kibot.yaml": {1: "# Gerber and drill files for JLCPCB, without stencil", 55: "      use_gerber_x2_attributes: false",
+                               58: "      subtract_mask_from_silk: true", 71: "      pth_and_npth_single_file: false", 75: "      map: gerber",
+                               92: "      only_smd: @_KIBOT_POS_ONLY_SMD@", 115: "      exclude_filter: '_only_jlc_parts'",
+                               146: "  _KIBOT_POS_ONLY_SMD: true", 147: "  _KIBOT_F_PASTE: ''", 148: "  _KIBOT_B_PASTE: ''"},
+         "PCBWay.kibot.yaml": {1: "# Gerber and drill files for PCBWay, with stencil (solder paste)", 30: "      use_gerber_x2_attributes: false",
+                               34: "      subtract_mask_from_silk: false", 56: "      pth_and_npth_single_file: false",
+                               77: "  _KIBOT_F_PASTE: ''", 78: "  _KIBOT_B_PASTE: ''"}}
+for name, cited in CITED.items():
+    lines = (TEMPLATES / name).read_text(encoding="utf-8").splitlines()
+    for number, text in cited.items():
+        assert lines[number - 1] == text, (name, number, lines[number - 1])
+P = kr.PRESETS
+assert "--no-x2" in P["jlcpcb"]["gerbers"] and "--no-x2" in P["pcbway"]["gerbers"]
+assert "--subtract-soldermask" in P["jlcpcb"]["gerbers"] and "--subtract-soldermask" not in P["pcbway"]["gerbers"]
+assert "--excellon-separate-th" in P["jlcpcb"]["drill"] and "--excellon-separate-th" not in P["pcbway"]["drill"]
+assert kr.KIBOT_POSITION_HEADER == ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+assert kr.KIBOT_POSITION_HEADER == list(kr.POS_COLUMNS.values()), kr.KIBOT_POSITION_HEADER
+GERBERS = ["p-f_cu.gtl", "p-b_cu.gbl", "p-f_silks.gto", "p-b_silks.gbo", "p-f_mask.gts", "p-b_mask.gbs", "p-edge_cuts.gko"]
+BOM_HEAD = ["Comment", "Designator", "Footprint", "LCSC Part #"]
+assert kr.kibot_differences("jlcpcb", GERBERS, [BOM_HEAD, ["10k", "R1", "R_0603", "C123"]]) == []
+assert kr.kibot_differences("jlcpcb", GERBERS + ["p-f_paste.gtp"], [BOM_HEAD, ["10k", "R1", "R_0603", ""]]) == [
+    "stencil layers exported; JLCPCB template excludes them (lines 147-148)",
+    "BOM rows without LCSC number; JLCPCB template filters them (line 115)"]
+assert kr.kibot_differences("jlcpcb", GERBERS, None) == []
+assert kr.kibot_differences("pcbway", GERBERS + ["p-f_paste.gtp"], None) == []   # PCBWay stencil is not checked
+missing = kr.kibot_differences("pcbway", ["p-f_cu.gtl"], None)
+assert len(missing) == 6 and all(d.startswith("missing ") for d in missing), missing
+import contextlib
+from unittest.mock import patch as _patch
+dl_mode.clear(); case = tempfile.mkdtemp(); source = dl_project(case, "P")
+kr.subprocess.run = dl_fake
+try:
+    notes = io.StringIO()
+    with _patch("kicad_review.kibot_differences", return_value=["probe difference"]), contextlib.redirect_stdout(notes):
+        made = export_downloads({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert not made[0]["error"], made
+    assert "::notice::P: jlcpcb fabrication differs from KiBot v1.9.1 template: probe difference" in notes.getvalue(), notes.getvalue()
+    # Unpatched fab_notices: schematic-only parts emit nothing; complete Protel Gerbers + LCSC BOM emit nothing.
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        kr.fab_notices("P", dl_settings, [f"{case}/P-review-jlcpcb-bom.csv"])
+    assert notes.getvalue() == "", notes.getvalue()
+    complete_fab = pathlib.Path(case, "complete")
+    complete_fab.mkdir()
+    with zipfile.ZipFile(complete_fab / "P-review-jlcpcb-gerbers.zip", "w") as z:
+        for member in GERBERS + ["P.drl"]:
+            z.writestr(member.upper(), "G04*\n")
+    (complete_fab / "P-review-jlcpcb-positions.csv").write_text(
+        "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\nR1,10k,R_0603,10,20,90,Top\n", encoding="utf-8")
+    (complete_fab / "P-review-jlcpcb-bom.csv").write_text(BOM, encoding="utf-8")
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        kr.fab_notices("P", dl_settings, [str(complete_fab / f"P-review-jlcpcb-{s}") for s in ("gerbers.zip", "positions.csv", "bom.csv")])
+    assert notes.getvalue() == "", notes.getvalue()
+    assert kr.kibot_differences("jlcpcb", [m.upper() for m in GERBERS] + ["P-B_Paste.GBP"], [BOM_HEAD, ["10k", "R1", "R_0603", "C123"]]) == [
+        "stencil layers exported; JLCPCB template excludes them (lines 147-148)"]
+    assert kr.kibot_differences("jlcpcb", GERBERS, [BOM_HEAD]) == []  # no placed parts
+    assert kr.kibot_differences("jlcpcb", GERBERS, [BOM_HEAD, ["10k", "R1", "R_0603", "  "]]) == [
+        "BOM rows without LCSC number; JLCPCB template filters them (line 115)"]
+    # Real differences remain notices, never fabrication errors or edits to release evidence.
+    with zipfile.ZipFile(complete_fab / "P-review-jlcpcb-gerbers.zip", "w") as z:
+        for member in [m for m in GERBERS if not m.endswith(".gko")] + ["P.drl", "P-F_Paste.gtp"]:
+            z.writestr(member, "G04*\n")
+    (complete_fab / "P-review-jlcpcb-bom.csv").write_text(
+        chr(0xfeff) + BOM.replace("C123", ""), encoding="utf-8")
+    original = {p.name: p.read_bytes() for p in complete_fab.iterdir()}
+    dl_calls.clear()
+    notes = io.StringIO()
+    dest = pathlib.Path(case, "fab-notices.zip")
+    with contextlib.redirect_stdout(notes):
+        made = kr.fab_entry(f"{source}/P.kicad_pro", "P", dl_settings, str(complete_fab), str(dest))
+    assert made["file"] == dest.name and made["error"] is None, made
+    prefix = "::notice::P: jlcpcb fabrication differs from KiBot v1.9.1 template: "
+    assert notes.getvalue().splitlines() == ["::notice::P: JLCPCB CPL rotation rules matched 0 rows (JLCKicadTools table, pinned)"] + [prefix + d for d in (
+        "missing Edge.Cuts (.gko)",
+        "stencil layers exported; JLCPCB template excludes them (lines 147-148)",
+        "BOM rows without LCSC number; JLCPCB template filters them (line 115)")], notes.getvalue()
+    assert not dl_calls, "template differences must not trigger a fabrication rebuild"
+    assert {p.name: p.read_bytes() for p in complete_fab.iterdir()} == original
+    with zipfile.ZipFile(dest) as z:
+        assert set(z.namelist()) == set(original)
+        for member, raw in original.items():
+            if member.endswith("-positions.csv"):
+                assert z.read(member).decode() == (
+                    "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\r\n"
+                    "R1,10k,R_0603,10.000000,20.000000,90.000000,Top\r\n")
+            else:
+                assert z.read(member) == raw
+    pcbway = copy.deepcopy(dl_settings); pcbway["fabrication"]["preset"] = "pcbway"
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        kr.fab_notices("P", pcbway, [str(p) for p in complete_fab.iterdir()])
+    assert notes.getvalue().splitlines() == [
+        "::notice::P: pcbway fabrication differs from KiBot v1.9.1 template: missing Edge.Cuts (.gko)"], notes.getvalue()
+finally:
+    kr.subprocess.run = dl_real
+print("ok KiBot v1.9.1 pins and fabrication checks")
+
+# ---- Task 3B: JLCPCB CPL rotation correction ----
+import math
+CPL = kr.load_cpl_table()
+assert hashlib.sha256(kr.CPL_TABLE.read_bytes()).hexdigest() == kr.CPL_TABLE_SHA256
+assert len(CPL) == 59 and CPL[0][0].pattern == "^R_Array_Convex_" and CPL[-1][0].pattern == "^^WSON-8-1EP_6x5mm_P1.27mm"
+def rule(package):
+    return kr.cpl_rule(CPL, package)
+# Known parts, each row's expected value worked out from the pinned arithmetic.
+assert kr.jlc_position("Top", 0, 1.0, 2.0, rule("SOT-23-5")) == (270, 1.0, 2.0)               # ^SOT-23 is -90
+assert kr.jlc_position("Bottom", 0, 1.0, 2.0, rule("SOT-23-5")) == (90, 1.0, 2.0)            # bottom subtracts -90, then mirrors
+assert kr.jlc_position("Top", 350, 0.0, 0.0, rule("SOT-23-5")) == (260, 0.0, 0.0)            # modulo 360
+assert kr.jlc_position("Top", 0, 1.0, 1.0, rule("SOT-223-3_TabPin2")) == (180, 1.0, 1.0)     # ^SOT-223 is not ^SOT-23
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("SOP-8_3.9x4.9mm_P1.27mm")) == (270, 0.0, 0.0)
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("SOP-18_3.9x4.9mm_P1.27mm")) == (0, 0.0, 0.0)  # ^SOP-18_ is 0 degrees
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("SOP-4_3.9x4.9mm_P1.27mm")) == (270, 0.0, 0.0) # ^SOP-4_ and ^SOP-(?!18_) both match; last wins
+assert kr.jlc_position("Top", 0, 0.0, 0.0, rule("QFN-16-1EP_4x4mm")) == (270, 0.0, 0.0)
+rot, x, y = kr.jlc_position("Top", 0, 10.0, 20.0, rule("PinHeader_2x05_P1.27mm_Vertical"))  # row with offsets 2.54, 0.635
+assert rot == 90 and math.isclose(x, 12.54) and math.isclose(y, 20.635), (rot, x, y)
+assert kr.jlc_position("Bottom", 0, -3.0, 4.0, rule("R_0805_2012Metric")) == (180, 3.0, 4.0)  # unmatched bottom: flip X, mirror
+assert kr.jlc_position("Top", 45, 1.0, 1.0, rule("R_0805_2012Metric")) == (45, 1.0, 1.0)      # unmatched top: unchanged
+# Overrides: a valid file parses; each bad file is refused.
+ov = pathlib.Path(tempfile.mkdtemp(), "P.cpl-overrides.csv")
+ov.write_text("Designator,Rotation,Offset X,Offset Y\nU1,90,0.5,0\n", encoding="utf-8")
+assert kr.load_cpl_overrides(str(ov)) == {"U1": (90, 0.5, 0.0)}
+assert kr.load_cpl_overrides(str(ov.with_name("missing.cpl-overrides.csv"))) == {}
+for text in ("Ref,Rotation,Offset X,Offset Y\nU1,90,0,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90.5,0,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,nan,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,0,0\nU1,0,0,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,0\n",
+             "Designator,Rotation,Offset X,Offset Y\nU1,90,,0\n"):
+    ov.write_text(text, encoding="utf-8")
+    try:
+        kr.load_cpl_overrides(str(ov))
+    except ValueError:
+        continue
+    raise AssertionError("accepted bad overrides: " + repr(text))
+# Download zip: corrected positions, overrides, PCBWay exemption, and untouched release evidence.
+kr.subprocess.run = dl_fake
+try:
+    dl_mode.clear(); case = tempfile.mkdtemp(); source = dl_project(case, "P")
+    cached = pathlib.Path(case, "out/fab"); cached.mkdir(parents=True)
+    kr.release_project(f"{source}/P.kicad_pro", "review", dl_settings, str(cached), "P")
+    RAW = ("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+           "Q1,BSS138,SOT-23-5,10.000000,20.000000,0.000000,Top\n"
+           "Q2,BSS138,SOT-23-5,5.000000,6.000000,0.000000,Bottom\n"
+           "R1,10k,R_0603,10.000000,20.000000,90.000000,Top\n")
+    (cached / "P-review-jlcpcb-positions.csv").write_text(RAW, encoding="utf-8")
+    original = {p.name: p.read_bytes() for p in cached.iterdir()}
+    os.makedirs(f"{case}/out/downloads", exist_ok=True)
+    HEADER = ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+    def zipped_cpl(entry):
+        with zipfile.ZipFile(f"{case}/out/downloads/{entry['file']}") as z:
+            return list(csv.reader(io.StringIO(z.read("P-review-jlcpcb-positions.csv").decode("utf-8"))))
+    def cpl_fab(settings, cache, filename, matched=None, failed=False):
+        notes = io.StringIO()
+        with contextlib.redirect_stdout(notes):
+            entry = kr.fab_entry(f"{source}/P.kicad_pro", "P", settings, str(cache), f"{case}/out/downloads/{filename}")
+        lines = notes.getvalue().splitlines()
+        if matched is not None:
+            assert f"::notice::P: JLCPCB CPL rotation rules matched {matched} rows (JLCKicadTools table, pinned)" in lines, lines
+        assert any(line.startswith("::warning::P: fabrication export failed") for line in lines) == failed, lines
+        assert all(line.startswith(("::notice::", "::warning::")) for line in lines), lines
+        return entry
+    first = cpl_fab(dl_settings, cached, "fab-P-bbbbbbb.zip", matched=2)
+    assert first["error"] is None, first
+    assert zipped_cpl(first) == [HEADER,
+        ["Q1", "BSS138", "SOT-23-5", "10.000000", "20.000000", "270.000000", "Top"],
+        ["Q2", "BSS138", "SOT-23-5", "5.000000", "6.000000", "90.000000", "Bottom"],
+        ["R1", "10k", "R_0603", "10.000000", "20.000000", "90.000000", "Top"]], zipped_cpl(first)
+    assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL correction changed release evidence"
+    # A per-project override replaces the table rule for its Designator (Q1 loses its -90), and adds to R1.
+    pathlib.Path(source, "P.cpl-overrides.csv").write_text("Designator,Rotation,Offset X,Offset Y\nR1,180,0,0\nQ1,0,0,0\n", encoding="utf-8")
+    second = cpl_fab(dl_settings, cached, "fab-P-ccccccc.zip", matched=3)
+    assert zipped_cpl(second) == [HEADER,
+        ["Q1", "BSS138", "SOT-23-5", "10.000000", "20.000000", "0.000000", "Top"],
+        ["Q2", "BSS138", "SOT-23-5", "5.000000", "6.000000", "90.000000", "Bottom"],
+        ["R1", "10k", "R_0603", "10.000000", "20.000000", "270.000000", "Top"]], zipped_cpl(second)
+    # PCBWay: positions are copied unchanged; overrides there are refused for that fabrication entry only.
+    pcb_settings = copy.deepcopy(dl_settings); pcb_settings["fabrication"]["preset"] = "pcbway"
+    pcb_cache = pathlib.Path(case, "out/fab-pcbway"); pcb_cache.mkdir(parents=True)
+    kr.release_project(f"{source}/P.kicad_pro", "review", pcb_settings, str(pcb_cache), "P")
+    pcb_pos = (pcb_cache / "P-review-pcbway-positions.csv").read_bytes()
+    os.remove(f"{source}/P.cpl-overrides.csv")
+    third = cpl_fab(pcb_settings, pcb_cache, "fab-P-ddddddd.zip")
+    assert third["error"] is None, third
+    with zipfile.ZipFile(f"{case}/out/downloads/{third['file']}") as z:
+        assert z.read("P-review-pcbway-positions.csv") == pcb_pos, "PCBWay positions must not be corrected"
+    pathlib.Path(source, "P.cpl-overrides.csv").write_text("Designator,Rotation,Offset X,Offset Y\nR1,180,0,0\n", encoding="utf-8")
+    refused = cpl_fab(pcb_settings, pcb_cache, "fab-P-eeeeeee.zip", failed=True)
+    assert refused["error"] == "fabrication export failed" and not os.path.exists(f"{case}/out/downloads/fab-P-eeeeeee.zip"), refused
+    # A malformed overrides file fails only the fabrication entry: PDF and GLB still arrive.
+    pathlib.Path(source, "P.cpl-overrides.csv").write_text("Designator,Rotation,Offset X,Offset Y\nR1,90.5,0,0\n", encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+    assert made[0]["error"] == "fabrication export failed" and all(e["file"] for e in made if e["kind"] in ("pdf", "glb")), made
+    assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL overrides changed release evidence"
+    assert not list(pathlib.Path(case, "out/downloads").glob(".fab-*")), "CPL staging leaked"
+finally:
+    kr.subprocess.run = dl_real
+print("ok CPL rotation rules, overrides and download zip")
+
+# Synthetic CSV regression: coordinates, offsets, overrides, bottom mirroring and row count.
+with tempfile.TemporaryDirectory() as cpl_dir:
+    raw = pathlib.Path(cpl_dir, "raw.csv")
+    corrected = pathlib.Path(cpl_dir, "corrected.csv")
+    raw.write_text("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+                   "J1,Header,PinHeader_2x05_P1.27mm_Vertical,10,20,90,Top\n"
+                   "J2,Header,PinHeader_2x05_P1.27mm_Vertical,-10,20,90,Bottom\n"
+                   "R1,10k,R_0805_2012Metric,-3,4,0,Bottom\n"
+                   "R2,10k,R_0805_2012Metric,1,2,45,Top\n"
+                   "Q1,BSS138,SOT-23-5,-5,6,30,Bottom\n", encoding="utf-8")
+    original = raw.read_bytes()
+    assert kr.correct_positions(raw, corrected, CPL, {"Q1": (90, 0.5, -1.5)}) == 3
+    assert list(csv.reader(io.StringIO(corrected.read_text()))) == [
+        ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"],
+        ["J1", "Header", "PinHeader_2x05_P1.27mm_Vertical", "12.540000", "20.635000", "180.000000", "Top"],
+        ["J2", "Header", "PinHeader_2x05_P1.27mm_Vertical", "12.540000", "20.635000", "180.000000", "Bottom"],
+        ["R1", "10k", "R_0805_2012Metric", "3.000000", "4.000000", "180.000000", "Bottom"],
+        ["R2", "10k", "R_0805_2012Metric", "1.000000", "2.000000", "45.000000", "Top"],
+        ["Q1", "BSS138", "SOT-23-5", "5.500000", "4.500000", "240.000000", "Bottom"]]
+    assert raw.read_bytes() == original
+    # Even a valid CSV is refused when it is not the pinned table.
+    wrong = pathlib.Path(cpl_dir, "table.csv")
+    wrong.write_bytes(kr.CPL_TABLE.read_bytes() + b"\n")
+    try:
+        kr.load_cpl_table(wrong)
+        raise AssertionError("accepted unpinned CPL table")
+    except SystemExit as error:
+        assert "not the pinned CPL rotation table" in str(error), error
+    override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
+    for row in ("U1,90,inf,0", "U1,90,0,-inf", ",90,0,0", "U1,90,0,0,extra", "U1,90,0,0\n\n"):
+        override.write_text("Designator,Rotation,Offset X,Offset Y\n" + row + "\n", encoding="utf-8")
+        try:
+            kr.load_cpl_overrides(override)
+            raise AssertionError("accepted malformed CPL override: " + row)
+        except ValueError:
+            pass
+print("ok synthetic CPL CSV regression and pin validation")
+
+# Task 3B fix: unterminated override fields must not be silently repaired.
+with tempfile.TemporaryDirectory() as cpl_dir:
+    override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
+    override.write_text('Designator,Rotation,Offset X,Offset Y\nU1,90,0,"0\n', encoding="utf-8")
+    try:
+        kr.load_cpl_overrides(override)
+    except csv.Error:
+        pass
+    else:
+        raise AssertionError("accepted an unterminated CPL override quote")
+print("ok CPL overrides reject unterminated quotes")
+
+# Task 3B fix: whole-degree overrides are periodic even beyond float range.
+with tempfile.TemporaryDirectory() as cpl_dir:
+    override = pathlib.Path(cpl_dir, "P.cpl-overrides.csv")
+    huge_degrees = 360 * 10**397 + 90  # 400 digits, exactly equivalent to +90 degrees.
+    for degrees, top, bottom in ((huge_degrees, 120, 240), (-huge_degrees, 300, 60)):
+        override.write_text(f"Designator,Rotation,Offset X,Offset Y\nU1,{degrees},0.5,-1\n", encoding="utf-8")
+        huge_rule = kr.load_cpl_overrides(override)["U1"]
+        assert kr.jlc_position("Top", 30.0, 1.0, 2.0, huge_rule) == (top, 1.5, 1.0)
+        assert kr.jlc_position("Bottom", 30.0, -1.0, 2.0, huge_rule) == (bottom, 1.5, 1.0)
+print("ok CPL oversized positive and negative rotations")
+
+# Task 3B fix: arithmetic/CSV failures stay inside fabrication; other exports survive.
+with tempfile.TemporaryDirectory() as case, patch("kicad_review.subprocess.run", side_effect=dl_fake):
+    dl_mode.clear()
+    source = dl_project(case, "P")
+    cached = pathlib.Path(case, "out/fab"); cached.mkdir()
+    kr.release_project(f"{source}/P.kicad_pro", "review", dl_settings, str(cached), "P")
+    (cached / "P-review-jlcpcb-positions.csv").write_text(
+        "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n"
+        "Q1,BSS138,SOT-23-5,1,2,30,Top\n"
+        "Q2,BSS138,SOT-23-5,-1,2,30,Bottom\n", encoding="utf-8")
+    original = {p.name: p.read_bytes() for p in cached.iterdir()}
+    override = pathlib.Path(source, "P.cpl-overrides.csv")
+    huge_degrees = 360 * 10**397 + 90
+    override.write_text(f"Designator,Rotation,Offset X,Offset Y\nQ1,{huge_degrees},0,0\nQ2,{-huge_degrees},0,0\n", encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert not warnings.getvalue() and all(e["file"] and e["error"] is None for e in made), (made, warnings.getvalue())
+    zip_path = pathlib.Path(case, "out/downloads", made[0]["file"])
+    with zipfile.ZipFile(zip_path) as z:
+        rows = list(csv.reader(io.StringIO(z.read("P-review-jlcpcb-positions.csv").decode("utf-8"))))
+    assert [row[5] for row in rows[1:]] == ["120.000000", "60.000000"], rows
+
+    # Force arithmetic overflow independently of normalization to pin the nonfatal boundary.
+    with patch("kicad_review.jlc_position", side_effect=OverflowError("synthetic arithmetic overflow")), contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert made[0]["file"] is None and made[0]["error"] == "fabrication export failed", made
+    assert all(e["file"] and e["error"] is None for e in made[1:]), made
+    assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+    assert not zip_path.exists() and not list(zip_path.parent.glob(".fab-*")), "failed CPL left archive or staging"
+
+    # A malformed quote must have the same fabrication-only failure semantics.
+    override.write_text('Designator,Rotation,Offset X,Offset Y\nQ1,90,0,"0\n', encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as warnings:
+        made = dl_export({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert made[0]["file"] is None and made[0]["error"] == "fabrication export failed", made
+    assert all(e["file"] and e["error"] is None for e in made[1:]), made
+    assert "::warning::P: fabrication export failed" in warnings.getvalue(), warnings.getvalue()
+    assert not zip_path.exists() and not list(zip_path.parent.glob(".fab-*")), "malformed CPL left archive or staging"
+    assert {p.name: p.read_bytes() for p in cached.iterdir()} == original, "CPL failure changed release evidence"
+print("ok CPL overflow and malformed CSV fabrication isolation")
+
+# Synthetic board CPL regression: raw KiCad export and committed corrected output (Task 3B, Step 6;
+# amended per Owner decision 2026-10-27 and AGENTS.md private-design rule: generic names only).
+FIXTURES = pathlib.Path(kr.__file__).with_name("cpl_rotations") / "fixtures"
+with open(FIXTURES / "cpl-rotation-pos-raw.csv", newline="", encoding="utf-8") as f:
+    raw_rows = list(csv.reader(f))
+out = pathlib.Path(tempfile.mkdtemp(), "corrected.csv")
+matched = kr.correct_positions(str(FIXTURES / "cpl-rotation-pos-raw.csv"), str(out), CPL, {})
+assert matched == sum(1 for r in raw_rows[1:] if rule(r[2]) is not None), matched
+assert out.read_bytes() == (FIXTURES / "cpl-rotation-pos-corrected.csv").read_bytes(), "cpl-rotation CPL regression"
+with open(out, newline="", encoding="utf-8") as f:
+    got = list(csv.reader(f))
+assert got[0] == raw_rows[0] == ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"], got[0]
+for before, after in zip(raw_rows[1:], got[1:]):
+    assert (after[0], after[2], after[6]) == (before[0], before[2], before[6]), before
+    if before[6] == "Top" and rule(before[2]) is None:
+        assert after[5] == f"{float(before[5]):.6f}", before  # unmatched top parts keep their angle
+print("ok cpl-rotation CPL regression")
+
+# ---- Whole-branch review: workflow command injection and snapshot provenance ----
+injected = "project%\r\n::error::forged,:"
+escaped = "project%25%0D%0A::error::forged,:"
+assert kr.workflow_command_escape(injected) == escaped
+assert kr.workflow_command_escape(injected, property=True) == "project%25%0D%0A%3A%3Aerror%3A%3Aforged%2C%3A"
+with patch("kicad_review.correct_positions", return_value=2), patch("kicad_review.load_cpl_table"), patch("kicad_review.load_cpl_overrides"), contextlib.redirect_stdout(io.StringIO()) as output:
+    kr.cpl_for_download("P.kicad_pro", injected, dl_settings, "raw", "dest")
+assert output.getvalue() == f"::notice::{escaped}: JLCPCB CPL rotation rules matched 2 rows (JLCKicadTools table, pinned)\n"
+with tempfile.TemporaryDirectory() as case:
+    raw, dest = pathlib.Path(case, "board.raw.glb"), pathlib.Path(case, "dest.glb")
+    raw.write_bytes(b"glTF")
+    with patch("kicad_review.shutil.copyfile", side_effect=OSError(injected)), contextlib.redirect_stdout(io.StringIO()) as output:
+        kr.glb_entry(str(raw), str(dest))
+    assert output.getvalue() == f"::warning::3D model (GLB): {escaped}\n"
+    source = dl_project(case, "P")
+    marker = pathlib.Path(case, "out/board.raw.glb.revision")
+    for revision in (None, "a" * 40, "b" * 7):
+        if revision is not None: marker.write_text(revision)
+        try:
+            export_downloads({"name": "P", "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40, policy=dl_settings, purpose="snapshot")
+            raise AssertionError("unverified snapshot GLB accepted")
+        except ValueError as error:
+            assert "snapshot GLB revision" in str(error), error
+    assert not pathlib.Path(case, "out/downloads-snapshot").exists()
+with tempfile.TemporaryDirectory() as case:
+    source = dl_project(case, injected)
+    with patch("kicad_review.fab_parts", side_effect=ValueError), patch("kicad_review.release_project", side_effect=ValueError), contextlib.redirect_stdout(io.StringIO()) as output:
+        kr.fab_entry(f"{source}/{injected}.kicad_pro", injected, dl_settings, case, f"{case}/fab.zip")
+    assert output.getvalue().startswith(f"::warning::{escaped}: fabrication export failed")
+    assert len(output.getvalue().splitlines()) == 1
+    archive = pathlib.Path(case, "P-gerbers.zip")
+    with zipfile.ZipFile(archive, "w") as z: z.writestr("P.gtl", "data")
+    with patch("kicad_review.kibot_differences", return_value=[injected]), contextlib.redirect_stdout(io.StringIO()) as output:
+        kr.fab_notices(injected, dl_settings, [str(archive)])
+    assert output.getvalue() == f"::notice::{escaped}: jlcpcb fabrication differs from KiBot v1.9.1 template: {escaped}\n"
+    failure = {"kind": "pdf", "label": injected, "file": None, "error": injected}
+    with patch("kicad_review.fab_entry", return_value={**failure, "kind": "fab"}), patch("kicad_review.export_one", return_value=failure), patch("kicad_review.glb_entry", return_value={**failure, "kind": "glb"}), contextlib.redirect_stdout(io.StringIO()) as output:
+        export_downloads({"name": injected, "dir": ""}, source, f"{case}/out", dl_settings, "b" * 40)
+    assert output.getvalue().splitlines() == [f"::warning::{escaped}: {escaped}: {escaped}"] * 3
+
+# Keep older workflow-command print sites covered by the same escaping contract.
+import ast
+commands = []
+for node in ast.walk(ast.parse(pathlib.Path(kr.__file__).read_text())):
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "print" or not node.args:
+        continue
+    arg = node.args[0]
+    if any(isinstance(part, ast.Constant) and isinstance(part.value, str) and part.value.startswith("::") for part in ast.walk(arg)):
+        commands.append(node)
+        assert isinstance(arg, ast.BinOp) and isinstance(arg.right, ast.Call) and isinstance(arg.right.func, ast.Name) and arg.right.func.id == "workflow_command_escape", node.lineno
+assert len(commands) >= 16
+print("ok workflow command injection and snapshot GLB revision gate")
+
+with tempfile.TemporaryDirectory() as case:
+    table = pathlib.Path(case, "table.csv")
+    for header in ('"Footprint pattern","Wrong","Offset X","Offset Y"',
+                   '"Footprint pattern","Rotation","Wrong","Offset Y"',
+                   '"Footprint pattern","Rotation","Offset X","Wrong"',
+                   '"Footprint pattern","Rotation","Offset X"',
+                   '"Footprint pattern","Rotation","Offset X","Offset Y","Extra"', ''):
+        data = (header + "\n").encode()
+        table.write_bytes(data)
+        with patch("kicad_review.CPL_TABLE_SHA256", hashlib.sha256(data).hexdigest()):
+            try:
+                kr.load_cpl_table(table)
+                raise AssertionError("invalid CPL header accepted")
+            except SystemExit as error:
+                assert "unexpected CPL rotation table header" in str(error), error
+print("ok complete CPL table header validation")
+
+cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+        seen = []
+        with patch("kicad_review.render_side"), patch("kicad_review.export_downloads", side_effect=lambda *a: seen.append(a)):
+            kr.cmd_render(None)
+            assert seen == [], "off by default"
+            pathlib.Path("base/kicad-review.toml").write_text("[downloads]\nenabled = true\n")
+            kr.cmd_render(None)
+        assert [(a[0]["name"], a[1], a[2], a[4]) for a in seen] == [("b", "head/p", "review/p/head", "b" * 40)], seen  # head only
+    finally:
+        os.chdir(cwd)
+# Same revision first cached as base must never satisfy a download-producing head.
+p = {"dir":"p", "name":"P", "status":"modified"}
+det = {"base":"a"*40, "head":"a"*40, "reason":"t", "projects":[p]}
+enabled = copy.deepcopy(DEFAULT_SETTINGS); enabled["downloads"]["enabled"] = True
+assert kr.render_cache(p, "base", det, enabled) != kr.render_cache(p, "head", det, enabled), "base/head cache collision"
+assert kr.render_cache(p, "head", det, DEFAULT_SETTINGS) != kr.render_cache(p, "head", det, enabled), "opt-in cache collision"
+for initial in (DEFAULT_SETTINGS, enabled):
+    with tempfile.TemporaryDirectory() as d:
+        os.chdir(d)
+        try:
+            pathlib.Path("review").mkdir(); pathlib.Path("base/p").mkdir(parents=True); pathlib.Path("head/p").mkdir(parents=True)
+            pathlib.Path("review/detect.json").write_text(json.dumps(det))
+            # Cache only the base role, including a complete marker, as an earlier comparison would.
+            cache = kr.render_cache(p, "base", det, initial); cache.mkdir(parents=True)
+            (cache / ".complete").write_text("complete")
+            with patch("kicad_review.load_settings", return_value=enabled):
+                try:
+                    kr.restore_renders(); raise AssertionError("head restored a downloads-less base cache")
+                except SystemExit as e: assert e.code == 1
+                with patch("kicad_review.render_side"), patch("kicad_review.export_downloads") as export:
+                    kr.cmd_render(None)
+                    assert any(c.args[2] == "review/p/head" for c in export.call_args_list), "head skipped after base/disabled cache"
+        finally: os.chdir(cwd)
+# Release-only runs stage/upload their already-built fabrication package; no PDF/STEP/GLB.
+release_only = copy.deepcopy(DEFAULT_SETTINGS); release_only["checks"]["release"] = "informational"
+assert kr.render_cache(p, "head", det, release_only) != kr.render_cache(p, "base", det, release_only), "release-only base/head cache collision"
+assert kr.render_cache(p, "head", det, release_only) != kr.render_cache(p, "head", det, DEFAULT_SETTINGS), "release-only off/on cache collision"
+with tempfile.TemporaryDirectory() as d:
+    source = dl_project(d, "P"); dl_calls.clear(); dl_mode.clear()
+    with patch("kicad_review.subprocess.run", side_effect=dl_fake):
+        entries = kr.export_downloads({"name":"P","dir":""}, source, f"{d}/out", release_only, "b"*40)
+    assert [e["kind"] for e in entries] == ["fab"] and not entries[0]["error"], entries
+    assert [c[0][3] for c in dl_calls] == ["gerbers", "drill", "pos", "bom"], dl_calls
+# release_project exception boundary: warning logged and export_downloads continues
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        pathlib.Path("head/p/b.kicad_pro").write_text("")
+        json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+        pathlib.Path("base/kicad-review.toml").write_text("[checks]\nrelease = 'informational'\n")
+        download_calls = []
+        warning_printed = []
+        real_print = print
+        def capture_print(*args, **kw):
+            msg = " ".join(str(a) for a in args)
+            if "release outputs incomplete; continuing other exports" in msg:
+                warning_printed.append(msg)
+            real_print(*args, **kw)
+        with patch("kicad_review.render_side"), \
+             patch("kicad_review.release_project", side_effect=ValueError("corrupt release")), \
+             patch("kicad_review.export_downloads", side_effect=lambda *a: download_calls.append(a)), \
+             patch("builtins.print", side_effect=capture_print):
+            kr.cmd_render(None)
+        assert len(warning_printed) == 1, f"warning not printed: {warning_printed}"
+        assert "::warning::b: release outputs incomplete; continuing other exports" in warning_printed[0]
+        assert len(download_calls) == 1 and download_calls[0][0]["name"] == "b" and download_calls[0][2] == "review/p/head", download_calls
+    finally:
+        os.chdir(cwd)
+# The head requests 02's raw GLB even with the 3D viewer off; the base never does so for downloads (needs 02's cmd_render gate).
+# Head download GLB export gates poster and viewer copies: only raw GLB is requested when 3D is off.
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
+        pathlib.Path("base/kicad-review.toml").write_text("[downloads]\nenabled = true\n[3d]\nenabled = false\n")
+        glb_calls = []
+        with patch("kicad_review.render_side"), patch("kicad_review.export_downloads"), \
+             patch("kicad_review.export_glb", side_effect=lambda p, side, out, **kw: glb_calls.append((side, kw.get("model"), kw.get("poster"), kw.get("viewer")))):
+            kr.cmd_render(None)
+        assert ("head", True, False, False) in glb_calls, glb_calls
+        assert not any(side == "base" and model for side, model, *rest in glb_calls), glb_calls
+    finally:
+        os.chdir(cwd)
+# Calling export_glb with poster=False and viewer=False creates only raw GLB, neither board.glb nor poster.png
+with tempfile.TemporaryDirectory() as d:
+    folder = pathlib.Path(d) / "out"
+    def fake_glb_subproc(argv, **kw):
+        dest = pathlib.Path(argv[argv.index("-o") + 1])
+        dest.write_bytes(b"glTF raw")
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    with patch("kicad_review.subprocess.run", side_effect=fake_glb_subproc):
+        kr.export_glb({"dir": "p", "name": "p"}, "head", str(folder), model=True, poster=False, viewer=False)
+    assert (folder / "board.raw.glb").is_file(), "board.raw.glb missing"
+    assert not (folder / "board.glb").exists(), "board.glb should not exist when viewer is off"
+    assert not (folder / "poster.png").exists(), "poster.png should not exist when poster is off"
+# The workflow's 3D compression steps key on the viewer's board.glb, so downloads with [3d] enabled = false skip them (07 Open question 9).
+for name in ('Cache 3D compression dependencies and processed models', 'Install 3D compression dependencies', 'Compress 3D board models'):
+    gate = pathlib.Path('.github/workflows/review.yml').read_text().split('name: ' + name + '\n', 1)[1].split('\n', 1)[0]
+    assert gate == "        if: steps.detect.outputs.changed == 'true' && hashFiles('review/**/board.raw.glb') != '' && hashFiles('review/**/board.glb') != ''", (name, gate)
+# render_cache_complete: raw GLB required on head only for downloads.enabled, not release-only (spec lines 27-28)
+with tempfile.TemporaryDirectory() as d, patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"):
+    c = pathlib.Path(d) / "cache"
+    c.mkdir()
+    prj = {"dir": "p", "name": "P"}
+    pcb_path = pathlib.Path(d) / "head/p/P.kicad_pcb"
+    pcb_path.parent.mkdir(parents=True)
+    pcb_path.write_text("(kicad_pcb)")
+    old_cwd = os.getcwd()
+    os.chdir(d)
+    try:
+        (c / ".complete").write_text(json.dumps(kr.image_export_identity(prj, "head")))
+        dl_set = copy.deepcopy(DEFAULT_SETTINGS)
+        dl_set["downloads"]["enabled"] = True
+        rel_set = copy.deepcopy(DEFAULT_SETTINGS)
+        rel_set["checks"]["release"] = "informational"
+        # downloads.enabled requires board.raw.glb on head
+        assert not kr.render_cache_complete(c, prj, "head", dl_set), "head downloads requires board.raw.glb"
+        (c / "board.raw.glb").write_bytes(b"")
+        assert not kr.render_cache_complete(c, prj, "head", dl_set), "empty board.raw.glb rejected"
+        (c / "board.raw.glb").write_bytes(b"glTF")
+        assert kr.render_cache_complete(c, prj, "head", dl_set), "valid board.raw.glb accepted"
+        (c / "board.raw.glb").unlink()
+        (c / "board.raw.glb.failed").write_text("failed")
+        assert kr.render_cache_complete(c, prj, "head", dl_set), "board.raw.glb.failed accepted"
+        (c / "board.raw.glb.failed").unlink()
+        # release-only does not export raw GLB, so it must not require board.raw.glb
+        assert kr.render_cache_complete(c, prj, "head", rel_set), "release-only must not require board.raw.glb"
+        # base side does not require board.raw.glb for downloads
+        pathlib.Path("base/p/P.kicad_pcb").parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path("base/p/P.kicad_pcb").write_text("(kicad_pcb)")
+        (c / ".complete").write_text(json.dumps(kr.image_export_identity(prj, "base")))
+        assert kr.render_cache_complete(c, prj, "base", dl_set), "base downloads must not require board.raw.glb"
+    finally:
+        os.chdir(old_cwd)
+print("ok render head gating, release-only staging and role/opt-in cache isolation")
+
+from kicad_review import collect_downloads
+cwd = os.getcwd()
+with tempfile.TemporaryDirectory() as d:
+    os.chdir(d)
+    try:
+        src = "review/p/head/downloads"; os.makedirs(src); os.makedirs("review/q/head/downloads")
+        pathlib.Path(f"{src}/fab-b-bbbbbbb.zip").write_bytes(b"zipdata")
+        kr.write_download_manifest(src, [{"kind": "fab", "label": "For fabrication", "file": "fab-b-bbbbbbb.zip", "error": None},
+                   {"kind": "step", "label": "3D model (STEP)", "file": None, "error": "skipped: export took longer than 120 s"}])
+        pathlib.Path("review/q/head/downloads/q-bbbbbbb-schematic.pdf").write_bytes(b"%PDF")
+        kr.write_download_manifest("review/q/head/downloads", [{"kind": "pdf", "label": "Schematic PDF", "file": "q-bbbbbbb-schematic.pdf", "error": None}])
+        got = collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40)
+        assert got == [{"kind": "fab", "label": "For fabrication", "bytes": 7, "sha256": hashlib.sha256(b"zipdata").hexdigest(),
+                        "path": "0/fab-b-bbbbbbb.zip", "artifact": "kicad-review-downloads-bbbbbbb"},
+                       {"kind": "step", "label": "3D model (STEP)", "error": "skipped: export took longer than 120 s"}], got
+        assert pathlib.Path("review/downloads/0/fab-b-bbbbbbb.zip").read_bytes() == b"zipdata"
+        second = collect_downloads({"dir": "q", "name": "q"}, 1, "b" * 40)  # index is the project's position, not its folder
+        assert second[0]["path"] == "1/q-bbbbbbb-schematic.pdf" and pathlib.Path("review/downloads/1/q-bbbbbbb-schematic.pdf").is_file()
+        assert collect_downloads({"dir": "missing", "name": "m"}, 2, "b" * 40) is None
+
+        staged = json.loads(pathlib.Path("review/downloads/0/downloads.json").read_text())
+        assert staged == {"files": got, "head": "b" * 40}, staged
+        # Report: compare the actual pre-feature module and assets, not two post-feature templates.
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": []}))
+        assert "fetch-depth: 0" in pathlib.Path(kr.__file__).with_name(".github").joinpath("workflows/test.yml").read_text(), "pinned baseline must be available in CI"
+        import tarfile
+        def downloads_baseline_root():
+            root = pathlib.Path(os.environ.get("DOWNLOADS_BASELINE") or tempfile.mkdtemp(prefix="downloads-baseline-"))
+            if not (root / "kicad_review.py").is_file():
+                archive = kr.subprocess.run(["git", "-C", str(pathlib.Path(kr.__file__).resolve().parent), "archive", "335db72", "kicad_review.py", "ui"], check=True, capture_output=True).stdout
+                with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                    tar.extractall(root)  # trusted, pinned git archive contains only kicad_review.py and ui/
+            return root
+        baseline_root = downloads_baseline_root()
+        # A pre-extracted override must not invoke git or overwrite the original assets.
+        with patch.dict(os.environ, {"DOWNLOADS_BASELINE": str(baseline_root)}), patch("kicad_review.subprocess.run", side_effect=AssertionError("pre-extracted baseline must not invoke git archive")):
+            assert downloads_baseline_root() == baseline_root
+        # Separately exercise the no-override CI fallback into a fresh, empty directory,
+        # while cwd remains outside every Git checkout.
+        with tempfile.TemporaryDirectory(prefix="downloads-fallback-") as fallback:
+            with patch.dict(os.environ, {"DOWNLOADS_BASELINE": ""}), patch("tempfile.mkdtemp", return_value=fallback), patch("kicad_review.subprocess.run", wraps=dl_real) as archive_run:
+                fallback_root = downloads_baseline_root()
+            archive_run.assert_called_once_with(["git", "-C", str(pathlib.Path(kr.__file__).resolve().parent), "archive", "335db72", "kicad_review.py", "ui"], check=True, capture_output=True)
+            assert fallback_root == pathlib.Path(fallback)
+            for relative in ("kicad_review.py", "ui/review.html", "ui/review.js", "ui/review.css"):
+                assert (fallback_root / relative).read_bytes() == (baseline_root / relative).read_bytes(), relative
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("downloads_baseline", baseline_root / "kicad_review.py")
+        baseline = importlib.util.module_from_spec(spec); spec.loader.exec_module(baseline)
+        with patch.object(baseline, "load_settings", return_value=copy.deepcopy(baseline.DEFAULT_SETTINGS)):
+            baseline.cmd_report(None)
+        before_data = pathlib.Path("review/data.json").read_bytes()
+        before_html = pathlib.Path("review/kicad-review.html").read_bytes()
+        with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
+            kr.cmd_report(None)
+        legacy, integrated = json.loads(before_data), json.loads(pathlib.Path("review/data.json").read_bytes())
+        def legacy_subset(old, new):
+            """Every value the 335db72 report holds is present unchanged; additive v1 fields from 01, 03 and 08 may appear."""
+            if isinstance(old, dict):
+                return isinstance(new, dict) and all(k in new and legacy_subset(v, new[k]) for k, v in old.items())
+            if isinstance(old, list):
+                return isinstance(new, list) and len(old) == len(new) and all(legacy_subset(a, b) for a, b in zip(old, new))
+            return old == new
+        assert legacy_subset(legacy, integrated), "opted-out report lost or changed a 335db72 field"
+        assert "downloads" not in integrated["settings"] and all("downloads" not in p for p in integrated["projects"]), "opted-out report carries download data"
+        after_html = pathlib.Path("review/kicad-review.html").read_bytes()
+        assert b'id="downloads-open"' not in before_html, "335db72 must not contain the Download button"
+        assert b'id="downloads-open"' in after_html, "Download button missing from new report"
+
+        # fe2206c (origin/main last merged into this branch) grew review.js and added 3D viewer and image-view assets
+        # after 335db72. Compare against a pinned-main report built without the Download UI to bound the
+        # always-on Download UI overhead under 12 KB uncompressed without relying on origin/main ref.
+        repo_dir = pathlib.Path(kr.__file__).resolve().parent
+        main_commit = "fe2206c"
+        archive_cmd = ["git", "-C", str(repo_dir), "archive", main_commit, "kicad_review.py", "ui", "vendor", "image-palettes.json", "fab_limits.json"]
+        probe_cmd = ["git", "-C", str(repo_dir), "cat-file", "-e", f"{main_commit}^{{commit}}"]
+        @contextlib.contextmanager
+        def downloads_main_root():
+            """Yield the extracted fe2206c tree, or None only when that commit is absent (shallow checkout).
+            Any other failure (git missing, git archive or extraction error) raises."""
+            override = os.environ.get("DOWNLOADS_MAIN_BASELINE")
+            with contextlib.ExitStack() as stack:
+                root = pathlib.Path(override or stack.enter_context(tempfile.TemporaryDirectory(prefix="downloads-main-")))
+                root.mkdir(parents=True, exist_ok=True)
+                if not (root / "kicad_review.py").is_file():
+                    if subprocess.run(probe_cmd, capture_output=True).returncode != 0:
+                        yield None
+                        return
+                    archive = subprocess.run(archive_cmd, check=True, capture_output=True).stdout
+                    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                        if hasattr(tarfile, "data_filter"):
+                            tar.extractall(root, filter="data")
+                        else:
+                            tar.extractall(root)
+                yield root
+
+        # Verify the DOWNLOADS_MAIN_BASELINE override path:
+        # A pre-extracted override must not invoke git archive.
+        with tempfile.TemporaryDirectory(prefix="downloads-main-pre-") as pre_dir:
+            pre_root = pathlib.Path(pre_dir)
+            (pre_root / "kicad_review.py").write_text("# baseline stub")
+            with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": str(pre_root)}), patch("subprocess.run", side_effect=AssertionError("pre-extracted main baseline must not invoke git archive")):
+                with downloads_main_root() as override_root:
+                    assert override_root == pre_root
+
+        # In a shallow clone fe2206c is absent: the commit probe fails, downloads_main_root yields None
+        # and never runs git archive.
+        absent = subprocess.CompletedProcess(probe_cmd, 128, b"", b"fatal: Not a valid object name fe2206c^{commit}")
+        with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": ""}), patch("subprocess.run", return_value=absent) as probe_run:
+            with downloads_main_root() as shallow_root:
+                assert shallow_root is None
+            probe_run.assert_called_once_with(probe_cmd, capture_output=True)
+
+        # Any other failure is real and must raise, never be reported as a shallow checkout:
+        # git not installed, and git archive failing although the commit is present.
+        present = subprocess.CompletedProcess(probe_cmd, 0, b"", b"")
+        for side_effect, error in ((FileNotFoundError("git"), FileNotFoundError),
+                                   ([present, subprocess.CalledProcessError(128, archive_cmd, stderr=b"fatal: disk error")], subprocess.CalledProcessError)):
+            with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": ""}), patch("subprocess.run", side_effect=side_effect):
+                try:
+                    with downloads_main_root():
+                        raise AssertionError(f"{error.__name__} was reported as a shallow checkout")
+                except error:
+                    pass
+
+        saved_main_path = None
+        with downloads_main_root() as main_root:
+            if main_root is None:
+                print("skip always-on Download UI overhead check: commit fe2206c not present in this checkout (shallow clone; set DOWNLOADS_MAIN_BASELINE to enable)")
+            else:
+                saved_main_path = main_root
+                baseline_files = ("kicad_review.py", "image-palettes.json", "ui/review.html", "ui/review.js", "ui/review.css")
+                for relative in baseline_files:
+                    assert (main_root / relative).is_file(), f"missing extracted baseline file: {relative}"
+                # An unextracted override directory is populated via git archive, byte-identical to the default extraction.
+                with tempfile.TemporaryDirectory(prefix="downloads-main-unextracted-") as unextracted_dir:
+                    target = os.path.join(unextracted_dir, "baseline")
+                    with patch.dict(os.environ, {"DOWNLOADS_MAIN_BASELINE": target}), patch("subprocess.run", wraps=subprocess.run) as archive_run:
+                        with downloads_main_root() as extracted_root:
+                            assert archive_run.call_args == ((archive_cmd,), {"check": True, "capture_output": True}), archive_run.call_args_list
+                            assert extracted_root == pathlib.Path(target)
+                            for relative in baseline_files:
+                                assert (extracted_root / relative).read_bytes() == (main_root / relative).read_bytes(), relative
+                main_spec = importlib.util.spec_from_file_location("downloads_main", main_root / "kicad_review.py")
+                main_mod = importlib.util.module_from_spec(main_spec)
+                main_spec.loader.exec_module(main_mod)
+                with patch.object(main_mod, "load_settings", return_value=copy.deepcopy(main_mod.DEFAULT_SETTINGS)):
+                    main_mod.cmd_report(None)
+                main_html = pathlib.Path("review/kicad-review.html").read_bytes()
+                assert b'id="downloads-open"' not in main_html, "pinned-main report must not contain the Download button"
+                # Rebuild after_html to restore current report state after main_mod.cmd_report
+                with patch("kicad_review.load_settings", return_value=copy.deepcopy(DEFAULT_SETTINGS)):
+                    kr.cmd_report(None)
+                after_html = pathlib.Path("review/kicad-review.html").read_bytes()
+                ui_overhead = len(after_html) - len(main_html)
+                assert 0 < ui_overhead < 12000, f"always-on Download UI must add less than 12 KB uncompressed (overhead: {ui_overhead})"
+
+        if saved_main_path is not None and not os.environ.get("DOWNLOADS_MAIN_BASELINE"):
+            assert not saved_main_path.exists(), "temporary main_root directory must be cleaned up after use"
+
+        shown = {"name": "b", "dir": "p", "status": "modified", "sheets": [], "board": {}, "changes": [], "checks": []}
+        on = copy.deepcopy(DEFAULT_SETTINGS); on["downloads"]["enabled"] = True
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}))
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        data = json.loads(pathlib.Path("review/data.json").read_text())
+        assert data["projects"][0]["downloads"] == got and data["settings"]["downloads"] == {"enabled": True, "step": True}
+        gh_out = pathlib.Path("gh-out.txt").read_text()
+        assert "downloads=true\n" in gh_out and "downloads_name=kicad-review-downloads-bbbbbbb\n" in gh_out, gh_out
+        off = copy.deepcopy(DEFAULT_SETTINGS); pathlib.Path("gh-out.txt").unlink()
+        with patch("kicad_review.load_settings", return_value=off), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads" not in json.loads(pathlib.Path("review/data.json").read_text())["projects"][0] and "downloads=false\n" in pathlib.Path("gh-out.txt").read_text()
+        assert not os.path.exists("review/downloads"), "stale download folder removed when disabled"
+        # Release-only outputs reach report and workflow upload even with downloads.enabled false.
+        release_only = copy.deepcopy(DEFAULT_SETTINGS); release_only["checks"]["release"] = "informational"
+        pathlib.Path("gh-out.txt").unlink()
+        with patch("kicad_review.load_settings", return_value=release_only), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT":"gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads=true\n" in pathlib.Path("gh-out.txt").read_text(), "checks.release package was discarded"
+        assert pathlib.Path("review/downloads/0/fab-b-bbbbbbb.zip").is_file()
+
+        # Malformed downloads.json: list-shaped manifest, non-list files, and missing kind/label must not raise or fail review.
+        # 1. List-shaped manifest
+        pathlib.Path(f"{src}/downloads.json").write_text("[]", encoding="utf-8")
+        assert collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40) is None
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads" not in json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]
+
+        # 2. Non-list files
+        pathlib.Path(f"{src}/downloads.json").write_text(json.dumps({"files": 123}), encoding="utf-8")
+        assert collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40) is None
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads" not in json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]
+
+        # 3. Entry missing kind or label is skipped rather than emitting null kind/label
+        pathlib.Path(f"{src}/downloads.json").write_text(json.dumps({"files": [{"path": "fab-b-bbbbbbb.zip"}]}), encoding="utf-8")
+        assert collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40) == []
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        assert "downloads" not in json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]
+
+        # 4. Mixed entries: invalid/missing kind/label skipped, valid entries preserved
+        pathlib.Path(f"{src}/downloads.json").write_text(json.dumps({"files": [
+            {"path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "path": "fab-b-bbbbbbb.zip"},
+            {"label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": None, "label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "label": None, "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "   ", "label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "label": "", "path": "fab-b-bbbbbbb.zip"},
+            {"kind": "fab", "label": "For fabrication", "path": "fab-b-bbbbbbb.zip"},
+        ]}), encoding="utf-8")
+        mixed_entries = collect_downloads({"dir": "p", "name": "b"}, 0, "b" * 40)
+        assert mixed_entries == [{"kind": "fab", "label": "For fabrication", "bytes": 7, "sha256": hashlib.sha256(b"zipdata").hexdigest(),
+                                  "path": "0/fab-b-bbbbbbb.zip", "artifact": "kicad-review-downloads-bbbbbbb"}]
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        assert json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["downloads"] == mixed_entries
+    finally:
+        os.chdir(cwd)
+print("ok report manifest, artifact folder, outputs and opt-out byte identity")
+
+wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+upload = wf[wf.index("- name: Upload downloads"):]
+upload = upload[:upload.index("\n      - name:", 10)]
+for needle in ("if: steps.report.outputs.downloads == 'true'", "continue-on-error: true",
+               "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+               "name: ${{ steps.report.outputs.downloads_name }}", "path: review/downloads", "compression-level: 0", "retention-days: 90"):
+    assert needle in upload, needle
+assert "archive: false" not in upload, "several files need an archived artifact"
+assert wf.index("- name: Upload report") < wf.index("- name: Upload downloads") < wf.index("- name: Screenshots of changed drawings")
+print("ok review.yml uploads the downloads artifact")
+
+readme = pathlib.Path("README.md").read_text(encoding="utf-8"); example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
+for needle in ("| `downloads.enabled` | `false` |", "| `downloads.step` | `true` |", "## Downloads (optional)", "projects[].downloads[]", "kicad-review-downloads-", "<name>.cpl-overrides.csv", "kibot_templates/v1.9.1", "cpl_rotations"):
+    assert needle in readme, needle
+assert "[downloads]\nenabled = false" in example and "step = true" in example
+assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
+assert "02's" not in readme, "plan numbers stay out of shipped assets"
+print("ok downloads documented")
 

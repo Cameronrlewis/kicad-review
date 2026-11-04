@@ -820,3 +820,15 @@ body.shot #image-search { display:none; }
   .bom-table thead th:nth-child(3) { width:26%; } .bom-table thead th:nth-child(4) { width:24%; }
   .bom-mpn-inline { display:none !important; }
 }
+
+#downloads { color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:3px; padding:0; width:min(560px,calc(100vw - 32px)); font-size:12px; }
+#downloads::backdrop { background:rgb(0 0 0 / .55); }
+#downloads > header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--surface-2,var(--surface)); }
+#downloads h2 { margin:0; font:600 13px var(--font-mono); }
+#downloads button { color:var(--text); background:var(--surface); border:1px solid var(--line); padding:4px 8px; font:inherit; cursor:pointer; }
+#downloads-body { padding:12px 16px; max-height:70vh; overflow:auto; }
+#downloads-body ul { margin:0; padding:0; list-style:none; }
+#downloads-body li { display:grid; gap:2px; justify-items:start; padding:8px 0; border-bottom:1px solid var(--line); }
+#downloads-body li:last-child { border-bottom:0; }
+#downloads-body a { color:var(--accent); text-decoration:none; }
+#downloads-body .muted { color:var(--muted); overflow-wrap:anywhere; }

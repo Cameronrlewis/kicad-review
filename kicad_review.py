@@ -44,6 +44,12 @@ SETTINGS_FILE = "kicad-review.toml"
 FAB_TABLE = pathlib.Path(__file__).with_name("fab_limits.json")
 
 
+def workflow_command_escape(value, *, property=False):
+    """Escape GitHub workflow-command data, with extra separators for properties."""
+    value = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return value.replace(":", "%3A").replace(",", "%2C") if property else value
+
+
 def git(*args, check=True):
     r = subprocess.run(["git", "-c", "core.quotePath=false", *args], capture_output=True, text=True)
     if check and r.returncode:
@@ -154,7 +160,7 @@ def cmd_detect(args):
         try:
             review = load_settings(("",))["release"]["review"]
         except (SystemExit, tomllib.TOMLDecodeError, OSError):
-            print("::warning::Cannot read tag review settings; tag review stays off.")
+            print("::warning::" + workflow_command_escape("Cannot read tag review settings; tag review stays off."))
             review = False
         if not review:
             with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
@@ -584,7 +590,7 @@ def metadata3d(side, objects, keep, finish, missing):
             warning = f"{ref or '(empty reference)'} ({uid}): {reason} skipped"
             warnings.append(warning)
             skipped.add(ref)
-            print(f"::warning::{warning}")
+            print("::warning::" + workflow_command_escape(warning))
             continue
         reason = reasons.get(ref) or (None if obj.get("has_model") else "no model in footprint")
         box, pos = obj.get("box"), obj.get("pos")
@@ -596,7 +602,7 @@ def metadata3d(side, objects, keep, finish, missing):
                      and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in box))
         if not valid_box:
             if box is not None:
-                print(f"::warning::{ref}: malformed bounding box {box!r}, using estimated bounds")
+                print("::warning::" + workflow_command_escape(f"{ref}: malformed bounding box {box!r}, using estimated bounds"))
             # Padless graphics get a 2 mm estimated box; it is not enclosure clearance.
             box = [pos[0] - 1, pos[1] - 1, pos[0] + 1, pos[1] + 1]
         layer = (obj.get("props") or {}).get("layer") or ""
@@ -796,7 +802,7 @@ def normalize_poster(path):
     path.write_bytes(png[:8] + chunk(b'IHDR', header) + metadata + chunk(b'IDAT', zlib.compress(output)) + chunk(b'IEND', b''))
 
 
-def export_glb(p, side, out, *, model=True):
+def export_glb(p, side, out, *, model=True, poster=True, viewer=True):
     """Best-effort raw/fallback model and shared still; render warnings never affect coverage."""
     pcb = board_path(p, side)
     folder = pathlib.Path(out)
@@ -821,17 +827,23 @@ def export_glb(p, side, out, *, model=True):
     if model:
         if run(glb_argv(pcb, folder), "board.raw.glb", "glb.log"):
             normalize_glb(folder / "board.raw.glb")
-            shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+            if viewer:
+                shutil.copyfile(folder / "board.raw.glb", folder / "board.glb")
+            else:
+                (folder / "board.glb").unlink(missing_ok=True)
         else:
             (folder / "board.glb").unlink(missing_ok=True)
-    if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
-        try:
-            normalize_poster(folder / "poster.png")
-        except (OSError, ValueError, zlib.error) as error:
-            (folder / "poster.png").unlink(missing_ok=True)
-            (folder / "poster.png.failed").write_text("normalization attempted and failed")
-            with (folder / "poster.log").open('a', encoding='utf-8') as log:
-                log.write(f'\nPoster normalization failed: {error}\n')
+    if poster:
+        if run(poster_argv(pcb, folder), "poster.png", "poster.log"):
+            try:
+                normalize_poster(folder / "poster.png")
+            except (OSError, ValueError, zlib.error) as error:
+                (folder / "poster.png").unlink(missing_ok=True)
+                (folder / "poster.png.failed").write_text("normalization attempted and failed")
+                with (folder / "poster.log").open('a', encoding='utf-8') as log:
+                    log.write(f'\nPoster normalization failed: {error}\n')
+    else:
+        (folder / "poster.png").unlink(missing_ok=True)
 
 
 def render_tool_identity():
@@ -850,6 +862,13 @@ def render_tool_identity():
 def render_cache_complete(cache, p, side, settings):
     if not cache or not image_cache_complete(cache, p, side):
         return False
+    # board.raw.glb is required for head only when downloads.enabled is True (spec lines 27-28,
+    # plan-context.md line 7). Release-only renders stage fab files but never produce raw GLB,
+    # so requiring raw GLB for release-only would cause permanent cache misses.
+    if side == "head" and settings.get("downloads", {}).get("enabled") and pathlib.Path(board_path(p, side)).is_file():
+        raw = cache / "board.raw.glb"
+        if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
+            return False
     need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
     if need_still and pathlib.Path(board_path(p, side)).is_file():
         if settings["3d"]["enabled"]:
@@ -901,6 +920,9 @@ def render_cache(p, side, det, settings):
               "board_models": glb_input_digest(p, side)}
     identity = pathlib.Path(__file__).read_bytes() + json.dumps(inputs, sort_keys=True).encode()
     identity += json.dumps(image_export_identity(p, side), sort_keys=True, separators=(',', ':')).encode()
+    needs_downloads = side == "head" and (settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off")
+    if needs_downloads:
+        identity += b"\0head-downloads-v1"
     if fab_enabled(settings):
         identity += FAB_TABLE.read_bytes() + (b"fab-head" if side == "head" else b"fab-base")
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
@@ -983,7 +1005,9 @@ def cmd_render(args):
                     render_fab(p, side, out, settings)
                 except (OSError, ValueError, RuntimeError) as exc:
                     sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
-            if need_still and pathlib.Path(board_path(p, side)).is_file():
+            if side == "head" and settings["downloads"]["enabled"]:
+                export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
+            elif need_still and pathlib.Path(board_path(p, side)).is_file():
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
                     for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
@@ -998,7 +1022,12 @@ def cmd_render(args):
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
                     os.makedirs(f"{out}/fab", exist_ok=True)
-                    release_project(pro, "review", settings, f"{out}/fab", p["name"])
+                    try:
+                        release_project(pro, "review", settings, f"{out}/fab", p["name"])
+                    except (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
+                        print("::warning::" + workflow_command_escape(f"{p['name']}: release outputs incomplete; continuing other exports"))
+            if side == "head" and det.get("head") and (settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"):
+                export_downloads(p, posixpath.join(side, p["dir"]), out, settings, det["head"])
             print(f"{p['name']}: rendered {side}")
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
@@ -1022,7 +1051,7 @@ def cmd_render(args):
                             # ponytail: unit 1 drawing; compare all units' pins, add unit views when requested.
                             pathlib.Path(f"{dest}/{lib_slug(c)}.svg").write_bytes(made[0].read_bytes())
                         except OSError:
-                            print(f"::warning::No drawing for library item {c['lib']}:{c['item']} ({side})")
+                            print("::warning::" + workflow_command_escape(f"No drawing for library item {c['lib']}:{c['item']} ({side})"))
 
     cache_renders()
 
@@ -2501,6 +2530,7 @@ DEFAULT_SETTINGS = {
     "release": {"review": False},
     "digikey": {"enabled": False, "site": "US", "currency": "USD", "max_lookups": 100},
     "pdf": {"enabled": False},
+    "downloads": {"enabled": False, "step": True},  # head-revision files for the report's Download dialog
 
     "threads": {"enabled": False, "block_merge": False},
     "issues": {"enabled": False},
@@ -2562,7 +2592,7 @@ def load_settings(roots=("base", "head")):
                 else:
                     settings[k] = v
             break
-    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf"):
+    for section in ("checks", "bom", "fabrication", "3d", "parts", "release", "digikey", "threads", "issues", "github", "waivers", "inventory", "libraries", "interfaces", "pdf", "downloads"):
         if not isinstance(settings[section], dict):
             sys.exit(f"{SETTINGS_FILE}: {section} must be a table")
     if not isinstance(settings["bom"]["required_fields"], list) or not all(isinstance(f, str) for f in settings["bom"]["required_fields"]):
@@ -2605,6 +2635,9 @@ def load_settings(roots=("base", "head")):
         sys.exit(f"{SETTINGS_FILE}: digikey.max_lookups must be an integer from 1 to 900")
     if not isinstance(settings["pdf"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: pdf.enabled must be true or false")
+    for key in ("enabled", "step"):
+        if not isinstance(settings["downloads"][key], bool):
+            sys.exit(f"{SETTINGS_FILE}: downloads.{key} must be true or false")
 
     if not isinstance(settings["threads"]["enabled"], bool):
         sys.exit(f"{SETTINGS_FILE}: threads.enabled must be true or false")
@@ -2805,6 +2838,406 @@ def cmd_release(args):
         with open("release/SHA256SUMS", "w", encoding="utf-8") as fh:
             fh.write("\n".join(sums) + "\n")
         print("release/SHA256SUMS")
+
+
+# ---- Downloads: head-revision files for the report's Download dialog (downloads.enabled). ----
+
+DOWNLOAD_STEP_TIMEOUT = 120  # seconds; a slower STEP export is skipped and the reason recorded
+DOWNLOAD_LABELS = {"fab": "For fabrication", "pdf": "Schematic PDF", "step": "3D model (STEP)", "glb": "3D model (GLB)"}
+
+
+def safe_name(text):
+    """File-name-safe label: the Worker route and the gh command only ever see [A-Za-z0-9_.-]."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("-.") or "project"
+
+
+def export_one(kind, args, dest, timeout=None):
+    """Run one kicad-cli export; record failed, slow or empty exports instead of raising."""
+    entry = {"kind": kind, "label": DOWNLOAD_LABELS[kind], "file": None, "error": None}
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        r = subprocess.run(["kicad-cli", *args], capture_output=True, text=True, timeout=timeout)
+        if r.returncode:
+            entry["error"] = f"kicad-cli exited {r.returncode}"
+        elif not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+            entry["error"] = "kicad-cli wrote no file"  # KiCad can exit 0 after printing an error (pcb export odb does)
+    except subprocess.TimeoutExpired:
+        entry["error"] = f"skipped: export took longer than {timeout} s"
+    except OSError as e:
+        entry["error"] = f"kicad-cli unavailable: {e}"
+    if entry["error"]:
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError as e:
+            entry["error"] += f"; cannot remove output: {e}"
+    else:
+        entry["file"] = os.path.basename(dest)
+    return entry
+
+
+def fab_parts(pro, name, settings, fab_dir):
+    """Require outputs for the source types actually present; never equate rc=0 with completeness."""
+    stem = f"{fab_dir}/{name}-review-{settings['fabrication']['preset']}"
+    pcb, sch = pro[:-len(".kicad_pro")] + ".kicad_pcb", pro[:-len(".kicad_pro")] + ".kicad_sch"
+    parts = []
+    def csv_ok(path, header):
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        # ponytail: header-only CSV is valid for a board with no placed parts; assembly readiness remains checks.release's job.
+        if not rows or rows[0] != header or any(len(row) != len(header) for row in rows[1:]):
+            raise ValueError("malformed fabrication CSV")
+    if os.path.isfile(pcb):
+        archive, pos = stem + "-gerbers.zip", stem + "-positions.csv"
+        with zipfile.ZipFile(archive) as z:
+            infos = z.infolist()
+            if not infos or any(i.file_size == 0 or i.is_dir() for i in infos) or z.testzip():
+                raise ValueError("empty or damaged Gerber archive")
+            names = [i.filename.lower() for i in infos]
+            if not any(n.endswith(".drl") for n in names):
+                raise ValueError("missing drill output")
+            # KiCad --no-x2 uses Protel extensions; also accept .gbr naming.
+            for layer in (l for l in board_layers(pcb) if l.endswith(".Cu")):
+                ext = {"F.Cu": ".gtl", "B.Cu": ".gbl"}.get(layer)
+                if layer.startswith("In"):
+                    ext = ".g" + layer[2:-3]
+                if not any(n.endswith("-" + layer.replace(".", "_").lower() + ".gbr") or (ext and n.endswith(ext)) for n in names):
+                    raise ValueError("missing copper Gerber: " + layer)
+        csv_ok(pos, list(POS_COLUMNS.values()))
+        parts += [archive, pos]
+    if os.path.isfile(sch):
+        bom = stem + "-bom.csv"
+        csv_ok(bom, [label for _, label in PRESETS[settings["fabrication"]["preset"]]["bom"]])
+        parts.append(bom)
+    if not parts or any(not os.path.isfile(f) or not os.path.getsize(f) for f in parts):
+        raise ValueError("missing fabrication output")
+    return parts
+
+
+CPL_TABLE = pathlib.Path(__file__).with_name("cpl_rotations") / "jlcpcb_cpl_rotations.csv"
+CPL_TABLE_SHA256 = "fce26b890863fa56c6fc8d91a44241d9f3b420c78da28a10bc13204903542698"
+CPL_OVERRIDE_HEADER = ["Designator", "Rotation", "Offset X", "Offset Y"]
+
+
+def load_cpl_table(path=CPL_TABLE):
+    """Rows of matthewlai/JLCKicadTools cpl_rotations_db.csv in file order: (compiled pattern, degrees, dx, dy)."""
+    data = pathlib.Path(path).read_bytes()
+    if hashlib.sha256(data).hexdigest() != CPL_TABLE_SHA256:
+        raise SystemExit(f"{path}: not the pinned CPL rotation table")
+    rows = list(csv.reader(data.decode("utf-8").splitlines(), skipinitialspace=True))
+    # The pinned source has whitespace before the final quoted header cell.
+    if not rows or rows[0] != ["Footprint pattern", "Rotation", "Offset X", "Offset Y"]:
+        raise SystemExit(f"{path}: unexpected CPL rotation table header")
+    table = []
+    for row in rows[1:]:
+        dx = float(row[2]) if len(row) > 2 else 0.0
+        dy = float(row[3]) if len(row) > 3 else 0.0
+        table.append((re.compile(row[0]), int(row[1]), dx, dy))
+    return table
+
+
+def cpl_rule(table, package):
+    """Last matching row wins, as in JLCKicadTools' FixRotations. re.match anchors only the start of the Package column."""
+    hit = None
+    for pattern, degrees, dx, dy in table:
+        if pattern.match(package):
+            hit = (degrees, dx, dy)
+    return hit
+
+
+def jlc_position(side, rotation, x, y, rule):
+    """One CPL row with the arithmetic of cpl_fix_rotations.py FixRotations (JLCKicadTools cdd504e, lines 121-173).
+    ponytail: the bottom-side mirror is the July 2022 rule the pinned code documents; unverified against JLCPCB's current behaviour (see cpl_rotations/SOURCE.md)."""
+    bottom = side == "Bottom"
+    if bottom and x < 0:
+        x = -x
+    if rule is not None:
+        degrees, dx, dy = rule
+        degrees %= 360  # Reduce integer overrides before float arithmetic, even beyond float range.
+        rotation = (rotation - degrees) % 360 if bottom else (rotation + degrees) % 360
+        x, y = x + dx, y + dy
+    if bottom:
+        rotation = (-rotation + 180) % 360
+    return rotation, x, y
+
+
+def load_cpl_overrides(path):
+    """Per-part overrides from <project folder>/<name>.cpl-overrides.csv. A listed Designator replaces its table rule."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f, strict=True))
+    if not rows or rows[0] != CPL_OVERRIDE_HEADER:
+        raise ValueError("CPL overrides header must be Designator,Rotation,Offset X,Offset Y")
+    overrides = {}
+    for row in rows[1:]:
+        if len(row) != 4 or not row[0]:
+            raise ValueError("malformed CPL override row")
+        if row[0] in overrides:
+            raise ValueError("duplicate CPL override for " + row[0])
+        dx, dy = float(row[2]), float(row[3])
+        if not (math.isfinite(dx) and math.isfinite(dy)):
+            raise ValueError("CPL override offset is not finite")
+        overrides[row[0]] = (int(row[1]), dx, dy)
+    return overrides
+
+
+def correct_positions(src, dest, table, overrides):
+    """Write the JLCPCB CPL with corrected rotation and offsets. Returns how many rows matched an override or a table rule."""
+    with open(src, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    col = {name: rows[0].index(name) for name in ("Designator", "Package", "Mid X", "Mid Y", "Rotation", "Layer")}
+    matched = 0
+    with open(dest, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(rows[0])
+        for row in rows[1:]:
+            side = row[col["Layer"]]
+            if side not in ("Top", "Bottom"):
+                raise ValueError("unexpected CPL side: " + side)
+            rule = overrides.get(row[col["Designator"]]) or cpl_rule(table, row[col["Package"]])
+            if rule is not None:
+                matched += 1
+            rot, x, y = jlc_position(side, float(row[col["Rotation"]]), float(row[col["Mid X"]]), float(row[col["Mid Y"]]), rule)
+            row[col["Rotation"]], row[col["Mid X"]], row[col["Mid Y"]] = f"{rot:.6f}", f"{x:.6f}", f"{y:.6f}"
+            w.writerow(row)
+    return matched
+
+
+def cpl_for_download(pro, name, settings, raw, dest):
+    """Corrected CPL for the download zip only. Release evidence and checks.release keep KiCad's raw export."""
+    overrides_path = os.path.join(os.path.dirname(pro), f"{name}.cpl-overrides.csv")
+    if settings["fabrication"]["preset"] != "jlcpcb":
+        if os.path.exists(overrides_path):
+            raise ValueError("CPL rotation overrides apply to the jlcpcb preset only")
+        shutil.copyfile(raw, dest)  # no PCBWay rotation source is pinned, so PCBWay positions stay KiCad's
+        return dest
+    matched = correct_positions(raw, dest, load_cpl_table(), load_cpl_overrides(overrides_path))
+    print("::notice::" + workflow_command_escape(f"{name}: JLCPCB CPL rotation rules matched {matched} rows (JLCKicadTools table, pinned)"))
+    return dest
+
+
+def fab_entry(pro, name, settings, fab_dir, dest):
+    """Read raw release evidence; correct only the download zip's disposable CPL copy."""
+    entry = {"kind": "fab", "label": DOWNLOAD_LABELS["fab"], "file": None, "error": None}
+    expected = (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile)
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        with tempfile.TemporaryDirectory(prefix=".fab-", dir=os.path.dirname(dest) or ".") as staging:
+            try:
+                parts = fab_parts(pro, name, settings, fab_dir)
+            except expected:
+                release_project(pro, "review", settings, staging, name)
+                parts = fab_parts(pro, name, settings, staging)
+            with zipfile.ZipFile(dest, "w") as z:
+                for part in parts:
+                    base = os.path.basename(part)
+                    if base.endswith("-positions.csv"):
+                        part = cpl_for_download(pro, name, settings, part, os.path.join(staging, "cpl-" + base))
+                    z.write(part, base)
+            fab_notices(name, settings, parts)
+        entry["file"] = os.path.basename(dest)
+    except expected:
+        print("::warning::" + workflow_command_escape(f"{name}: fabrication export failed (incomplete outputs, invalid CSV/archive or CPL overrides)"))
+        entry["error"] = "fabrication export failed"
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+    return entry
+
+
+def glb_entry(raw, dest):
+    """Copy 02's raw head export; a missing or empty raw file is an error, never a second GLB export here."""
+    entry = {"kind": "glb", "label": DOWNLOAD_LABELS["glb"], "file": None, "error": None}
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+        if os.path.isfile(raw) and os.path.getsize(raw) > 0:
+            shutil.copyfile(raw, dest)
+            entry["file"] = os.path.basename(dest)
+        else:
+            print("::warning::" + workflow_command_escape("3D model (GLB): board.raw.glb was not produced"))
+            entry["error"] = "GLB export missing"
+    except OSError as e:
+        print("::warning::" + workflow_command_escape(f"3D model (GLB): {e}"))
+        entry["error"] = f"GLB export unavailable: {e}"
+        try:
+            if os.path.lexists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
+    return entry
+
+
+def download_policy_key(policy):
+    """Only byte-affecting export policy; enabled gates collection, not fabrication identity."""
+    value = {"fabrication": policy["fabrication"], "step": policy.get("downloads", {}).get("step", True)}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def download_directory(out, purpose):
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    return f"{out}/" + ("downloads-snapshot" if purpose == "snapshot" else "downloads")
+
+
+def write_download_manifest(dl, entries, *, policy=None, purpose="comparison"):
+    """Additive policy-bound files envelope; never confuse comparison and trusted snapshot exports."""
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    policy = DEFAULT_SETTINGS if policy is None else policy
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    files = []
+    for e in entries:
+        item = {"kind": e["kind"], "label": e["label"]}
+        if e["error"]:
+            item["error"] = e["error"]
+        else:
+            path = pathlib.Path(dl, e["file"])
+            with path.open("rb") as f:
+                sha = hashlib.file_digest(f, "sha256").hexdigest()
+            item.update(path=e["file"], bytes=path.stat().st_size, sha256=sha)
+        files.append(item)
+    pathlib.Path(dl, "downloads.json").write_text(json.dumps({"files": files, "purpose": purpose, "policy": download_policy_key(policy)}), encoding="utf-8")
+    return files
+
+
+def export_downloads(p, src, out, settings, head, *, policy=None, purpose="comparison"):
+    """Best-effort exports under an explicit trusted/comparison policy and separate manifest."""
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("head must be the full 40-character SHA")
+    settings = settings if policy is None else policy
+    name, dl = p["name"], download_directory(out, purpose)
+    pcb, sch = f"{src}/{name}.kicad_pcb", f"{src}/{name}.kicad_sch"
+    if purpose == "snapshot" and os.path.exists(pcb):
+        # Task 9A gate: the raw exporter must record its verified source revision.
+        # Never relabel comparison-head bytes as a different snapshot revision.
+        marker = pathlib.Path(out, "board.raw.glb.revision")
+        try:
+            revision = marker.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            revision = None
+        if revision != head:
+            raise ValueError("snapshot GLB revision must match the requested full SHA (Task 9A gate)")
+    shutil.rmtree(dl, ignore_errors=True)
+    os.makedirs(dl, exist_ok=True)
+    stem = f"{safe_name(name)}-{head[:7]}"
+    entries = []
+    if os.path.exists(pcb):
+        fab_dir = f"{out}/" + ("fab-snapshot" if purpose == "snapshot" else "fab")
+        entries.append(fab_entry(f"{src}/{name}.kicad_pro", name, settings, fab_dir, f"{dl}/fab-{stem}.zip"))
+    if settings["downloads"]["enabled"] and os.path.exists(sch):
+        dest = f"{dl}/{stem}-schematic.pdf"
+        entries.append(export_one("pdf", ["sch", "export", "pdf", "-o", dest, sch], dest))
+    if settings["downloads"]["enabled"] and os.path.exists(pcb):
+        if settings["downloads"]["step"]:
+            dest = f"{dl}/{stem}-board.step"
+            entries.append(export_one("step", ["pcb", "export", "step", "--subst-models", "-f", "-o", dest, pcb], dest, DOWNLOAD_STEP_TIMEOUT))
+        dest = f"{dl}/{stem}-board.glb"  # 02's uncompressed raw export, copied unchanged; never the Meshopt-compressed viewer GLB
+        entries.append(glb_entry(f"{out}/board.raw.glb", dest))
+    for e in entries:
+        if e["error"] and e["kind"] != "fab":
+            print("::warning::" + workflow_command_escape(f"{name}: {e['label']}: {e['error']}"))
+    write_download_manifest(dl, entries, policy=settings, purpose=purpose)
+    return entries
+
+
+# Pinned KiBot v1.9.1 JLCPCB.kibot.yaml position columns (lines 94-106).
+KIBOT_POSITION_HEADER = ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
+# Protel extensions (KiCad --no-x2) for the layers both templates plot (JLCPCB lines 161-167, PCBWay lines 87-93).
+KIBOT_LAYER_SUFFIXES = {"F.Cu": ".gtl", "B.Cu": ".gbl", "F.SilkS": ".gto", "B.SilkS": ".gbo",
+                        "F.Mask": ".gts", "B.Mask": ".gbs", "Edge.Cuts": ".gko"}
+
+
+def kibot_differences(preset, gerber_names, bom_rows):
+    """Only the differences Task 3A checks. Everything else is recorded in kibot_templates/v1.9.1/SOURCE.md."""
+    lower = [n.lower() for n in gerber_names]
+    diffs = [f"missing {layer} ({suffix})" for layer, suffix in KIBOT_LAYER_SUFFIXES.items()
+             if not any(n.endswith(suffix) for n in lower)]
+    if preset == "jlcpcb":
+        if any(n.endswith((".gtp", ".gbp")) for n in lower):
+            diffs.append("stencil layers exported; JLCPCB template excludes them (lines 147-148)")
+        if bom_rows and "LCSC Part #" in bom_rows[0]:
+            lcsc = bom_rows[0].index("LCSC Part #")
+            if any(len(row) <= lcsc or not row[lcsc].strip() for row in bom_rows[1:]):
+                diffs.append("BOM rows without LCSC number; JLCPCB template filters them (line 115)")
+    return diffs
+
+
+def fab_notices(name, settings, parts):
+    """Print checked template differences as notices. They never fail the fabrication entry."""
+    preset = settings["fabrication"]["preset"]
+    archive = next((p for p in parts if p.endswith("-gerbers.zip")), None)
+    if archive is None:  # a schematic-only project has no Gerbers to compare
+        return
+    bom = next((p for p in parts if p.endswith("-bom.csv")), None)
+    with zipfile.ZipFile(archive) as z:
+        names = z.namelist()
+    rows = None
+    if bom:
+        with open(bom, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+    for diff in kibot_differences(preset, names, rows):
+        print("::notice::" + workflow_command_escape(f"{name}: {preset} fabrication differs from KiBot v1.9.1 template: {diff}"))
+
+
+def collect_downloads(p, index, head, *, policy=None, purpose="comparison", report=None):
+    """The project's manifest, with its files copied into the purpose's staging folder for that run's downloads artifact."""
+    if purpose not in ("comparison", "snapshot"):
+        raise ValueError("invalid download purpose")
+    if purpose == "snapshot" and policy is None:
+        raise ValueError("snapshot downloads need the trusted snapshot policy")
+    if report not in (None, "design") or (report == "design") != (purpose == "snapshot"):
+        raise ValueError("report kind must match purpose: None with comparison, 'design' with snapshot")
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise ValueError("head must be the full 40-character SHA")
+    snapshot = report == "design"
+    src = f"review/{project_id(p['dir'])}/head/" + ("downloads-snapshot" if snapshot else "downloads")
+    staging = "review/design-downloads" if snapshot else "review/downloads"
+    bundle = f"kicad-{'design' if snapshot else 'review'}-downloads-{head[:7]}"
+    try:
+        envelope = json.loads(pathlib.Path(f"{src}/downloads.json").read_text(encoding="utf-8"))
+        entries = envelope["files"]
+        if not isinstance(entries, list):
+            return None
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+    if snapshot and envelope.get("policy") != download_policy_key(policy):
+        return None  # a comparison-policy package never reaches a trusted snapshot
+    out = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        kind = e.get("kind")
+        label = e.get("label")
+        if not isinstance(kind, str) or not kind.strip():
+            continue
+        if not isinstance(label, str) or not label.strip():
+            continue
+        item = {"kind": kind, "label": label}
+        epath = e.get("path")
+        path = f"{src}/{epath}" if isinstance(epath, str) and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", epath) else ""
+        if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+            os.makedirs(f"{staging}/{index}", exist_ok=True)
+            shutil.copyfile(path, f"{staging}/{index}/{epath}")
+            with open(path, "rb") as fh:
+                sha = hashlib.file_digest(fh, "sha256").hexdigest()
+            item.update(bytes=os.path.getsize(path), sha256=sha, path=f"{index}/{epath}", artifact=bundle)
+        else:
+            err = e.get("error")
+            item["error"] = str(err) if err is not None and str(err).strip() else "not exported"
+        out.append(item)
+    if out:
+        os.makedirs(f"{staging}/{index}", exist_ok=True)
+        pathlib.Path(f"{staging}/{index}/downloads.json").write_text(json.dumps({"files": out, "head": head}), encoding="utf-8")
+    return out
 
 
 FAB_START = "# kicad-review fab limits - start"
@@ -3623,7 +4056,7 @@ def load_waivers(ref):
         out["proposed"] = [e for e in entries if (e["check"], e["match"]) not in out["active"]]
         out["invalid"] += invalid
     for m in out["invalid"]:
-        print(f"::warning::{m}")
+        print("::warning::" + workflow_command_escape(f"{m}"))
     return out
 
 
@@ -5034,7 +5467,7 @@ def cmd_report(args):
     settings = load_settings()
     # An opted-out report must remain byte-for-byte compatible with reports made before this feature.
     report_settings = {k: v for k, v in settings.items()
-                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
+                       if k != "release" and not ((k in ("3d", "parts", "digikey", "threads", "issues", "waivers", "inventory", "libraries", "pdf", "downloads") and not v["enabled"]) or (k == "github" and not v["check_runs"]))}
     if not settings["parts"]["enabled"]:
         report_settings["bom"] = {"required_fields": settings["bom"]["required_fields"]}
     if settings["checks"].get("interfaces") == "off":  # opted-out reports stay byte-identical
@@ -5054,11 +5487,15 @@ def cmd_report(args):
         "run_id": env.get("GITHUB_RUN_ID", ""),
     }
     waivers = load_waivers(env.get("WAIVERS_REF") or det["base"]) if settings["waivers"]["enabled"] else None
+    shutil.rmtree("review/downloads", ignore_errors=True)
     data["projects"] = []
     change_offset = 0
     bom_boards = []
-    for p in det["projects"]:
+    for i, p in enumerate(det["projects"]):
         project = build_project(p, blobs, settings, waivers, change_offset, bom_boards)
+        downloads = collect_downloads(p, i, det["head"]) if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off" else None
+        if downloads:
+            project["downloads"] = downloads
         data["projects"].append(project)
         change_offset += len(project["changes"])
     if len(bom_boards) >= 2:  # repository-wide BOM, only when there are several projects (Owner decision 2026-10-26)
@@ -5094,7 +5531,7 @@ def cmd_report(args):
         fh.write(f"name={name}\n")
         fh.write(f"issues={'true' if settings['issues']['enabled'] else 'false'}\n")
         fh.write(f"pdf={'true' if settings.get('pdf', {}).get('enabled') else 'false'}\npdf_name={name[:-5]}.pdf\n")
-
+        fh.write(f"downloads={'true' if os.path.isdir('review/downloads') and os.listdir('review/downloads') else 'false'}\ndownloads_name=kicad-review-downloads-{det['head'][:7]}\n")
         fh.write(f"threads={'true' if settings['threads']['enabled'] else 'false'}\n")
 
 
@@ -5331,7 +5768,7 @@ def cmd_shots(args):
         if r.returncode == 0 and os.path.exists(out):
             done.append(s)
         else:
-            print(f"::warning::Screenshot of {s['title']} failed: {r.stderr[-300:]}")
+            print("::warning::" + workflow_command_escape(f"Screenshot of {s['title']} failed: {r.stderr[-300:]}"))
     with open(f"review/images/shots.json", "w", encoding="utf-8") as fh:
         json.dump(done, fh, indent=2)
     print(f"{len(done)} screenshot(s)")
@@ -5354,21 +5791,21 @@ def cmd_summary(args):
                 for key in ("data", "repository", "pullRequest", "reviewThreads"):
                     review_threads = review_threads.get(key) if isinstance(review_threads, dict) else None
                 if not isinstance(raw, dict) or raw.get("errors") or not isinstance(review_threads, dict) or not review_threads:
-                    print("::warning::review/threads.json has no review threads; thread counts left out")
+                    print("::warning::" + workflow_command_escape("review/threads.json has no review threads; thread counts left out"))
                 elif review_threads.get("totalCount", 0) > len(review_threads.get("nodes") or []):
                     # ponytail: first 100 threads; fail closed beyond the ceiling until paginated.
-                    print("::warning::review/threads.json is incomplete; thread counts left out")
+                    print("::warning::" + workflow_command_escape("review/threads.json is incomplete; thread counts left out"))
                 else:
                     threads = thread_counts(raw)
             except ValueError:
-                print("::warning::review/threads.json is not JSON; thread counts left out")
+                print("::warning::" + workflow_command_escape("review/threads.json is not JSON; thread counts left out"))
     issues = None
     if data["settings"].get("issues", {}).get("enabled") and os.path.exists("review/issues.json"):
         with open("review/issues.json", encoding="utf-8") as fh:
             try:
                 issues = touched_issues(json.load(fh), data)
             except ValueError:
-                print("::warning::review/issues.json is not JSON; issue links left out")
+                print("::warning::" + workflow_command_escape("review/issues.json is not JSON; issue links left out"))
     log = ""
     if os.environ.get("HISTORY") == "true":
         previous = ""
@@ -5662,7 +6099,7 @@ def cmd_pdf(args):
         fh.write(page)
     name = os.environ.get("PDF_NAME", "")
     if not re.fullmatch(r"kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.pdf", name):
-        print("::warning::PDF report failed: invalid PDF_NAME")
+        print("::warning::" + workflow_command_escape("PDF report failed: invalid PDF_NAME"))
         return
     out = os.path.abspath(f"review/{name}")
     try:
@@ -5675,7 +6112,7 @@ def cmd_pdf(args):
     except (OSError, subprocess.TimeoutExpired):
         if os.path.exists(out):
             os.remove(out)
-        print("::warning::PDF report failed: Chrome unavailable, failed or timed out")
+        print("::warning::" + workflow_command_escape("PDF report failed: Chrome unavailable, failed or timed out"))
         return
     print(f"{out}: {os.path.getsize(out) / 1e6:.2f} MB")
 

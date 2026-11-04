@@ -2667,6 +2667,44 @@ function showShortcuts() { const dialog=$("#shortcuts"); if(!dialog.open) dialog
 new MutationObserver(updateStatus).observe($("#panel"), {childList:true, subtree:true});   // change n/N follows any list rebuild or filter
 $("#shortcuts-open").onclick=showShortcuts;
 $("#shortcuts [data-close]").onclick=()=>$("#shortcuts").close();
+
+// ---- Download dialog: GitHub zips of both revisions, plus the head files the run exported when downloads.enabled is on. ----
+function hostedBase(href = location.href, framed = parent !== window) {   // the review site's /r/<owner>/<repo>/a/<id> when this page is its framed report, else ""
+  try {
+    const u = new URL(href), m = /^(\/r\/[^/]+\/[^/]+\/a\/\d{1,20})\/raw$/.exec(u.pathname);
+    return framed && m ? u.origin + m[1] : "";
+  } catch { return ""; }
+}
+const fileSize = n => !Number.isFinite(n) ? "" : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+function downloadItems() {
+  const L = D.links || {}, items = [], hosted = hostedBase();
+  // ponytail: GitHub's zip is the whole repository at the commit; a project-folder zip needs the Worker to rewrite a zipball.
+  const zipOf = url => /^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*\/commit\/[0-9a-f]{40}$/.test(url || "") ? url.replace(/\/commit\/([0-9a-f]{40})$/, "/archive/$1.zip") : "";
+  [["head", "KiCad project, head revision"], ["base", "KiCad project, base revision"]].forEach(([side, label]) => {
+    const href = zipOf(L[side]);
+    if (href) items.push({ label, note: "whole repository, zip from GitHub", href });
+  });
+  D.projects.forEach((p, i) => (p.downloads || []).forEach(d => {
+    const label = D.projects.length > 1 ? `${d.label} · ${p.name}` : d.label, note = fileSize(d.bytes);
+    if (d.error || !/^(fab|pdf|step|glb)$/.test(d.kind)) { items.push({ label, note: d.error || "unavailable" }); return; }
+    if (hosted) { items.push({ label, note, href: `${hosted}/download/${i}/${d.kind}` }); return; }
+    const safe = /^\d{1,20}$/.test(D.run_id) && /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(D.repo) && /^kicad-(?:review|design)-downloads-[0-9a-f]{7}$/.test(d.artifact) && new RegExp(`^${i}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}$`).test(d.path);
+    items.push({ label, note: safe ? `${note} · kicad-review-downloads/${d.path}`.replace(/^ · /, "") : note,
+      cmd: safe ? `gh run download ${D.run_id} -R ${D.repo} -n ${d.artifact} -D kicad-review-downloads` : "" });
+  }));
+  return items;
+}
+function renderDownloads() {
+  const body = $("#downloads-body"), any = D.projects.some(p => (p.downloads || []).length);
+  body.innerHTML = `<ul>${downloadItems().map(i => i.href
+    ? `<li><a href="${esc(i.href)}" target="_blank" rel="noopener">${esc(i.label)}</a><span class="muted">${esc(i.note)}</span></li>`
+    : i.cmd ? `<li><button type="button" data-copy="${esc(i.cmd)}">Copy download command: ${esc(i.label)}</button><span class="muted">${esc(i.note)}</span></li>`
+    : `<li><span>${esc(i.label)}</span><span class="muted">${esc(i.note)}</span></li>`).join("")}</ul>`
+    + (any ? "" : `<p class="muted">Fabrication files, the schematic PDF and 3D models are exported when <code>downloads.enabled = true</code> is set in kicad-review.toml.</p>`);
+  body.querySelectorAll("[data-copy]").forEach(b => { b.onclick = () => benchCopy(b.dataset.copy); });
+}
+$("#downloads-open").onclick = () => { renderDownloads(); const dialog = $("#downloads"); if (!dialog.open) dialog.showModal(); };
+$("#downloads [data-close]").onclick = () => $("#downloads").close();
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && $("#shortcuts").open) { e.preventDefault(); $("#shortcuts").close(); return; }
   if (e.target.closest?.('input,select,textarea,[contenteditable]:not([contenteditable="false"]),dialog[open]')) return;
