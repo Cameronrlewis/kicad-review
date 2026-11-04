@@ -4569,9 +4569,15 @@ def br02_render_cache_contract():
             settings['3d']['enabled'] = True
             calls = []
             def cli(args, **kw):
-                calls.append(args)
-                pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
-                return subprocess.CompletedProcess(args, 0, 'GLB log' if 'glb' in args else 'poster log', '')
+                if '-o' in args:
+                    calls.append(args)
+                    pathlib.Path(args[args.index('-o')+1]).write_bytes(b'glTF' if 'glb' in args else br02_png())
+                    return subprocess.CompletedProcess(args, 0, 'GLB log' if 'glb' in args else 'poster log', '')
+                m = re.search(r'"([^"]+\.svg)"\]; run', args[2]) if len(args) > 2 else None
+                if m:
+                    pathlib.Path(m.group(1)).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(m.group(1)).write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>')
+                return subprocess.CompletedProcess(args, 0, '', '')
             with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side'), \
                  patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
                  patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.0'), patch.object(kr.subprocess, 'run', cli):
@@ -6117,8 +6123,14 @@ with _DpTmp() as t:
         calls = []
         def cli(args, **kw):
             calls.append(args)
-            dest = pathlib.Path(args[args.index('-o')+1])
-            dest.write_bytes(b'glTF' if 'glb' in args else _dp_png)
+            if '-o' in args:
+                dest = pathlib.Path(args[args.index('-o')+1])
+                dest.write_bytes(b'glTF' if 'glb' in args else _dp_png)
+            elif len(args) > 2 and 'pcbdraw' in args[2]:
+                m = re.search(r'"([^"]+\.svg)"\]; run', args[2])
+                if m:
+                    pathlib.Path(m.group(1)).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(m.group(1)).write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>')
             return subprocess.CompletedProcess(args, 0, '', '')
         def fake_render_side(src, name, out, **kw):
             pathlib.Path(out).mkdir(parents=True, exist_ok=True)
@@ -6214,4 +6226,65 @@ with _DpTmp() as t:
         os.chdir(old_cwd)
 
 print('ok DP-S5 canonical still, no GLB prerequisite, no base probes')
+
+# DP-P1: PcbDraw uses the evidenced command, keeps front and back SVGs, and records a note for a board without a closed outline.
+_dp_svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>'
+_dp_refusal = 'Error: Board has no closed outline on Edge.Cuts'
+assert kr.pcbdraw_argv('front', 'P/P.kicad_pcb', 'out/f.svg') == ['python3', '-c', 'from pcbdraw.ui import run; import sys; sys.argv=["pcbdraw","plot","--side","front","--placeholders","P/P.kicad_pcb","out/f.svg"]; run()']
+assert kr.pcbdraw_argv('back', 'P/P.kicad_pcb', 'out/b.svg')[2].count('"back"') == 1
+with _DpTmp() as t:
+    calls = []
+    def writes(argv):
+        calls.append(argv)
+        out = re.search(r'"([^"]+\.svg)"\]; run', argv[2]).group(1)
+        pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(out).write_bytes(_dp_svg)
+        return 0, ''
+    products, note = kr.pcbdraw_plot('P/P.kicad_pcb', os.path.join(t, 'head'), writes)
+    assert note == '' and all(products[face] and pathlib.Path(products[face]).read_bytes() == _dp_svg for face in ('front', 'back')), products
+    assert len(calls) == 2
+    calls.clear()
+    products, note = kr.pcbdraw_plot('Thermal_Camera/T.kicad_pcb', os.path.join(t, 'thermal'), lambda argv: (1, _dp_refusal))
+    assert products == {'front': None, 'back': None} and 'no closed Edge.Cuts outline' in note, (products, note)
+    assert kr.pcbdraw_svg_valid(os.path.join(t, 'thermal', 'pcbdraw-front.svg')) is False
+print('ok DP-P1 PcbDraw command, front and back plots, skip note')
+
+# DP-P2: a comparison attaches front and back plots for both revisions; a design report attaches the head side only, with no base probes.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        write(t, {'head/H/H.kicad_pcb': _dp_pcb(''), 'review/H/head/drc.json': '{}', 'review/H/base/drc.json': '{}'})
+        for side, body in (('head', _dp_svg), ('base', _dp_svg)):
+            for face in ('front', 'back'):
+                pathlib.Path(f'review/H/{side}/pcbdraw-{face}.svg').write_bytes(body)
+            pathlib.Path(f'review/H/{side}/pcbdraw.json').write_text('{"note": ""}', encoding='utf-8')
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        settings['design']['enabled'] = True
+        settings['3d']['enabled'] = False
+        blobs = {}
+        both = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, blobs, settings)
+        assert both['board']['pcbdraw']['base']['front'] and both['board']['pcbdraw']['head']['back']
+        real_read, real_isfile = pathlib.Path.read_bytes, os.path.isfile
+        def no_base(path):
+            assert '/base/' not in str(path), 'base filesystem probe: ' + str(path)
+        with patch.object(pathlib.Path, 'read_bytes', lambda self: (no_base(self), real_read(self))[1]), patch.object(os.path, 'isfile', lambda path: (no_base(path), real_isfile(path))[1]):
+            single_blobs = {}
+            one = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, single_blobs, settings, single=True)
+        assert one['board']['pcbdraw']['base'] is None
+        assert _dpgz.decompress(_dpb64.b64decode(single_blobs[one['board']['pcbdraw']['head']['front']])) == _dp_svg
+        assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in single_blobs.values())
+        off = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        assert 'pcbdraw' not in kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, {}, off)['board']
+    finally:
+        os.chdir(old_cwd)
+print('ok DP-P2 PcbDraw attaches head only in design reports')
+
+# DP-P3: PcbDraw is installed only for design runs, pinned to the evidenced version, and reaches the KiCad image's render step.
+_wf_p = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+assert "pip install -q --target /w/.pydeps pcbdraw==1.3.0" in _wf_p
+assert "if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.design == 'true'" in _wf_p
+assert "-e PYTHONPATH=/w/.pydeps" in _wf_p.split("- name: Render both revisions and run ERC/DRC")[1].split("- name:")[0]
+print("ok DP-P3 PcbDraw install and render wiring")
+
 

@@ -41,6 +41,12 @@ KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
 
 
+def workflow_command_escape(value, *, property=False):
+    """Escape GitHub workflow-command data, with extra separators for properties."""
+    value = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return value.replace(":", "%3A").replace(",", "%2C") if property else value
+
+
 def git(*args, check=True):
     r = subprocess.run(["git", "-c", "core.quotePath=false", *args], capture_output=True, text=True)
     if check and r.returncode:
@@ -167,8 +173,12 @@ def cmd_detect(args):
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
     with open("../review/detect.json", "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2)
+    try:
+        design_enabled_out = bool(load_settings(("",))["design"]["enabled"])
+    except Exception:
+        design_enabled_out = False
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
-        fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\n")
+        fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\ndesign={'true' if design_enabled_out else 'false'}\n")
     print(f"Comparing {base} -> {head} ({reason})")
     for p in projects:
         print(f"  {p['name']} ({p['dir'] or '.'}, {p['status']})")
@@ -643,6 +653,52 @@ def export_glb(p, side, out, *, model=True):
                 log.write(f'\nPoster normalization failed: {error}\n')
 
 
+PCBDRAW_VERSION = "1.3.0"   # the version the evidence installed; review.yml pins the same number
+PCBDRAW_NO_OUTLINE = "Board has no closed outline on Edge.Cuts"
+
+
+def pcbdraw_argv(face, board, out):
+    """The call from kicad10-commands.md, run by the KiCad image's Python: `python3 -m pcbdraw` fails there, so the entry point is imported."""
+    args = ["pcbdraw", "plot", "--side", face, "--placeholders", board, out]
+    return ["python3", "-c", "from pcbdraw.ui import run; import sys; sys.argv=[%s]; run()" % ",".join(json.dumps(a) for a in args)]
+
+
+def pcbdraw_svg_valid(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(256)
+    except OSError:
+        return False
+    return b"<svg" in head and os.path.getsize(path) > 0
+
+
+def pcbdraw_run(argv):
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return 124, "timeout"
+    return done.returncode, done.stderr + done.stdout
+
+
+def pcbdraw_plot(board, side_dir, run):
+    """Front and back SVGs of one board. A board without a closed outline stops with a note; any other failure warns and keeps the other face."""
+    os.makedirs(side_dir, exist_ok=True)
+    products, note = {"front": None, "back": None}, ""
+    for face in ("front", "back"):
+        out = os.path.join(side_dir, f"pcbdraw-{face}.svg")
+        if not pcbdraw_svg_valid(out):
+            rc, text = run(pcbdraw_argv(face, board, out))
+            if PCBDRAW_NO_OUTLINE in text:
+                return products, "PcbDraw skipped: no closed Edge.Cuts outline."
+            if rc != 0 or not pcbdraw_svg_valid(out):
+                print("::warning::" + workflow_command_escape(f"PcbDraw {face} plot failed for {board} (rc {rc})"), file=sys.stderr)
+                continue
+        products[face] = out
+    if not any(products.values()):
+        note = "PcbDraw failed for both faces: see the job log."
+    return products, note
+
+
 def render_tool_identity():
     """The pinned image identifies CI's KiCad, including on the host before it is pulled."""
     if os.environ.get("KICAD_IMAGE"):
@@ -775,6 +831,9 @@ def cmd_render(args):
                             shutil.copyfile(source, dest)
                 else:
                     export_glb(p, side, out, model=export_3d)
+            if settings.get("design", {}).get("enabled", False) and os.path.isfile(board_path(p, side)):
+                _, note = pcbdraw_plot(board_path(p, side), out, pcbdraw_run)
+                pathlib.Path(out, "pcbdraw.json").write_text(json.dumps({"note": note}), encoding="utf-8")
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
@@ -3287,6 +3346,25 @@ def attach3d(board, out, blobs, allowed_sides=("base", "head")):
         board['coverage3d'] = coverage
 
 
+put_blob = add_blob
+
+
+def attach_pcbdraw(board, root, blobs, allowed_sides):
+    """board.pcbdraw.{base,head}: front and back blob ids plus the note. Single mode lists head only, so base is never read."""
+    board["pcbdraw"] = {"base": None, "head": None}
+    for side in allowed_sides:
+        folder = os.path.join(root, side)
+        meta = os.path.join(folder, "pcbdraw.json")
+        if not os.path.isfile(meta):
+            continue
+        entry = {"front": None, "back": None, "note": json.loads(pathlib.Path(meta).read_text(encoding="utf-8")).get("note", "")}
+        for face in ("front", "back"):
+            path = os.path.join(folder, f"pcbdraw-{face}.svg")
+            if pcbdraw_svg_valid(path):
+                entry[face] = put_blob(blobs, pathlib.Path(path).read_bytes())
+        board["pcbdraw"][side] = entry
+
+
 def image_pair(base, head):
     return {'base': base, 'head': head}
 
@@ -3496,6 +3574,8 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
         board["no_model"] = model3d_missing(out, objs, allowed_sides)
     if settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False):
         attach3d(board, out, blobs, allowed_sides=allowed_sides)
+    if settings.get("design", {}).get("enabled", False):
+        attach_pcbdraw(board, out, blobs, allowed_sides)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None

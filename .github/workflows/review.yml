@@ -10,6 +10,7 @@ on:
 env:
   # Official KiCad image, pinned by digest so a new upload under the same tag cannot change results.
   KICAD_IMAGE: kicad/kicad:10.0.6-full@sha256:e36e29b5f4a638a1a7238eba3d2fcbc8e061ffed1e99a8f39cb722706c94a58e
+  PYTHON_IMAGE: python:3.13-slim@sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1
 
 jobs:
   review:
@@ -91,11 +92,19 @@ jobs:
           path: .render-cache/${{ steps.detect.outputs.head }}
           key: renders-v1-${{ runner.os }}-${{ hashFiles('tools/kicad_review.py', 'tools/ui/compress3d.cjs', 'base/kicad-review.toml', 'head/kicad-review.toml') }}-${{ env.KICAD_IMAGE }}-${{ steps.detect.outputs.head }}
 
+      # PcbDraw (owner decision 2026-10-26, decision 1): installed into the workspace, then imported only by the KiCad image's Python.
+      - name: Install PcbDraw
+        if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.design == 'true'
+        run: |
+          rm -rf .pydeps
+          docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$PYTHON_IMAGE" \
+            pip install -q --target /w/.pydeps pcbdraw==1.3.0
+
       - name: Render both revisions and run ERC/DRC
         if: steps.detect.outputs.changed == 'true'
         run: |
           if ! python3 tools/kicad_review.py restore-renders; then
-            docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
+            docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e KICAD_IMAGE -e PYTHONPATH=/w/.pydeps -v "$PWD:/w" -w /w "$KICAD_IMAGE" \
               python3 tools/kicad_review.py render
           fi
 
