@@ -44,16 +44,16 @@ export async function issuesRoute(request, env, { owner, repo, rest }, { access,
   const result = await (async () => {
     if (rest !== '') return json({ error: 'Not found' }, 404);
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, token = allowed.s.token;
-    const loadIssues = async (max = 100) => {
+    const loadIssues = async (max = 100, allowOverflow = false) => {
       const paged = await ghPages(gh, `${root}/issues?state=open`, token);
-      if (!paged.ok) {
+      if (!paged.ok && !(allowOverflow && paged.overflow)) {
         const denied = paged.response && refused(paged.response);
         return denied || json({ error: 'GitHub did not load issues. Try again.' }, 502);
       }
       return parseIssues(paged.items, owner, repo, max);
     };
     if (request.method === 'GET') {
-      const issues = await loadIssues(100);
+      const issues = await loadIssues(100, true);
       return issues instanceof Response ? issues : json({ issues });
     }
     if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);

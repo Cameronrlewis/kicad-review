@@ -5662,8 +5662,7 @@ test('finding 12: issues route paginates open issues past 100 and fails closed w
   assert.equal(posts, 0);
 });
 
-
-test('finding 6: reviews list still shows the newest reviews when artifacts exceed the 10-page bound', async () => {
+test('finding 6: listing keeps the 10-page bound', async () => {
   const sealed = await signedIn();
   const pages = [];
   const restore = mockFetch(async url => {
@@ -5682,3 +5681,54 @@ test('finding 6: reviews list still shows the newest reviews when artifacts exce
     assert.match(await response.text(), /\/r\/Cameronrlewis\/repo\/a\/1\d{3}/);
   } finally { restore(); }
 });
+
+test('issues GET returns partial anchored issues when open issues exceed the 10-page bound', async () => {
+  const sealed = await signedIn();
+  const anchoredIssue = {
+    number: 1, title: 'Issue 1', html_url: 'https://github.com/Cameronrlewis/repo/issues/1', state: 'open',
+    body: threadBody({ anchor, text: 'note 1', link: 'https://s/r' }),
+  };
+  const unanchored = Array.from({ length: 100 }, (_, i) => ({ number: 100 + i, title: `Issue ${100 + i}`, html_url: `https://github.com/Cameronrlewis/repo/issues/${100 + i}`, state: 'open', body: 'no anchor' }));
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.includes('/issues?state=open')) {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      return Response.json(page === 1 ? [anchoredIssue, ...unanchored.slice(1)] : unanchored);
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/issues', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.issues?.length, 1);
+    assert.equal(body.issues[0]?.number, 1);
+  } finally { restore(); }
+});
+
+test('home dashboard paginates artifacts past page 1 to discover recent reviews', async () => {
+  const sealed = await signedIn();
+  const pages = [];
+  const dummyArtifacts = Array.from({ length: 100 }, (_, i) => ({ id: 2000 + i, name: `dummy-${i}.zip`, expired: false }));
+  const reportArtifact = { id: 999, name: 'kicad-review-deadbee-cafebad-pass.html', created_at: '2026-10-16T10:00:00Z', expired: false, workflow_run: { id: 42, head_sha: 'cafebad'.padEnd(40, '0'), head_branch: 'main' } };
+  const restore = mockFetch(async url => {
+    if (url.endsWith('/user/installations')) return Response.json({ installations: [{ id: 1 }] });
+    if (url.includes('/repositories?')) return Response.json({ repositories: [{ owner: { login: 'Cameronrlewis' }, name: 'repo', pushed_at: '2026-10-16T10:00:00Z' }] });
+    if (url.includes('/actions/artifacts?')) {
+      const page = Number(new URL(url).searchParams.get('page') || 1);
+      pages.push(page);
+      return Response.json({ artifacts: page === 1 ? dummyArtifacts : [reportArtifact] });
+    }
+    if (url.includes('/actions/runs?')) return Response.json({ workflow_runs: [{ id: 42, pull_requests: [], name: 'Review', conclusion: 'success', created_at: '2026-10-16T10:00:00Z' }] });
+    if (url.includes('/pulls?')) return Response.json([]);
+    throw new Error(`unexpected ${url}`);
+  });
+  try {
+    const response = await call('/', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.deepEqual(pages, [1, 2]);
+    assert.match(body, /\/r\/Cameronrlewis\/repo\/a\/999/);
+  } finally { restore(); }
+});
+

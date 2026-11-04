@@ -615,15 +615,15 @@ async function home(request, env) {
     await Promise.all(repositories.slice(0, 5).map(async repo => {
       const owner = repo.owner.login;
       const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo.name)}`;
-      const [artifacts, runs, pulls] = await Promise.all([
-        json(`${root}/actions/artifacts?per_page=100`),
-        json(`${root}/actions/runs?per_page=20`),
-        json(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=20`),
-      ].map(promise => promise.catch(() => null)));
-      if (!artifacts || !runs || !pulls) errors.push(`Some recent data for ${owner}/${repo.name} could not be loaded.`);
+      const [artifactsPaged, runs, pulls] = await Promise.all([
+        artifactList(owner, repo.name, active.token).catch(() => null),
+        json(`${root}/actions/runs?per_page=20`).catch(() => null),
+        json(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=20`).catch(() => null),
+      ]);
+      if (!artifactsPaged?.ok || !runs || !pulls) errors.push(`Some recent data for ${owner}/${repo.name} could not be loaded.`);
       repo.runs = runs?.workflow_runs || [];
       activity.push(...repo.runs.map(run => ({ ...run, owner, repo: repo.name })));
-      const items = reviews(artifacts?.artifacts).slice(0, 20).map(item => {
+      const items = reviews(artifactsPaged?.items).slice(0, 20).map(item => {
         const run = repo.runs.find(run => run.id === item.workflow_run?.id);
         const pullNumber = run?.pull_requests?.[0]?.number;
         const pull = Array.isArray(pulls) ? pulls.find(pr => pr.number === pullNumber || (!pullNumber && pr.head?.sha === item.workflow_run?.head_sha)) : null;
