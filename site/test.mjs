@@ -18,7 +18,7 @@ const anchor = { v: 1, project: 'Thermal_Camera', file: 'Thermal_Camera/Thermal_
   target: 'object', uuid: '0a1b2c3d-0000-4000-8000-000000000001', kind: 'footprint', ref: 'R16', x: 12.3, y: 45.6,
   side: 'head', commit: 'a'.repeat(40), severity: 'blocking' };
 
-const repoOk = () => new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true }, default_branch: 'main' }));
+const repoOk = () => new Response(JSON.stringify({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push: true }, default_branch: 'main' }));
 
 test('history ignores unrelated artifacts from the same run', () => {
   const artifacts = [{ id: 900, name: 'kicad-review.html', workflow_run: { id: 77 } }, { id: 901, name: 'build.zip', workflow_run: { id: 77 } }];
@@ -581,8 +581,9 @@ test('raw artifact route streams the signed blob with its frame-only sandbox CSP
   const seen = [];
   const restore = mockFetch(async (url, options = {}) => {
     seen.push([url, options]);
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return accessibleRepo();
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return reviewRun();
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42/zip') {
       assert.equal(options.redirect, 'manual');
       return new Response(null, { status: 302, headers: { Location: blobUrl } });
@@ -599,7 +600,48 @@ test('raw artifact route streams the signed blob with its frame-only sandbox CSP
     assert.equal(response.headers.get('Location'), null);
     assert.equal(await response.text(), '<!doctype html><svg></svg>');
     assert.equal(cookies(response).length, 0);
-    assert.equal(seen.length, 4);
+    assert.equal(seen.length, 5);
+  } finally { restore(); }
+});
+
+test('report routes serve only report-family artifacts from this repository kicad-review.yml run of the named head', async () => {
+  const sealed = await signedIn(), head = 'b'.repeat(40);
+  let artifact, run, downloads = 0;
+  const restore = mockFetch(async (url) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42') return Response.json(artifact);
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return run ? Response.json(run) : new Response('{}', { status: 404 });
+    if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/provenance' } });
+    assert.equal(url, 'https://signed.example/provenance'); downloads++;
+    return new Response('<!doctype html><p>report</p>');
+  });
+  const good = { id: 9, path: '.github/workflows/kicad-review.yml', event: 'push', head_sha: head, repository: { id: 5 } };
+  const report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5, head_sha: head } };
+  const get = async (suffix) => (await call(`/r/Cameronrlewis/repo/a/42${suffix}`, { headers: { Cookie: `s=${sealed}`, 'Sec-Fetch-Dest': 'iframe' } })).status;
+  try {
+    for (const [label, a, r] of [
+      ['unrelated HTML', { ...report, name: 'unrelated.html' }, good],
+      ['other workflow', report, { ...good, path: '.github/workflows/other.yml' }],
+      ['missing run', report, null],
+      ['no run identity', { ...report, workflow_run: { repository_id: 5 } }, good],
+      ['other repository run', report, { ...good, repository: { id: 99 } }],
+      ['artifact without repository', { ...report, workflow_run: { id: 9 } }, good],
+      ['name head is not the run head', report, { ...good, head_sha: 'c'.repeat(40) }],
+      ['design name head is not the run head', { ...report, name: 'kicad-design-ccccccc.html' }, good],
+    ]) {
+      artifact = a; run = r;
+      for (const suffix of ['', '/raw']) assert.equal(await get(suffix), 404, `${label} ${suffix}`);
+    }
+    assert.equal(downloads, 0);
+    for (const [label, a, r] of [
+      ['push run', report, good],
+      ['manual run of a hand-given head', report, { ...good, event: 'workflow_dispatch', head_sha: 'c'.repeat(40) }],
+      ['legacy name', { ...report, name: 'kicad-review.html' }, good],
+      ['design snapshot', { ...report, name: 'kicad-design-bbbbbbb.html' }, good],
+    ]) {
+      artifact = a; run = r;
+      for (const suffix of ['', '/raw']) assert.equal(await get(suffix), 200, `${label} ${suffix}`);
+    }
   } finally { restore(); }
 });
 
@@ -608,7 +650,8 @@ test('raw document navigation redirects to its framed review without downloading
   const restore = mockFetch(async (url) => {
     seen.push(url);
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/43')) return new Response(JSON.stringify({ name: 'kicad-review-deadbee-cafebad-pass.html', expired: false }));
+    if (url.endsWith('/artifacts/43')) return new Response(JSON.stringify({ name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun({ head_sha: 'cafebad'.padEnd(40, '0') });
     throw new Error(`unexpected ${url}`);
   });
   try {
@@ -618,6 +661,7 @@ test('raw document navigation redirects to its framed review without downloading
     assert.deepEqual(seen, [
       'https://api.github.com/repos/Cameronrlewis/repo',
       'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/43',
+      'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9',
     ]);
   } finally { restore(); }
 });
@@ -626,11 +670,11 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
   const sealed = await signedIn(); const seen = [];
   const restore = mockFetch(async (url) => {
     seen.push(url);
-    if (url.includes('/actions/runs/')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
+    if (url.includes('/actions/runs/')) return reviewRun({ id: 123, head_sha: 'cafebad'.padEnd(40, '0'), pull_requests: [] });
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
       name: 'kicad-review-deadbee-cafebad-fail.html', expired: false,
-      workflow_run: { id: 123 },
+      workflow_run: { id: 123, repository_id: 5 },
     }));
     throw new Error(`unexpected ${url}`);
   });
@@ -658,8 +702,8 @@ test('framed artifact page keeps the report sandboxed and escapes metadata', asy
 test('framed artifact page uses legacy review crumbs', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => {
-    if (url.includes('/actions/runs/')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
-    return url.endsWith('/repo') ? accessibleRepo() : new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.includes('/actions/runs/')) return reviewRun({ pull_requests: [] });
+    return url.endsWith('/repo') ? accessibleRepo() : new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
   });
   try {
     const body = await (await call('/r/Cameronrlewis/repo/a/45', { headers: { Cookie: `s=${sealed}` } })).text();
@@ -672,8 +716,9 @@ test('artifact redirect URL remains server-side', async () => {
   const sealed = await signedIn();
   const blobUrl = 'https://signed.example/very-secret';
   const restore = mockFetch(async (url) => {
-    if (url.endsWith('/repo')) return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
-    if (url.endsWith('/artifacts/7')) return new Response(JSON.stringify({ name: 'report.html' }));
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/7')) return new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/artifacts/7/zip')) return new Response(null, { status: 302, headers: { Location: blobUrl } });
     return new Response('<p>review</p>');
   });
@@ -690,8 +735,8 @@ test('artifact redirect URL remains server-side', async () => {
 test('expired artifacts explain how to get a new review', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async (url) => url.endsWith('/repo')
-    ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
-    : new Response(JSON.stringify({ name: 'report.html', expired: true })));
+    ? accessibleRepo()
+    : new Response(JSON.stringify({ name: 'kicad-review.html', expired: true, workflow_run: { id: 9, repository_id: 5 } })));
   try {
     const response = await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } });
     assert.equal(response.status, 404);
@@ -884,7 +929,11 @@ function compareRequest(path, body, sealed, origin = 'https://site.example') {
 }
 
 function accessibleRepo() {
-  return new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
+  return new Response(JSON.stringify({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true }, default_branch: 'main' }));
+}
+// The kicad-review.yml run of repository 5 that report routes require (reportArtifact checks its provenance).
+function reviewRun(fields = {}) {
+  return Response.json({ id: 9, path: '.github/workflows/kicad-review.yml', event: 'push', head_sha: 'b'.repeat(40), repository: { id: 5 }, ...fields });
 }
 
 const base = 'deadbeef00000000000000000000000000000000';
@@ -1293,8 +1342,8 @@ test('expired artifacts offer regeneration only when their name records revision
     ['kicad-review.html', /Back to reviews/],
   ]) {
     const restore = mockFetch(async (url) => url.endsWith('/repo')
-      ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }))
-      : new Response(JSON.stringify({ name, expired: true })));
+      ? accessibleRepo()
+      : new Response(JSON.stringify({ name, expired: true, workflow_run: { id: 9, repository_id: 5 } })));
     try {
       const body = await (await call('/r/Cameronrlewis/repo/a/8', { headers: { Cookie: `s=${sealed}` } })).text();
       assert.match(body, /Reviews are kept for 90 days by GitHub\. Generate it again to see it\./);
@@ -1423,13 +1472,14 @@ test('share tokens are unguessable, strictly validated, expiring and bound to on
 const { privateKey, publicKey: sharePublicKey } = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
 const appEnv = { ...shareEnv, GITHUB_APP_ID: '42', GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${Buffer.from(await crypto.subtle.exportKey('pkcs8', privateKey)).toString('base64')}\n-----END PRIVATE KEY-----` };
 const sharePost = async (path, body = {}, headers = {}, cookie) => request(path, { method: 'POST', headers: { Origin: 'https://site.example', 'Content-Type': 'application/json', Cookie: `s=${cookie ?? await signedIn()}`, ...headers }, body: JSON.stringify(body) });
-const shareMeta = (expires = new Date(Date.now() + 2 * 86400_000).toISOString()) => ({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, expires_at: expires });
+const shareMeta = (expires = new Date(Date.now() + 2 * 86400_000).toISOString()) => ({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, expires_at: expires, workflow_run: { id: 9, repository_id: 5 } });
 const shareJson = (data, status = 200) => new Response(JSON.stringify(data), { status });
 function shareCreationFetch({ push = true, metadata = shareMeta(), generation = '3', genStatus = 200, refreshed = false } = {}) {
   return mockFetch(async (url, options = {}) => {
     if (url === 'https://github.com/login/oauth/access_token' && refreshed) return tokenResponse();
-    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return shareJson({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push } });
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return shareJson({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push } });
     if (url.endsWith('/actions/artifacts/123')) return shareJson(metadata);
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/installation')) return shareJson({ id: 7 });
     if (url.endsWith('/access_tokens')) {
       assert.deepEqual(JSON.parse(options.body), { repositories: ['repo'], permissions: { actions: 'read', actions_variables: 'read' } });
@@ -1601,9 +1651,9 @@ test('review page avoids PDF discovery calls and uses listing hint when present'
     const restore = mockFetch(async (url) => {
       seen.push(url);
       if (url.endsWith('/repo')) return accessibleRepo();
-      if (url.endsWith('/actions/runs/9')) return new Response(JSON.stringify({ event: 'push', pull_requests: [] }));
+      if (url.endsWith('/actions/runs/9')) return reviewRun({ pull_requests: [] });
       assert.ok(url.endsWith('/artifacts/123'));
-      return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9 } }));
+      return new Response(JSON.stringify({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, repository_id: 5 } }));
     });
     try {
       const response = await call(`/r/Cameronrlewis/repo/a/123${suffix}`, { headers: { Cookie: `s=${sealed}` } });
@@ -1925,22 +1975,23 @@ test('resolve and unresolve handle scope-query 403 and 502 errors without mutati
   }
 });
 
-test('artifact PR discovery is best-effort on the framed artifact route', async () => {
+test('artifact PR discovery reads the mandatory provenance run on the framed artifact route', async () => {
   const sealed = await signedIn();
-  for (const runData of [{ event: 'pull_request', pull_requests: [{ number: 7 }] }, { event: 'push', pull_requests: [] }, null, 'throw']) {
+  for (const [runData, status] of [[{ event: 'pull_request', pull_requests: [{ number: 7 }] }, 200], [{ event: 'push', pull_requests: [] }, 200], [null, 404], ['throw', 404]]) {
     const seen = [];
     const restore = mockFetch(async (url) => {
       seen.push(url);
       if (url.endsWith('/repo')) return repoOk();
-      if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 123 } }));
+      if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({ name: 'kicad-review.html', workflow_run: { id: 123, repository_id: 5 } }));
       if (runData === 'throw') throw new Error('run unavailable');
-      return new Response(JSON.stringify(runData), { status: runData ? 200 : 403 });
+      return runData ? reviewRun({ id: 123, ...runData }) : new Response('{}', { status: 403 });
     });
     try {
       const response = await call('/r/Cameronrlewis/repo/a/44', { headers: { Cookie: `s=${sealed}` } });
-      assert.equal(response.status, 200);
-      assert.match(await response.text(), /<iframe/);
+      assert.equal(response.status, status);
+      if (status === 200) assert.match(await response.text(), /<iframe/);
       assert.equal(seen[2], 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/123');
+      assert.equal(seen.length, 3, 'one run lookup serves provenance and PR discovery');
     } finally { restore(); }
   }
 });
@@ -2078,9 +2129,9 @@ test('artifact wrapper discovers PR number and disables thread requests for push
     const restore = mockFetch(async (url) => {
       if (url.endsWith('/repo')) return accessibleRepo();
       if (url.endsWith('/artifacts/44')) return new Response(JSON.stringify({
-        name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 123 },
+        name: 'kicad-review-deadbee-cafebad-pass.html', expired: false, workflow_run: { id: 123, repository_id: 5 },
       }));
-      if (url.endsWith('/actions/runs/123')) return new Response(JSON.stringify({ event, status: 'completed', conclusion: 'failure', pull_requests: [{ number: 7 }] }));
+      if (url.endsWith('/actions/runs/123')) return reviewRun({ id: 123, head_sha: 'cafebad'.padEnd(40, '0'), event, status: 'completed', conclusion: 'failure', pull_requests: [{ number: 7 }] });
       throw new Error(`unexpected ${url}`);
     });
     try {
@@ -2235,7 +2286,7 @@ test('missing share secrets keep existing review HTML byte-identical and guest r
     for (const key of ['SHARE_KEY', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY']) {
       const config = { ...appEnv, [key]: '' };
       const response = await worker.fetch(request('/r/Cameronrlewis/repo/a/123', { headers: { Cookie: `s=${cookie}` } }), config);
-      assert.equal(await response.text(), reviewPage(props));
+      assert.equal(await response.text(), reviewPage({ ...props, workflowRunId: 9 }));
       assert.equal((await worker.fetch(request(`/s/${await guestToken()}`), config)).status, 404);
       assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share'), config)).status, 404);
       assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/share/revoke'), config)).status, 404);
@@ -3728,7 +3779,8 @@ test('digest assets revalidate permissions and expiry before 200 or 304 and neve
   const restore = mockFetch(async (url, options) => {
     seen.push(url);
     if (url.endsWith('/repo')) return pullRevoked ? new Response(JSON.stringify({ owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })) : denied ? new Response('{}', { status: 404 }) : accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return unknown ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({ name: 'kicad-review.html', expired, workflow_run: { repository_id: 5 } }));
+    if (url.endsWith('/artifacts/42')) return unknown ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({ name: 'kicad-review.html', expired, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/image-envelope' } });
     assert.equal(url, 'https://signed.example/image-envelope');
     assert.equal(options?.headers?.Authorization, undefined);
@@ -3762,7 +3814,8 @@ test('worker wrapper response defers the allowlist envelope fetch to the browser
   const restore = mockFetch(async url => {
     seen.push(url);
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired: false });
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     assert.equal(url, 'https://signed.example/envelope');
     return new Response(storedImageReport());
@@ -3772,7 +3825,7 @@ test('worker wrapper response defers the allowlist envelope fetch to the browser
     const page = await call('/r/Cameronrlewis/repo/a/42', options);
     assert.equal(page.status, 200);
     assert.match(await page.text(), /assetParentFactory/);
-    assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42']);
+    assert.deepEqual(seen, ['https://api.github.com/repos/Cameronrlewis/repo', 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/42', 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9']);
     for (const suffix of ['/raw', `/assets/${imageId}.svg`]) {
       const result = await call(`/r/Cameronrlewis/repo/a/42${suffix}`, options);
       assert.equal(result.status, 200);
@@ -3835,7 +3888,8 @@ test('asset parent uses authenticated route declarations without trusting the ch
   data.blobs.deadbeef1111 = gzipSync('{"version":1}').toString('base64');
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return denied ? new Response('{}', { status: 404 }) : accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired });
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review.html', expired, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     assert.equal(url, 'https://signed.example/envelope'); downloads++;
     return new Response(storedImageReport(data));
@@ -3981,7 +4035,7 @@ test('digest asset denies foreign repository IDs, expired timestamps and unknown
     if (url.endsWith('/repo')) return new Response(JSON.stringify({ id: 10, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } }));
     if (url.endsWith('/artifacts/42')) return mode === 'unknown' ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({
       name: 'kicad-review.html', expired: false, expires_at: mode === 'invalid' ? 'not-a-date' : mode === 'expired' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z',
-      workflow_run: { repository_id: mode === 'foreign' ? 20 : 10 } }));
+      workflow_run: { id: 9, repository_id: mode === 'foreign' ? 20 : 10 } }));
     downloads++; throw new Error(`must not download ${url}`);
   });
   try {
@@ -3996,7 +4050,8 @@ test('digest JSON uses gzip MIME and hosted raw takes declarations only from the
   const sealed = await signedIn(), data = imageData(); data.assets[imageId].kind = 'json';
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     return new Response(storedImageReport(data));
   });
@@ -4022,7 +4077,8 @@ test('private gzip responses preserve encodeBody manual through the wrapper', as
   const restore = mockFetch(async url => {
     if (url === 'https://github.com/login/oauth/access_token') { refreshes++; return tokenResponse(); }
     if (url.endsWith('/repo')) return repoOk();
-    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/envelope' } });
     assert.equal(url, 'https://signed.example/envelope');
     return new Response(storedImageReport());
@@ -4095,7 +4151,8 @@ test('raw and digest delivery follow signed blob redirects without forwarding Gi
   const sealed = await signedIn(), redirects = [];
   const restore = mockFetch(async (url, options) => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false }));
+    if (url.endsWith('/artifacts/42')) return new Response(JSON.stringify({ name: 'kicad-review.html', expired: false, workflow_run: { id: 9, repository_id: 5 } }));
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/redirecting-blob' } });
     assert.equal(url, 'https://signed.example/redirecting-blob');
     redirects.push(options?.redirect ?? 'follow');
@@ -4644,8 +4701,9 @@ test('report cache reuses raw parsing and assets but revalidates every request',
       return mode === 'missing' ? new Response('{}', { status: 404 }) : Response.json({
         name: 'kicad-review.html', size_in_bytes: stored.length, updated_at: updated,
         expired: mode === 'expired', expires_at: mode === 'past' ? '2000-01-01T00:00:00Z' : '2099-01-01T00:00:00Z',
-        workflow_run: { repository_id: 5 } });
+        workflow_run: { id: 9, repository_id: 5 } });
     }
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/cache-probe' } });
     assert.equal(url, 'https://signed.example/cache-probe'); downloads++; return new Response(stored);
   });
@@ -4694,7 +4752,8 @@ test('raw handler evicts least recently used reports by retained bytes before en
     if (url.endsWith('/repo')) return accessibleRepo();
     const artifact = url.match(/\/artifacts\/(87650[1-3])$/);
     if (artifact) return Response.json({ name: 'kicad-review.html', size_in_bytes: stored.length,
-      updated_at: '2026-10-29T00:00:00Z', workflow_run: { repository_id: 5 } });
+      updated_at: '2026-10-29T00:00:00Z', workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     const zip = url.match(/\/artifacts\/(87650[1-3])\/zip$/);
     if (zip) { downloading = zip[1]; return new Response(null, { status: 302, headers: { Location: 'https://signed.example/lru' } }); }
     assert.equal(url, 'https://signed.example/lru'); downloads.push(downloading); return new Response(stored);
@@ -4737,7 +4796,8 @@ async function coldHarness({ legacy = false } = {}) {
   const restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
     if (/\/artifacts\/\d+$/.test(url)) return Response.json({ name: 'kicad-review.html',
-      ...(legacy ? {} : { size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z' }), workflow_run: { repository_id: 5 } });
+      ...(legacy ? {} : { size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z' }), workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/single-flight' } });
     assert.equal(url, 'https://signed.example/single-flight'); h.downloads++;
     h.maxActive = Math.max(h.maxActive, ++h.active);
@@ -4836,6 +4896,7 @@ for (const scenario of ['valid', 'valid-parts', 'design', 'design-head-mismatch'
         return new Response(JSON.stringify({ name: reportName, expired,
           workflow_run: { id: 9, repository_id: scenario === 'foreign-repo' ? 6 : 5 } }));
       }
+      if (url.endsWith('/actions/runs/9')) return reviewRun();
       if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302,
         headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
       if (url === 'https://artifact.actions.githubusercontent.com/report') return new Response(stored);
@@ -4995,7 +5056,7 @@ async function lazy3dHarness({ family = 'comparison', scenario = 'valid' } = {})
     if (url.endsWith('/repos/Cameronrlewis/repo')) return h.revoked
       ? Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: false } })
       : Response.json({ id: 5, owner: { login: 'Cameronrlewis' }, permissions: { pull: true } });
-    if (url.endsWith('/actions/runs/9')) return Response.json({ status: 'completed', conclusion: 'success', event: 'push' });
+    if (url.endsWith('/actions/runs/9')) return reviewRun({ status: 'completed', conclusion: 'success' });
     if (url.endsWith('/artifacts/12')) return Response.json({ name, expired: h.expired, workflow_run: { id: 9, repository_id: 5 } });
     if (url.endsWith('/artifacts/12/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report' } });
     if (url === 'https://artifact.actions.githubusercontent.com/report') { h.html++; return new Response(stored); }
@@ -5085,8 +5146,10 @@ for (const family of ['comparison', 'design']) for (const scenario of ['bad-name
   test(`BR02 authenticated lazy 3D fails closed: ${family} ${scenario}`, async () => {
     const h = await lazy3dHarness({ family, scenario: scenario === 'no-pull' || scenario === 'expired-html' ? 'valid' : scenario });
     try {
-      // Unverifiable names keep their embedded models: never stripped, never silently served.
-      if (scenario === 'bad-name' || scenario === 'head-mismatch') await assertEmbeddedShell(h);
+      // Names outside the report families are not served at all; a design head that the
+      // stored data does not bind keeps its embedded models: never stripped, never silently served.
+      if (scenario === 'bad-name') { assert.equal((await h.wrapper()).status, 404); assert.equal((await h.raw()).status, 404); assert.equal(h.html, 0); }
+      else if (scenario === 'head-mismatch') await assertEmbeddedShell(h);
       else if (scenario !== 'no-pull' && scenario !== 'expired-html') await assertStrippedShell(h);
       // A previously issued ETag must never turn a denial into 304.
       const etags = { model: `"${h.files.model.digest}"`, parts: `"${h.files.parts.digest}"` };
@@ -5468,7 +5531,7 @@ test('artifact size bounds reject oversized reports, 3D descriptors, manifest en
   // 1. Oversized report metadata.size_in_bytes rejected before downloading /zip or blob.
   let restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: 10 * 1024 * 1024 + 1 });
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: 10 * 1024 * 1024 + 1, workflow_run: { id: 9, repository_id: 5 } });
     downloads++; throw new Error(`must not download oversized report ${url}`);
   });
   try {
@@ -5479,7 +5542,8 @@ test('artifact size bounds reject oversized reports, 3D descriptors, manifest en
   // Also reject oversized report body when metadata omits size_in_bytes.
   restore = mockFetch(async url => {
     if (url.endsWith('/repo')) return accessibleRepo();
-    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false });
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/huge-report' } });
     return new Response('x', { headers: { 'Content-Length': String(10 * 1024 * 1024 + 1) } });
   });
@@ -5495,6 +5559,7 @@ test('artifact size bounds reject oversized reports, 3D descriptors, manifest en
     restore = mockFetch(async url => {
       if (url.endsWith('/repo')) return accessibleRepo();
       if (url.endsWith('/artifacts/43')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+      if (url.endsWith('/actions/runs/9')) return reviewRun();
       if (url.endsWith('/artifacts/43/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/3d-report' } });
       if (url === 'https://signed.example/3d-report') return new Response(stored);
       siblingCalls++; throw new Error(`must not fetch sibling for oversized ${kind}: ${url}`);
@@ -5565,6 +5630,7 @@ test('artifact size bounds reject oversized reports, 3D descriptors, manifest en
     restore = mockFetch(async url => {
       if (url.endsWith('/repo')) return accessibleRepo();
       if (url.endsWith('/artifacts/44')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+      if (url.endsWith('/actions/runs/9')) return reviewRun();
       if (url.endsWith('/artifacts/44/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/3d-report44' } });
       if (url === 'https://signed.example/3d-report44') return new Response(stored);
       if (url.includes('/runs/9/artifacts?')) return Response.json({ artifacts: [{ id: 91, name: `kicad-3d-${digest}-${kind}.gz`, expired: false, size_in_bytes: limit + 1, workflow_run: { id: 9 } }] });
@@ -5594,6 +5660,7 @@ test('conditional asset requests validate access, expiry, descriptor and sibling
     url = String(url);
     if (url.endsWith('/repo')) return accessibleRepo();
     if (url.endsWith('/artifacts/55')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z', workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/actions/runs/9')) return reviewRun();
     if (url.endsWith('/artifacts/55/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report55' } });
     if (url === 'https://artifact.actions.githubusercontent.com/report55') return new Response(stored);
     if (url.includes('/runs/9/artifacts?')) {

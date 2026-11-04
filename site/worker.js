@@ -332,20 +332,31 @@ function assetFromData(data, id, kind, matched = false) {
   } catch { return null; }
 }
 
-// Shared raw-report/asset validation. The repository-scoped GitHub endpoint rejects
-// IDs belonging to another repository; also check the recorded repository when present.
+// Shared report validation for the wrapper, raw body, image and 3D routes. Only report-family
+// names from this repository's kicad-review.yml run are served; a name's head must be the run's
+// head_sha, except a manual (workflow_dispatch) run, which reviews a head given by hand. The legacy
+// kicad-review.html name carries no head, so only its run provenance is checked.
+// ponytail: one run lookup per request (each image/3D asset too); memoize per artifact if GitHub rate limits bite.
 async function reportArtifact(owner, repo, id, active, repository) {
-  const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${id}`;
+  const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
+  const base = `${root}/artifacts/${id}`;
   const result = await gh(base, active.token);
   if (result.status !== 200) return null;
   const metadata = await result.json();
-  if (!metadata.name?.endsWith('.html')) return null;
+  const name = String(metadata.name || '');
+  const head7 = artifactName.exec(name)?.[2] ?? /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
+  if (!head7 && name !== 'kicad-review.html') return null;
   if (metadata.size_in_bytes != null && (!Number.isSafeInteger(metadata.size_in_bytes) || metadata.size_in_bytes < 0 || metadata.size_in_bytes > MAX_REPORT_BYTES)) return null;
-  if (repository?.id != null && metadata.workflow_run?.repository_id != null
-    && metadata.workflow_run.repository_id !== repository.id) return null;
+  const runId = metadata.workflow_run?.id;
+  if (!/^\d{1,20}$/.test(String(runId)) || !Number.isSafeInteger(repository?.id) || metadata.workflow_run.repository_id !== repository.id) return null;
   if (metadata.expires_at != null && !Number.isFinite(Date.parse(metadata.expires_at))) return null;
   const expired = metadata.expired || (metadata.expires_at && Date.parse(metadata.expires_at) <= Date.now());
-  return { base, metadata, expired: Boolean(expired) };
+  if (expired) return { base, metadata, expired: true };
+  const runResponse = await gh(`${root}/runs/${runId}`, active.token);
+  const run = runResponse.ok ? await runResponse.json() : null;
+  if (run?.path !== `.github/workflows/${workflowFile}` || run.repository?.id !== repository.id
+    || (head7 && run.event !== 'workflow_dispatch' && !(/^[0-9a-f]{40}$/.test(run.head_sha) && run.head_sha.startsWith(head7)))) return null;
+  return { base, metadata, run, expired: false };
 }
 
 async function storedReport(artifact, active) {
@@ -523,19 +534,10 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
         user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
       }), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
     }
-    if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
     if (!raw) {
-      let pull = null, runStatus = null, runConclusion = null;
-      const runId = metadata.workflow_run?.id;
-      try {
-        if (/^\d+$/.test(String(runId))) {
-          const runResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${runId}`, active.token);
-          const runData = runResponse.ok ? await runResponse.json() : null;
-          runStatus = runData?.status || null;
-          runConclusion = runData?.conclusion || null;
-          if (runData?.event === 'pull_request' && Number.isInteger(runData.pull_requests?.[0]?.number)) pull = runData.pull_requests[0].number;
-        }
-      } catch { /* PR discovery must not prevent opening the report. */ }
+      const { run } = artifact, runId = metadata.workflow_run.id;
+      const runStatus = run.status || null, runConclusion = run.conclusion || null;
+      const pull = run.event === 'pull_request' && Number.isInteger(run.pull_requests?.[0]?.number) ? run.pull_requests[0].number : null;
       // The browser parent downloads the authenticated raw envelope for its allowlist,
       // never trusting child declarations. digestAsset revalidates authorization and
       // declarations per request; the parent checks the returned MIME type and digest.
