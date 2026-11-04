@@ -267,7 +267,7 @@ export async function scanHistory(gh, token, root, ref, dir, cursor) {
   let skipping = Boolean(cursor), last = cursor || '', progressed = false, listPages = 0;
   for (let page = 1; ; page += 1) {
     if (listPages >= MAX_LIST_PAGES) {
-      if (skipping) throw new Error('history unavailable');
+      if (skipping || !progressed) throw new Error('history unavailable');
       return { rows, next: last, truncated: true };
     }
     listPages += 1;

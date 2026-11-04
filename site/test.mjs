@@ -5682,4 +5682,14 @@ test('list page budget bounds cursor skip and unexhausted history returns 502 in
   const route = [['/repos/Cameronrlewis/repo/', (url) => mockGh(url.replace('https://api.github.com', ''))]];
   const res = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${sha40(99999)}`, route);
   assert.equal(res.status, 502, 'list budget exhaustion returns 502, not 404');
+
+  // When cursor is the last item of page 50 and a next page exists, no commit after cursor is examined (!progressed);
+  // must throw 'history unavailable' (502) instead of returning { rows: [], next: cursor, truncated: true }.
+  const cursorAt50End = sha40((50 - 1) * 100 + 99 + 1000);
+  await assert.rejects(
+    () => scanHistory(mockGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', cursorAt50End),
+    (err) => !(err instanceof CursorNotFoundError) && err.message === 'history unavailable'
+  );
+  const resAt50End = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${cursorAt50End}`, route);
+  assert.equal(resAt50End.status, 502, 'cursor at end of page 50 with no progress returns 502 instead of self-looping Older link');
 });
