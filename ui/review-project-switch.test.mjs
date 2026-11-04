@@ -7,6 +7,7 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
 const slice = (from, to) => { const a = source.indexOf(from), b = source.indexOf(to, a); assert.ok(a >= 0 && b > a, from); return source.slice(a, b); };
 const viewerIdFn = source.includes('function viewerIdFor(') ? slice('function viewerIdFor(', '\n') + '\n' : '';
+const modeForFn = slice('function modeFor(', '\n') + '\n';
 
 function harness() {
   const D = {repo: 'r', projects: [
@@ -31,7 +32,7 @@ function harness() {
     select: () => log.push(['select', current]),
     draw: () => { log.push(['draw', current]); return Promise.resolve(); }, goTo() {},
   });
-  vm.runInContext(viewerIdFn + slice('function openProject(', '\n') + '\n' + slice('function applyState(', '\nconst PX'), ctx);
+  vm.runInContext(viewerIdFn + modeForFn + slice('function openProject(', '\n') + '\n' + slice('function applyState(', '\nconst PX'), ctx);
   return {ctx, log, id};
 }
 

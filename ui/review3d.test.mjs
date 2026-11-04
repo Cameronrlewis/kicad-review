@@ -265,6 +265,7 @@ test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
   const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
   const validFn = reviewSource.slice(reviewSource.indexOf('function valid(st) {'), reviewSource.indexOf('function applyState('));
   const selectFn = reviewSource.slice(reviewSource.indexOf('function select(view) {'), reviewSource.indexOf('function decodeState('));
+  const modeFn = reviewSource.slice(reviewSource.indexOf('function modeFor('), reviewSource.indexOf('function valid(st) {'));
 
   const validCtx = {
     D: { projects: [{ board: { layers: [], model3d: { head: 'head-id' } }, sheets: [], changes: [], checks: [] }] },
@@ -275,7 +276,7 @@ test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
     LIGHT_RIGS3D: [],
     window: { ThreeStudio: { normalizeLighting: x => x } }
   };
-  runInNewContext(validFn, validCtx);
+  runInNewContext(modeFn + validFn, validCtx);
   const normalized = validCtx.valid({ v: '3d', m: 'wipe' });
   assert.equal(normalized.v, '3d');
   assert.equal(normalized.m, 'side');
@@ -294,7 +295,7 @@ test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
     draw: () => {},
     saveHash: () => {}
   };
-  runInNewContext(selectFn, selectCtx);
+  runInNewContext(modeFn + selectFn, selectCtx);
   selectCtx.select('3d');
   assert.equal(S.v, '3d');
   assert.equal(S.m, 'side');
@@ -425,4 +426,37 @@ test('U6: fallback focus outlines the renamed footprint in the base view too', (
   api.focus(change, false);
   assert.ok(window.outlined.includes(j1), 'base view must outline J1');
   assert.ok(s.selected.some(l => l.side === 'base'), 'the base outline is attributed to the base revision');
+});
+
+test('BR02 applyState normalizes a retained wipe mode to side when the link has no m', () => {
+  const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const applySource = reviewSource.slice(reviewSource.indexOf('function modeFor('), reviewSource.indexOf('const PX = 4;'));
+  const S = {p: 0, v: 'board', m: 'wipe', s: null, t: 'changes', layers: null};
+  const ctx = {
+    S,
+    D: {projects: [{board: {layers: [], model3d: {head: 'head-id'}}, sheets: [], changes: [], checks: []}]},
+    GROUPS3D: [],
+    LIGHT_RIGS3D: [],
+    MODES: {side: true, overlay: true, wipe: true, blend: true, semantic: true},
+    boardAvailable: () => true,
+    modelAvailable: () => true,
+    firstChangedView: () => 'board',
+    clearImageSelection: () => {},
+    renderModes: () => {},
+    renderNav: () => {},
+    renderPanel: () => {},
+    renderInspector: () => {},
+    renderZoombar: () => {},
+    draw: () => Promise.resolve(),
+    goTo: () => {},
+    Appearance: {patch: () => {}, configure: () => {}},
+    viewerIdFor: () => 'viewer',
+    proj: () => ctx.D.projects[0],
+    canon: x => x,
+    window: {ThreeStudio: {normalizeLighting: x => x, PRESETS: {bench: {}}}}
+  };
+  runInNewContext(applySource, ctx);
+  ctx.applyState({v: '3d'});
+  assert.equal(S.v, '3d');
+  assert.equal(S.m, 'side');
 });
