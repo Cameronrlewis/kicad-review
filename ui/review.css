@@ -765,3 +765,7 @@ html[data-theme="dark"] #stage.mode-3d { background:var(--bg); }
 #image-results button:is(:hover,:focus-visible) { background:var(--surface-2); outline:2px solid var(--accent); outline-offset:-2px; }
 #image-results p { padding:var(--space-2); margin:0; }
 body.shot #image-search { display:none; }
+/* Design report: one revision, so nothing to compare, mark or step through. */
+body.design-single #toolbar [data-compare], body.design-single #project-filter, body.design-single .board-mark-legend, body.design-single .diff-mark-legend, body.design-single .board-mark-key { display:none; }
+.design-message { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--tx2); }
+body.design-single .review-bar { overflow-x:auto; }

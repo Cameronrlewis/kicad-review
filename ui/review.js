@@ -4,6 +4,8 @@ const D = window.REVIEW_DATA;
 // bench-t2: never repeat the site frame inside its sandboxed report.
 document.body.classList.toggle("report-framed", parent !== window);
 const $ = s => document.querySelector(s);
+const single = () => D.mode === "single";   // a design report: one revision, nothing compared
+document.body.classList.toggle("design-single", single());
 const LIGHT_RIGS3D = ["bench", "lowsun", "photo"];
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, part3d: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
@@ -96,7 +98,7 @@ function chips(c) {
 }
 function checksVerdict() {
   const all = D.projects.flatMap(p => p.checks);
-  return { failing: all.filter(c => c.status === "fail").length, newErrors: all.reduce((n, c) => n + c.new_errors, 0) };
+  return { failing: all.filter(c => c.status === "fail").length, newErrors: all.reduce((n, c) => n + c.new_errors, 0), errors: all.reduce((n, c) => n + c.errors, 0) };
 }
 function renderLayers() {
   const box = $("#layers");
@@ -108,13 +110,21 @@ function renderLayers() {
   }
   box.innerHTML = "";   // board layers live in the Appearance dock
 }
+function designBar(link) {   // commit, ref, date and subject of the design on show
+  const s = D.snapshot || {}, when = Date.parse(s.committedAt);
+  return `<span class="bench-revision"><span class="bench-label">DESIGN</span> ${link(D.links?.head, String(D.head || "").slice(0, 7))}</span>`
+    + (s.ref ? `<span class="muted" title="Branch or tag">${esc(s.ref)}</span>` : "")
+    + (Number.isFinite(when) ? `<time class="muted" datetime="${esc(s.committedAt)}">${esc(new Date(when).toISOString().slice(0, 10))}</time>` : "")
+    + (s.message ? `<span class="design-message" title="${esc(s.message)}">${esc(s.message)}</span>` : "");
+}
+const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
   const pr = /\/pull\/(\d+)/.exec(L.review || '');
-  $("#hdr").innerHTML = `<span>${esc(D.repo || 'Repository')}</span><span aria-hidden="true">›</span><span>${pr ? `PR #${pr[1]}` : 'Review'}</span>`;
-  $("#report-state").textContent = v.failing ? `✕ NEEDS WORK · ${v.failing} CHK · ${v.newErrors} NEW ERR` : '✓ CHECKS PASSING';
-  $("#report-review-bar").innerHTML = `<span class="bench-revision"><span class="bench-label">BASE</span> ${link(L.base, short(D.base))}</span><span aria-hidden="true">→</span><span class="bench-revision"><span class="bench-label">HEAD</span> ${link(L.head, short(D.head))}</span>${L.review ? link(L.review, pr ? `PR #${pr[1]} ↗` : 'Compare ↗') : ''}<span class="muted">Run result not recorded</span><details class="bench-menu bench-merge"><summary>MERGE · Unavailable</summary><div class="bench-popover"><ul>${['This review', 'GitHub approval', 'Blocking threads'].map(label => `<li>… ${label}: live data unavailable offline</li>`).join('')}</ul></div></details><details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${pr ? link(L.review + '/commits', 'History ↗') : '<button disabled title="No pull request recorded">History</button>'}<button disabled title="Open the online review to create a share link">Share…</button>${L.run ? link(L.run, 'Open run ↗') : '<button disabled title="Run not recorded">Open run</button>'}<button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved review position" placeholder="Paste a review link"></label><input class="copyfield" aria-label="Link to copy" readonly hidden></div></details>`;
+  $("#hdr").innerHTML = `<span>${esc(D.repo || 'Repository')}</span><span aria-hidden="true">›</span><span>${single() ? 'Design' : pr ? `PR #${pr[1]}` : 'Review'}</span>`;
+  $("#report-state").textContent = v.failing ? (single() ? `${v.failing} CHECKS FAILING · ${v.errors} ERR` : `✕ NEEDS WORK · ${v.failing} CHK · ${v.newErrors} NEW ERR`) : '✓ CHECKS PASSING';
+  $("#report-review-bar").innerHTML = single() ? designBar(link) + `<details class="bench-menu bench-overflow"><summary aria-label="Design actions">Actions</summary><div class="bench-popover"><button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved design position"></label><input class="copyfield" readonly hidden></div></details>` : `<span class="bench-revision"><span class="bench-label">BASE</span> ${link(L.base, short(D.base))}</span><span aria-hidden="true">→</span><span class="bench-revision"><span class="bench-label">HEAD</span> ${link(L.head, short(D.head))}</span>${L.review ? link(L.review, pr ? `PR #${pr[1]} ↗` : 'Compare ↗') : ''}<span class="muted">Run result not recorded</span><details class="bench-menu bench-merge"><summary>MERGE · Unavailable</summary><div class="bench-popover"><ul>${['This review', 'GitHub approval', 'Blocking threads'].map(label => `<li>… ${label}: live data unavailable offline</li>`).join('')}</ul></div></details><details class="bench-menu bench-overflow"><summary aria-label="Review actions">•••</summary><div class="bench-popover">${pr ? link(L.review + '/commits', 'History ↗') : '<button disabled title="No pull request recorded">History</button>'}<button disabled title="Open the online review to create a share link">Share…</button>${L.run ? link(L.run, 'Open run ↗') : '<button disabled title="Run not recorded">Open run</button>'}<button data-act="copy">Copy link</button><label>Go to<input class="goto" aria-label="Go to saved review position" placeholder="Paste a review link"></label><input class="copyfield" aria-label="Link to copy" readonly hidden></div></details>`;
   $("#report-review-bar [data-act=copy]").onclick = async event => {
     const button = event.currentTarget, value = positionLink();
     button.closest('details').open = true;
@@ -148,7 +158,7 @@ function navigateSheet(direction) {
   if (page) select(`sheet:${page.path}`);
 }
 // bench-t4: the left dock owns navigation and Appearance; t=appearance remains shareable.
-let leftTab = "project", rightTab = "changes";
+let leftTab = "project", rightTab = single() ? "checks" : "changes";
 const projectTools = {q:"", sort:"page", filter:"all"};
 let leftWidth = 262, leftCollapsed = false;
 try {
@@ -191,16 +201,16 @@ function renderNav() {
   const sheetItems = (parent, depth) => kids(parent).map(s => {
     const view = `sheet:${s.path}`, children = sheetItems(s.path, depth + 1);
     if (!matches(s.name, s.status) && !children) return "";
-    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}" aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${projectChips(counts(p, view))}</button>${children ? `<ul>${children}</ul>` : ""}</li>`;
+    return `<li><button data-view="${esc(view)}" data-status="${esc(s.status)}" style="--depth:${depth}" aria-current="${S.v === view}"><span class="name" title="${esc(s.name)} (page ${esc(sheetNumber(s))})">${esc(s.name)} (page ${esc(sheetNumber(s))})</span>${single() ? "" : projectChips(counts(p, view))}</button>${children ? `<ul>${children}</ul>` : ""}</li>`;
   }).join("");
   $("#nav").innerHTML = `<div class="left-tabs" role="tablist" aria-label="Left dock">${[["project","Project"],["appearance","Appearance"]].map(([id,label]) => `<button type="button" role="tab" id="left-tab-${id}" data-left-tab="${id}" ${id === "appearance" ? 'data-tab="appearance"' : ''} aria-controls="left-body" aria-selected="${leftTab === id}" tabindex="${leftTab === id ? 0 : -1}">${label}</button>`).join("")}<button type="button" class="left-collapse" aria-label="Collapse left dock" title="Collapse left dock">‹</button></div>
     <div id="left-body" role="tabpanel" aria-labelledby="left-tab-${leftTab}">${leftTab === "appearance" ? '<div id="appearance-root"></div><div id="layers" hidden></div>' : `
     <div class="project-tools"><input type="search" id="project-search" aria-label="Search project tree" placeholder="Search project…" value="${esc(projectTools.q)}"><div><select id="project-sort" aria-label="Sort project tree"><option value="page" ${projectTools.sort === "page" ? "selected" : ""}>Page order</option><option value="name" ${projectTools.sort === "name" ? "selected" : ""}>Name A–Z</option></select><select id="project-filter" aria-label="Filter project tree">${[["all","All items"],["changed","Changed"],["added","Added"],["removed","Removed"],["modified","Modified"]].map(([v,label]) => `<option value="${v}" ${projectTools.filter === v ? "selected" : ""}>${label}</option>`).join("")}</select></div></div>
-    <h3>Project</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project" title="${esc(p.name)}">${D.projects.map((q,i) => `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)} (${esc(q.status)})</option>`).join("")}</select></label><div class="project-name" title="${esc(p.name)}">${esc(p.name)}</div>
+    <h3>Project</h3><label class="projsel"><span class="sr-only">Project</span><select id="proj" aria-label="Project" title="${esc(p.name)}">${D.projects.map((q,i) => `<option value="${i}" ${i === S.p ? "selected" : ""}>${esc(q.name)}${single() ? "" : ` (${esc(q.status)})`}</option>`).join("")}</select></label><div class="project-name" title="${esc(p.name)}">${esc(p.name)}</div>
     <h3>Schematic sheets</h3><ul class="tree" aria-label="Schematic hierarchy">${sheetItems(null,0) || '<li class="muted">No matching sheets</li>'}</ul>
-    <h3>Board</h3><ul class="tree">${boardAvailable(p) && matches(p.name + ".kicad_pcb", p.board.status || "unchanged") ? `<li><button data-view="board" data-status="${esc(p.board.status || "unchanged")}" aria-current="${S.v === "board"}"><span class="name" title="${esc(p.name)}.kicad_pcb">${esc(p.name)}.kicad_pcb</span>${projectChips(counts(p,"board"))}</button><div class="project-meta" data-board-summary>${projectBoardSummary()}</div></li>` : '<li class="muted">No matching board</li>'}
+    <h3>Board</h3><ul class="tree">${boardAvailable(p) && matches(p.name + ".kicad_pcb", p.board.status || "unchanged") ? `<li><button data-view="board" data-status="${esc(p.board.status || "unchanged")}" aria-current="${S.v === "board"}"><span class="name" title="${esc(p.name)}.kicad_pcb">${esc(p.name)}.kicad_pcb</span>${single() ? "" : projectChips(counts(p,"board"))}</button><div class="project-meta" data-board-summary>${projectBoardSummary()}</div></li>` : '<li class="muted">No matching board</li>'}
     ${modelAvailable(p) && matches("3D model",p.board.status || "unchanged") ? `<li><button data-view="3d" aria-current="${S.v === "3d"}"><span class="name" title="${esc(p.name)} — 3D model">3D model</span></button></li>` : ""}</ul>
-    <h3>Libraries</h3><ul class="tree">${p.libraries?.map((c,i) => matches(c.item + " " + c.file,c.status) ? `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span></button></li>` : "").join("") || '<li class="muted">No library changes</li>'}</ul><div id="layers"></div>`}</div>
+    ${single() ? "" : `<h3>Libraries</h3><ul class="tree">${p.libraries?.map((c,i) => matches(c.item + " " + c.file,c.status) ? `<li><button data-view="lib:${i}" data-status="${esc(c.status)}" aria-current="${S.v === `lib:${i}`}"><span class="name" title="${esc(c.file)}">${esc(c.kind === "symbol" ? "Symbol" : "Footprint")} ${esc(c.item)}</span></button></li>` : "").join("") || '<li class="muted">No library changes</li>'}</ul>`}<div id="layers"></div>`}</div>
     <div class="left-splitter" role="separator" tabindex="0" aria-label="Resize left dock" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="520" aria-valuenow="${leftWidth}"></div>`;
   for (const tab of $("#nav").querySelectorAll("[data-left-tab]")) {
     tab.onclick = () => { leftTab = tab.dataset.leftTab; S.t = leftTab === "appearance" ? "appearance" : rightTab; renderNav(); renderPanel(); saveHash(); $(`#left-tab-${leftTab}`).focus(); };
@@ -224,7 +234,7 @@ function renderNav() {
   syncLeftDock();
 }
 function firstChangedView(p) {
-  const s = p.sheets.find(s => s.status !== "unchanged");
+  const s = single() ? p.sheets[0] : p.sheets.find(s => s.status !== "unchanged");
   return s ? `sheet:${s.path}` : boardAvailable(p) ? "board" : p.libraries?.length ? "lib:0" : p.sheets[0] ? `sheet:${p.sheets[0].path}` : "board";
 }
 function openProject(i) { clearImageSelection(); S.part3d = null; S.p = i; S.s = null; S.io = null; S.ig = null; S.layers = null; select(firstChangedView(proj())); renderPanel(); }
@@ -246,11 +256,11 @@ function decodeState(hash) {
 function valid(st) {   // drop anything that does not exist in this report
   const pi = Number.isInteger(st.p) && D.projects[st.p] ? st.p : 0, out = { p: pi }, p = D.projects[pi];
   if ((st.v === "board" && boardAvailable(p)) || (st.v === '3d' && modelAvailable(p)) || p.sheets.some(s => `sheet:${s.path}` === st.v) || (/^lib:\d+$/.test(st.v) && !!p.libraries?.[+st.v.slice(4)])) out.v = st.v;
-  if (Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
+  if (!single() && Object.hasOwn(MODES, st.m ?? "")) out.m = st.m;
   out.revision = ["base", "head"].includes(st.revision) ? st.revision : "head";
   for (const k of ["x", "y", "z"]) if (Number.isFinite(st[k]) && (k !== "z" || st[k] > 0)) out[k] = st[k];
   if (p.changes.some(r => r.id === st.s) || p.checks.some(c => c.violations.some(v => v.id === st.s))) out.s = st.s;
-  if (st.t === "checks" || st.t === "changes" || st.t === "threads" || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
+  if (st.t === "checks" || !single() && (st.t === "changes" || st.t === "threads") || st.t === "parts" && p.parts || st.t === "appearance") out.t = st.t;
   if (st.layers) {   // [] = the reviewer turned every layer off; unknown names only = default layers, not an empty board
     const ls = st.layers.filter(n => p.board.layers.some(l => l.name === n));
     if (!st.layers.length || ls.length) out.layers = ls;
@@ -268,7 +278,7 @@ function applyState(st) {
   const v = valid(st);
   if(v.p!==S.p || (v.v ?? firstChangedView(D.projects[v.p]))!==S.v)clearImageSelection();
   if (v.t === "appearance") { leftTab = "appearance"; leftCollapsed = false; }
-  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? S.t,
+  Object.assign(S, { p: v.p, v: v.v ?? firstChangedView(D.projects[v.p]), m: single() ? "side" : v.m ?? S.m, s: v.s ?? null, part3d: null, io: null, ig: null, t: v.t ?? (single() ? "checks" : S.t),
                      revision: v.revision ?? "head", layers: v.layers ?? null, hidden3d: v.hidden3d ?? [], assembled3d: v.assembled3d ?? true, lighting3d: v.lighting3d ?? window.ThreeStudio.normalizeLighting(window.ThreeStudio.PRESETS.bench), camera3d: v.camera3d ?? null, x: v.x ?? null, y: v.y ?? null, z: v.z ?? null });
   if (S.layers && S.v === "board") Appearance.patch({layers: Object.fromEntries(proj().board.layers.map(l => [canon(l.name), {visible: S.layers.includes(l.name)}]))});   // the link's l= wins over stored eyes
   if (S.x == null || S.y == null || S.z == null) S.x = S.y = S.z = null;
@@ -838,7 +848,7 @@ async function draw() {
     target.setAttribute('aria-busy', 'false');
     const drawingStatus = target.dataset.boardReady === String(my) ? boardView.note || 'Ready' :
       mounts.failed || mounts.expected > 0 ? 'Drawing unavailable' :
-        view ? 'No visible board artwork' : 'This drawing is unavailable in both revisions.';
+        view ? 'No visible board artwork' : `This drawing is unavailable${single() ? "" : " in both revisions"}.`;
     statusText('.status-message', target.querySelector('.image-error')?.textContent || drawingStatus);
   };
   $("#stage").setAttribute("aria-busy", "true");
@@ -912,7 +922,7 @@ async function draw() {
   }
   if (!boardView.useGL) disposeBoardRenderers();
   if (S.v === 'board') boardGate(stage);
-  if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable in both revisions.</p>`;
+  if (!view) stage.innerHTML = `<p class="empty">This drawing is unavailable${single() ? "" : " in both revisions"}.</p>`;
   else try { await MODES[S.m](stage, view); }
   catch (error) {
     if (!(error instanceof AssetUnavailableError)) throw error;
@@ -959,6 +969,7 @@ async function draw() {
   finishBoard(stage);
 }
 function noChangeNotice(stage) {
+  if (single()) return;   // nothing is compared, so "no changes" says nothing
   const text = S.v === "board" ? (!proj().board.changed && "No layout changes") :
     proj().sheets.find(s => `sheet:${s.path}` === S.v)?.status === "unchanged" && "No schematic changes on this sheet";
   if (!text || stage.querySelector('.no-change-notice')) return;
@@ -1169,7 +1180,7 @@ function updateStatus() {
   if (swatch.dataset.color !== swatchColor) { swatch.style.background = swatchColor; swatch.dataset.color = swatchColor; }
   const selected = S.imageSelection || proj()?.changes.find(c=>c.id===S.s) || allViolations().find(c=>c.id===S.s);
   statusText("[data-selection]",selected ? selected.ref || selected.reference || selected.kind || selected.id : "Nothing selected");
-  statusText("[data-view-mode]",({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
+  statusText("[data-view-mode]", single() ? "Design" : ({side:"Side",overlay:"Overlay",wipe:"Wipe",blend:"Blend",semantic:"Delta"})[S.m] || S.m);
 
 }
 function updateCoordinates(vp, event) {
@@ -2169,19 +2180,21 @@ function dockListTools(name, state) {
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
   const active = document.activeElement, key = ["data-tab", "data-inv", "data-action", "data-check-summary", "data-check-scope", "data-check-severity", "data-check-waived", "data-waive", "data-parts-filter", "data-thread-status", "data-thread", "data-issue-for", "data-issue"].find(k => active?.closest("#panel") && !active.matches(".card") && active.hasAttribute(k)), focus = key ? `[${key}="${CSS.escape(active.getAttribute(key))}"]` : active?.matches("#panel select.kind") ? "select.kind" : active?.matches("#panel select.thread-severity") ? "select.thread-severity" : active?.matches("#panel .show-all") ? ".show-all" : null;
-  const p = proj(), f = S.filter;
-  if (S.t === "parts" && !p.parts) S.t = "changes";
+  const p = proj(), f = S.filter, fallback = single() ? "checks" : "changes";
+  if (single() && (S.t === "changes" || S.t === "threads")) S.t = "checks";
+  if (single() && (rightTab === "changes" || rightTab === "threads")) rightTab = "checks";
+  if (S.t === "parts" && !p.parts) S.t = fallback;
   if (S.t === "appearance" && leftTab !== "appearance") renderNav();
-  if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = "changes"; }
+  if (S.t === "threads" && !S.threads && !S.issues) { S.wantThreads = true; S.t = fallback; }
   if (S.t !== "appearance") rightTab = S.t;
-  if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = "changes";
+  if (rightTab === "parts" && !p.parts || rightTab === "threads" && !S.threads && !S.issues) rightTab = fallback;
   const panelTab = rightTab;
   const kinds = [...new Set(p.changes.map(r => r.kind))];
   const c = { added: 0, removed: 0, modified: 0 }; p.changes.forEach(r => c[r.action]++);
   const tab = (name, label, enabled, extra = "") => `<button type="button" role="tab" id="tab-${name}" data-tab="${name}" aria-controls="panel-body" aria-selected="${panelTab === name}" ${enabled ? "" : `disabled title="${name === "parts" ? "Parts data was not included in this report" : "Threads require the connected review site"}"`}>${label}${extra}</button>`;
   const partsExtra = p.parts ? ` ${p.parts.lines.length}${partsProblemCount(p.parts) ? ` · ${partsProblemCount(p.parts)} ⚠` : ""}` : "";
   const threadsExtra = S.threads || S.issues ? ` ${(S.threads || []).filter(t => !t.resolved && t.anchor.project === p.dir).length}` : "";
-  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
+  $("#panel").innerHTML = `<div class="dock-actions"><span>REVIEW</span><button type="button" data-panel-wide title="${S.panelWide ? "Narrow the dock to 360 px" : "Widen the dock to 700 px"}" aria-pressed="${!!S.panelWide}">${tbIcon("expand")}<span>${S.panelWide ? "Narrow" : "Widen"}</span></button>${["parts", "checks"].includes(panelTab) ? `<button type="button" data-panel-table aria-pressed="${!!S.panelTable}" title="Full-width table view">${S.panelTable ? "Close table" : "Table view"}</button>` : ""}<button type="button" data-panel-close aria-label="Collapse right dock" title="Collapse right dock">×</button></div><div id="panel-tabs" role="tablist" aria-label="Inspector">${single() ? "" : tab("changes", "Changes", true, ` ${p.changes.length}`)}${tab("checks", "Checks", true)}${tab("parts", "Parts", !!p.parts, partsExtra)}${single() ? "" : tab("threads", "Threads", !!(S.threads || S.issues), threadsExtra)}</div><div id="panel-body" role="tabpanel" aria-labelledby="tab-${panelTab}">` +
     (panelTab === "threads" ? renderThreads() : panelTab === "parts" ? renderParts() : panelTab === "checks" ? renderChecks() : `
     ${String(S.v).startsWith("lib:") && p.libraries?.[+S.v.slice(4)] ? libInfoHtml(p.libraries[+S.v.slice(4)]) : ""}
     ${dockListTools("changes", f)}

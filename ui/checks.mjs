@@ -6897,3 +6897,48 @@ CHECKS.push(["design revisions thumbnails: every row has an image or a placehold
   if(!img || !img.complete || img.naturalWidth<1)return 'thumbnail data URL did not decode';
   return true;
 `]);
+
+// ---- Design report (D.mode === "single"): one revision, nothing compared ----
+// Turns the loaded comparison report into the data a design snapshot has: head side only, nothing changed, nothing new.
+const TO_SINGLE = `
+  D.mode = 'single'; D.base = null; D.snapshot = {ref:'main', sha:D.head, committedAt:'2026-10-24T10:00:00Z', message:'Move R16 <b>bold</b>'};
+  for (const p of D.projects) {
+    p.changes = []; p.status = 'unchanged';
+    for (const o of p.objects || []) { delete o.added; delete o.action; delete o.pos_before; }
+    for (const s of p.sheets) { s.status = 'unchanged'; if (s.svg) s.svg.base = null; }
+    p.board.changed = false; p.board.status = 'unchanged';
+    for (const l of p.board.layers) { l.changed = false; l.svg.base = null; }
+    if (p.board.geometry) p.board.geometry.base = null;
+    if (p.board.model3d) { p.board.model3d.base = null; p.board.model3d.changed = false; }
+    for (const c of p.checks) { c.new_errors = c.new_warnings = c.fixed = 0; for (const v of c.violations) v.new = false; }
+  }
+  rightTab = 'checks'; S.t = 'checks'; S.m = 'side'; S.s = null; S.v = null;
+  document.body.classList.add('design-single');
+`;
+CHECKS.push(
+  ["design page: head only, no comparison controls, forged state ignored, absolute checks", "", `
+    ${TO_SINGLE}
+    await applyState({p: 0, v: 'sheet:/', m: 'overlay', t: 'changes', s: 'c1'});
+    renderHeader();
+    const visible = el => el && el.getClientRects().length > 0;
+    if (S.m !== 'side' || S.t !== 'checks') return 'forged mode or tab accepted: ' + S.m + ' ' + S.t;
+    for (const el of document.querySelectorAll('[data-compare], #project-filter, .diff-mark-legend, .board-mark-key')) if (visible(el)) return 'comparison control visible: ' + (el.id || el.getAttribute('aria-label') || el.className);
+    const tabs = [...document.querySelectorAll('#panel-tabs [data-tab]')].map(t => t.dataset.tab);
+    if (tabs.includes('changes') || tabs.includes('threads') || !tabs.includes('checks')) return 'tabs ' + tabs;
+    const bar = document.querySelector('#report-review-bar');
+    if (!bar.textContent.includes('DESIGN') || /BASE|MERGE|Run result/.test(bar.textContent)) return 'bar ' + bar.textContent;
+    if (!bar.textContent.includes('Move R16 <b>bold</b>') || bar.querySelector('b')) return 'message is not text';
+    if (/NEW/.test(document.querySelector('#report-state').textContent) || document.querySelector('#nav .counts')) return 'compare words in single';
+    if (document.querySelector('#nav').textContent.includes('Libraries') || document.querySelector('.no-change-notice')) return 'compare leftovers';
+    const status = document.querySelector('[data-view-mode]').textContent;
+    return status === 'Design' || 'status ' + status;
+  `],
+  ["design page: a report without mode keeps every comparison control", "", `
+    if (D.mode) return 'skip';
+    await applyState({p: 0, m: 'overlay'});
+    const hidden = [...document.querySelectorAll('[data-compare]')].filter(el => !el.getClientRects().length);
+    const tabs = [...document.querySelectorAll('#panel-tabs [data-tab]')].map(t => t.dataset.tab);
+    return !document.body.classList.contains('design-single') && !hidden.length && tabs.includes('changes') && tabs.includes('threads') && S.m === 'overlay'
+      && document.querySelector('#report-review-bar').textContent.includes('BASE') || 'comparison report changed: ' + hidden.length + ' ' + tabs + ' ' + S.m;
+  `],
+);
