@@ -129,7 +129,7 @@ jobs:
               touch "$DEPS/.complete"
             else
               rm -rf "$DEPS"
-              echo "::warning::3D compression dependencies unavailable; keeping raw GLBs."
+              python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('3D compression dependencies unavailable; keeping raw GLBs.'))"
               exit 0
             fi
           fi

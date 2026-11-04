@@ -5895,6 +5895,8 @@ def ci_finding_3_npm_cache_completion_marker_contract():
     assert 'node -e' in install_block, 'CI finding 3: dependencies must be verified via require'
     for pkg in ('@gltf-transform/core', '@gltf-transform/extensions', '@gltf-transform/functions', 'meshoptimizer'):
         assert pkg in install_block, f'CI finding 3: verification must require {pkg}'
+    assert 'workflow_command_escape' in install_block, 'Warning branch must route through workflow_command_escape'
+    assert 'echo "::warning::' not in install_block, 'Warning branch must not print ::warning:: directly without workflow_command_escape'
 
     raw_script = install_block.split('run: |\n', 1)[1]
     with tempfile.TemporaryDirectory() as td:
