@@ -1725,6 +1725,7 @@ for command in (
     'node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"',
     'node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
     'node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"',
+    'node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"',
 ):
     assert "      - run: " + command in test_wf.splitlines(), "TS-S1 CI missing " + command
 assert '("images", "review-data-images.js")' in test_wf, "TS-S1 image fixture missing"
@@ -1998,7 +1999,7 @@ fab_step = wf[wf.index("- name: Fabrication outputs"):wf.index("- name: Attach t
 attach_step = wf[wf.index("- name: Attach to"):wf.index("- name: Write release notes")]
 assert "always()" in fab_step and "!cancelled()" in fab_step and "id: fabrication" in fab_step
 assert "always()" in attach_step and "steps.fabrication.outcome == 'success'" in attach_step
-notes_step = wf[wf.index("- name: Write release notes"):]
+notes_step = wf[wf.index("- name: Write release notes"):wf.index("  design-thumbnails:")]
 assert "continue-on-error: true" in notes_step and "steps.report.outcome == 'success'" in notes_step
 assert '--existing review/release-body.md --artifact-id "$ARTIFACT_ID"' in notes_step
 print("ok tag workflow wiring")
@@ -6360,7 +6361,9 @@ with _DpTmp() as t:
         out = f"{t}/gh-output"
         with patch.dict(os.environ, {"GITHUB_OUTPUT": out, "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
             kr.cmd_snapshot(None)
-        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\n"
+        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=true\n"
+        assert json.load(open("review/design/thumbnail-plan.json")) == {"sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "projects": [{"dir": "H", "poster": "review/design/thumb-src/H.png"}]}
+        assert open("review/design/thumb-src/H.png", "rb").read() == _dp_png
         data = _dp_report_data("review/design/kicad-design-ccccccc.html")
         assert data["mode"] == "single" and data["base"] is None and data["head"] == head and data["snapshot"]["ref"] == "main", data["snapshot"]
         assert [p["name"] for p in data["projects"]] == ["H"] and data["projects"][0]["changes"] == [], data["projects"][0]["changes"]
@@ -6370,6 +6373,11 @@ with _DpTmp() as t:
         assert texts and not any(b"M0 0H5" in x for x in texts), "base drawings must not be embedded"
         assert _dpgz.decompress(_dpb64.b64decode(data["blobs"][data["projects"][0]["board"]["poster3d"]["head"]])) == _dp_png
         assert open("review/design/design-snapshot.html", "rb").read() == open("review/design/kicad-design-ccccccc.html", "rb").read()
+        shutil.rmtree("review/design"); os.remove("review/H/head/poster.png")
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": out + "np", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_snapshot(None)
+        assert open(out + "np").read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=false\n"
+        assert not os.path.exists("review/design/thumbnail-plan.json") and not os.path.exists("review/design/thumb-src")
         shutil.rmtree("review/design"); os.remove("head/kicad-review.toml")
         det["snapshot_settings"]["design"]["enabled"] = False
         write(t, {"review/detect.json":json.dumps(det)})
@@ -6688,3 +6696,55 @@ with tempfile.TemporaryDirectory() as t:
     finally:
         os.chdir(old_cwd)
 print("ok DP-S4D invalid settings default design to false")
+
+# DP-T1: a 1600x1000 3D still becomes a valid 200x125 RGB PNG thumbnail with no external tools.
+import argparse, struct, zlib
+def _dp_rgb_png(w, h, fn):
+    raw = b"".join(b"\0" + b"".join(bytes(fn(x, y)) for x in range(w)) for y in range(h))
+    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+_still = _dp_rgb_png(1600, 1000, lambda x, y: (20, 110, 50, 255) if x < 800 else (180, 150, 40, 255))
+_thumb = kr.poster_thumbnail(_still)
+assert _thumb[:8] == b"\x89PNG\r\n\x1a\n" and len(_thumb) < 20_000, len(_thumb)
+_tw, _th, _tch, _trows = kr._png_decode(_thumb)
+assert (_tw, _th, _tch) == (200, 125, 3)
+assert tuple(_trows[60][:3]) == (20, 110, 50) and tuple(_trows[60][199 * 3:200 * 3]) == (180, 150, 40)
+print("ok DP-T1 200x125 PNG thumbnail from 1600x1000 still")
+
+# DP-T2: the thumbnail index updates one folder, keeps other folders, orders newest first and caps at 60 per folder.
+_idx = kr.thumbnail_index({"v": 1, "projects": {"other": [{"sha": "z" * 40, "at": "2026-01-01T00:00:00Z", "png": "OLD"}]}},
+                          sha="b" * 40, committed_at="2026-10-25T10:00:00Z",
+                          thumbs={"H": b"new-h"})
+assert _idx["projects"]["other"][0]["png"] == "OLD"
+assert _idx["projects"]["H"] == [{"sha": "b" * 40, "at": "2026-10-25T10:00:00Z", "png": _dpb64.b64encode(b"new-h").decode()}]
+for i in range(65):
+    _idx = kr.thumbnail_index(_idx, sha=f"{i:040x}", committed_at=f"2026-10-{(i % 28) + 1:02d}T00:00:00Z", thumbs={"H": b"x"})
+assert len(_idx["projects"]["H"]) == 60
+assert _idx["projects"]["H"][0]["at"] >= _idx["projects"]["H"][1]["at"]
+with _DpTmp() as _tt:
+    _old_cwd = os.getcwd()
+    try:
+        os.chdir(_tt)
+        os.makedirs("review/design/thumb-src", exist_ok=True)
+        pathlib.Path("review/design/thumb-src/Sub_Dir.png").write_bytes(_still)
+        pathlib.Path("review/design/thumbnail-plan.json").write_text(json.dumps({
+            "sha": "e" * 40, "committedAt": "2026-10-26T10:00:00Z",
+            "projects": [{"dir": "Sub/Dir", "poster": "review/design/thumb-src/Sub_Dir.png"}]
+        }))
+        pathlib.Path("prev.json").write_text(json.dumps({"v": 1, "projects": {"other": [{"sha": "a" * 40, "at": "2026-01-01T00:00:00Z", "png": "KEEP"}]}}))
+        kr.cmd_thumbs(argparse.Namespace(existing="prev.json"))
+        _written = json.loads(pathlib.Path("review/thumbs/thumbs.json").read_text())
+        assert _written["v"] == 1 and _written["projects"]["other"][0]["png"] == "KEEP"
+        assert _written["projects"]["Sub/Dir"][0]["sha"] == "e" * 40
+        assert _dpb64.b64decode(_written["projects"]["Sub/Dir"][0]["png"]) == _thumb
+    finally:
+        os.chdir(_old_cwd)
+print("ok DP-T2 thumbnail index merge, order and 60-entry cap")
+
+# DP-T3: the thumbnail release write runs in its own non-cancelling concurrency group so two pushes never clobber each other.
+_wf_t = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+assert "concurrency:\n      group: kicad-design-thumbs-${{ github.repository }}" in _wf_t
+assert "cancel-in-progress: false" in _wf_t.split("kicad-design-thumbs-")[1].split("steps:")[0]
+assert 'gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/thumbs.json' in _wf_t
+assert "--prerelease" in _wf_t and "design-thumbs" in _wf_t
+print("ok DP-T3 serialized design-thumbs release job")

@@ -63,6 +63,25 @@ jobs:
                   project['board'][key]['base'] = None
           pathlib.Path(os.environ['PAGES'], 'single.html').write_text(k.inline_page('window.REVIEW_DATA = ' + json.dumps(data) + ';'))
           PYFIXTURE
+          node --import ./site/css-loader.mjs - <<'NODEFIXTURE'
+          import fs from 'node:fs';
+          import { designsPage } from './site/pages.js';
+          import { projectKey } from './site/design.js';
+          const sha40 = (n) => String(n).padStart(40, '0');
+          const rows = Array.from({ length: 25 }, (_, i) => ({
+            sha: sha40(i + 1),
+            message: `Update layout step ${i + 1} with long identifier ${'x'.repeat(40)}`,
+            author: 'cameronrlewis',
+            date: '2026-10-24T10:00:00Z',
+          }));
+          const onePixelPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+          const html = designsPage({
+            user: 'cameronrlewis', owner: 'ORG-LONG-NAME', repo: 'REPO-VERY-LONG-IDENTIFIER-2026',
+            key: projectKey('Student Design Teams/Horizon'), ref: 'main', rows, tip: rows[0].sha,
+            next: rows[24].sha, truncated: true, thumbs: new Map([[rows[0].sha, onePixelPng]]), first: true, started: false,
+          }).replace('</body>', '<script>window.__dpSiteFixture="design-history.html";window.reviewReady=true;</script></body>');
+          fs.writeFileSync(`${process.env.PAGES}/design-history.html`, html);
+          NODEFIXTURE
       - run: node ui/check.mjs
       - run: node ui/check.mjs --no-skip "Waivers"
       - run: node ui/check.mjs --no-skip "images fallback selected export palettes" --page "$PAGES/two.html"
@@ -95,3 +114,4 @@ jobs:
       - run: node ui/check.mjs --persist-check --no-skip "Themes reload seed" --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
       - run: node ui/check.mjs --no-skip "images screen and legacy appearance" --dark --width 1440 --height 900 --dpr 2 --page "$PAGES/images.html"
+      - run: node ui/check.mjs --no-skip "design revisions thumbnails" --page "$PAGES/design-history.html"

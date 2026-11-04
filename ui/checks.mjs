@@ -6879,3 +6879,21 @@ CHECKS.push(["design site screen: wrapper, missing or history is reachable", "",
   }
   window.scrollTo(0,0); return true;
 `]);
+
+CHECKS.push(["design revisions thumbnails: every row has an image or a placeholder, the box is 8:5, no overflow", "", `
+  if(!window.__dpSiteFixture?.includes('design-history'))return 'skip';
+  const W=document.documentElement.clientWidth;
+  if(document.documentElement.scrollWidth>W+1)return 'document overflows '+document.documentElement.scrollWidth+'/'+W;
+  const cells=[...document.querySelectorAll('td.design-thumb')];
+  if(cells.length!==25)return 'expected 25 thumbnail cells, got '+cells.length;
+  for(const td of cells){
+    const box=td.querySelector('img,.design-thumb-missing');
+    if(!box)return 'thumbnail cell without image or placeholder';
+    const r=box.getBoundingClientRect();
+    if(r.width<60 || r.height<37 || Math.abs(r.width/r.height-1.6)>0.08)return 'bad thumbnail box '+r.width+'x'+r.height;
+    if(r.right>W+1)return 'thumbnail overflows viewport';
+  }
+  const img=document.querySelector('td.design-thumb img');
+  if(!img || !img.complete || img.naturalWidth<1)return 'thumbnail data URL did not decode';
+  return true;
+`]);

@@ -308,14 +308,24 @@ export async function scanHistory(gh, token, root, ref, dir, cursor) {
   }
 }
 
-// The list's thumbnails: one release asset.
-// Task 8 stub: checks the release tag; Task 8A implements asset download and index parsing.
+// The list's thumbnails: one release asset, read in at most three requests whatever the row count.
 export async function thumbnailsFor(gh, token, root, dir, shas) {
+  const wanted = new Set(shas);
   try {
     const release = await gh(`${root}/releases/tags/design-thumbs`, token);
     if (!release.ok) return new Map();
-  } catch {}
-  return new Map();
+    const asset = ((await release.json()).assets || []).find((a) => a.name === 'thumbs.json');
+    if (!asset) return new Map();
+    const index = JSON.parse(await releaseText(gh, token, root, asset));
+    if (index?.v !== 1) return new Map();
+    const list = index.projects?.[dir || '.'];
+    if (!Array.isArray(list)) return new Map();
+    const out = new Map();
+    for (const e of list) {
+      if (wanted.has(e?.sha) && typeof e.png === 'string' && /^[A-Za-z0-9+/=]{1,40000}$/.test(e.png)) out.set(e.sha, e.png);
+    }
+    return out;
+  } catch { return new Map(); }
 }
 
 // GET /r/:owner/:repo/p/<key>/designs?ref=&cursor=: the KiCad-change history of one folder.

@@ -5003,7 +5003,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
 });
 
 // ---- Design page: the newest snapshot for a branch, tag or commit ----
-import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery, scanHistory, CursorNotFoundError } from './design.js';
+import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery, scanHistory, CursorNotFoundError, thumbnailsFor } from './design.js';
 import { designMissingPage, projectsPage, designsPage } from './pages.js';
 // The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
 const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
@@ -5692,4 +5692,36 @@ test('list page budget bounds cursor skip and unexhausted history returns 502 in
   );
   const resAt50End = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${cursorAt50End}`, route);
   assert.equal(resAt50End.status, 502, 'cursor at end of page 50 with no progress returns 502 instead of self-looping Older link');
+});
+
+test('list thumbnails come from one release asset: 25 rows make at most 3 thumbnail requests', async () => {
+  const shas = Array.from({ length: 25 }, (_, k) => sha40(k + 1));
+  const index = { v: 1, projects: { A: [{ sha: shas[0], at: '2026-10-25T10:00:00Z', png: 'iVBORw0KGgo=' }, { sha: shas[5], at: '2026-10-20T10:00:00Z', png: 'QUJD' }] } };
+  const calls = [];
+  const gh = async (path) => {
+    calls.push(path);
+    if (path.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 88, name: 'thumbs.json' }] });
+    if (path.endsWith('/releases/assets/88')) return new Response(null, { status: 302, headers: { Location: 'https://objects.githubusercontent.com/thumbs.json' } });
+    throw Error('unexpected ' + path);
+  };
+  const restore = mockFetch(async (url) => { calls.push(url); return new Response(JSON.stringify(index)); });
+  try {
+    const map = await thumbnailsFor(gh, 't', '/repos/o/r', 'A', shas);
+    assert.equal(calls.length, 3, 'release lookup + asset redirect + signed body, whatever the row count');
+    assert.equal(map.get(shas[0]), 'iVBORw0KGgo=');
+    assert.equal(map.get(shas[5]), 'QUJD');
+    assert.equal(map.has(shas[1]), false);
+    const page = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main',
+      rows: [{ sha: shas[0], message: 'm', author: 'a', date: '' }, { sha: shas[1], message: 'm2', author: 'a', date: '' }],
+      tip: shas[0], next: null, truncated: false, thumbs: map, started: false, first: true });
+    assert.match(page, /<img alt="" width="200" height="125" src="data:image\/png;base64,iVBORw0KGgo=">/);
+    assert.match(page, /<span class="design-thumb-missing" aria-hidden="true"><\/span>/);
+  } finally { restore(); }
+});
+
+test('a missing or unreadable thumbnail asset leaves placeholders and never fails the list', async () => {
+  for (const status of [404, 500]) {
+    const map = await thumbnailsFor(async () => new Response('{}', { status }), 't', '/repos/o/r', 'A', [sha40(1)]);
+    assert.equal(map.size, 0);
+  }
 });
