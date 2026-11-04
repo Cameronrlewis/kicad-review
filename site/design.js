@@ -1,0 +1,208 @@
+// The design page: the newest design snapshot for a branch, tag or commit, found through GitHub. No store.
+import { reportCsp, frameCsp } from './csp.js';
+import { currentReport } from './report-shell.js';
+
+export const designName = /^kicad-design-([0-9a-f]{7})\.html$/;
+const hex40 = /^[0-9a-f]{40}$/;
+const shaRef = /^[0-9a-f]{7,40}$/i;
+const enc = encodeURIComponent;
+const repoPath = (owner, repo) => `/r/${enc(owner)}/${enc(repo)}`;
+// Git ref rules: no control characters, spaces, ~ ^ : ? * [ \ or "..", and the 255 limit the commits page uses.
+export const refOk = (ref) => typeof ref === 'string' && ref.length > 0 && ref.length <= 255 && !/[\x00-\x20\x7f~^:?*[\\]|\.\.|\/\/|^\/|\/$|\.lock$|@\{/.test(ref);
+const live = (a) => a && !a.expired && /^\d{1,20}$/.test(String(a.id)) && designName.test(a.name || '');
+const byNewest = (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''));
+
+// The signed storage URL GitHub redirects to. The token is never sent to it.
+async function signedBody(response, what) {
+  const location = new URL(response.headers.get('Location'));
+  if (location.protocol !== 'https:' || location.username || location.password) throw new Error('invalid artifact URL');
+  const body = await fetch(location.href, { redirect: 'manual' });
+  if (!body.ok) throw new Error(`${what} body unavailable`);
+  return body.text();
+}
+// The report's payload: a single-revision report that names its own commit. Anything else is refused.
+export function snapshotPayload(text) {
+  // ponytail: the existing non-archived HTML artifact format only; no arbitrary script execution.
+  const match = /window\.REVIEW_DATA = (.*?);<\/script>/s.exec(text);
+  if (!match) throw new Error('snapshot payload unavailable');
+  const data = JSON.parse(match[1]);
+  if (data.mode !== 'single' || !hex40.test(data.head || '') || data.head !== data.snapshot?.sha) throw new Error('invalid snapshot provenance');
+  return data;
+}
+// Download only through the authenticated GitHub artifact endpoint. Never expose its signed URL.
+export async function readSnapshot(gh, token, root, artifact) {
+  const response = await gh(`${root}/actions/artifacts/${artifact.id}/zip`, token, { redirect: 'manual' });
+  if (response.status === 410) return null;
+  if (response.status !== 302) throw new Error('snapshot download unavailable');
+  return snapshotPayload(await signedBody(response, 'snapshot'));
+}
+// The release asset's body as text.
+export async function releaseText(gh, token, root, asset) {
+  const response = await gh(`${root}/releases/assets/${enc(String(asset.id))}`, token, { headers: { Accept: 'application/octet-stream' }, redirect: 'manual' });
+  if (response.status !== 302) throw new Error('release asset unavailable');
+  return signedBody(response, 'release');
+}
+export async function readReleaseSnapshot(gh, token, root, asset) {
+  return snapshotPayload(await releaseText(gh, token, root, asset));
+}
+
+// Files whose change alters a design snapshot. Settings files that every folder reads are global.
+const designInput = (path) => /\.kicad_(?:pro|sch|pcb|sym|mod|dru|wks)$|\.(?:step|stp|wrl|glb|gz)$/i.test(path);
+const globalInput = (path) => /(?:^|\/)(?:kicad-review\.toml|sym-lib-table|fp-lib-table)$/i.test(path); // ponytail: a new global settings file must be added here
+export const affects = (path, dir) => globalInput(path) || (designInput(path) && (dir === '' || path === dir || path.startsWith(`${dir}/`)));
+// Renames count for both names: a file moved into or out of the folder changes its design.
+export const changesProject = (files, dir) => (files || []).some((f) => affects(f.filename || '', dir) || affects(f.previous_filename || '', dir));
+// The folders with a .kicad_pro on the default branch: the unit one design page belongs to. The root folder is ''.
+export const projectsFromTree = (nodes) => [...new Set((nodes || []).filter((n) => n.type === 'blob' && /\.kicad_pro$/.test(n.path))
+  .map((n) => (n.path.includes('/') ? n.path.slice(0, n.path.lastIndexOf('/')) : '')))].sort();
+// The root folder's key is an encoded slash: '.' is a dot segment that URL parsing drops, and no folder is named '/'.
+export const projectKey = (dir) => enc(dir || '/');
+export const dirFromKey = (key) => { const dir = decodeURIComponent(key); return dir === '/' ? '' : dir; };
+
+async function commitDetails(gh, token, root, sha) {
+  const files = []; let commit;
+  for (let page = 1; ; page++) {
+    const response = await gh(`${root}/commits/${enc(sha)}?per_page=100&page=${page}`, token);
+    if (!response.ok) throw new Error('commit inputs unavailable');
+    const data = await response.json(); commit ||= data;
+    files.push(...(data.files || []));
+    if (!response.headers.get('Link')?.includes('rel="next"')) break;
+  }
+  return { ...commit, files };
+}
+// Newest live artifact named for this sha7 whose payload names this exact sha. An expired artifact is never read.
+async function artifactAt(gh, token, root, sha, read) {
+  for (let page = 1; ; page += 1) {
+    const response = await gh(`${root}/actions/artifacts?name=${enc(`kicad-design-${sha.slice(0, 7)}.html`)}&per_page=100&page=${page}`, token);
+    if (!response.ok) throw new Error('artifacts unavailable');
+    for (const artifact of ((await response.json()).artifacts || []).filter(live).sort(byNewest)) {
+      const snapshot = await read(gh, token, root, artifact);
+      if (snapshot?.head === sha && snapshot.snapshot?.sha === sha) return { source: 'artifact', artifact, snapshot };
+    }
+    if (!response.headers.get('Link')?.includes('rel="next"')) return null;
+  }
+}
+// The tag's release asset design-snapshot.html, or null. Only a tag name can match.
+async function releaseAsset(gh, token, root, tag) {
+  const response = await gh(`${root}/releases/tags/${enc(tag)}`, token);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error('release unavailable');
+  return ((await response.json()).assets || []).find((a) => a.name === 'design-snapshot.html') || null;
+}
+// After the artifact expired: the tag's release asset, when its payload names the tip.
+async function releaseAt(gh, token, root, ref, tip, readRelease) {
+  if (shaRef.test(ref)) return null;
+  const asset = await releaseAsset(gh, token, root, ref);
+  if (!asset) return null;
+  const snapshot = await readRelease(gh, token, root, asset);
+  return snapshot.head === tip && snapshot.snapshot?.sha === tip ? { source: 'release', asset, snapshot } : null;
+}
+// state: found {source, artifact|asset, snapshot, tip, exact, index} | missing {tip, reason?} | unknown | error.
+// reason 'project' means the snapshot exists but has no such folder. A ref that is a full or short sha is never walked.
+// Otherwise walk first-parent history (a merge's files describe its difference from its first parent) and stop at the
+// nearest commit that changes this folder, even when its render is missing: older geometry never stands in for a change.
+export async function findDesign(gh, token, owner, repo, ref, dir, read = readSnapshot, readRelease = readReleaseSnapshot) {
+  const root = `/repos/${enc(owner)}/${enc(repo)}`;
+  try {
+    const response = await gh(`${root}/commits?sha=${enc(ref)}&per_page=1`, token);
+    if (response.status === 404 || response.status === 422) return { state: 'unknown' };
+    if (!response.ok) return { state: 'error' };
+    const tip = (await response.json())[0]?.sha;
+    if (!hex40.test(tip || '')) return { state: 'unknown' };
+    const place = (hit) => {
+      const index = hit.snapshot.projects?.findIndex((p) => p.dir === dir) ?? -1;
+      return index < 0 ? { state: 'missing', tip, reason: 'project' } : { state: 'found', ...hit, tip, exact: hit.exact ?? true, index };
+    };
+    // The tip's details are the walk's first step; reading them first also proves the commit is readable.
+    let sha = tip, commit = await commitDetails(gh, token, root, tip);
+    const exact = (await artifactAt(gh, token, root, tip, read)) ?? (await releaseAt(gh, token, root, ref, tip, readRelease));
+    if (exact) return place(exact);
+    if (shaRef.test(ref)) return { state: 'missing', tip };
+    for (let steps = 0; steps < 500; steps += 1) { // ponytail: at most 500 first-parent commits; the nearest change is nearly always within a few
+      if (changesProject(commit.files, dir)) {
+        const hit = sha === tip ? null : await artifactAt(gh, token, root, sha, read);
+        return hit ? place({ ...hit, exact: false }) : { state: 'missing', tip };
+      }
+      sha = commit.parents?.[0]?.sha;
+      if (!sha) break;
+      if (!hex40.test(sha)) throw new Error('invalid parent');
+      commit = await commitDetails(gh, token, root, sha);
+    }
+    return { state: 'missing', tip };
+  } catch { return { state: 'error' }; }
+}
+
+const generic = ['Not found', 'The requested branch, tag or commit is unavailable.'];
+const html = { 'Content-Type': 'text/html; charset=utf-8' };
+const unavailable = (errorPage, active) => errorPage(502, 'Could not load the design', 'GitHub did not answer. Try again.', [], active);
+const defaultTree = (gh, owner, repo, allowed) => gh(`/repos/${enc(owner)}/${enc(repo)}/git/trees/${enc(allowed.repo.default_branch)}?recursive=1`, allowed.s.token);
+
+// GET /r/:owner/:repo/projects: the project folders of the default branch, each with Latest design and Revisions.
+export async function projectsRoute(request, env, { owner, repo }, { access, gh, errorPage, sessionResponse, projectsPage }) {
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  const tree = await defaultTree(gh, owner, repo, allowed);
+  if (!tree.ok) return errorPage(502, 'Could not load the projects', 'GitHub did not answer. Try again.', [], allowed.s);
+  return sessionResponse(projectsPage({ user: allowed.s.login, owner, repo, projects: projectsFromTree((await tree.json()).tree) }), { headers: html }, allowed.s);
+}
+
+// GET /r/:owner/:repo/design[/<ref>] (repository-wide link) and GET /r/:owner/:repo/p/<key>/design[/<ref>] (one folder).
+// Without a key: one folder goes to its page, several go to the picker, none says so.
+export async function designRoute(request, env, { owner, repo, key, rest }, { access, gh, errorPage, sessionResponse, sessionRedirect, designMissingPage }) {
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  const path = repoPath(owner, repo);
+  const projects = { href: `${path}/projects`, label: 'Projects' };
+  if (key === undefined) {
+    const tree = await defaultTree(gh, owner, repo, allowed);
+    if (!tree.ok) return unavailable(errorPage, allowed.s);
+    const dirs = projectsFromTree((await tree.json()).tree);
+    if (dirs.length === 0) return errorPage(404, 'No KiCad project', 'This repository has no KiCad project folder on its default branch.', [], allowed.s);
+    return sessionRedirect(dirs.length === 1 ? `${path}/p/${projectKey(dirs[0])}/design${rest || ''}` : `${path}/projects`, 302, allowed.s);
+  }
+  let ref, dir;
+  try { ref = rest ? decodeURIComponent(rest.slice(1)) : allowed.repo.default_branch; dir = dirFromKey(key); } catch { ref = ''; dir = ''; }
+  if (!refOk(ref)) return errorPage(404, ...generic, [projects], allowed.s);
+  const found = await findDesign(gh, allowed.s.token, owner, repo, ref, dir);
+  if (found.state === 'unknown') return errorPage(404, ...generic, [projects], allowed.s);
+  if (found.state === 'error') return unavailable(errorPage, allowed.s);
+  if (found.state === 'found') {
+    const query = new URLSearchParams({ design: ref, tip: found.tip.slice(0, 7), p: String(found.index), folder: key });
+    const target = found.source === 'release' ? `${path}/design-release/${enc(ref)}` : `${path}/a/${enc(found.artifact.id)}`;
+    return sessionRedirect(`${target}?${query}`, 302, allowed.s);
+  }
+  if (found.reason === 'project') return errorPage(404, 'No design for this folder', 'This project folder is not in that design.', [projects], allowed.s);
+  return sessionResponse(designMissingPage({ user: allowed.s.login, owner, repo, key, ref, sha: found.tip, canRender: Boolean(allowed.repo.permissions?.push) }),
+    { status: 404, headers: html }, allowed.s);
+}
+
+// The wrapper's optional design context from its query: requested ref, requested tip, report index and folder key.
+export function designQuery(params) {
+  const value = (name, pattern) => (pattern.test(params.get(name) || '') ? params.get(name) : '');
+  return { designRef: refOk(params.get('design') || '') ? params.get('design') : '', tip: value('tip', /^[0-9a-f]{7}$/),
+    projectIndex: value('p', /^\d{1,4}$/), folderKey: value('folder', /^(?!\.\.?$)[^/]{1,400}$/) };
+}
+
+// GET /r/:owner/:repo/design-release/:tag and .../:tag/raw: a tag's release snapshot, once its artifact has expired.
+// The wrapper is the report wrapper; the raw file is served like the artifact raw route (sandboxed reportCsp, re-dressed).
+export async function designReleaseRoute(request, env, { owner, repo, tag, raw }, { access, gh, errorPage, sessionResponse, sessionRedirect, reviewPage }) {
+  const allowed = await access(request, env, owner, repo);
+  if (allowed instanceof Response) return allowed;
+  if (!refOk(tag) || shaRef.test(tag)) return errorPage(404, ...generic, [], allowed.s);
+  const root = `/repos/${enc(owner)}/${enc(repo)}`, wrapper = `${repoPath(owner, repo)}/design-release/${enc(tag)}`;
+  if (raw && request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(wrapper, 302, allowed.s);
+  try {
+    const first = await gh(`${root}/commits?sha=${enc(tag)}&per_page=1`, allowed.s.token);
+    if (!first.ok) return first.status === 404 || first.status === 422 ? errorPage(404, ...generic, [], allowed.s) : unavailable(errorPage, allowed.s);
+    const tip = (await first.json())[0]?.sha;
+    const asset = hex40.test(tip || '') ? await releaseAsset(gh, allowed.s.token, root, tag) : null;
+    if (!asset) return errorPage(404, ...generic, [], allowed.s);
+    const text = await releaseText(gh, allowed.s.token, root, asset);
+    if (snapshotPayload(text).head !== tip) return errorPage(404, ...generic, [], allowed.s);
+    if (raw) return sessionResponse(currentReport(text) ?? text, { headers: { ...html, 'Content-Security-Policy': reportCsp, 'X-Frame-Options': 'SAMEORIGIN' } }, allowed.s);
+    return sessionResponse(reviewPage({ user: allowed.s.login, owner, repo, name: `kicad-design-${tip.slice(0, 7)}.html`, rawPath: `${wrapper}/raw`,
+      ...designQuery(new URL(request.url).searchParams) }), { headers: { ...html, 'Content-Security-Policy': frameCsp } }, allowed.s);
+  } catch {
+    return unavailable(errorPage, allowed.s);
+  }
+}

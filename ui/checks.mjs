@@ -6841,3 +6841,34 @@ CHECKS.push(...['parent-corrupt-reply','parent-delayed-reply'].map(fault=>["BR02
    frame.remove();Review3D.dispose();
  }
 `]));
+
+CHECKS.push(["design site screen: wrapper, missing or history is reachable", "", `
+  if(!window.__dpSiteFixture)return 'skip';
+  const root=document.querySelector('main.design-site'); if(!root)return 'missing design-site root on marked fixture '+window.__dpSiteFixture;
+  const W=document.documentElement.clientWidth;
+  if(document.documentElement.scrollWidth>W+1)return 'document overflows '+document.documentElement.scrollWidth+'/'+W;
+  const actions=[...root.querySelectorAll('a.btn,button:not([disabled]),summary,input:not([type=hidden])')].filter(el=>el.getClientRects().length);
+  if(document.querySelector('#review-report'))for(const label of ['Revisions','Latest design']){
+    const link=[...root.querySelectorAll('a.design-action')].find(el=>el.textContent===label);
+    if(!link || !link.getClientRects().length || getComputedStyle(link).visibility!=='visible' || link.tabIndex<0)return 'missing or hidden wrapper action '+label;
+  }
+  for(const el of actions){
+    el.scrollIntoView({block:'nearest',inline:'nearest'}); el.focus();
+    const r=el.getBoundingClientRect();
+    if(r.width<44 || r.height<44)return 'touch target '+el.textContent+' '+r.width+'x'+r.height;
+    if(r.left < -1 || r.right > W+1 || r.top < -1 || r.bottom > innerHeight+1)return 'unreachable '+el.textContent;
+    if(document.activeElement!==el)return 'not focusable '+el.textContent;
+  }
+  const grouped=[...root.querySelectorAll('.design-actions,.page-actions,.message-actions')];
+  for(const group of grouped){const controls=[...group.querySelectorAll('a.btn,button')].filter(el=>el.getClientRects().length); for(let i=0;i<controls.length;i++)for(let j=i+1;j<controls.length;j++){const a=controls[i].getBoundingClientRect(),b=controls[j].getBoundingClientRect();const dx=Math.max(a.left-b.right,b.left-a.right),dy=Math.max(a.top-b.bottom,b.top-a.bottom); if(dx<8 && dy<8)return 'action gap below 8 px';}}
+  if(document.querySelector('#review-report')){
+    for(let n=0;n<100&&!document.querySelector('[data-design-subject]')?.textContent;n++)await new Promise(r=>setTimeout(r,50));
+    const subject=document.querySelector('[data-design-subject]');
+    if(subject?.textContent!=='Move R16 <b>bold</b>' || subject.querySelector('b'))return 'hosted subject absent or interpreted as HTML';
+    if(document.querySelector('[data-design-date]')?.textContent!=='2026-10-24')return 'hosted date absent';
+    if(document.querySelector('[data-design-ref]')?.textContent!=='main')return 'recorded snapshot ref absent on query-free artifact entry';
+    const bad=document.createElement('iframe'); bad.hidden=true; bad.srcdoc='<script>parent.postMessage({designSnapshot:{sha:"'+'c'.repeat(40)+'",committedAt:"2020-01-01",message:"FORGED"}},"*")<'+ '/script>'; document.body.append(bad);
+    await new Promise(r=>setTimeout(r,100)); if(subject.textContent==='FORGED')return 'foreign frame metadata accepted'; bad.remove();
+  }
+  window.scrollTo(0,0); return true;
+`]);

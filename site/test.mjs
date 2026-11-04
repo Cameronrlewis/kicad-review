@@ -5001,3 +5001,247 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
   assert.match(html, /"endpoint":"\/r\/o\/r\/a\/12\/3d\/"/);
   assert.doesNotMatch(html, /Review3D|review3d\.js/, 'viewer runs only inside the report frame');
 });
+
+// ---- Design page: the newest snapshot for a branch, tag or commit ----
+import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject } from './design.js';
+import { designMissingPage, projectsPage } from './pages.js'; // designsPage arrives with Task 8
+// The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
+const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
+const tipSha = 'c'.repeat(40);
+const snap = (id, sha7, extra = {}) => ({ id, name: `kicad-design-${sha7}.html`, expired: false, created_at: '2026-10-24T10:00:00Z', ...extra });
+const API = 'https://api.github.com/repos/Cameronrlewis/repo';
+function designGh(routes) {
+  const seen = [];
+  const gh = async (path) => { seen.push(path); const hit = routes.find(([match]) => path.includes(match)); return hit ? hit[1](path) : new Response('{}', { status: 404 }); };
+  return { gh, seen };
+}
+const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
+
+test('refOk accepts Git ref names and refuses what GitHub or a shell would misread', () => {
+  for (const ok of ['main', 'feature/x', 'v1.0', 'release-2026', 'abcdef0']) assert.equal(refOk(ok), true, ok);
+  for (const bad of ['', 'a..b', 'x y', 'a~1', 'a^', 'a:b', 'a?', 'a*', 'a[b', 'a\\b', 'a@{1}', 'x.lock', '/x', 'x/', 'a//b', 'a\nb', 'x'.repeat(256)]) assert.equal(refOk(bad), false, JSON.stringify(bad));
+  assert.equal(refOk(undefined), false);
+});
+
+// A first-parent chain for discovery tests: commits[0] is the tip. `files` are the commit's changed files.
+// A commit with `snapshot: id` has a live snapshot artifact named for its sha7; `expired` marks it expired.
+const shaOf = (n) => n.toString(16).padStart(7, '0') + '0'.repeat(33);
+const c = (n, files = [], extra = {}) => ({ sha: shaOf(n), files, ...extra });
+function chainGh(commits, { releases = {}, fail = '', status = 500 } = {}) {
+  const at = new Map(commits.map((x, i) => [x.sha, { ...x, parents: i + 1 < commits.length ? [{ sha: commits[i + 1].sha }] : [] }]));
+  return async (path) => {
+    if (fail && path.includes(fail)) return json({}, status);
+    if (path.includes('/commits?')) return json([{ sha: commits[0].sha }]);
+    if (path.includes('/actions/artifacts?')) {
+      const name = new URL('https://x' + path).searchParams.get('name');
+      return json({ artifacts: commits.filter((x) => x.snapshot && name === `kicad-design-${x.sha.slice(0, 7)}.html`)
+        .map((x) => snap(x.snapshot, x.sha.slice(0, 7), x.expired ? { expired: true } : {})) });
+    }
+    const tag = /\/releases\/tags\/(.+)$/.exec(path);
+    if (tag) return releases[decodeURIComponent(tag[1])] ? json(releases[decodeURIComponent(tag[1])]) : json({}, 404);
+    const m = /\/commits\/([0-9a-f]{40})/.exec(path);
+    if (m) { const x = at.get(m[1]); return x ? json({ sha: x.sha, parents: x.parents, files: x.files }) : json({}, 404); }
+    throw Error('unexpected ' + path);
+  };
+}
+// The snapshot body read for an artifact: its payload head is the sha the artifact was named for, unless the test says otherwise.
+const readAs = (commits, dirs = ['A', 'B']) => async (gh, token, root, artifact) => {
+  const hit = commits.find((x) => x.snapshot === artifact.id);
+  return hit ? payload(hit.sha, dirs) : null;
+};
+
+test('a project folder is the unit of design: its page finds only its own nearest KiCad change', async () => {
+  // T changes only B; Q changes A; R changes only the README. Both folders are snapshotted at Q and R.
+  const commits = [c(3, [{ filename: 'B/B.kicad_pcb' }]), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 }), c(1, [{ filename: 'README.md' }], { snapshot: 11 })];
+  const gh = chainGh(commits);
+  const a = await findDesign(gh, 't', 'o', 'r', 'main', 'A', readAs(commits));
+  assert.equal(a.state, 'found');
+  assert.equal(a.exact, false, 'A reuses the nearest A change (Q) because T does not change A');
+  assert.equal(a.index, 0, 'the report index of folder A');
+  assert.equal(a.artifact.id, 21);
+  const b = await findDesign(gh, 't', 'o', 'r', 'main', 'B', readAs(commits));
+  assert.equal(b.state, 'missing', 'B changed at the tip and has no render: never substitute older geometry');
+  assert.equal(b.tip, shaOf(3));
+});
+
+test('renames into or out of a folder count for both folders; a global settings file counts for every folder', async () => {
+  const moved = [c(3, [{ filename: 'B/x.kicad_sch', previous_filename: 'A/x.kicad_sch', status: 'renamed' }]), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  assert.equal((await findDesign(chainGh(moved), 't', 'o', 'r', 'main', 'A', readAs(moved))).state, 'missing', 'the folder A file was renamed away');
+  assert.equal((await findDesign(chainGh(moved), 't', 'o', 'r', 'main', 'B', readAs(moved))).state, 'missing', 'the file arrived in folder B');
+  const global = [c(3, [{ filename: 'kicad-review.toml' }]), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  assert.equal((await findDesign(chainGh(global), 't', 'o', 'r', 'main', 'A', readAs(global))).state, 'missing');
+  assert.equal(changesProject([{ filename: 'A/x.kicad_dru' }], 'A'), true);
+  assert.equal(changesProject([{ filename: 'A/x.kicad_wks' }], 'A'), true);
+  assert.equal(changesProject([{ filename: 'A/README.md' }], 'A'), false);
+  assert.equal(changesProject([{ filename: 'B/x.kicad_pcb' }], 'A'), false);
+});
+
+test('an unrelated snapshot under the same sha7 or a force push never substitutes', async () => {
+  const commits = [c(3, []), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  const otherSha = async (gh, token, root, artifact) => ({ ...payload(shaOf(9)), projects: [{ dir: 'A' }] });
+  assert.equal((await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'A', otherSha)).state, 'missing', 'sha7 is not provenance');
+  const forced = [c(3, [{ filename: 'A/A.kicad_sch' }]), c(2, [], { snapshot: 21 })];
+  assert.equal((await findDesign(chainGh(forced), 't', 'o', 'r', 'main', 'A', readAs(forced))).state, 'missing');
+});
+
+test('an expired artifact falls back to the live release asset design-snapshot.html of the tag', async () => {
+  const tipAndTag = [c(1, [], { snapshot: 31, expired: true })];
+  const releases = { 'v1.0': { assets: [{ id: 901, name: 'design-snapshot.html' }] } };
+  const found = await findDesign(chainGh(tipAndTag, { releases }), 't', 'o', 'r', 'v1.0', 'A', readAs(tipAndTag), async (gh, token, root, asset) => {
+    assert.equal(asset.id, 901);
+    return payload(shaOf(1));
+  });
+  assert.equal(found.state, 'found');
+  assert.equal(found.source, 'release', 'the expired artifact is ignored; the release asset is the source');
+  assert.equal(found.exact, true);
+  assert.equal(found.asset.id, 901);
+  assert.equal(found.index, 0);
+  const wrong = await findDesign(chainGh(tipAndTag, { releases }), 't', 'o', 'r', 'v1.0', 'A', readAs(tipAndTag), async () => payload(shaOf(7)));
+  assert.equal(wrong.state, 'missing', 'a release whose snapshot names another commit is never shown');
+});
+
+test('a folder missing from the report it would open is reported as missing, not shown', async () => {
+  const commits = [c(1, [], { snapshot: 21 })];
+  const found = await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'C', readAs(commits, ['A', 'B']));
+  assert.equal(found.state, 'missing');
+  assert.equal(found.reason, 'project');
+});
+
+test('design discovery matrix: 403, 429 and 500 at each GitHub call are errors, and bad refs never reach GitHub', async () => {
+  const commits = [c(1, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  for (const status of [403, 429, 500]) for (const fail of ['/commits?', '/actions/artifacts?', '/commits/'])
+    assert.equal((await findDesign(chainGh(commits, { fail, status }), 't', 'o', 'r', 'main', 'A', readAs(commits))).state, 'error', `${status} at ${fail}`);
+  const readerFailure = await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'A', async () => { throw Error('download 429'); });
+  assert.equal(readerFailure.state, 'error');
+});
+
+test('design discovery propagates artifact download and body failures, rather than offering another render', async()=>{
+  for(const status of [403,429,500]) {
+    await assert.rejects(()=>readSnapshot(async()=>json({},status),'t','/repos/o/r',snap(1,'ccccccc')),/snapshot download unavailable/);
+    const restore=mockFetch(async()=>json({},status));
+    try {
+      await assert.rejects(()=>readSnapshot(async()=>new Response(null,{status:302,headers:{Location:'https://artifact.example/design'}}),'t','/repos/o/r',snap(1,'ccccccc')),/snapshot body unavailable/);
+    } finally {restore();}
+  }
+});
+
+async function designGet(path, routes, { push = true, headers = {} } = {}) {
+  const sealed = await signedIn();
+  const repo = () => json({ owner: { login: 'Cameronrlewis' }, permissions: { pull: true, push }, default_branch: 'main' });
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === API) return repo();
+    const hit = routes.find(([match]) => url.includes(match));
+    if (hit) return hit[1](url, options);
+    if (/\/actions\/artifacts\/\d+\/zip$/.test(url)) return new Response(null,{status:302,headers:{Location:'https://artifact.example/design'}});
+    if (url==='https://artifact.example/design') return new Response('<!doctype html><script>window.REVIEW_DATA = '+JSON.stringify(payload(tipSha))+';</script>');
+    if (url.includes('/commits/')) return json({parents:[],files:[]});
+    return new Response('{}', {status:404});
+  });
+  try { return await call(path, { headers: { Cookie: `s=${sealed}`, ...headers } }); } finally { restore(); }
+}
+
+const twoFolders = [['/git/trees/', () => json({ tree: [{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }] })],
+  ['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [snap(55, 'ccccccc')] })]];
+
+test('a project page opens the commit snapshot at that folder\'s report index, keeping the ref and sha7', async () => {
+  const a = await designGet('/r/Cameronrlewis/repo/p/A/design', twoFolders);
+  assert.equal(a.status, 302);
+  assert.equal(a.headers.get('Location'), '/r/Cameronrlewis/repo/a/55?design=main&tip=ccccccc&p=0&folder=A');
+  const b = await designGet('/r/Cameronrlewis/repo/p/B/design', twoFolders);
+  assert.equal(b.headers.get('Location'), '/r/Cameronrlewis/repo/a/55?design=main&tip=ccccccc&p=1&folder=B', 'the second folder opens the same commit at its own index');
+});
+
+test('the repository-wide design link goes to the folder picker when there are several folders, and to the folder when there is one', async () => {
+  const many = await designGet('/r/Cameronrlewis/repo/design', twoFolders);
+  assert.equal(many.status, 302);
+  assert.equal(many.headers.get('Location'), '/r/Cameronrlewis/repo/projects');
+  const picker = await (await designGet('/r/Cameronrlewis/repo/projects', twoFolders)).text();
+  assert.match(picker, /href="\/r\/Cameronrlewis\/repo\/p\/A\/design">Latest design/);
+  assert.match(picker, /href="\/r\/Cameronrlewis\/repo\/p\/B\/designs">Revisions/);
+  assert.deepEqual(projectsFromTree([{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }, { type: 'blob', path: 'README.md' }]), ['A', 'B']);
+  // '.' (and '%2E') is a dot segment that URL parsing removes, so the root folder's key is an encoded slash.
+  assert.equal(projectKey(''), '%2F');
+  assert.equal(dirFromKey(projectKey('')), '');
+  assert.equal(new URL(`https://x/r/o/r/p/${projectKey('')}/design`).pathname, '/r/o/r/p/%2F/design');
+  assert.equal(dirFromKey(encodeURIComponent('Student Design Teams/Horizon')), 'Student Design Teams/Horizon');
+  const one = await designGet('/r/Cameronrlewis/repo/design', [['/git/trees/', () => json({ tree: [{ type: 'blob', path: 'Only/Only.kicad_pro' }] })]]);
+  assert.equal(one.headers.get('Location'), '/r/Cameronrlewis/repo/p/Only/design');
+});
+
+test('design resolves slash branches and explicit commits per folder, and refuses bad refs before calling GitHub', async () => {
+  const calls = [];
+  const routes = [['/commits?', (url) => { calls.push(url); return json([{ sha: tipSha }]); }], ['/actions/artifacts?name=', () => json({ artifacts: [snap(7, 'ccccccc')] })]];
+  const slash = await designGet('/r/Cameronrlewis/repo/p/A/design/feature%2Fx', routes);
+  assert.equal(slash.headers.get('Location'), '/r/Cameronrlewis/repo/a/7?design=feature%2Fx&tip=ccccccc&p=0&folder=A');
+  assert.ok(calls[0].includes('sha=feature%2Fx'));
+  calls.length = 0;
+  for (const bad of ['a..b', 'x%20y', '%E0%A4%A']) {
+    const response = await designGet(`/r/Cameronrlewis/repo/p/A/design/${bad}`, routes);
+    assert.equal(response.status, 404, bad);
+  }
+  assert.equal(calls.length, 0, 'a refused ref never reaches GitHub');
+});
+
+test('design says why there is no snapshot, and offers the render only to writers', async () => {
+  const routes = [['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [] })]];
+  const writer = await designGet(`/r/Cameronrlewis/repo/p/A/design/${tipSha}`, routes);
+  const body = await writer.text();
+  assert.equal(writer.status, 404);
+  assert.match(body, /No design snapshot for c{40}/);
+  assert.match(body, new RegExp(`action="/r/Cameronrlewis/repo/design/render"[^>]*><input type="hidden" name="key" value="A"><input type="hidden" name="sha" value="${tipSha}"`));
+  const reader = await (await designGet(`/r/Cameronrlewis/repo/p/A/design/${tipSha}`, routes, { push: false })).text();
+  assert.ok(!reader.includes('design/render') && reader.includes('Someone with write access'));
+  const unknown = await designGet('/r/Cameronrlewis/repo/p/A/design/nope', [['/commits?', () => json({ message: 'No commit found' }, 422)]]);
+  assert.equal(unknown.status, 404);
+  assert.match(await unknown.text(), /requested branch, tag or commit is unavailable/);
+  const down = await designGet('/r/Cameronrlewis/repo/p/A/design', [['/commits?', () => json({}, 500)]]);
+  assert.equal(down.status, 502);
+});
+
+test('a folder the snapshot does not contain says so, instead of opening another folder', async () => {
+  const routes = [['/git/trees/', () => json({ tree: [{ type: 'blob', path: 'A/A.kicad_pro' }] })], ['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [snap(55, 'ccccccc')] })]];
+  const response = await designGet('/r/Cameronrlewis/repo/p/C/design', routes);
+  assert.equal(response.status, 404);
+  assert.match(await response.text(), /This project folder is not in that design\./);
+});
+
+test('the release fallback opens the tag asset through the same wrapper, and its raw body is the authenticated file', async () => {
+  const sealed = await signedIn();
+  const releases = { 'v1.0': { assets: [{ id: 901, name: 'design-snapshot.html' }] } };
+  const routes = [['/commits?', () => json([{ sha: tipSha }])], ['/actions/artifacts?name=', () => json({ artifacts: [] })],
+    ['/releases/tags/v1.0', () => json(releases['v1.0'])],
+    ['/releases/assets/901', () => new Response(null, { status: 302, headers: { Location: 'https://asset.example/design-snapshot.html?sig=x' } })],
+    ['asset.example', () => new Response('<!doctype html><script>window.REVIEW_DATA = ' + JSON.stringify(payload(tipSha)) + ';</script>')]];
+  const opened = await designGet('/r/Cameronrlewis/repo/p/A/design/v1.0', routes);
+  assert.equal(opened.status, 302);
+  assert.equal(opened.headers.get('Location'), '/r/Cameronrlewis/repo/design-release/v1.0?design=v1.0&tip=ccccccc&p=0&folder=A');
+  const raw = await designGet('/r/Cameronrlewis/repo/design-release/v1.0/raw', routes);
+  assert.match(await raw.text(), /window\.REVIEW_DATA/);
+  // The raw file is the framed report: sandboxed like the artifact raw route (frameCsp's frame-ancestors 'none' would block the wrapper's iframe).
+  assert.equal(raw.headers.get('Content-Security-Policy'), reportCsp);
+  assert.equal(raw.headers.get('X-Frame-Options'), 'SAMEORIGIN');
+  const top = await designGet('/r/Cameronrlewis/repo/design-release/v1.0/raw', routes, { headers: { 'Sec-Fetch-Dest': 'document' } });
+  assert.equal(top.status, 302, 'a top-level visit to the raw file goes back to the wrapper');
+  assert.equal(top.headers.get('Location'), '/r/Cameronrlewis/repo/design-release/v1.0');
+});
+
+test('a snapshot-only run opens its design, and the report wrapper names the design instead of a comparison', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => url === API ? accessibleRepo() : url.endsWith('/actions/runs/9') ? json({ status: 'completed', conclusion: 'success', html_url: 'https://github.com/o/r/actions/runs/9' })
+    : url.endsWith('/actions/runs/9/artifacts') ? json({ artifacts: [{ id: 77, name: 'kicad-design-ccccccc.html', expired: false }] }) : new Response('{}', { status: 404 }));
+  try {
+    const response = await call('/r/Cameronrlewis/repo/run/9', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.headers.get('Location'), '/r/Cameronrlewis/repo/a/77');
+  } finally { restore(); }
+  const page = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 77, name: 'kicad-design-bbbbbbb.html', designRef: 'main', tip: 'ccccccc', projectIndex: '1', folderKey: 'A' });
+  assert.match(page, /DESIGN<\/span> <code>bbbbbbb<\/code>/);
+  assert.match(page, /snapshot for <code>main<\/code> \(requested tip ccccccc\)/);
+  assert.match(page, /href="\/r\/o\/r\/p\/A\/designs">Revisions/);
+  assert.match(page, /src="\/r\/o\/r\/a\/77\/raw#p=1"/, 'the report opens at the folder index');
+  assert.ok(!page.includes('MERGE ·') && !page.includes('BASE'));
+  assert.match(reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 1, name: 'kicad-design-bbbbbbb.html', designRef: '<b>', tip: 'bbbbbbb' }), /<code>&lt;b&gt;<\/code>/);
+  assert.match(reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 2, name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html' }), /BASE<\/span> <code>aaaaaaa/);
+  assert.equal(designName.test('kicad-design-ccccccc.html'), true);
+  assert.equal(designName.test('kicad-review-aaaaaaa-bbbbbbb-pass.html'), false);
+  assert.ok(designMissingPage({ user: 'u', owner: 'o', repo: 'r', ref: '<i>', sha: tipSha, canRender: true }).includes('&lt;i&gt;'));
+});

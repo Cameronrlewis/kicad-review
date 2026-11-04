@@ -4,11 +4,12 @@ import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
 import { verifyReportFamily } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
-import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
+import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep, designMissingPage, projectsPage } from './pages.js';
 
 import { threadsRoute } from './threads.js';
 import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
+import { designName, designRoute, designReleaseRoute, projectsRoute, designQuery } from './design.js';
 
 import { readinessRoute, rerunRoute } from './readiness.js';
 
@@ -462,8 +463,10 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       // never trusting child declarations. digestAsset revalidates authorization and
       // declarations per request; the parent checks the returned MIME type and digest.
       const sharing = shareEnabled(env) && canShare;
+      const query = new URL(request.url).searchParams;
       return sessionResponse(reviewPage({
-        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: new URL(request.url).searchParams.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
+        user: active.login, owner, repo, id, name: metadata.name, workflowRunId: runId, pdf: query.get('pdf') === '1', pull, runStatus, runConclusion, share: sharing,
+        ...designQuery(query),
       }), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': frameCsp } }, active);
     }
     if (request.headers.get('Sec-Fetch-Dest') === 'document') return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(id)}`, 302, active);
@@ -783,6 +786,8 @@ async function run(request, env, owner, repo, id, url) {
     const artifacts = (await artifactsResponse.json()).artifacts || [];
     const artifact = reviews(artifacts)[0];
     if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}${matchingPdf(artifacts, artifact) ? '?pdf=1' : ''}`, 302, allowed.s);
+    const snapshot = artifacts.find((a) => !a.expired && designName.test(a.name || '') && /^\d{1,20}$/.test(String(a.id)));
+    if (snapshot) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(snapshot.id)}`, 302, allowed.s);
   } catch {
     return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
   }
@@ -929,6 +934,19 @@ const routes = {
         const result = await issuesRoute(request, env, { owner, repo, rest }, { access, gh });
         return response(result.body, { status: result.status, headers: result.headers });
       }
+      const designDeps = { access, gh, errorPage, sessionResponse, sessionRedirect, designMissingPage, projectsPage, reviewPage, workflowFile };
+      const designScoped = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/p\/([^/]+)\/design(\/.+)?$/);
+      const designRepo = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/design(\/.+)?$/);
+      const designTag = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/design-release\/([^/]+)(\/raw)?$/);
+      const projectList = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/projects$/);
+      if (request.method === 'GET' && designScoped) return await designRoute(request, env, { owner: designScoped[1], repo: designScoped[2], key: designScoped[3], rest: designScoped[4] || '' }, designDeps);
+      if (request.method === 'GET' && designRepo) return await designRoute(request, env, { owner: designRepo[1], repo: designRepo[2], rest: designRepo[3] || '' }, designDeps);
+      if (request.method === 'GET' && designTag) {
+        let tag = '';
+        try { tag = decodeURIComponent(designTag[3]); } catch { /* refused below as an invalid ref */ }
+        return await designReleaseRoute(request, env, { owner: designTag[1], repo: designTag[2], tag, raw: Boolean(designTag[4]) }, designDeps);
+      }
+      if (request.method === 'GET' && projectList) return await projectsRoute(request, env, { owner: projectList[1], repo: projectList[2] }, designDeps);
       const commitsRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/commits$/);
       if (request.method === 'GET' && commitsRoute) {
         return commits(request, env, commitsRoute[1], commitsRoute[2], url);

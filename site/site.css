@@ -298,3 +298,22 @@ input:focus-visible, select:focus-visible { border-color:var(--acc); outline:1px
 .bench-search select { max-width:132px; font-size:var(--fs-sm); }
 
 .deployment { box-sizing: border-box; min-height: 24px; padding: 3px var(--space-4); color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+/* 06 design routes: wrapper, missing snapshot and project picker. */
+.design-site { min-width:0; max-width:100%; overflow-wrap:anywhere; }
+.design-site .btn, .design-site button, .design-site summary, .design-site input:not([type=hidden]) { min-width:44px; min-height:44px; }
+.design-site .review-bar, .design-site .page-actions, .design-site .message-actions, .design-site .design-actions { gap:8px; flex-wrap:wrap; }
+.design-site .review-bar { min-width:0; height:auto; }
+.design-site .design-metadata { display:inline-flex; flex-wrap:wrap; align-items:baseline; gap:8px; min-width:0; }
+.design-site a.btn { display:inline-flex; align-items:center; justify-content:center; min-width:44px; min-height:44px; box-sizing:border-box; }
+.design-site a.design-action:focus-visible { outline:2px solid currentColor; outline-offset:2px; }
+.design-site [data-design-subject], .design-site [data-design-date] { overflow-wrap:anywhere; min-width:0; }
+.design-site table { table-layout:fixed; width:100%; }
+.design-site td { overflow-wrap:anywhere; }
+.design-site .design-actions, .design-site .page-actions { display:flex; }
+/* A closed menu's popover keeps layout boxes in Chrome; drop them so only reachable actions exist. */
+.design-site .bench-menu:not([open]) > .bench-popover { display:none; }
+@media(max-width:600px) {
+  .design-site table, .design-site tbody, .design-site tr, .design-site td { display:block; width:100%; }
+  .design-site thead { display:none; }
+  .design-site td { box-sizing:border-box; white-space:normal; }
+}
