@@ -6552,3 +6552,43 @@ with _DpTmp() as t:
         kr.load_settings, kr.release_project, kr.release_findings, kr.package_summary = saved
         os.chdir(old_cwd)
 print("ok DP-S4F fabrication packages match each report policy")
+
+# DP-S4L: historical heads without DigiKey still use trusted snapshot lookup policy.
+from unittest.mock import patch as _dp_patch
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    saved = kr.load_settings, kr.project_objects, kr.parts_lines, kr.digikey_lookup
+    try:
+        os.chdir(t)
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); historical["digikey"]["enabled"] = False
+        trusted = json.loads(json.dumps(historical)); trusted["design"]["enabled"] = True
+        trusted["parts"]["enabled"] = True
+        trusted["digikey"].update(enabled=True, currency="CAD", site="CA")
+        det = {"projects":[{"dir":"P", "name":"P", "status":"added"}], "snapshot_settings":trusted}
+        write(t, {"review/detect.json":json.dumps(det)})
+        kr.load_settings = lambda: json.loads(json.dumps(historical))
+        kr.project_objects = lambda *args: {}
+        kr.parts_lines = lambda objects: [{"mpn":"SN74LVC1G17DBVR", "refs":["U1"]}]
+        calls = []
+        def lookup(wanted, creds, settings):
+            cfg = settings["digikey"]; calls.append((cfg["currency"],cfg["site"]))
+            return {"supplier":kr.supplier_info(cfg["currency"]), "results":{"SN74LVC1G17DBVR":{"status":"ok", "quantity":23}}}
+        kr.digikey_lookup = lookup
+        with _dp_patch.dict(os.environ, DIGIKEY_CLIENT_ID="test", DIGIKEY_CLIENT_SECRET="test"):
+            kr.cmd_lookup(None)
+            snapshot = json.loads(pathlib.Path("review/supplier-snapshot.json").read_text())
+            assert snapshot["supplier"]["currency"] == "CAD" and snapshot["results"]["SN74LVC1G17DBVR"]["quantity"] == 23
+            assert not pathlib.Path("review/supplier.json").exists()
+            projects = [{"parts":{"lines":[{"mpn":"SN74LVC1G17DBVR"}]}}]
+            kr.load_supplier(trusted, projects, "review/supplier-snapshot.json")
+            assert projects[0]["parts"]["lines"][0]["supplier"]["quantity"] == 23
+            historical["digikey"].update(enabled=True, currency="USD", site="US")
+            calls.clear(); kr.cmd_lookup(None)
+            assert calls == [("USD","US"),("CAD","CA")], calls
+            assert json.loads(pathlib.Path("review/supplier.json").read_text())["supplier"]["currency"] == "USD"
+            historical["digikey"] = trusted["digikey"].copy(); calls.clear(); kr.cmd_lookup(None)
+            assert calls == [("CAD","CA")], "identical lookup policies share one request set"
+    finally:
+        kr.load_settings, kr.project_objects, kr.parts_lines, kr.digikey_lookup = saved
+        os.chdir(old_cwd)
+print("ok DP-S4L trusted supplier results reach historical snapshots")

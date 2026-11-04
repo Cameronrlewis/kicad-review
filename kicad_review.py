@@ -3796,11 +3796,14 @@ def inline_page(data_js):
 
 
 def cmd_lookup(args):
-    settings = load_settings()
-    if not settings["digikey"]["enabled"]:
+    """supplier.json under the comparison policy; supplier-snapshot.json under the trusted snapshot policy."""
+    det = json.loads(pathlib.Path("review/detect.json").read_text())
+    policies = [("review/supplier.json", load_settings())]
+    if det.get("snapshot_settings"):
+        policies.append(("review/supplier-snapshot.json", det["snapshot_settings"]))
+    policies = [(path, policy) for path, policy in policies if policy["digikey"]["enabled"]]
+    if not policies:
         return
-    with open("review/detect.json", encoding="utf-8") as fh:
-        det = json.load(fh)
     wanted, manufacturers = {}, {}
     for project in det["projects"]:
         objects = project_objects(posixpath.join("head", project["dir"]), project["name"])
@@ -3819,23 +3822,27 @@ def cmd_lookup(args):
                         hints.add(name.strip().lower())
     for key, hints in manufacturers.items():
         wanted[key]["manufacturer"] = next(iter(hints)) if len(hints) == 1 else None
-    cfg = settings["digikey"]
-    supplier = supplier_info(cfg["currency"])
     creds = (os.environ.get("DIGIKEY_CLIENT_ID", ""), os.environ.get("DIGIKEY_CLIENT_SECRET", ""))
-    output = {"supplier": supplier, "results": {}}
-    if not all(creds):
-        supplier["skipped"] = "no credentials (forked pull request or secrets not set)"
-    elif wanted:
-        try:
-            output = digikey_lookup(wanted, creds, settings)
-        except Exception as error:
-            # No response bodies or exception messages: they may contain credentials.
-            supplier["error"] = f"lookup unavailable ({type(error).__name__})"
-    else:
-        supplier["skipped"] = "no valid MPNs"
-    with open("review/supplier.json", "w", encoding="utf-8") as fh:
-        json.dump(output, fh)
-    print(f"DigiKey lookup: {output['supplier']['calls']} calls")
+    outputs = {}
+    for path, policy in policies:
+        key = json.dumps(policy["digikey"], sort_keys=True)  # currency, site and every option: differing policies never share results
+        if key not in outputs:
+            supplier = supplier_info(policy["digikey"]["currency"])
+            output = {"supplier": supplier, "results": {}}
+            if not all(creds):
+                supplier["skipped"] = "no credentials (forked pull request or secrets not set)"
+            elif wanted:
+                try:
+                    output = digikey_lookup(wanted, creds, policy)
+                except Exception as error:
+                    # No response bodies or exception messages: they may contain credentials.
+                    supplier["error"] = f"lookup unavailable ({type(error).__name__})"
+            else:
+                supplier["skipped"] = "no valid MPNs"
+            outputs[key] = output
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(outputs[key], fh)
+        print(f"DigiKey lookup ({path}): {outputs[key]['supplier']['calls']} calls")
 
 
 def merge_supplier(projects, lookup):
