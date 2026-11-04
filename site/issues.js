@@ -1,7 +1,6 @@
 // Anchored GitHub issues share the review-thread marker; GitHub remains the store.
-import { parseAnchor, threadBody, validAnchor } from './threads.js';
+import { json, parseAnchor, threadBody, validAnchor } from './threads.js';
 
-const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 const positive = n => Number.isSafeInteger(n) && n > 0;
 const issueURL = (url, number, owner, repo) => {
   try {

@@ -161,6 +161,10 @@ function errorPage(status, title, message, links = [], active, init = {}, detail
   return sessionResponse(messagePage({ title, message, code: status, details: pageDetails, links: allLinks, user: active?.login }), { ...init, status, headers }, active);
 }
 
+function notFound(active) {
+  return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+}
+
 export function gh(path, token, init = {}) {
   return fetch(`https://api.github.com${path}`, {
     ...init,
@@ -186,20 +190,20 @@ export async function access(request, env, owner, repo) {
   }
   if (!repositoryName.test(owner) || !repositoryName.test(repo)
     || !allowedOwners(env).includes(owner.toLowerCase())) {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    return notFound(active);
   }
   try {
     const repoResponse = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, active.token);
     const data = repoResponse.status === 200 ? await repoResponse.json() : null;
-    if (!data?.permissions?.pull || !allowedOwners(env).includes(data.owner.login.toLowerCase())) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    if (!data?.permissions?.pull || !allowedOwners(env).includes(data.owner.login.toLowerCase())) return notFound(active);
     return { s: active, repo: data };
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    return notFound(active);
   }
 }
 
-function pdfError(active, status = 404) {
-  return sessionResponse(JSON.stringify({ error: 'PDF unavailable' }), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
+function jsonError(active, message) {
+  return sessionResponse(JSON.stringify({ error: message }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
 }
 
 function matchingPdf(artifacts, metadata) {
@@ -227,78 +231,74 @@ async function pdfArtifact(owner, repo, id, token) {
 async function pdfDownload(owner, repo, id, active) {
   try {
     const artifact = await pdfArtifact(owner, repo, id, active.token);
-    if (!artifact) return pdfError(active);
+    if (!artifact) return jsonError(active, 'PDF unavailable');
     const download = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/artifacts/${artifact.id}/zip`, active.token, { redirect: 'manual' });
-    if (download.status !== 302) return pdfError(active);
+    if (download.status !== 302) return jsonError(active, 'PDF unavailable');
     const location = new URL(download.headers.get('Location'));
-    if (location.protocol !== 'https:' || location.username || location.password) return pdfError(active);
+    if (location.protocol !== 'https:' || location.username || location.password) return jsonError(active, 'PDF unavailable');
     const blob = await fetch(location.href, { redirect: 'manual' });
-    if (!blob.ok || !blob.body) return pdfError(active);
+    if (!blob.ok || !blob.body) return jsonError(active, 'PDF unavailable');
     return sessionResponse(blob.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${artifact.name}"` } }, active);
-  } catch { return pdfError(active); }
+  } catch { return jsonError(active, 'PDF unavailable'); }
 }
 
 const downloadKinds = { fab: ['application/zip', /\.zip$/], pdf: ['application/pdf', /\.pdf$/], step: ['model/step', /\.step$/], glb: ['model/gltf-binary', /\.glb$/] };
-
-function downloadError(active) {
-  return sessionResponse(JSON.stringify({ error: 'Download unavailable' }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
-}
 
 // The run's downloads artifact is one archived zip; read the one entry asked for by byte range, never the whole file.
 async function downloadFile(owner, repo, id, index, kind, active) {
   try {
     const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
     const meta = await gh(`${root}/artifacts/${id}`, active.token);
-    if (!meta.ok) return downloadError(active);
+    if (!meta.ok) return jsonError(active, 'Download unavailable');
     const report = await meta.json(), runId = report.workflow_run?.id, name = String(report.name || '');
     // The report name carries the reviewed head's first 7 characters. The run's head_sha is the reviewed head except
     // for a manual (workflow_dispatch) run, which reviews the head given by hand, not its dispatch ref's tip.
     const runHead = String(report.workflow_run?.head_sha || '');
     const head7 = verifyReportFamily('comparison', name) ? /-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name)[1] : /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
     const family = !head7 || !/^[0-9a-f]{40}$/.test(runHead) ? null : verifyReportFamily('comparison', name) ? 'review' : 'design';
-    if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return downloadError(active);
+    if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return jsonError(active, 'Download unavailable');
     const bundleName = `kicad-${family}-downloads-${head7}`;
     // Every page of the run's artifacts is read: 02 adds digest assets, so the bundle can sit past the first 100.
     const found = [];
     let complete = false;
     for (let page = 1; page <= 10 && !complete; page += 1) {
       const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100&page=${page}`, active.token);
-      if (!list.ok) return downloadError(active);
+      if (!list.ok) return jsonError(active, 'Download unavailable');
       const rows = (await list.json()).artifacts;
-      if (!Array.isArray(rows)) return downloadError(active);
+      if (!Array.isArray(rows)) return jsonError(active, 'Download unavailable');
       found.push(...rows.filter((a) => !a?.expired && a?.name === bundleName && a.workflow_run?.id === runId && /^\d{1,20}$/.test(String(a.id))));
       complete = rows.length < 100;
     }
-    if (!complete || found.length !== 1) return downloadError(active);  // zero, several or unpaged matches are refused
+    if (!complete || found.length !== 1) return jsonError(active, 'Download unavailable');  // zero, several or unpaged matches are refused
     const bundle = found[0];
     const zip = await gh(`${root}/artifacts/${bundle.id}/zip`, active.token, { redirect: 'manual' });
-    if (zip.status !== 302) return downloadError(active);
+    if (zip.status !== 302) return jsonError(active, 'Download unavailable');
     const location = new URL(zip.headers.get('Location'));
-    if (location.protocol !== 'https:' || location.username || location.password) return downloadError(active);
+    if (location.protocol !== 'https:' || location.username || location.password) return jsonError(active, 'Download unavailable');
     // The signed blob URL gets no GitHub token; 'manual' (workerd rejects 'error') plus the 206 checks refuse further redirects.
     const range = (start, end) => fetch(location.href, { redirect: 'manual', headers: { Range: `bytes=${start}-${end}` } });
     const probe = await range(0, 0);
     const total = Number(/^bytes 0-0\/(\d+)$/.exec(probe.headers.get('Content-Range') || '')?.[1]);
-    if (probe.status !== 206 || !Number.isSafeInteger(total) || total < 22) { await probe.body?.cancel(); return downloadError(active); }
-    if ((await probe.arrayBuffer()).byteLength !== 1) return downloadError(active);
+    if (probe.status !== 206 || !Number.isSafeInteger(total) || total < 22) { await probe.body?.cancel(); return jsonError(active, 'Download unavailable'); }
+    if ((await probe.arrayBuffer()).byteLength !== 1) return jsonError(active, 'Download unavailable');
     const [type, suffix] = downloadKinds[kind];
     const entries = await zipEntries(range, total);  // exactRange inside checks every 206 and Content-Range
     // Full-head provenance: the staged envelope carries the run's reviewed full head (collect_downloads writes it).
     const envelope = entries.find((e) => e.name === `${index}/downloads.json`);
     const head = envelope ? (await new Response(await zipEntryStream(range, envelope)).json())?.head : null;
     if (!/^[0-9a-f]{40}$/.test(head) || !head.startsWith(head7) || bundle.workflow_run?.head_sha !== runHead
-      || (family === 'design' && !verifyReportFamily('design', name, head))) return downloadError(active);
+      || (family === 'design' && !verifyReportFamily('design', name, head))) return jsonError(active, 'Download unavailable');
     if (head !== runHead) {  // only a manual run may review a head other than its run's head_sha
       const run = await gh(`${root}/runs/${runId}`, active.token);
-      if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return downloadError(active);
+      if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return jsonError(active, 'Download unavailable');
     }
     const matches = entries.filter((e) => e.name.startsWith(`${index}/`) && !e.name.slice(`${index}/`.length).includes('/') && suffix.test(e.name));
     const entry = matches.length === 1 ? matches[0] : null;
     const filename = entry?.name.split('/').pop();
-    if (!entry || !/^[A-Za-z0-9_.-]{1,200}$/.test(filename)) return downloadError(active);
+    if (!entry || !/^[A-Za-z0-9_.-]{1,200}$/.test(filename)) return jsonError(active, 'Download unavailable');
     // Errors after this point (truncation, CRC, length) error the stream; they cannot become a 404.
     return sessionResponse(await zipEntryStream(range, entry), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${filename}"` } }, active);
-  } catch { return downloadError(active); }
+  } catch { return jsonError(active, 'Download unavailable'); }
 }
 
 export function assetFromReport(html, id, kind) {
@@ -499,7 +499,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
         user: active.login, owner, repo, state: 'expired', base: match?.[1], head: match?.[2],
       }), { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } }, active);
     }
-    if (!metadata.name?.endsWith('.html')) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    if (!metadata.name?.endsWith('.html')) return notFound(active);
     if (!raw) {
       let pull = null, runStatus = null, runConclusion = null;
       const runId = metadata.workflow_run?.id;
@@ -529,7 +529,7 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
       },
     }, active);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], active);
+    return notFound(active);
   }
 }
 
@@ -691,7 +691,7 @@ async function reviewList(request, env, owner, repo, url) {
       items: filtered, counts, filter, view, groups,
     }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
 }
 
@@ -745,7 +745,7 @@ async function commits(request, env, owner, repo, url) {
     if (!data) return errorPage(404, 'Not found', 'The requested branch is unavailable.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
     return sessionResponse(commitsPage({ user: allowed.s.login, owner, repo, ...data }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
 }
 
@@ -811,10 +811,10 @@ async function run(request, env, owner, repo, id, url) {
   let runData;
   try {
     const runResponse = await gh(`${root}/actions/runs/${id}`, allowed.s.token);
-    if (runResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    if (runResponse.status !== 200) return notFound(allowed.s);
     runData = await runResponse.json();
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
   const githubUrl = githubRunUrl(runData);
   if (runData.status !== 'completed') {
@@ -832,12 +832,12 @@ async function run(request, env, owner, repo, id, url) {
   }
   try {
     const artifactsResponse = await gh(`${root}/actions/runs/${id}/artifacts`, allowed.s.token);
-    if (artifactsResponse.status !== 200) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    if (artifactsResponse.status !== 200) return notFound(allowed.s);
     const artifacts = (await artifactsResponse.json()).artifacts || [];
     const artifact = reviews(artifacts)[0];
     if (artifact) return sessionRedirect(`${repoPath(owner, repo)}/a/${encodeURIComponent(artifact.id)}${matchingPdf(artifacts, artifact) ? '?pdf=1' : ''}`, 302, allowed.s);
   } catch {
-    return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], allowed.s);
+    return notFound(allowed.s);
   }
   if (runData.conclusion === 'success') {
     return sessionResponse(runPage({ user: allowed.s.login, owner, repo, state: 'nothing', base, head }), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }, allowed.s);
@@ -939,8 +939,8 @@ const routes = {
       if (request.method === 'GET' && artifactRoute) {
         const [, owner, repo, id, raw] = artifactRoute;
         if (!/^\d{1,20}$/.test(id)) {
-          if (raw === '/pdf') return pdfError(await session(request, env));
-          return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+          if (raw === '/pdf') return jsonError(await session(request, env), 'PDF unavailable');
+          return notFound();
         }
         const allowed = await access(request, env, owner, repo);
         if (raw === '/pdf') {
@@ -960,7 +960,7 @@ const routes = {
       const runRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/run\/([^/]+)$/);
       if (request.method === 'GET' && runRoute) {
         const [, owner, repo, id] = runRoute;
-        if (!/^\d{1,20}$/.test(id)) return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.");
+        if (!/^\d{1,20}$/.test(id)) return notFound();
         return run(request, env, owner, repo, id, url);
       }
       const historyMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/history$/);
@@ -996,7 +996,7 @@ const routes = {
       if (request.method === 'GET' && reviewRoute) {
         return reviewList(request, env, reviewRoute[1], reviewRoute[2], url);
       }
-      return errorPage(404, "Can't open this page", "Either it doesn't exist, or your GitHub account can't see it.", [], await session(request, env));
+      return notFound(await session(request, env));
     } catch {
       return errorPage(500, 'Internal server error', 'Try again later.');
     }
