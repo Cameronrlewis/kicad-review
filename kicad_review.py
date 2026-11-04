@@ -1034,7 +1034,7 @@ def missing_products(cache, p, side, settings, purposes):
             # and a head restored from base's shared revision cache has none. With no captured policy there is nothing to
             # validate against: still missing, never skipped.
             if purpose == "snapshot" and (downloads or policy is not None):
-                if policy is None or not downloads_valid(cache, "snapshot", {**settings, "fabrication": policy}):
+                if policy is None or not downloads_valid(cache, "snapshot", snapshot_download_policy(settings)):
                     missing.append("downloads-snapshot")
     return missing
 
@@ -1105,7 +1105,18 @@ def render_settings(det):
         # Release checks need the trusted fabrication policy; so will 07's snapshot downloads (its manifest is keyed by it).
         if snapshot["checks"].get("release", "off") != "off" or snapshot.get("downloads", {}).get("enabled", False):
             settings["_snapshot_fabrication"] = snapshot["fabrication"]
+            if isinstance(snapshot.get("downloads"), dict):
+                settings["_snapshot_downloads"] = snapshot["downloads"]
     return settings
+
+
+def snapshot_download_policy(settings):
+    """The trusted policy downloads-snapshot/ is exported under and cmd_snapshot verifies: the trusted fabrication preset
+    and the trusted [downloads] table (so its step choice, not the comparison's, decides the manifest key). None when not captured."""
+    fabrication = settings.get("_snapshot_fabrication")
+    if fabrication is None:
+        return None
+    return {**settings, "fabrication": fabrication, "downloads": settings.get("_snapshot_downloads") or settings.get("downloads", {})}
 
 
 def render_fabrication(p, side, out, settings, products=("fab", "fab-snapshot")):
@@ -1162,9 +1173,8 @@ def render_downloads(p, side, out, settings, head, purposes, missing):
     wanted = settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"
     if "comparison" in purposes and wanted and (missing is None or "downloads" in missing):
         export_downloads(p, src, out, settings, head)
-    policy = settings.get("_snapshot_fabrication")
-    if "snapshot" in purposes and policy is not None and (missing is None or "downloads-snapshot" in missing):
-        trusted = {**settings, "fabrication": policy}
+    trusted = snapshot_download_policy(settings)
+    if "snapshot" in purposes and trusted is not None and (missing is None or "downloads-snapshot" in missing):
         try:
             export_downloads(p, src, out, trusted, head, policy=trusted, purpose="snapshot")
         except ValueError as error:  # the revision gate refused: the design report goes without downloads
@@ -6033,14 +6043,26 @@ def cmd_snapshot(args):
     blobs = {}
     waivers = load_waivers(env.get("WAIVERS_REF")) if settings["waivers"]["enabled"] else None
     selected = [p for p in det["projects"] if p["status"] != "removed"]  # every index (downloads, context links) follows this order
+    # 06 is Ask-independent: context remains None until 09 fills the optional hook.
     projects = [build_project(p, blobs, settings, waivers, change_offset=0, single=True) for p in selected]
+    shutil.rmtree("review/design-downloads", ignore_errors=True)  # never review/downloads: that is the comparison's bundle
+    for i, (p, project) in enumerate(zip(selected, projects)):
+        if settings.get("downloads", {}).get("enabled") or settings["checks"].get("release", "off") != "off":
+            downloads = collect_downloads(p, i, det["head"], policy=settings, purpose="snapshot", report="design")
+            if downloads:
+                project["downloads"] = downloads  # absent when empty, as in cmd_report
     load_supplier(settings, projects, "review/supplier-snapshot.json")
     assign_ids(projects)
     snapshot = det.get("snapshot") or {"ref": "", "sha": det["head"], "committedAt": "", "message": ""}
+    report_settings = filtered_settings(settings)
+    report_settings.pop("ask", None)  # 09's optional hook: no Ask on a design page until 09 turns it on
     data = {"version": 1, "repo": env.get("GITHUB_REPOSITORY", ""), "links": review_links(env, {**det, "base": None}),
             "base": None, "head": det["head"], "reason": "design snapshot", "mode": "single",
             "snapshot": snapshot,
-            "settings": filtered_settings(settings), "run_id": env.get("GITHUB_RUN_ID", ""), "projects": projects, "blobs": blobs}
+            # The report-family descriptor: index -> the project's position in selected, its stable folder and its name.
+            "report": {"kind": "design", "head": det["head"],
+                       "projects": [{"index": i, "dir": p["dir"], "name": p["name"]} for i, p in enumerate(selected)]},
+            "settings": report_settings, "run_id": env.get("GITHUB_RUN_ID", ""), "projects": projects, "blobs": blobs}
     html = finalize_report(data, f"{DESIGN_DIR}/assets")  # 01's shared finalizer: asset map, sidecars, offline HTML; no local JSON or inline_page here
     name = f"kicad-design-{det['head'][:7]}.html"
     os.makedirs(DESIGN_DIR, exist_ok=True)
@@ -6066,7 +6088,9 @@ def cmd_snapshot(args):
         with open(f"{DESIGN_DIR}/thumbnail-plan.json", "w", encoding="utf-8") as fh:
             json.dump({"sha": snapshot["sha"], "committedAt": snapshot["committedAt"], "projects": thumb_projects}, fh)
     print(f"{DESIGN_DIR}/{name}: {len(html) / 1e6:.2f} MB, {len(blobs)} embedded drawings")
-    emit(built="true", name=name, thumbnails="true" if thumb_projects else "false")
+    # ask stays false and context_name is never emitted: 09 owns producing kicad-design-<sha7>.context.json and switching it on.
+    emit(built="true", name=name, thumbnails="true" if thumb_projects else "false", ask="false",
+         downloads="true" if any(project.get("downloads") for project in projects) else "false")
 
 
 STATUS_ICON = {"pass": "✅", "fail": "❌", "warn": "⚠️", "not_run": "—"}

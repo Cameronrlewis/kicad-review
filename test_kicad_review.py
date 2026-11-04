@@ -8064,7 +8064,7 @@ with _DpTmp() as t:
         out = f"{t}/gh-output"
         with patch.dict(os.environ, {"GITHUB_OUTPUT": out, "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
             kr.cmd_snapshot(None)
-        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=true\n"
+        assert open(out).read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=true\nask=false\ndownloads=false\n"
         assert json.load(open("review/design/thumbnail-plan.json")) == {"sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "projects": [{"dir": "H", "poster": "review/design/thumb-src/H.png"}]}
         assert open("review/design/thumb-src/H.png", "rb").read() == _dp_png
         data = _dp_report_data("review/design/kicad-design-ccccccc.html")
@@ -8079,7 +8079,7 @@ with _DpTmp() as t:
         shutil.rmtree("review/design"); os.remove("review/H/head/poster.png")
         with patch.dict(os.environ, {"GITHUB_OUTPUT": out + "np", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
             kr.cmd_snapshot(None)
-        assert open(out + "np").read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=false\n"
+        assert open(out + "np").read() == "built=true\nname=kicad-design-ccccccc.html\nthumbnails=false\nask=false\ndownloads=false\n"
         assert not os.path.exists("review/design/thumbnail-plan.json") and not os.path.exists("review/design/thumb-src")
         shutil.rmtree("review/design"); os.remove("head/kicad-review.toml")
         det["snapshot_settings"]["design"]["enabled"] = False
@@ -10973,3 +10973,87 @@ assert "docs/superpowers" not in readme, "plan paths stay out of shipped assets"
 assert "02's" not in readme, "plan numbers stay out of shipped assets"
 print("ok downloads documented")
 
+
+# DP-S3I: the snapshot integrates 01's assets and 07's downloads under its own report family; Ask stays an inert hook without 09.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        head = "c" * 40
+        for side, line in (("base", "M0 0H5"), ("head", "M0 0H9")):
+            write(t, {f"{side}/H/H.kicad_sch": '(kicad_sch (sheet_instances (path "/" (page "1"))))', f"{side}/H/H.kicad_pcb": _dp_pcb(""),
+                      f"{side}/H/H.kicad_pro": "{}", f"review/H/{side}/sch/H.svg": f'<svg viewBox="0 0 100 50"><path d="{line}"/></svg>',
+                      f"review/H/{side}/pcb/H-F_Cu.svg": f'<svg viewBox="0 0 10 10"><path d="{line}"/></svg>',
+                      f"review/H/{side}/erc.json": _dp_erc("u-" + side, "pin_not_connected"), f"review/H/{side}/drc.json": "{}"})
+        pathlib.Path("review/H/head/poster.png").write_bytes(_dp_png)
+        snap = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); snap["design"]["enabled"] = True; snap["downloads"]["enabled"] = True
+        det = {"base": "b" * 40, "head": head, "reason": "push: new commit vs previous branch tip",
+               "snapshot": {"ref": "main", "sha": head, "committedAt": "2026-10-24T10:00:00+00:00", "message": "Move R16"},
+               "projects": [{"dir": "H", "name": "H", "status": "modified"}, {"dir": "Gone", "name": "Gone", "status": "removed"}]}
+        # 07's per-render manifests: the comparison's downloads/ and the trusted snapshot policy's downloads-snapshot/.
+        def _dp_stage(folder, content, purpose):
+            os.makedirs(folder, exist_ok=True)
+            pathlib.Path(folder, "fab-H-ccccccc.zip").write_bytes(content)
+            kr.write_download_manifest(folder, [{"kind": "fab", "label": "For fabrication", "file": "fab-H-ccccccc.zip", "error": None}], policy=snap, purpose=purpose)
+        _dp_stage("review/H/head/downloads", b"comparison zip", "comparison")
+        _dp_stage("review/H/head/downloads-snapshot", b"snapshot zip", "snapshot")
+        _dp_env = {"GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GITHUB_SERVER_URL": "https://github.com"}
+        def _dp_snapshot(settings, output):
+            det["snapshot_settings"] = settings
+            write(t, {"review/detect.json": json.dumps(det)})
+            with patch.dict(os.environ, {**_dp_env, "GITHUB_OUTPUT": output}, clear=True), patch("sys.stdout", new_callable=io.StringIO), \
+                 patch.object(kr, "finalize_report", wraps=kr.finalize_report) as finalize:
+                kr.cmd_snapshot(None)
+            return finalize, dict(row.split("=", 1) for row in open(output).read().splitlines())
+        _dp_no_context = lambda: not list(pathlib.Path("review").rglob("*.context.json")) and not os.path.exists("review/design-context.json")
+        for n, ask in enumerate((None, {"enabled": False}, {"enabled": True})):  # 09 absent: the [ask] table never turns anything on
+            settings = json.loads(json.dumps(snap))
+            if ask is not None:
+                settings["ask"] = ask
+            shutil.rmtree("review/design", ignore_errors=True)
+            finalize, outputs = _dp_snapshot(settings, f"{t}/out-ask-{n}")
+            assert finalize.call_count == 1 and finalize.call_args.args[1] == "review/design/assets", finalize.call_args_list
+            assert outputs == {"built": "true", "name": "kicad-design-ccccccc.html", "thumbnails": "true", "ask": "false", "downloads": "true"}, outputs
+            assert _dp_no_context(), "06 writes no context file"
+            data = _dp_report_data("review/design/kicad-design-ccccccc.html")
+            assert "assets" in data and "ask" not in data["settings"], (sorted(data), sorted(data["settings"]))
+            assert data["report"] == {"kind": "design", "head": head, "projects": [{"index": 0, "dir": "H", "name": "H"}]}, data.get("report")
+            files = data["projects"][0]["downloads"]
+            assert [(f["artifact"], f["path"]) for f in files] == [("kicad-design-downloads-ccccccc", "0/fab-H-ccccccc.zip")], files
+            assert files[0]["sha256"] == hashlib.sha256(b"snapshot zip").hexdigest(), "the snapshot reads downloads-snapshot/, never the comparison's downloads/"
+            assert json.loads(pathlib.Path("review/design-downloads/0/downloads.json").read_text())["head"] == head
+            assert not os.path.exists("review/downloads"), "a snapshot never writes the comparison bundle"
+        # Snapshot-only run with downloads off: no bundle, no context, ask=false and no context_name.
+        shutil.rmtree("review/design"); shutil.rmtree("review/design-downloads")
+        det["base"], det["reason"] = None, kr.SNAPSHOT_REASON
+        off = json.loads(json.dumps(snap)); off["downloads"]["enabled"] = False; off["ask"] = {"enabled": True}
+        _, outputs = _dp_snapshot(off, f"{t}/out-off")
+        assert outputs["ask"] == "false" and outputs["downloads"] == "false" and "context_name" not in outputs, outputs
+        assert not os.path.exists("review/design-downloads") and _dp_no_context()
+        assert "downloads" not in _dp_report_data("review/design/kicad-design-ccccccc.html")["projects"][0]
+        # Comparison plus snapshot in one run: separate folders, artifact names and file hashes; neither overwrites the other.
+        det["base"], det["reason"] = "b" * 40, "push: new commit vs previous branch tip"
+        def _dp_report():
+            write(t, {"review/detect.json": json.dumps(det)})
+            with patch.dict(os.environ, {**_dp_env, "GITHUB_OUTPUT": f"{t}/out-report"}, clear=True), patch("sys.stdout", new_callable=io.StringIO), \
+                 patch.object(kr, "load_settings", return_value=json.loads(json.dumps(snap))):
+                kr.cmd_report(None)
+        _dp_report()
+        _dp_snapshot(snap, f"{t}/out-both")
+        _dp_report()  # a second comparison build must leave the design bundle alone
+        compared = json.loads(pathlib.Path("review/downloads/0/downloads.json").read_text())["files"]
+        designed = json.loads(pathlib.Path("review/design-downloads/0/downloads.json").read_text())["files"]
+        assert compared[0]["artifact"] == "kicad-review-downloads-ccccccc" != designed[0]["artifact"] == "kicad-design-downloads-ccccccc", (compared, designed)
+        assert compared[0]["sha256"] != designed[0]["sha256"]
+        assert pathlib.Path("review/downloads/0/fab-H-ccccccc.zip").read_bytes() == b"comparison zip"
+        assert pathlib.Path("review/design-downloads/0/fab-H-ccccccc.zip").read_bytes() == b"snapshot zip"
+        assert _dp_no_context()
+        # The render's trusted downloads-snapshot manifest carries the key cmd_snapshot verifies, even when the comparison's step differs.
+        historical = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); historical["downloads"]["step"] = False
+        with patch.object(kr, "load_settings", return_value=historical):
+            rendered = kr.render_settings({"snapshot_settings": snap})
+        assert kr.download_policy_key(kr.snapshot_download_policy(rendered)) == kr.download_policy_key(snap)
+        assert kr.snapshot_download_policy({**rendered, "_snapshot_fabrication": None}) is None
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S3I snapshot integrates assets and downloads without Ask")
