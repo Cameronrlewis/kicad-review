@@ -382,3 +382,47 @@ test('U5: Escape in 3D clears a real selection without draw()', () => {
   }
   assert.ok(escapeHarness({v:'board', s:'c1'}).includes('draw'), '2D Escape keeps its redraw');
 });
+
+class Node3 {
+  constructor(name, parent) { this.name=name; this.children=[]; this.userData={}; this.visible=true; this.parent=null; if(parent)parent.add(this); }
+  add(c) { c.parent=this; this.children.push(c); return this; }
+  getObjectByName(n) { if(this.name===n)return this; for(const c of this.children){const r=c.getObjectByName(n);if(r)return r;} }
+  traverse(fn) { fn(this); this.children.forEach(c=>c.traverse(fn)); }
+}
+function fallbackHarness() {
+  const window = {outlined:[]}, picks = [];
+  const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8')
+    .replace('let active = null, bundle;', 'let active = null, bundle; window.setTestSession = s => active = s;')
+    .replace('function outline(scene, node, colour) {', 'function outline(scene, node, colour) { window.outlined.push(node); return {node}; ')
+    .replace('const testSeam = {', 'const testSeam = {pick,');
+  const sceneBase = new Node3('scene-base'), sceneHead = new Node3('scene-head');
+  const base = new Node3('base', sceneBase), head = new Node3('head', sceneHead);
+  const j1 = new Node3('J1', base), mesh = new Node3('', j1); new Node3('J12', head);
+  window.THREE3D = {THREE:{Raycaster:class { setFromCamera() {} intersectObjects(roots) { return roots.includes(base) ? [{object:mesh}] : []; } }, Vector2:class {},
+    Box3:class { setFromObject() { return this; } getCenter(v) { return v; } getBoundingSphere(s) { return s; } }, Vector3:class {}, Sphere:class { radius=1; }}};
+  runInNewContext(readFileSync(new URL('./three-parts.js', import.meta.url), 'utf8'), {window});
+  runInNewContext(source, {window, THREE3D:window.THREE3D, ThreeParts:window.ThreeParts, document:{createElement:() => ({}), head:{appendChild() {}}, documentElement:{}},
+    getComputedStyle:() => ({getPropertyValue:() => ''}), clearTimeout});
+  const change = {id:'c1', action:'modified', ref:'J12', uuid:'u', changes:[['reference','J1','J12']]};
+  const host = {getBoundingClientRect:() => ({left:0, top:0, width:1, height:1}), querySelector:() => null};
+  const views = [{side:'base', scene:sceneBase, host, visible:true}, {side:'head', scene:sceneHead, host, visible:true}];
+  const s = {roots:[base, head], allowedSides:['base','head'], indexedSides:new Set(), changes:[change], views, selected:[], groups:[],
+    hiddenGroups:new Set(), assembled:true, mode:'side', invalidate() {},
+    state:{visibleSides:['base','head'], parts:{base:[], head:[]}, blocks:[], ghosts:[], highlights:[], selected:[]}};
+  window.setTestSession(s); window.Review3D.state = s.state;
+  window.Review3D.onPick = id => picks.push(id);
+  return {api:window.Review3D, views, picks, window, s, change, j1};
+}
+
+test('U6: fallback picking finds a renamed footprint in base by its base reference', () => {
+  const {api, views, picks} = fallbackHarness();
+  api.testSeam.pick(views[0], {clientX:0, clientY:0});
+  assert.deepEqual(picks, ['c1'], 'clicking J1 in base must select the J1 -> J12 change');
+});
+
+test('U6: fallback focus outlines the renamed footprint in the base view too', () => {
+  const {api, window, change, j1, s} = fallbackHarness();
+  api.focus(change, false);
+  assert.ok(window.outlined.includes(j1), 'base view must outline J1');
+  assert.ok(s.selected.some(l => l.side === 'base'), 'the base outline is attributed to the base revision');
+});

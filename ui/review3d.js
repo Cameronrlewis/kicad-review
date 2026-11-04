@@ -594,11 +594,12 @@ window.Review3D = (() => {
   function hit(v,e) {
     const {THREE}=THREE3D, r=v.host.getBoundingClientRect(), ray=new THREE.Raycaster();
     ray.setFromCamera(new THREE.Vector2((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1),v.camera);
-    const roots=active.allowedSides.filter(side=>!active.indexedSides.has(side)&&(!v.side||v.side===side))
-      .map(side=>sideRoot(active,side)).filter(root=>root?.parent===v.scene);
-    const h=ray.intersectObjects(roots,true).find(x=>visibleNode(x.object));
-    let n=h?.object;while(n&&!n.userData.noModel&&!active.changes.some(c=>c.ref===n.name))n=n.parent;
-    return n;
+    const sides=active.allowedSides.filter(side=>!active.indexedSides.has(side)&&(!v.side||v.side===side)&&sideRoot(active,side)?.parent===v.scene);
+    const h=ray.intersectObjects(sides.map(side=>sideRoot(active,side)),true).find(x=>visibleNode(x.object));
+    let side=null;for(let o=h?.object;o&&!side;o=o.parent)side=sides.find(sd=>sideRoot(active,sd)===o)||null;
+    let n=h?.object,change=null;
+    while(n&&!n.userData.noModel&&!(change=active.changes.find(c=>ThreeParts.revisionRef(c,side)===n.name)))n=n.parent;
+    return n&&{node:n,change};
   }
   function pick(v,e) {
     if(!active)return;
@@ -611,12 +612,12 @@ window.Review3D = (() => {
       tooltip(v,p.ref+(p.hasModel?'':' · no 3D model'),e.clientX-b.left,e.clientY-b.top,1200);
       return;
     }
-    const n=hit(v,e);if(!n)return;const c=active.changes.find(x=>x.ref===n.name);
+    const c=hit(v,e)?.change;
     if(c)window.Review3D.onPick?.(c.id);else hover(v,e);
   }
   function hover(v,e) {
     if(!active)return;
-    const p=indexedHit(v,e), n=p?null:hit(v,e), r=v.host.getBoundingClientRect();
+    const p=indexedHit(v,e), n=p?null:hit(v,e)?.node, r=v.host.getBoundingClientRect();
     if(p)tooltip(v,p.ref+(p.hasModel?'':' · no 3D model'),e.clientX-r.left,e.clientY-r.top,1200);
     else if(n?.userData.noModel)tooltip(v,`${n.name} · no 3D model`,e.clientX-r.left,e.clientY-r.top,1200);
     else v.host.querySelector('.tip3d')?.remove();
@@ -693,7 +694,7 @@ window.Review3D = (() => {
     render();
   }
   function tooltip(v,text,x,y,ms){ let el=v.host.querySelector(".tip3d");if(!el){el=document.createElement("span");el.className="tip3d";v.host.appendChild(el);}el.textContent=text;el.style.left=`${x}px`;el.style.top=`${y}px`;clearTimeout(v.tip);if(ms)v.tip=setTimeout(()=>el.remove(),ms); }
-  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.filter(v=>v.visible).flatMap(v=>{const own=[root,sideRoot(active,side === "head" ? "base" : "head")].map(r=>r?.parent===v.scene&&r?.getObjectByName(change.ref)).find(Boolean);if(!own)return [];const line=outline(v.scene,own,css("--accent"));line.ref=change.ref;line.side=active.allowedSides.find(side=>sideRoot(active,side)?.getObjectByName(change.ref)===own);return [line];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
+  function focus(change, moveCamera=true) { if(!active)return; if(active.indexedSides.size)return focusIndexedChange(change,moveCamera); const side=change.action === "removed" ? "base" : "head", root=sideRoot(active,side), n=root?.getObjectByName(change.ref); if(!n)return; const {THREE}=window.THREE3D,b=new THREE.Box3().setFromObject(n), c=b.getCenter(new THREE.Vector3()), radius=b.getBoundingSphere(new THREE.Sphere()).radius; if(moveCamera)active.views.forEach(v=>setCamera(v,c,radius,true)); active.selected.forEach(x=>{x.removeFromParent();x.traverse(free);}); active.views.forEach(v=>{v.host.querySelector(".tip3d")?.remove();if(n.userData.noModel)tooltip(v,`${n.name} · no 3D model`,v.host.clientWidth/2,v.host.clientHeight/2,0);}); active.selected=active.views.filter(v=>v.visible).flatMap(v=>{const own=[side,side === "head" ? "base" : "head"].map(sd=>{const r=sideRoot(active,sd);return r?.parent===v.scene&&r.getObjectByName(ThreeParts.revisionRef(change,sd));}).find(Boolean);if(!own)return [];const line=outline(v.scene,own,css("--accent"));line.side=active.allowedSides.find(sd=>sideRoot(active,sd)?.getObjectByName(ThreeParts.revisionRef(change,sd))===own);line.ref=ThreeParts.revisionRef(change,line.side);return [line];}); window.Review3D.state.selected=active.selected; applyVisibility(); render(); }
   function setBlend(value) {
     if(!active?.blend)return;
     value=Number.isFinite(value)?Math.max(0,Math.min(1,value)):.5;
