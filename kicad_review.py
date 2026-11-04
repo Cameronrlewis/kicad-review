@@ -39,6 +39,7 @@ import xml.etree.ElementTree as ET
 KICAD_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_sym", ".kicad_mod", ".kicad_dru", ".kicad_wks")
 KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
+SNAPSHOT_REASON = "design snapshot (no comparison)"  # detect.json reason of a run that leaves only a design snapshot
 
 
 def workflow_command_escape(value, *, is_property=False):
@@ -85,6 +86,11 @@ def resolve_revisions(env):
         head = env["PR_HEAD"]
         return git("merge-base", env["PR_BASE"], head), head, "pull request head vs merge base"
     if event == "workflow_dispatch":
+        if env.get("SNAPSHOT_ONLY") == "true":  # a design snapshot has one revision and nothing to compare it with
+            head = commit(env["IN_HEAD"])
+            if not head:
+                sys.exit(f"Cannot resolve revision: head={env['IN_HEAD']!r}")
+            return None, head, SNAPSHOT_REASON
         base, head = commit(env["IN_BASE"]), commit(env["IN_HEAD"])
         if not base or not head:
             sys.exit(f"Cannot resolve revisions: base={env['IN_BASE']!r} head={env['IN_HEAD']!r}")
@@ -151,25 +157,55 @@ def detect(base, head):
     return projects
 
 
+def design_enabled():
+    """Trusted workflow checkout policy, never the historical head or comparison base."""
+    try:
+        return load_settings(("",))["design"]["enabled"]
+    except (SystemExit, tomllib.TOMLDecodeError, OSError):
+        return False
+
+
+def snapshot_plan(env):
+    """(wanted, only). wanted: this event leaves a design snapshot. only: it leaves nothing else (no comparison report)."""
+    if env.get("EVENT") == "workflow_dispatch":
+        manual = env.get("SNAPSHOT_ONLY") == "true"
+        return manual, manual
+    if env.get("TAG"):
+        return True, False  # a tag without release.review becomes snapshot-only in cmd_detect
+    return env.get("EVENT") == "push" and bool(env.get("REF_NAME")) and env.get("REF_NAME") == env.get("DEFAULT_BRANCH"), False
+
+
 def cmd_detect(args):
     env = dict(os.environ)
+    wanted, only = snapshot_plan(env)
+    wanted = wanted and design_enabled()
     if env.get("TAG"):
         try:
             review = load_settings(("",))["release"]["review"]
         except (SystemExit, tomllib.TOMLDecodeError, OSError):
-            print("::warning::Cannot read tag review settings; tag review stays off.")
+            print("::warning::" + workflow_command_escape("Cannot read tag review settings; tag review stays off."))
             review = False
-        if not review:
-            with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
-                fh.write("base=\nhead=\nchanged=false\n")
-            print("Tag review is off ([release] review = false); only fabrication outputs are made.")
-            return
+        only = only or not review
+    if only and not wanted:
+        with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
+            fh.write("base=\nhead=\nchanged=false\n")
+        print("Nothing to compare: tag review is off ([release] review = false) and design snapshots are off ([design] enabled = false).")
+        return
     base, head, reason = resolve_revisions(env)
+    if only:
+        base, reason = None, SNAPSHOT_REASON
     projects = detect(base, head)
     ids = [project_id(p["dir"]) for p in projects]
     if len(set(ids)) < len(ids):
         sys.exit("Detected project ids collide; rename one project directory")
     result = {"base": base, "head": head, "reason": reason, "projects": projects}
+    if wanted:
+        # The trusted workflow checkout's validated settings, captured before any revision is checked out:
+        # the only snapshot policy, even for a historical head that predates [design].
+        result["snapshot_settings"] = load_settings(("",))
+        show = lambda fmt: git("show", "-s", f"--format={fmt}", head, check=False) or ""
+        result["snapshot"] = {"ref": env.get("IN_HEAD") or env.get("TAG") or env.get("REF_NAME", ""), "sha": head,
+                              "committedAt": show("%cI"), "message": show("%s")}
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
     with open("../review/detect.json", "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2)
@@ -183,6 +219,7 @@ def cmd_detect(args):
         design_enabled_out = False
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\ndesign={'true' if design_enabled_out else 'false'}\n")
+        fh.write(f"review={'true' if projects and not only else 'false'}\nsnapshot={'true' if projects and wanted else 'false'}\n")
     print(f"Comparing {base} -> {head} ({reason})")
     for p in projects:
         print(f"  {p['name']} ({p['dir'] or '.'}, {p['status']})")
@@ -782,10 +819,28 @@ def render_cache(p, side, det, settings):
     return pathlib.Path(".render-cache") / revision / project_id(p["dir"]) / hashlib.sha256(identity).hexdigest()[:16]
 
 
+def render_settings(det):
+    """Comparison settings (base wins) plus the configuration-independent products the trusted snapshot policy asks for.
+
+    Policy-dependent products (fabrication, DigiKey) are kept in their own locations, keyed by their own policy."""
+    settings = json.loads(json.dumps(load_settings()))
+    snapshot = det.get("snapshot_settings")
+    if snapshot:
+        settings["design"]["enabled"] = snapshot["design"]["enabled"]
+        # Configuration-independent products are unioned: 02's GLB and still, library drawings, and
+        # 07's downloads and 09's Ask inputs once those sections exist.
+        for section in ("3d", "libraries", "downloads", "ask"):
+            if section in settings and section in snapshot:
+                settings[section]["enabled"] |= snapshot[section]["enabled"]
+        if snapshot["checks"].get("interfaces", "off") != "off" and settings["checks"].get("interfaces", "off") == "off":
+            settings["checks"]["interfaces"] = snapshot["checks"]["interfaces"]
+    return settings
+
+
 def restore_renders(args=None):
     """Use complete revision caches without starting/downloading the KiCad container."""
     det = json.loads(pathlib.Path("review/detect.json").read_text())
-    settings = load_settings()
+    settings = render_settings(det)
     # Library drawings are selected by the compared pair, not the revision alone.
     if settings["libraries"]["enabled"]:
         raise SystemExit(1)
@@ -802,7 +857,7 @@ def restore_renders(args=None):
 def cache_renders(args=None):
     """Snapshot final outputs, including workflow-compressed GLBs."""
     det = json.loads(pathlib.Path("review/detect.json").read_text())
-    settings = load_settings()
+    settings = render_settings(det)
     for p in det["projects"]:
         for side in ("base", "head"):
             cache = render_cache(p, side, det, settings)
@@ -815,7 +870,7 @@ def cache_renders(args=None):
 def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
-    settings = load_settings()
+    settings = render_settings(det)
     for p in det["projects"]:
         export_3d = settings["3d"]["enabled"]
         need_still = export_3d or settings.get("design", {}).get("enabled", False)

@@ -6379,3 +6379,88 @@ with _DpTmp() as t:
     finally:
         os.chdir(old_cwd)
 print("ok DP-S3 snapshot report, release copy and opt-out")
+
+# DP-S4: which events leave a design snapshot, and when it is the only thing a run makes.
+from kicad_review import snapshot_plan
+assert snapshot_plan({"EVENT": "pull_request"}) == (False, False)
+assert snapshot_plan({"EVENT": "push", "REF_NAME": "feature/x", "DEFAULT_BRANCH": "main"}) == (False, False)
+assert snapshot_plan({"EVENT": "push", "REF_NAME": "main", "DEFAULT_BRANCH": "main"}) == (True, False)
+assert snapshot_plan({"EVENT": "push", "REF_NAME": "", "DEFAULT_BRANCH": ""}) == (False, False)
+assert snapshot_plan({"EVENT": "push", "TAG": "v1"}) == (True, False)
+assert snapshot_plan({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true"}) == (True, True)
+assert snapshot_plan({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "false"}) == (False, False)
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.makedirs(f"{t}/repo")
+        os.chdir(f"{t}/repo")
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True, text=True).stdout.strip()
+        g("init", "-q", "-b", "main")
+        write(f"{t}/repo", {"P/P.kicad_pro": "{}", "P/P.kicad_sch": "(kicad_sch)", "P/P.kicad_pcb": _dp_pcb(""), "kicad-review.toml": "[3d]\nenabled = true\n"})
+        g("add", "."); g("commit", "-qm", "first")
+        first = g("rev-parse", "HEAD")
+        write(f"{t}/repo", {"P/P.kicad_sch": "(kicad_sch (uuid \"x\"))", "kicad-review.toml":"[design]\nenabled = true\n[3d]\nenabled = true\n"})
+        g("commit", "-qam", "Move R16"); g("tag", "v1")
+        head = g("rev-parse", "HEAD")
+        assert kr.resolve_revisions({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": "main", "IN_BASE": ""}) == (None, head, "design snapshot (no comparison)")
+        try:
+            kr.resolve_revisions({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": "nope"})
+            raise AssertionError("an unknown head must stop the run")
+        except SystemExit as e:
+            assert "head='nope'" in str(e)
+
+        def detect_run(env):
+            out = f"{t}/out"
+            open(out, "w").close()
+            with patch.dict(os.environ, {**env, "GITHUB_OUTPUT": out}, clear=True), patch("sys.stdout", new_callable=io.StringIO):
+                kr.cmd_detect(None)
+            return dict(line.split("=", 1) for line in open(out).read().splitlines()), (json.load(open(f"{t}/review/detect.json")) if os.path.exists(f"{t}/review/detect.json") else None)
+        push = {"EVENT": "push", "BEFORE": first, "AFTER": head, "REF_NAME": "main", "DEFAULT_BRANCH": "main"}
+        def snapshot_cycle(detected):
+            # Build real checkout trees from the trusted local test repository, not settings mocks.
+            for side in ("base", "head"):
+                root=pathlib.Path(t,side); shutil.rmtree(root,ignore_errors=True)
+                if detected.get(side):
+                    for file in g("ls-tree","-r","--name-only",detected[side]).splitlines():
+                        write(t,{f"{side}/{file}":g("show",f"{detected[side]}:{file}")})
+            write(t,{"review/detect.json":json.dumps(detected)})
+            def render(src,name,out,**kw):
+                write(t,{f"{out}/sch/P.svg":'<svg viewBox="0 0 20 10"><path d="M0 0H10"/></svg>', f"{out}/pcb/P-F_Cu.svg":'<svg viewBox="0 0 20 10"><path d="M0 0H10"/></svg>', f"{out}/erc.json":"{}", f"{out}/drc.json":"{}"})
+            # 02's export_glb is the only still producer: it writes the raw and served model and the poster.
+            glb = lambda p,side,out,**kw: write(t,{f"{out}/board.raw.glb":"model", f"{out}/board.glb":"model"}) or pathlib.Path(out,"poster.png").write_bytes(_dp_png)
+            os.chdir(t)
+            try:
+                assert not kr.load_settings()["design"]["enabled"], "comparison still uses disabled historical base/head config"
+                with patch.object(kr,"render_side",side_effect=render), patch.object(kr,"export_glb",side_effect=glb), patch.object(kr,"pcbdraw_run",return_value=(1, kr.PCBDRAW_NO_OUTLINE)), patch.object(kr,"project_checks",return_value=[]), patch.object(kr,"inline_page",side_effect=lambda data:'<script>'+data+'</script>'), patch("sys.stdout", new_callable=io.StringIO):
+                    kr.cmd_render(None); kr.cmd_snapshot(None)
+                data=_dp_report_data(f"review/design/kicad-design-{detected['head'][:7]}.html")
+                assert data["mode"]=="single" and data["head"]==detected["head"]
+                assert data["settings"]["design"]["enabled"] and data["projects"][0]["board"]["poster3d"]["head"]
+                assert data["projects"][0]["board"]["model3d"]["head"], "trusted snapshot configuration controls 3D even for historical head"
+            finally:
+                os.chdir(f"{t}/repo")
+        out, det = detect_run(push)
+        snapshot_cycle(det)  # first enabling push: base config is off
+        assert (out["changed"], out["review"], out["snapshot"]) == ("true", "true", "true") and det["base"] == first, out
+        assert det["snapshot"] == {"ref": "main", "sha": head, "committedAt": det["snapshot"]["committedAt"], "message": "Move R16"} and det["snapshot"]["committedAt"].startswith("20"), det
+        out, det = detect_run({**push, "REF_NAME": "feature/x"})
+        assert (out["review"], out["snapshot"]) == ("true", "false") and "snapshot" not in det, out
+        shutil.rmtree(f"{t}/review")
+        out, det = detect_run({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": first, "IN_BASE": "", "DEFAULT_BRANCH": "main"})
+        assert (out["changed"], out["review"], out["snapshot"], out["base"]) == ("true", "false", "true", ""), out
+        assert det["base"] is None and det["head"] == first and det["projects"][0]["status"] == "added" and det["snapshot"]["ref"] == first, det
+        snapshot_cycle(det)  # snapshot_only renders a revision from before [design] existed
+        out, det = detect_run({"EVENT": "push", "TAG": "v1", "AFTER": head, "DEFAULT_BRANCH": "main"})
+        assert (out["review"], out["snapshot"], out["base"]) == ("false", "true", "") and det["base"] is None and det["snapshot"]["ref"] == "v1", out
+        write(f"{t}/repo", {"kicad-review.toml": "[design]\nenabled = true\n[release]\nreview = true\n"})
+        out, det = detect_run({"EVENT": "push", "TAG": "v1", "AFTER": head, "DEFAULT_BRANCH": "main"})
+        assert (out["review"], out["snapshot"]) == ("true", "true") and det["snapshot"]["sha"] == head, out
+        write(f"{t}/repo", {"kicad-review.toml": "[release]\nreview = false\n"})
+        for env in ({"EVENT": "workflow_dispatch", "SNAPSHOT_ONLY": "true", "IN_HEAD": first}, {"EVENT": "push", "TAG": "v1", "AFTER": head}):
+            out, _ = detect_run(env)
+            assert out == {"base": "", "head": "", "changed": "false"}, out  # design off: nothing to do, the old early exit
+        out, det = detect_run(push)
+        assert out["snapshot"] == "false" and "snapshot" not in det
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4 snapshot events and snapshot-only runs")
