@@ -15,7 +15,6 @@ import urllib.request
 import base64
 import contextlib
 import csv
-import datetime
 import gzip
 import hashlib
 import importlib.util
@@ -34,7 +33,6 @@ import tempfile
 import tomllib
 import zipfile
 from collections import Counter
-from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
 # Files that change what KiCad renders or checks. .kicad_prl is per-user UI state, so it is left out.
@@ -4833,7 +4831,6 @@ def svg_body(path):
 
 def comparison_svg(text, side, schematic=False):
     """Tint inside the decoded image, preserving custom source paints and alpha."""
-    import xml.etree.ElementTree as ET
     root = ET.fromstring(text)
     ns = '{http://www.w3.org/2000/svg}'
     uid = 'kr-image-' + side
@@ -5748,10 +5745,10 @@ def shot_list(data, limit=8):
 
 
 def cmd_shots(args):
-    with open(f"review/data.json", encoding="utf-8") as fh:
+    with open("review/data.json", encoding="utf-8") as fh:
         data = json.load(fh)
-    os.makedirs(f"review/images", exist_ok=True)
-    report = os.path.abspath(f"review/kicad-review.html")
+    os.makedirs("review/images", exist_ok=True)
+    report = os.path.abspath("review/kicad-review.html")
     done = []
     for s in shot_list(data):
         out = os.path.abspath(f"review/images/{s['file']}")
@@ -5762,17 +5759,17 @@ def cmd_shots(args):
             done.append(s)
         else:
             print("::warning::" + workflow_command_escape(f"Screenshot of {s['title']} failed: {r.stderr[-300:]}"))
-    with open(f"review/images/shots.json", "w", encoding="utf-8") as fh:
+    with open("review/images/shots.json", "w", encoding="utf-8") as fh:
         json.dump(done, fh, indent=2)
     print(f"{len(done)} screenshot(s)")
 
 
 def cmd_summary(args):
-    with open(f"review/data.json", encoding="utf-8") as fh:
+    with open("review/data.json", encoding="utf-8") as fh:
         data = json.load(fh)
     images = []
-    if args.image_base and os.path.exists(f"review/images/shots.json"):
-        with open(f"review/images/shots.json", encoding="utf-8") as fh:
+    if args.image_base and os.path.exists("review/images/shots.json"):
+        with open("review/images/shots.json", encoding="utf-8") as fh:
             images = [{**s, "url": f"{args.image_base}/{s['file']}"} for s in json.load(fh)]
     site = os.environ.get("SITE", "").rstrip("/")
     threads = None
@@ -5808,7 +5805,7 @@ def cmd_summary(args):
         when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
         log = "\n" + merge_log(extract_log(previous), log_row(data, when))
     body = comment_markdown(data, images, args.artifact_url, args.artifact_id, site=site, threads=threads, log=log, issues=issues)
-    with open(f"review/comment.md", "w", encoding="utf-8") as fh:
+    with open("review/comment.md", "w", encoding="utf-8") as fh:
         fh.write(body)
     settings = data["settings"]
     block_merge = settings.get("threads", {}).get("block_merge")
@@ -6000,7 +5997,7 @@ def release_notes(data, site, artifact_id):
     out = [NOTES_START, "## KiCad review", "", f"{literal(data['reason'])}."]
     site = site.rstrip("/")
     try:
-        url = urlsplit(site)
+        url = urllib.parse.urlsplit(site)
         valid_site = url.scheme in ("https", "http") and url.hostname and url.username is None and url.password is None and not url.query and not url.fragment
         url.port  # Access validates malformed or out-of-range ports.
     except ValueError:
