@@ -6592,3 +6592,99 @@ with _DpTmp() as t:
         kr.load_settings, kr.project_objects, kr.parts_lines, kr.digikey_lookup = saved
         os.chdir(old_cwd)
 print("ok DP-S4L trusted supplier results reach historical snapshots")
+
+# DP-S4M: a snapshot-only run checks downloads-snapshot/ under the trusted policy, even with release checks off.
+# 07's download_directory/download_policy_key and [downloads] section are not on this branch yet; stand-ins follow 07's interface.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        base_settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); base_settings.setdefault("downloads", {"enabled": False})
+        snap = json.loads(json.dumps(base_settings))
+        snap["design"]["enabled"] = True
+        snap["downloads"]["enabled"] = True   # snap["checks"]["release"] stays "off"
+        det = {"base": None, "head": "c" * 40, "snapshot": {"ref": "main", "sha": "c" * 40, "committedAt": "", "message": ""}, "snapshot_settings": snap}
+        directory = lambda out, purpose: f"{out}/downloads" if purpose == "comparison" else f"{out}/downloads-snapshot"
+        policy_key = lambda policy: json.dumps(policy["fabrication"], sort_keys=True)
+        with patch.object(kr, "load_settings", return_value=base_settings), patch.object(kr, "download_directory", directory, create=True), patch.object(kr, "download_policy_key", policy_key, create=True):
+            settings = kr.render_settings(det)
+            purposes = kr.run_purposes(det)
+            p, cache = {"dir": "P", "name": "P", "status": "added"}, pathlib.Path("review/P/head")
+            assert purposes == ("snapshot",) and settings["_snapshot_fabrication"] == snap["fabrication"]
+            assert kr.run_purposes({"base": "a" * 40, "head": "c" * 40}) == ("comparison",)
+            assert kr.run_purposes({"base": "a" * 40, "head": "c" * 40, "snapshot": {"ref": "main"}}) == ("comparison", "snapshot")
+            assert kr.missing_products(cache, p, "head", settings, purposes) == ["fab-snapshot", "downloads-snapshot"]
+            unpolicied = {key: value for key, value in settings.items() if key != "_snapshot_fabrication"}
+            assert "downloads-snapshot" in kr.missing_products(cache, p, "head", unpolicied, purposes)
+            pathlib.Path(cache, "downloads").mkdir(parents=True)
+            pathlib.Path(cache, "downloads", "downloads.json").write_text(json.dumps({"files": [], "purpose": "comparison", "policy": kr.download_policy_key(settings)}))
+            assert "downloads-snapshot" in kr.missing_products(cache, p, "head", settings, purposes)
+            trusted = {**settings, "fabrication": settings["_snapshot_fabrication"]}
+            pathlib.Path(cache, "downloads-snapshot").mkdir(parents=True)
+            pathlib.Path(cache, "downloads-snapshot", "downloads.json").write_text(json.dumps({"files": [], "purpose": "snapshot", "policy": kr.download_policy_key(trusted)}))
+            pathlib.Path(cache, "fab-snapshot").mkdir(parents=True)
+            pathlib.Path(cache, "fab-snapshot", "P.zip").write_bytes(b"zip")
+            assert kr.missing_products(cache, p, "head", settings, purposes) == []
+            assert kr.missing_products(cache, p, "head", settings, ("comparison",)) == []
+        # 02's still and model: a 1600x1000 poster and non-empty raw+processed GLB, or the .failed marker of an attempted export.
+        write(t, {"head/P/P.kicad_pcb": _dp_pcb("")})
+        on3d = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); on3d["3d"]["enabled"] = True
+        assert kr.missing_products(cache, p, "head", on3d, ("comparison",)) == ["poster", "glb"]
+        pathlib.Path(cache, "poster.png.failed").write_text("x"); pathlib.Path(cache, "board.raw.glb").write_bytes(b"glTF")
+        assert kr.missing_products(cache, p, "head", on3d, ("comparison",)) == ["glb"], "raw GLB without processed board.glb is a miss"
+        pathlib.Path(cache, "board.glb").write_bytes(b"glTF")
+        assert kr.missing_products(cache, p, "head", on3d, ("comparison",)) == []
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4M snapshot downloads use the trusted downloads-snapshot folder")
+
+# DP-S4P: a partial revision-cache hit exports only the missing products, never the cached images again.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {"dir": "P", "name": "P", "status": "modified"}
+        det = {"base": "a" * 40, "head": "b" * 40, "projects": [pr]}
+        write(t, {"review/detect.json": json.dumps(det), "base/P/P.kicad_pro": "{}", "head/P/P.kicad_pro": "{}"})
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS)); settings["checks"]["release"] = "informational"
+        made = []
+        def produce(pro, tag, s, directory, label):
+            made.append(directory); write(t, {f"{directory}/P-review-{s['fabrication']['preset']}-gerbers.zip": "z"}); return []
+        def fake_render_side(src, name, out, **kw):
+            write(t, {f"{out}/drc.json": "{}"})
+        with patch.object(kr, "load_settings", return_value=settings), patch.object(kr, "render_side", side_effect=fake_render_side) as rs, \
+             patch.object(kr, "release_project", side_effect=produce), patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"), \
+             patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.0"), patch("sys.stdout", new_callable=io.StringIO):
+            kr.cmd_render(None); kr.cache_renders()
+            assert rs.call_count == 2 and made == ["review/P/base/fab", "review/P/head/fab"], made
+            cache = kr.render_cache(pr, "head", det, settings)
+            assert kr.render_cache_complete(cache, pr, "head", settings)
+            shutil.rmtree(cache / "fab"); shutil.rmtree("review")
+            write(t, {"review/detect.json": json.dumps(det)})
+            assert kr.missing_products(cache, pr, "head", settings, ("comparison",)) == ["fab"]
+            assert not kr.render_cache_complete(cache, pr, "head", settings), "a cache without its fabrication package is not complete"
+            made.clear(); rs.reset_mock()
+            kr.cmd_render(None)
+            assert rs.call_count == 0 and made == ["review/P/head/fab"], (rs.call_count, made)
+            # Stale preset files never survive a re-export.
+            write(t, {"review/P/head/fab/P-review-pcbway-gerbers.zip": "old", "review/P/head/fab-snapshot/P-review-pcbway-gerbers.zip": "old"})
+            kr.render_fabrication(pr, "head", "review/P/head", {**settings, "_snapshot_fabrication": settings["fabrication"]})
+            assert sorted(os.listdir("review/P/head/fab")) == sorted(os.listdir("review/P/head/fab-snapshot")) == ["P-review-jlcpcb-gerbers.zip"]
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4P partial cache hits export only missing products")
+
+# DP-S4D: invalid trusted settings warn and set design=false instead of stopping detection.
+with tempfile.TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pathlib.Path("kicad-review.toml").write_text('fail_on = "sometimes"\n', encoding="utf-8")
+        err = io.StringIO()
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": "outputs"}, clear=True), patch("sys.stderr", err), patch("sys.stdout", new_callable=io.StringIO), \
+             patch("kicad_review.resolve_revisions", return_value=("a" * 40, "b" * 40, "test")), patch("kicad_review.detect", return_value=[]):
+            kr.cmd_detect(None)
+        assert "design=false" in pathlib.Path("outputs").read_text() and "::warning::" in err.getvalue(), err.getvalue()
+    finally:
+        os.chdir(old_cwd)
+print("ok DP-S4D invalid settings default design to false")

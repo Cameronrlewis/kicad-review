@@ -158,11 +158,15 @@ def detect(base, head):
 
 
 def design_enabled():
-    """Trusted workflow checkout policy, never the historical head or comparison base."""
+    """Trusted workflow checkout policy, never the historical head or comparison base. Unreadable settings warn and mean off."""
     try:
         return load_settings(("",))["design"]["enabled"]
-    except (SystemExit, tomllib.TOMLDecodeError, OSError):
-        return False
+    except tomllib.TOMLDecodeError as error:
+        problem = f"syntax error: {error}"
+    except (SystemExit, OSError) as error:
+        problem = f"invalid settings: {error}"
+    print("::warning::" + workflow_command_escape(f"{SETTINGS_FILE} {problem}; defaulting to design = false"), file=sys.stderr)
+    return False
 
 
 def snapshot_plan(env):
@@ -178,7 +182,8 @@ def snapshot_plan(env):
 def cmd_detect(args):
     env = dict(os.environ)
     wanted, only = snapshot_plan(env)
-    wanted = wanted and design_enabled()
+    design = design_enabled()
+    wanted = wanted and design
     if env.get("TAG"):
         try:
             review = load_settings(("",))["release"]["review"]
@@ -209,16 +214,8 @@ def cmd_detect(args):
     os.makedirs("../review", exist_ok=True)  # runs inside the project checkout
     with open("../review/detect.json", "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2)
-    try:
-        design_enabled_out = bool(load_settings(("",))["design"]["enabled"])
-    except tomllib.TOMLDecodeError as error:
-        print("::warning::" + workflow_command_escape(f"{SETTINGS_FILE} syntax error: {error}; defaulting to design = false"), file=sys.stderr)
-        design_enabled_out = False
-    except (KeyError, TypeError) as error:
-        print("::warning::" + workflow_command_escape(f"{SETTINGS_FILE} invalid design setting: {error}; defaulting to design = false"), file=sys.stderr)
-        design_enabled_out = False
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
-        fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\ndesign={'true' if design_enabled_out else 'false'}\n")
+        fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\ndesign={'true' if design else 'false'}\n")
         fh.write(f"review={'true' if projects and not only else 'false'}\nsnapshot={'true' if projects and wanted else 'false'}\n")
     print(f"Comparing {base} -> {head} ({reason})")
     for p in projects:
@@ -762,18 +759,69 @@ def render_tool_identity():
     return "local-kicad-unavailable"
 
 
-def render_cache_complete(cache, p, side, settings):
-    if not cache or not image_cache_complete(cache, p, side):
+def render_cache_complete(cache, p, side, settings, purposes=("comparison",)):
+    return bool(cache) and image_cache_complete(cache, p, side) and not missing_products(cache, p, side, settings, purposes)
+
+
+def run_purposes(det):
+    """Run modes this render serves: a snapshot-only dispatch has no comparison base; a comparison run also leaves a snapshot when det["snapshot"] is set."""
+    if det.get("base") is None:
+        return ("snapshot",)
+    return ("comparison", "snapshot") if det.get("snapshot") else ("comparison",)
+
+
+def nonempty_dir(path):
+    path = pathlib.Path(path)
+    return path.is_dir() and any(path.iterdir())
+
+
+def poster_png_valid(path):
+    """02's still: a PNG on the shared 1600x1000 canvas (normalize_poster's output)."""
+    return poster_size(path) == (1600, 1000)
+
+
+def glb_valid(cache):
+    """02's export_glb publishes board.raw.glb and board.glb only when it wrote a non-empty file; a failed export deletes its target."""
+    return all(pathlib.Path(cache, name).is_file() and pathlib.Path(cache, name).stat().st_size > 0 for name in ("board.raw.glb", "board.glb"))
+
+
+def downloads_valid(cache, purpose, policy):
+    """07's downloads.json envelope in the purpose's folder, written for that purpose and under this policy's download_policy_key.
+
+    download_directory and download_policy_key are 07's; this is reached only once 07 adds the [downloads] section."""
+    try:
+        envelope = json.loads(pathlib.Path(download_directory(str(cache), purpose), "downloads.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
-    need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
-    if need_still and pathlib.Path(board_path(p, side)).is_file():
-        if settings["3d"]["enabled"]:
-            raw = cache / "board.raw.glb"
-            if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
-                return False
-        poster = cache / "poster.png"
-        return poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()
-    return True
+    return envelope.get("purpose") == purpose and envelope.get("policy") == download_policy_key(policy)
+
+
+def missing_products(cache, p, side, settings, purposes):
+    """Names of the products this settings object requests that are absent or invalid in the per-side cache directory.
+
+    Pure check, never exports. Never lists SVG, schematic or board images (image_cache_complete validates those).
+    A .failed marker is 02's record of a best-effort export that was attempted, so it satisfies the product."""
+    missing = []
+    cache = pathlib.Path(cache)
+    board = os.path.isfile(board_path(p, side))
+    if (settings["design"]["enabled"] or settings["3d"]["enabled"]) and board:
+        if not poster_png_valid(cache / "poster.png") and not (cache / "poster.png.failed").is_file():
+            missing.append("poster")
+    if settings["3d"]["enabled"] and board and not glb_valid(cache) and not (cache / "board.raw.glb.failed").is_file():
+        missing.append("glb")
+    if settings["checks"].get("release", "off") != "off" and not nonempty_dir(cache / "fab"):
+        missing.append("fab")
+    if settings.get("_snapshot_fabrication") is not None and not nonempty_dir(cache / "fab-snapshot"):
+        missing.append("fab-snapshot")
+    if settings.get("downloads", {}).get("enabled", False):
+        for purpose in purposes:  # comparison reads downloads/, snapshot reads downloads-snapshot/
+            if purpose == "comparison" and not downloads_valid(cache, "comparison", settings):
+                missing.append("downloads")
+            if purpose == "snapshot":  # with no captured policy there is nothing to validate against: still missing, never skipped
+                policy = settings.get("_snapshot_fabrication")
+                if policy is None or not downloads_valid(cache, "snapshot", {**settings, "fabrication": policy}):
+                    missing.append("downloads-snapshot")
+    return missing
 
 
 def glb_input_digest(p, side):
@@ -840,24 +888,27 @@ def render_settings(det):
     return settings
 
 
-def render_fabrication(p, side, out, settings):
+def render_fabrication(p, side, out, settings, products=("fab", "fab-snapshot")):
     """fab/ under the comparison policy, fab-snapshot/ under the trusted snapshot policy; never one preset's files relabelled as another.
 
-    fab-snapshot/ is made for either side: the revision cache is shared by base and head."""
+    fab-snapshot/ is made for either side: the revision cache is shared by base and head.
+    Only the named products are rebuilt, each into an emptied folder so no earlier preset's files remain."""
     pro = posixpath.join(side, p["dir"], p["name"] + ".kicad_pro")
     if not os.path.isfile(pro):
         return
     compared = settings["checks"].get("release", "off") != "off"
-    if compared:
-        os.makedirs(f"{out}/fab", exist_ok=True)
+    if compared and "fab" in products:
+        shutil.rmtree(f"{out}/fab", ignore_errors=True)
+        os.makedirs(f"{out}/fab")
         release_project(pro, "review", settings, f"{out}/fab", p["name"])
     snapshot = settings.get("_snapshot_fabrication")
-    if snapshot is not None:
+    if snapshot is not None and "fab-snapshot" in products:
         dest = f"{out}/fab-snapshot"
-        if compared and snapshot == settings["fabrication"]:
-            shutil.copytree(f"{out}/fab", dest, dirs_exist_ok=True)
+        shutil.rmtree(dest, ignore_errors=True)
+        if compared and snapshot == settings["fabrication"] and nonempty_dir(f"{out}/fab"):
+            shutil.copytree(f"{out}/fab", dest)
         else:
-            os.makedirs(dest, exist_ok=True)
+            os.makedirs(dest)
             release_project(pro, "review", {**settings, "fabrication": snapshot}, dest, p["name"])
 
 
@@ -871,7 +922,8 @@ def restore_renders(args=None):
     entries = [(p, side, render_cache(p, side, det, settings)) for p in det["projects"]
                for side in ("base", "head")
                if not (side == "base" and p["status"] == "added" or side == "head" and p["status"] == "removed")]
-    if any(not render_cache_complete(cache, p, side, settings) for p, side, cache in entries):
+    purposes = run_purposes(det)
+    if any(not render_cache_complete(cache, p, side, settings, purposes) for p, side, cache in entries):
         raise SystemExit(1)
     for p, side, cache in entries:
         shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
@@ -895,6 +947,7 @@ def cmd_render(args):
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     settings = render_settings(det)
+    purposes = run_purposes(det)
     for p in det["projects"]:
         export_3d = settings["3d"]["enabled"]
         need_still = export_3d or settings.get("design", {}).get("enabled", False)
@@ -904,15 +957,17 @@ def cmd_render(args):
                 continue
             out = f"review/{project_id(p['dir'])}/{side}"
             cache = render_cache(p, side, det, settings)
-            if render_cache_complete(cache, p, side, settings):
-                shutil.copytree(cache, out, dirs_exist_ok=True)
-                print(f"{p['name']}: {side} render cache hit ({det[side]})")
-                continue
             if cache and image_cache_complete(cache, p, side):
+                # A hit restores what is valid and exports only the products missing_products names.
                 shutil.copytree(cache, out, dirs_exist_ok=True)
+                missing = missing_products(cache, p, side, settings, purposes)
+                if not missing:
+                    print(f"{p['name']}: {side} render cache hit ({det[side]})")
+                    continue
             else:
                 render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
-            if need_still and pathlib.Path(board_path(p, side)).is_file():
+                missing = None  # a full render makes every product
+            if need_still and pathlib.Path(board_path(p, side)).is_file() and (missing is None or {"poster", "glb"} & set(missing)):
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
                     for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
@@ -923,10 +978,10 @@ def cmd_render(args):
                             shutil.copyfile(source, dest)
                 else:
                     export_glb(p, side, out, model=export_3d)
-            if settings.get("design", {}).get("enabled", False) and os.path.isfile(board_path(p, side)):
+            if settings.get("design", {}).get("enabled", False) and os.path.isfile(board_path(p, side)) and (missing is None or not pathlib.Path(out, "pcbdraw.json").is_file()):
                 _, note = pcbdraw_plot(board_path(p, side), out, pcbdraw_run)
                 pathlib.Path(out, "pcbdraw.json").write_text(json.dumps({"note": note}), encoding="utf-8")
-            render_fabrication(p, side, out, settings)
+            render_fabrication(p, side, out, settings, ("fab", "fab-snapshot") if missing is None else missing)
             print(f"{p['name']}: rendered {side}")
         if settings["libraries"]["enabled"]:
             roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
