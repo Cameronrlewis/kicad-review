@@ -5985,6 +5985,17 @@ def ci_review_1_workflow_commands_escaped_contract():
                                cwd=tools_root)
             assert r.returncode == 0, r.stderr
             assert r.stdout.count('\n') == 1 and r.stdout.startswith('::error::') and 'p%0A::error::forged' in r.stdout, r.stdout
+        # Permission hints keep their original wording; only the escaping changed.
+        for start, message in (
+                ('|| { rm -f review/issues.json', "Could not read issues. Add 'issues: read' to the caller's permissions."),
+                ('[ -f review/check-runs.json ]', 'review/check-runs.json missing; no check runs published.'),
+                ('|| { python3', "Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml.")):
+            hits = [l for l in wf_text.splitlines() if 'workflow_command_escape' in l and message.split()[1] in l
+                    and l.strip().startswith(start)]
+            assert len(hits) == 1, (start, hits)
+            command = re.search(r'python3 -c "(?:[^"\\]|\\.)*"', hits[0]).group(0)
+            r = subprocess.run(['bash', '-c', command], capture_output=True, text=True, cwd=tools_root)
+            assert r.returncode == 0 and r.stdout == '::warning::' + message + '\n', (r.stdout, r.stderr)
 
 
 with tempfile.TemporaryDirectory() as _ci_scratch:

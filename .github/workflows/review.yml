@@ -208,7 +208,7 @@ jobs:
         run: |
           # ponytail: first 100 open issues; paginate if a repository ever anchors more.
           gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" > review/issues.json \
-            || { rm -f review/issues.json; python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('Could not read issues. Add issues: read to the caller permissions.'))"; }
+            || { rm -f review/issues.json; python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape(\"Could not read issues. Add 'issues: read' to the caller's permissions.\"))"; }
 
       - name: Copy named report
         if: steps.detect.outputs.changed == 'true'
@@ -369,7 +369,7 @@ jobs:
           jq -c '.[]' review/check-runs.json | while read -r run; do
             printf '%s\n' "$run" | jq --arg sha "$HEAD" '. + {head_sha: $sha, status: "completed"}' \
               | gh api "repos/$GITHUB_REPOSITORY/check-runs" --input - > /dev/null \
-              || { python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape('Could not publish check runs. Add checks: write to the permissions of .github/workflows/kicad-review.yml.'))"; exit 0; }
+              || { python3 -c "import sys; sys.path.insert(0, 'tools'); import kicad_review as kr; print('::warning::' + kr.workflow_command_escape(\"Could not publish check runs. Add 'checks: write' to the permissions of .github/workflows/kicad-review.yml.\"))"; exit 0; }
           done
 
       - name: Pull request comment
