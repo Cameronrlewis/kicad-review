@@ -5424,3 +5424,57 @@ test('render refuses a foreign Origin, a bad commit and a caller workflow withou
     assert.match(await refused.text(), /snapshot_only input/);
   } finally { restore(); }
 });
+
+test('designs list returns 404 for invalid cursor or disallowed ref', async () => {
+  for (const badRef of ['a..b', 'feature@{1}', 'v1.0^', '']) {
+    const res = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=${encodeURIComponent(badRef)}`, []);
+    assert.equal(res.status, 404, badRef);
+  }
+  for (const badCursor of ['abc', 'not-a-40-hex-string', 'g'.repeat(40), '12345']) {
+    const res = await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${encodeURIComponent(badCursor)}`, []);
+    assert.equal(res.status, 404, badCursor);
+  }
+});
+
+test('render accepts 204 dispatch response, redirects with ?started=1, and renders the started notice', async () => {
+  const sealed = await signedIn();
+  const restore = mockFetch(async (url) => { if (url === API) return accessibleRepo(); return new Response(null, { status: 204 }); });
+  try {
+    // Valid folder key: redirects to /p/<key>/designs?started=1
+    const resWithKey = await renderRequest({ sha: tipSha, key: 'A' }, { sealed });
+    assert.equal(resWithKey.status, 303);
+    assert.equal(resWithKey.headers.get('Location'), '/r/Cameronrlewis/repo/p/A/designs?started=1');
+
+    // Non-folder key: redirects to /projects?started=1
+    const resNoKey = await renderRequest({ sha: tipSha, key: '' }, { sealed });
+    assert.equal(resNoKey.status, 303);
+    assert.equal(resNoKey.headers.get('Location'), '/r/Cameronrlewis/repo/projects?started=1');
+
+    // Non-folder key fallback on validation error (400)
+    const badShaNoKey = await renderRequest({ sha: 'bad', key: '' }, { sealed });
+    assert.equal(badShaNoKey.status, 400);
+    assert.match(await badShaNoKey.text(), /href="\/r\/Cameronrlewis\/repo\/projects">Back to revisions<\/a>/);
+
+    // Non-folder key in designsRoute returns 404
+    const badKeyRoute = await designGet('/r/Cameronrlewis/repo/p/%252e%252e/designs', []);
+    assert.equal(badKeyRoute.status, 404);
+  } finally { restore(); }
+
+  // Check the started notice on designsPage
+  const pageWithNotice = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [], tip: '', next: null, truncated: false, thumbs: new Map(), started: true, first: true });
+  assert.match(pageWithNotice, /class="notice notice-info" role="status">The render has started\. It appears in the list in about two minutes\.<\/div>/);
+  const pageWithoutNotice = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [], tip: '', next: null, truncated: false, thumbs: new Map(), started: false, first: true });
+  assert.ok(!pageWithoutNotice.includes('The render has started'));
+});
+
+test('designsPage renders thumbnail image when thumbs has a hit, placeholder otherwise, and displays decoded canonical dir in lead', () => {
+  const hitMap = new Map([[tipSha, 'iVBORw0KGgo=']]);
+  const row = { sha: tipSha, message: 'msg', author: 'auth', date: '2026-10-24T10:00:00Z' };
+  const htmlHit = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'Student%20Design%20Teams%2FHorizon', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: hitMap, started: false, first: true });
+  assert.match(htmlHit, /<img alt="" width="200" height="125" src="data:image\/png;base64,iVBORw0KGgo=">/);
+  assert.match(htmlHit, /<code>Student Design Teams\/Horizon<\/code>/, 'lead line shows decoded canonical dir rather than URL-encoded key');
+
+  const emptyMap = new Map();
+  const htmlMiss = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: emptyMap, started: false, first: true });
+  assert.match(htmlMiss, /<span class="design-thumb-missing" aria-hidden="true"><\/span>/);
+});
