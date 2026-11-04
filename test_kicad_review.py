@@ -5959,6 +5959,37 @@ exit 0
 ci_finding_3_npm_cache_completion_marker_contract()
 
 
+def ci_review_1_workflow_commands_escaped_contract():
+    # Every ::warning:: / ::error:: in every workflow goes through workflow_command_escape;
+    # in particular no echo interpolates a $VAR straight into a workflow command.
+    for wf in sorted(pathlib.Path('.github/workflows').glob('*.yml')):
+        for n, line in enumerate(wf.read_text().splitlines(), 1):
+            if '::warning::' not in line and '::error::' not in line:
+                continue
+            assert not re.search(r'echo\s+["\']?::(warning|error)::[^\n]*\$', line), f'{wf}:{n}: workflow command interpolates a variable unescaped'
+            assert 'workflow_command_escape' in line, f'{wf}:{n}: workflow command must go through workflow_command_escape'
+    # The per-model 3D warning carries a pull-request-controlled directory name.
+    wf_text = pathlib.Path('.github/workflows/review.yml').read_text()
+    # The workflow imports the checked-out tool from ./tools.
+    tools_root = tempfile.mkdtemp()
+    os.symlink(os.path.abspath('.'), os.path.join(tools_root, 'tools'))
+    line = next(l.strip() for l in wf_text.splitlines() if '3D processing failed for' in l)
+    evil = 'review/a%0Ab\n::stop-commands::x'
+    r = subprocess.run(['bash', '-c', f'dir="$1"; {line}', 'sh', evil], capture_output=True, text=True, cwd=tools_root)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.count('\n') == 1 and r.stdout.startswith('::warning::3D processing failed for review/a%250Ab%0A::stop-commands::x'), r.stdout
+    # Required-check errors carry project names.
+    for var in ('FAILED', 'THREADS'):
+        line = next(l.strip() for l in wf_text.splitlines() if '::error::' in l and f'${var}' in l)
+        r = subprocess.run(['bash', '-c', line], capture_output=True, text=True, env={**os.environ, var: 'p\n::error::forged'},
+                           cwd=tools_root)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count('\n') == 1 and r.stdout.startswith('::error::') and 'p%0A::error::forged' in r.stdout, r.stdout
+
+
+ci_review_1_workflow_commands_escaped_contract()
+
+
 def br02_processed_sample_contract():
     import base64, gzip, hashlib, json, math, struct, zlib
     source = pathlib.Path('ui/sample/review-data-3d-processed.js').read_text()
