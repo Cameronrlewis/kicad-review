@@ -10062,6 +10062,48 @@ with tempfile.TemporaryDirectory() as d:
         with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", return_value=dict(shown)), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
             kr.cmd_report(None)
         assert json.loads(pathlib.Path("review/data.json").read_text())["projects"][0]["downloads"] == mixed_entries
+
+        # A failed downloads upload turns every download row into an error row, in the HTML payload and data.json.
+        kr.write_download_manifest(src, [{"kind": "fab", "label": "For fabrication", "file": "fab-b-bbbbbbb.zip", "error": None},
+                   {"kind": "step", "label": "3D model (STEP)", "file": None, "error": "skipped: export took longer than 120 s"}])
+        pathlib.Path("review/detect.json").write_text(json.dumps({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [
+            {"dir": "p", "name": "b", "status": "modified"}, {"dir": "q", "name": "q", "status": "modified"}, {"dir": "missing", "name": "m", "status": "modified"}]}))
+        named = lambda p, *rest: {**shown, "name": p["name"] + " </script><b>", "dir": p["dir"]}
+        with patch("kicad_review.load_settings", return_value=on), patch("kicad_review.build_project", side_effect=named), patch.dict(os.environ, {"GITHUB_OUTPUT": "gh-out.txt"}):
+            kr.cmd_report(None)
+        marker = "<script>window.REVIEW_DATA = "
+        def split_payload(page):
+            start = page.index(marker) + len(marker)
+            end = page.index("</script>", start)
+            return page[:start], page[start:end], page[end:]
+        before = pathlib.Path("review/kicad-review.html").read_text(encoding="utf-8")
+        before_head, before_payload, before_tail = split_payload(before)
+        assert [len(p.get("downloads", [])) for p in json.loads(before_payload.removesuffix(";"))["projects"]] == [2, 1, 0]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kr.cmd_drop_downloads(None)
+        assert out.getvalue().startswith("::warning::"), out.getvalue()
+        after = pathlib.Path("review/kicad-review.html").read_text(encoding="utf-8")
+        head, payload, tail = split_payload(after)
+        assert (head, tail) == (before_head, before_tail), "only the embedded data may change"
+        assert "<" not in payload and "\\u003c/script>\\u003cb>" in payload, "the payload must keep < escaped"
+        not_stored = "not stored: this run could not upload its download files"
+        expected = [[{"kind": "fab", "label": "For fabrication", "error": not_stored}, {"kind": "step", "label": "3D model (STEP)", "error": not_stored}],
+                    [{"kind": "pdf", "label": "Schematic PDF", "error": not_stored}], None]
+        for data in (json.loads(payload.removesuffix(";")), json.loads(pathlib.Path("review/data.json").read_text(encoding="utf-8"))):
+            assert [p.get("downloads") for p in data["projects"]] == expected, data["projects"]
+            assert data["projects"][0]["name"] == "b </script><b>"
+        old = json.loads(before_payload.removesuffix(";"))
+        for p in old["projects"]:
+            if p.get("downloads"):
+                p["downloads"] = [{"kind": d["kind"], "label": d["label"], "error": not_stored} for d in p["downloads"]]
+        assert payload == json.dumps(old, separators=(",", ":")).replace("<", "\\u003c") + ";", "nothing else in the payload changes"
+        pathlib.Path("review/kicad-review.html").write_text(before.replace(marker, "<script>window.OTHER = "), encoding="utf-8")
+        try:
+            kr.cmd_drop_downloads(None)
+            raise AssertionError("a report without the data marker must fail loudly")
+        except RuntimeError:
+            pass
     finally:
         os.chdir(cwd)
 print("ok report manifest, artifact folder, outputs and opt-out byte identity")
@@ -10069,12 +10111,19 @@ print("ok report manifest, artifact folder, outputs and opt-out byte identity")
 wf = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
 upload = wf[wf.index("- name: Upload downloads"):]
 upload = upload[:upload.index("\n      - name:", 10)]
-for needle in ("if: steps.report.outputs.downloads == 'true'", "continue-on-error: true",
+for needle in ("id: downloads", "if: steps.report.outputs.downloads == 'true'", "continue-on-error: true",
                "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
                "name: ${{ steps.report.outputs.downloads_name }}", "path: review/downloads", "compression-level: 0", "retention-days: 90"):
     assert needle in upload, needle
 assert "archive: false" not in upload, "several files need an archived artifact"
-assert wf.index("- name: Upload report") < wf.index("- name: Upload downloads") < wf.index("- name: Screenshots of changed drawings")
+# Downloads upload before the report is copied, uploaded or published; a failed upload rewrites its rows first.
+assert (wf.index("- name: Build comparison report and checks") < wf.index("- name: Upload downloads")
+        < wf.index("- name: Drop unstored downloads from the report") < wf.index("- name: Collect review threads")
+        < wf.index("- name: Copy named report") < wf.index("- name: Upload report"))
+drop = wf[wf.index("- name: Drop unstored downloads from the report"):]
+drop = drop[:drop.index("\n      - name:")]
+assert "if: steps.downloads.outcome == 'failure'" in drop and "run: python3 tools/kicad_review.py drop-downloads" in drop, drop
+assert "continue-on-error" not in drop, "a report that cannot be corrected must fail the job"
 print("ok review.yml uploads the downloads artifact")
 
 readme = pathlib.Path("README.md").read_text(encoding="utf-8"); example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")

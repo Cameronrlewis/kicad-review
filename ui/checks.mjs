@@ -7722,13 +7722,15 @@ CHECKS.push(['Download dialog lists GitHub zips, exported files and safe command
     D.links = { ...D.links, head: sha('b'), base: sha('a') }; D.run_id = '77'; D.repo = 'o/r';
     proj().downloads = [
       { kind: 'fab', label: 'For fabrication', bytes: 261000, sha256: '0'.repeat(64), path: '0/fab-P-bbbbbbb.zip', artifact: 'kicad-review-downloads-bbbbbbb' },
-      { kind: 'step', label: '3D model (STEP)', error: 'skipped: export took longer than 120 s' }];
+      { kind: 'step', label: '3D model (STEP)', error: 'skipped: export took longer than 120 s' },
+      { kind: 'pdf', label: 'Schematic PDF', error: 'not stored: this run could not upload its download files' }];
     let dlg = open();
     if (!dlg.open) return 'dialog did not open';
     const hrefs = [...dlg.querySelectorAll('a')].map(a => a.getAttribute('href'));
     if (hrefs.join() !== ['b', 'a'].map(c => 'https://github.com/o/r/archive/' + c.repeat(40) + '.zip').join()) return 'archive links ' + hrefs;
     const copy = dlg.querySelector('[data-copy]');
     if (copy?.dataset.copy !== 'gh run download 77 -R o/r -n kicad-review-downloads-bbbbbbb -D kicad-review-downloads') return 'offline command ' + copy?.dataset.copy;
+    if (dlg.querySelectorAll('[data-copy]').length !== 1 || !dlg.textContent.includes('not stored: this run could not upload')) return 'error rows must show their reason with no command';
     if (!dlg.textContent.includes('skipped: export took longer than 120 s') || !dlg.textContent.includes('255 KB')) return 'step reason or size missing';
     dlg.close();
     window.hostedBase = () => 'https://site.example/r/o/r/a/9';
