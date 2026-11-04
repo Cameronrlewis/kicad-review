@@ -1,9 +1,8 @@
 import { currentBody } from './report-shell.js';
 import { reviewListName } from './report-kind.js';
+import { encode as b64url, decode as unb64url } from './b64.js';
 // Read-only, artifact-bound capabilities. No GitHub credential enters a URL or page.
 const enc = new TextEncoder();
-const b64url = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-const unb64url = s => Uint8Array.from(atob(s.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
 const name = /^[A-Za-z0-9_.-]{1,100}$/;
 const maxLife = 30 * 86400_000;
 async function hmacKey(env) {

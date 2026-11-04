@@ -1,9 +1,10 @@
 // Review-site threads: GitHub pull-request review comments that carry a KiCad anchor.
+import { encode, decode } from './b64.js';
 const MARKER = /<!-- kicad-review-anchor ([A-Za-z0-9_-]+) -->[ \t\r\n]*$/;
 const KEYS = ['v', 'project', 'file', 'sheet', 'layer', 'target', 'uuid', 'kind', 'ref', 'x', 'y', 'side', 'commit', 'severity'];
 
-const toB64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-const fromB64 = (value) => new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0)));
+const toB64 = (text) => encode(new TextEncoder().encode(text));
+const fromB64 = (value) => new TextDecoder('utf-8', { fatal: true }).decode(decode(value));
 
 export function encodeAnchor(anchor) { return toB64(JSON.stringify(anchor)); }
 

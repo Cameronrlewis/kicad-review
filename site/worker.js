@@ -2,6 +2,7 @@ import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from
 import { reportCsp, frameCsp } from './csp.js';
 import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
+import { encode, decode } from './b64.js';
 import { verifyReportFamily, reviewListName } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
@@ -22,25 +23,14 @@ const securityHeaders = {
 };
 const workflowFile = 'kicad-review.yml';
 
-function base64url(bytes) {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-}
-
 function unbase64(value) {
   const binary = atob(value), bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
-function unbase64url(value) {
-  const base64 = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
-  return unbase64(base64);
-}
-
 async function key(env) {
-  const raw = unbase64url(env.SESSION_KEY);
+  const raw = decode(env.SESSION_KEY);
   if (raw.length !== 32) throw new Error('SESSION_KEY must be 32 bytes');
   return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
@@ -52,7 +42,7 @@ export async function seal(value, env) {
     await key(env),
     text.encode(JSON.stringify(value)),
   );
-  return `${base64url(iv)}.${base64url(new Uint8Array(ciphertext))}`;
+  return `${encode(iv)}.${encode(new Uint8Array(ciphertext))}`;
 }
 
 export async function open(value, env) {
@@ -60,9 +50,9 @@ export async function open(value, env) {
     const [ivText, ciphertextText, extra] = value.split('.');
     if (!ivText || !ciphertextText || extra) return null;
     const plaintext = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: unbase64url(ivText) },
+      { name: 'AES-GCM', iv: decode(ivText) },
       await key(env),
-      unbase64url(ciphertextText),
+      decode(ciphertextText),
     );
     return JSON.parse(untext.decode(plaintext));
   } catch {
@@ -873,7 +863,7 @@ function nextPath(value) {
 
 function stateCookie(next) {
   const random = crypto.getRandomValues(new Uint8Array(24));
-  return base64url(text.encode(JSON.stringify({ s: base64url(random), n: next })));
+  return encode(text.encode(JSON.stringify({ s: encode(random), n: next })));
 }
 
 async function callback(request, env) {
@@ -886,7 +876,7 @@ async function callback(request, env) {
   }
   let stateData;
   try {
-    stateData = JSON.parse(untext.decode(unbase64url(savedState)));
+    stateData = JSON.parse(untext.decode(decode(savedState)));
   } catch {
     return errorPage(400, "Sign-in didn't complete", 'The sign-in link expired or was opened in a different browser.', [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   }
