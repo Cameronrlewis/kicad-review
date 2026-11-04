@@ -155,7 +155,8 @@ async function fillDesignCard(p) {   // called by renderNav once the card is in 
     } else if (!image && card.isConnected) {
       card.remove();
     }
-  } catch {
+  } catch (err) {
+    console.error("fillDesignCard failed:", err);
     if (card.isConnected) card.remove();
   }
 }
@@ -247,7 +248,8 @@ async function fillDesignPcbDrawCard(p) {
         btn.setAttribute("title", currentFace === "front" ? "Show back plot" : "Show front plot");
       };
     }
-  } catch {
+  } catch (err) {
+    console.error("fillDesignPcbDrawCard failed:", err);
     if (card.isConnected) card.remove();
   }
 }
@@ -363,8 +365,8 @@ function renderNav() {
   if (single() && leftTab === "project") {   // no library changes to list; the board still sits under the project name
     $("#nav").querySelectorAll("h3").forEach(h => { if (h.textContent === "Libraries") { h.nextElementSibling.remove(); h.remove(); } });
     $("#nav .project-name")?.insertAdjacentHTML("afterend", designCard(p) + designPcbDrawCard(p));
-    fillDesignCard(p).catch(() => {});
-    fillDesignPcbDrawCard(p).catch(() => {});
+    fillDesignCard(p).catch(console.error);
+    fillDesignPcbDrawCard(p).catch(console.error);
   }
   const grip = $("#nav .left-splitter");
   const resize = width => { leftWidth=Math.max(220,Math.min(520,width)); syncLeftDock(); grip.setAttribute("aria-valuenow",leftWidth); persistLeftDock(); };

@@ -7105,11 +7105,18 @@ CHECKS.push(
     });
     proj().board.poster3d = {head: 'dpposter'};
     await applyState({p: 0, v: 'sheet:/'}); renderNav();
-    await new Promise(r => setTimeout(r, 300));
-    const img = document.querySelector('#nav .design-poster'), nav = document.querySelector('#nav');
+    let img = null, nav = document.querySelector('#nav');
+    for (let n = 0; n < 40 && (!img || img.hidden || !img.src?.startsWith('blob:')); n++) {
+      await new Promise(r => setTimeout(r, 50));
+      img = document.querySelector('#nav .design-poster');
+    }
     if (!img || img.hidden || !img.src.startsWith('blob:')) return 'poster not shown';
-    renderNav(); await new Promise(r => setTimeout(r, 300));
-    const cards = document.querySelectorAll('#nav .design-poster');
+    renderNav();
+    let cards = null;
+    for (let n = 0; n < 40 && (!cards || cards.length !== 1); n++) {
+      await new Promise(r => setTimeout(r, 50));
+      cards = document.querySelectorAll('#nav .design-poster');
+    }
     if (cards.length !== 1 || !img.complete || img.naturalWidth <= 0 || img.getBoundingClientRect().width > nav.getBoundingClientRect().width || !img.alt.endsWith('board, rendered')) return 'poster size or duplicate card';
     if (decodeCount !== 1) return 'poster decoded ' + decodeCount + ' times';
     return true;
@@ -7153,6 +7160,7 @@ CHECKS.push(["design PcbDraw card: front plot, back toggle, note when skipped", 
   const front = card.querySelector('img[data-face="front"]');
   if (!front || !front.src.startsWith('blob:') || front.hidden) return 'front plot not shown';
   const toggle = card.querySelector('button[data-face="back"]'); if (!toggle) return 'no Back toggle';
+  if (toggle.getBoundingClientRect().height < 44) return 'Back toggle height under 44px: ' + toggle.getBoundingClientRect().height;
   toggle.click(); await new Promise(r => setTimeout(r, 100));
   const shown = card.querySelector('img:not([hidden])');
   if (!shown || shown.dataset.face !== 'back') return 'Back toggle did not switch the plot';

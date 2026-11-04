@@ -18,7 +18,12 @@ window.Review3D = (() => {
     s.dead = true; s.abort.abort(); settleFrame(s);
     for (const {reject} of s.pending.values()) reject(new DOMException('Viewer closed', 'AbortError'));
     s.pending.clear(); s.worker?.terminate(); s.worker = null;
-    for (const url of s.urls) URL.revokeObjectURL(url);
+    for (const url of s.urls) {
+      URL.revokeObjectURL(url);
+      for (const [id, cachedUrl] of posterBlobUrls) {
+        if (cachedUrl === url) { posterBlobUrls.delete(id); posterLoads.delete(id); }
+      }
+    }
     s.urls.clear(); clearTimeout(s.idleTimer); cancelAnimationFrame(s.raf); s.raf = 0;
     s.policy?.dispose();
     for (const remove of s.motionPreferences || []) remove();
