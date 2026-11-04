@@ -10388,6 +10388,9 @@ def test_f4_render_and_release_cache():
                 kr.cmd_render(None)
                 for side in ("base", "head"):
                     assert not pathlib.Path(f"review/p/{side}/fab").exists(), f"stale fab/ must be removed when release check is off on {side}"
+                    # Assert on the pcbway-keyed cache dir: prior pcbway cache remains intact and uncorrupted.
+                    cached_pcbway_fab = kr.render_cache(prj, side, det, spcbway) / "fab"
+                    assert cached_pcbway_fab.is_dir(), f"pcbway-keyed cache dir should remain intact on {side}"
 
             # Missing-project .kicad_pro branch: with release on and no .kicad_pro, stale fab/ is removed.
             snopro = copy.deepcopy(srel)
