@@ -125,6 +125,9 @@ async function releaseAt(gh, token, root, ref, tip, readRelease) {
   const snapshot = await readRelease(gh, token, root, asset);
   return snapshot.head === tip && snapshot.snapshot?.sha === tip ? { source: 'release', asset, snapshot } : null;
 }
+// ponytail: at most DESIGN_WALK_MAX commit-detail requests (pages included) per lookup, within a Worker's subrequest budget.
+// A folder whose nearest change lies further back reads as missing (a render is offered), never as an older stand-in.
+export const DESIGN_WALK_MAX = 40;
 // state: found {source, artifact|asset, snapshot, tip, exact, index} | missing {tip, reason?} | unknown | error.
 // reason 'project' means the snapshot exists but has no such folder. A ref that is a full or short sha is never walked.
 // Otherwise walk first-parent history (a merge's files describe its difference from its first parent) and stop at the
@@ -145,17 +148,18 @@ export async function findDesign(gh, token, owner, repo, ref, dir, read = readSn
     if (exact) return place(exact);
     if (shaRef.test(ref)) return { state: 'missing', tip };
     let sha = tip;
-    for (let steps = 0; steps < 500; steps += 1) { // ponytail: at most 500 first-parent commits; the nearest change is nearly always within a few
-      const commit = await commitDetails(gh, token, root, sha);
+    const budget = { used: 0, max: DESIGN_WALK_MAX };
+    for (;;) {
+      const commit = await commitDetails(gh, token, root, sha, budget);
+      if (commit.incomplete) return { state: 'missing', tip };   // out of budget: this commit's files are not all known
       if (changesProject(commit.files, dir)) {
         const hit = sha === tip ? null : await artifactAt(gh, token, root, sha, read);
         return hit ? place({ ...hit, exact: false }) : { state: 'missing', tip };
       }
       sha = commit.parents?.[0]?.sha;
-      if (!sha) break;
+      if (!sha) return { state: 'missing', tip };
       if (!hex40.test(sha)) throw new Error('invalid parent');
     }
-    return { state: 'missing', tip };
   } catch { return { state: 'error' }; }
 }
 

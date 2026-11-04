@@ -5102,6 +5102,22 @@ test('renames into or out of a folder count for both folders; a global settings 
   assert.equal(changesProject([{ filename: 'B/x.kicad_pcb' }], 'A'), false);
 });
 
+test('design discovery spends a bounded number of GitHub requests, then reports missing rather than an older design', async () => {
+  const { DESIGN_WALK_MAX } = await import('./design.js');
+  assert.ok(Number.isInteger(DESIGN_WALK_MAX) && DESIGN_WALK_MAX > 0 && DESIGN_WALK_MAX <= 40, 'stays under a Worker subrequest budget');
+  // The folder last changed 300 first-parent commits ago; every newer commit touches only the README.
+  const commits = Array.from({ length: 300 }, (_, i) => c(300 - i, i === 299 ? [{ filename: 'A/A.kicad_sch' }] : [{ filename: 'README.md' }], i === 299 ? { snapshot: 7 } : {}));
+  let calls = 0;
+  const gh = async (path) => { calls += 1; return chainGh(commits)(path); };
+  const found = await findDesign(gh, 't', 'o', 'r', 'main', 'A', readAs(commits));
+  assert.equal(found.state, 'missing', 'an unverified stretch of history never stands in for the tip');
+  assert.equal(found.tip, shaOf(300));
+  assert.ok(calls <= DESIGN_WALK_MAX + 4, `${calls} GitHub requests`);
+  // Within the budget the nearest change is still found.
+  const near = commits.slice(290);
+  assert.equal((await findDesign(chainGh(near), 't', 'o', 'r', 'main', 'A', readAs(near))).state, 'found');
+});
+
 test('an unrelated snapshot under the same sha7 or a force push never substitutes', async () => {
   const commits = [c(3, []), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
   const otherSha = async (gh, token, root, artifact) => ({ ...payload(shaOf(9)), projects: [{ dir: 'A' }] });
