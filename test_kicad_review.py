@@ -10378,7 +10378,7 @@ def test_f4_render_and_release_cache():
                     cached_names = [f.name for f in cached_fab.iterdir()]
                     assert cached_names and all("pcbway" in name and "jlcpcb" not in name for name in cached_names), (side, cached_names)
 
-            # Re-running with checks.release off clears stale package files so they are not retained in review or cache.
+            # Re-running with checks.release off clears stale package files from review.
             sreloff = copy.deepcopy(spcbway)
             sreloff["checks"]["release"] = "off"
             with patch.object(kr, "load_settings", return_value=sreloff), \
@@ -10388,8 +10388,24 @@ def test_f4_render_and_release_cache():
                 kr.cmd_render(None)
                 for side in ("base", "head"):
                     assert not pathlib.Path(f"review/p/{side}/fab").exists(), f"stale fab/ must be removed when release check is off on {side}"
-                    cached_fab = kr.render_cache(prj, side, det, sreloff) / "fab"
-                    assert not cached_fab.exists(), f"cache must not contain fab/ when release check is off on {side}"
+
+            # Missing-project .kicad_pro branch: with release on and no .kicad_pro, stale fab/ is removed.
+            snopro = copy.deepcopy(srel)
+            shutil.rmtree(".render-cache", ignore_errors=True)
+            for side in ("base", "head"):
+                stale_fab = pathlib.Path(f"review/p/{side}/fab")
+                stale_fab.mkdir(parents=True, exist_ok=True)
+                (stale_fab / "stale.txt").write_text("stale", encoding="utf-8")
+                assert (stale_fab / "stale.txt").is_file()
+                pathlib.Path(f"{side}/p/P.kicad_pro").unlink(missing_ok=True)
+
+            with patch.object(kr, "load_settings", return_value=snopro), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"):
+                kr.cmd_render(None)
+                for side in ("base", "head"):
+                    assert not pathlib.Path(f"review/p/{side}/fab").exists(), f"stale fab/ must be removed when project file is missing on {side}"
         finally:
             os.chdir(old)
 
