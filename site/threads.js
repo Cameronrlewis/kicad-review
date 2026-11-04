@@ -64,7 +64,7 @@ export const COMMENTS_QUERY = 'query($threadId:ID!,$after:String){node(id:$threa
 export const SCOPE_QUERY = 'query($id:ID!){node(id:$id){... on PullRequestReviewThread{repository{name owner{login}} pullRequest{number}}}}';
 export const threadMutation = (op) => `mutation($id:ID!){${op}ReviewThread(input:{threadId:$id}){thread{isResolved}}}`;
 
-// Shared bounded pagination helper for GitHub REST list endpoints (100 items/page, max 10 pages).
+// Shared bounded pagination helper for GitHub REST list endpoints (100 items/page, default max 10 pages).
 // Bound hit: ok is false (callers that need a complete scan fail closed); items holds the pages read.
 export async function ghPages(ghFn, path, token, extract = x => x, maxPages = 10) {
   const sep = path.includes('?') ? '&' : '?';
