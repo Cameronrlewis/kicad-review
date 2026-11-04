@@ -2614,10 +2614,19 @@ test('report readiness announces the gate only with framed enabled threads', () 
   const declarations = source.slice(source.indexOf('let THREADS_ON'), source.indexOf('const validThread'));
   for (const framed of [false, true]) for (const enabled of [false, true]) for (const block_merge of [false, true]) {
     const window = {}, parent = framed ? {} : window;
-    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D: { settings: { threads: { enabled, block_merge } } } });
+    const D = { settings: { threads: { enabled, block_merge } } };
+    const message = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D, single: () => D.mode === 'single' });
     assert.equal(message.kicadReviewReady, true);
     assert.equal(message.threads, framed && enabled);
     assert.equal(message.blockMerge, framed && enabled && block_merge);
+    assert.equal(message.designSnapshot, undefined);
+    // A design report never announces PR discussions or a merge gate; it sends its recorded snapshot instead.
+    const snapshot = { ref: 'main', sha: 'c'.repeat(40), committedAt: '2026-10-24T10:00:00Z', message: 'Move R16' };
+    const designD = { ...D, mode: 'single', snapshot };
+    const design = runInNewContext(`${declarations}\nreadyMessage()`, { window, parent, S: {}, D: designD, single: () => designD.mode === 'single' });
+    assert.equal(design.threads, false);
+    assert.equal(design.blockMerge, false);
+    assert.deepEqual({ ...design.designSnapshot }, snapshot);
   }
   const html = reviewPage({ owner: 'owner', repo: 'repo', id: '123', pull: 7 });
   assert.match(html, /"rerun":"\/r\/owner\/repo\/pull\/7\/rerun"/);
