@@ -11164,3 +11164,11 @@ with _DpTmp() as t:
     finally:
         os.chdir(old_cwd)
 print("ok Session E 4 thumbnails read the render folder's head poster")
+
+# Session E 15: thumbnail source file names are injective, so two folders never share one poster file.
+_stems = ["", "root", "_root", "a/b", "a_b", "a/_b", "a_/b", "a__b", "a/__b", "a___b", "R F/ü", "R_20F/ü", "x.y-z"]
+_named = [kr._thumb_src_stem(folder) for folder in _stems]
+assert len(set(_named)) == len(_stems), dict(zip(_stems, _named))
+assert all(_dpre.fullmatch(r"[A-Za-z0-9._-]+", stem) for stem in _named), _named
+assert kr._thumb_src_stem("") == "root" and kr._thumb_src_stem("H") == "H" and kr._thumb_src_stem("x.y-z") == "x.y-z"
+print("ok Session E 15 thumbnail source names never collide")

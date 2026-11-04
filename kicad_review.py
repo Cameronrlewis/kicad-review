@@ -6006,11 +6006,13 @@ def thumbnail_index(index, plan, src_dir, cap=50):
 
 
 def _thumb_src_stem(folder):
+    """A file name for one folder's poster that no other folder maps to: UTF-8 bytes outside [A-Za-z0-9.-] become _<hex>.
+    Every escape is "_" plus two hex digits, so "_root" (the folder named root) is never produced by escaping."""
     if not folder:
         return "root"
     if folder == "root":
         return "_root"
-    return folder.replace("_", "__").replace("/", "_")
+    return "".join(chr(b) if chr(b).isascii() and (chr(b).isalnum() or chr(b) in ".-") else f"_{b:02x}" for b in folder.encode("utf-8"))
 
 
 def cmd_thumbs(args):
