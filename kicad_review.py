@@ -1069,17 +1069,24 @@ def is_net_number(token):
 
 def parse_sexpr(text):
     """KiCad S-expression text to nested lists of strings, preserving quoted tokens."""
-    stack = [[]]
+    stack, pos = [[]], 0
     for m in TOKEN.finditer(text):
+        if m.start() != pos:
+            raise ValueError("malformed S-expression")
+        pos = m.end()
         if m.group(1):
             stack.append([])
         elif m.group(2):
+            if len(stack) < 2:
+                raise ValueError("malformed S-expression")
             node = stack.pop()
             stack[-1].append(node)
         elif m.group(3) is not None:
             stack[-1].append(Quoted(re.sub(r"\\(.)", lambda e: "\n" if e.group(1) == "n" else e.group(1), m.group(3))))
         elif m.group(4):
             stack[-1].append(m.group(4))
+    if len(stack) != 1 or len(stack[0]) != 1 or not isinstance(stack[0][0], list) or text[pos:].strip():
+        raise ValueError("malformed S-expression")
     return stack[0][0]
 
 
@@ -4275,25 +4282,6 @@ def net_members(text, objects, commit):
 
 def validate_netlist(text):
     """Raise ValueError unless text is exactly one usable netlist export."""
-    # parse_sexpr returns only the first expression, so reject truncated or trailing content here.
-    depth, quoted, escaped, roots, end = 0, False, False, 0, None
-    for index, char in enumerate(text):
-        if quoted:
-            if escaped: escaped = False
-            elif char == "\\": escaped = True
-            elif char == '"': quoted = False
-        elif char == '"': quoted = True
-        elif char == "(":
-            if depth == 0:
-                roots += 1
-                if roots != 1: raise ValueError("trailing netlist expression")
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth < 0: raise ValueError("unbalanced netlist")
-            if depth == 0: end = index + 1
-    if quoted or depth != 0 or roots != 1 or text[end:].strip():
-        raise ValueError("incomplete or trailing netlist content")
     root = parse_sexpr(text)
     if not isinstance(root, list) or not root or root[0] != "export":
         raise ValueError("not a netlist export")

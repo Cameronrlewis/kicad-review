@@ -3362,8 +3362,8 @@ def fab(d, files, pos_rows, bom_rows, preset="jlcpcb"):
     part = "LCSC Part #" if preset == "jlcpcb" else "Mfg Part #"
     with open(f"{d}/b-review-{preset}-bom.csv", "w") as fh:
         fh.write(f"Comment,Designator,Footprint,{part}\n" + "".join(f'x,"{refs}",y,{pn}\n' for refs, pn in bom_rows))
-def pcb(d, layers):
-    open(f"{d}/b.kicad_pcb", "w").write("(kicad_pcb\n  (layers\n" + "".join(f'    (0 "{l}" signal)\n' for l in layers) + "  )\n)\n")
+def pcb(d, layers, extra=""):
+    open(f"{d}/b.kicad_pcb", "w").write("(kicad_pcb\n  (layers\n" + "".join(f'    (0 "{l}" signal)\n' for l in layers) + "  )\n" + extra + ")\n")
     return f"{d}/b.kicad_pcb"
 fpd = lambda ref, side, attrs, pads="smd": {"kind": "footprint", "ref": ref, "props": {"layer": side, "attributes": attrs, "pads_kind": pads}}
 G = "%FSLAX46Y46*%\nD10*\nX0Y0D03*\nM02*\n"
@@ -3397,8 +3397,7 @@ with tempfile.TemporaryDirectory() as d:
 print("ok pcbway drill detected")
 with tempfile.TemporaryDirectory() as d:
     fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
-    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
-    open(p, "a").write('(footprint "J" (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6)))\n')
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"], '(footprint "J" (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6)))\n')
     v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "J1", "props": {"layer": "F.Cu", "attributes": "through_hole"}}})
     assert [x["type"] for x in v] == ["missing_drill"], v
 print("ok plated pads in the board file require a drill file")
@@ -3436,8 +3435,7 @@ from kicad_review import bom_refs_expand
 assert bom_refs_expand("C1,C3-C5, R10") == {"C1", "C3", "C4", "C5", "R10"}
 with tempfile.TemporaryDirectory() as d:
     fab(d, {k: v for k, v in full.items() if "Paste" not in k and "B_Mask" not in k}, ["A1"], [("A1", "C5")])
-    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"])
-    open(p, "a").write('(footprint "Sensor:TO39" (layer "B.Cu") (attr smd) (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6) (layers "*.Cu" "*.Mask")))\n')
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"], '(footprint "Sensor:TO39" (layer "B.Cu") (attr smd) (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.6) (layers "*.Cu" "*.Mask")))\n')
     v = release_findings(d, "b", "jlcpcb", p, {"1": {"kind": "footprint", "ref": "A1", "props": {"layer": "B.Cu", "attributes": "smd"}}})
     assert not any("Paste" in x["description"] for x in v), v
 with tempfile.TemporaryDirectory() as d:
@@ -3455,7 +3453,7 @@ from kicad_review import smd_pad_sides
 assert smd_pad_sides('(footprint "R" locked (layer "B.Cu") (pad "1" smd rect))') == {"B"}
 with tempfile.TemporaryDirectory() as d:
     fab(d, {k: v for k, v in full.items() if not k.endswith(".drl")}, [], [("J1", "C9")])
-    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"]); open(p, "a").write('(footprint "H" (pad "" np_thru_hole circle (at 0 0) (size 3 3) (drill 3)))\n')
+    p = pcb(d, ["F.Cu", "B.Cu", "Edge.Cuts"], '(footprint "H" (pad "" np_thru_hole circle (at 0 0) (size 3 3) (drill 3)))\n')
     assert [x["type"] for x in release_findings(d, "b", "jlcpcb", p, {})] == ["missing_drill"]
 with tempfile.TemporaryDirectory() as d:
     fab(d, {**full, "b-GND_PLANE.g2": G}, ["R1"], [("R1", "C1")])
@@ -10046,4 +10044,82 @@ def test_f2_cross_sheet_multi_unit():
 test_f2_cross_sheet_multi_unit()
 print("ok F2 cross-sheet multi-unit net comparison")
 
+
+# F3: Malformed S-expressions raise ValueError, and validate_netlist delegates balance/root checking to parse_sexpr.
+def test_f3_malformed_sexpr():
+    import inspect
+    from kicad_review import parse_sexpr, validate_netlist, export_netlist, electrical_changes
+
+    bad_sexprs = [
+        "",
+        "   \n\t  ",
+        "atom",
+        '"quoted"',
+        ")",
+        "(()",
+        "(kicad_pcb",
+        "(kicad_pcb))",
+        "(kicad_pcb) (extra)",
+        "(kicad_pcb) trailing",
+        "leading (kicad_pcb)",
+        '(kicad_pcb "unterminated)',
+        '(kicad_pcb "unterminated\\")',
+        '(kicad_pcb (setup (stackup "unclosed)',
+    ]
+    for text in bad_sexprs:
+        try:
+            parse_sexpr(text)
+            raise AssertionError(f"F3 malformed S-expression accepted: {text!r}")
+        except ValueError:
+            pass
+
+    assert parse_sexpr(' \n (kicad_pcb (layers (0 "F.Cu" signal)) (paper "A4 \\"x\\"\\n")) \t ') == [
+        "kicad_pcb",
+        ["layers", ["0", "F.Cu", "signal"]],
+        ["paper", 'A4 "x"\n'],
+    ]
+
+    # validate_netlist uses parse_sexpr for S-expression balance/root checking without a duplicated character scanner.
+    src = inspect.getsource(validate_netlist)
+    assert "for index, char in enumerate" not in src, "duplicated balance scanner still in validate_netlist"
+
+    for text in bad_sexprs:
+        try:
+            validate_netlist(text)
+            raise AssertionError(f"F3 malformed netlist accepted: {text!r}")
+        except ValueError:
+            pass
+
+    # Callers that handle parse failures record incomplete evidence instead of crashing on malformed S-expressions.
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            def truncated_netlist(cmd, **kw):
+                pathlib.Path(cmd[cmd.index("-o") + 1]).write_text("(export (nets", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with patch("kicad_review.subprocess.run", side_effect=truncated_netlist), \
+                 _contextlib.redirect_stderr(io.StringIO()):
+                export_netlist("p.kicad_sch", "review/p/base")
+            assert pathlib.Path("review/p/base/netlist.net.error").is_file()
+            assert not pathlib.Path("review/p/base/netlist.net").exists()
+
+            p = {"dir": "p", "name": "p"}
+            write("base", {"p/p.kicad_sch": "(kicad_sch", "p/p.kicad_pcb": "(kicad_pcb"})
+            write("head", {"p/p.kicad_sch": "(kicad_sch)", "p/p.kicad_pcb": '(kicad_pcb (setup (stackup (layer "F.Cu"))))'})
+            write("review/p/base", {"netlist.net": "(export (nets"})
+            write("review/p/head", {"netlist.net": "(export (nets))"})
+            write("review/p", {"copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            with patch("kicad_review.board_pads", return_value={}):
+                rows, issues = electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
+            assert not [r for r in rows if r["kind"] in ("rule", "stackup")], rows
+            assert any(i["channel"] == "wiring" and i["document"] == "schematic" and "base netlist unavailable" in i["reason"] for i in issues), issues
+            assert {"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"} in issues, issues
+        finally:
+            os.chdir(old)
+
+
+test_f3_malformed_sexpr()
+print("ok F3 malformed S-expressions raise ValueError")
 
