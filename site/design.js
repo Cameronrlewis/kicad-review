@@ -98,12 +98,30 @@ async function commitDetails(gh, token, root, sha, budget) {
   }
   return { ...commit, files, incomplete };
 }
-// Newest live artifact named for this sha7 whose payload names this exact sha. An expired artifact is never read.
+// A pull request's run (a fork's above all) can upload a file with any name, so a snapshot counts only from this
+// repository's own push or manual run. A fork run is refused from the listing alone; the others cost one run lookup each.
+const ownRun = (a) => /^\d{1,20}$/.test(String(a.workflow_run?.id)) && Number.isSafeInteger(a.workflow_run?.repository_id)
+  && a.workflow_run.head_repository_id === a.workflow_run.repository_id;
+async function snapshotRun(gh, token, root, artifact) {
+  const response = await gh(`${root}/actions/runs/${enc(String(artifact.workflow_run.id))}`, token);
+  if (!response.ok) throw new Error('run unavailable');
+  const run = await response.json();
+  return (run.event === 'push' || run.event === 'workflow_dispatch') && run.repository?.id === artifact.workflow_run.repository_id
+    && run.head_repository?.id === run.repository?.id;
+}
+// ponytail: at most SNAPSHOT_CANDIDATES same-named artifacts are examined per commit (newest first); older ones are not read.
+const SNAPSHOT_CANDIDATES = 3;
+// Newest live artifact named for this sha7, from this repository's push or manual run, whose payload names this exact sha.
+// An expired artifact is never read.
 async function artifactAt(gh, token, root, sha, read) {
+  let examined = 0;
   for (let page = 1; ; page += 1) {
     const response = await gh(`${root}/actions/artifacts?name=${enc(`kicad-design-${sha.slice(0, 7)}.html`)}&per_page=100&page=${page}`, token);
     if (!response.ok) throw new Error('artifacts unavailable');
-    for (const artifact of ((await response.json()).artifacts || []).filter(live).sort(byNewest)) {
+    for (const artifact of ((await response.json()).artifacts || []).filter(live).filter(ownRun).sort(byNewest)) {
+      if (examined >= SNAPSHOT_CANDIDATES) return null;
+      examined += 1;
+      if (!(await snapshotRun(gh, token, root, artifact))) continue;
       const snapshot = await read(gh, token, root, artifact);
       if (snapshot?.head === sha && snapshot.snapshot?.sha === sha) return { source: 'artifact', artifact, snapshot };
     }

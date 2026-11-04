@@ -5034,7 +5034,10 @@ import { designMissingPage, projectsPage, designsPage } from './pages.js';
 // The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
 const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
 const tipSha = 'c'.repeat(40);
-const snap = (id, sha7, extra = {}) => ({ id, name: `kicad-design-${sha7}.html`, expired: false, created_at: '2026-10-24T10:00:00Z', ...extra });
+// A snapshot artifact as GitHub lists it, uploaded by this repository's own run (see pushRun).
+const snap = (id, sha7, extra = {}) => ({ id, name: `kicad-design-${sha7}.html`, expired: false, created_at: '2026-10-24T10:00:00Z',
+  workflow_run: { id: 4000 + id, repository_id: 1, head_repository_id: 1 }, ...extra });
+const pushRun = () => json({ event: 'push', repository: { id: 1 }, head_repository: { id: 1 } });
 const API = 'https://api.github.com/repos/Cameronrlewis/repo';
 function designGh(routes) {
   const seen = [];
@@ -5063,6 +5066,7 @@ function chainGh(commits, { releases = {}, fail = '', status = 500 } = {}) {
       return json({ artifacts: commits.filter((x) => x.snapshot && name === `kicad-design-${x.sha.slice(0, 7)}.html`)
         .map((x) => snap(x.snapshot, x.sha.slice(0, 7), x.expired ? { expired: true } : {})) });
     }
+    if (/\/actions\/runs\/\d+$/.test(path)) return pushRun();
     const tag = /\/releases\/tags\/(.+)$/.exec(path);
     if (tag) return releases[decodeURIComponent(tag[1])] ? json(releases[decodeURIComponent(tag[1])]) : json({}, 404);
     const m = /\/commits\/([0-9a-f]{40})/.exec(path);
@@ -5118,6 +5122,36 @@ test('design discovery spends a bounded number of GitHub requests, then reports 
   assert.equal((await findDesign(chainGh(near), 't', 'o', 'r', 'main', 'A', readAs(near))).state, 'found');
 });
 
+test('a snapshot from a pull-request run (a fork\'s above all) is never shown, and decoys cost a bounded number of reads', async () => {
+  const sha = shaOf(1);
+  const genuine = { ...snap(21, sha.slice(0, 7)), created_at: '2026-10-01T00:00:00Z', workflow_run: { id: 501, repository_id: 1, head_repository_id: 1 } };
+  const fork = (n) => ({ ...snap(60 + n, sha.slice(0, 7)), created_at: `2026-10-2${n}T00:00:00Z`, workflow_run: { id: 600 + n, repository_id: 1, head_repository_id: 99 } });
+  const pull = (n) => ({ ...snap(70 + n, sha.slice(0, 7)), created_at: `2026-10-1${n}T00:00:00Z`, workflow_run: { id: 700 + n, repository_id: 1, head_repository_id: 1 } });
+  const events = { 501: 'push', 701: 'pull_request', 702: 'pull_request', 703: 'pull_request', 704: 'pull_request' };
+  const lookup = async (artifacts) => {
+    const runs = [], reads = [];
+    const gh = async (path) => {
+      if (path.includes('/commits?')) return json([{ sha }]);
+      if (path.includes('/actions/artifacts?')) return json({ artifacts });
+      const run = /\/actions\/runs\/(\d+)$/.exec(path);
+      if (run) { runs.push(+run[1]); return json({ event: events[run[1]], repository: { id: 1 }, head_repository: { id: 1 } }); }
+      return json({}, 404);
+    };
+    const read = async (gh, token, root, artifact) => { reads.push(artifact.id); return payload(sha); };
+    return { found: await findDesign(gh, 't', 'o', 'r', sha, 'A', read), runs, reads };
+  };
+  const mixed = await lookup([fork(1), fork(2), pull(1), genuine]);
+  assert.equal(mixed.found.state, 'found');
+  assert.equal(mixed.found.artifact.id, 21, 'only the push run\'s snapshot is shown');
+  assert.deepEqual(mixed.reads, [21], 'a fork or pull-request snapshot is never downloaded');
+  assert.ok(!mixed.runs.some((id) => id >= 600 && id < 700), 'a fork run is refused from the listing alone');
+  const flood = await lookup([pull(1), pull(2), pull(3), pull(4), genuine]);
+  assert.equal(flood.found.state, 'missing', 'past the candidate cap nothing is read');
+  assert.ok(flood.runs.length <= 3 && flood.reads.length === 0, JSON.stringify(flood));
+  const noProvenance = await lookup([{ ...genuine, workflow_run: undefined }]);
+  assert.equal(noProvenance.found.state, 'missing', 'an artifact without its run is never trusted');
+});
+
 test('an unrelated snapshot under the same sha7 or a force push never substitutes', async () => {
   const commits = [c(3, []), c(2, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
   const otherSha = async (gh, token, root, artifact) => ({ ...payload(shaOf(9)), projects: [{ dir: 'A' }] });
@@ -5151,7 +5185,7 @@ test('a folder missing from the report it would open is reported as missing, not
 
 test('design discovery matrix: 403, 429 and 500 at each GitHub call are errors, and bad refs never reach GitHub', async () => {
   const commits = [c(2, [{ filename: 'README.md' }]), c(1, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
-  for (const status of [403, 429, 500]) for (const fail of ['/commits?', '/actions/artifacts?', '/commits/'])
+  for (const status of [403, 429, 500]) for (const fail of ['/commits?', '/actions/artifacts?', '/actions/runs/', '/commits/'])
     assert.equal((await findDesign(chainGh(commits, { fail, status }), 't', 'o', 'r', 'main', 'A', readAs(commits))).state, 'error', `${status} at ${fail}`);
   const readerFailure = await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'A', async () => { throw Error('download 429'); });
   assert.equal(readerFailure.state, 'error');
@@ -5185,6 +5219,7 @@ async function designGet(path, routes, { push = true, headers = {} } = {}) {
     const hit = routes.find(([match]) => url.includes(match));
     if (hit) return hit[1](url, options);
     if (/\/actions\/artifacts\/\d+\/zip$/.test(url)) return new Response(null,{status:302,headers:{Location:'https://artifact.example/design'}});
+    if (/\/actions\/runs\/\d+$/.test(url)) return pushRun();
     if (url==='https://artifact.example/design') return new Response('<!doctype html><script>window.REVIEW_DATA = '+JSON.stringify(payload(tipSha))+';</script>');
     if (url.includes('/commits/')) return json({parents:[],files:[]});
     return new Response('{}', {status:404});
