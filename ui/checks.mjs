@@ -2558,7 +2558,13 @@ return true;
   ["modified card shows every changed property old and new", "p=1", `
     const r = REVIEW_DATA.projects[1].changes.find(r => r.action === "modified");
     // Bench: the old → new values live in the bottom inspector for the selected card.
-    document.querySelector('#panel .card[data-id="' + r.id + '"]')?.click?.(); await new Promise(res => setTimeout(res, 1500));
+    document.querySelector('#panel .card[data-id="' + r.id + '"]')?.click?.();
+    // goTo awaits draw() before markSelected() renders the inspector; wait for that render, not a fixed delay.
+    const head = () => document.querySelector('#inspector .insp-head'), selected = () => document.querySelector('#panel .card[data-id="' + r.id + '"]')?.getAttribute("aria-selected");
+    const ready = () => S.s === r.id && selected() === "true"
+      && head()?.querySelector("strong")?.textContent === (r.ref || r.type || r.kind) && head()?.querySelector(".badge.modified") !== null, until = performance.now() + 10000;
+    while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
+    if (!ready()) return 'inspector did not show the selected modified row within 10 s: ' + JSON.stringify({selected: S.s, want: r.id, card: selected(), head: head()?.textContent});
     const text = document.querySelector('#inspector')?.textContent || "";
     return r.changes.every(([k, a, b]) => text.includes(k) && text.includes(String(a ?? "—")) && text.includes(String(b ?? "—")));`],
   ["selecting a row zooms to it and highlights it", "p=1", `
@@ -2676,8 +2682,10 @@ return true;
   ["clicking a located violation selects it and moves the drawing", "p=1&t=checks", `
     S.v = "board"; await draw(); S.checks.scope = "all"; renderPanel();
     const v = REVIEW_DATA.projects[1].checks.flatMap(c => c.violations).find(v => v.where?.board && v.pos), el = document.querySelector('#panel .viol[data-id="' + v.id + '"]'); el.click();
-    await new Promise(r => setTimeout(r, 1200));
-    return S.s === v.id && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < .01 && document.querySelector('#panel .viol[data-id="' + v.id + '"]').getAttribute("aria-selected") === "true";`],
+    // goTo awaits draw() before zoomTo() and markSelected(); wait for that selection to land, not a fixed delay.
+    const ready = () => S.s === v.id && S.x != null && Math.abs(S.x - (v.box ? (v.box[0] + v.box[2]) / 2 : v.pos[0])) < .01 && document.querySelector('#panel .viol[data-id="' + v.id + '"]')?.getAttribute("aria-selected") === "true", until = performance.now() + 10000;
+    while (!ready() && performance.now() < until) await new Promise(r => setTimeout(r, 50));
+    return ready() || 'violation click did not select and centre it within 10 s: ' + JSON.stringify({selected: S.s, want: v.id, x: S.x, pos: v.pos, box: v.box, card: document.querySelector('#panel .viol[data-id="' + v.id + '"]')?.getAttribute("aria-selected")});`],
   ["j steps through rendered checks violations", "p=1&t=checks", `
     S.v = "board"; await draw(); S.checks.scope = "all"; renderPanel(); S.s = null;
     const ids = [...document.querySelectorAll('#panel .viol[data-id]:not([aria-disabled])')].map(v => v.dataset.id);
@@ -2796,9 +2804,15 @@ return true;
       if(!next)return 'added footprint card missing from Changes pages';
       next.click();
     }
-    card.click(); await new Promise(res => setTimeout(res, 1500));
+    card.click();
+    // goTo awaits draw() before markSelected() renders the inspector; wait for that render, not a fixed delay.
+    const head = () => document.querySelector('#inspector .insp-head'), selected = () => document.querySelector('#panel .card[data-id="' + r.id + '"]')?.getAttribute("aria-selected");
+    const ready = () => S.s === r.id && selected() === "true"
+      && head()?.querySelector("strong")?.textContent === r.ref && head()?.querySelector(".badge.added") !== null, until = performance.now() + 10000;
+    while (!ready() && performance.now() < until) await new Promise(res => setTimeout(res, 50));
+    if (!ready()) return 'inspector did not show the selected added footprint within 10 s: ' + JSON.stringify({selected: S.s, want: r.id, card: selected(), head: head()?.textContent});
     const t = document.querySelector('#inspector').textContent;
-    return t.includes(r.props.footprint) && t.includes(r.props.layer);`],
+    return (t.includes(r.props.footprint) && t.includes(r.props.layer)) || JSON.stringify({footprint: r.props.footprint, layer: r.props.layer, inspector: t.slice(0, 400)});`],
   ["address with selection and position keeps the position", "p=1&v=board&x=150&y=100&z=8&s=c600", `
     await new Promise(r => setTimeout(r, 1200));
     return (S.x === 150 && S.y === 100 && S.z === 8 && S.s === "c600" && document.querySelector("#stage .marker.sel") !== null) || JSON.stringify([S.x, S.z, S.s]);`],
