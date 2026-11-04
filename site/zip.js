@@ -30,6 +30,16 @@ export async function exactRange(range, start, end, total, stream = false) {
     if (b.length !== wanted) fail('bad range length');
     return b;
   }
+  const length = response.headers.get('Content-Length');
+  if (length !== null && length !== String(wanted)) { await response.body.cancel(); fail('bad range length'); }
+  // workerd: a native-to-native pipe runs outside JavaScript (a JS transform per network chunk overran the CPU limit
+  // on a 14 MB GLB). FixedLengthStream gives the response an exact Content-Length and errors a short or long body.
+  if (globalThis.FixedLengthStream) {
+    const fixed = new FixedLengthStream(wanted);
+    response.body.pipeTo(fixed.writable).catch(() => {});  // a failed pipe errors fixed.readable itself
+    return fixed.readable;
+  }
+  // Node (tests) has no FixedLengthStream: count bytes in JavaScript instead.
   let seen = 0;
   return response.body.pipeThrough(new TransformStream({
     transform(chunk, controller) {
@@ -80,7 +90,7 @@ export async function zipEntryStream(range, entry) {
   if (names.decode(name) !== entry.name) fail('bad entry');
   if (entry.method === 8 && Math.max(entry.size, entry.bytes) > SMALL_BYTES) fail('deflated entry too large');
   let body = entry.size ? await exactRange(range, start, start + entry.size - 1, entry.total, true) : new Response(new Uint8Array(0)).body;
-  // A large stored entry goes back as the ranged body itself: exactRange's byte count is the only per-chunk work.
+  // A large stored entry goes back as exactRange's stream itself: no JavaScript runs per chunk on workerd.
   if (entry.bytes > SMALL_BYTES) return body;
   if (entry.method === 8) body = body.pipeThrough(new DecompressionStream('deflate-raw'));
   let seen = 0, crc = 0xffffffff;

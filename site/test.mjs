@@ -5173,6 +5173,48 @@ test('zip reader passes large stored entries through with no per-byte JavaScript
   assert.deepEqual(fetched, [big.offset, big.offset + 30], 'only the local header and name are read');
 });
 
+// workerd's FixedLengthStream, emulated: records the size it was given and passes bytes through.
+function stubFixedLengthStream() {
+  const made = [], original = globalThis.FixedLengthStream;
+  globalThis.FixedLengthStream = class { constructor(size) { const pair = new TransformStream(); this.size = size; this.readable = pair.readable; this.writable = pair.writable; made.push(this); } };
+  return { made, restore: () => { if (original) globalThis.FixedLengthStream = original; else delete globalThis.FixedLengthStream; } };
+}
+
+test('large stored entries pipe the upstream body natively into a FixedLengthStream of the entry size', async () => {
+  // A JavaScript transform on every network chunk still overran the Worker CPU limit on a 14 MB GLB (a truncated 200).
+  const data = Buffer.alloc(256 * 1024, 9), zip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data }]);
+  const [entry] = await zipEntries(rangeOf(zip), zip.length), start = entry.offset + 30 + entry.name.length + 4;
+  const fixed = stubFixedLengthStream(), pipes = [];
+  try {
+    const range = async (a, b) => {
+      const response = await rangeOf(zip)(a, b);
+      if (a !== start) return response;
+      const body = response.body, pipeTo = body.pipeTo.bind(body);
+      body.pipeThrough = () => assert.fail('no JavaScript transform on the large path');
+      body.pipeTo = (dest, options) => { pipes.push(dest); return pipeTo(dest, options); };
+      return response;
+    };
+    const stream = await zipEntryStream(range, entry), fls = fixed.made.at(-1);
+    assert.equal(fls.size, entry.size); assert.equal(entry.size, data.length);
+    assert.equal(stream, fls.readable, 'the FixedLengthStream readable is returned as is');
+    assert.deepEqual(pipes, [fls.writable], 'the upstream body pipes straight into it');
+    assert.ok(Buffer.from(await new Response(stream).arrayBuffer()).equals(data));
+    // A Content-Length other than the wanted length is refused before any body is streamed.
+    const longer = async (a, b) => { const r = await rangeOf(zip)(a, b); if (a === start) r.headers.set('Content-Length', String(b - a + 2)); return r; };
+    await assert.rejects(zipEntryStream(longer, entry), /bad range length/);
+    // Through the whole route: no wrapper re-wraps, tees or buffers the body.
+    const big = Buffer.alloc(70 * 1024, 3), routeZip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: big }, { name: '0/downloads.json', data: downloadEnvelope() }]);
+    const sealed = await signedIn(), restore = downloadFetch({ zip: routeZip });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers: { Cookie: `s=${sealed}` } });
+      const last = fixed.made.at(-1);
+      assert.equal(response.status, 200); assert.equal(last.size, big.length);
+      assert.equal(response.body, last.readable, 'the response body is the FixedLengthStream readable');
+      assert.ok(Buffer.from(await response.arrayBuffer()).equals(big));
+    } finally { restore(); }
+  } finally { fixed.restore(); }
+});
+
 function downloadFetch({ zip, event = 'pull_request', rangeOk = true, badRange = false, forbidden = false, shortPayload = false, bundles, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }) {
   return mockFetch(async (url, options = {}) => {
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return forbidden ? new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}})) : accessibleRepo();
