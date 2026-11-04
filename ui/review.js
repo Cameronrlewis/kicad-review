@@ -2733,6 +2733,10 @@ document.addEventListener("keydown", e => {
   else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
   else if (e.key === "c" && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
   else if (e.key === "f") fit();
+  else if (e.key === "Escape" && S.v === "3d") {   // never rebuild the 3D session for Escape
+    if (S.s == null && !S.part3d && !S.placing && !window.Review3D?.state?.selected?.length) return;
+    stopPlacing(); S.s = null; markSelected(); window.Review3D?.clearSelection(); saveHash();
+  }
   else if (e.key === "Escape") { stopPlacing(); S.s = null; markSelected(); draw(); saveHash(); }
 });
 function positionLink() {

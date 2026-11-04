@@ -412,7 +412,7 @@ window.Review3D = (() => {
     session.intersectionObserver.observe(session.stage);
   }
   function setCamera(v, centre, radius, animate) { const { THREE } = window.THREE3D, dir = v.camera.position.clone().sub(v.controls.target).normalize(), vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect), distance = Math.max(radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.25, .02), target = centre.clone(), position = centre.clone().addScaledVector(dir, distance);
-    const owner=active, startP=v.camera.position.clone(), startT=v.controls.target.clone(), start=performance.now(), length=animate&&!matchMedia("(prefers-reduced-motion: reduce)").matches?400:0; const tick=now=>{ if(owner.dead)return; const t=length?Math.min(1,(now-start)/length):1, e=1-(1-t)*(1-t); v.camera.position.lerpVectors(startP,position,e); v.controls.target.lerpVectors(startT,target,e); if(!length){v.camera.near=distance/100;v.camera.far=distance*100;} v.camera.updateProjectionMatrix(); v.controls.update(); if(length)render(); if(t<1) animateFrame(owner,tick); }; if(length)animateFrame(owner,tick);else tick(start);
+    const owner=active, startP=v.camera.position.clone(), startT=v.controls.target.clone(), start=performance.now(), length=animate&&!matchMedia("(prefers-reduced-motion: reduce)").matches?400:0; v.camera.near=distance/100; v.camera.far=distance*100; const tick=now=>{ if(owner.dead)return; const t=length?Math.min(1,(now-start)/length):1, e=1-(1-t)*(1-t); v.camera.position.lerpVectors(startP,position,e); v.controls.target.lerpVectors(startT,target,e); v.camera.updateProjectionMatrix(); v.controls.update(); if(length)render(); if(t<1) animateFrame(owner,tick); else window.Review3D.onCameraEnd?.(); }; if(length)animateFrame(owner,tick);else tick(start);
   }
   function frame(direction = "3d") { if (!active?.box) return; const { THREE } = window.THREE3D, b = active.box, c = b.getCenter(new THREE.Vector3()), dirs = { top:[0,1,0], bottom:[0,-1,0], front:[0,0,-1], back:[0,0,1], left:[-1,0,0], right:[1,0,0], "3d":[1,.99,-1], reset:[1,.99,-1] }, d = new THREE.Vector3(...dirs[direction]).normalize(), radius = b.getBoundingSphere(new THREE.Sphere()).radius;
     active.views.forEach(v => { const vfov = THREE.MathUtils.degToRad(v.camera.fov), hfov = 2 * Math.atan(Math.tan(vfov / 2) * v.camera.aspect), distance = radius / Math.sin(Math.min(vfov, hfov) / 2) * 1.08; v.camera.up.set(...((direction === "top" || direction === "bottom") ? [0,0,-1] : [0,1,0])); v.controls._quat.setFromUnitVectors(v.camera.up, new THREE.Vector3(0,1,0)); v.controls._quatInverse.copy(v.controls._quat).invert(); v.camera.position.copy(c).addScaledVector(d, distance); v.controls.target.copy(c); v.camera.near = distance / 100; v.camera.far = distance * 100; v.camera.updateProjectionMatrix(); v.controls.update(); }); render(); }
@@ -647,6 +647,8 @@ window.Review3D = (() => {
     active.selected.forEach(o=>{o.removeFromParent();o.traverse(free);});
     active.selected=[];active.state.selected=active.selected;
   }
+  // Escape: drop the outline and tooltips in place; the session, models and renderer stay.
+  function clearSelection() { if(!active)return; clearPartSelection(); clearPartTooltips(); render(); }
   function appendPartOutline(ref,side) {
     const s=active,p=s.state.parts[side]?.find(p=>p.ref===ref);
     if(!p||!visiblePart(p))return;
@@ -1021,5 +1023,5 @@ window.Review3D = (() => {
   // Node and headless browser contracts share one explicit test seam.
   const testSeam = {sampleFrame, session:()=>active, poster3d, parseByDigest, releaseGpu};
   if (typeof module !== 'undefined') module.exports = testSeam;
-  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,state:null,testSeam};
+  return {show,dispose,cameraBar,frame,focus,focusPart,clearSelection,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,state:null,testSeam};
 })();

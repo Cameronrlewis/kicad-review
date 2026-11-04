@@ -299,3 +299,86 @@ test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
   assert.equal(S.v, '3d');
   assert.equal(S.m, 'side');
 });
+
+class V3 {
+  constructor(x=0,y=0,z=0){this.x=x;this.y=y;this.z=z;}
+  clone(){return new V3(this.x,this.y,this.z);} copy(v){this.x=v.x;this.y=v.y;this.z=v.z;return this;}
+  sub(v){this.x-=v.x;this.y-=v.y;this.z-=v.z;return this;}
+  normalize(){const l=Math.hypot(this.x,this.y,this.z)||1;this.x/=l;this.y/=l;this.z/=l;return this;}
+  addScaledVector(v,s){this.x+=v.x*s;this.y+=v.y*s;this.z+=v.z*s;return this;}
+  lerpVectors(a,b,t){this.x=a.x+(b.x-a.x)*t;this.y=a.y+(b.y-a.y)*t;this.z=a.z+(b.z-a.z)*t;return this;}
+}
+function cameraHarness(reducedMotion) {
+  const window = {THREE3D:{THREE:{MathUtils:{degToRad:d=>d*Math.PI/180}}}};
+  const source = readFileSync(new URL('./review3d.js', import.meta.url), 'utf8')
+    .replace('let active = null, bundle;', 'let active = null, bundle; window.setTestSession = s => active = s;')
+    .replace('const testSeam = {', 'const testSeam = {setCamera,');
+  runInNewContext(source, {window, document:{createElement:() => ({}), head:{appendChild() {}}}, performance, matchMedia:() => ({matches:reducedMotion})});
+  const frames = [], ends = [];
+  const s = {dead:false, animationFrames:{add:fn => frames.push(fn)}, invalidate() {}};
+  window.setTestSession(s);
+  window.Review3D.onCameraEnd = () => ends.push(window.Review3D.testSeam);
+  const v = {camera:{position:new V3(0,0,1), fov:45, aspect:1, near:1, far:2, updateProjectionMatrix() {}}, controls:{target:new V3(), update() {}}};
+  return {setCamera:window.Review3D.testSeam.setCamera, v, frames, ends};
+}
+
+test('U5: animated 3D focus sets near/far for the destination before animating and reports the final camera', () => {
+  const {setCamera, v, frames, ends} = cameraHarness(false);
+  setCamera(v, new V3(), .001, true);
+  const distance = .02;   // the minimum focus distance for a tiny part
+  assert.ok(Math.abs(v.camera.near - distance / 100) < 1e-12, `near ${v.camera.near} would clip the focused part`);
+  assert.ok(Math.abs(v.camera.far - distance * 100) < 1e-12);
+  assert.equal(frames.length, 1); assert.equal(ends.length, 0);
+  frames[0](performance.now() + 1000);
+  assert.ok(Math.abs(v.camera.position.z - distance) < 1e-12);
+  assert.equal(ends.length, 1, 'the URL must record the post-focus camera');
+});
+
+test('U5: an immediate 3D focus also reports the final camera once', () => {
+  const {setCamera, v, frames, ends} = cameraHarness(true);
+  setCamera(v, new V3(), .001, true);
+  assert.equal(frames.length, 0); assert.equal(ends.length, 1);
+  assert.ok(Math.abs(v.camera.near - .0002) < 1e-12);
+});
+
+test('U5: Review3D.clearSelection drops the outline and tooltips without a new session', () => {
+  const {api, s} = viewer();
+  let detached = 0, tips = 0;
+  s.selected.push({removeFromParent() { detached++; }, traverse(free) { free({}); }});
+  s.state.selected = s.selected; s.invalidate = () => {};
+  s.views[0].host.querySelector = () => ({remove() { tips++; }});
+  assert.equal(typeof api.clearSelection, 'function');
+  api.clearSelection();
+  assert.equal(detached, 1); assert.equal(tips, 1);
+  assert.equal(s.selected.length, 0); assert.equal(s.state.selected, s.selected);
+});
+
+function escapeHarness(S, selected = []) {
+  const source = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const from = source.indexOf('document.addEventListener("keydown", e => {\n  if (e.key === "Escape" && $("#shortcuts").open)');
+  const handler = source.slice(from, source.indexOf('\nfunction positionLink(', from));
+  const calls = [];
+  let listener;
+  const ctx = {S, THREADS_ON:false, $:() => ({open:false}), boardKey:() => false,
+    document:{addEventListener:(_, fn) => listener = fn},
+    stopPlacing:() => calls.push('stopPlacing'), markSelected:() => { S.part3d = null; calls.push('markSelected'); },
+    draw:() => calls.push('draw'), saveHash:() => calls.push('saveHash'),
+    window:{Review3D:{state:{selected}, clearSelection:() => calls.push('clearSelection')}}};
+  runInNewContext(handler, ctx);
+  listener({key:'Escape', target:{closest:() => null}, preventDefault() {}, ctrlKey:false, metaKey:false, altKey:false, shiftKey:false});
+  return calls;
+}
+
+test('U5: Escape in 3D with nothing selected does not rebuild the 3D session', () => {
+  assert.deepEqual(escapeHarness({v:'3d', s:null, part3d:null, placing:false}), []);
+});
+
+test('U5: Escape in 3D clears a real selection without draw()', () => {
+  for (const [S, selected] of [[{v:'3d', s:'c1', part3d:null}, [{}]], [{v:'3d', s:null, part3d:{ref:'R1'}}, [{}]]]) {
+    const calls = escapeHarness(S, selected);
+    assert.ok(!calls.includes('draw'), calls.join());
+    assert.ok(calls.includes('clearSelection') && calls.includes('saveHash'), calls.join());
+    assert.equal(S.s, null); assert.equal(S.part3d, null);
+  }
+  assert.ok(escapeHarness({v:'board', s:'c1'}).includes('draw'), '2D Escape keeps its redraw');
+});
