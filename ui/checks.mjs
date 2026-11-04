@@ -7054,3 +7054,9 @@ CHECKS.push(['design inspector: actual snapshot object and finding are absolute'
   }
   return true;
 `]);
+CHECKS.push(["design framed: single report never enables PR discussions", "", `
+  if(!window.__dpSiteFixture || ['design-missing.html','design-history.html'].includes(window.__dpSiteFixture))return 'skip';
+  if(window.__dpSiteFixture!=='design-wrapper.html' || !document.querySelector('main.design-site #review-report'))return 'malformed marked wrapper fixture';
+  for(let n=0;n<200&&!window.__dpProof;n++)await new Promise(r=>setTimeout(r,50));
+  return window.__dpProof?.ok===true && window.__dpComposerRequests===0 && !document.querySelector('dialog[open]') || JSON.stringify({proof:window.__dpProof,requests:window.__dpComposerRequests});
+`]);

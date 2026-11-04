@@ -9,16 +9,17 @@ document.body.classList.toggle("design-single", single());
 const LIGHT_RIGS3D = ["bench", "lowsun", "photo"];
 const S = { p: 0, v: null, m: "side", x: null, y: null, z: null, s: null, part3d: null, t: "changes", layers: null, hidden3d: [], checks: { check: "", scope: null, error: true, warning: true, waived: false } };
 S.threads = null; S.threadFilter = { status: "open", severity: "" }; S.placing = false;
-let THREADS_ON = parent !== window && !!D.settings?.threads?.enabled;
+let THREADS_ON = !single() && parent !== window && !!D.settings?.threads?.enabled;   // a design report has no PR to discuss
 let ISSUES_ON = parent !== window && !!D.settings?.issues?.enabled;
 S.issues = null;
 S.units = "mm"; S.grid = true; S.imageSelection = null;
 // A design report tells the hosted wrapper its recorded ref, date and subject; the wrapper checks and shows them as text.
-const readyMessage = () => ({ kicadReviewReady: true, threads: THREADS_ON, issues: ISSUES_ON, blockMerge: THREADS_ON && !!D.settings?.threads?.block_merge,
+const readyMessage = () => ({ kicadReviewReady: true, threads: !single() && THREADS_ON, issues: ISSUES_ON, blockMerge: !single() && THREADS_ON && !!D.settings?.threads?.block_merge,
   ...(single() ? { designSnapshot: { ref: D.snapshot?.ref, sha: D.snapshot?.sha, committedAt: D.snapshot?.committedAt, message: D.snapshot?.message } } : {}) });
 const validThread = t => t && t.id !== Object(t.id) && Object(t.id) instanceof String && (t.resolved === true || t.resolved === false) && t.anchor && t.anchor === Object(t.anchor)
   && t.anchor.v === 1 && Number.isFinite(t.anchor.x) && Number.isFinite(t.anchor.y) && Array.isArray(t.comments);
 function acceptThreads(list) {
+  if (single()) return;
   S.threads = list.filter(t => { try { return validThread(t); } catch { return false; } }).slice(0, 500);   // ponytail: 500 threads drawn at most
   if (S.wantThreads) S.t = "threads";
   S.wantThreads = false;
@@ -62,6 +63,7 @@ function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON) {
 }
 addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
+  if (single()) return;   // a design report has no PR thread to place, whatever the capabilities say later
   const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
   const [x, y] = p?.point || toWorld(vp, e);
   const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp))
@@ -2394,7 +2396,7 @@ function canvasMenu(vp,e){
   showBenchMenu([
     {label:'Zoom to here',run:()=>setT({x:point[0],y:point[1],z:S.z*1.3})},
     {label:'Copy coordinates',run:()=>{const units=board?a.units:S.units,div=units==='mil'?.0254:units==='in'?25.4:1;benchCopy(`X ${(point[0]/div).toFixed(3)} Y ${(point[1]/div).toFixed(3)} ${units}`);}},
-    {label:'Comment here',disabled:!THREADS_ON,run:()=>proposePin(vp,e)},
+    {label:'Comment here',disabled:single() || !THREADS_ON,run:()=>proposePin(vp,e)},
     {label:'Select object under cursor',run:()=>pickAt(vp,e)},
     {label:`Hide layer${layerAvailable?' · '+layer:''}`,disabled:!layerAvailable,run:()=>Appearance.patch({layers:{[layer]:{visible:false}}})},
     {label:'Show only this layer',disabled:!layerAvailable,run:()=>Appearance.patch({layers:Object.fromEntries(Object.keys(a.layers).map(name=>[name,{visible:name===layer}]))})}
@@ -2446,7 +2448,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); step(1); }
   else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); step(-1); }
   else if (e.key === "b" && S.v === '3d' && S.m === "blend") toggleBlend3D();
-  else if (e.key === "c" && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
+  else if (e.key === "c" && !single() && THREADS_ON && S.v && S.v !== "3d") { S.placing = !S.placing; document.body.classList.toggle("placing", S.placing); }
   else if (e.key === "f") fit();
   else if (e.key === "Escape") { stopPlacing(); S.s = null; markSelected(); draw(); saveHash(); }
 });
