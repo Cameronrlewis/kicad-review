@@ -11123,3 +11123,18 @@ _attach_body = _wf[_wf.index("- name: Attach to the GitHub release\n"):].split("
 assert "design-snapshot.html" not in _attach_body and "release/*" in _attach_body, "fabrication attachment behaviour is unchanged"
 assert _wf.index("- name: Attach to the GitHub release\n") < _wf.index("- name: Attach the design snapshot to the GitHub release")
 print("ok tagged design snapshot attachment is independent of fabrication")
+
+# DP-S6: the setting and its routes are documented where a user looks.
+_readme = pathlib.Path("README.md").read_text(encoding="utf-8")
+for wording in ("## Design page (optional)", "`design.enabled`", "kicad-design-<sha7>.html", "KICAD_REVIEW_SNAPSHOT_DAYS", "design-snapshot.html", "snapshot_only", "Render this revision", "Compare with newest", "/p/<folder>/design", "KiCad changes", "design-thumbs", "PcbDraw", "defaults to 90", "design-release/<tag>"):
+    assert wording in _readme, wording
+_example = pathlib.Path("examples/kicad-review.toml").read_text(encoding="utf-8")
+assert "[design]" in _example and "enabled = false" in _example.split("[design]")[1]
+_site_readme = pathlib.Path("site/README.md").read_text(encoding="utf-8")
+assert "## Design pages (optional)" in _site_readme
+for text in (_readme, _site_readme):
+    for wording in ("downloadable and usable offline", "gh release download TAG", "--pattern design-snapshot.html", "defaults to 90"):
+        assert wording in text, wording
+    assert "currently depends on a live Actions artifact" not in text, "release fallback is implemented (decision 5)"
+    assert "owner-gated" not in text and "owner-approved scope reduction" not in text, "approved decisions are recorded, not gated"
+print("ok DP-S6 design setting and routes are documented")
