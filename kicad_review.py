@@ -2256,9 +2256,10 @@ def rule_values(root: str, name: str) -> dict[str, object]:
     return out
 
 
-def diff_rules(base_root, head_root, name) -> list[dict]:
+def diff_rules(base_root, head_root, name, b=None, h=None) -> list[dict]:
     """Describe dimensional constraints, ordered assignments, custom text and stackup."""
-    b, h = rule_values(base_root, name), rule_values(head_root, name)
+    b = dict(rule_values(base_root, name) if b is None else b)
+    h = dict(rule_values(head_root, name) if h is None else h)
     rows = []
     unavailable = {"before": b.pop("_unavailable", None), "after": h.pop("_unavailable", None)}
     if any(unavailable.values()):
@@ -4645,10 +4646,14 @@ def electrical_changes(p, out, objs, commits):
         r["where"] = {"sheet": first["sheet"]} if first else None
     pcbs = {s: pathlib.Path(root, p["name"] + ".kicad_pcb") for s, root in roots.items()}
     try:
-        padrows = diff_board_pins(objs["base"], objs["head"], board_pads(pcbs["base"]), board_pads(pcbs["head"]), commits)
-    except (OSError, ValueError, TypeError, AttributeError, IndexError, KeyError):
+        base_pads = board_pads(pcbs["base"])
+        head_pads = board_pads(pcbs["head"])
+    except (OSError, ValueError, TypeError, AttributeError, IndexError, KeyError) as exc:
         padrows = []
-        issues.append({"channel": "wiring", "document": "board", "reason": "Board pad evidence missing or malformed"})
+        issues.append({"channel": "wiring", "document": "board",
+                       "reason": f"Board pad evidence missing or malformed: {str(exc)[:500]}"})
+    else:
+        padrows = diff_board_pins(objs["base"], objs["head"], base_pads, head_pads, commits)
 
     def pin_net(side, key):
         """Schematic net of a pin: None means unknown; "" means a proven pin with no net assignment."""
@@ -4671,10 +4676,14 @@ def electrical_changes(p, out, objs, commits):
     copperrows, found = read_copper(pathlib.Path(out) / "copper-diff.json") if any(f.is_file() for f in pcbs.values()) else ([], [])
     issues += [{**i, "document": "board"} for i in found]
     try:
-        rulerows = diff_rules(roots["base"], roots["head"], p["name"])
-    except (OSError, ValueError, TypeError, AttributeError, IndexError):
+        base_rules = rule_values(roots["base"], p["name"])
+        head_rules = rule_values(roots["head"], p["name"])
+    except (OSError, ValueError, TypeError, AttributeError, IndexError, KeyError) as exc:
         rulerows = []
-        issues.append({"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"})
+        issues.append({"channel": "rules", "document": "board",
+                       "reason": f"Rules evidence missing or malformed: {str(exc)[:500]}"})
+    else:
+        rulerows = diff_rules(roots["base"], roots["head"], p["name"], b=base_rules, h=head_rules)
     return netrows + diff_wires(objs["base"], objs["head"]) + padrows + copperrows + rulerows, issues
 
 

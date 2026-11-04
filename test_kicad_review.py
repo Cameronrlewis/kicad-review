@@ -10125,8 +10125,24 @@ def test_f3_malformed_sexpr():
             rows, issues = electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
             assert not [r for r in rows if r["kind"] in ("rule", "stackup", "board-pad-net")], rows
             assert any(i["channel"] == "wiring" and i["document"] == "schematic" and "base netlist unavailable" in i["reason"] for i in issues), issues
-            assert {"channel": "wiring", "document": "board", "reason": "Board pad evidence missing or malformed"} in issues, issues
-            assert {"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"} in issues, issues
+            assert any(i["channel"] == "wiring" and i["document"] == "board" and i["reason"] == "Board pad evidence missing or malformed: malformed S-expression" for i in issues), issues
+            assert any(i["channel"] == "rules" and i["document"] == "board" and i["reason"] == "Rules evidence missing or malformed: malformed S-expression" for i in issues), issues
+
+            # Logic bugs in diff_board_pins and diff_rules are not swallowed as malformed evidence
+            write("base", {"p/p.kicad_pcb": '(kicad_pcb (layers (0 "F.Cu" signal)))'})
+            try:
+                with patch("kicad_review.diff_board_pins", side_effect=TypeError("diff_board_pins logic bug")):
+                    electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
+                raise AssertionError("diff_board_pins logic bug was swallowed")
+            except TypeError as exc:
+                assert str(exc) == "diff_board_pins logic bug"
+
+            try:
+                with patch("kicad_review.diff_rules", side_effect=TypeError("diff_rules logic bug")):
+                    electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
+                raise AssertionError("diff_rules logic bug was swallowed")
+            except TypeError as exc:
+                assert str(exc) == "diff_rules logic bug"
 
             settings = kr.load_settings()
             settings["checks"]["interfaces"] = "required"
