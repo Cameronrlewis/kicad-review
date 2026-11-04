@@ -335,8 +335,8 @@ function assetFromData(data, id, kind, matched = false) {
 // Shared report validation for the wrapper, raw body, image and 3D routes. Only report-family
 // names from this repository's kicad-review.yml run are served; a name's head must be the run's
 // head_sha, except a manual (workflow_dispatch) run, which reviews a head given by hand. The legacy
-// kicad-review.html name carries no head, so only its run provenance is checked.
-// ponytail: one run lookup per request (each image/3D asset too); memoize per artifact if GitHub rate limits bite.
+// kicad-review.html name carries no head, so only its run provenance is checked. Verified runs are
+// memoized per artifact in the isolate cache to avoid repeated GitHub run lookups on asset requests.
 async function reportArtifact(owner, repo, id, active, repository) {
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
   const base = `${root}/artifacts/${id}`;
@@ -352,8 +352,14 @@ async function reportArtifact(owner, repo, id, active, repository) {
   if (metadata.expires_at != null && !Number.isFinite(Date.parse(metadata.expires_at))) return null;
   const expired = metadata.expired || (metadata.expires_at && Date.parse(metadata.expires_at) <= Date.now());
   if (expired) return { base, metadata, expired: true };
-  const runResponse = await gh(`${root}/runs/${runId}`, active.token);
-  const run = runResponse.ok ? await runResponse.json() : null;
+  const key = metadata.size_in_bytes != null && metadata.updated_at != null
+    ? JSON.stringify([base, metadata.workflow_run?.repository_id, metadata.size_in_bytes, metadata.updated_at]) : null;
+  const cachedRun = key ? reportCache.entries.get(key)?.run : null;
+  let run = cachedRun;
+  if (!run) {
+    const runResponse = await gh(`${root}/runs/${runId}`, active.token);
+    run = runResponse.ok ? await runResponse.json() : null;
+  }
   if (run?.path !== `.github/workflows/${workflowFile}` || run.repository?.id !== repository.id
     || (head7 && run.event !== 'workflow_dispatch' && !(/^[0-9a-f]{40}$/.test(run.head_sha) && run.head_sha.startsWith(head7)))) return null;
   return { base, metadata, run, expired: false };
@@ -401,7 +407,7 @@ async function cachedReport(artifact, active) {
     // UTF-16 strings plus a conservative parsed-envelope allowance (including object overhead).
     // Count shared/fallback strings twice rather than under-account retained report bytes.
     // Stored HTML is temporary: only parsed data (4x envelope allowance) and raw body remain.
-    const entry = { data, raw, bytes: 4 * stored.length + 2 * raw.length };
+    const entry = { data, raw, run: artifact.run, bytes: 4 * stored.length + 2 * raw.length };
     if (key) reportCache.set(key, entry);
     return entry;
   });

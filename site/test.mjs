@@ -645,6 +645,85 @@ test('report routes serve only report-family artifacts from this repository kica
   } finally { restore(); }
 });
 
+test('finding 2: image and 3D asset requests reuse verified run from warm isolate cache without extra GitHub run call', async () => {
+  const { reportCache } = await import('./report-cache.js');
+  reportCache.clear();
+  const sealed = await signedIn();
+  let runCalls = 0;
+  const digest3d = 'd'.repeat(64);
+  const gzModel = gzipSync('glTF-binary-payload');
+  const data = {
+    version: 1,
+    assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
+    blobs: { [imageId]: gzipSync(imageText).toString('base64') },
+    projects: [{ board: { assets3d: { head: { model: { digest: digest3d, artifactName: `kicad-3d-${digest3d}-board.glb.gz`, bytes: gzModel.length } } } } }],
+  };
+  const stored = storedImageReport(data);
+  const restore = mockFetch(async (url) => {
+    url = String(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) {
+      return Response.json({
+        name: 'kicad-review-deadbee-cafebad-pass.html',
+        size_in_bytes: stored.length,
+        updated_at: '2026-10-29T00:00:00Z',
+        workflow_run: { id: 9, repository_id: 5 },
+      });
+    }
+    if (url.endsWith('/actions/runs/9')) {
+      runCalls++;
+      return reviewRun({ head_sha: 'cafebad'.padEnd(40, '0') });
+    }
+    if (url.endsWith('/artifacts/42/zip')) {
+      return new Response(null, { status: 302, headers: { Location: 'https://signed.example/run-memo' } });
+    }
+    if (url === 'https://signed.example/run-memo') {
+      return new Response(stored);
+    }
+    if (url.includes('/runs/9/artifacts?')) {
+      return Response.json({ artifacts: [{ id: 91, name: `kicad-3d-${digest3d}-board.glb.gz`, expired: false, size_in_bytes: gzModel.length, workflow_run: { id: 9 } }] });
+    }
+    if (url.endsWith('/artifacts/91/zip')) {
+      return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/model91' } });
+    }
+    if (url === 'https://artifact.actions.githubusercontent.com/model91') {
+      return new Response(gzModel);
+    }
+    throw new Error(`unexpected URL ${url}`);
+  });
+  try {
+    const raw = await call('/r/Cameronrlewis/repo/a/42/raw', {
+      headers: { Cookie: `s=${sealed}` },
+    });
+    assert.equal(raw.status, 200);
+    assert.equal(runCalls, 1, 'initial raw report fetch must verify run once');
+
+    // Image asset request reuses verified run from warm cache:
+    const asset = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, {
+      headers: { Cookie: `s=${sealed}` },
+    });
+    assert.equal(asset.status, 200);
+    assert.equal(runCalls, 1, 'image asset request must not make an extra GitHub run call');
+
+    // Conditional image asset request reuses verified run:
+    const asset304 = await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, {
+      headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${imageId}"` },
+    });
+    assert.equal(asset304.status, 304);
+    assert.equal(runCalls, 1, 'conditional image asset request must not make an extra GitHub run call');
+
+    // 3D asset request reuses verified run:
+    const model = await call(`/r/Cameronrlewis/repo/a/42/3d/${digest3d}/board.glb`, {
+      headers: { Cookie: `s=${sealed}` },
+    });
+    assert.equal(model.status, 200);
+    assert.equal(runCalls, 1, '3D asset request must not make an extra GitHub run call');
+  } finally {
+    restore();
+    reportCache.clear();
+  }
+});
+
 test('raw document navigation redirects to its framed review without downloading', async () => {
   const sealed = await signedIn(); const seen = [];
   const restore = mockFetch(async (url) => {
