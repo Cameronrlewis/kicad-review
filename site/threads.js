@@ -100,6 +100,54 @@ export function sessionResponse(result, allowed) {
   return result;
 }
 
+export async function graphqlQuery(gh, token, query, variables) {
+  const response = await gh('/graphql', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }) }).catch(() => null);
+  if (!response) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+  const denied = refused(response); if (denied) return denied;
+  if (!response.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+  const data = await response.json().catch(() => null);
+  if (!data) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+  const forbidden = data.errors?.some(error => error?.type === 'FORBIDDEN');
+  if (data.errors?.length) return json({ error: forbidden ? permissionHint : 'GitHub did not answer. Try again.' }, forbidden ? 403 : 502);
+  return data;
+}
+
+export async function loadReviewThreads(gh, token, { owner, repo, name = repo, number }, initial = null) {
+  const nodes = [];
+  let head = null, after;
+  for (let page = 1; ; page++) {
+    let data;
+    if (page === 1 && initial !== null) {
+      if (initial instanceof Response) {
+        const denied = refused(initial); if (denied) return denied;
+        if (!initial.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+        data = await initial.json().catch(() => null);
+        if (!data) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+      } else {
+        data = initial;
+      }
+      const forbidden = data?.errors?.some(error => error?.type === 'FORBIDDEN');
+      if (data?.errors?.length) return json({ error: forbidden ? permissionHint : 'GitHub did not answer. Try again.' }, forbidden ? 403 : 502);
+    } else {
+      data = await graphqlQuery(gh, token, LIST_QUERY, { owner, name, number, ...(after ? { after } : {}) });
+      if (data instanceof Response) return data;
+    }
+    const pr = data?.data?.repository?.pullRequest;
+    const rt = pr?.reviewThreads;
+    if (!Array.isArray(rt?.nodes)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+    if (page === 1) head = pr?.headRefOid || null;
+    nodes.push(...rt.nodes);
+    const more = rt.pageInfo?.hasNextPage || (rt.totalCount > nodes.length && Boolean(rt.pageInfo?.endCursor));
+    if (!more) {
+      if (rt.totalCount > nodes.length) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+      break;
+    }
+    if (page >= 10 || !rt.pageInfo?.endCursor) return json({ error: 'GitHub did not answer. Try again.' }, 502);
+    after = rt.pageInfo.endCursor;
+  }
+  return { ok: true, nodes, head };
+}
+
 export async function threadsRoute(request, env, { owner, repo, number, rest }, { access, gh }) {
   const url = new URL(request.url);
   if (request.method === 'POST') {
@@ -110,39 +158,15 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
   if (allowed instanceof Response) return accessFailure(allowed);
   const result = await (async () => {
     const token = allowed.s.token, root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-    const graphql = async (query, variables) => {
-      const response = await gh('/graphql', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }) });
-      const denied = refused(response); if (denied) return denied;
-      if (!response.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-      const data = await response.json();
-      const forbidden = data.errors?.some(error => error.type === 'FORBIDDEN');
-      if (data.errors?.length) return json({ error: forbidden ? permissionHint : 'GitHub did not answer. Try again.' }, forbidden ? 403 : 502);
-      return data;
-    };
     let body = {};
     if (request.method === 'POST') { try { body = await request.json(); } catch { return json({ error: 'Send JSON' }, 400); } }
     if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'Send a JSON object.' }, 400);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (request.method === 'GET') {
       if (rest !== '') return json({ error: 'Not found' }, 404);
-      const nodes = [];
-      let head = null, after;
-      for (let page = 1; ; page++) {
-        const data = await graphql(LIST_QUERY, { owner, name: repo, number, ...(after ? { after } : {}) });
-        if (data instanceof Response) return data;
-        const pr = data?.data?.repository?.pullRequest;
-        const rt = pr?.reviewThreads;
-        if (!Array.isArray(rt?.nodes)) break;
-        if (page === 1) head = pr?.headRefOid || null;
-        nodes.push(...rt.nodes);
-        const more = rt.pageInfo?.hasNextPage || (rt.totalCount > nodes.length && Boolean(rt.pageInfo?.endCursor));
-        if (!more) {
-          if (rt.totalCount > nodes.length) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-          break;
-        }
-        if (page >= 10 || !rt.pageInfo?.endCursor) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-        after = rt.pageInfo.endCursor;
-      }
+      const threadsResult = await loadReviewThreads(gh, token, { owner, repo, number });
+      if (threadsResult instanceof Response) return threadsResult;
+      const { nodes, head } = threadsResult;
       for (const node of nodes) {
         const c = node?.comments;
         if (!c || !Array.isArray(c.nodes) || !parseAnchor(c.nodes[0]?.body)) continue;
@@ -150,7 +174,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
         let cMore = c.pageInfo?.hasNextPage || c.totalCount > c.nodes.length;
         for (let page = 1; cMore; page++) {
           if (page >= 10 || !cAfter) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-          const extra = await graphql(COMMENTS_QUERY, { threadId: String(node.id), after: cAfter });
+          const extra = await graphqlQuery(gh, token, COMMENTS_QUERY, { threadId: String(node.id), after: cAfter });
           if (extra instanceof Response) return extra;
           const next = extra?.data?.node?.comments;
           if (!Array.isArray(next?.nodes)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
@@ -180,7 +204,7 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     }
     const resolve = /^\/([A-Za-z0-9_=-]{1,100})\/(resolve|unresolve)$/.exec(rest);
     if (resolve) {
-      const response = await graphql(threadMutation(resolve[2]), { id: resolve[1] });
+      const response = await graphqlQuery(gh, token, threadMutation(resolve[2]), { id: resolve[1] });
       return response instanceof Response ? response : json({ ok: true });
     }
     return json({ error: 'Not found' }, 404);

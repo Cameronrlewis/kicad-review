@@ -1,5 +1,5 @@
 // Merge readiness derives from GitHub reviews and anchored review threads.
-import { LIST_QUERY, parseThreads, refused, accessFailure, sessionResponse, json, ghPages } from './threads.js';
+import { LIST_QUERY, parseThreads, refused, accessFailure, sessionResponse, json, ghPages, loadReviewThreads } from './threads.js';
 
 export function latestDecisions(reviews, head) {
   const latest = new Map();
@@ -28,13 +28,13 @@ export async function readinessRoute(request, env, { owner, repo, number }, { ac
     if (!pull.ok || !reviews.ok) return json({ error: 'GitHub did not answer. Try again.' }, 502);
     const pr = await pull.json(), head = pr.head?.sha || null;
     if (!head) return json({ error: 'GitHub did not answer. Try again.' }, 502);
-    const body = threads?.ok ? await threads.json().catch(() => null) : null;
-    const reviewThreads = body?.data?.repository?.pullRequest?.reviewThreads;
-    const nodes = reviewThreads?.nodes;
     // Missing data and GraphQL errors are unreadable, never an empty successful list.
     let list = null;
-    if (body && !body.errors?.length && Array.isArray(nodes) && !(reviewThreads.totalCount > nodes.length)) {
-      try { list = parseThreads(body).filter((t) => !t.resolved); } catch { /* unreadable */ }
+    if (threads) {
+      const res = await loadReviewThreads(gh, token, { owner, repo, number }, threads).catch(() => null);
+      if (res && !(res instanceof Response) && Array.isArray(res.nodes)) {
+        try { list = parseThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: res.nodes } } } } }).filter((t) => !t.resolved); } catch { /* unreadable */ }
+      }
     }
     return json({
       head, decisions: latestDecisions(reviews.items, head),

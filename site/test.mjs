@@ -5572,6 +5572,76 @@ test('finding 7: readiness paginates reviews past 100 before computing latest de
   } finally { restore(); }
 });
 
+test('readiness paginates review threads past 100 before computing open and blocking counts', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const head = 'n'.repeat(40);
+  const makeThread = (i, severity = 'comment', resolved = false) => ({
+    id: `PRRT_${i}`,
+    isResolved: resolved,
+    resolvedBy: null,
+    comments: {
+      totalCount: 1,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{
+        databaseId: i,
+        body: threadBody({ anchor: { ...anchor, ref: `R${i}`, severity }, text: `thread ${i}`, link: 'https://s/r' }),
+        author: { login: 'alice' },
+        createdAt: '2026-10-12T10:00:00Z',
+        url: `https://github.com/x#${i}`,
+      }],
+    },
+  });
+  const threadsPage1 = Array.from({ length: 100 }, (_, i) => makeThread(i + 1, 'comment', true));
+  const threadsPage2 = [makeThread(101, 'blocking', false)];
+
+  const restore = mockFetch(async (url, options = {}) => {
+    assert.equal(options.headers.Authorization, 'Bearer access-secret');
+    if (url.endsWith('/repo')) return repoOk();
+    if (url.endsWith('/pulls/7')) return Response.json({ head: { sha: head }, requested_reviewers: [] });
+    if (url.includes('/reviews?')) return Response.json([]);
+    assert.equal(url, 'https://api.github.com/graphql');
+    const { variables } = JSON.parse(options.body);
+    if (!variables.after) {
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: head,
+              reviewThreads: {
+                totalCount: 101,
+                pageInfo: { hasNextPage: true, endCursor: 'cursor_100' },
+                nodes: threadsPage1,
+              },
+            },
+          },
+        },
+      });
+    }
+    assert.equal(variables.after, 'cursor_100');
+    return Response.json({
+      data: {
+        repository: {
+          pullRequest: {
+            headRefOid: head,
+            reviewThreads: {
+              totalCount: 101,
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: threadsPage2,
+            },
+          },
+        },
+      },
+    });
+  });
+  try {
+    const response = await call('/r/Cameronrlewis/repo/pull/7/readiness', { headers: { Cookie: `s=${sealed}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.open, 1);
+    assert.equal(body.blocking, 1);
+  } finally { restore(); }
+});
+
 test('finding 10: commit history links the newest review when a commit head was reviewed multiple times', async () => {
   const sealed = await signedIn();
   const restore = mockFetch(async url => {
