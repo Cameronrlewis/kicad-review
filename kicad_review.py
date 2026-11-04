@@ -2231,12 +2231,24 @@ def pro_objects(path):
         return {}
     with open(path, encoding="utf-8") as fh:
         pro = json.load(fh)
-    if not isinstance(pro, dict) or any(
-            v is not None and not isinstance(v, dict) for v in (pro.get("net_settings"), pro.get("board"), pro.get("erc"))):
+
+    def section(parent, key):
+        if not isinstance(parent, dict):
+            return None
+        val = parent.get(key)
+        if val is not None and not isinstance(val, dict):
+            raise ValueError(f"{posixpath.basename(path)}: {key} is not a JSON object")
+        return val
+
+    if not isinstance(pro, dict):
         raise ValueError(f"{posixpath.basename(path)}: project settings are not JSON objects")
-    keep = {"net_settings": pro.get("net_settings")}
-    keep["board"] = (pro.get("board") or {}).get("design_settings")
-    keep["erc"] = (pro.get("erc") or {}).get("rule_severities")
+    net_settings = section(pro, "net_settings")
+    board = section(pro, "board")
+    design_settings = section(board, "design_settings")
+    erc = section(pro, "erc")
+    rule_severities = section(erc, "rule_severities")
+
+    keep = {"net_settings": net_settings, "board": design_settings, "erc": rule_severities}
     return {"meta:pro": {"kind": "design rules", "ref": posixpath.basename(path), "where": None,
                          "props": {k: v for k, v in flatten(keep).items() if v != "None"}}}
 
@@ -5191,7 +5203,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
                 pathlib.Path(out, side, 'sheet-hotspots.json').write_text(payload)
                 hotspot_ids[side] = add_blob(blobs, payload)
         except Exception as exc:  # optional evidence: any hotspot failure keeps the schematic SVGs
-            print('::warning::' + workflow_command_escape(f'{source}: hotspots unavailable; retaining schematic SVGs: {exc!r}'))
+            print('::warning::' + workflow_command_escape(f'{source}: hotspots unavailable; retaining schematic SVGs: {exc!r}'), file=sys.stderr)
     pages = {}
     for side in sides:
         for pg in pages_by_side[side]:

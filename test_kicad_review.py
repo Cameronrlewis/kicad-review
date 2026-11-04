@@ -10375,6 +10375,8 @@ def test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors():
                     kr.pro_objects("bad/p/p.kicad_pro")
                 except ValueError:
                     pass  # project_objects records unreadable evidence for ValueError
+                else:
+                    raise AssertionError(f"expected ValueError from pro_objects for bad shape {bad}")
             put("bad", {"p/p.kicad_pro": '{"board": {"design_settings": {"rules": {"min_clearance": 0.2}}}}'})
             assert kr.rule_values("bad/p", "p") == {"rules.min_clearance": 0.2}
             put("bad", {"p/p.kicad_pro": '{"board": null, "net_settings": null}'})
@@ -10415,7 +10417,7 @@ def test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors():
                 put(f"review/H/{side}", {"erc.json": '{"sheets": []}',
                                          "sch/H.svg": '<svg viewBox="0 0 320 213"><path d="M10 10H310"/></svg>'})
             err = io.StringIO()
-            with contextlib.redirect_stdout(err), \
+            with contextlib.redirect_stderr(err), \
                  patch.object(kr, "sheet_hotspots", side_effect=ValueError("recursive schematic hierarchy")):
                 report = kr.build_project({"dir": "H", "name": "H", "status": "modified"}, {}, kr.DEFAULT_SETTINGS)
             root_page = next(pg for pg in report["sheets"] if pg["path"] == "/")
