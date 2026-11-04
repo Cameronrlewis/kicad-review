@@ -803,13 +803,14 @@ from kicad_review import sch_objects
 symbols = sch_objects(f"{t}/p", "H")
 assert all(symbols[path]["ref"] == "R1" and symbols[path]["props"]["Value"] == "10k" and symbols[path]["pos"] == [10, 20, 0] for path in ("/u1/u3/r1", "/u2/u4/r1")), "TS-S2 schematic symbols"
 print("ok TS-S2 schematic symbols")
-# Sibling sheets with one name share one SVG file, so neither drawing can be trusted: stop with a message.
+# Sibling sheets with one name share one SVG file: warn and skip the later sibling.
 write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A", "a.kicad_sch", "u1") + sheet("A", "b.kicad_sch", "u2") + ")"})
-try:
-    sheet_pages(f"{t}/p", "H")
-    raise AssertionError("duplicate sibling sheet names must stop the review")
-except SystemExit as e:
-    assert "same name" in str(e), e
+import io, contextlib
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    dup_pages = sheet_pages(f"{t}/p", "H")
+assert [p["name"] for p in dup_pages] == ["H", "A", "Power"], dup_pages
+assert "collides with another sheet using sanitized name 'A'; skipped" in err.getvalue()
 print("ok")
 
 # SCH6: page numbers belong to the project and parent instance, not the shared file.
@@ -10601,6 +10602,7 @@ def test_f1_sheetfile_containment_and_hierarchy():
     old = os.getcwd()
     with TemporaryDirectory() as t:
         os.chdir(t)
+        kr._sheet_warnings.clear()
         try:
             secret = '(kicad_sch (symbol (uuid "leak") (property "Reference" "SECRET")))'
             write(t, {'base/P/private.kicad_sch': secret, 'outside.kicad_sch': secret,
@@ -10629,13 +10631,42 @@ def test_f1_sheetfile_containment_and_hierarchy():
             for needle in ("'Up'", "'Abs'", "'Link'", "'NoFile'", "'NoUuid'", "'Again'", 'head/P/dir'):
                 assert needle in text, (needle, text)
             assert all(line.startswith('::warning::') for line in text.splitlines()), text
-            # Sibling names that sanitize to one SVG stem stop like exact duplicates.
+            # Sibling names that sanitize to one SVG stem warn and skip the later sibling.
             write(t, {'head/P/H.kicad_sch': '(kicad_sch ' + sheet('A/B', 'a.kicad_sch', 'u1') + sheet('A_B', 'b.kicad_sch', 'u2') + ')'})
-            try:
-                kr.sheet_pages('head/P', 'H')
-                raise AssertionError('colliding sanitized sheet names must stop the review')
-            except SystemExit as e:
-                assert 'same name' in str(e), e
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                collide_pages = kr.sheet_pages('head/P', 'H')
+            assert [p['name'] for p in collide_pages] == ['H', 'A/B'], collide_pages
+            assert "sheet 'A_B' collides with another sheet using sanitized name 'A_B'; skipped" in err.getvalue()
+
+            # Relative proj_dir with leading './' still bounds containment to the revision root.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                      + sheet('Escape', '../../base/P/private.kicad_sch', 'esc') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                dot_pages = kr.sheet_pages('./head/P', 'H')
+            assert [p['name'] for p in dot_pages] == ['H'], dot_pages
+            assert "sheet 'Escape' file '../../base/P/private.kicad_sch' is outside the revision; skipped" in err.getvalue()
+
+            # NUL byte in Sheetfile warns and skips instead of crashing realpath.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                      + sheet('NullByte', 'sub\x00file.kicad_sch', 'null1') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                null_pages = kr.sheet_pages('head/P', 'H')
+            assert [p['name'] for p in null_pages] == ['H'], null_pages
+            assert "sheet 'NullByte' file 'sub\\x00file.kicad_sch' contains a null byte; skipped" in err.getvalue()
+
+            # Warning deduplication does not suppress warnings across distinct revisions/projects.
+            write(t, {'base/P/B.kicad_sch': '(kicad_sch (uuid "broot") '
+                      + sheet('Outside', '../../outside.kicad_sch', 'out1') + ')'})
+            write(t, {'head/P/H2.kicad_sch': '(kicad_sch (uuid "hroot") '
+                      + sheet('Outside', '../../outside.kicad_sch', 'out2') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                kr.sheet_pages('base/P', 'B')
+                kr.sheet_pages('head/P', 'H2')
+            assert err.getvalue().count("is outside the revision; skipped") == 2, err.getvalue()
         finally:
             os.chdir(old)
 

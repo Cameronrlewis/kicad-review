@@ -1008,6 +1008,7 @@ def cmd_copper(args):
 
 
 def cmd_render(args):
+    _sheet_warnings.clear()
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     settings = load_settings()
@@ -1144,6 +1145,25 @@ def sheet_instance_page(node, project, parent_uuid_path):
     return None
 
 
+def revision_root(proj_dir):
+    """Return the absolute path of the revision root containing proj_dir.
+
+    In production, kicad-review passes relative project directories prefixed with the
+    revision: 'base/<dir>' or 'head/<dir>' (and may have leading './' or be absolute paths).
+    Any path with a 'base' or 'head' segment is contained within that revision root,
+    preventing sheets from escaping into sibling revisions or the workspace root.
+    If no 'base' or 'head' segment exists (e.g. standalone tests), the containment root
+    is the realpath of proj_dir itself.
+    """
+    p = pathlib.Path(proj_dir).resolve() if os.path.isabs(proj_dir) else pathlib.Path(os.path.normpath(proj_dir))
+    parts = p.parts
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] in ("base", "head"):
+            sub = pathlib.Path(*parts[:i + 1])
+            return os.path.realpath(str(sub))
+    return os.path.realpath(proj_dir)
+
+
 def sheet_pages(proj_dir, name):
     """Schematic pages in hierarchy order, with instance page numbers and UUID paths."""
     root_file = posixpath.join(proj_dir, f"{name}.kicad_sch")
@@ -1158,12 +1178,12 @@ def sheet_pages(proj_dir, name):
         if page and len(page) > 1 and str(page[1]).strip():
             legacy[instance[1].rstrip("/") or "/"] = str(page[1])
     pages = []
-    # Revision root: the workflow passes "base/<dir>" or "head/<dir>"; an absolute directory is its own root.
-    top = os.path.realpath(proj_dir if os.path.isabs(proj_dir) else proj_dir.split("/")[0])
+    top = revision_root(proj_dir)
 
     def warn(message):
-        if message not in _sheet_warnings:  # sheet_pages runs several times per revision
-            _sheet_warnings.add(message)
+        key = (os.path.realpath(proj_dir), message)
+        if key not in _sheet_warnings:  # sheet_pages runs several times per revision
+            _sheet_warnings.add(key)
             print("::warning::" + workflow_command_escape(message), file=sys.stderr)
 
     # stem: the file name kicad-cli gives the page's SVG, the sheet names along its path joined by "-".
@@ -1184,15 +1204,23 @@ def sheet_pages(proj_dir, name):
             child = props.get("Sheetname", "?")
             safe = re.sub(r"[\\/]", "_", child)
             if safe in names:  # kicad-cli names SVGs after the sanitized name, so A/B and A_B collide too
-                sys.exit(f"{file} has two sheets with the same name {safe!r} once / and \\ become _; kicad-cli "
-                         "renders both to one file, so neither drawing can be shown. Rename one of them.")
+                warn(f"{full}: sheet {child!r} collides with another sheet using sanitized name {safe!r}; skipped")
+                continue
             names.add(safe)
             uid, sheetfile = val(s, "uuid"), props.get("Sheetfile") or ""
-            child_file = posixpath.normpath(posixpath.join(posixpath.dirname(file), sheetfile))
-            real = os.path.realpath(posixpath.join(proj_dir, child_file))
             if not uid or not sheetfile:
                 warn(f"{full}: sheet {child!r} has no uuid or Sheetfile; skipped")
-            elif posixpath.isabs(sheetfile) or os.path.commonpath([top, real]) != top:
+                continue
+            if "\0" in sheetfile:
+                warn(f"{full}: sheet {child!r} file {sheetfile!r} contains a null byte; skipped")
+                continue
+            child_file = posixpath.normpath(posixpath.join(posixpath.dirname(file), sheetfile))
+            try:
+                real = os.path.realpath(posixpath.join(proj_dir, child_file))
+            except ValueError:
+                warn(f"{full}: sheet {child!r} file {sheetfile!r} path is invalid; skipped")
+                continue
+            if posixpath.isabs(sheetfile) or os.path.commonpath([top, real]) != top:
                 warn(f"{full}: sheet {child!r} file {sheetfile!r} is outside the revision; skipped")
             elif child_file in ancestors:
                 warn(f"{full}: sheet {child!r} includes {sheetfile!r}, which contains it; recursive hierarchy skipped")
@@ -1424,8 +1452,6 @@ def sheet_hotspots(proj_dir, name):
     """Per-sheet-instance hotspot manifest: symbols with bounding boxes and pin endpoints, labels, no-connects, wires (mm)."""
     views, warnings = [], []
     pages = sheet_pages(proj_dir, name)
-    if any(p['path'].count('/') > 33 for p in pages):
-        raise ValueError('recursive schematic hierarchy')
     root_uuid = None
     for page in pages:
         view = {'sheet': page['path'], 'file': page['file'], 'viewBox': None,
@@ -5547,6 +5573,7 @@ def merge_supplier(projects, lookup):
 
 
 def cmd_report(args):
+    _sheet_warnings.clear()
     with open("review/detect.json", encoding="utf-8") as fh:
         det = json.load(fh)
     blobs = {}
