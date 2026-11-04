@@ -5173,10 +5173,11 @@ test('zip reader passes large stored entries through with no per-byte JavaScript
   assert.deepEqual(fetched, [big.offset, big.offset + 30], 'only the local header and name are read');
 });
 
-function downloadFetch({ zip, rangeOk = true, badRange = false, forbidden = false, shortPayload = false, bundles, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }) {
+function downloadFetch({ zip, event = 'pull_request', rangeOk = true, badRange = false, forbidden = false, shortPayload = false, bundles, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }) {
   return mockFetch(async (url, options = {}) => {
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return forbidden ? new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}})) : accessibleRepo();
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/123') return new Response(JSON.stringify(report));
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/runs/9') return new Response(JSON.stringify({ id: 9, event }));
     const pageMatch = /^https:\/\/api\.github\.com\/repos\/Cameronrlewis\/repo\/actions\/runs\/9\/artifacts\?per_page=100&page=(\d+)$/.exec(url);
     if (pageMatch) { const rows = bundles || (bundle ? [bundle] : []), page = +pageMatch[1]; return new Response(JSON.stringify({ artifacts: rows.slice((page - 1) * 100, page * 100) })); }
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo/actions/artifacts/124/zip') {
@@ -5268,6 +5269,24 @@ test('download bundle is chosen exactly across pages and must match the full hea
   // A design snapshot selects only the design bundle family, never a review bundle with the same head7.
   restore = downloadFetch({ zip: downloadZip(), report: { name: 'kicad-design-bbbbbbb.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } });
   try { assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404); } finally { restore(); }
+});
+
+test('download route binds the report name head to the envelope head, including manual and design runs', async () => {
+  // workflow_dispatch reviews the head given by hand; workflow_run.head_sha is the dispatch ref's tip.
+  const headers = { Cookie: `s=${await signedIn()}` }, tip = { id: 9, head_sha: 'd'.repeat(40) };
+  const report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: tip }, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: tip };
+  for (const [label, settings, status] of [['manual run', { zip: downloadZip(), event: 'workflow_dispatch', report, bundle }, 200],
+    ['pull request run whose envelope differs from its run head', { zip: downloadZip(), report, bundle }, 404],
+    ['manual run whose envelope head is not the report head', { zip: downloadZip('c'.repeat(40)), event: 'workflow_dispatch', report, bundle }, 404],
+    ['manual run whose bundle metadata names another head', { zip: downloadZip(), event: 'workflow_dispatch', report, bundle: { ...bundle, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, 404],
+    ['design snapshot', { zip: downloadZip(), report: { name: 'kicad-design-bbbbbbb.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, bundle: { ...bundle, name: 'kicad-design-downloads-bbbbbbb', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }, 200]]) {
+    const restore = downloadFetch(settings);
+    try {
+      const response = await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers });
+      assert.equal(response.status, status, label);
+      if (status === 200) assert.equal(await response.text(), 'PK-fab', label);
+    } finally { restore(); }
+  }
 });
 
 test('download route requires sign-in and a numeric index and known kind', async () => {

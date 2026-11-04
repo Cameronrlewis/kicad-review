@@ -261,11 +261,11 @@ async function downloadFile(owner, repo, id, index, kind, active) {
     const meta = await gh(`${root}/artifacts/${id}`, active.token);
     if (!meta.ok) return downloadError(active);
     const report = await meta.json(), runId = report.workflow_run?.id, name = String(report.name || '');
-    // The report's own run head is the reviewed full SHA; the report name must carry its first 7 characters.
-    const runHead = String(report.workflow_run?.head_sha || ''), head7 = runHead.slice(0, 7);
-    const family = !/^[0-9a-f]{40}$/.test(runHead) ? null
-      : verifyReportFamily('comparison', name) && /-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name)[1] === head7 ? 'review'
-        : verifyReportFamily('design', name, runHead) && name.endsWith('.html') ? 'design' : null;
+    // The report name carries the reviewed head's first 7 characters. The run's head_sha is the reviewed head except
+    // for a manual (workflow_dispatch) run, which reviews the head given by hand, not its dispatch ref's tip.
+    const runHead = String(report.workflow_run?.head_sha || '');
+    const head7 = verifyReportFamily('comparison', name) ? /-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name)[1] : /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
+    const family = !head7 || !/^[0-9a-f]{40}$/.test(runHead) ? null : verifyReportFamily('comparison', name) ? 'review' : 'design';
     if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return downloadError(active);
     const bundleName = `kicad-${family}-downloads-${head7}`;
     // Every page of the run's artifacts is read: 02 adds digest assets, so the bundle can sit past the first 100.
@@ -293,10 +293,15 @@ async function downloadFile(owner, repo, id, index, kind, active) {
     if ((await probe.arrayBuffer()).byteLength !== 1) return downloadError(active);
     const [type, suffix] = downloadKinds[kind];
     const entries = await zipEntries(range, total);  // exactRange inside checks every 206 and Content-Range
-    // Full-head provenance: the staged envelope must carry this bundle's reviewed full head (collect_downloads writes it).
+    // Full-head provenance: the staged envelope carries the run's reviewed full head (collect_downloads writes it).
     const envelope = entries.find((e) => e.name === `${index}/downloads.json`);
-    const envelopeJson = envelope ? await new Response(await zipEntryStream(range, envelope)).json() : null;
-    if (!/^[0-9a-f]{40}$/.test(envelopeJson?.head) || envelopeJson.head !== bundle.workflow_run?.head_sha || envelopeJson.head !== runHead) return downloadError(active);
+    const head = envelope ? (await new Response(await zipEntryStream(range, envelope)).json())?.head : null;
+    if (!/^[0-9a-f]{40}$/.test(head) || !head.startsWith(head7) || bundle.workflow_run?.head_sha !== runHead
+      || (family === 'design' && !verifyReportFamily('design', name, head))) return downloadError(active);
+    if (head !== runHead) {  // only a manual run may review a head other than its run's head_sha
+      const run = await gh(`${root}/runs/${runId}`, active.token);
+      if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return downloadError(active);
+    }
     const matches = entries.filter((e) => e.name.startsWith(`${index}/`) && !e.name.slice(`${index}/`.length).includes('/') && suffix.test(e.name));
     const entry = matches.length === 1 ? matches[0] : null;
     const filename = entry?.name.split('/').pop();
