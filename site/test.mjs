@@ -151,7 +151,7 @@ test('timed-out runner body settles before the next check starts', async () => {
 
 test('TS-S4 named UI assertions reject missing content and no-op gestures', async () => {
   const run = (name, globals) => runInNewContext(`(async()=>{${CHECKS.find(c => c[0] === name)[2]}})()`, {
-    setTimeout: f => setTimeout(f, 0), requestAnimationFrame: f => setTimeout(f, 0), ...globals });
+    performance, setTimeout: f => setTimeout(f, 0), requestAnimationFrame: f => setTimeout(f, 0), ...globals });
   assert.notEqual(await run('modified card shows every changed property old and new', {
     REVIEW_DATA: { projects: [{}, { changes: [{ id: 'c1', action: 'modified', changes: [['Value', '10k', '20k']] }] }] },
     document: { querySelector: () => ({ textContent: 'Value 20k' }) } }), true);
