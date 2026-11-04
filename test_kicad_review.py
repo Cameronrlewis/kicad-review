@@ -10504,6 +10504,27 @@ def test_f6_downloads_guards_and_fab_tempdir_leak():
             assert (head_out / "board.glb").read_bytes() == b"glTF-viewer-content"
             assert (head_out / "poster.png").read_bytes() == b"poster-png-content"
 
+            # Finding 8: Board project with downloads enabled, 3D viewer off, and shared revisions (e.g. design/still enabled).
+            # The "shared_3d and downloads enabled and not export_3d" branch must cause head to do its own raw-GLB export instead of copying base.
+            shutil.rmtree("review/pcb_prj", ignore_errors=True)
+            s_dl_no3d = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s_dl_no3d["downloads"]["enabled"] = True
+            s_dl_no3d["3d"]["enabled"] = False
+            s_dl_no3d.setdefault("design", {})["enabled"] = True
+
+            glb_calls_dl_no3d = []
+            with patch.object(kr, "load_settings", return_value=s_dl_no3d), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"), \
+                 patch.object(kr, "export_glb", side_effect=lambda p, side, out, **kw: glb_calls_dl_no3d.append((side, kw))):
+                kr.cmd_render(None)
+
+            assert glb_calls_dl_no3d == [
+                ("base", {"model": False}),
+                ("head", {"model": True, "poster": True, "viewer": False}),
+            ], f"head must do its own raw-GLB export when shared_3d and downloads enabled and not export_3d: {glb_calls_dl_no3d}"
+
             # 3. Finding 9: release_project cleans up temporary fabrication directory on success and on error.
             pro_dir = pathlib.Path("fab_test")
             pro_dir.mkdir(parents=True, exist_ok=True)
@@ -10537,6 +10558,15 @@ def test_f6_downloads_guards_and_fab_tempdir_leak():
                 made = kr.release_project(str(pro_path), "v1", kr.DEFAULT_SETTINGS, str(fab_out), "T")
                 assert len(created_dirs) == 1, "release_project must use tempfile.TemporaryDirectory"
                 assert not os.path.exists(created_dirs[0]), f"temp dir {created_dirs[0]} leaked after success"
+                expected_made = [f"{fab_out}/T-v1-jlcpcb-gerbers.zip", f"{fab_out}/T-v1-jlcpcb-positions.csv"]
+                assert made == expected_made, f"unexpected release artifacts: {made} != {expected_made}"
+                for path in made:
+                    assert os.path.isfile(path), f"release artifact missing: {path}"
+                    assert os.path.getsize(path) > 0, f"release artifact empty: {path}"
+                with zipfile.ZipFile(made[0]) as z:
+                    assert sorted(z.namelist()) == ["T-F_Cu.gbr", "T.drl"]
+                with open(made[1], encoding="utf-8") as fh:
+                    assert "Designator" in fh.read()
 
             # Failure during fabrication also cleans up the temp dir
             created_dirs_err = []
