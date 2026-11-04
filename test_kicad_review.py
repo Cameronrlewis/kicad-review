@@ -6247,9 +6247,25 @@ with _DpTmp() as t:
     products, note = kr.pcbdraw_plot('Thermal_Camera/T.kicad_pcb', os.path.join(t, 'thermal'), lambda argv: (1, _dp_refusal))
     assert products == {'front': None, 'back': None} and 'no closed Edge.Cuts outline' in note, (products, note)
     assert kr.pcbdraw_svg_valid(os.path.join(t, 'thermal', 'pcbdraw-front.svg')) is False
+    calls.clear()
+    stderr_buf = io.StringIO()
+    def partial_run(argv):
+        if '"front"' in argv[2]:
+            out = re.search(r'"([^"]+\.svg)"\]; run', argv[2]).group(1)
+            pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(out).write_bytes(_dp_svg)
+            return 0, ''
+        return 1, 'Error: back layer failed\nsecond error line\n'
+    with patch('sys.stderr', stderr_buf):
+        products, note = kr.pcbdraw_plot('P/P.kicad_pcb', os.path.join(t, 'partial'), partial_run)
+    assert products['front'] is not None and products['back'] is None
+    assert note == 'PcbDraw failed for back face: see the job log.', note
+    assert 'Error: back layer failed' in stderr_buf.getvalue()
 print('ok DP-P1 PcbDraw command, front and back plots, skip note')
 
 # DP-P2: a comparison attaches front and back plots for both revisions; a design report attaches the head side only, with no base probes.
+assert not hasattr(kr, 'put_blob'), 'put_blob alias should be removed'
+assert 'is_property' in kr.workflow_command_escape.__code__.co_varnames
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
@@ -6276,6 +6292,11 @@ with _DpTmp() as t:
         assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in single_blobs.values())
         off = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
         assert 'pcbdraw' not in kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, {}, off)['board']
+        # Corrupt pcbdraw.json is handled gracefully and treated as absent
+        pathlib.Path('review/H/head/pcbdraw.json').write_text('{invalid-json', encoding='utf-8')
+        corrupt_blobs = {}
+        corrupt_proj = kr.build_project({'dir': 'H', 'name': 'H', 'status': 'unchanged'}, corrupt_blobs, settings, single=True)
+        assert corrupt_proj['board']['pcbdraw']['head'] is None
     finally:
         os.chdir(old_cwd)
 print('ok DP-P2 PcbDraw attaches head only in design reports')
@@ -6285,6 +6306,25 @@ _wf_p = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
 assert "pip install -q --target /w/.pydeps pcbdraw==1.3.0" in _wf_p
 assert "if: steps.detect.outputs.changed == 'true' && steps.detect.outputs.design == 'true'" in _wf_p
 assert "-e PYTHONPATH=/w/.pydeps" in _wf_p.split("- name: Render both revisions and run ERC/DRC")[1].split("- name:")[0]
+assert "PYTHON_IMAGE: python:3.13-slim@sha256:" in _wf_p
+assert 'docker run -q --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w "$PYTHON_IMAGE"' in _wf_p
 print("ok DP-P3 PcbDraw install and render wiring")
+
+# Broken kicad-review.toml warns and defaults design output to false
+with tempfile.TemporaryDirectory() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        output_f = pathlib.Path("outputs")
+        pathlib.Path("kicad-review.toml").write_text("[design\ninvalid", encoding="utf-8")
+        detect_stderr = io.StringIO()
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output_f)}, clear=True), patch("sys.stderr", detect_stderr), patch("kicad_review.resolve_revisions", return_value=("a" * 40, "b" * 40, "test")), patch("kicad_review.detect", return_value=[]):
+            kr.cmd_detect(None)
+        assert "design=false" in output_f.read_text()
+        assert "kicad-review.toml syntax error:" in detect_stderr.getvalue()
+    finally:
+        os.chdir(old_cwd)
+print("ok cmd_detect warns on broken settings and defaults design to false")
+
 
 

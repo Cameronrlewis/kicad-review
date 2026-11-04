@@ -41,10 +41,10 @@ KICAD_NAMES = ("sym-lib-table", "fp-lib-table")
 SETTINGS_FILE = "kicad-review.toml"
 
 
-def workflow_command_escape(value, *, property=False):
+def workflow_command_escape(value, *, is_property=False):
     """Escape GitHub workflow-command data, with extra separators for properties."""
     value = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    return value.replace(":", "%3A").replace(",", "%2C") if property else value
+    return value.replace(":", "%3A").replace(",", "%2C") if is_property else value
 
 
 def git(*args, check=True):
@@ -175,7 +175,11 @@ def cmd_detect(args):
         json.dump(result, fh, indent=2)
     try:
         design_enabled_out = bool(load_settings(("",))["design"]["enabled"])
-    except Exception:
+    except tomllib.TOMLDecodeError as error:
+        print("::warning::" + workflow_command_escape(f"{SETTINGS_FILE} syntax error: {error}; defaulting to design = false"), file=sys.stderr)
+        design_enabled_out = False
+    except (KeyError, TypeError) as error:
+        print("::warning::" + workflow_command_escape(f"{SETTINGS_FILE} invalid design setting: {error}; defaulting to design = false"), file=sys.stderr)
         design_enabled_out = False
     with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as fh:
         fh.write(f"base={base or ''}\nhead={head}\nchanged={'true' if projects else 'false'}\ndesign={'true' if design_enabled_out else 'false'}\n")
@@ -691,11 +695,16 @@ def pcbdraw_plot(board, side_dir, run):
             if PCBDRAW_NO_OUTLINE in text:
                 return products, "PcbDraw skipped: no closed Edge.Cuts outline."
             if rc != 0 or not pcbdraw_svg_valid(out):
-                print("::warning::" + workflow_command_escape(f"PcbDraw {face} plot failed for {board} (rc {rc})"), file=sys.stderr)
+                err_lines = [l.strip() for l in (text or "").strip().splitlines() if l.strip()][:5]
+                err_detail = ("\n" + "\n".join(err_lines)) if err_lines else ""
+                print("::warning::" + workflow_command_escape(f"PcbDraw {face} plot failed for {board} (rc {rc}){err_detail}"), file=sys.stderr)
                 continue
         products[face] = out
     if not any(products.values()):
         note = "PcbDraw failed for both faces: see the job log."
+    elif not all(products.values()):
+        failed_faces = [face for face in ("front", "back") if products[face] is None]
+        note = f"PcbDraw failed for {failed_faces[0]} face: see the job log."
     return products, note
 
 
@@ -3346,9 +3355,6 @@ def attach3d(board, out, blobs, allowed_sides=("base", "head")):
         board['coverage3d'] = coverage
 
 
-put_blob = add_blob
-
-
 def attach_pcbdraw(board, root, blobs, allowed_sides):
     """board.pcbdraw.{base,head}: front and back blob ids plus the note. Single mode lists head only, so base is never read."""
     board["pcbdraw"] = {"base": None, "head": None}
@@ -3357,11 +3363,18 @@ def attach_pcbdraw(board, root, blobs, allowed_sides):
         meta = os.path.join(folder, "pcbdraw.json")
         if not os.path.isfile(meta):
             continue
-        entry = {"front": None, "back": None, "note": json.loads(pathlib.Path(meta).read_text(encoding="utf-8")).get("note", "")}
+        try:
+            raw_meta = json.loads(pathlib.Path(meta).read_text(encoding="utf-8"))
+            if not isinstance(raw_meta, dict):
+                continue
+            note = str(raw_meta.get("note") or "")
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        entry = {"front": None, "back": None, "note": note}
         for face in ("front", "back"):
             path = os.path.join(folder, f"pcbdraw-{face}.svg")
             if pcbdraw_svg_valid(path):
-                entry[face] = put_blob(blobs, pathlib.Path(path).read_bytes())
+                entry[face] = add_blob(blobs, pathlib.Path(path).read_bytes())
         board["pcbdraw"][side] = entry
 
 
