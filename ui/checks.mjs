@@ -7955,7 +7955,8 @@ CHECKS.push(
     p.board.parts3d = {head: p.board.parts3d?.head || null, base: 'dp-base-parts'};
     p.board.poster3d = {head: p.board.poster3d?.head || null, base: 'dp-base-poster'};
     const stage = document.querySelector('#stage');
-    await Review3D.show(stage, p, {...S, m: 'side', s: null});
+    // As the report calls it (review.js renderStage): a design report asks for its head-only viewer.
+    await Review3D.show(stage, p, {...S, m: 'side', s: null}, {single: D.mode === 'single'});
     if (forbiddenBaseRead) return 'forbidden base blob accessed in single mode';
     const hosts = [...stage.querySelectorAll('.view3d')];
     if (hosts.length !== 1 || !hosts[0].classList.contains('one') || hosts[0].querySelector('.tag').textContent !== 'Design') return 'hosts ' + hosts.length;
