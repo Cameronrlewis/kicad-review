@@ -1451,6 +1451,10 @@ def sheet_hotspots(proj_dir, name):
                 except KeyError:
                     coords, pins, approximate = [], [], True
                     warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'library unavailable'})
+                except (ValueError, TypeError, IndexError, AttributeError):
+                    # Inheritance cycle or malformed primitive: keep the symbol as an approximate box.
+                    coords, pins, approximate = [], [], True
+                    warnings.append({'sheet': page['path'], 'uuid': uid, 'reason': 'symbol geometry unavailable'})
                 if not coords:
                     coords, approximate = [[-1, -1], [1, 1]], True
                 placed_pins = []
@@ -2227,6 +2231,9 @@ def pro_objects(path):
         return {}
     with open(path, encoding="utf-8") as fh:
         pro = json.load(fh)
+    if not isinstance(pro, dict) or any(
+            v is not None and not isinstance(v, dict) for v in (pro.get("net_settings"), pro.get("board"), pro.get("erc"))):
+        raise ValueError(f"{posixpath.basename(path)}: project settings are not JSON objects")
     keep = {"net_settings": pro.get("net_settings")}
     keep["board"] = (pro.get("board") or {}).get("design_settings")
     keep["erc"] = (pro.get("erc") or {}).get("rule_severities")
@@ -2264,18 +2271,26 @@ def rule_values(root: str, name: str) -> dict[str, object]:
     if pro.exists():
         try:
             data = json.loads(pro.read_text(encoding="utf-8"))
+            # Valid JSON of the wrong shape is as unknown as invalid JSON; null sections are simply empty.
+            def section(parent, key):
+                value = parent.get(key)
+                if value is not None and not isinstance(value, dict):
+                    raise ValueError(f"{key} is not an object")
+                return value or {}
+
+            if not isinstance(data, dict):
+                raise ValueError("project is not an object")
+            net_settings = section(data, "net_settings")
+            design_settings = section(section(data, "board"), "design_settings")
         except ValueError:
             out["_unavailable"] = f"Project rules unavailable: malformed {pro.name}"
-            data = {}
-        board = data.get("board") or {}
-        design_settings = board.get("design_settings") or {}
-        walk(design_settings.get("rules") or {}, "rules")
-        net_settings = data.get("net_settings") or {}
-        if "classes" in net_settings:
-            walk(net_settings["classes"], "net_settings.classes")
-        # Pattern order is meaningful, unlike named class order. Keep assignments intact.
-        if "netclass_patterns" in net_settings:
-            out["net_settings.netclass_patterns"] = net_settings["netclass_patterns"]
+        else:
+            walk(design_settings.get("rules") or {}, "rules")
+            if "classes" in net_settings:
+                walk(net_settings["classes"], "net_settings.classes")
+            # Pattern order is meaningful, unlike named class order. Keep assignments intact.
+            if "netclass_patterns" in net_settings:
+                out["net_settings.netclass_patterns"] = net_settings["netclass_patterns"]
     dru = pathlib.Path(root) / (name + ".kicad_dru")
     if dru.exists():
         out["custom rules"] = dru.read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -5161,19 +5176,22 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
         src = posixpath.join(side, p['dir'])
         source = pathlib.Path(src, p['name'] + '.kicad_sch')
         # Legacy fixtures may lack a root identity. Keep artwork without inventing anchors.
-        if source.is_file() and val(parse_sexpr(source.read_text()), 'uuid'):
-            manifest = sheet_hotspots(src, p['name'])
-            page_by_path = {page['path']: page for page in pages_by_side[side]}
-            for view in manifest['views']:
-                rel = theme_paths[side].get(view['sheet'], {}).get('light')
-                page = page_by_path.get(view['sheet'])
-                path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', p['name'], page)
-                text = svg_body(path)
-                if text:
-                    view['viewBox'] = svg_viewbox(text)
-            payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
-            pathlib.Path(out, side, 'sheet-hotspots.json').write_text(payload)
-            hotspot_ids[side] = add_blob(blobs, payload)
+        try:
+            if source.is_file() and val(parse_sexpr(source.read_text()), 'uuid'):
+                manifest = sheet_hotspots(src, p['name'])
+                page_by_path = {page['path']: page for page in pages_by_side[side]}
+                for view in manifest['views']:
+                    rel = theme_paths[side].get(view['sheet'], {}).get('light')
+                    page = page_by_path.get(view['sheet'])
+                    path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', p['name'], page)
+                    text = svg_body(path)
+                    if text:
+                        view['viewBox'] = svg_viewbox(text)
+                payload = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
+                pathlib.Path(out, side, 'sheet-hotspots.json').write_text(payload)
+                hotspot_ids[side] = add_blob(blobs, payload)
+        except Exception as exc:  # optional evidence: any hotspot failure keeps the schematic SVGs
+            print('::warning::' + workflow_command_escape(f'{source}: hotspots unavailable; retaining schematic SVGs: {exc!r}'))
     pages = {}
     for side in sides:
         for pg in pages_by_side[side]:

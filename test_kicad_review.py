@@ -10344,3 +10344,87 @@ test_f4_render_and_release_cache()
 print("ok F4 render and release cache completeness and preset cleanup")
 
 
+def test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors():
+    import contextlib
+    import io
+    import os
+    import pathlib
+    import tempfile
+
+    def put(root, files):
+        for rel, text in files.items():
+            path = pathlib.Path(root, rel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    bad_projects = ["[]", "null", '{"board": []}', '{"board": {"design_settings": []}}', '{"net_settings": []}',
+                    '{"board": {"design_settings": 5}}']
+    with tempfile.TemporaryDirectory() as td:
+        old = os.getcwd()
+        os.chdir(td)
+        try:
+            # Finding 5: valid JSON of the wrong shape marks only project rules unavailable.
+            for bad in bad_projects:
+                put("bad", {"p/p.kicad_pro": bad})
+                try:
+                    values = kr.rule_values("bad/p", "p")
+                except Exception as exc:
+                    raise AssertionError(f"rule_values crashed on {bad}: {exc!r}")
+                assert values.get("_unavailable", "").startswith("Project rules unavailable"), (bad, values)
+                try:
+                    kr.pro_objects("bad/p/p.kicad_pro")
+                except ValueError:
+                    pass  # project_objects records unreadable evidence for ValueError
+            put("bad", {"p/p.kicad_pro": '{"board": {"design_settings": {"rules": {"min_clearance": 0.2}}}}'})
+            assert kr.rule_values("bad/p", "p") == {"rules.min_clearance": 0.2}
+            put("bad", {"p/p.kicad_pro": '{"board": null, "net_settings": null}'})
+            assert kr.rule_values("bad/p", "p") == {}
+
+            # A non-object project file never poisons project_objects either.
+            issues = []
+            put("bad", {"p/p.kicad_pro": "[]", "p/p.kicad_sch": "(kicad_sch (uuid root))"})
+            with contextlib.redirect_stderr(io.StringIO()):
+                kr.project_objects("bad/p", "p", issues)
+            assert any(i.get("unknownMeta") == "meta:pro" for i in issues), issues
+
+            # electrical_changes keeps the independent .kicad_dru and stackup diffs.
+            p = {"dir": "p", "name": "p"}
+            for side, thickness, dru in (("base", ".2", "(version 1)\n"),
+                                         ("head", ".3", '(version 1)\n(rule "r" (constraint clearance (min 0.3mm)))\n')):
+                put(side, {"p/p.kicad_pro": "[]", "p/p.kicad_dru": dru,
+                           "p/p.kicad_pcb": f'(kicad_pcb (setup (stackup (layer "d" (thickness {thickness})))))'})
+            put("review/p", {"copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
+            rows, issues = kr.electrical_changes(p, "review/p", {"base": {}, "head": {}},
+                                                 {"base": "b" * 40, "head": "h" * 40})
+            refs = {r["ref"] for r in rows}
+            assert {"custom rules", "stackup"} <= refs, refs
+            assert any(r["detail"].get("kind") == "unavailable" for r in rows), rows
+            assert not [i for i in issues if i["channel"] == "rules"], issues
+
+            # Finding 6: a symbol-geometry error keeps the symbol, with a warning.
+            cycle_sch = ('(kicad_sch (uuid root) (lib_symbols (symbol "L:A" (extends "B")) (symbol "L:B" (extends "A")))'
+                         ' (symbol (uuid s1) (lib_id "L:A") (at 10 10 0) (property "Reference" "U1")))')
+            put("hot", {"Board.kicad_sch": cycle_sch})
+            m = kr.sheet_hotspots("hot", "Board")
+            assert [w["reason"] for w in m["warnings"]] == ["symbol geometry unavailable"], m["warnings"]
+            assert m["views"][0]["elements"][0]["confidence"] == "approximate"
+
+            # ... and a hotspot failure in build_project keeps the schematic SVGs.
+            for side in ("base", "head"):
+                put(side, {"H/H.kicad_sch": "(kicad_sch (uuid root))"})
+                put(f"review/H/{side}", {"erc.json": '{"sheets": []}',
+                                         "sch/H.svg": '<svg viewBox="0 0 320 213"><path d="M10 10H310"/></svg>'})
+            err = io.StringIO()
+            with contextlib.redirect_stdout(err), \
+                 patch.object(kr, "sheet_hotspots", side_effect=ValueError("recursive schematic hierarchy")):
+                report = kr.build_project({"dir": "H", "name": "H", "status": "modified"}, {}, kr.DEFAULT_SETTINGS)
+            root_page = next(pg for pg in report["sheets"] if pg["path"] == "/")
+            assert root_page["svg"]["base"] and root_page["svg"]["head"], root_page
+            assert root_page["hotspots"] == {"base": None, "head": None}, root_page["hotspots"]
+            assert "::warning::" in err.getvalue() and "hotspots unavailable" in err.getvalue(), err.getvalue()
+        finally:
+            os.chdir(old)
+
+
+test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors()
+print("ok F5 optional evidence survives bad project JSON and hotspot errors")
