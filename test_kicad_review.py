@@ -5923,7 +5923,7 @@ with _DpTmp() as t:
         os.chdir(old_cwd)
 print("ok DP-S2 single-revision project ignores the base side")
 
-# DP-S3: a design report skips the base side of the libraries, release and interface checks, even when base inputs are on disk.
+# DP-S2B: a design report skips the base side of the libraries, release and interface checks, even when base inputs are on disk.
 with _DpTmp() as t:
     old_cwd = os.getcwd()
     try:
@@ -5962,7 +5962,7 @@ with _DpTmp() as t:
         assert all(not v["new"] for c in one["checks"] for v in c["violations"]), one["checks"]
     finally:
         os.chdir(old_cwd)
-print("ok DP-S3 single-revision project skips base libraries, release and interface checks")
+print("ok DP-S2B single-revision project skips base libraries, release and interface checks")
 
 # DP-S5: 02's still can exist without a model; all base artifacts are unreadable in single mode.
 import builtins, contextlib, struct as _dpstruct, zlib as _dpzlib
