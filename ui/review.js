@@ -122,19 +122,6 @@ function designBar(link) {   // commit, ref, date and subject of the design on s
     + (s.message ? `<span class="design-message" title="${esc(s.message)}">${esc(s.message)}</span>` : "");
 }
 const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
-let review3dLoading = null;
-function ensureReview3D() {
-  if (window.Review3D) return Promise.resolve(window.Review3D);
-  if (!review3dLoading && globalThis.document && location.protocol.startsWith('http')) {
-    review3dLoading = new Promise(resolve => {
-      const s = document.createElement('script');
-      s.src = 'review3d.js';
-      s.onload = s.onerror = () => resolve(window.Review3D);
-      document.head.appendChild(s);
-    });
-  }
-  return review3dLoading || Promise.resolve(null);
-}
 
 // The board still is 02's head poster (`board.poster3d.head`, 1600 x 1000, CSS-scaled to the 8:5 card).
 // designCard is only a placeholder; the image comes from 02's gunzip and poster3d helpers.
@@ -145,7 +132,6 @@ function designCard(p) {
 async function fillDesignCard(p) {   // called by renderNav once the card is in the DOM
   const id = p.board?.poster3d?.head, card = $("#nav [data-design-poster]");
   if (!id || !card) return;
-  if (!window.Review3D) await ensureReview3D();
   try {
     const image = await designPoster(id);   // 02's poster3d('head', id, session): HTMLImageElement | null, owned by 02's session
     if (image && card.isConnected && !card.contains(image)) {
@@ -162,7 +148,7 @@ async function fillDesignCard(p) {   // called by renderNav once the card is in 
 }
 // The still is a page-lifetime image from Review3D.poster3d with no session, so it works in sheet view and survives a viewer closing.
 const designPoster = id => window.Review3D?.poster3d ? window.Review3D.poster3d("head", id) : Promise.resolve(null);
-const pcbDrawBlobUrl = async id => (await ensureReview3D())?.blobUrl(id, "image/svg+xml") ?? null;   // 02's shared gunzip + blob-URL cache
+const pcbDrawBlobUrl = async id => (await window.Review3D?.blobUrl(id, "image/svg+xml")) ?? null;   // 02's shared gunzip + blob-URL cache
 function designPcbDrawCard(p) {
   const head = p.board?.pcbdraw?.head;
   if (!head) return "";

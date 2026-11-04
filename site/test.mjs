@@ -5738,3 +5738,14 @@ test('a missing thumbnail asset leaves every row a placeholder, and never fails 
     assert.equal((await thumbnailsFor(gh, 'tok', '/repos/o/r', 'A', [sha40(1)])).size, 0);
   } finally { restore(); }
 });
+
+test('a stored report with a board still but no 3D model inlines poster code only and loads no script at run time', () => {
+  const data = { version: 1, blobs: { poster: 'png-base64' }, projects: [{ dir: 'p', changes: [], board: { poster3d: { head: 'poster' } } }] };
+  const bundle = '<script type="application/octet-stream" id="three-bundle">retained</script>';
+  const html = currentReport(storedImageReport(data) + bundle);
+  assert.equal(html.split('window.Review3D = (() =>').length - 1, 1, 'review3d.js inlined once');
+  assert.ok(!html.includes('id="three-bundle"') && !html.includes('id="three-decode-worker"'), 'no 3D bundle without a model');
+  assert.ok(!html.includes('src="review3d.js"'));
+  assert.doesNotMatch(html, /\.src\s*=\s*['"][^'"]*\.js['"]/, 'self-contained report must not load scripts at run time');
+  assert.ok(html.indexOf('window.Review3D = (() =>') < html.indexOf('const D = window.REVIEW_DATA'));
+});

@@ -408,6 +408,14 @@ for asset in ('board-gl.js', 'appearance-state.js', 'appearance.js', 'board-mark
 assert 'globalThis.ImageView' in inline_page('window.REVIEW_DATA={};')
 assert 'window.BoardMarks' in html and 'window.BoardDiff' in html
 assert html.index('window.BoardMarks') < html.index('window.BoardDiff') < html.index('const D = window.REVIEW_DATA')
+# A report with a board still but no 3D model inlines the poster code only, and loads no script at run time.
+poster_page = inline_page('window.REVIEW_DATA = {"projects":[{"board":{"poster3d":{"head":"poster"}}}],"blobs":{"poster":"x"}};')
+assert poster_page.count('window.Review3D = (() =>') == 1, 'poster-only report inlines review3d.js once'
+assert 'id="three-bundle"' not in poster_page and 'id="three-decode-worker"' not in poster_page, 'no 3D bundle without a model'
+assert 'src="review3d.js"' not in poster_page and not re.search(r"""\.src\s*=\s*['"][^'"]*\.js['"]""", poster_page), \
+    'self-contained report must not load scripts at run time'
+assert poster_page.index('window.Review3D = (() =>') < poster_page.index('const D = window.REVIEW_DATA')
+print("ok poster-only report")
 assert not re.search(r'<script[^>]+src=', html)
 assert html.count('window.ThreeStudio=') == 1 and 'function normalizeLighting(value)' in html
 assert html.index('window.ThreeStudio=') < html.index('const D = window.REVIEW_DATA')
