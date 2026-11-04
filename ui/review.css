@@ -769,3 +769,12 @@ body.shot #image-search { display:none; }
 body.design-single #toolbar [data-compare], body.design-single #project-filter, body.design-single #image-search-side, body.design-single .board-mark-legend, body.design-single .diff-mark-legend, body.design-single .board-mark-key { display:none; }
 .design-message { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--tx2); }
 body.design-single .review-bar { overflow-x:auto; }
+
+.design-card { margin:var(--sp-2) 0 var(--sp-3); box-sizing:border-box; width:100%; }
+.design-card .design-poster { display:block; width:100%; max-width:100%; height:auto; aspect-ratio:8/5; object-fit:contain; background:var(--inset); border:1px solid var(--hair); border-radius:var(--r-2); box-sizing:border-box; }
+.design-card figcaption { margin-top:var(--sp-1); font:var(--fs-xs) var(--font-mono); }
+.design-pcbdraw { position:relative; }
+.design-pcbdraw .pcbdraw-actions { margin-top:var(--sp-1); display:flex; justify-content:flex-end; }
+.design-pcbdraw .pcbdraw-toggle { min-height:24px; padding:2px 8px; font:var(--fs-xs) var(--font-mono); color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:var(--r-1); cursor:pointer; }
+.design-pcbdraw .pcbdraw-toggle:hover { border-color:var(--accent); }
+.design-pcbdraw .pcbdraw-note { margin:0; padding:var(--sp-2); font:var(--fs-xs) var(--font-sans); color:var(--muted); background:var(--inset); border:1px solid var(--hair); border-radius:var(--r-2); }

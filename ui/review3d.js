@@ -5,7 +5,32 @@ window.Review3D = (() => {
   style.textContent = `.mode-3d [hidden]{display:none!important}.mode-3d .error3d{position:absolute;bottom:16px;left:16px;right:16px;z-index:3;padding:12px;background:var(--surface);color:var(--text);border:1px solid var(--line)}.mode-3d .error3d{overflow-wrap:anywhere;max-height:calc(100% - 32px);overflow:auto;box-sizing:border-box}.mode-3d .error3d button{min-height:32px;cursor:pointer;color:var(--text);background:var(--surface);border:1px solid var(--line);padding:4px 12px}.mode-3d .error3d p{margin:0 0 8px}.mode-3d button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.mode-3d .view3d{min-width:0;position:relative}.mode-3d .view3d.one{grid-column:1/-1}.mode-3d canvas{display:block;width:100%;height:100%}.mode-3d .marker3d,.tip3d{position:absolute;z-index:2;pointer-events:none;transform:translate(-50%,-100%);font:700 13px system-ui,sans-serif;line-height:1;white-space:nowrap;color:var(--text);text-shadow:0 1px 2px var(--paper),1px 0 2px var(--paper),-1px 0 2px var(--paper),0 -1px 2px var(--paper)}.tip3d{text-shadow:none;padding:3px 5px;background:var(--surface);border:1px solid var(--line);border-radius:3px}.loading,.empty3d{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);margin:0}#modes button[aria-disabled=true]{cursor:not-allowed;opacity:.55}`;
   document.head.appendChild(style);
   let active = null, bundle;
+  let defaultSession = null;
+  function getSession() {
+    if (active) return active;
+    if (!defaultSession || defaultSession.dead) {
+      defaultSession = {
+        dead: false,
+        urls: new Set(),
+        resourceCounts: { workers: 0, urls: 0, pending: 0 },
+        pending: new Map(),
+        abort: new AbortController()
+      };
+    }
+    return defaultSession;
+  }
   const gunzip = b64 => new Response(new Blob([Uint8Array.from(atob(b64), c => c.charCodeAt(0))]).stream().pipeThrough(new DecompressionStream("gzip")));
+  async function blobUrl(id, type = 'image/png', s = getSession()) {
+    if (!id || !window.REVIEW_DATA?.blobs?.[id]) return null;
+    s = s || getSession();
+    s.blobUrls = s.blobUrls || new Map();
+    if (s.blobUrls.has(id)) return s.blobUrls.get(id);
+    const bytes = await guardSession(s, gunzip(window.REVIEW_DATA.blobs[id]).arrayBuffer());
+    const url = URL.createObjectURL(new Blob([bytes], {type}));
+    s.urls.add(url); s.resourceCounts.urls = s.urls.size;
+    s.blobUrls.set(id, url);
+    return url;
+  }
   function guardSession(s, promise, discard = () => {}) {
     return promise.then(value => {
       if (s.dead) { discard(value); throw new DOMException('Viewer closed', 'AbortError'); }
@@ -126,14 +151,19 @@ window.Review3D = (() => {
       });
     } catch (error) { return Promise.reject(error); }
   }
-  async function poster3d(side, id, s) {
-    if (!id || !window.REVIEW_DATA.blobs[id]) return null;
-    // Small stills retain the native stream path; model and vendor bytes use the worker.
-    const bytes = await guardSession(s, gunzip(window.REVIEW_DATA.blobs[id]).arrayBuffer());
-    const url = URL.createObjectURL(new Blob([bytes], {type:'image/png'}));
-    s.urls.add(url); s.resourceCounts.urls = s.urls.size;
-    const image = new Image(); image.dataset.poster = side; image.alt = side + ' revision 3D preview';
-    image.src = url; await guardSession(s, image.decode()); return image;
+  async function poster3d(side, id, s = getSession()) {
+    if (!id || !window.REVIEW_DATA?.blobs?.[id]) return null;
+    s = s || getSession();
+    s.posters = s.posters || new Map();
+    if (s.posters.has(id)) return s.posters.get(id);
+    const promise = (async () => {
+      const url = await blobUrl(id, 'image/png', s);
+      if (!url) return null;
+      const image = new Image(); image.dataset.poster = side; image.alt = side + ' revision 3D preview';
+      image.src = url; await guardSession(s, image.decode()); return image;
+    })();
+    s.posters.set(id, promise);
+    return promise;
   }
   const loadThree = async s => {
     if (window.THREE3D) return window.THREE3D;
@@ -803,7 +833,8 @@ window.Review3D = (() => {
     mesh.name='parts:missing';mesh.raycast=()=>{};return mesh;
   }
 
-  async function show(stage, project, appState, {single = false} = {}) {
+  async function show(stage, project, appState, options = {}) {
+    const single = options.single !== undefined ? options.single : (window.REVIEW_DATA?.mode === "single");
     window.Review3D.onStateChange?.({partSelection:null});
     dispose();
     const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m;
@@ -1021,5 +1052,5 @@ window.Review3D = (() => {
   // Node and headless browser contracts share one explicit test seam.
   const testSeam = {sampleFrame, session:()=>active, poster3d, parseByDigest, releaseGpu};
   if (typeof module !== 'undefined') module.exports = testSeam;
-  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,state:null,testSeam};
+  return {show,dispose,cameraBar,frame,focus,focusPart,changeForPart,setHidden,setLighting,setAssembled,normalizeLighting,cameraState,setCameraState,setBlend,toggleBlend,resize,setRevision,session:getSession,poster3d,blobUrl,gunzip,state:null,testSeam};
 })();

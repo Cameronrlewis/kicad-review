@@ -7084,3 +7084,54 @@ CHECKS.push(["design framed: single report never enables PR discussions", "", `
   for(let n=0;n<200&&!window.__dpProof;n++)await new Promise(r=>setTimeout(r,50));
   return window.__dpProof?.ok===true && window.__dpComposerRequests===0 && !document.querySelector('dialog[open]') || JSON.stringify({proof:window.__dpProof,requests:window.__dpComposerRequests});
 `]);
+CHECKS.push(
+  ["design empty project: no drawing or board still opens and says so", "", `
+    const i = D.projects.findIndex(p => !p.board.layers.length && p.sheets.every(s => !s.svg)); if (i < 0) return 'skip';
+    ${TO_SINGLE}
+    await applyState({p: i});
+    const empty = document.querySelector('#stage .empty');
+    return !!empty && empty.textContent === 'This drawing is unavailable.' && !document.querySelector('#stage .stack') || 'stage ' + document.querySelector('#stage').textContent;
+  `],
+  ["design page: the poster and header fit their docks and the board still is decoded once", "", `
+    ${TO_SINGLE}
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+    const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.dpposter = btoa(String.fromCharCode(...gz)); proj().board.poster3d = {head: 'dpposter'};
+    await applyState({p: 0, v: 'sheet:/'}); renderNav();
+    await new Promise(r => setTimeout(r, 300));
+    const img = document.querySelector('#nav .design-poster'), nav = document.querySelector('#nav');
+    if (!img || img.hidden || !img.src.startsWith('blob:')) return 'poster not shown';
+    renderNav(); await new Promise(r => setTimeout(r, 300));
+    const cards = document.querySelectorAll('#nav .design-poster');
+    return cards.length === 1 && img.complete && img.naturalWidth > 0 && img.getBoundingClientRect().width <= nav.getBoundingClientRect().width && img.alt.endsWith('board, rendered') || 'poster size or duplicate card';
+  `],
+  ["design 3D: one viewport, no base pane, no comparison notice", "v=3d", `
+    if (!window.Review3D || !REVIEW_DATA.projects[0].board.model3d?.head) return 'skip';
+    ${TO_SINGLE}
+    const stage = document.querySelector('#stage');
+    await Review3D.show(stage, proj(), {...S, m: 'side', s: null});
+    const hosts = [...stage.querySelectorAll('.view3d')];
+    if (hosts.length !== 1 || !hosts[0].classList.contains('one') || hosts[0].querySelector('.tag').textContent !== 'Design') return 'hosts ' + hosts.length;
+    if (Review3D.state.renderers.length !== 1 || stage.textContent.includes('not in this revision') || stage.querySelector('.no-change-notice')) return 'base pane or notice';
+    return Review3D.state.cameras.length === 1;
+  `],
+);
+CHECKS.push(["design PcbDraw card: front plot, back toggle, note when skipped", "", `
+  ${TO_SINGLE}
+  const setPlot = async (value) => { proj().board.pcbdraw = {head: value, base: null}; await applyState({p: 0, v: 'sheet:/'}); renderNav(); await new Promise(r => setTimeout(r, 200)); };
+  const svg = (fill) => new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="25"><rect width="40" height="25" fill="' + fill + '"/></svg>');
+  const gz = async (bytes) => btoa(String.fromCharCode(...new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer())));
+  D.blobs.dppcbf = await gz(svg('#2a6')); D.blobs.dppcbb = await gz(svg('#a26'));
+  await setPlot({front: 'dppcbf', back: 'dppcbb', note: ''});
+  const card = document.querySelector('#nav .design-pcbdraw'); if (!card) return 'card missing';
+  const front = card.querySelector('img[data-face="front"]');
+  if (!front || !front.src.startsWith('blob:') || front.hidden) return 'front plot not shown';
+  const toggle = card.querySelector('button[data-face="back"]'); if (!toggle) return 'no Back toggle';
+  toggle.click(); await new Promise(r => setTimeout(r, 100));
+  const shown = card.querySelector('img:not([hidden])');
+  if (!shown || shown.dataset.face !== 'back') return 'Back toggle did not switch the plot';
+  await setPlot({front: null, back: null, note: 'PcbDraw skipped: no closed Edge.Cuts outline.'});
+  const noted = document.querySelector('#nav .design-pcbdraw');
+  if (!noted || !noted.textContent.includes('no closed Edge.Cuts outline') || noted.querySelector('img')) return 'skip note not shown alone';
+  return true;
+`]);

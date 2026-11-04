@@ -122,6 +122,107 @@ function designBar(link) {   // commit, ref, date and subject of the design on s
     + (s.message ? `<span class="design-message" title="${esc(s.message)}">${esc(s.message)}</span>` : "");
 }
 const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
+let review3dLoading = null;
+function ensureReview3D() {
+  if (window.Review3D) return Promise.resolve(window.Review3D);
+  if (!review3dLoading && globalThis.document) {
+    review3dLoading = new Promise(resolve => {
+      const s = document.createElement('script');
+      s.src = 'review3d.js';
+      s.onload = s.onerror = () => resolve(window.Review3D);
+      document.head.appendChild(s);
+    });
+  }
+  return review3dLoading || Promise.resolve(null);
+}
+if (!window.Review3D) ensureReview3D();
+
+// The board still is 02's head poster (`board.poster3d.head`, 1600 x 1000, CSS-scaled to the 8:5 card).
+// designCard is only a placeholder; the image comes from 02's gunzip and poster3d helpers.
+function designCard(p) {
+  const id = p.board?.poster3d?.head;
+  return id ? `<figure class="design-card" data-design-poster="${esc(id)}"><figcaption class="muted">${designLabel()}</figcaption></figure>` : "";
+}
+async function fillDesignCard(p) {   // called by renderNav once the card is in the DOM
+  const id = p.board?.poster3d?.head, card = $("#nav [data-design-poster]");
+  if (!id || !card) return;
+  await ensureReview3D();
+  const image = await designPoster(id);   // 02's poster3d('head', id, session): HTMLImageElement | null, owned by 02's session
+  if (image && card.isConnected && !card.contains(image)) { image.className = "design-poster"; image.alt = `${p.name} board, rendered`; card.prepend(image); }
+}
+// designPoster wraps the public boundary already defined in 02 Task 6; verify its committed exports before wiring:
+//   Review3D.session()                  -> the live renderer session created by show(), or null after dispose()
+//   Review3D.poster3d(side, blobId, s)  -> Promise<HTMLImageElement|null>, owned by that session
+// Reuse those exact exports; report any committed-implementation mismatch as an integration finding.
+// 06 adds no decoder, blob-URL cache or session of its own.
+function designPoster(id) {
+  const session = window.Review3D?.session();
+  return session ? window.Review3D.poster3d("head", id, session) : Promise.resolve(null);
+}
+function designPcbDrawCard(p) {
+  const head = p.board?.pcbdraw?.head;
+  if (!head) return "";
+  if (head.note && !head.front) {
+    return `<div class="design-card design-pcbdraw"><p class="muted pcbdraw-note">${esc(head.note)}</p></div>`;
+  }
+  if (!head.front) return "";
+  return `<figure class="design-card design-pcbdraw" data-pcbdraw-front="${esc(head.front)}" ${head.back ? `data-pcbdraw-back="${esc(head.back)}"` : ""}>` +
+    `<div class="pcbdraw-stage"></div>` +
+    `${head.back ? `<div class="pcbdraw-actions"><button type="button" class="pcbdraw-toggle" data-face="back" title="Show back plot">Back</button></div>` : ""}` +
+    `<figcaption class="muted">${esc(p.name)} · PcbDraw</figcaption></figure>`;
+}
+async function fillDesignPcbDrawCard(p) {
+  const card = $("#nav .design-pcbdraw[data-pcbdraw-front]");
+  if (!card) return;
+  await ensureReview3D();
+  const frontId = card.dataset.pcbdrawFront, backId = card.dataset.pcbdrawBack;
+  const stage = card.querySelector(".pcbdraw-stage");
+  if (!stage) return;
+  const session = window.Review3D?.session();
+  if (frontId && window.Review3D?.blobUrl) {
+    const frontUrl = await window.Review3D.blobUrl(frontId, "image/svg+xml", session);
+    if (frontUrl && card.isConnected) {
+      let img = stage.querySelector('img[data-face="front"]');
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "design-poster design-pcbdraw-plot";
+        img.dataset.face = "front";
+        img.alt = `${p.name} front plot (PcbDraw)`;
+        stage.appendChild(img);
+      }
+      img.src = frontUrl;
+      img.hidden = false;
+    }
+  }
+  if (backId && window.Review3D?.blobUrl) {
+    const backUrl = await window.Review3D.blobUrl(backId, "image/svg+xml", session);
+    if (backUrl && card.isConnected) {
+      let img = stage.querySelector('img[data-face="back"]');
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "design-poster design-pcbdraw-plot";
+        img.dataset.face = "back";
+        img.alt = `${p.name} back plot (PcbDraw)`;
+        img.hidden = true;
+        stage.appendChild(img);
+      }
+      img.src = backUrl;
+    }
+  }
+  const btn = card.querySelector('button[data-face="back"]');
+  if (btn) {
+    let currentFace = "front";
+    btn.onclick = () => {
+      currentFace = currentFace === "front" ? "back" : "front";
+      const f = stage.querySelector('img[data-face="front"]');
+      const b = stage.querySelector('img[data-face="back"]');
+      if (f) f.hidden = currentFace !== "front";
+      if (b) b.hidden = currentFace !== "back";
+      btn.textContent = currentFace === "front" ? "Back" : "Front";
+      btn.setAttribute("title", currentFace === "front" ? "Show back plot" : "Show front plot");
+    };
+  }
+}
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
@@ -230,6 +331,12 @@ function renderNav() {
     renderLayers();
     const summary = $("[data-board-summary]"), geometry = p.board.geometry?.head || p.board.geometry?.base;
     if (summary && geometry) loadBoardScene(geometry).then(scene => { if (scene && summary.isConnected && proj() === p) summary.textContent = projectBoardSummary(scene); }).catch(() => {});
+  }
+  if (single() && leftTab === "project") {   // no library changes to list; the board still sits under the project name
+    $("#nav").querySelectorAll("h3").forEach(h => { if (h.textContent === "Libraries") { h.nextElementSibling.remove(); h.remove(); } });
+    $("#nav .project-name")?.insertAdjacentHTML("afterend", designCard(p) + designPcbDrawCard(p));
+    fillDesignCard(p).catch(() => {});
+    fillDesignPcbDrawCard(p).catch(() => {});
   }
   const grip = $("#nav .left-splitter");
   const resize = width => { leftWidth=Math.max(220,Math.min(520,width)); syncLeftDock(); grip.setAttribute("aria-valuenow",leftWidth); persistLeftDock(); };
