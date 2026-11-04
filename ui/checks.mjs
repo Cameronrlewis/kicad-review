@@ -6912,7 +6912,7 @@ const TO_SINGLE = `
     if (p.board.model3d) { p.board.model3d.base = null; p.board.model3d.changed = false; }
     for (const c of p.checks) { c.new_errors = c.new_warnings = c.fixed = 0; for (const v of c.violations) v.new = false; }
   }
-  rightTab = 'checks'; S.t = 'checks'; S.m = 'side'; S.s = null; S.v = null;
+  rightTab = 'checks'; leftTab = 'project'; S.t = 'checks'; S.m = 'side'; S.s = null; S.v = null;
   document.body.classList.add('design-single');
 `;
 CHECKS.push(
@@ -7096,23 +7096,49 @@ CHECKS.push(
     ${TO_SINGLE}
     const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
     const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
-    D.blobs.dpposter = btoa(String.fromCharCode(...gz)); proj().board.poster3d = {head: 'dpposter'};
+    let decodeCount = 0;
+    const rawPoster = btoa(String.fromCharCode(...gz));
+    Object.defineProperty(D.blobs, 'dpposter', {
+      get() { decodeCount++; return rawPoster; },
+      configurable: true,
+      enumerable: true
+    });
+    proj().board.poster3d = {head: 'dpposter'};
     await applyState({p: 0, v: 'sheet:/'}); renderNav();
     await new Promise(r => setTimeout(r, 300));
     const img = document.querySelector('#nav .design-poster'), nav = document.querySelector('#nav');
     if (!img || img.hidden || !img.src.startsWith('blob:')) return 'poster not shown';
     renderNav(); await new Promise(r => setTimeout(r, 300));
     const cards = document.querySelectorAll('#nav .design-poster');
-    return cards.length === 1 && img.complete && img.naturalWidth > 0 && img.getBoundingClientRect().width <= nav.getBoundingClientRect().width && img.alt.endsWith('board, rendered') || 'poster size or duplicate card';
+    if (cards.length !== 1 || !img.complete || img.naturalWidth <= 0 || img.getBoundingClientRect().width > nav.getBoundingClientRect().width || !img.alt.endsWith('board, rendered')) return 'poster size or duplicate card';
+    if (decodeCount !== 1) return 'poster decoded ' + decodeCount + ' times';
+    return true;
   `],
   ["design 3D: one viewport, no base pane, no comparison notice", "v=3d", `
     if (!window.Review3D || !REVIEW_DATA.projects[0].board.model3d?.head) return 'skip';
     ${TO_SINGLE}
+    const p = proj();
+    let forbiddenBaseRead = false;
+    const baseTrap = (id) => {
+      Object.defineProperty(D.blobs, id, {
+        get() { forbiddenBaseRead = true; return 'H4sIAAAAAAAC/wMAAAAAAAAAAAA='; },
+        configurable: true,
+        enumerable: true
+      });
+    };
+    baseTrap('dp-base-model');
+    baseTrap('dp-base-parts');
+    baseTrap('dp-base-poster');
+    p.board.model3d.base = 'dp-base-model';
+    p.board.parts3d = {head: p.board.parts3d?.head || null, base: 'dp-base-parts'};
+    p.board.poster3d = {head: p.board.poster3d?.head || null, base: 'dp-base-poster'};
     const stage = document.querySelector('#stage');
-    await Review3D.show(stage, proj(), {...S, m: 'side', s: null});
+    await Review3D.show(stage, p, {...S, m: 'side', s: null});
+    if (forbiddenBaseRead) return 'forbidden base blob accessed in single mode';
     const hosts = [...stage.querySelectorAll('.view3d')];
     if (hosts.length !== 1 || !hosts[0].classList.contains('one') || hosts[0].querySelector('.tag').textContent !== 'Design') return 'hosts ' + hosts.length;
     if (Review3D.state.renderers.length !== 1 || stage.textContent.includes('not in this revision') || stage.querySelector('.no-change-notice')) return 'base pane or notice';
+    if (!Review3D.state.allowedSides || Review3D.state.allowedSides.join() !== 'head') return 'allowedSides not head-only: ' + Review3D.state.allowedSides;
     return Review3D.state.cameras.length === 1;
   `],
 );

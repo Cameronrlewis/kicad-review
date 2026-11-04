@@ -125,7 +125,7 @@ const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
 let review3dLoading = null;
 function ensureReview3D() {
   if (window.Review3D) return Promise.resolve(window.Review3D);
-  if (!review3dLoading && globalThis.document) {
+  if (!review3dLoading && globalThis.document && location.protocol.startsWith('http')) {
     review3dLoading = new Promise(resolve => {
       const s = document.createElement('script');
       s.src = 'review3d.js';
@@ -135,7 +135,6 @@ function ensureReview3D() {
   }
   return review3dLoading || Promise.resolve(null);
 }
-if (!window.Review3D) ensureReview3D();
 
 // The board still is 02's head poster (`board.poster3d.head`, 1600 x 1000, CSS-scaled to the 8:5 card).
 // designCard is only a placeholder; the image comes from 02's gunzip and poster3d helpers.
@@ -146,9 +145,19 @@ function designCard(p) {
 async function fillDesignCard(p) {   // called by renderNav once the card is in the DOM
   const id = p.board?.poster3d?.head, card = $("#nav [data-design-poster]");
   if (!id || !card) return;
-  await ensureReview3D();
-  const image = await designPoster(id);   // 02's poster3d('head', id, session): HTMLImageElement | null, owned by 02's session
-  if (image && card.isConnected && !card.contains(image)) { image.className = "design-poster"; image.alt = `${p.name} board, rendered`; card.prepend(image); }
+  if (!window.Review3D) await ensureReview3D();
+  try {
+    const image = await designPoster(id);   // 02's poster3d('head', id, session): HTMLImageElement | null, owned by 02's session
+    if (image && card.isConnected && !card.contains(image)) {
+      image.className = "design-poster";
+      image.alt = `${p.name} board, rendered`;
+      card.prepend(image);
+    } else if (!image && card.isConnected) {
+      card.remove();
+    }
+  } catch {
+    if (card.isConnected) card.remove();
+  }
 }
 // designPoster wraps the public boundary already defined in 02 Task 6; verify its committed exports before wiring:
 //   Review3D.session()                  -> the live renderer session created by show(), or null after dispose()
@@ -156,8 +165,23 @@ async function fillDesignCard(p) {   // called by renderNav once the card is in 
 // Reuse those exact exports; report any committed-implementation mismatch as an integration finding.
 // 06 adds no decoder, blob-URL cache or session of its own.
 function designPoster(id) {
-  const session = window.Review3D?.session();
-  return session ? window.Review3D.poster3d("head", id, session) : Promise.resolve(null);
+  if (!window.Review3D?.poster3d) return Promise.resolve(null);
+  const session = window.Review3D.session();
+  return window.Review3D.poster3d("head", id, session);
+}
+const pcbdrawBlobUrls = new Map();
+addEventListener('pagehide', () => {
+  for (const url of pcbdrawBlobUrls.values()) URL.revokeObjectURL(url);
+  pcbdrawBlobUrls.clear();
+});
+async function pcbDrawBlobUrl(id) {
+  if (!id || !D.blobs?.[id]) return null;
+  if (pcbdrawBlobUrls.has(id)) return pcbdrawBlobUrls.get(id);
+  const bin = Uint8Array.from(atob(D.blobs[id]), c => c.charCodeAt(0));
+  const text = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  const url = URL.createObjectURL(new Blob([text], { type: "image/svg+xml" }));
+  pcbdrawBlobUrls.set(id, url);
+  return url;
 }
 function designPcbDrawCard(p) {
   const head = p.board?.pcbdraw?.head;
@@ -174,14 +198,16 @@ function designPcbDrawCard(p) {
 async function fillDesignPcbDrawCard(p) {
   const card = $("#nav .design-pcbdraw[data-pcbdraw-front]");
   if (!card) return;
-  await ensureReview3D();
   const frontId = card.dataset.pcbdrawFront, backId = card.dataset.pcbdrawBack;
   const stage = card.querySelector(".pcbdraw-stage");
   if (!stage) return;
-  const session = window.Review3D?.session();
-  if (frontId && window.Review3D?.blobUrl) {
-    const frontUrl = await window.Review3D.blobUrl(frontId, "image/svg+xml", session);
-    if (frontUrl && card.isConnected) {
+  try {
+    const frontUrl = await pcbDrawBlobUrl(frontId);
+    if (!frontUrl) {
+      if (card.isConnected) card.remove();
+      return;
+    }
+    if (card.isConnected) {
       let img = stage.querySelector('img[data-face="front"]');
       if (!img) {
         img = document.createElement("img");
@@ -193,34 +219,36 @@ async function fillDesignPcbDrawCard(p) {
       img.src = frontUrl;
       img.hidden = false;
     }
-  }
-  if (backId && window.Review3D?.blobUrl) {
-    const backUrl = await window.Review3D.blobUrl(backId, "image/svg+xml", session);
-    if (backUrl && card.isConnected) {
-      let img = stage.querySelector('img[data-face="back"]');
-      if (!img) {
-        img = document.createElement("img");
-        img.className = "design-poster design-pcbdraw-plot";
-        img.dataset.face = "back";
-        img.alt = `${p.name} back plot (PcbDraw)`;
-        img.hidden = true;
-        stage.appendChild(img);
+    if (backId) {
+      const backUrl = await pcbDrawBlobUrl(backId);
+      if (backUrl && card.isConnected) {
+        let img = stage.querySelector('img[data-face="back"]');
+        if (!img) {
+          img = document.createElement("img");
+          img.className = "design-poster design-pcbdraw-plot";
+          img.dataset.face = "back";
+          img.alt = `${p.name} back plot (PcbDraw)`;
+          img.hidden = true;
+          stage.appendChild(img);
+        }
+        img.src = backUrl;
       }
-      img.src = backUrl;
     }
-  }
-  const btn = card.querySelector('button[data-face="back"]');
-  if (btn) {
-    let currentFace = "front";
-    btn.onclick = () => {
-      currentFace = currentFace === "front" ? "back" : "front";
-      const f = stage.querySelector('img[data-face="front"]');
-      const b = stage.querySelector('img[data-face="back"]');
-      if (f) f.hidden = currentFace !== "front";
-      if (b) b.hidden = currentFace !== "back";
-      btn.textContent = currentFace === "front" ? "Back" : "Front";
-      btn.setAttribute("title", currentFace === "front" ? "Show back plot" : "Show front plot");
-    };
+    const btn = card.querySelector('button[data-face="back"]');
+    if (btn) {
+      let currentFace = "front";
+      btn.onclick = () => {
+        currentFace = currentFace === "front" ? "back" : "front";
+        const f = stage.querySelector('img[data-face="front"]');
+        const b = stage.querySelector('img[data-face="back"]');
+        if (f) f.hidden = currentFace !== "front";
+        if (b) b.hidden = currentFace !== "back";
+        btn.textContent = currentFace === "front" ? "Back" : "Front";
+        btn.setAttribute("title", currentFace === "front" ? "Show back plot" : "Show front plot");
+      };
+    }
+  } catch {
+    if (card.isConnected) card.remove();
   }
 }
 function renderHeader() {

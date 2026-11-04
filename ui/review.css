@@ -775,6 +775,6 @@ body.design-single .review-bar { overflow-x:auto; }
 .design-card figcaption { margin-top:var(--sp-1); font:var(--fs-xs) var(--font-mono); }
 .design-pcbdraw { position:relative; }
 .design-pcbdraw .pcbdraw-actions { margin-top:var(--sp-1); display:flex; justify-content:flex-end; }
-.design-pcbdraw .pcbdraw-toggle { min-height:24px; padding:2px 8px; font:var(--fs-xs) var(--font-mono); color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:var(--r-1); cursor:pointer; }
+.design-pcbdraw .pcbdraw-toggle { min-height:44px; min-width:44px; padding:8px 12px; font:var(--fs-xs) var(--font-mono); color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:var(--r-1); cursor:pointer; display:inline-flex; align-items:center; justify-content:center; box-sizing:border-box; }
 .design-pcbdraw .pcbdraw-toggle:hover { border-color:var(--accent); }
 .design-pcbdraw .pcbdraw-note { margin:0; padding:var(--sp-2); font:var(--fs-xs) var(--font-sans); color:var(--muted); background:var(--inset); border:1px solid var(--hair); border-radius:var(--r-2); }
