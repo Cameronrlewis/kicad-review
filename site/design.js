@@ -59,6 +59,30 @@ export const projectsFromTree = (nodes) => [...new Set((nodes || []).filter((n) 
 export const projectKey = (dir) => enc(dir || '/');
 export const dirFromKey = (key) => { const dir = decodeURIComponent(key); return dir === '/' ? '' : dir; };
 
+// Canonicalize a project folder path: relative to repository root, no . or .. traversal segments,
+// and safe from query/fragment injection. Root is ''. Invalid or traversal folders return null.
+export function canonicalFolder(folder) {
+  if (typeof folder !== 'string') return null;
+  let dir;
+  try { dir = dirFromKey(folder); } catch { return null; }
+  if (dir === '') return '';
+  if (/[\x00-\x1f\x7f\\]/.test(dir)) return null;
+  const segments = dir.split('/');
+  for (const s of segments) {
+    if (!s || s === '.' || s === '..') return null;
+    let decoded = s;
+    try {
+      while (decoded.includes('%')) {
+        const next = decodeURIComponent(decoded);
+        if (next === decoded) break;
+        decoded = next;
+      }
+    } catch { return null; }
+    if (decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\')) return null;
+  }
+  return segments.join('/');
+}
+
 async function commitDetails(gh, token, root, sha) {
   const files = []; let commit;
   for (let page = 1; ; page++) {
@@ -113,12 +137,12 @@ export async function findDesign(gh, token, owner, repo, ref, dir, read = readSn
       const index = hit.snapshot.projects?.findIndex((p) => p.dir === dir) ?? -1;
       return index < 0 ? { state: 'missing', tip, reason: 'project' } : { state: 'found', ...hit, tip, exact: hit.exact ?? true, index };
     };
-    // The tip's details are the walk's first step; reading them first also proves the commit is readable.
-    let sha = tip, commit = await commitDetails(gh, token, root, tip);
     const exact = (await artifactAt(gh, token, root, tip, read)) ?? (await releaseAt(gh, token, root, ref, tip, readRelease));
     if (exact) return place(exact);
     if (shaRef.test(ref)) return { state: 'missing', tip };
+    let sha = tip;
     for (let steps = 0; steps < 500; steps += 1) { // ponytail: at most 500 first-parent commits; the nearest change is nearly always within a few
+      const commit = await commitDetails(gh, token, root, sha);
       if (changesProject(commit.files, dir)) {
         const hit = sha === tip ? null : await artifactAt(gh, token, root, sha, read);
         return hit ? place({ ...hit, exact: false }) : { state: 'missing', tip };
@@ -126,7 +150,6 @@ export async function findDesign(gh, token, owner, repo, ref, dir, read = readSn
       sha = commit.parents?.[0]?.sha;
       if (!sha) break;
       if (!hex40.test(sha)) throw new Error('invalid parent');
-      commit = await commitDetails(gh, token, root, sha);
     }
     return { state: 'missing', tip };
   } catch { return { state: 'error' }; }
@@ -161,7 +184,15 @@ export async function designRoute(request, env, { owner, repo, key, rest }, { ac
     return sessionRedirect(dirs.length === 1 ? `${path}/p/${projectKey(dirs[0])}/design${rest || ''}` : `${path}/projects`, 302, allowed.s);
   }
   let ref, dir;
-  try { ref = rest ? decodeURIComponent(rest.slice(1)) : allowed.repo.default_branch; dir = dirFromKey(key); } catch { ref = ''; dir = ''; }
+  try {
+    ref = rest ? decodeURIComponent(rest.slice(1)) : allowed.repo.default_branch;
+    const canonical = canonicalFolder(key);
+    if (canonical === null) return errorPage(404, ...generic, [projects], allowed.s);
+    dir = canonical;
+    key = projectKey(dir);
+  } catch {
+    return errorPage(404, ...generic, [projects], allowed.s);
+  }
   if (!refOk(ref)) return errorPage(404, ...generic, [projects], allowed.s);
   const found = await findDesign(gh, allowed.s.token, owner, repo, ref, dir);
   if (found.state === 'unknown') return errorPage(404, ...generic, [projects], allowed.s);
@@ -179,8 +210,14 @@ export async function designRoute(request, env, { owner, repo, key, rest }, { ac
 // The wrapper's optional design context from its query: requested ref, requested tip, report index and folder key.
 export function designQuery(params) {
   const value = (name, pattern) => (pattern.test(params.get(name) || '') ? params.get(name) : '');
+  const folder = params.get('folder');
+  let folderKey = '';
+  if (folder !== null) {
+    const canonical = canonicalFolder(folder);
+    if (canonical !== null) folderKey = projectKey(canonical);
+  }
   return { designRef: refOk(params.get('design') || '') ? params.get('design') : '', tip: value('tip', /^[0-9a-f]{7}$/),
-    projectIndex: value('p', /^\d{1,4}$/), folderKey: value('folder', /^(?!\.\.?$)[^/]{1,400}$/) };
+    projectIndex: value('p', /^\d{1,4}$/), folderKey };
 }
 
 // GET /r/:owner/:repo/design-release/:tag and .../:tag/raw: a tag's release snapshot, once its artifact has expired.

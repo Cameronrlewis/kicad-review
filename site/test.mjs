@@ -5003,7 +5003,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
 });
 
 // ---- Design page: the newest snapshot for a branch, tag or commit ----
-import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject } from './design.js';
+import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery } from './design.js';
 import { designMissingPage, projectsPage } from './pages.js'; // designsPage arrives with Task 8
 // The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
 const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
@@ -5108,11 +5108,21 @@ test('a folder missing from the report it would open is reported as missing, not
 });
 
 test('design discovery matrix: 403, 429 and 500 at each GitHub call are errors, and bad refs never reach GitHub', async () => {
-  const commits = [c(1, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  const commits = [c(2, [{ filename: 'README.md' }]), c(1, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
   for (const status of [403, 429, 500]) for (const fail of ['/commits?', '/actions/artifacts?', '/commits/'])
     assert.equal((await findDesign(chainGh(commits, { fail, status }), 't', 'o', 'r', 'main', 'A', readAs(commits))).state, 'error', `${status} at ${fail}`);
   const readerFailure = await findDesign(chainGh(commits), 't', 'o', 'r', 'main', 'A', async () => { throw Error('download 429'); });
   assert.equal(readerFailure.state, 'error');
+
+  let commitDetailsCalled = false;
+  const single = [c(1, [{ filename: 'A/A.kicad_sch' }], { snapshot: 21 })];
+  const gh = async (path) => {
+    if (path.includes('/commits/')) commitDetailsCalled = true;
+    return chainGh(single)(path);
+  };
+  const exactFound = await findDesign(gh, 't', 'o', 'r', 'main', 'A', readAs(single));
+  assert.equal(exactFound.state, 'found');
+  assert.equal(commitDetailsCalled, false, 'exact tip lookup never calls /commits/<tip>');
 });
 
 test('design discovery propagates artifact download and body failures, rather than offering another render', async()=>{
@@ -5223,6 +5233,9 @@ test('the release fallback opens the tag asset through the same wrapper, and its
   const top = await designGet('/r/Cameronrlewis/repo/design-release/v1.0/raw', routes, { headers: { 'Sec-Fetch-Dest': 'document' } });
   assert.equal(top.status, 302, 'a top-level visit to the raw file goes back to the wrapper');
   assert.equal(top.headers.get('Location'), '/r/Cameronrlewis/repo/design-release/v1.0');
+  const wrapper = await (await designGet('/r/Cameronrlewis/repo/design-release/v1.0', routes)).text();
+  assert.ok(!wrapper.includes('/a/undefined'), 'release wrapper derives threadsClient link from rawPath instead of /a/undefined');
+  assert.match(wrapper, /"link":"[^"]*\/design-release\/v1\.0"/);
 });
 
 test('a snapshot-only run opens its design, and the report wrapper names the design instead of a comparison', async () => {
@@ -5244,4 +5257,47 @@ test('a snapshot-only run opens its design, and the report wrapper names the des
   assert.equal(designName.test('kicad-design-ccccccc.html'), true);
   assert.equal(designName.test('kicad-review-aaaaaaa-bbbbbbb-pass.html'), false);
   assert.ok(designMissingPage({ user: 'u', owner: 'o', repo: 'r', ref: '<i>', sha: tipSha, canRender: true }).includes('&lt;i&gt;'));
+});
+
+test('designQuery and folder validation canonicalizes and re-encodes via projectKey, preventing traversal and injection', async () => {
+  assert.equal(canonicalFolder('A'), 'A');
+  assert.equal(canonicalFolder(''), '');
+  assert.equal(canonicalFolder('/'), '');
+  assert.equal(canonicalFolder('%2F'), '');
+  assert.equal(canonicalFolder('Student Design Teams/Horizon'), 'Student Design Teams/Horizon');
+  assert.equal(canonicalFolder('Student%20Design%20Teams%2FHorizon'), 'Student Design Teams/Horizon');
+  // Traversal and injection inputs are rejected or sanitized
+  assert.equal(canonicalFolder('..'), null);
+  assert.equal(canonicalFolder('%2e%2e'), null);
+  assert.equal(canonicalFolder('%252e%252e'), null);
+  assert.equal(canonicalFolder('a/../b'), null);
+  assert.equal(canonicalFolder('a/./b'), null);
+  assert.equal(canonicalFolder('a\x00b'), null);
+
+  // designQuery re-encodes via projectKey
+  const q1 = designQuery(new URLSearchParams('folder=%252e%252e'));
+  assert.equal(q1.folderKey, '', 'traversal folder query yields empty folderKey');
+  const q2 = designQuery(new URLSearchParams('folder=a%3Fb%23c'));
+  assert.equal(q2.folderKey, 'a%3Fb%23c', 'query and fragment chars are re-encoded');
+  const q3 = designQuery(new URLSearchParams('folder=A'));
+  assert.equal(q3.folderKey, 'A');
+  const q4 = designQuery(new URLSearchParams('folder=%2F'));
+  assert.equal(q4.folderKey, '%2F');
+
+  // reviewPage sanitizes folderKey
+  const traversalPage = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 77, name: 'kicad-design-bbbbbbb.html', folderKey: '%2e%2e' });
+  assert.ok(!traversalPage.includes('/p/%2e%2e/'), 'no traversal in reviewPage action links');
+  assert.ok(traversalPage.includes('/r/o/r/projects'), 'falls back to projects page');
+  const injectionPage = reviewPage({ user: 'u', owner: 'o', repo: 'r', id: 77, name: 'kicad-design-bbbbbbb.html', folderKey: 'a?b#c' });
+  assert.ok(injectionPage.includes('/p/a%3Fb%23c/'), 'query/fragment are encoded in reviewPage');
+
+  // designMissingPage sanitizes key
+  const missingTraversal = designMissingPage({ user: 'u', owner: 'o', repo: 'r', key: '%2e%2e', ref: 'main', sha: tipSha });
+  assert.ok(!missingTraversal.includes('/p/%2e%2e/'), 'no traversal in designMissingPage');
+  const missingInjection = designMissingPage({ user: 'u', owner: 'o', repo: 'r', key: 'a?b#c', ref: 'main', sha: tipSha });
+  assert.ok(missingInjection.includes('/p/a%3Fb%23c/'), 'query/fragment encoded in designMissingPage');
+
+  // designRoute returns 404 for traversal folder key
+  const traversalRoute = await designGet('/r/Cameronrlewis/repo/p/%252e%252e/design', twoFolders);
+  assert.equal(traversalRoute.status, 404);
 });

@@ -5,7 +5,7 @@ import site from './site.css';
 import { readinessClient } from './readiness-client.js';
 import { threadsClient } from './threads-client.js';
 import { threeClient } from './three-client.js';
-import { designName, projectKey } from './design.js';
+import { designName, projectKey, canonicalFolder } from './design.js';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -124,9 +124,12 @@ export function reviewsPage({ user, owner, repo, items, counts = {}, filter = 'a
 
 export function designMissingPage({ user, owner, repo, key, ref, sha, canRender }) {
   const path = repoPath(owner, repo);
-  const render = canRender ? `<form method="post" action="${path}/design/render"><input type="hidden" name="key" value="${e(key)}"><input type="hidden" name="sha" value="${e(sha)}"><button class="btn btn-primary">Render this revision</button></form>` : '<p class="muted">Someone with write access can render it from here.</p>';
+  const canonical = canonicalFolder(key);
+  const safeKey = canonical === null ? '' : projectKey(canonical);
+  const browseLink = safeKey ? link(`${path}/p/${safeKey}/designs`, 'Browse revisions', 'btn') : link(`${path}/projects`, 'Browse revisions', 'btn');
+  const render = canRender ? `<form method="post" action="${path}/design/render"><input type="hidden" name="key" value="${e(safeKey || key)}"><input type="hidden" name="sha" value="${e(sha)}"><button class="btn btn-primary">Render this revision</button></form>` : '<p class="muted">Someone with write access can render it from here.</p>';
   return frame({ title: 'No design snapshot', user, crumbs: [{ href: '/', label: 'Repositories' }, { href: path, label: `${owner}/${repo}` }, { label: 'Design' }],
-    body: `<main class="page message-page design-site"><section class="card message-card"><h1>No design snapshot for ${e(ref)}</h1><p><code>${e(String(sha).slice(0, 7))}</code> has no design snapshot. Snapshots are made on pushes to the default branch and on version tags, and expire with the repository's artifact retention.</p>${render}<p class="message-actions">${link(`${path}/p/${key}/designs`, 'Browse revisions', 'btn')} ${link(path, 'Reviews', 'btn')}</p></section></main>` });
+    body: `<main class="page message-page design-site"><section class="card message-card"><h1>No design snapshot for ${e(ref)}</h1><p><code>${e(String(sha).slice(0, 7))}</code> has no design snapshot. Snapshots are made on pushes to the default branch and on version tags, and expire with the repository's artifact retention.</p>${render}<p class="message-actions">${browseLink} ${link(path, 'Reviews', 'btn')}</p></section></main>` });
 }
 
 // The project folders of the default branch: one design page each.
@@ -201,7 +204,9 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = f
   const path = repoPath(owner, repo);
   const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
   const design = designName.exec(name || '');
-  const folder = folderKey ? `${path}/p/${folderKey}` : '';
+  const canonicalFolderKey = folderKey ? canonicalFolder(folderKey) : null;
+  const safeFolderKey = canonicalFolderKey === null ? '' : projectKey(canonicalFolderKey);
+  const folder = safeFolderKey ? `${path}/p/${safeFolderKey}` : '';
   const designLinks = { latest: folder ? `${folder}/design` : `${path}/projects`, revisions: folder ? `${folder}/designs` : `${path}/projects` };
   const revision = match ? `${match[1]} → ${match[2]}` : design ? `Design ${design[1]}` : 'Review';
   const result = runStatus === 'completed' && runConclusion ? (runConclusion === 'success' ? '<span class="status status-pass">✓ run passing</span>' : `<span class="status status-fail">✕ run ${e(runConclusion.replace(/_/g, ' '))}</span>`)
@@ -231,7 +236,7 @@ export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = f
       <label>Reply<textarea name="text" rows="3" maxlength="10000"></textarea></label>
       <p class="muted thread-shortcut">Ctrl+Enter to submit · Esc to close</p>
       <p role="status" class="muted"></p><p class="dialog-actions"><button class="btn btn-primary" data-act="reply">Reply</button> <button class="btn" data-act="resolve">Resolve</button> <button class="btn" data-act="issue" hidden>Create issue</button> <button type="button" class="btn" data-act="close">Close</button></p></form></dialog>
-    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: Number.isInteger(pull) ? `${path}/pull/${pull}/threads` : null, issues: `${path}/issues`, pull, rerun: Number.isInteger(pull) ? `${path}/pull/${pull}/rerun` : null, run: `${path}/run/`, link: `${path}/a/${encodeURIComponent(id)}` }).replace(/</g, '\\u003c')});</script>`;
+    <script>(${threadsClient.toString()})(${JSON.stringify({ threads: Number.isInteger(pull) ? `${path}/pull/${pull}/threads` : null, issues: `${path}/issues`, pull, rerun: Number.isInteger(pull) ? `${path}/pull/${pull}/rerun` : null, run: `${path}/run/`, link: id !== undefined ? `${path}/a/${encodeURIComponent(id)}` : (rawPath ? rawPath.replace(/\/raw$/, '') : path) }).replace(/</g, '\\u003c')});</script>`;
   return frame({ title: revision, user, reviewStatus: design ? 'DESIGN' : match?.[3] === 'fail' || (runStatus === 'completed' && runConclusion && runConclusion !== 'success') ? '✕ NEEDS WORK' : match ? '✓ CHECKS PASSING' : 'REVIEW', crumbs: [{ href: path, label: `${owner}/${repo}` }, { label: design ? 'Design' : Number.isInteger(pull) ? `PR #${pull}` : 'Review' }], body: `<main class="review-page${design ? ' design-site' : ''}"><nav class="review-bar" aria-label="Review navigation">${design ? designChips(design[1], designRef, tip, designLinks) : revisionChips(match)}${Number.isInteger(pull) ? link(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${pull}`, `PR #${pull} ↗`) : ''}${workflowRunId && /^\d+$/.test(String(workflowRunId)) ? `<span class="mono">Run ${e(workflowRunId)}</span>` : ''}${design ? '' : result}${design ? '' : readiness}${reviewOverflow(`${design ? link(designLinks.revisions, 'Revisions') : Number.isInteger(pull) ? link(`${path}/pull/${pull}/history`, 'History') : '<button disabled title="History requires a pull request">History</button>'}${share ? '<button id="share-open" type="button">Share…</button>' : '<button disabled title="Sharing is not enabled for this review">Share…</button>'}${runLink || '<button disabled title="Run not recorded">Open run</button>'}${pdf ? link(`${path}/a/${encodeURIComponent(id)}/pdf`, 'Download PDF') : ''}`)}${notice}</nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw + start)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" allow="clipboard-write" referrerpolicy="same-origin" title="KiCad review report"></iframe></div></main>${script}${readinessScript}${threads}${sharing}` });
 }
 
