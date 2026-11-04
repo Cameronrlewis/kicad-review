@@ -1852,6 +1852,36 @@ test('resolve accepts a thread when repository was renamed or transferred', asyn
   } finally { restore(); }
 });
 
+test('resolve refuses a thread whose owner and name come from different repositories', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const owners = env.ALLOWED_OWNERS;
+  env.ALLOWED_OWNERS = 'Cameronrlewis,oldowner,newowner';
+  try { for (const [nodeOwner, nodeName] of [['oldowner', 'new-name'], ['newowner', 'old-name']]) {
+    const mutations = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url === 'https://api.github.com/repos/oldowner/old-name') {
+        return new Response(JSON.stringify({ name: 'new-name', owner: { login: 'newowner' }, permissions: { pull: true } }));
+      }
+      const { query } = JSON.parse(options.body || '{}');
+      if (/ReviewThread\(input/.test(query)) {
+        mutations.push(query);
+        return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }));
+      }
+      if (/PullRequestReviewThread\{repository/.test(query)) {
+        return new Response(JSON.stringify({ data: { node: { repository: { name: nodeName, owner: { login: nodeOwner } }, pullRequest: { number: 7 } } } }));
+      }
+      return new Response('not found', { status: 404 });
+    });
+    try {
+      for (const op of ['resolve', 'unresolve']) {
+        const response = await threadsJson(`/r/oldowner/old-name/pull/7/threads/PRRT_1/${op}`, {}, undefined, sealed);
+        assert.equal(response.status, 404, `${nodeOwner}/${nodeName} ${op}`);
+      }
+      assert.equal(mutations.length, 0, `${nodeOwner}/${nodeName}`);
+    } finally { restore(); }
+  } } finally { env.ALLOWED_OWNERS = owners; }
+});
+
 test('thread routes explain a missing Pull requests and Contents permissions', async () => {
   const sealed = await signedIn({ t: 'access-secret' });
   const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? repoOk()

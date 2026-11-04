@@ -214,9 +214,9 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
       if (scope instanceof Response) return scope;
       const node = scope?.data?.node, same = (a, b) => String(a || '').toLowerCase() === String(b).toLowerCase();
       const nodeOwner = node?.repository?.owner?.login, nodeRepo = node?.repository?.name;
-      const matchOwner = same(nodeOwner, owner) || same(nodeOwner, allowed.repo?.owner?.login);
-      const matchRepo = same(nodeRepo, repo) || same(nodeRepo, allowed.repo?.name);
-      if (!matchOwner || !matchRepo || node?.pullRequest?.number !== number) return json({ error: 'Thread not found.' }, 404);
+      const matchPair = (same(nodeOwner, owner) && same(nodeRepo, repo))
+        || (same(nodeOwner, allowed.repo?.owner?.login) && same(nodeRepo, allowed.repo?.name));
+      if (!matchPair || node?.pullRequest?.number !== number) return json({ error: 'Thread not found.' }, 404);
       const response = await graphqlQuery(gh, token, threadMutation(resolve[2]), { id: resolve[1] });
       return response instanceof Response ? response : json({ ok: true });
     }
