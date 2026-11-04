@@ -660,6 +660,9 @@ export const CHECKS = [
         if(Appearance.get().netColors['12']?.[0]!==1)return 'net highlight missing';
         clearImageSelection();await draw();
         if(JSON.stringify(Appearance.get().netColors)!==JSON.stringify(look.netColors))return 'net colour not restored';
+        if(Appearance.get().nets['12']?.color)return 'net colour not restored in nets: '+JSON.stringify(Appearance.get().nets['12'].color);
+        const persisted=JSON.parse(localStorage.getItem('kr.appearance.v1')||'{}').viewers?.[JSON.stringify([D.repo||location.pathname,proj().dir])];
+        if(persisted?.nets?.['12']?.color||persisted?.netColors?.['12'])return 'net colour persisted after selection cleared: '+JSON.stringify(persisted?.nets?.['12']||persisted?.netColors?.['12']);
         if(!click([...document.querySelectorAll('#stage .vp')].at(-1),[5,8])||S.imageSelection.kind!=='pad'||S.imageSelection.pin!=='2'||inspectorProperties().head.pin!=='2')return 'pad number missing from inspection';
         await draw();
         if(!boardDiff&&!document.querySelector('#stage .image-selection g rect'))return 'exact fallback pad geometry overlay missing';

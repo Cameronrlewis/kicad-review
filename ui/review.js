@@ -1407,8 +1407,7 @@ function restoreImageNet() {
   const {name,previous}=savedImageNets,look=Appearance.get(),netColors={...look.netColors};
   // Restore only our temporary colour; preserve intervening Appearance edits.
   if(JSON.stringify(netColors[name])===JSON.stringify([1,.8,0,1])) {
-    if(previous===undefined)delete netColors[name];else netColors[name]=previous;
-    Appearance.set({...look,netColors});
+    Appearance.patch({nets:{[name]:{color:previous??null}}});
   }
   savedImageNets=null;
 }
@@ -1417,7 +1416,7 @@ function clearImageSelection() {
   document.querySelectorAll('#stage .image-selection').forEach(n=>n.remove());
 }
 function selectImageNet(name) {
-  restoreImageNet();savedImageNets={name,previous:Appearance.get().netColors[name]};
+  restoreImageNet();savedImageNets={name,previous:Appearance.get().nets[name]?.color?[...Appearance.get().nets[name].color]:null};
   Appearance.patch({netColors:{[name]:[1,.8,0,1]}});
 }
 function chooseImage(record,side,kind,point,pin=null) {
