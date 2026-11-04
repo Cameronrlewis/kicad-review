@@ -1158,13 +1158,23 @@ def sheet_pages(proj_dir, name):
         if page and len(page) > 1 and str(page[1]).strip():
             legacy[instance[1].rstrip("/") or "/"] = str(page[1])
     pages = []
+    # Revision root: the workflow passes "base/<dir>" or "head/<dir>"; an absolute directory is its own root.
+    top = os.path.realpath(proj_dir if os.path.isabs(proj_dir) else proj_dir.split("/")[0])
+
+    def warn(message):
+        if message not in _sheet_warnings:  # sheet_pages runs several times per revision
+            _sheet_warnings.add(message)
+            print("::warning::" + workflow_command_escape(message), file=sys.stderr)
 
     # stem: the file name kicad-cli gives the page's SVG, the sheet names along its path joined by "-".
-    def walk(file, path, sheet_name, parent, depth, stem, page=None):
+    def walk(file, path, sheet_name, parent, depth, stem, ancestors, page=None):
         pages.append({"path": path, "name": sheet_name, "file": file, "parent": parent, "stem": stem,
                       "page": page or legacy.get(path.rstrip("/") or "/") or str(len(pages) + 1)})
         full = posixpath.join(proj_dir, file)
-        if depth > 32 or not os.path.exists(full):
+        if depth > 32:
+            return
+        if not os.path.isfile(full):
+            warn(f"{full}: sheet file missing or not a regular file; its drawing is not read")
             return
         with open(full, encoding="utf-8") as fh:
             node = parse_sexpr(fh.read())
@@ -1172,19 +1182,30 @@ def sheet_pages(proj_dir, name):
         for s in findall(node, "sheet"):
             props = properties(s)
             child = props.get("Sheetname", "?")
-            if child in names:
-                sys.exit(f"{file} has two sheets with the same name {child!r}; kicad-cli renders both to one file, "
-                         "so neither drawing can be shown. Rename one of them.")
-            names.add(child)
             safe = re.sub(r"[\\/]", "_", child)
-            child_path = f"{path}{find(s, 'uuid')[1]}/"
-            parent_uuid_path = f'/{root_uuid}{path.rstrip("/")}'
-            child_page = sheet_instance_page(s, name, parent_uuid_path)
-            walk(posixpath.normpath(posixpath.join(posixpath.dirname(file), props.get("Sheetfile", ""))),
-                 child_path, child, path, depth + 1, f"{stem}-{safe}", child_page)
+            if safe in names:  # kicad-cli names SVGs after the sanitized name, so A/B and A_B collide too
+                sys.exit(f"{file} has two sheets with the same name {safe!r} once / and \\ become _; kicad-cli "
+                         "renders both to one file, so neither drawing can be shown. Rename one of them.")
+            names.add(safe)
+            uid, sheetfile = val(s, "uuid"), props.get("Sheetfile") or ""
+            child_file = posixpath.normpath(posixpath.join(posixpath.dirname(file), sheetfile))
+            real = os.path.realpath(posixpath.join(proj_dir, child_file))
+            if not uid or not sheetfile:
+                warn(f"{full}: sheet {child!r} has no uuid or Sheetfile; skipped")
+            elif posixpath.isabs(sheetfile) or os.path.commonpath([top, real]) != top:
+                warn(f"{full}: sheet {child!r} file {sheetfile!r} is outside the revision; skipped")
+            elif child_file in ancestors:
+                warn(f"{full}: sheet {child!r} includes {sheetfile!r}, which contains it; recursive hierarchy skipped")
+            else:
+                parent_uuid_path = f'/{root_uuid}{path.rstrip("/")}'
+                walk(child_file, f"{path}{uid}/", child, path, depth + 1, f"{stem}-{safe}",
+                     ancestors | {child_file}, sheet_instance_page(s, name, parent_uuid_path))
 
-    walk(f"{name}.kicad_sch", "/", name, None, 0, name)
+    walk(f"{name}.kicad_sch", "/", name, None, 0, name, {f"{name}.kicad_sch"})
     return pages
+
+
+_sheet_warnings = set()
 
 
 # ---- Object model: every reviewable object as {kind, ref, props, pos, box, where}, keyed by UUID. ----
@@ -1312,7 +1333,7 @@ def sch_objects(proj_dir, name):
     root_uuid = None
     for page in sheet_pages(proj_dir, name):
         full = posixpath.join(proj_dir, page["file"])
-        if not os.path.exists(full):
+        if not os.path.isfile(full):
             continue
         with open(full, encoding="utf-8") as fh:
             root = parse_sexpr(fh.read())

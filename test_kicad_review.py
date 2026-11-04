@@ -1076,14 +1076,14 @@ def hotspot_regressions():
         assert [v['sheet'] for v in m['views']] == ['/', '/g/'] and m['views'][1]['elements'] == []
         assert m['warnings'] == [{'sheet': '/g/', 'reason': 'sheet file missing'}], m['warnings']
 
-    # A sheet that contains itself is rejected rather than expanded forever.
+    # A sheet that contains itself is skipped with a warning rather than expanded forever.
     with TemporaryDirectory() as root:
         write(root, {'Board.kicad_sch': '(kicad_sch (uuid root) ' + sheet('Again', 'Board.kicad_sch', 'again') + ')'})
-        try:
-            kr.sheet_hotspots(root, 'Board')
-            raise AssertionError('recursive hierarchy must be rejected')
-        except ValueError as error:
-            assert 'recursive schematic hierarchy' in str(error)
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            m = kr.sheet_hotspots(root, 'Board')
+        assert [v['sheet'] for v in m['views']] == ['/'] and 'recursive hierarchy skipped' in err.getvalue(), err.getvalue()
 
 hotspot_regressions()
 print('ok instance-aware sheet hotspots and pins')
@@ -10593,3 +10593,52 @@ def test_f6_downloads_guards_and_fab_tempdir_leak():
 
 test_f6_downloads_guards_and_fab_tempdir_leak()
 print("ok F6 downloads guards and temp-dir leak")
+
+
+# F1: Sheetfile paths stay inside the revision; bad sheets warn instead of crashing.
+def test_f1_sheetfile_containment_and_hierarchy():
+    import contextlib, io
+    old = os.getcwd()
+    with TemporaryDirectory() as t:
+        os.chdir(t)
+        try:
+            secret = '(kicad_sch (symbol (uuid "leak") (property "Reference" "SECRET")))'
+            write(t, {'base/P/private.kicad_sch': secret, 'outside.kicad_sch': secret,
+                      'head/Shared/common.kicad_sch': '(kicad_sch (symbol (uuid "c1") (property "Reference" "C1")))',
+                      'head/P/dir/keep.txt': ''})
+            os.symlink(f'{t}/outside.kicad_sch', 'head/P/link.kicad_sch')
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch (uuid "root") '
+                      + sheet('Shared', '../Shared/common.kicad_sch', 'shared')
+                      + sheet('Up', '../../base/P/private.kicad_sch', 'up')
+                      + sheet('Abs', f'{t}/outside.kicad_sch', 'abs')
+                      + sheet('Link', 'link.kicad_sch', 'link')
+                      + sheet('Dir', 'dir', 'dir')
+                      + '(sheet (uuid "nofile") (property "Sheetname" "NoFile"))'
+                      + '(sheet (property "Sheetname" "NoUuid") (property "Sheetfile" "../Shared/common.kicad_sch"))'
+                      + sheet('Again', 'H.kicad_sch', 'again') + ')'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                pages = kr.sheet_pages('head/P', 'H')
+                objs = kr.sch_objects('head/P', 'H')
+                hot = kr.sheet_hotspots('head/P', 'H')
+            assert [(p['path'], p['file']) for p in pages] == [
+                ('/', 'H.kicad_sch'), ('/shared/', '../Shared/common.kicad_sch'), ('/dir/', 'dir')], pages
+            assert objs['/shared/c1']['ref'] == 'C1' and not any(o.get('ref') == 'SECRET' for o in objs.values()), objs
+            assert [v['sheet'] for v in hot['views']] == ['/', '/shared/', '/dir/'], hot['views']
+            text = err.getvalue()
+            for needle in ("'Up'", "'Abs'", "'Link'", "'NoFile'", "'NoUuid'", "'Again'", 'head/P/dir'):
+                assert needle in text, (needle, text)
+            assert all(line.startswith('::warning::') for line in text.splitlines()), text
+            # Sibling names that sanitize to one SVG stem stop like exact duplicates.
+            write(t, {'head/P/H.kicad_sch': '(kicad_sch ' + sheet('A/B', 'a.kicad_sch', 'u1') + sheet('A_B', 'b.kicad_sch', 'u2') + ')'})
+            try:
+                kr.sheet_pages('head/P', 'H')
+                raise AssertionError('colliding sanitized sheet names must stop the review')
+            except SystemExit as e:
+                assert 'same name' in str(e), e
+        finally:
+            os.chdir(old)
+
+
+test_f1_sheetfile_containment_and_hierarchy()
+print("ok F1 sheetfile containment and hierarchy")
