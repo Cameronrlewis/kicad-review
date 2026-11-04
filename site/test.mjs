@@ -5203,7 +5203,7 @@ test('large stored entries pipe the upstream body natively into a FixedLengthStr
     const longer = async (a, b) => { const r = await rangeOf(zip)(a, b); if (a === start) r.headers.set('Content-Length', String(b - a + 2)); return r; };
     await assert.rejects(zipEntryStream(longer, entry), /bad range length/);
     // Through the whole route: no wrapper re-wraps, tees or buffers the body.
-    const big = Buffer.alloc(70 * 1024, 3), routeZip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: big }, { name: '0/downloads.json', data: downloadEnvelope() }]);
+    const big = Buffer.alloc(70 * 1024, 3), routeZip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: big }, { name: '0/downloads.json', data: downloadEnvelope('b'.repeat(40), [{ kind: 'glb', path: '0/P-bbbbbbb-board.glb', bytes: big.length }]) }]);
     const sealed = await signedIn(), restore = downloadFetch({ zip: routeZip });
     try {
       const response = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers: { Cookie: `s=${sealed}` } });
@@ -5240,10 +5240,19 @@ function downloadFetch({ zip, event = 'pull_request', rangeOk = true, badRange =
     return new Response(zip.subarray(+m[1], bodyEnd), { status: 206, headers: { 'Content-Range': badRange ? `bytes 1-1/${zip.length}` : `bytes ${m[1]}-${Math.min(+m[2], zip.length - 1)}/${zip.length}` } });
   });
 }
-const downloadEnvelope = (head = 'b'.repeat(40)) => Buffer.from(JSON.stringify({ files: [], head }));
+const defaultDownloadFiles0 = [
+  { kind: 'fab', path: '0/fab-P-bbbbbbb.zip', bytes: 6 },
+  { kind: 'pdf', path: '0/P-bbbbbbb-schematic.pdf', bytes: 8 },
+  { kind: 'step', path: '0/P-bbbbbbb-board.step', bytes: 9 },
+  { kind: 'glb', path: '0/P-bbbbbbb-board.glb', bytes: 4 },
+];
+const defaultDownloadFiles1 = [
+  { kind: 'pdf', path: '1/Q-bbbbbbb-schematic.pdf', bytes: 6 },
+];
+const downloadEnvelope = (head = 'b'.repeat(40), files = defaultDownloadFiles0) => Buffer.from(JSON.stringify({ files, head }));
 const downloadZip = (head) => makeZip([{ name: '0/fab-P-bbbbbbb.zip', data: Buffer.from('PK-fab') }, { name: '0/P-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-1.7'), deflate: true },
   { name: '0/P-bbbbbbb-board.step', data: Buffer.from('ISO-10303') }, { name: '0/P-bbbbbbb-board.glb', data: Buffer.from('glTF') }, { name: '1/Q-bbbbbbb-schematic.pdf', data: Buffer.from('%PDF-Q') },
-  { name: '0/downloads.json', data: downloadEnvelope(head) }, { name: '1/downloads.json', data: downloadEnvelope(head) }]);  // envelopes last, so the first-entry offsets above stay valid
+  { name: '0/downloads.json', data: downloadEnvelope(head, defaultDownloadFiles0) }, { name: '1/downloads.json', data: downloadEnvelope(head, defaultDownloadFiles1) }]);  // envelopes last, so the first-entry offsets above stay valid
 
 test('download route streams attachments without sending the GitHub token to the redirected host', async () => {
   const sealed = await signedIn(), restore = downloadFetch({ zip: downloadZip() });
@@ -5821,4 +5830,136 @@ test('home dashboard paginates artifacts past page 1 to discover recent reviews'
     assert.match(body, /\/r\/Cameronrlewis\/repo\/a\/999/);
   } finally { restore(); }
 });
+
+test('finding 8: downloads are selected by manifest record, rejecting unlisted, mismatched-size, or failed entries', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}` };
+  const head = 'b'.repeat(40);
+
+  // 1. Failed export in manifest (error: "export failed") while zip contains stale 0/old.pdf -> must 404, not 200.
+  const stalePdfZip = makeZip([
+    { name: '0/old.pdf', data: Buffer.from('%PDF-stale') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'pdf', error: 'export failed' }], head })) },
+  ]);
+  let restore = downloadFetch({ zip: stalePdfZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'failed manifest export must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 2. Sole .glb in zip has a different path from manifest record -> must 404.
+  const pathMismatchZip = makeZip([
+    { name: '0/unlisted.glb', data: Buffer.from('glTF-unlisted') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'glb', path: '0/manifest.glb', bytes: 13 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: pathMismatchZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers });
+    assert.equal(res.status, 404, 'unlisted zip entry must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 3. Central-directory entry size differs from manifest declared bytes -> must 404.
+  const sizeMismatchZip = makeZip([
+    { name: '0/board.glb', data: Buffer.from('glTF-data') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'glb', path: '0/board.glb', bytes: 9999 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: sizeMismatchZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/glb', { headers });
+    assert.equal(res.status, 404, 'size mismatch between manifest and zip entry must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 4. Manifest path with path traversal or unsafe characters -> must 404.
+  const traversalZip = makeZip([
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({ files: [{ kind: 'pdf', path: '0/../evil.pdf', bytes: 10 }], head })) },
+  ]);
+  restore = downloadFetch({ zip: traversalZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'unsafe path in manifest must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+
+  // 5. Multiple successful manifest records for the requested kind -> must 404 (ambiguous).
+  const duplicateRecordZip = makeZip([
+    { name: '0/one.pdf', data: Buffer.from('%PDF-1') },
+    { name: '0/two.pdf', data: Buffer.from('%PDF-2') },
+    { name: '0/downloads.json', data: Buffer.from(JSON.stringify({
+      files: [
+        { kind: 'pdf', path: '0/one.pdf', bytes: 6 },
+        { kind: 'pdf', path: '0/two.pdf', bytes: 6 },
+      ],
+      head,
+    })) },
+  ]);
+  restore = downloadFetch({ zip: duplicateRecordZip });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/a/123/download/0/pdf', { headers });
+    assert.equal(res.status, 404, 'multiple manifest records for same kind must return 404');
+    assert.deepEqual(await res.json(), { error: 'Download unavailable' });
+  } finally { restore(); }
+});
+
+test('finding 9: malformed compare body and OAuth callback /user errors keep cookies and error gracefully', async () => {
+  // Part 1: Malformed multipart compare request retains renewed session cookie
+  const expired = await seal({ t: 'old-token', r: 'old-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://github.com/login/oauth/access_token') {
+      return tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' });
+    }
+    if (url === 'https://api.github.com/repos/Cameronrlewis/repo') {
+      return accessibleRepo();
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  try {
+    const res = await call('/r/Cameronrlewis/repo/compare', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://site.example',
+        Cookie: `s=${expired}`,
+        'Content-Type': 'multipart/form-data; boundary=invalid-boundary',
+      },
+      body: '--invalid-boundary\r\nContent-Disposition: form-data; name="x"\r\n',
+    });
+    assert.equal(res.status, 400, 'malformed multipart compare body should return 400');
+    assert.ok(cookieValue(res, 's'), 'renewed session cookie must be present on 400');
+    assert.match(await res.text(), /Choose two different commits/);
+  } finally { restore(); }
+
+  // Part 2: OAuth callback /user network error clears state cookie and returns 502
+  const login = await call('/login');
+  const savedState = cookieValue(login, 'st');
+  restore = mockFetch(async (url) => {
+    if (url.includes('access_token')) return tokenResponse();
+    if (url === 'https://api.github.com/user') throw new Error('network down');
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  try {
+    const res = await call(`/callback?code=code&state=${encodeURIComponent(savedState)}`, {
+      headers: { Cookie: `st=${savedState}` },
+    });
+    assert.equal(res.status, 502, '/user network failure must return 502');
+    assert.match(cookies(res).join('\n'), /st=;.*Max-Age=0/, 'state cookie must be cleared on /user network failure');
+    assert.match(await res.text(), /Sign-in didn&#39;t complete/);
+  } finally { restore(); }
+
+  // Part 3: OAuth callback /user malformed JSON clears state cookie and returns 502
+  restore = mockFetch(async (url) => {
+    if (url.includes('access_token')) return tokenResponse();
+    if (url === 'https://api.github.com/user') return new Response('not valid json {', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+  try {
+    const res = await call(`/callback?code=code&state=${encodeURIComponent(savedState)}`, {
+      headers: { Cookie: `st=${savedState}` },
+    });
+    assert.equal(res.status, 502, '/user invalid JSON must return 502');
+    assert.match(cookies(res).join('\n'), /st=;.*Max-Age=0/, 'state cookie must be cleared on /user JSON error');
+    assert.match(await res.text(), /Sign-in didn&#39;t complete/);
+  } finally { restore(); }
+});
+
 

@@ -289,17 +289,27 @@ async function downloadFile(owner, repo, id, index, kind, active) {
     const entries = await zipEntries(range, total);  // exactRange inside checks every 206 and Content-Range
     // Full-head provenance: the staged envelope carries the run's reviewed full head (collect_downloads writes it).
     const envelope = entries.find((e) => e.name === `${index}/downloads.json` && e.size <= MAX_ENVELOPE_BYTES && e.bytes <= MAX_ENVELOPE_BYTES);
-    const head = envelope ? (await new Response(await zipEntryStream(range, envelope)).json())?.head : null;
+    if (!envelope) return downloadError(active);
+    const manifest = await new Response(await zipEntryStream(range, envelope)).json();
+    const head = manifest?.head;
     if (!/^[0-9a-f]{40}$/.test(head) || !head.startsWith(head7) || bundle.workflow_run?.head_sha !== runHead
       || (family === 'design' && !verifyReportFamily('design', name, head))) return downloadError(active);
     if (head !== runHead) {  // only a manual run may review a head other than its run's head_sha
       const run = await gh(`${root}/runs/${runId}`, active.token);
       if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return downloadError(active);
     }
-    const matches = entries.filter((e) => e.name.startsWith(`${index}/`) && !e.name.slice(`${index}/`.length).includes('/') && suffix.test(e.name));
-    const entry = matches.length === 1 ? matches[0] : null;
-    const filename = entry?.name.split('/').pop();
-    if (!entry || !/^[A-Za-z0-9_.-]{1,200}$/.test(filename)) return downloadError(active);
+    const files = Array.isArray(manifest?.files) ? manifest.files : [];
+    const records = files.filter((f) => f && f.kind === kind && !f.error);
+    if (records.length !== 1) return downloadError(active);
+    const record = records[0];
+    const prefix = `${index}/`;
+    const recordPath = String(record.path || '');
+    const entryPath = recordPath.startsWith(prefix) ? recordPath : `${prefix}${recordPath}`;
+    const filename = entryPath.slice(prefix.length);
+    if (!/^[A-Za-z0-9_.-]{1,200}$/.test(filename) || entryPath !== `${prefix}${filename}` || !suffix.test(filename)) return downloadError(active);
+    if (!Number.isSafeInteger(record.bytes) || record.bytes <= 0) return downloadError(active);
+    const entry = entries.find((e) => e.name === entryPath);
+    if (!entry || entry.bytes !== record.bytes) return downloadError(active);
     // Errors after this point (truncation, CRC, length) error the stream; they cannot become a 404.
     return sessionResponse(await zipEntryStream(range, entry), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${filename}"` } }, active);
   } catch { return downloadError(active); }
@@ -777,7 +787,13 @@ async function compare(request, env, owner, repo) {
   if (request.headers.get('Origin') !== new URL(request.url).origin) return errorPage(403, 'Forbidden', 'This request cannot be completed.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }]);
   const allowed = await access(request, env, owner, repo);
   if (allowed instanceof Response) return allowed;
-  const form = await request.formData(); const base = String(form.get('base') || ''); const head = String(form.get('head') || '');
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
+  }
+  const base = String(form.get('base') || ''); const head = String(form.get('head') || '');
   if (!commitSha.test(base) || !commitSha.test(head) || base === head) return errorPage(400, 'Choose two different commits', 'Select two different commit SHAs to compare.', [{ href: `${repoPath(owner, repo)}/commits`, label: 'Back to commits' }], allowed.s);
   const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   let comparison;
@@ -908,10 +924,15 @@ async function callback(request, env) {
   if (!code) return errorPage(400, "Sign-in didn't complete", "GitHub didn't send a sign-in code. You may have cancelled.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const token = await tokenRequest(env, { code });
   if (!token) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
-  const userResponse = await gh('/user', token.access_token);
-  if (!userResponse.ok) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
-  const user = await userResponse.json();
-  if (!user.login) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
+  let user;
+  try {
+    const userResponse = await gh('/user', token.access_token);
+    if (!userResponse.ok) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
+    user = await userResponse.json();
+  } catch {
+    return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
+  }
+  if (!user?.login) return errorPage(502, "Sign-in didn't complete", "GitHub didn't accept the sign-in. Try again.", [{ href: '/login', label: 'Try again' }, { href: '/', label: 'Back to the start' }], null, { headers: { 'Set-Cookie': clear('st', secure) } }, [], false);
   const value = {
     t: token.access_token,
     r: token.refresh_token,
