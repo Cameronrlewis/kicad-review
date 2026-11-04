@@ -1,5 +1,12 @@
 import { readFileSync } from 'node:fs';
-const BR03_HOTSPOT_CONTRACT=JSON.parse(readFileSync(new URL('./fixtures/br03-hotspot-contract.json',import.meta.url),'utf8'));
+import { gzipSync, gunzipSync } from 'node:zlib';
+// The fixture is raw sheet_hotspots() output; the report build fills each viewBox from the page SVG
+// (A4 here) before the blob ships, and the viewer accepts only that validated report-stage manifest.
+const BR03_HOTSPOT_CONTRACT=(c=>({...c,blobs:Object.fromEntries(Object.entries(c.blobs).map(([id,blob])=>{
+  const m=JSON.parse(gunzipSync(Buffer.from(blob,'base64')));
+  for(const v of m.views) v.viewBox??=[0,0,297,210];
+  return [id,gzipSync(JSON.stringify(m)).toString('base64')];
+}))}))(JSON.parse(readFileSync(new URL('./fixtures/br03-hotspot-contract.json',import.meta.url),'utf8')));
 // These dependency-free browser functions are shared by CDP and Safari WebDriver
 // calibration. Compare actual composited screenshots, not a second SVG renderer.
 export async function softnessProbe(phase, scale) {
@@ -4772,8 +4779,10 @@ return true;
     const p=proj(), sheets=p.sheets, row={...r,id:'c906',detail:{kind:'members'}};
     const id='__br03_manifest';
     // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide envelope as spec 01.
-    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',views:[
-      {sheet:'/a/',elements:manifest.elements},{sheet:'/b/',elements:manifest.elements}]})});
+    // A complete envelope: electricalManifest() now accepts only what validateImageManifest() accepts.
+    const sheetView=sheet=>({sheet,file:'a.svg',viewBox:[0,0,297,210],labels:[],noConnects:[],wires:[],
+      elements:manifest.elements.map(e=>({...e,bbox:[0,0,20,30]}))});
+    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',warnings:[],views:[sheetView('/a/'),sheetView('/b/')]})});
     try {
       p.sheets=[{path:'/a/',hotspots:{head:id}},{path:'/b/',hotspots:{head:id}}];
       const view=await electricalManifest('/a/','head');
