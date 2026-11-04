@@ -1828,15 +1828,71 @@ test('resolve refuses a thread from another repository or pull request', async (
   }
 });
 
+test('resolve accepts a thread when repository was renamed or transferred', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  const mutations = [];
+  const restore = mockFetch(async (url, options = {}) => {
+    if (url === 'https://api.github.com/repos/Cameronrlewis/old-name') {
+      return new Response(JSON.stringify({ name: 'canonical-name', owner: { login: 'cameronrlewis' }, permissions: { pull: true } }));
+    }
+    const { query } = JSON.parse(options.body || '{}');
+    if (/ReviewThread\(input/.test(query)) {
+      mutations.push(query);
+      return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }));
+    }
+    if (/PullRequestReviewThread\{repository/.test(query)) {
+      return new Response(JSON.stringify({ data: { node: { repository: { name: 'canonical-name', owner: { login: 'cameronrlewis' } }, pullRequest: { number: 7 } } } }));
+    }
+    return new Response('not found', { status: 404 });
+  });
+  try {
+    const response = await threadsJson('/r/Cameronrlewis/old-name/pull/7/threads/PRRT_1/resolve', {}, undefined, sealed);
+    assert.equal(response.status, 200);
+    assert.equal(mutations.length, 1);
+  } finally { restore(); }
+});
+
 test('thread routes explain a missing Pull requests and Contents permissions', async () => {
   const sealed = await signedIn({ t: 'access-secret' });
   const restore = mockFetch(async (url) => url === 'https://api.github.com/repos/Cameronrlewis/repo' ? repoOk()
     : new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), { status: 403 }));
   try {
-    const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/11/reply', { text: 'x' }, undefined, sealed);
-    assert.equal(response.status, 403);
-    assert.match((await response.json()).error, /Pull requests and Contents permissions \(read and write\)/);
+    for (const action of ['/11/reply', '/PRRT_1/resolve', '/PRRT_1/unresolve']) {
+      const response = await threadsJson('/r/Cameronrlewis/repo/pull/7/threads' + action, action.endsWith('/reply') ? { text: 'x' } : {}, undefined, sealed);
+      assert.equal(response.status, 403);
+      assert.match((await response.json()).error, /Pull requests and Contents permissions \(read and write\)/);
+    }
   } finally { restore(); }
+});
+
+test('resolve and unresolve handle scope-query 403 and 502 errors without mutating', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const [scenario, scopeResponse, expectedStatus] of [
+    ['forbidden error', new Response(JSON.stringify({ errors: [{ type: 'FORBIDDEN' }] })), 403],
+    ['general error', new Response(JSON.stringify({ errors: [{ message: 'Service unavailable' }] })), 502],
+    ['server error', new Response('error', { status: 500 }), 502],
+  ]) {
+    const mutations = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+      const { query } = JSON.parse(options.body || '{}');
+      if (/ReviewThread\(input/.test(query)) {
+        mutations.push(query);
+        return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }));
+      }
+      return scopeResponse.clone();
+    });
+    try {
+      for (const op of ['resolve', 'unresolve']) {
+        const response = await threadsJson(`/r/Cameronrlewis/repo/pull/7/threads/PRRT_1/${op}`, {}, undefined, sealed);
+        assert.equal(response.status, expectedStatus, scenario);
+        const data = await response.json();
+        if (expectedStatus === 403) assert.match(data.error, /Pull requests and Contents permissions \(read and write\)/);
+        else assert.equal(data.error, 'GitHub did not answer. Try again.');
+      }
+      assert.equal(mutations.length, 0, scenario);
+    } finally { restore(); }
+  }
 });
 
 test('artifact PR discovery is best-effort on the framed artifact route', async () => {
