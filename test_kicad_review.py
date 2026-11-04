@@ -10122,11 +10122,22 @@ def test_f3_malformed_sexpr():
             write("review/p/base", {"netlist.net": "(export (nets"})
             write("review/p/head", {"netlist.net": "(export (nets))"})
             write("review/p", {"copper-diff.json": json.dumps({"rows": [], "incomplete": []})})
-            with patch("kicad_review.board_pads", return_value={}):
-                rows, issues = electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
-            assert not [r for r in rows if r["kind"] in ("rule", "stackup")], rows
+            rows, issues = electrical_changes(p, "review/p", {"base": {}, "head": {}}, {"base": "b" * 40, "head": "h" * 40})
+            assert not [r for r in rows if r["kind"] in ("rule", "stackup", "board-pad-net")], rows
             assert any(i["channel"] == "wiring" and i["document"] == "schematic" and "base netlist unavailable" in i["reason"] for i in issues), issues
+            assert {"channel": "wiring", "document": "board", "reason": "Board pad evidence missing or malformed"} in issues, issues
             assert {"channel": "rules", "document": "board", "reason": "Rules evidence missing or malformed"} in issues, issues
+
+            settings = kr.load_settings()
+            settings["checks"]["interfaces"] = "required"
+            ic = kr.interface_check(p, settings, {"base": {}, "head": {}}, "review/p")
+            assert ic["status"] == "not_run" and ic["incomplete"] is True and "base netlist unavailable" in ic["reason"], ic
+
+            cache = pathlib.Path(td, "cache")
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / ".complete").write_text("{}", encoding="utf-8")
+            with patch.object(kr, "IMAGE_RENDERER", "kicad-cli-10.0.6"):
+                assert kr.image_cache_complete(cache, p, "base") is False
         finally:
             os.chdir(old)
 

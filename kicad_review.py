@@ -4644,7 +4644,11 @@ def electrical_changes(p, out, objs, commits):
         first = next(iter(r["anchors"]["head"] or r["anchors"]["base"]), None)
         r["where"] = {"sheet": first["sheet"]} if first else None
     pcbs = {s: pathlib.Path(root, p["name"] + ".kicad_pcb") for s, root in roots.items()}
-    padrows = diff_board_pins(objs["base"], objs["head"], board_pads(pcbs["base"]), board_pads(pcbs["head"]), commits)
+    try:
+        padrows = diff_board_pins(objs["base"], objs["head"], board_pads(pcbs["base"]), board_pads(pcbs["head"]), commits)
+    except (OSError, ValueError, TypeError, AttributeError, IndexError, KeyError):
+        padrows = []
+        issues.append({"channel": "wiring", "document": "board", "reason": "Board pad evidence missing or malformed"})
 
     def pin_net(side, key):
         """Schematic net of a pin: None means unknown; "" means a proven pin with no net assignment."""
