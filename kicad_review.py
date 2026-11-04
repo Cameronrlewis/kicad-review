@@ -760,7 +760,10 @@ def cmd_render(args):
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
-            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
+            if cache and image_cache_complete(cache, p, side):
+                shutil.copytree(cache, out, dirs_exist_ok=True)
+            else:
+                render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=settings["checks"].get("interfaces", "off") != "off")
             if need_still and pathlib.Path(board_path(p, side)).is_file():
                 if side == "head" and shared_3d:
                     os.makedirs(out, exist_ok=True)
@@ -3231,7 +3234,9 @@ def artifact3d(raw, suffix, root=pathlib.Path('review/3d')):
     (root / name).write_bytes(packed)
     return {'digest': digest, 'artifactName': name, 'bytes': len(packed)}
 
-def attach3d(board, out, blobs, sides=("base", "head")):
+def attach3d(board, out, blobs, sides=("base", "head"), *, allowed_sides=None):
+    if allowed_sides is not None:
+        sides = allowed_sides
     """Attach stills independently, and coverage/index/assets only for verified processed sets."""
     board.pop('coverage3d', None)
     board.update({key:{side:None for side in ('base','head')}
@@ -3390,7 +3395,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
         changed |= b != h and not single
         if b is not None or h is not None:
             layers.append({"name": f[len(p["name"]) + 1: -4], "base": b, "head": h})
-    has = {s: os.path.isfile(board_path(p, s)) and not (single and s == "base") for s in ("base", "head")}
+    has = {s: False if (single and s == "base") else os.path.isfile(board_path(p, s)) for s in ("base", "head")}
     board = {"changed": changed, "layers": [],
              "status": "unchanged" if single else "added" if not has["base"] else "removed" if not has["head"] else "modified" if changed else "unchanged"}
     if layers:
@@ -3478,18 +3483,21 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
             parts["coverage"]["base"] = None
             for line in parts["lines"]:
                 line["new_problems"] = []
+    allowed_sides = ("head",) if single else ("base", "head")
     if settings["3d"]["enabled"]:
-        models = {side: f"{out}/{side}/board.glb" for side in ("base", "head")}
-        board["model3d"] = {side: add_blob(blobs, pathlib.Path(path).read_bytes())
-                            if os.path.exists(path) and not (single and side == "base") else None
-                            for side, path in models.items()}
+        models = {side: f"{out}/{side}/board.glb" for side in allowed_sides}
+        board["model3d"] = {side: None for side in ("base", "head")}
+        for side in allowed_sides:
+            path = models[side]
+            if os.path.exists(path):
+                board["model3d"][side] = add_blob(blobs, pathlib.Path(path).read_bytes())
         board["model3d"].update({"enabled": True,
                                  "changed": board["model3d"].get("base") != board["model3d"].get("head") and not single,
-                                 "errors": {side: "3D export unavailable" for side in ("base", "head")
+                                 "errors": {side: "3D export unavailable" for side in allowed_sides
                                             if has[side] and not board["model3d"].get(side)}})
-        board["no_model"] = model3d_missing(out, objs, ("head",) if single else ("base", "head"))
+        board["no_model"] = model3d_missing(out, objs, allowed_sides)
     if settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False):
-        attach3d(board, out, blobs, ("head",) if single else ("base", "head"))
+        attach3d(board, out, blobs, allowed_sides=allowed_sides)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
     libraries = None

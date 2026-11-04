@@ -5957,3 +5957,118 @@ with _DpTmp() as t:
     finally:
         os.chdir(old_cwd)
 print("ok DP-S3 single-revision project skips base libraries, release and interface checks")
+
+# DP-S5: 02's still can exist without a model; all base artifacts are unreadable in single mode.
+import struct as _dpstruct, zlib as _dpzlib
+
+def _dpchunk(kind, data):
+    return _dpstruct.pack('>I', len(data)) + kind + data + _dpstruct.pack('>I', _dpzlib.crc32(kind + data))
+
+_dp_png = (b'\x89PNG\r\n\x1a\n' + _dpchunk(b'IHDR', _dpstruct.pack('>IIBBBBB', 1600, 1000, 8, 6, 0, 0, 0))
+           + _dpchunk(b'IDAT', _dpzlib.compress((b'\0' + b'\0' * 6400) * 1000)) + _dpchunk(b'IEND', b''))
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        write(t, {'head/H/H.kicad_pcb': _dp_pcb(''), 'review/H/head/drc.json': '{}', 'review/H/head/board.glb': 'head glb'})
+        pathlib.Path('review/H/head/poster.png').write_bytes(_dp_png)
+        write(t, {'review/H/base/poster.png': 'poison base', 'review/H/base/board.glb': 'poison model'})
+        settings = json.loads(json.dumps(kr.DEFAULT_SETTINGS))
+        settings['design']['enabled'] = True
+        settings['3d']['enabled'] = False
+        real_read, real_isfile, real_exists, real_osexists = pathlib.Path.read_bytes, os.path.isfile, pathlib.Path.exists, os.path.exists
+        def no_base(path):
+            assert '/base/' not in str(path), 'base filesystem probe: ' + str(path)
+        def read(path):
+            no_base(path); return real_read(path)
+        def isfile(path):
+            no_base(path); return real_isfile(path)
+        def exists(path):
+            no_base(path); return real_exists(path)
+        def osexists(path):
+            no_base(path); return real_osexists(path)
+        with patch.object(pathlib.Path, 'read_bytes', read), patch.object(os.path, 'isfile', isfile), \
+             patch.object(pathlib.Path, 'exists', exists), patch.object(os.path, 'exists', osexists):
+            blobs = {}
+            one = kr.build_project({'dir':'H','name':'H','status':'unchanged'}, blobs, settings, single=True)
+        board = one['board']
+        assert board['poster3d']['base'] is None
+        assert _dpgz.decompress(_dpb64.b64decode(blobs[board['poster3d']['head']])) == _dp_png
+        assert 'poster' not in board and not board.get('model3d', {}).get('head')
+        assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs.values())
+
+        # With 3d.enabled = True: still and GLB attach, but base remains completely unprobed
+        settings['3d']['enabled'] = True
+        with patch.object(pathlib.Path, 'read_bytes', read), patch.object(os.path, 'isfile', isfile), \
+             patch.object(pathlib.Path, 'exists', exists), patch.object(os.path, 'exists', osexists):
+            blobs3d = {}
+            one3d = kr.build_project({'dir':'H','name':'H','status':'unchanged'}, blobs3d, settings, single=True)
+        board3d = one3d['board']
+        assert board3d['poster3d']['base'] is None
+        assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['poster3d']['head']])) == _dp_png
+        assert board3d['model3d']['base'] is None
+        assert _dpgz.decompress(_dpb64.b64decode(blobs3d[board3d['model3d']['head']])) == b'head glb'
+        assert not any(b'poison' in _dpgz.decompress(_dpb64.b64decode(b)) for b in blobs3d.values())
+    finally:
+        os.chdir(old_cwd)
+
+# Cache regression: restore a revision first rendered as base as a later head;
+# delete only its poster and require a cache miss plus one still export, not repeated SVG/GLB exports.
+with _DpTmp() as t:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(t)
+        pr = {'dir': 'P', 'name': 'P', 'status': 'modified'}
+        det = {'base': 'a'*40, 'head': 'b'*40, 'projects': [pr]}
+        pathlib.Path('review').mkdir()
+        pathlib.Path('review/detect.json').write_text(json.dumps(det))
+        for side in ('base', 'head'):
+            pathlib.Path(side, 'P').mkdir(parents=True)
+            pathlib.Path(side, 'P/P.kicad_pcb').write_text(f'(kicad_pcb {side})')
+        settings = copy.deepcopy(kr.DEFAULT_SETTINGS)
+        settings['design']['enabled'] = True
+        settings['3d']['enabled'] = False
+        calls = []
+        def cli(args, **kw):
+            calls.append(args)
+            dest = pathlib.Path(args[args.index('-o')+1])
+            dest.write_bytes(b'glTF' if 'glb' in args else _dp_png)
+            return subprocess.CompletedProcess(args, 0, '', '')
+        def fake_render_side(src, name, out, **kw):
+            pathlib.Path(out).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(out, 'drc.json').write_text('{}')
+        with patch.object(kr, 'load_settings', return_value=settings), patch.object(kr, 'render_side', side_effect=fake_render_side) as rs, \
+             patch.object(kr, 'IMAGE_RENDERER', 'verified-10.0.6'), \
+             patch.object(kr, 'render_tool_identity', return_value='KiCad 10.0.0'), patch.object(kr.subprocess, 'run', cli):
+            kr.cmd_render(None)
+            base_cache = kr.render_cache(pr, 'base', det, settings)
+            assert kr.render_cache_complete(base_cache, pr, 'base', settings)
+
+            # Revision 'a'*40 becomes head in a later run
+            det2 = {'base': 'c'*40, 'head': 'a'*40, 'projects': [pr]}
+            pathlib.Path('review/detect.json').write_text(json.dumps(det2))
+            pathlib.Path('base/P/P.kicad_pcb').write_text('(kicad_pcb new_base)')
+            pathlib.Path('head/P/P.kicad_pcb').write_text('(kicad_pcb base)')
+
+            # Delete only its poster
+            (base_cache / 'poster.png').unlink()
+            assert not kr.render_cache_complete(base_cache, pr, 'head', settings), 'cache miss on deleted poster'
+            calls.clear()
+            rs.reset_mock()
+
+            kr.cmd_render(None)
+            head_calls = [c for c in calls if c[-1].startswith('head/')]
+            assert len(head_calls) == 1 and head_calls[0][1:3] == ['pcb', 'render'], f'head_calls: {head_calls}'
+            assert not any('glb' in c for c in head_calls), 'zero GLB exports when 3d is off'
+            head_render_side = [call for call in rs.call_args_list if call[0][0].startswith('head/')]
+            assert len(head_render_side) == 0, 'no repeated SVG exports for cached head'
+            assert (base_cache / 'poster.png').is_file(), 'poster restored in cache'
+
+            blobs = {}
+            one = kr.build_project(pr, blobs, settings, single=True)
+            assert one['board']['poster3d']['head'] and one['board']['poster3d']['base'] is None
+    finally:
+        os.chdir(old_cwd)
+
+print('ok DP-S5 canonical still, no GLB prerequisite, no base probes')
+
