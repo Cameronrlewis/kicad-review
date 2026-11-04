@@ -350,6 +350,13 @@ def render_side(src_dir, name, out, netlist=False):
         previous = os.environ.get('KICAD_CONFIG_HOME')
         os.environ['KICAD_CONFIG_HOME'] = cfg
         mapping = {}
+        layers = None
+        if os.path.exists(pcb):
+            try:
+                layers = board_layers(pcb)
+            except (OSError, ValueError) as exc:  # Incomplete evidence is recorded later; keep rendering the rest.
+                print("::warning::" + workflow_command_escape(
+                    f"{pcb}: malformed board file; board drawing not rendered: {exc}"), file=sys.stderr)
         try:
             for theme in ('light', 'dark'):
                 suffix = '' if theme == 'light' else '-dark'
@@ -367,11 +374,11 @@ def render_side(src_dir, name, out, netlist=False):
                         resolved.add(path)
                         path.write_text(simplify_sheet_svg(path.read_text(encoding='utf-8')), encoding='utf-8')
                         mapping.setdefault(pg['path'], {})[theme] = str(path.relative_to(out))
-                if os.path.exists(pcb):
+                if layers is not None:
                     # Drill marks off; page coordinates keep both revisions aligned in mm.
                     kicad_cli('pcb', 'export', 'svg', '--mode-multi', '--exclude-drawing-sheet',
                               '--page-size-mode', '1', '--drill-shape-opt', '0', '--check-zones',
-                              '--layers', ','.join(board_layers(pcb)), '--theme', 'kicad-review-' + theme,
+                              '--layers', ','.join(layers), '--theme', 'kicad-review-' + theme,
                               '-o', f'{out}/pcb{suffix}', pcb)
             pathlib.Path(out).mkdir(parents=True, exist_ok=True)
             pathlib.Path(out, 'sheet-images.json').write_text(json.dumps(mapping, sort_keys=True), encoding='utf-8')

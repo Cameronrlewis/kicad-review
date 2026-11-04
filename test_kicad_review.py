@@ -10188,6 +10188,18 @@ def test_f3_malformed_sexpr():
             assert kr.image_cache_complete(cache, p_bad, "base") is False
             assert kr.render_cache_complete(cache, p_bad, "base", settings) is False
 
+            # render_side on a malformed PCB warns with the file name and skips only the board drawing.
+            write("head", {"p_bad/bad.kicad_pcb": "(kicad_pcb (layers (0 \"F.Cu\" signal))"})
+            err = io.StringIO()
+            with patch.object(kr, "kicad_cli") as cli, patch.object(kr, "export_board_stats", return_value=None), \
+                 contextlib.redirect_stderr(err):
+                kr.render_side("head/p_bad", "bad", str(pathlib.Path(td, "render_bad")))
+            calls = [c.args for c in cli.call_args_list]
+            assert not any(c[:3] == ("pcb", "export", "svg") for c in calls), calls
+            assert any(c[:2] == ("pcb", "drc") for c in calls), calls
+            assert "::warning::head/p_bad/bad.kicad_pcb: malformed board file; board drawing not rendered" in err.getvalue(), err.getvalue()
+            assert all(line.startswith("::warning::") for line in err.getvalue().splitlines()), err.getvalue()
+
             # cache_renders does not persist incomplete identity for malformed PCB
             write("review", {"detect.json": json.dumps(det_bad)})
             out_bad = pathlib.Path("review/p_bad/base")
