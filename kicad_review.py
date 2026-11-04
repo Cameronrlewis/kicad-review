@@ -1036,10 +1036,8 @@ def cmd_render(args):
                         render_fab(p, side, out, settings)
                     except (OSError, ValueError, RuntimeError) as exc:
                         sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
-                if side == "head" and settings["downloads"]["enabled"]:
-                    export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
-                elif need_still and pathlib.Path(board_path(p, side)).is_file():
-                    if side == "head" and shared_3d:
+                if pathlib.Path(board_path(p, side)).is_file():
+                    if side == "head" and shared_3d and (export_3d or not settings["downloads"]["enabled"]):
                         os.makedirs(out, exist_ok=True)
                         for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
                             source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
@@ -1047,7 +1045,9 @@ def cmd_render(args):
                             dest.unlink(missing_ok=True)
                             if source.is_file():
                                 shutil.copyfile(source, dest)
-                    else:
+                    elif side == "head" and settings["downloads"]["enabled"]:
+                        export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
+                    elif need_still:
                         export_glb(p, side, out, model=export_3d)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
@@ -2757,23 +2757,23 @@ def release_project(pro_path, tag, settings, out_dir, label):
     stem = f"{out_dir}/{label}-{tag}-{preset_name}"
     made = []
     if os.path.exists(pcb):
-        work = tempfile.mkdtemp()
-        layers = [l for l in board_layers(pcb) if FAB_LAYER.search(l)]
-        kicad_cli("pcb", "export", "gerbers", *preset["gerbers"], "--check-zones", "-l", ",".join(layers), "-o", work, pcb)
-        kicad_cli("pcb", "export", "drill", "--format", "excellon", "--excellon-units", "mm", "--excellon-zeros-format", "decimal",
-                  "--excellon-oval-format", "alternate", *preset["drill"], "-o", work + "/", pcb)
-        with zipfile.ZipFile(f"{stem}-gerbers.zip", "w", zipfile.ZIP_DEFLATED) as z:
-            for f in sorted(os.listdir(work)):
-                z.write(f"{work}/{f}", f)
-        kicad_cli("pcb", "export", "pos", "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
-                  "-o", f"{work}/pos.csv", pcb)
-        with open(f"{work}/pos.csv", newline="", encoding="utf-8") as fh, open(f"{stem}-positions.csv", "w", newline="", encoding="utf-8") as out:
-            rows = list(csv.reader(fh))
-            w = csv.writer(out)
-            w.writerow([POS_COLUMNS.get(h, h) for h in rows[0]])
-            side = rows[0].index("Side")
-            w.writerows([*r[:side], r[side].capitalize(), *r[side + 1:]] for r in rows[1:])
-        made += [f"{stem}-gerbers.zip", f"{stem}-positions.csv"]
+        with tempfile.TemporaryDirectory() as work:
+            layers = [l for l in board_layers(pcb) if FAB_LAYER.search(l)]
+            kicad_cli("pcb", "export", "gerbers", *preset["gerbers"], "--check-zones", "-l", ",".join(layers), "-o", work, pcb)
+            kicad_cli("pcb", "export", "drill", "--format", "excellon", "--excellon-units", "mm", "--excellon-zeros-format", "decimal",
+                      "--excellon-oval-format", "alternate", *preset["drill"], "-o", work + "/", pcb)
+            with zipfile.ZipFile(f"{stem}-gerbers.zip", "w", zipfile.ZIP_DEFLATED) as z:
+                for f in sorted(os.listdir(work)):
+                    z.write(f"{work}/{f}", f)
+            kicad_cli("pcb", "export", "pos", "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
+                      "-o", f"{work}/pos.csv", pcb)
+            with open(f"{work}/pos.csv", newline="", encoding="utf-8") as fh, open(f"{stem}-positions.csv", "w", newline="", encoding="utf-8") as out:
+                rows = list(csv.reader(fh))
+                w = csv.writer(out)
+                w.writerow([POS_COLUMNS.get(h, h) for h in rows[0]])
+                side = rows[0].index("Side")
+                w.writerows([*r[:side], r[side].capitalize(), *r[side + 1:]] for r in rows[1:])
+            made += [f"{stem}-gerbers.zip", f"{stem}-positions.csv"]
     if os.path.exists(sch):
         fields = [f.replace("{part}", part) for f, _ in preset["bom"]]
         group = [f for f in ("Value", "Footprint", part) if f in fields]

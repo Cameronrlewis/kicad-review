@@ -9664,6 +9664,7 @@ with tempfile.TemporaryDirectory() as d:
     os.chdir(d)
     try:
         os.makedirs("review"); os.makedirs("base/p"); os.makedirs("head/p")
+        pathlib.Path("head/p/b.kicad_pcb").write_text("(kicad_pcb (version 20240108))", encoding="utf-8")
         json.dump({"base": "a" * 40, "head": "b" * 40, "reason": "t", "projects": [{"dir": "p", "name": "b", "status": "modified"}]}, open("review/detect.json", "w"))
         pathlib.Path("base/kicad-review.toml").write_text("[downloads]\nenabled = true\n[3d]\nenabled = false\n")
         glb_calls = []
@@ -10430,3 +10431,135 @@ def test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors():
 
 test_f5_optional_evidence_survives_bad_project_json_and_hotspot_errors()
 print("ok F5 optional evidence survives bad project JSON and hotspot errors")
+
+
+def test_f6_downloads_guards_and_fab_tempdir_leak():
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as root:
+        os.chdir(root)
+        try:
+            # 1. Finding 8: Schematic-only project with downloads enabled must NOT call export_glb or write glb failure markers.
+            det_sch = {
+                "base": "a" * 40, "head": "b" * 40, "reason": "t",
+                "projects": [{"dir": "sch_prj", "name": "S", "status": "modified"}]
+            }
+            pathlib.Path("review").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("review/detect.json").write_text(json.dumps(det_sch), encoding="utf-8")
+            pathlib.Path("base/sch_prj").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("head/sch_prj").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("base/sch_prj/S.kicad_sch").write_text("(kicad_sch (uuid s-base))", encoding="utf-8")
+            pathlib.Path("head/sch_prj/S.kicad_sch").write_text("(kicad_sch (uuid s-head))", encoding="utf-8")
+
+            s_dl = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s_dl["downloads"]["enabled"] = True
+            s_dl["3d"]["enabled"] = False
+
+            glb_calls = []
+            with patch.object(kr, "load_settings", return_value=s_dl), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"), \
+                 patch.object(kr, "export_glb", side_effect=lambda p, side, out, **kw: glb_calls.append((side, kw))):
+                kr.cmd_render(None)
+
+            assert len(glb_calls) == 0, f"schematic-only project must not invoke export_glb: {glb_calls}"
+            assert not pathlib.Path("review/sch_prj/head/board.raw.glb.failed").exists()
+            assert not pathlib.Path("review/sch_prj/head/glb.log").exists()
+
+            # 2. Finding 8: Board project with downloads and 3D enabled on byte-identical revisions reuses base 3D artifacts without a second export_glb.
+            det_3d = {
+                "base": "a" * 40, "head": "b" * 40, "reason": "t",
+                "projects": [{"dir": "pcb_prj", "name": "B", "status": "modified"}]
+            }
+            pathlib.Path("review/detect.json").write_text(json.dumps(det_3d), encoding="utf-8")
+            pathlib.Path("base/pcb_prj").mkdir(parents=True, exist_ok=True)
+            pathlib.Path("head/pcb_prj").mkdir(parents=True, exist_ok=True)
+            pcb_content = '(kicad_pcb (version 20240108) (generator kicad-review))'
+            pathlib.Path("base/pcb_prj/B.kicad_pcb").write_text(pcb_content, encoding="utf-8")
+            pathlib.Path("head/pcb_prj/B.kicad_pcb").write_text(pcb_content, encoding="utf-8")
+
+            s_3d_dl = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s_3d_dl["downloads"]["enabled"] = True
+            s_3d_dl["3d"]["enabled"] = True
+
+            glb_calls_3d = []
+            def fake_export_glb(p, side, out, **kw):
+                glb_calls_3d.append((side, kw))
+                folder = pathlib.Path(out)
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "board.raw.glb").write_bytes(b"glTF-raw-content")
+                (folder / "board.glb").write_bytes(b"glTF-viewer-content")
+                (folder / "poster.png").write_bytes(b"poster-png-content")
+
+            with patch.object(kr, "load_settings", return_value=s_3d_dl), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"), \
+                 patch.object(kr, "export_glb", side_effect=fake_export_glb):
+                kr.cmd_render(None)
+
+            assert [side for side, kw in glb_calls_3d] == ["base"], f"head must reuse base 3D artifacts, not export twice: {glb_calls_3d}"
+            head_out = pathlib.Path("review/pcb_prj/head")
+            assert (head_out / "board.raw.glb").read_bytes() == b"glTF-raw-content"
+            assert (head_out / "board.glb").read_bytes() == b"glTF-viewer-content"
+            assert (head_out / "poster.png").read_bytes() == b"poster-png-content"
+
+            # 3. Finding 9: release_project cleans up temporary fabrication directory on success and on error.
+            pro_dir = pathlib.Path("fab_test")
+            pro_dir.mkdir(parents=True, exist_ok=True)
+            pro_path = pro_dir / "T.kicad_pro"
+            pro_path.write_text("{}", encoding="utf-8")
+            (pro_dir / "T.kicad_pcb").write_text('(kicad_pcb (version 20240108) (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))', encoding="utf-8")
+            fab_out = pathlib.Path("fab_out")
+            fab_out.mkdir(parents=True, exist_ok=True)
+
+            created_dirs = []
+            orig_tempdir = tempfile.TemporaryDirectory
+
+            class TrackingTempDir(orig_tempdir):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    created_dirs.append(self.name)
+
+            def fake_kicad_cli(*args):
+                kind = args[2] if args[1] == "export" else args[1]
+                out_idx = args.index("-o") + 1
+                out_path = pathlib.Path(args[out_idx])
+                if kind == "gerbers":
+                    (out_path / "T-F_Cu.gbr").write_bytes(b"gerber")
+                elif kind == "drill":
+                    (out_path / "T.drl").write_bytes(b"drill")
+                elif kind == "pos":
+                    out_path.write_text("Designator,Val,Package,Mid X,Mid Y,Rotation,Side\nR1,10k,0603,0,0,0,top\n", encoding="utf-8")
+
+            with patch("tempfile.TemporaryDirectory", TrackingTempDir), \
+                 patch.object(kr, "kicad_cli", side_effect=fake_kicad_cli):
+                made = kr.release_project(str(pro_path), "v1", kr.DEFAULT_SETTINGS, str(fab_out), "T")
+                assert len(created_dirs) == 1, "release_project must use tempfile.TemporaryDirectory"
+                assert not os.path.exists(created_dirs[0]), f"temp dir {created_dirs[0]} leaked after success"
+
+            # Failure during fabrication also cleans up the temp dir
+            created_dirs_err = []
+            class TrackingTempDirErr(orig_tempdir):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    created_dirs_err.append(self.name)
+
+            def failing_kicad_cli(*args):
+                raise RuntimeError("simulated fabrication failure")
+
+            with patch("tempfile.TemporaryDirectory", TrackingTempDirErr), \
+                 patch.object(kr, "kicad_cli", side_effect=failing_kicad_cli):
+                try:
+                    kr.release_project(str(pro_path), "v1", kr.DEFAULT_SETTINGS, str(fab_out), "T")
+                except RuntimeError:
+                    pass
+                assert len(created_dirs_err) == 1
+                assert not os.path.exists(created_dirs_err[0]), f"temp dir {created_dirs_err[0]} leaked after error"
+
+        finally:
+            os.chdir(old)
+
+
+test_f6_downloads_guards_and_fab_tempdir_leak()
+print("ok F6 downloads guards and temp-dir leak")
