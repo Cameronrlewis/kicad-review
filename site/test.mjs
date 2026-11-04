@@ -5142,6 +5142,37 @@ test('zip reader caps central-directory allocation before fetching it', async ()
   assert.equal(calls, 1);
 });
 
+test('zip reader passes large stored entries through with no per-byte JavaScript work', async () => {
+  // A per-byte CRC here overran the Worker CPU limit on multi-MB STEP/GLB entries (truncated 200s, then 503s).
+  const size = 4 * 1024 * 1024, step = 64 * 1024, zip = makeZip([{ name: '0/P-bbbbbbb-board.glb', data: Buffer.alloc(size, 7) }]);
+  const [entry] = await zipEntries(rangeOf(zip), zip.length), start = entry.offset + 30 + entry.name.length + 4;
+  const sent = []; let touched = 0;
+  const range = async (a, b) => {
+    if (a !== start) return rangeOf(zip)(a, b);
+    // Payload chunks are proxies: any access but byteLength (iteration, indexing, slicing) counts as per-byte work.
+    const body = new ReadableStream({ pull(controller) {
+      const o = sent.length * step;
+      if (o >= size) return controller.close();
+      const chunk = new Proxy(zip.subarray(a + o, a + Math.min(o + step, size)), { get(target, key) {
+        if (key !== 'byteLength') touched++;
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+      sent.push(chunk); controller.enqueue(chunk);
+    } });
+    return { status: 206, headers: new Headers({ 'Content-Range': `bytes ${a}-${b}/${zip.length}` }), body };
+  };
+  const reader = (await zipEntryStream(range, entry)).getReader(), got = [];
+  for (let read; !(read = await reader.read()).done;) got.push(read.value);
+  assert.equal(touched, 0, 'stored payload bytes are never read in JavaScript');
+  assert.equal(got.length, size / step); assert.ok(got.every((chunk, i) => chunk === sent[i]), 'chunks pass through uncopied');
+  // Inflating is per-byte work too; the upload stores entries, so a large deflated one is refused before its payload is fetched.
+  const deflated = makeZip([{ name: 'big.step', data: Buffer.alloc(64 * 1024 + 1), deflate: true }]), [big] = await zipEntries(rangeOf(deflated), deflated.length);
+  const fetched = [];
+  await assert.rejects(zipEntryStream(async (a, b) => { fetched.push(a); return rangeOf(deflated)(a, b); }, big), /deflated entry too large/);
+  assert.deepEqual(fetched, [big.offset, big.offset + 30], 'only the local header and name are read');
+});
+
 function downloadFetch({ zip, rangeOk = true, badRange = false, forbidden = false, shortPayload = false, bundles, bundle = { id: 124, name: 'kicad-review-downloads-bbbbbbb', expired: false, workflow_run: { id: 9, head_sha: 'b'.repeat(40) } }, report = { name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', workflow_run: { id: 9, head_sha: 'b'.repeat(40) } } }) {
   return mockFetch(async (url, options = {}) => {
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return forbidden ? new Response(JSON.stringify({permissions:{pull:false},owner:{login:'Cameronrlewis'}})) : accessibleRepo();

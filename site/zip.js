@@ -5,6 +5,13 @@ const fail = message => { throw new Error(message); };
 const names = new TextDecoder('utf-8', { fatal: true });
 // Bound the buffered directory independently of the archive's (up to 4 GB) size.
 const MAX_DIRECTORY_BYTES = 16 * 1024 * 1024;
+// Only entries up to SMALL_BYTES (the downloads.json envelopes) get a CRC-32 or may be deflated. A JavaScript
+// CRC costs about 4-8 ms per MB and inflating about 3.5 ms per MB, so on multi-MB STEP/GLB entries either
+// overruns the Worker CPU limit and the runtime cuts off a 200 mid-stream. The upload stores entries
+// (compression-level 0), so large ones stream straight through; they rely on exactRange (a 206, the exact
+// Content-Range, the exact byte count) and the report manifest's sha256 and size. A CRC adds no security
+// there: whoever can rewrite the bundle can rewrite its CRCs too; it would only catch storage corruption.
+const SMALL_BYTES = 64 * 1024;
 const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, byte) => {
   let crc = byte;
   for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
@@ -71,14 +78,17 @@ export async function zipEntryStream(range, entry) {
   if (!(entry.flags & 8) && (u32(head, 14) !== entry.crc || u32(head, 18) !== entry.size || u32(head, 22) !== entry.bytes)) fail('bad entry');
   const name = await exactRange(range, entry.offset + 30, entry.offset + 30 + n - 1, entry.total);
   if (names.decode(name) !== entry.name) fail('bad entry');
+  if (entry.method === 8 && Math.max(entry.size, entry.bytes) > SMALL_BYTES) fail('deflated entry too large');
   let body = entry.size ? await exactRange(range, start, start + entry.size - 1, entry.total, true) : new Response(new Uint8Array(0)).body;
+  // A large stored entry goes back as the ranged body itself: exactRange's byte count is the only per-chunk work.
+  if (entry.bytes > SMALL_BYTES) return body;
   if (entry.method === 8) body = body.pipeThrough(new DecompressionStream('deflate-raw'));
   let seen = 0, crc = 0xffffffff;
   return body.pipeThrough(new TransformStream({
     transform(chunk, controller) {
       seen += chunk.byteLength;
-      if (seen > entry.bytes) fail('bad entry length');
-      for (const byte of chunk) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
+      if (seen > entry.bytes) fail('bad entry length');  // also bounds the CRC loop to SMALL_BYTES
+      for (let i = 0; i < chunk.length; i++) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ chunk[i]) & 0xff];
       controller.enqueue(chunk);
     },
     flush() {
