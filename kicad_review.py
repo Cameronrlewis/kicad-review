@@ -1080,13 +1080,15 @@ def cmd_render(args):
                         export_glb(p, side, out, model=export_3d)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
                 if os.path.exists(pro):
-                    shutil.rmtree(f"{out}/fab", ignore_errors=True)
                     os.makedirs(f"{out}/fab", exist_ok=True)
                     try:
                         release_project(pro, "review", settings, f"{out}/fab", p["name"])
                     except (SystemExit, OSError, ValueError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
                         print("::warning::" + workflow_command_escape(f"{p['name']}: release outputs incomplete; continuing other exports"))
+            else:
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
             if side == "head" and det.get("head") and (settings["downloads"]["enabled"] or settings["checks"].get("release", "off") != "off"):
                 export_downloads(p, posixpath.join(side, p["dir"]), out, settings, det["head"])
             print(f"{p['name']}: rendered {side}")

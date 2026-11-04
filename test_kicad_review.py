@@ -10377,6 +10377,19 @@ def test_f4_render_and_release_cache():
                     cached_fab = kr.render_cache(prj, side, det, spcbway) / "fab"
                     cached_names = [f.name for f in cached_fab.iterdir()]
                     assert cached_names and all("pcbway" in name and "jlcpcb" not in name for name in cached_names), (side, cached_names)
+
+            # Re-running with checks.release off clears stale package files so they are not retained in review or cache.
+            sreloff = copy.deepcopy(spcbway)
+            sreloff["checks"]["release"] = "off"
+            with patch.object(kr, "load_settings", return_value=sreloff), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "export_downloads"):
+                kr.cmd_render(None)
+                for side in ("base", "head"):
+                    assert not pathlib.Path(f"review/p/{side}/fab").exists(), f"stale fab/ must be removed when release check is off on {side}"
+                    cached_fab = kr.render_cache(prj, side, det, sreloff) / "fab"
+                    assert not cached_fab.exists(), f"cache must not contain fab/ when release check is off on {side}"
         finally:
             os.chdir(old)
 
