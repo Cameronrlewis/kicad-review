@@ -18,10 +18,10 @@ All five findings reproduce as failures (RED) on pre-fix code (baseline `7a02f45
 
 Reproduction runner command:
 ```bash
-# Pre-fix baseline test (RED)
+# Pre-fix baseline test (RED, exit code 1)
 node --import ./site/css-loader.mjs .superpowers/sdd/overnight-site-fixes/run-repro-s5.mjs --baseline
 
-# Post-fix HEAD test (GREEN)
+# Post-fix HEAD test (GREEN, exit code 0)
 node --import ./site/css-loader.mjs .superpowers/sdd/overnight-site-fixes/run-repro-s5.mjs
 ```
 

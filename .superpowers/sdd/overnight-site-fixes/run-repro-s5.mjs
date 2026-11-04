@@ -218,6 +218,11 @@ try {
   }
 
   console.log(JSON.stringify(results, null, 2));
+  const expectedFindings = ['finding 6', 'finding 7', 'finding 10', 'finding 11', 'finding 12'];
+  const hasFailures = expectedFindings.some(f => results[f]?.status !== 'PASS');
+  if (hasFailures) {
+    process.exitCode = 1;
+  }
 } finally {
   if (cleanupDir) {
     fs.rmSync(cleanupDir, { recursive: true, force: true });
