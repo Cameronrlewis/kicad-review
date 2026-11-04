@@ -7035,6 +7035,30 @@ CHECKS.push(
     await applyState({p:0,v:'board'}); await frames();
     return ready('board') && !ready('sheet:'+sheet.path) || 'board renderer never became ready';
   `],
+  ["design readiness: undecoded image retries until settled", "", `
+    ${TO_SINGLE}
+    const p = proj(), sheet = p.sheets.find(s => s.svg?.head); if (!sheet) return 'skip';
+    await applyState({ p: 0, v: 'sheet:' + sheet.path });
+    const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await frames();
+    window.reviewViewReady = null;
+    const stage = document.querySelector('#stage');
+    const img = document.createElement('img');
+    img.style.width = '100px'; img.style.height = '100px';
+    let complete = false;
+    Object.defineProperty(img, 'complete', { get: () => complete, configurable: true });
+    Object.defineProperty(img, 'naturalWidth', { get: () => complete ? 100 : 0, configurable: true });
+    stage.appendChild(img);
+    afterDraw(currentView());
+    await frames();
+    if (window.reviewViewReady !== null) { img.remove(); return 'stamped before image settled'; }
+    complete = true;
+    img.dispatchEvent(new Event('load'));
+    await frames();
+    const ready = window.reviewViewReady?.project === S.p && window.reviewViewReady?.view === 'sheet:' + sheet.path;
+    img.remove();
+    return ready || 'readiness never stamped after image settled';
+  `],
 );
 CHECKS.push(['design inspector: actual snapshot object and finding are absolute', '', `
   if(D.mode!=='single' || D.snapshot?.message!=='Inspector fixture')return 'skip';

@@ -63,7 +63,7 @@ function handleParentMessage(e, on = THREADS_ON, issuesOn = ISSUES_ON) {
 }
 addEventListener("message", e => handleParentMessage(e));
 function proposePin(vp, e) {
-  if (single()) return;   // a design report has no PR thread to place, whatever the capabilities say later
+  if (single()) return;   // a design report has no PR thread to place; !THREADS_ON omitted so comparison check fixtures can test pin placement standalone (parent === window)
   const p = boardDiff?.point(vp,e), hit = boardDiff?.hits(vp,e)[0];
   const [x, y] = p?.point || toWorld(vp, e);
   const anchor = S.v?.startsWith('sheet:') ? anchorAt(x,y,sideOf(vp))
@@ -121,7 +121,7 @@ function designBar(link) {   // commit, ref, date and subject of the design on s
     + (Number.isFinite(when) ? `<time class="muted" datetime="${esc(s.committedAt)}">${esc(new Date(when).toISOString().slice(0, 10))}</time>` : "")
     + (s.message ? `<span class="design-message" title="${esc(s.message)}">${esc(s.message)}</span>` : "");
 }
-const designLabel = () => `Design · ${esc(String(D.head || "").slice(0, 7))}`;   // HTML: viewport() parses its label
+const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
@@ -1043,7 +1043,7 @@ async function drawSideGL(stage, view) {
 async function drawSide(stage, view) {
   if (boardView.useGL && await drawSideGL(stage, view)) return;
   if (!single()) viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
-  viewport(stage, single() ? designLabel() : "Head", view.kind).appendChild(await stack("head", view));
+  viewport(stage, single() ? esc(designLabel()) : "Head", view.kind).appendChild(await stack("head", view));
 }
 var MODES = { side: drawSide };
 
@@ -1174,7 +1174,7 @@ function updateStatus() {
   coords?.classList.toggle("off-canvas",!current); coords?.toggleAttribute("data-sch-coordinates",sheet);
   const ids = changeCardIds(), at = ids.indexOf(S.s);
   statusText("[data-change]",`${at < 0 ? 0 : at+1}/${ids.length}`);
-  $("[data-change]").parentElement.hidden = single();   // no change stepper in a design report
+  if (single()) $("[data-change]").parentElement.hidden = true;   // no change stepper in a design report
   statusText("[data-zoom]",placed() ? `${(S.z / PX * 100).toFixed(0)}%` : "off canvas");
   statusText("[data-units]",units);
   if ($("#status-units").value !== units) $("#status-units").value = units;
@@ -1723,12 +1723,31 @@ function afterDraw(view) {
   mountImageSearch();
   // Stamp readiness two frames later, only if this draw still owns the stage and the selected view.
   const readyGeneration = gen, readyProject = S.p, readyView = S.v;
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (readyGeneration !== gen || readyProject !== S.p || readyView !== S.v) return;
-    const elements = [...$("#stage").querySelectorAll("canvas,svg,img")].filter(el => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
-    if (!elements.length || elements.some(el => el.tagName === "IMG" && (!el.complete || !el.naturalWidth))) return;
+  const checkReady = (retries = 30) => {
+    if (readyGeneration !== gen || readyProject !== S.p || readyView !== S.v || !view) return;
+    const stage = $("#stage");
+    if (!stage) return;
+    const elements = [...stage.querySelectorAll("canvas,svg,img")].filter(el => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+    const pendingImages = elements.filter(el => el.tagName === "IMG" && (!el.complete || !el.naturalWidth));
+    if (!elements.length || pendingImages.length) {
+      if (retries > 0) {
+        let retried = false;
+        const retry = () => {
+          if (retried) return;
+          retried = true;
+          requestAnimationFrame(() => checkReady(retries - 1));
+        };
+        for (const img of pendingImages) {
+          img.addEventListener("load", retry, { once: true });
+          img.addEventListener("error", retry, { once: true });
+        }
+        requestAnimationFrame(retry);
+      }
+      return;
+    }
     window.reviewViewReady = {project:S.p, dir:proj().dir, view:S.v, renderer:boardView.useGL ? "board-gl" : "svg"};
-  }));
+  };
+  requestAnimationFrame(() => requestAnimationFrame(() => checkReady()));
 }
 function drawPins() {
   // Refresh pins in place: replacing the drawing can swallow an in-flight right-click.
