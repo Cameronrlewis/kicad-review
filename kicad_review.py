@@ -859,24 +859,46 @@ def render_tool_identity():
     return "local-kicad-unavailable"
 
 
-def render_cache_complete(cache, p, side, settings):
+def render_cache_complete(cache, p, side, settings, *, check_release=True):
     if not cache or not image_cache_complete(cache, p, side):
         return False
+    board_exists = pathlib.Path(board_path(p, side)).is_file()
+    if fab_enabled(settings):
+        try:
+            doc = json.loads((cache / "fab-limits.json").read_text(encoding="utf-8"))
+            sections = doc.get("sections") if isinstance(doc, dict) else None
+            if not isinstance(sections, list):
+                return False
+            if board_exists:
+                if any(sum(1 for s in sections if isinstance(s, dict) and s.get("vendor") == v) != 1 for v in FAB_VENDORS):
+                    return False
+        except (OSError, ValueError):
+            return False
     # board.raw.glb is required for head only when downloads.enabled is True (spec lines 27-28,
     # plan-context.md line 7). Release-only renders stage fab files but never produce raw GLB,
     # so requiring raw GLB for release-only would cause permanent cache misses.
-    if side == "head" and settings.get("downloads", {}).get("enabled") and pathlib.Path(board_path(p, side)).is_file():
+    if side == "head" and settings.get("downloads", {}).get("enabled") and board_exists:
         raw = cache / "board.raw.glb"
         if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
             return False
     need_still = settings["3d"]["enabled"] or settings.get("design", {}).get("enabled", False)
-    if need_still and pathlib.Path(board_path(p, side)).is_file():
+    if need_still and board_exists:
         if settings["3d"]["enabled"]:
             raw = cache / "board.raw.glb"
-            if (not raw.is_file() or not raw.stat().st_size) and not (cache / "board.raw.glb.failed").is_file():
-                return False
+            glb = cache / "board.glb"
+            if not (cache / "board.raw.glb.failed").is_file():
+                if not raw.is_file() or not raw.stat().st_size or not glb.is_file() or not glb.stat().st_size:
+                    return False
         poster = cache / "poster.png"
-        return poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()
+        if not (poster_size(poster) == (1600, 1000) or (cache / "poster.png.failed").is_file()):
+            return False
+    if check_release and settings["checks"].get("release", "off") != "off":
+        pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
+        if os.path.exists(pro) and (board_exists or os.path.isfile(posixpath.join(side, p["dir"], f"{p['name']}.kicad_sch"))):
+            try:
+                fab_parts(pro, p["name"], settings, str(pathlib.Path(cache) / "fab"))
+            except (SystemExit, OSError, ValueError, ArithmeticError, IndexError, KeyError, csv.Error, zipfile.BadZipFile):
+                return False
     return True
 
 
@@ -941,7 +963,9 @@ def restore_renders(args=None):
     if any(not render_cache_complete(cache, p, side, settings) for p, side, cache in entries):
         raise SystemExit(1)
     for p, side, cache in entries:
-        shutil.copytree(cache, f"review/{project_id(p['dir'])}/{side}", dirs_exist_ok=True)
+        out = f"review/{project_id(p['dir'])}/{side}"
+        shutil.rmtree(f"{out}/fab", ignore_errors=True)
+        shutil.copytree(cache, out, dirs_exist_ok=True)
         print(f"{p['name']}: {side} render cache hit ({det[side]})")
 
 
@@ -954,6 +978,8 @@ def cache_renders(args=None):
             cache = render_cache(p, side, det, settings)
             out = pathlib.Path(f"review/{project_id(p['dir'])}/{side}")
             if cache and out.is_dir():
+                if cache.exists():
+                    shutil.rmtree(cache)
                 shutil.copytree(out, cache, dirs_exist_ok=True)
                 (cache / '.complete').write_text(json.dumps(image_export_identity(p, side), sort_keys=True), encoding='utf-8')
 
@@ -995,32 +1021,38 @@ def cmd_render(args):
             out = f"review/{project_id(p['dir'])}/{side}"
             cache = render_cache(p, side, det, settings)
             if render_cache_complete(cache, p, side, settings):
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
                 shutil.copytree(cache, out, dirs_exist_ok=True)
                 print(f"{p['name']}: {side} render cache hit ({det[side]})")
                 continue
-            # Connectivity evidence for every present schematic, whatever the check settings.
-            render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
-            if fab_enabled(settings):
-                try:
-                    render_fab(p, side, out, settings)
-                except (OSError, ValueError, RuntimeError) as exc:
-                    sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
-            if side == "head" and settings["downloads"]["enabled"]:
-                export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
-            elif need_still and pathlib.Path(board_path(p, side)).is_file():
-                if side == "head" and shared_3d:
-                    os.makedirs(out, exist_ok=True)
-                    for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
-                        source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
-                        dest = pathlib.Path(out) / name
-                        dest.unlink(missing_ok=True)
-                        if source.is_file():
-                            shutil.copyfile(source, dest)
-                else:
-                    export_glb(p, side, out, model=export_3d)
+            if render_cache_complete(cache, p, side, settings, check_release=False):
+                shutil.rmtree(f"{out}/fab", ignore_errors=True)
+                shutil.copytree(cache, out, dirs_exist_ok=True)
+            else:
+                # Connectivity evidence for every present schematic, whatever the check settings.
+                render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
+                if fab_enabled(settings):
+                    try:
+                        render_fab(p, side, out, settings)
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
+                if side == "head" and settings["downloads"]["enabled"]:
+                    export_glb(p, side, out, model=True, poster=need_still, viewer=export_3d)
+                elif need_still and pathlib.Path(board_path(p, side)).is_file():
+                    if side == "head" and shared_3d:
+                        os.makedirs(out, exist_ok=True)
+                        for name in ("board.raw.glb", "board.glb", "poster.png", "glb.log", "poster.log", "board.raw.glb.failed", "poster.png.failed"):
+                            source = pathlib.Path(f"review/{project_id(p['dir'])}/base/{name}")
+                            dest = pathlib.Path(out) / name
+                            dest.unlink(missing_ok=True)
+                            if source.is_file():
+                                shutil.copyfile(source, dest)
+                    else:
+                        export_glb(p, side, out, model=export_3d)
             if settings["checks"].get("release", "off") != "off":
                 pro = posixpath.join(side, p["dir"], f"{p['name']}.kicad_pro")
                 if os.path.exists(pro):
+                    shutil.rmtree(f"{out}/fab", ignore_errors=True)
                     os.makedirs(f"{out}/fab", exist_ok=True)
                     try:
                         release_project(pro, "review", settings, f"{out}/fab", p["name"])

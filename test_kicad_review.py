@@ -10161,3 +10161,152 @@ def test_f3_malformed_sexpr():
 test_f3_malformed_sexpr()
 print("ok F3 malformed S-expressions raise ValueError")
 
+
+# F4: Cache correctness for render and release products (findings 4, 7, 10).
+def test_f4_render_and_release_cache():
+    import copy, json, os, pathlib, tempfile, zipfile
+    from unittest.mock import patch
+    import kicad_review as kr
+
+    old = os.getcwd()
+    with tempfile.TemporaryDirectory() as td, patch.object(kr, "IMAGE_RENDERER", "verified-10.0.6"):
+        os.chdir(td)
+        try:
+            prj = {"dir": "p", "name": "P", "status": "modified"}
+            det = {"base": "a" * 40, "head": "b" * 40, "projects": [prj]}
+            for side in ("base", "head"):
+                src = pathlib.Path(side, "p")
+                src.mkdir(parents=True)
+                (src / "P.kicad_pro").write_text("{}", encoding="utf-8")
+                (src / "P.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
+                (src / "P.kicad_pcb").write_text('(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))', encoding="utf-8")
+
+            def seed_cache(side="head"):
+                c = pathlib.Path(td, f"cache-{side}")
+                if c.exists():
+                    shutil.rmtree(c)
+                c.mkdir(parents=True)
+                (c / ".complete").write_text(json.dumps(kr.image_export_identity(prj, side), sort_keys=True), encoding="utf-8")
+                return c
+
+            def seed_fab_package(fab_dir, preset="jlcpcb"):
+                fab_dir = pathlib.Path(fab_dir)
+                fab_dir.mkdir(parents=True, exist_ok=True)
+                stem = fab_dir / f"P-review-{preset}"
+                with zipfile.ZipFile(f"{stem}-gerbers.zip", "w") as z:
+                    z.writestr("P-F_Cu.gtl", "G04*\n")
+                    z.writestr("P-B_Cu.gbl", "G04*\n")
+                    z.writestr("P.drl", "M48\n")
+                pathlib.Path(f"{stem}-positions.csv").write_text(
+                    "Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\nR1,10k,R_0603,10,20,90,Top\n", encoding="utf-8")
+                pathlib.Path(f"{stem}-bom.csv").write_text(
+                    ",".join(label for _, label in kr.PRESETS[preset]["bom"]) + "\n", encoding="utf-8")
+
+            # Finding 4a: 3D viewer enabled requires nonempty board.glb as well as board.raw.glb when no .failed marker exists.
+            s3d = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            s3d["3d"]["enabled"] = True
+            c3d = seed_cache("head")
+            (c3d / "board.raw.glb").write_bytes(b"glTF-raw")
+            (c3d / "poster.png").write_bytes(br02_png())
+            assert not kr.render_cache_complete(c3d, prj, "head", s3d), "missing board.glb must invalidate 3D cache"
+            (c3d / "board.glb").write_bytes(b"")
+            assert not kr.render_cache_complete(c3d, prj, "head", s3d), "empty board.glb must invalidate 3D cache"
+            (c3d / "board.glb").write_bytes(b"glTF-viewer")
+            assert kr.render_cache_complete(c3d, prj, "head", s3d), "nonempty board.raw.glb + board.glb + poster accepted"
+            (c3d / "board.raw.glb").unlink()
+            (c3d / "board.glb").unlink()
+            (c3d / "board.raw.glb.failed").write_text("failed", encoding="utf-8")
+            assert kr.render_cache_complete(c3d, prj, "head", s3d), "raw export failure marker accepted without board.glb"
+
+            # Finding 4b: Fabrication-limit checks enabled requires parseable fab-limits.json with vendor sections.
+            sfab = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            sfab["fabrication"]["check_limits"] = True
+            sfab["checks"]["fab_limits"] = "required"
+            cfab = seed_cache("head")
+            assert not kr.render_cache_complete(cfab, prj, "head", sfab), "missing fab-limits.json must invalidate cache"
+            (cfab / "fab-limits.json").write_text("{malformed", encoding="utf-8")
+            assert not kr.render_cache_complete(cfab, prj, "head", sfab), "malformed fab-limits.json must invalidate cache"
+            (cfab / "fab-limits.json").write_text(json.dumps({"sections": [{"vendor": "jlcpcb"}]}), encoding="utf-8")
+            assert not kr.render_cache_complete(cfab, prj, "head", sfab), "incomplete vendor sections must invalidate cache"
+            (cfab / "fab-limits.json").write_text(json.dumps({"sections": [{"vendor": "jlcpcb"}, {"vendor": "pcbway"}]}), encoding="utf-8")
+            assert kr.render_cache_complete(cfab, prj, "head", sfab), "valid fab-limits.json with both vendors accepted"
+            # Absent board revision accepts empty sections list
+            pathlib.Path("base/p/P.kicad_pcb").unlink()
+            cbase = seed_cache("base")
+            (cbase / "fab-limits.json").write_text(json.dumps({"sections": [], "reason": "no base board"}), encoding="utf-8")
+            assert kr.render_cache_complete(cbase, prj, "base", sfab), "absent board fab-limits.json accepted"
+            pathlib.Path("base/p/P.kicad_pcb").write_text('(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))', encoding="utf-8")
+            assert not kr.render_cache_complete(cbase, prj, "base", sfab), "present board rejects empty sections"
+
+            # Finding 7: Transient release-export failures are not cached as complete and retry only missing release products.
+            srel = copy.deepcopy(kr.DEFAULT_SETTINGS)
+            srel["checks"]["release"] = "informational"
+            crel = seed_cache("head")
+            assert not kr.render_cache_complete(crel, prj, "head", srel), "missing fab/ package must invalidate release cache"
+            seed_fab_package(crel / "fab", "jlcpcb")
+            assert kr.render_cache_complete(crel, prj, "head", srel), "valid fab/ package accepted in release cache"
+
+            pathlib.Path("review").mkdir(exist_ok=True)
+            pathlib.Path("review/detect.json").write_text(json.dumps(det), encoding="utf-8")
+            render_side_calls = []
+            release_calls = []
+            download_calls = []
+            fail_head_once = {"failed": False}
+
+            def fake_release(pro_path, tag, settings, out_dir, label):
+                release_calls.append((pro_path, out_dir, settings["fabrication"]["preset"]))
+                if pro_path.startswith("head/") and not fail_head_once["failed"]:
+                    fail_head_once["failed"] = True
+                    raise OSError("transient release failure")
+                seed_fab_package(out_dir, settings["fabrication"]["preset"])
+                return []
+
+            with patch.object(kr, "load_settings", return_value=srel), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side", side_effect=lambda src, name, out, **kw: render_side_calls.append((src, out))), \
+                 patch.object(kr, "release_project", side_effect=fake_release), \
+                 patch.object(kr, "export_downloads", side_effect=lambda *a: download_calls.append(a[2])):
+                kr.cmd_render(None)
+                base_cache = kr.render_cache(prj, "base", det, srel)
+                head_cache = kr.render_cache(prj, "head", det, srel)
+                assert kr.render_cache_complete(base_cache, prj, "base", srel), "base release succeeded and is complete"
+                assert not kr.render_cache_complete(head_cache, prj, "head", srel), "transient head release failure must not be cached as complete"
+                assert len(render_side_calls) == 2
+
+                # Next identical run: base is a full cache hit; head reuses cached non-release outputs and retries only release + downloads.
+                kr.cmd_render(None)
+                assert len(render_side_calls) == 2, f"render_side should not re-run when only release is missing: {render_side_calls}"
+                assert [c[0] for c in release_calls] == [
+                    "base/p/P.kicad_pro", "head/p/P.kicad_pro", "head/p/P.kicad_pro"
+                ], release_calls
+                assert len(download_calls) == 2
+                assert kr.render_cache_complete(head_cache, prj, "head", srel), "retried head release is now cached as complete"
+
+                # Third identical run: full cache hit on both sides, nothing runs.
+                kr.cmd_render(None)
+                assert len(render_side_calls) == 2 and len(release_calls) == 3 and len(download_calls) == 2
+
+            # Finding 10: Re-running with another fabrication preset clears stale package files in fab/.
+            spcbway = copy.deepcopy(srel)
+            spcbway["fabrication"]["preset"] = "pcbway"
+            with patch.object(kr, "load_settings", return_value=spcbway), \
+                 patch.object(kr, "render_tool_identity", return_value="KiCad 10.0.6"), \
+                 patch.object(kr, "render_side"), \
+                 patch.object(kr, "release_project", side_effect=fake_release), \
+                 patch.object(kr, "export_downloads"):
+                kr.cmd_render(None)
+                for side in ("base", "head"):
+                    summary = kr.package_summary(f"review/p/{side}/fab")
+                    paths = [f["path"] for f in summary["files"]]
+                    assert paths and all("pcbway" in name and "jlcpcb" not in name for name in paths), (side, paths)
+                    cached_fab = kr.render_cache(prj, side, det, spcbway) / "fab"
+                    cached_names = [f.name for f in cached_fab.iterdir()]
+                    assert cached_names and all("pcbway" in name and "jlcpcb" not in name for name in cached_names), (side, cached_names)
+        finally:
+            os.chdir(old)
+
+
+test_f4_render_and_release_cache()
+print("ok F4 render and release cache completeness and preset cleanup")
+
+
