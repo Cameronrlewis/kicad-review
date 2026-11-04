@@ -1787,7 +1787,9 @@ test('reply and resolve call the right GitHub endpoints', async () => {
   const calls = [];
   const restore = mockFetch(async (url, options = {}) => {
     if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
-    calls.push([url, JSON.parse(options.body || '{}')]);
+    const sent = JSON.parse(options.body || '{}');
+    calls.push([url, sent]);
+    if (/node\(id:/.test(sent.query)) return new Response(JSON.stringify({ data: { node: { repository: { name: 'Repo', owner: { login: 'cameronrlewis' } }, pullRequest: { number: 7 } } } }));
     return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } }), { status: url.endsWith('/replies') ? 201 : 200 });
   });
   try {
@@ -1796,10 +1798,34 @@ test('reply and resolve call the right GitHub endpoints', async () => {
     assert.equal((await threadsJson('/r/Cameronrlewis/repo/pull/7/threads/bad%20id/resolve', {}, undefined, sealed)).status, 404);
     assert.deepEqual(calls[0], ['https://api.github.com/repos/Cameronrlewis/repo/pulls/7/comments/11/replies', { body: 'done' }]);
     assert.equal(calls[1][0], 'https://api.github.com/graphql');
-    assert.match(calls[1][1].query, /resolveReviewThread/);
+    assert.match(calls[1][1].query, /PullRequestReviewThread\{repository/);
     assert.deepEqual(calls[1][1].variables, { id: 'PRRT_kwDO1' });
-    assert.equal(calls.length, 2);
+    assert.match(calls[2][1].query, /resolveReviewThread/);
+    assert.deepEqual(calls[2][1].variables, { id: 'PRRT_kwDO1' });
+    assert.equal(calls.length, 3);
   } finally { restore(); }
+});
+
+test('resolve refuses a thread from another repository or pull request', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const [label, scope] of [['other repo', { repository: { name: 'secret', owner: { login: 'outsider' } }, pullRequest: { number: 7 } }],
+    ['other pull', { repository: { name: 'repo', owner: { login: 'Cameronrlewis' } }, pullRequest: { number: 8 } }],
+    ['not a thread', null]]) {
+    const mutations = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url === 'https://api.github.com/repos/Cameronrlewis/repo') return repoOk();
+      const { query } = JSON.parse(options.body || '{}');
+      if (/ReviewThread\(input/.test(query)) { mutations.push(query); return new Response(JSON.stringify({ data: { resolveReviewThread: { thread: { isResolved: true } } } })); }
+      return new Response(JSON.stringify({ data: { node: scope } }));
+    });
+    try {
+      for (const op of ['resolve', 'unresolve']) {
+        const response = await threadsJson(`/r/Cameronrlewis/repo/pull/7/threads/PRRT_foreign/${op}`, {}, undefined, sealed);
+        assert.equal(response.status, 404, label);
+      }
+      assert.equal(mutations.length, 0, label);
+    } finally { restore(); }
+  }
 });
 
 test('thread routes explain a missing Pull requests and Contents permissions', async () => {

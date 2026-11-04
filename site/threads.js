@@ -60,6 +60,8 @@ export function parseThreads(graphql) {
 // ponytail: cursor-paginate threads and comments up to 10 pages each; fail closed if truncated.
 export const LIST_QUERY = 'query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid reviewThreads(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{id isResolved resolvedBy{login} comments(first:50){totalCount pageInfo{hasNextPage endCursor} nodes{databaseId body author{login} createdAt url}}}}}}}';
 export const COMMENTS_QUERY = 'query($threadId:ID!,$after:String){node(id:$threadId){... on PullRequestReviewThread{comments(first:50,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{databaseId body author{login} createdAt url}}}}}';
+// Node IDs are global: check the thread's repository and pull request before mutating it.
+export const SCOPE_QUERY = 'query($id:ID!){node(id:$id){... on PullRequestReviewThread{repository{name owner{login}} pullRequest{number}}}}';
 export const threadMutation = (op) => `mutation($id:ID!){${op}ReviewThread(input:{threadId:$id}){thread{isResolved}}}`;
 
 // Shared bounded pagination helper for GitHub REST list endpoints (100 items/page, max 10 pages).
@@ -208,6 +210,10 @@ export async function threadsRoute(request, env, { owner, repo, number, rest }, 
     }
     const resolve = /^\/([A-Za-z0-9_=-]{1,100})\/(resolve|unresolve)$/.exec(rest);
     if (resolve) {
+      const scope = await graphqlQuery(gh, token, SCOPE_QUERY, { id: resolve[1] });
+      if (scope instanceof Response) return scope;
+      const node = scope?.data?.node, same = (a, b) => String(a || '').toLowerCase() === String(b).toLowerCase();
+      if (!same(node?.repository?.owner?.login, owner) || !same(node?.repository?.name, repo) || node?.pullRequest?.number !== number) return json({ error: 'Thread not found.' }, 404);
       const response = await graphqlQuery(gh, token, threadMutation(resolve[2]), { id: resolve[1] });
       return response instanceof Response ? response : json({ ok: true });
     }
