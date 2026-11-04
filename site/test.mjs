@@ -5748,6 +5748,25 @@ test('list thumbnails cost at most three GitHub requests, however many rows ther
   }
 });
 
+test('thumbnails at the shared size limit are shown; one character over is a placeholder (the producer never writes one)', async () => {
+  const { THUMB_PNG_B64_MAX } = await import('./design.js');
+  assert.equal(THUMB_PNG_B64_MAX, 40000, 'kicad_review.py THUMB_PNG_B64_MAX pins the same number');
+  const at = 'A'.repeat(THUMB_PNG_B64_MAX), over = 'A'.repeat(THUMB_PNG_B64_MAX + 1);
+  const index = { v: 1, projects: { A: [{ sha: sha40(1), date: '', png: at }, { sha: sha40(2), date: '', png: over }] } };
+  const restore = mockFetch(async (url) => {
+    if (url.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 555, name: 'thumbs.json' }] });
+    if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://thumbs.example/t.json' } });
+    if (url === 'https://thumbs.example/t.json') return json(index);
+    return new Response('{}', { status: 404 });
+  });
+  try {
+    const gh = async (path, token, init) => fetch(`https://api.github.com${path}`, init);
+    const found = await thumbnailsFor(gh, 'tok', '/repos/o/r', 'A', [sha40(1), sha40(2)]);
+    assert.equal(found.get(sha40(1)), at);
+    assert.equal(found.has(sha40(2)), false);
+  } finally { restore(); }
+});
+
 test('a missing thumbnail asset leaves every row a placeholder, and never fails the list', async () => {
   const restore = mockFetch(async () => new Response('{}', { status: 404 }));
   try {

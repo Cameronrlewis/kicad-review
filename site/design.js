@@ -309,6 +309,9 @@ export async function scanHistory(gh, token, root, ref, dir, cursor) {
 }
 
 // The list's thumbnails: one release asset, read in at most three requests whatever the row count.
+// kicad_review.py THUMB_PNG_B64_MAX writes no longer thumbnail; a longer one is shown as a placeholder.
+export const THUMB_PNG_B64_MAX = 40000;
+const thumbPng = new RegExp(`^[A-Za-z0-9+/=]{1,${THUMB_PNG_B64_MAX}}$`);
 export async function thumbnailsFor(gh, token, root, dir, shas) {
   const wanted = new Set(shas);
   try {
@@ -322,7 +325,7 @@ export async function thumbnailsFor(gh, token, root, dir, shas) {
     if (!Array.isArray(list)) return new Map();
     const out = new Map();
     for (const e of list) {
-      if (wanted.has(e?.sha) && typeof e.png === 'string' && /^[A-Za-z0-9+/=]{1,40000}$/.test(e.png)) out.set(e.sha, e.png);
+      if (wanted.has(e?.sha) && typeof e.png === 'string' && thumbPng.test(e.png)) out.set(e.sha, e.png);
     }
     return out;
   } catch { return new Map(); }

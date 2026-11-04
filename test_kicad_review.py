@@ -11172,3 +11172,26 @@ assert len(set(_named)) == len(_stems), dict(zip(_stems, _named))
 assert all(_dpre.fullmatch(r"[A-Za-z0-9._-]+", stem) for stem in _named), _named
 assert kr._thumb_src_stem("") == "root" and kr._thumb_src_stem("H") == "H" and kr._thumb_src_stem("x.y-z") == "x.y-z"
 print("ok Session E 15 thumbnail source names never collide")
+
+# Session E 5: a thumbnail the review site would drop (over THUMB_PNG_B64_MAX base64 characters) is never written.
+import random as _dprandom
+assert kr.THUMB_PNG_B64_MAX == 40000
+assert "export const THUMB_PNG_B64_MAX = 40000;" in pathlib.Path("site/design.js").read_text(encoding="utf-8"), "site and producer share one limit"
+_dp_rng = _dprandom.Random(5)
+_dp_noise_rows = [bytes(_dp_rng.randrange(256) for _ in range(400 * 3)) for _ in range(250)]
+_dp_noise = kr._png_rgb(400, 250, _dp_noise_rows)
+with _DpTmp() as t:
+    pathlib.Path(t, "noise.png").write_bytes(_dp_noise)
+    plan = {"sha": "e" * 40, "committedAt": "2026-11-01T00:00:00Z", "projects": [{"dir": "N", "poster": "noise.png"}]}
+    with patch("sys.stderr", new_callable=io.StringIO):
+        entry = kr.thumbnail_index({}, plan, t)["projects"]["N"][0]
+    assert 0 < len(entry["png"]) <= kr.THUMB_PNG_B64_MAX, len(entry["png"])
+    w, h, bpp, rows = kr._png_decode(base64.b64decode(entry["png"]))
+    assert bpp == 3 and 0 < w < 200, w   # noise only fits once shrunk
+# Rows are filtered (Sub/Up/Average/Paeth chosen per row) and still decode to the same pixels.
+_dp_grad = [bytes((x + y) % 256 for x in range(300) for _ in range(3)) for y in range(120)]
+_dp_grad_png = kr._png_rgb(300, 120, _dp_grad)
+assert kr._png_decode(_dp_grad_png)[3] == _dp_grad
+_dp_idat = zlib.decompress(_dp_grad_png[_dp_grad_png.index(b"IDAT") + 4:_dp_grad_png.index(b"IEND") - 8])
+assert any(_dp_idat[y * (1 + 300 * 3)] != 0 for y in range(120)), "every row was left unfiltered"
+print("ok Session E 5 thumbnails stay within the review site's limit")

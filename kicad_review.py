@@ -5945,10 +5945,38 @@ def _png_decode(data):
     return width, height, bpp, rows
 
 
+def _png_filter(kind, row, prev, bpp):
+    """One PNG filter (0 None, 1 Sub, 2 Up, 3 Average, 4 Paeth) applied to a row; prev is the unfiltered row above."""
+    out = bytearray(len(row))
+    for i, x in enumerate(row):
+        a = row[i - bpp] if i >= bpp else 0
+        b = prev[i]
+        c = prev[i - bpp] if i >= bpp else 0
+        if kind == 1:
+            pred = a
+        elif kind == 2:
+            pred = b
+        elif kind == 3:
+            pred = (a + b) // 2
+        elif kind == 4:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            pred = a if pa <= pb and pa <= pc else b if pb <= pc else c
+        else:
+            pred = 0
+        out[i] = (x - pred) & 0xFF
+    return bytes(out)
+
+
 def _png_rgb(width, height, rows):
-    raw = b"".join(b"\0" + row for row in rows)
+    """8-bit RGB PNG. Each row takes the filter with the smallest sum of absolute signed bytes (the usual heuristic)."""
+    prev, parts = bytes(width * 3), []
+    for row in rows:
+        kind, encoded = min(((k, _png_filter(k, row, prev, 3)) for k in range(5)), key=lambda c: sum(v if v < 128 else 256 - v for v in c[1]))
+        parts.append(bytes([kind]) + encoded)
+        prev = row
     return (b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-            + _png_chunk(b"IDAT", zlib.compress(raw, 9)) + _png_chunk(b"IEND", b""))
+            + _png_chunk(b"IDAT", zlib.compress(b"".join(parts), 9)) + _png_chunk(b"IEND", b""))
 
 
 def poster_thumbnail(png, width=200, bg=(19, 22, 27)):
@@ -5956,7 +5984,26 @@ def poster_thumbnail(png, width=200, bg=(19, 22, 27)):
     ponytail: a 1600 x 1000 poster takes seconds of Python; the thumbnail job is separate so it never delays a review."""
     if width < 1:
         raise ValueError("invalid thumbnail width")
-    w, h, bpp, rows = _png_decode(png)
+    return _thumb_png(_png_decode(png), width, bg)
+
+
+# site/design.js THUMB_PNG_B64_MAX: the review site shows no thumbnail whose base64 is longer, so none is written.
+THUMB_PNG_B64_MAX = 40000
+THUMB_WIDTHS = (200, 160, 128, 100, 80, 64)
+
+
+def bounded_thumbnail(png, bg=(19, 22, 27)):
+    """The widest THUMB_WIDTHS thumbnail whose base64 fits THUMB_PNG_B64_MAX, or None. The poster is decoded once."""
+    decoded = _png_decode(png)
+    for width in THUMB_WIDTHS:
+        thumb = _thumb_png(decoded, width, bg)
+        if len(base64.b64encode(thumb)) <= THUMB_PNG_B64_MAX:
+            return thumb
+    return None
+
+
+def _thumb_png(decoded, width, bg):
+    w, h, bpp, rows = decoded
     tw = max(1, min(width, w))
     th = max(1, round(h * tw / w))
     out = []
@@ -5995,9 +6042,12 @@ def thumbnail_index(index, plan, src_dir, cap=50):
             if not poster.is_file():
                 rel = pathlib.Path(src_dir, project["poster"].removeprefix(f"{DESIGN_DIR}/"))
                 poster = rel if rel.is_file() else pathlib.Path(project["poster"])
-            png = poster_thumbnail(poster.read_bytes())
+            png = bounded_thumbnail(poster.read_bytes())
         except (OSError, ValueError, zlib.error, struct.error):
             print("::notice::" + workflow_command_escape(f"No thumbnail for {key}: its poster is not a plain 8-bit PNG"), file=sys.stderr)
+            continue
+        if png is None:
+            print("::notice::" + workflow_command_escape(f"No thumbnail for {key}: even a {THUMB_WIDTHS[-1]} px preview is over the review site's {THUMB_PNG_B64_MAX}-character limit"), file=sys.stderr)
             continue
         entries = [e for e in index["projects"].get(key, []) if e["sha"] != plan["sha"]]
         entries.insert(0, {"sha": plan["sha"], "date": plan["committedAt"], "png": base64.b64encode(png).decode("ascii")})
