@@ -12,6 +12,7 @@ import { issuesRoute } from './issues.js';
 import { historyRoute } from './history.js';
 
 import { readinessRoute, rerunRoute } from './readiness.js';
+import { zipEntries, zipEntryStream } from './zip.js';
 
 const text = new TextEncoder();
 const untext = new TextDecoder();
@@ -246,6 +247,69 @@ async function pdfDownload(owner, repo, id, active) {
     if (!blob.ok || !blob.body) return pdfError(active);
     return sessionResponse(blob.body, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${artifact.name}"` } }, active);
   } catch { return pdfError(active); }
+}
+
+const downloadKinds = { fab: ['application/zip', /\.zip$/], pdf: ['application/pdf', /\.pdf$/], step: ['model/step', /\.step$/], glb: ['model/gltf-binary', /\.glb$/] };
+
+function downloadError(active) {
+  return sessionResponse(JSON.stringify({ error: 'Download unavailable' }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
+}
+
+// The run's downloads artifact is one archived zip; read the one entry asked for by byte range, never the whole file.
+async function downloadFile(owner, repo, id, index, kind, active) {
+  try {
+    const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`;
+    const meta = await gh(`${root}/artifacts/${id}`, active.token);
+    if (!meta.ok) return downloadError(active);
+    const report = await meta.json(), runId = report.workflow_run?.id, name = String(report.name || '');
+    // The report name carries the reviewed head's first 7 characters. The run's head_sha is the reviewed head except
+    // for a manual (workflow_dispatch) run, which reviews the head given by hand, not its dispatch ref's tip.
+    const runHead = String(report.workflow_run?.head_sha || '');
+    const head7 = verifyReportFamily('comparison', name) ? /-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name)[1] : /^kicad-design-([0-9a-f]{7})\.html$/.exec(name)?.[1];
+    const family = !head7 || !/^[0-9a-f]{40}$/.test(runHead) ? null : verifyReportFamily('comparison', name) ? 'review' : 'design';
+    if (report.expired || !family || !/^\d{1,20}$/.test(String(runId))) return downloadError(active);
+    const bundleName = `kicad-${family}-downloads-${head7}`;
+    // Every page of the run's artifacts is read: 02 adds digest assets, so the bundle can sit past the first 100.
+    const found = [];
+    let complete = false;
+    for (let page = 1; page <= 10 && !complete; page += 1) {
+      const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100&page=${page}`, active.token);
+      if (!list.ok) return downloadError(active);
+      const rows = (await list.json()).artifacts;
+      if (!Array.isArray(rows)) return downloadError(active);
+      found.push(...rows.filter((a) => !a?.expired && a?.name === bundleName && a.workflow_run?.id === runId && /^\d{1,20}$/.test(String(a.id))));
+      complete = rows.length < 100;
+    }
+    if (!complete || found.length !== 1) return downloadError(active);  // zero, several or unpaged matches are refused
+    const bundle = found[0];
+    const zip = await gh(`${root}/artifacts/${bundle.id}/zip`, active.token, { redirect: 'manual' });
+    if (zip.status !== 302) return downloadError(active);
+    const location = new URL(zip.headers.get('Location'));
+    if (location.protocol !== 'https:' || location.username || location.password) return downloadError(active);
+    // The signed blob URL gets no GitHub token; 'manual' (workerd rejects 'error') plus the 206 checks refuse further redirects.
+    const range = (start, end) => fetch(location.href, { redirect: 'manual', headers: { Range: `bytes=${start}-${end}` } });
+    const probe = await range(0, 0);
+    const total = Number(/^bytes 0-0\/(\d+)$/.exec(probe.headers.get('Content-Range') || '')?.[1]);
+    if (probe.status !== 206 || !Number.isSafeInteger(total) || total < 22) { await probe.body?.cancel(); return downloadError(active); }
+    if ((await probe.arrayBuffer()).byteLength !== 1) return downloadError(active);
+    const [type, suffix] = downloadKinds[kind];
+    const entries = await zipEntries(range, total);  // exactRange inside checks every 206 and Content-Range
+    // Full-head provenance: the staged envelope carries the run's reviewed full head (collect_downloads writes it).
+    const envelope = entries.find((e) => e.name === `${index}/downloads.json`);
+    const head = envelope ? (await new Response(await zipEntryStream(range, envelope)).json())?.head : null;
+    if (!/^[0-9a-f]{40}$/.test(head) || !head.startsWith(head7) || bundle.workflow_run?.head_sha !== runHead
+      || (family === 'design' && !verifyReportFamily('design', name, head))) return downloadError(active);
+    if (head !== runHead) {  // only a manual run may review a head other than its run's head_sha
+      const run = await gh(`${root}/runs/${runId}`, active.token);
+      if (!run.ok || (await run.json()).event !== 'workflow_dispatch') return downloadError(active);
+    }
+    const matches = entries.filter((e) => e.name.startsWith(`${index}/`) && !e.name.slice(`${index}/`.length).includes('/') && suffix.test(e.name));
+    const entry = matches.length === 1 ? matches[0] : null;
+    const filename = entry?.name.split('/').pop();
+    if (!entry || !/^[A-Za-z0-9_.-]{1,200}$/.test(filename)) return downloadError(active);
+    // Errors after this point (truncation, CRC, length) error the stream; they cannot become a 404.
+    return sessionResponse(await zipEntryStream(range, entry), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${filename}"` } }, active);
+  } catch { return downloadError(active); }
 }
 
 export function assetFromReport(html, id, kind) {
@@ -882,6 +946,12 @@ const routes = {
       if (request.method === 'GET' && modelRoute) {
         const [, owner, repo, id, digest, kind] = modelRoute;
         return artifact3d(request, env, owner, repo, id, digest, kind);
+      }
+      const downloadRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/(\d{1,20})\/download\/(\d{1,3})\/(fab|pdf|step|glb)$/);
+      if (request.method === 'GET' && downloadRoute) {
+        const [, owner, repo, id, index, kind] = downloadRoute;
+        const allowed = await access(request, env, owner, repo);
+        return allowed instanceof Response ? allowed : downloadFile(owner, repo, id, index, kind, allowed.s);
       }
       const artifactRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/a\/([^/]+)(\/raw|\/pdf)?$/);
       if (request.method === 'GET' && artifactRoute) {

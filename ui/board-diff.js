@@ -94,7 +94,60 @@
     gl.uniform1f(gl.getUniformLocation(pane.program,'headAlpha'),alpha);
     gl.drawArrays(gl.TRIANGLES,0,3); gl.disable(gl.SCISSOR_TEST);
   }
-  function marks(pane, state, look, actions, background) {
+  function electricalNetNames(row,side) {
+    const d=row?.detail;
+    return d?.kind==='members' ? (side==='base'?d.beforeNets:d.afterNets)||[]
+      : d?.kind==='pad-net' ? [side==='base'?d.before:d.after].filter(Boolean) : [];
+  }
+  // Net ids for this pass only: recomputed per draw, so no cache can outlive a scene edit.
+  function electricalNetIds(scene,row,side) {
+    const names=electricalNetNames(row,side);
+    return new Set((scene?.nets||[]).filter(n=>n.name && names.includes(n.name)).map(n=>n.id));
+  }
+  function electricalNetMatch(netIds,object,row,side) {
+    if(!row) return false;
+    if(netIds.has(object.net)) return true;
+    const d=row.detail;
+    if(d?.kind!=='pad-net') return false;
+    // Board anchors carry no sheet (PCBs have none); KiCad identity is UUID, ref, pin, sheet path and commit.
+    const commit=window.REVIEW_DATA?.[side];
+    const anchors=row.anchors?.[side]||[];
+    return !!commit && anchors.some(a=>a.board && a.commit===commit &&
+      (!a.sheet && !object.sheet || a.sheet===object.sheet) && a.uuid===object.changeUuid &&
+      a.padUuid===object.uuid && a.ref===object.reference && String(a.pin)===String(object.number));
+  }
+  function electricalLook(look,row,side) {
+    const names=electricalNetNames(row,side);
+    if(!names.length) return look;
+    return {...look,netColors:{...look.netColors,...Object.fromEntries(
+      names.map(n=>[n,side==='base'?[1,.3,.3,1]:[.3,1,.3,1]]))}};
+  }
+  function selectedCopper(pane,row,state) {
+    if(row?.detail?.kind!=='area') return;
+    const width=pane.vp.clientWidth, height=pane.vp.clientHeight;
+    for(const side of pane.sides) {
+      if(!pane.scenes[side]) continue;
+      const action=side==='base'?'removed':'added', rings=row.detail[action+'Contours']||[];
+      if(!rings.length) continue;
+      const svg=document.createElementNS('http:'+'//www.w3.org/2000/svg','svg'); // split: no URL literal offline
+      svg.classList.add('copper-selection'); svg.dataset.side=side;
+      svg.setAttribute('width',width); svg.setAttribute('height',height);
+      svg.style.opacity=String(state.m==='blend' && side==='head'?state.blend:1);
+      if(state.m==='wipe') {
+        // Same boundary as clipRects: base owns the left of the split, head the right.
+        const cut=Math.max(0,Math.min(1,state.wipe))*width;
+        svg.style.clipPath=side==='base'? 'inset(0 '+(width-cut)+'px 0 0)' : 'inset(0 0 0 '+cut+'px)';
+      }
+      const path=document.createElementNS(svg.namespaceURI,'path');
+      // ponytail: only the selected row; one path per sign bounds DOM nodes, not polygon bytes.
+      path.setAttribute('d',rings.map(ring=>ring.map((p,i)=>{
+        const [x,y]=pane.renderer.worldToScreen(p); return (i?'L':'M')+x+' '+y;
+      }).join(' ')+'Z').join(' '));
+      path.dataset.action=action; path.setAttribute('aria-label',action+' copper on '+row.detail.layer);
+      svg.append(path); pane.markHud.append(svg);
+    }
+  }
+  function marks(pane, state, look, actions, background, selectedRow) {
     const {renderer} = pane, hud = pane.markHud, {gl} = renderer, M = window.BoardMarks;
     const palette = Object.fromEntries(Object.keys(M.styles).map(a=>[a,M.pickColor(a,background)]));
     hud.replaceChildren();
@@ -166,9 +219,14 @@
       const alpha=state.m==='blend' && side==='head'?state.blend:1;
       if (!alpha) continue;
       renderer.setScene(pane.scenes[side],side);
-      renderer.draw({target:pane.targets[0],mask:true,marks:true,filter:o=>o.changeIds?.includes(state.s)});
+      renderer.setAppearance(electricalLook(look,selectedRow,side));
+      const netIds=electricalNetIds(pane.scenes[side],selectedRow,side);
+      renderer.draw({target:pane.targets[0],mask:true,marks:true,
+        filter:o=>o.changeIds?.includes(state.s) || electricalNetMatch(netIds,o,selectedRow,side)});
       effect('added',alpha,clips?.[side],true);
     }
+    selectedCopper(pane,selectedRow,state);
+    renderer.setAppearance(look);
   }
   function mount({stage, scenes, changes, state, appearance, onLost, attachPanZoom}) {
     const panes = [], actions = actionMap(changes), sideMode = state.m === 'side';
@@ -179,7 +237,7 @@
       render() {
         if (disposed) return;
         try {
-          const look = getAppearance(), bg = look.background || [0,16,35,1];
+          const look = getAppearance(), selectedRow = changes.find(r=>r.id===state.s), bg = look.background || [0,16,35,1];
           const background = look.boardBackground || [bg[0]/255,bg[1]/255,bg[2]/255,bg[3] ?? 1];
           for (const pane of panes) {
             const {vp,canvas,renderer} = pane, {gl} = renderer;
@@ -193,7 +251,7 @@
             const mode = state.m;
             for (const [i,side] of ['base','head'].entries()) {
               const scene = pane.scenes[side], overlay = mode === 'overlay';
-              renderer.setScene(scene,side);
+              renderer.setScene(scene,side); renderer.setAppearance(electricalLook(look,selectedRow,side));
               const options = {target:pane.targets[i], background:overlay ? [1,1,1,1] : i && mode !== 'wipe' && !sideMode ? [0,0,0,0] : background,
                 grid: !overlay && (sideMode || mode === 'wipe' || i === 0)};
               if (look.markStyle === 'recolour' && !overlay) options.override = (o,normal) => {
@@ -203,8 +261,10 @@
               if (mode === 'semantic') {
                 if (i === 0) {
                   renderer.setScene(scenes.head || scenes.base,'head');
+                  renderer.setAppearance(electricalLook(look,selectedRow,scenes.head ? 'head' : 'base'));
                   renderer.draw({...options,filter:o=>!actionFor(o,actions),override:(o,normal)=>({...normal,opacity:normal.opacity*.2})});
                   renderer.setScene(scene,side);
+                  renderer.setAppearance(electricalLook(look,selectedRow,side));
                   renderer.draw({...options,clear:false,grid:false,filter:o=>!!actionFor(o,actions)});
                 } else renderer.draw({...options,filter:o=>!!actionFor(o,actions)});
               } else renderer.draw(options);
@@ -215,9 +275,11 @@
             } else composite(pane,mode === 'overlay' ? 1 : 0,mode === 'blend' ? state.blend : 1);
             if (mode==='overlay' && look.markStyle==='recolour') for (const side of pane.sides) {
               renderer.setScene(pane.scenes[side],side);
+              renderer.setAppearance(electricalLook(look,selectedRow,side));
               renderer.draw({clear:false,grid:false,background:[1,1,1,1],filter:o=>!!actionFor(o,actions),override:(o,normal)=>({...normal,color:window.BoardMarks.pickColor(actionFor(o,actions),[255,255,255]).map(v=>v/255)})});
             }
-            marks(pane,state,look,actions,mode==='overlay'?[255,255,255]:background.slice(0,3).map(v=>v*255));
+            renderer.setAppearance(look);
+            marks(pane,state,look,actions,mode==='overlay'?[255,255,255]:background.slice(0,3).map(v=>v*255),selectedRow);
           }
         } catch (error) { controller.dispose(); onLost?.(error); }
       },

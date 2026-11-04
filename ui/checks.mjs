@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+const BR03_HOTSPOT_CONTRACT=JSON.parse(readFileSync(new URL('./fixtures/br03-hotspot-contract.json',import.meta.url),'utf8'));
 // These dependency-free browser functions are shared by CDP and Safari WebDriver
 // calibration. Compare actual composited screenshots, not a second SVG renderer.
 export async function softnessProbe(phase, scale) {
@@ -111,7 +113,7 @@ const BOARD_LIFECYCLE_FIXTURE = `
 
 const MARK_STYLE_FIXTURE = `
     // The template may lack retained board data; enable the real toolbar against a retained fixture.
-    const object={kind:'pad',uuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
+    const object={kind:'pad',uuid:'style',changeUuid:'style',changeIds:['c0'],layers:['F.Cu'],net:0,category:'pads',side:'front',hidden:false,
       box:[2000,2000,6000,6000],geometry:{primitive:{shape:'circle',center:[4000,4000],size:[4000,4000],angle:0}}};
     const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],layers:[{id:0,name:'F.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''}],objects:[object]};
     disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
@@ -1049,6 +1051,55 @@ export const CHECKS = [
     }
     return count>0||'no sheets checked';
   `],
+  ["BR03 grouped electrical rows and old v1 fallback", "", `
+  const p=proj(), old=p.changes, summary=p.summary, filter={...S.filter}, savedTab=S.t;
+  try {
+    p.changes=[{id:'c903',kind:'net-members',ref:'USB',action:'modified',channel:'wiring',weight:'heavy',
+      detail:{kind:'members',added:['U1.19','R2.1'],removed:['J1.3'],beforeNets:['USB'],afterNets:['USB'],transitions:[{pin:'U1.19',before:['A'],after:['C']}]},where:null},
+      {id:'c904',kind:'rule',ref:'min clearance',action:'modified',channel:'rules',weight:'heavy',
+      detail:{kind:'number',unit:'mm',before:0.2,after:0.25},where:null}];
+    p.summary={headline:'No headline changes',incomplete:[{channel:'routing',reason:'pcbnew unavailable'}]};
+    S.t='changes'; Object.assign(S.filter,{all:false,q:'',added:true,removed:true,modified:true,kind:'',group:''});
+    renderPanel();
+    const text=document.querySelector('#panel').textContent;
+    if(!text.includes('Wiring') || !text.includes('+U1.19') || !text.includes('−J1.3') || !text.includes('heavy')) return 'missing grouping or chips';
+    if(!text.includes('U1.19: A → C')) return 'pin destination missing';
+    if(!text.includes('pcbnew unavailable') || !text.includes('0.25')) return 'missing completeness or numeric detail';
+    S.filter.q='U1.19'; renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length!==1) return 'member search failed';
+    delete p.summary; p.changes=[{id:'c905',kind:'symbol',ref:'R1',action:'added',props:{Value:'1k'},where:null}];
+    S.filter.q=''; renderPanel();
+    return document.querySelector('#panel .card[data-id="c905"]') ? true : 'old report failed';
+  } finally {p.changes=old; p.summary=summary; S.filter=filter; S.t=savedTab; renderPanel();}
+`],
+  ["BR03 hostile text and full array search", "", `
+  const p=proj(), changes=p.changes, summary=p.summary, filter={...S.filter};
+  const hostile='</button><img src=x onerror=alert(1)>', savedTab=S.t;
+  try {
+    p.changes=Array.from({length:1501},(_,i)=>({id:'c'+(10000+i),kind:'rule',ref:'rule '+i,
+      action:['added','removed','modified'][i%3],channel:'rules',weight:'heavy',where:null,
+      detail:{kind:'text',before:'safe',after:i===1500?'FINAL_NEEDLE':hostile}}));
+    p.summary={headline:hostile,incomplete:[{channel:'routing',reason:hostile}]};
+    S.t='changes';Object.assign(S.filter,{all:false,q:'FINAL_NEEDLE',added:true,removed:true,modified:true,kind:'',group:''});
+    renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length!==1) return 'last searchable row missing';
+    S.filter.q='';renderPanel();
+    if(document.querySelector('#panel img')) return 'unsafe electrical detail';
+    if(!document.querySelector('#panel').textContent.includes(hostile)) return 'hostile text lost';
+    if(document.querySelectorAll('#panel .card[data-id]').length!==50 || !document.querySelector('[data-change-page="next"]')) return 'Changes page size changed';
+    for(const action of ['added','removed','modified']) {
+      Object.assign(S.filter,{added:false,removed:false,modified:false,[action]:true}); renderPanel();
+      const ids=[...document.querySelectorAll('#panel .card[data-id]')].map(e=>e.dataset.id);
+      if(!ids.length || ids.some(id=>p.changes.find(r=>r.id===id).action!==action)) return action+' toggle failed';
+    }
+    Object.assign(S.filter,{added:true,removed:true,modified:true,q:'no match anywhere'});renderPanel();
+    if(document.querySelectorAll('#panel .card[data-id]').length || !document.querySelector('.electrical-incomplete')?.textContent.includes(hostile)) return 'empty search hid incompleteness';
+    const unknown=electricalDetail({detail:{kind:'pad-net',before:'A',after:'B',boardOnly:null,evidenceNote:hostile}});
+    const probe=document.createElement('div');probe.innerHTML=unknown;
+    if(probe.querySelector('img') || !probe.textContent.includes(hostile) || probe.textContent.includes('board-only net change')) return 'uncertain pad labelled definite';
+    return true;
+  } finally {p.changes=changes;p.summary=summary;S.filter=filter;S.t=savedTab;renderPanel();}
+`],
   ["images large Changes dock pages retain every row and selection", "", `
     const p=D.projects.findIndex(p=>p.changes.length>100);
     if(p<0)return true;
@@ -1470,6 +1521,165 @@ return true;
   } finally {P.sheets.forEach((s,i)=>{if(maps[i])s.hotspots=maps[i];});if(saved)board.inspect=saved;if(geometry)board.geometry=geometry;}
 `])
 ,
+  ["Fab limits vendor isolation and desktop coverage", "v=board&t=checks", `
+    const p=proj(), previous=p.checks, old=S.checks;
+    const original=previous.flatMap(c=>c.violations).find(v=>v.where?.board && v.pos);
+    if(!original) return 'vendor isolation requires a located board violation';
+    try {
+      S.checks={...old,check:'',scope:'all',error:true,warning:true,q:'',group:'check'};
+      p.checks=['jlcpcb','pcbway'].map((vendor,i)=>({name:'fab_limits',title:'Fab limits',
+        vendor,profile:i?'pcbway-std':'jlcpcb-2l',level:'required',status:'fail',
+        errors:1,warnings:0,new_errors:1,new_warnings:0,fixed:0,baselineAvailable:true,
+        checked:['trackWidthOuterMm'],unchecked:['holeToHoleMixedMm'],
+        checkedOn:'2026-10-24',assumedCopperOz:1,coverageWarnings:['F.Cu: copper thickness unknown'],
+        violations:[{...structuredClone(original),id:'v-fab-'+vendor,new:true}]}));
+      renderPanel();
+      const panel=document.querySelector('#panel');
+      for(const c of p.checks) {
+        if(panel.querySelectorAll('.viol[data-id="'+c.violations[0].id+'"]').length!==1)
+          return 'vendor finding duplicated or lost: '+c.vendor;
+      }
+      for(const c of p.checks) {
+        const label='Fab limits · '+({jlcpcb:'JLCPCB',pcbway:'PCBWay'}[c.vendor]);
+        const key=encodeURIComponent(c.name+'\u0000'+c.vendor);
+        let button=panel.querySelector('[data-check-summary="'+key+'"]');
+        if(!button?.textContent.includes(label)) return 'vendor summary label missing: '+c.vendor;
+        button.click();
+        button=panel.querySelector('[data-check-summary="'+key+'"]');
+        const findings=[...panel.querySelectorAll('.viol')];
+        if(button.getAttribute('aria-pressed')!=='true' || findings.length!==1 ||
+            findings[0].dataset.id!==c.violations[0].id) return 'vendor summary mixes findings: '+c.vendor;
+        if(panel.querySelector('.check-group .rule')?.textContent!==label) return 'vendor group label missing';
+        if(valid(decodeState('#'+encodeState())).t!=='checks') return 'vendor filter broke URL tab state';
+        button.click();
+        if(panel.querySelector('[data-check-summary="'+key+'"]').getAttribute('aria-pressed')!=='false' ||
+            panel.querySelectorAll('.viol').length!==2) return 'vendor summary toggle did not reset';
+      }
+      const ledgers=[...panel.querySelectorAll('[aria-label="Fabrication limit coverage"]')];
+      if(ledgers.length!==2 || !ledgers[0].textContent.includes('JLCPCB 2-layer') ||
+          !ledgers[1].textContent.includes('PCBWay standard')) return 'separate vendor ledgers missing';
+      for(const ledger of ledgers) {
+        if(ledger.scrollWidth>ledger.clientWidth+1) return 'fab coverage overflows its block';
+        const box=ledger.getBoundingClientRect();
+        if(box.left<0 || box.right>innerWidth+1) return 'fab coverage outside viewport';
+      }
+      const c=p.checks[0];
+      c.status='not_run'; c.unsupported='no head board'; delete c.baselineAvailable; delete c.fixed;
+      const host=document.createElement('div');host.innerHTML=renderChecks();
+      const text=host.querySelector('[aria-label="Fabrication limit coverage"]').textContent;
+      if(!text.includes('Not run: no head board, so no fab comparison was made.') ||
+          text.includes('Compared with base')) return 'not-run optional comparison metadata misrepresented';
+      return true;
+    } finally {p.checks=previous;S.checks=old;renderPanel();}
+  `],
+["Fab limits ledger", "", `
+  const p = proj(), previous = p.checks, previousMode = D.mode;
+  const c = {name:'fab_limits', title:'Fab limits',vendor:'jlcpcb',level:'informational',status:'warn',
+    errors:0,warnings:0,new_errors:0,new_warnings:0,fixed:0,violations:[],
+    profile:'jlcpcb-2l',checkedOn:'2026-10-24',assumedCopperOz:1,
+    checked:['trackWidthOuterMm'],unchecked:['holeToHoleMixedMm'],
+    unsupported:null,coverageWarnings:['F.Cu: copper thickness unknown'],baselineAvailable:false};
+  try {
+    p.checks = [...previous,c];
+    const host = document.createElement('div'); host.innerHTML = renderChecks();
+    const text = host.textContent;
+    if (!text.includes('JLCPCB 2-layer') || !text.includes('Not checked') ||
+        !text.includes('holeToHoleMixedMm') || !text.includes('newly audited'))
+      return 'fab profile, coverage or baseline explanation missing';
+    if (!text.includes('copper thickness unknown')) return 'copper warning hidden';
+    c.baselineAvailable = true; c.fixed = 1; c.new_errors = 0;
+    host.innerHTML = renderChecks();
+    if (!host.textContent.includes('Compared with base: 0 new, 1 fixed.')) return 'base comparison text missing';
+    c.baselineAvailable = false; c.fixed = 0;
+    if (typeof c.warnings !== 'number' || !text.includes('0 warnings')) return 'numeric warnings contract lost';
+    c.unsupported = 'not checked: profile covers 2 layers';
+    if (!renderChecks().includes('profile covers 2 layers')) return 'unsupported hidden';
+    c.coverageWarnings = ['<img src=x onerror=alert(1)>'];
+    host.innerHTML = renderChecks();
+    if (host.querySelector('img')) return 'unescaped fab metadata';
+    D.mode = 'single';
+    c.coverageWarnings = ['F.Cu: copper thickness unknown'];
+    host.innerHTML = renderChecks();
+    const ledger = host.querySelector('[aria-label="Fabrication limit coverage"]');
+    if (!ledger || !ledger.textContent.includes('Current-design audit: no base fab comparison was run.') ||
+        ledger.textContent.includes('newly audited') || !ledger.textContent.includes('holeToHoleMixedMm') ||
+        !ledger.textContent.includes('copper thickness unknown')) return 'single-mode fab coverage/provenance lost';
+    // 06 owns the surrounding single-mode presentation; run its integration assertions only when merged.
+    if (typeof single === 'function') {
+      p.checks = [c];
+      for (const [status, unsupported] of [['fail', null], ['fail', 'not checked: unsupported layers'], ['not_run', 'no head board']]) {
+        Object.assign(c, {level:'required',status,unsupported,reason:unsupported,errors:unsupported ? 0 : 1,
+                          new_errors:0,new_warnings:0,fixed:0,violations:[]});
+        host.innerHTML = renderChecks();
+        if (!host.querySelector('.check-' + status.replace('_','-'))) return 'single-mode fab status changed';
+        if (host.querySelector('[data-check-scope="new"], .check-new, .check-fixed') ||
+            host.textContent.includes('no new errors')) return 'single-mode comparison-only fab labels remain';
+        if (!host.querySelector('[aria-label="Fabrication limit coverage"]')) return 'single-mode fab ledger hidden';
+      }
+    }
+    return true;
+  } finally { p.checks = previous; if (previousMode === undefined) delete D.mode; else D.mode = previousMode; }
+`],
+["Fab limits selection and waiver", "v=board&t=checks", `
+  const old = {p:S.p,v:S.v,s:S.s,x:S.x,y:S.y,z:S.z,t:S.t,checks:S.checks,waiveOpen:S.waiveOpen};
+  const index = D.projects.findIndex(p => p.board?.layers?.length && p.checks.some(c =>
+    c.violations.some(v => v.where?.board && v.pos)));
+  if (index < 0) return 'fab selection fixture requires a located board violation';
+  S.p = index;
+  const p = proj(), previous = p.checks;
+  const original = p.checks.flatMap(c=>c.violations).find(v=>v.where?.board && v.pos);
+  const max = Math.max(0,...D.projects.flatMap(p=>p.checks.flatMap(c=>c.violations.map(v=>Number(v.id?.slice(1))||0))));
+  const v = {...structuredClone(original),id:'v'+(max+1),new:true,waiver_key:'w-0123456789ab'};
+  delete v.waived;
+  const c = {name:'fab_limits',title:'Fab limits',level:'required',status:'fail',
+    errors:1,warnings:0,new_errors:1,new_warnings:0,fixed:0,violations:[v],
+    vendor:'jlcpcb',profile:'jlcpcb-2l',coverageWarnings:['copper thickness unknown'],baselineAvailable:false};
+  try {
+    p.checks = [...previous,c];
+    S.v='board'; S.t='checks'; S.checks={...S.checks,check:'fab_limits',scope:'all',error:true,warning:true,q:''};
+    renderNav(); renderPanel(); await draw();
+    const row=document.querySelector('#panel .viol[data-id="'+v.id+'"]');
+    if (!row || row.getAttribute('aria-disabled')==='true') return 'fab row not selectable';
+    row.click();
+    for(let n=0;n<120 && (S.s!==v.id || S.x==null);n++) await new Promise(r=>requestAnimationFrame(r));
+    // draw may resolve after selection is set: wait for final camera centre too.
+    const box=v.box || [v.pos[0]-3,v.pos[1]-3,v.pos[0]+3,v.pos[1]+3];
+    const cx=(box[0]+box[2])/2,cy=(box[1]+box[3])/2;
+    for(let n=0;n<120 && (Math.abs(S.x-cx)>.001 || Math.abs(S.y-cy)>.001);n++) await new Promise(r=>requestAnimationFrame(r));
+    if(S.v!=='board' || S.s!==v.id || Math.abs(S.x-cx)>.001 || Math.abs(S.y-cy)>.001)
+      return JSON.stringify({view:S.v,id:S.s,x:S.x,y:S.y,expected:[cx,cy]});
+    const waive=document.querySelector('#panel [data-waive="'+v.id+'"]');
+    if(!waive) return 'fab waiver control missing';
+    waive.click();
+    const text=document.querySelector('#panel [data-waiver-snippet="'+v.id+'"]')?.textContent || '';
+    if(!text.includes('check = "fab_limits"') || !text.includes('match = "w-0123456789ab"')) return 'fab waiver snippet wrong check/key';
+    p.checks=previous.filter(c=>c.name!=='fab_limits');
+    const legacy=document.createElement('div'); legacy.innerHTML=renderChecks();
+    if(legacy.querySelector('[aria-label="Fabrication limit coverage"]') || legacy.textContent.includes('Fab limits')) return 'old report acquired fab UI';
+    return true;
+  } finally {
+    p.checks=previous; Object.assign(S,old); renderNav(); renderPanel(); await draw(); saveHash();
+  }
+`],
+["Fabrication producer contract", "v=board&t=checks", `
+  if(D.fabProducerFixture !== true) return "skip";
+  const old=S.p;
+  try {
+    const index=D.projects.findIndex(p=>p.checks.some(c=>c.name==='fab_limits'));
+    if(index<0) return 'producer page missing fab check';
+    S.p=index;
+    const c=proj().checks.find(c=>c.name==='fab_limits' && c.vendor==='jlcpcb');
+    if(typeof c.warnings!=='number' || c.warnings!==0 || c.errors!==1) return 'producer numeric counts changed';
+    if(!Array.isArray(c.coverageWarnings) || !c.coverageWarnings.length) return 'producer coverage missing';
+    const host=document.createElement('div'); host.innerHTML=renderChecks();
+    const ledger=host.querySelector('[aria-label="Fabrication limit coverage"]');
+    if(!ledger || !c.coverageWarnings.every(w=>ledger.textContent.includes(w))) return 'coverage not rendered separately';
+    if(!host.textContent.includes('0 warnings')) return 'numeric warning count not rendered';
+    if(!host.querySelector('.viol[data-id="'+c.violations[0].id+'"]')) return 'producer finding missing';
+    return true;
+  } finally {S.p=old;}
+`],
+
   ["SCH6 exact paints stay schematic-only and preserve raster source", "", `
     const id='__sch6_palette_probe__';
     const source='<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" style="stroke:#A90000"><path d="M0 0H10V10H0Z" style="fill:#009600!important;stroke:none"/></svg>';
@@ -2884,7 +3094,9 @@ return true;
   S.partsFilter.changed = false; renderPanel();
   const line = [...document.querySelectorAll('.parts-row')].find(r => r.textContent.includes('R7'));
   if (!line.classList.contains('changed') || line.children[1].textContent !== 'R6, R7' || line.querySelector('strong').textContent !== 'R7'
-    || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 2) return 'changed marking';
+    || !line.textContent.includes('10k → 4.7k (R7)') || document.querySelectorAll('.parts-row.changed').length !== 3) return 'changed marking';
+  const changedGroups = [...document.querySelectorAll('.parts-row.changed .parts-refs')].map(c => c.textContent).sort().join('|');
+  if (changedGroups !== 'J5|R1|R6, R7') return 'changed reference groups ' + changedGroups;
   REVIEW_DATA.projects[0].parts.supplier = null; renderPanel();
   if (document.querySelector('.parts-age, .parts-attribution, .parts-lookup-error') || [...document.querySelectorAll('.parts-stock')].some(c => c.textContent !== '—')) return 'no lookup';
   if (valid({t:'parts'}).t !== 'parts') return 'hash';
@@ -2896,6 +3108,16 @@ return true;
   parts.supplier = {fetched_at:'invalid <timestamp>'}; renderPanel();
   if (!document.querySelector('.parts-age.stale') || document.querySelector('.parts-age').textContent.includes('NaN')
       || [...document.querySelectorAll('.parts-stock')].some(c => !c.classList.contains('stale') || c.textContent.includes('✔'))) return 'invalid timestamp';
+  const savedLines = parts.lines;
+  parts.lines = [{refs:['U1'], key:'unit-conflict', value:'TL072', footprint:'SOIC-8', lcsc:'C123', mpn:'A',
+    problems:['unit_identity_conflict']}];
+  S.partsFilter.problems = true; renderPanel();
+  const unitRow = document.querySelector('.parts-row');
+  if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 1 · 1 ⚠'
+      || !unitRow?.classList.contains('problem') || !unitRow.children[0].textContent.includes('⚠')
+      || unitRow.querySelector('.problem-tag')?.textContent !== 'UNITS'
+      || unitRow.querySelector('.problem-tag')?.title !== 'conflicting identities across symbol units') return 'unit identity conflict';
+  parts.lines = savedLines; S.partsFilter.problems = false; renderPanel();
   const savedProblems = parts.lines.map(l => l.problems);
   parts.lines.forEach(l => l.problems = ['missing_mpn', 'unavailable']); renderPanel();
   if (document.querySelector('[data-tab=parts]').textContent !== 'Parts 5') return 'zero blocking count';
@@ -2908,6 +3130,302 @@ return true;
   if (!document.querySelector('.parts-footprint')?.textContent.includes('R_0402 → R_0603')) return 'footprint change';
   delete REVIEW_DATA.projects[0].parts; renderPanel();
   return document.querySelector('[data-tab=parts]').disabled && S.t === 'changes';
+`],
+  ["Parts fixture BOM search values only and category heading padding", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    document.querySelector('[data-tab=parts]').click();
+    for (const view of ['bom', 'problems']) {
+      S.partsView = view;
+      for (const q of ['footprint', 'refs', 'category', 'datasheet']) {
+        S.partsFilter.q = q; renderPanel();
+        if (document.querySelectorAll(view === 'bom' ? '.bom-row' : '.parts-row').length) return view + ' matched key ' + q;
+      }
+      for (const q of ['Resistors', 'R1', 'RC0603', 'ESP32']) {
+        S.partsFilter.q = q; renderPanel();
+        if (!document.querySelectorAll(view === 'bom' ? '.bom-row' : '.parts-row').length) return view + ' missing value ' + q;
+      }
+    }
+    S.partsFilter.q = ''; S.partsView = 'bom'; renderPanel();
+    const heading = document.querySelector('.bom-cat th'), style = getComputedStyle(heading);
+    const expected = getComputedStyle(document.documentElement).getPropertyValue('--sp-2').trim();
+    const probe = document.createElement('div'); probe.style.padding = expected; document.body.append(probe);
+    const padding = getComputedStyle(probe).paddingLeft; probe.remove();
+    return style.paddingLeft === padding && style.paddingRight === padding || 'category heading padding ' + style.padding;
+  `],
+  ["Parts fixture BOM view groups, counts, sorts and escapes", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  if (document.querySelector('.bom-table') || !document.querySelector('.parts-row')) return 'the Problems view must stay the default';
+  document.querySelector('[data-parts-view=bom]').click();
+  const text = sel => document.querySelector(sel)?.textContent.trim();
+  if (text('.bom-summary') !== '6 components · 5 unique parts · 4 with MPN') return 'summary ' + text('.bom-summary');
+  const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
+  if (chips !== 'All 6|Resistors 3|Connectors 1|ICs & Modules 2') return 'chips ' + chips;
+  const heads = [...document.querySelectorAll('.bom-cat')].map(r => r.textContent.trim()).join('|');
+  if (heads !== 'Resistors 3|Connectors 1|ICs & Modules 2') return 'headings ' + heads;
+  const refs = () => [...document.querySelectorAll('.bom-row .bom-refs')].map(c => c.textContent).join('|');
+  if (refs() !== 'R1|R6-R7|J5|U4|U5') return 'refs ' + refs();
+  document.querySelector('[data-bom-sort=qty]').click();
+  document.querySelector('[data-bom-sort=qty]').click();
+  if (refs() !== 'R6-R7|R1|J5|U4|U5' || document.querySelector('[data-bom-sort=qty]').closest('th').getAttribute('aria-sort') !== 'descending') return 'qty descending ' + refs();
+  document.querySelector('[data-bom-cat="Resistors"]').click();
+  if (document.querySelectorAll('.bom-row').length !== 2 || document.querySelectorAll('.bom-cat').length !== 1) return 'category filter';
+  document.querySelector('[data-bom-cat=""]').click();
+  const q = document.querySelector('[data-list-search=parts]'); q.value = 'esp32'; q.dispatchEvent(new Event('input'));
+  if (document.querySelectorAll('.bom-row').length !== 1) return 'search';
+  S.partsFilter.q = ''; renderPanel();
+  if (document.querySelector('.bom-table img') || [...document.querySelectorAll('.bom-table a')].some(a => !/^https?:/.test(a.href) || a.rel !== 'noopener noreferrer' || a.target !== '_blank')
+      || document.querySelector('.bom-table a[href^=javascript]') || !document.querySelector('.bom-table').textContent.includes('<img src=x onerror=alert(1)>')) return 'escaping';
+  const mpnRow = [...document.querySelectorAll('.bom-row')].find(r => r.querySelector('.bom-refs')?.textContent === 'R1');
+  if (!mpnRow?.querySelector('.bom-delta')?.textContent.includes('~') || !mpnRow.textContent.includes('RC0603')) return 'BOM MPN-only change';
+  const marks = [...document.querySelectorAll('.bom-row.changed .bom-delta')].map(c => c.firstChild?.textContent ?? '').sort().join('');
+  if (marks !== '+~~') return 'change marks ' + marks;
+  document.querySelector('[data-parts-view=problems]').click();
+  const row = [...document.querySelectorAll('.parts-row')].find(r => r.querySelector('.parts-refs')?.textContent === 'R1');
+  return document.querySelectorAll('.parts-row').length === 5 && !document.querySelector('.bom-table') && row?.textContent.includes('~') && row.textContent.includes('OLD-MPN → RC0603') || 'MPN-only change must show badge and old/new MPN in Problems';
+`],
+  ["Parts fixture BOM renders the same from old lines with key and nulls and from compact lines", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalChanges = parts.changes;
+  const slim = l => l && Object.fromEntries(Object.entries(l).filter(([k, v]) => k !== 'key' && v !== null));
+  const snapshot = () => {
+    setDock('panel', true); S.t = 'parts';
+    S.partsView = 'problems'; renderPanel(); const problems = [...document.querySelectorAll('.parts-row')].map(r => r.textContent + '/' + r.className).join('|');
+    S.partsView = 'bom'; renderPanel(); const bom = [...document.querySelectorAll('.bom-row')].map(r => r.textContent + '/' + r.className).join('|');
+    const inspector = [];
+    for (const ref of ['R1', 'J5', 'U4']) { S.s = null; S.io = null; S.ig = {object: {ref, kind: 'symbol'}}; const d = inspectorProperties(); inspector.push(JSON.stringify([d?.base, d?.head])); }
+    S.ig = null;
+    return {problems, bom, inspector: inspector.join('|')};
+  };
+  try {
+    if (!originalLines.some(l => 'key' in l) || !originalLines.some(l => l.mpn === null)) return 'fixture must keep the old line shape (key and null fields)';
+    if (!originalChanges.some(c => c.before === null) || !originalChanges.some(c => c.before && 'key' in c.before)) return 'fixture changes must keep the old shape (key, null before)';
+    // The fixture's keys are placeholders; give the old shape the real canonical key so it can be compared with the restored one.
+    const canon = l => l && {...l, key: JSON.stringify([l.value, l.footprint, l.lcsc || '', l.mpn || '', l.category, l.manufacturer ?? null, l.datasheet ?? null])};
+    parts.lines = originalLines.map(canon);
+    parts.changes = originalChanges.map(c => ({...c, before: canon(c.before), after: canon(c.after)}));
+    const oldLines = parts.lines, oldChanges = parts.changes;
+    const old = snapshot();
+    if (!old.problems || !old.bom || !old.inspector.includes('part.mpn')) return 'old-shape views rendered nothing';
+    parts.lines = oldLines.map(slim);
+    parts.changes = oldChanges.map(c => ({...c, before: slim(c.before), after: slim(c.after)}));
+    if (parts.lines.some(l => 'key' in l) || parts.changes.some(c => c.after && 'key' in c.after)) return 'compaction failed';
+    const compact = snapshot();
+    for (const k of Object.keys(old)) if (old[k] !== compact[k]) return 'compact data renders ' + k + ' differently';
+    return true;
+  } finally { parts.lines = originalLines; parts.changes = originalChanges; S.s = null; S.ig = null; S.partsView = 'problems'; renderPanel(); }
+`],
+  ["Parts fixture BOM MPN removal keeps the previous number and change badge", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalChanges = parts.changes;
+  try {
+    const before = parts.lines[0], after = {...before, mpn:null, problems:['missing_mpn']};
+    parts.lines = [after, ...parts.lines.slice(1)];
+    parts.changes = [{action:'mpn', refs:['R1'], before, after}];
+    setDock('panel', true); S.t = 'parts'; S.partsView = 'problems'; renderPanel();
+    const row = [...document.querySelectorAll('.parts-row')].find(r => r.querySelector('.parts-refs')?.textContent === 'R1');
+    if (!row?.querySelector('.parts-mpn')?.textContent.includes('RC0603 → —') || !row.classList.contains('changed') || !row.children[0].textContent.includes('~')) return 'Problems must show removed MPN, missing marker and badge';
+    document.querySelector('[data-parts-view=bom]').click();
+    const bom = [...document.querySelectorAll('.bom-row')].find(r => r.querySelector('.bom-refs')?.textContent === 'R1');
+    return !!bom?.classList.contains('changed') && bom.querySelector('.bom-delta')?.textContent.includes('~') && bom.children[4].textContent === '—' || 'BOM MPN removal badge/missing value';
+  } finally { parts.lines = originalLines; parts.changes = originalChanges; S.partsView = 'problems'; renderPanel(); }
+`],
+  ["Parts fixture BOM Table view sorts both ways", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, original = parts.lines;
+  try {
+    setDock('panel', true);
+    document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+    document.querySelector('[data-panel-table]').click();
+    // Behavior only at Task 6: Task 8 owns column visibility, widths and page containment.
+    const seed = original[0];
+    parts.lines = [
+      {...seed, refs:['R10'], refsCompressed:'R10', value:'Alpha', mpn:'Z9', lcsc:'C3', datasheet:'https://z.example'},
+      {...seed, refs:['R2'], refsCompressed:'R2', value:'Zulu', mpn:'A2', lcsc:'C1', datasheet:'https://a.example'},
+      {...seed, refs:['R1'], refsCompressed:'R1', value:'Beta', mpn:'M5', lcsc:'C2', datasheet:'https://m.example'}
+    ];
+    for (const [key, asc] of [['part','R10|R1|R2'], ['refs','R1|R2|R10'], ['mpn','R2|R1|R10'], ['lcsc','R2|R1|R10'], ['datasheet','R2|R1|R10']]) {
+      S.bomFilter = {category:'', sort:'qty', dir:1}; renderPanel();
+      document.querySelector('[data-bom-sort=' + key + ']').click();
+      const order = () => [...document.querySelectorAll('.bom-refs')].map(c => c.textContent).join('|');
+      if (order() !== asc) return key + ' ascending ' + order();
+      document.querySelector('[data-bom-sort=' + key + ']').click();
+      if (order() !== asc.split('|').reverse().join('|')) return key + ' descending ' + order();
+    }
+    // BOM-only symbol has no PCB footprint/geometry and must still appear.
+    parts.lines = [{...seed, key:'bom-only', category:'Mechanical', refs:['H1'], refsCompressed:'H1', value:'Watch glass', footprint:'', mpn:null}];
+    S.bomFilter = {category:'',sort:'refs',dir:1}; renderPanel();
+    if (!document.querySelector('.bom-table').textContent.includes('Watch glass') || !document.querySelector('.bom-cat').textContent.includes('Mechanical')) return 'BOM-only symbol omitted';
+    return true;
+  } finally { parts.lines = original; S.panelTable = false; S.bomFilter = {category:'',sort:'refs',dir:1}; renderPanel(); }
+`],
+  ["Parts fixture BOM view old report and unknown category", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  const parts = REVIEW_DATA.projects[0].parts, originalSummary = parts.summary, originalExports = parts.exports;
+  const line = parts.lines[3], originalCategory = line.category;
+  try {
+    delete parts.summary; delete parts.exports; S.t = 'parts'; S.partsView = 'bom'; renderPanel();
+    if (document.querySelector('[data-parts-view]') || document.querySelector('.bom-table') || document.querySelectorAll('.parts-row').length !== 5) return 'a report from before the BOM view must show only the Problems view';
+    parts.summary = {components: 6, unique: 5, withMpn: 4, byCategory: {Resistors: 3, Connectors: 1, 'ICs & Modules': 2}};
+    line.category = 'Antennas & RF'; renderPanel();
+    const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
+    if (!chips.endsWith('Antennas & RF 1') || !document.querySelector('.bom-table').textContent.includes('Antennas & RF')) return 'unknown category ' + chips;
+    line.category = undefined; renderPanel();
+    return [...document.querySelectorAll('.bom-cat')].map(r => r.textContent.trim()).includes('Other 1') || 'a line without a category belongs to Other';
+  } finally {
+    parts.summary = originalSummary; parts.exports = originalExports; line.category = originalCategory; S.partsView = 'problems'; renderPanel();
+  }
+`],
+  ["Multi-board BOM: All boards view combines boards with qualified references", "", `
+  if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+  document.querySelector('[data-tab=parts]').click();
+  document.querySelector('[data-parts-view=bom]').click();
+  const chips = [...document.querySelectorAll('[data-bom-board]')].map(b => b.textContent.trim()).join('|');
+  if (chips !== 'All boards|Alpha|Beta') return 'board chips ' + chips;
+  const summary = document.querySelector('.bom-summary')?.textContent.trim();
+  if (summary !== '7 components · 5 unique parts · 5 with MPN') return 'combined summary ' + summary;
+  const refs = [...document.querySelectorAll('.bom-row .bom-refs')].map(c => c.textContent).join('|');
+  if (refs !== 'Alpha:R1-R2; Beta:R1|Beta:R2|Alpha:C1|Beta:C1|Alpha:U1') return 'combined refs ' + refs;
+  const qty = [...document.querySelectorAll('.bom-row .bom-qty')].map(c => c.textContent).join('|');
+  return qty === '3|1|1|1|1' || 'combined quantities ' + qty;
+`],
+  ["Multi-board BOM: unavailable repository falls back to project", "", `
+    if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+    const originalBom = REVIEW_DATA.bom, originalP = S.p, originalBoard = S.bomBoard, originalView = S.partsView;
+    try {
+      REVIEW_DATA.bom = {...originalBom, error: 'Repository BOM unavailable'};
+      document.querySelector('[data-tab=parts]').click();
+      S.p = 0; S.bomBoard = 'all'; S.partsView = 'bom'; renderPanel();
+      const chips = [...document.querySelectorAll('[data-bom-board]')];
+      if (chips[0]?.textContent.trim() !== 'All boards (unavailable)' || chips[0]?.getAttribute('aria-pressed') !== 'false') return 'unavailable label or pressed state';
+      if (chips[1]?.getAttribute('aria-pressed') !== 'true') return 'project chip not pressed';
+      if (!document.querySelector('.bom-export-error')?.textContent.includes('Repository BOM unavailable')) return 'missing repository diagnostic';
+      if (!document.querySelector('.bom-summary')?.textContent.startsWith('4 components')) return 'project fallback summary';
+      if (![...document.querySelectorAll('[data-bom-board]')].some(b => b.textContent.trim() === 'Beta')) return 'missing Beta chip';
+      return true;
+    } finally { REVIEW_DATA.bom = originalBom; S.p = originalP; S.bomBoard = originalBoard; S.partsView = originalView; renderPanel(); }
+  `],
+  ["Multi-board BOM: a board chip shows that project; All boards saves the combined files", "", `
+  if (REVIEW_DATA.repo !== 'example/multi') return 'skip';
+  const originalP = S.p, originalBoard = S.bomBoard, originalView = S.partsView;
+  document.querySelector('[data-tab=parts]').click();
+  document.querySelector('[data-parts-view=bom]').click();
+  const names = [], saved = [], clickAnchor = HTMLAnchorElement.prototype.click, createUrl = URL.createObjectURL;
+  HTMLAnchorElement.prototype.click = function () { names.push(this.download); };
+  URL.createObjectURL = blob => { saved.push(blob); return 'blob:fixture/' + saved.length; };
+  try {
+    document.querySelector('[data-bom-board="1"]').click();
+    if (!document.querySelector('.bom-summary')?.textContent.startsWith('3 components')) return 'Beta summary ' + document.querySelector('.bom-summary')?.textContent;
+    document.querySelector('[data-bom-download=csv]').click();
+    document.querySelector('[data-bom-board="all"]').click();
+    if (!document.querySelector('.bom-summary')?.textContent.startsWith('7 components')) return 'All boards summary';
+    if (document.querySelector('[data-bom-download=fab]').textContent.trim() !== 'JLCPCB review file ↓') return 'combined file must not imply upload readiness';
+    document.querySelector('[data-bom-download=csv]').click();
+    document.querySelector('[data-bom-download=fab]').click();
+    if (names[0] !== 'Beta-bom.csv' || names[1] !== 'all-boards-bom.csv' || names[2] !== 'all-boards-bom-jlcpcb.csv') return 'download names ' + names;
+    if (new TextDecoder('utf-8', {ignoreBOM:true}).decode(await saved[1].arrayBuffer()) !== '\uFEFF' + REVIEW_DATA.bom.exports.csv) return 'combined CSV bytes differ from the embedded export';
+    return await saved[2].text() === REVIEW_DATA.bom.exports.fab || 'combined fab bytes differ from the embedded export';
+  } finally { HTMLAnchorElement.prototype.click = clickAnchor; URL.createObjectURL = createUrl; S.p = originalP; S.bomBoard = originalBoard; S.partsView = originalView; renderPanel(); }
+`],
+  ["Parts fixture BOM empty state and prototype-named categories", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    const parts = REVIEW_DATA.projects[0].parts, originalLines = parts.lines, originalSummary = parts.summary;
+    try {
+      setDock('panel', true); S.t = 'parts'; S.partsView = 'bom';
+      S.partsFilter.q = ''; S.bomFilter = {category:'Resistors',sort:'refs',dir:1};
+      parts.lines = []; parts.summary = {components:0,unique:0,withMpn:0,byCategory:{}}; renderPanel();
+      if (document.querySelector('.bom-summary')?.textContent !== '0 components · 0 unique parts · 0 with MPN'
+          || document.querySelectorAll('.bom-row, .bom-cat').length || S.bomFilter.category !== ''
+          || !document.querySelector('.parts-scroll').textContent.includes('No parts match these filters.')) return 'empty BOM';
+      parts.lines = ['constructor', '__proto__'].map((category, i) => ({...originalLines[0], category, refs:['A' + i], refsCompressed:'A' + i}));
+      parts.summary = {components:2,unique:2,withMpn:2,byCategory:{}}; renderPanel();
+      const chips = [...document.querySelectorAll('[data-bom-cat]')].map(b => b.textContent.trim()).join('|');
+      if (chips !== 'All 2|constructor 1|__proto__ 1' || document.querySelectorAll('.bom-row').length !== 2) return 'prototype category ' + chips;
+      const chip = document.querySelector('[data-bom-cat="__proto__"]'); chip.focus(); chip.click();
+      if (document.activeElement?.dataset.bomCat !== '__proto__' || document.querySelectorAll('.bom-row').length !== 1) return 'category focus/filter';
+      const sort = document.querySelector('[data-bom-sort=qty]'); sort.focus(); sort.click();
+      if (document.activeElement?.dataset.bomSort !== 'qty' || document.activeElement.closest('th').getAttribute('aria-sort') !== 'ascending') return 'sort focus';
+      return true;
+    } finally { parts.lines = originalLines; parts.summary = originalSummary; S.partsView = 'problems'; S.bomFilter = {category:'',sort:'refs',dir:1}; renderPanel(); }
+  `],
+  ["Parts fixture BOM downloads save the exact export text", "", `
+    if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+    const project = REVIEW_DATA.projects[0], parts = project.parts, saved = [], originalExports = {...parts.exports}, originalName = project.name;
+    const create = URL.createObjectURL; URL.createObjectURL = blob => { saved.push({blob}); return 'blob:fixture/' + saved.length; };
+    const click = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { saved[saved.length - 1].name = this.download; saved[saved.length - 1].href = this.href; };
+    try {
+      document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+      const label = [...document.querySelectorAll('[data-bom-download]')].map(b => b.textContent.trim()).join('|');
+      if (label !== 'JLCPCB ↓|CSV ↓') return 'buttons ' + label;
+      document.querySelector('[data-bom-download=fab]').click();
+      document.querySelector('[data-bom-download=csv]').click();
+      if (saved.length !== 2 || saved[0].name !== 'Parts-bom-jlcpcb.csv' || saved[1].name !== 'Parts-bom.csv') return 'names ' + JSON.stringify(saved.map(s => s.name));
+      if (await saved[0].blob.text() !== parts.exports.fab || new TextDecoder('utf-8', {ignoreBOM:true}).decode(await saved[1].blob.arrayBuffer()) !== '\uFEFF' + parts.exports.csv) return 'bytes differ from the embedded export';
+      if (!saved.every(s => s.blob.type.startsWith('text/csv') && s.href.startsWith('blob:fixture/'))) return 'CSV blob type or URL';
+      const csv = document.querySelector('[data-bom-download=csv]'); csv.focus(); renderPanel();
+      if (document.activeElement?.dataset.bomDownload !== 'csv') return 'download focus';
+      parts.exports.preset = 'pcbway'; renderPanel();
+      if (document.querySelector('[data-bom-download=fab]').textContent.trim() !== 'PCBWay ↓') return 'pcbway label';
+      document.querySelector('[data-bom-download=fab]').click();
+      if (saved[2].name !== 'Parts-bom-pcbway.csv' || await saved[2].blob.text() !== parts.exports.fab) return 'pcbway download';
+      for (const [name, stem] of [['', 'bom'], ['..', 'bom'], ['!!!', 'bom'], ['._-', 'bom'], ['Board / rev.1', 'Board_rev.1']]) {
+        project.name = name;
+        document.querySelector('[data-bom-download=csv]').click();
+        document.querySelector('[data-bom-download=fab]').click();
+        if (saved.at(-2).name !== stem + '-bom.csv' || saved.at(-1).name !== stem + '-bom-pcbway.csv') return 'project filename ' + JSON.stringify({name, saved:saved.slice(-2).map(s => s.name)});
+        if (await saved.at(-2).blob.text() !== parts.exports.csv || await saved.at(-1).blob.text() !== parts.exports.fab) return 'filename fallback changed export bytes';
+      }
+      project.name = originalName;
+      parts.exports.fab = null; parts.exports.fabError = 'JLCPCB export unavailable: X1 alone exceeds 2048 UTF-8 bytes'; renderPanel();
+      if (document.querySelector('[data-bom-download=fab]') || !document.querySelector('[data-bom-download=csv]') || !document.querySelector('.bom-export-error')?.textContent.includes('X1') || !document.querySelector('.bom-row')) return 'fabrication failure must retain report, CSV and diagnostic';
+      delete parts.exports; renderPanel();
+      return !document.querySelector('[data-bom-download]') || 'no exports, no buttons';
+    } finally { URL.createObjectURL = create; HTMLAnchorElement.prototype.click = click; project.name = originalName; parts.exports = originalExports; S.partsView = 'problems'; renderPanel(); }
+  `],
+  ["Parts fixture BOM Table view layout exposes columns without page overflow", "", `
+  if (REVIEW_DATA.repo !== 'example/parts') return 'skip';
+  setDock('panel', true); resizeRightDock(300, false);
+  document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+  if (innerWidth >= 900) {
+    document.querySelector('[data-panel-wide]').click();
+    if ([...document.querySelectorAll('[data-bom-sort]')].filter(b => b.getBoundingClientRect().width > 0).length !== 6) return 'wide dock must expose all six sortable headers';
+    if ([...document.querySelectorAll('.bom-mpn-inline')].some(n => n.getBoundingClientRect().width > 0)) return 'wide dock must hide duplicate inline MPN';
+    document.querySelector('[data-panel-wide]').click();
+  }
+  document.querySelector('[data-panel-table]').click();
+  if (document.documentElement.scrollWidth > innerWidth) return 'Table view must scroll inside the panel, never the page';
+  const keys = [...document.querySelectorAll('[data-bom-sort]')].filter(b => b.getClientRects().length && b.getBoundingClientRect().width > 0).map(b => b.dataset.bomSort);
+  if (keys.join('|') !== 'qty|part|refs|mpn|lcsc|datasheet') return 'Table view headers ' + keys;
+  return ![...document.querySelectorAll('.bom-mpn-inline')].some(n => n.getBoundingClientRect().width > 0) || 'Table view must hide duplicate inline MPN';
+`],
+  ["Parts fixture BOM whole screen is contained and readable", "", `
+  if (REVIEW_DATA.repo !== 'example/parts' || innerWidth < 900) return 'skip';
+  resizeRightDock(300, false);
+  document.querySelector('[data-tab=parts]').click(); document.querySelector('[data-parts-view=bom]').click();
+  const panel = document.querySelector('#panel').getBoundingClientRect(), stage = document.querySelector('#stage').getBoundingClientRect();
+  if (document.documentElement.scrollWidth > innerWidth) return 'the page overflows sideways';
+  const out = [...document.querySelectorAll('#panel .parts-view button, #panel .bom-head button, #panel .bom-chips button, #panel .bom-table thead th button')]
+    .filter(b => b.getClientRects().length && b.getBoundingClientRect().width > 0)
+    .filter(b => { const r = b.getBoundingClientRect(); return r.left < panel.left - .5 || r.right > panel.right + .5; });
+  if (out.length) return 'controls outside the dock: ' + out.map(b => b.textContent.trim());
+  for (const k of ['mpn', 'lcsc', 'datasheet']) if (document.querySelector('[data-bom-sort=' + k + ']').getBoundingClientRect().width) return 'narrow mode must hide ' + k;
+  const scroller = document.querySelector('#panel .parts-scroll');
+  if (scroller.scrollWidth > scroller.clientWidth + 1) return 'the table scrolls sideways inside the narrow dock';
+  const part = document.querySelector('.bom-row .bom-part').getBoundingClientRect();
+  if (part.width < 80) return 'narrow PART column must stay readable, got ' + part.width;
+  if (stage.width < innerWidth * .4) return 'the dock leaves the drawing too narrow';
+  const ctx = document.createElement('canvas').getContext('2d', {willReadFrequently: true});
+  const px = css => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); return [...ctx.getImageData(0, 0, 1, 1).data]; };
+  const over = (f, b) => [0, 1, 2].map(i => f[i] * f[3] / 255 + b[i] * (1 - f[3] / 255));
+  const lum = c => { const [r, g, b] = c.map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * r + .7152 * g + .0722 * b; };
+  const background = el => { for (let e = el; e; e = e.parentElement) { const c = px(getComputedStyle(e).backgroundColor); if (c[3] > 250) return c.slice(0, 3); } return px(getComputedStyle(document.body).backgroundColor).slice(0, 3); };
+  const low = [];
+  for (const sel of ['.bom-summary', '.bom-downloads button', '.bom-chips .check-chip', '.bom-table thead th button', '.bom-cat th', '.bom-row .bom-part b', '.bom-row .bom-part small', '.bom-row .bom-refs', '.bom-row .bom-qty', '.bom-row a']) {
+    const el = document.querySelector('#panel ' + sel); if (!el) continue;
+    const bg = background(el), fg = over(px(getComputedStyle(el).color), bg), [a, b] = [lum(fg), lum(bg)].sort((x, y) => y - x);
+    const ratio = (a + .05) / (b + .05); if (ratio < 4.5) low.push(sel + ' ' + ratio.toFixed(2));
+  }
+  return low.length ? 'low contrast in ' + document.documentElement.dataset.theme + ': ' + low : true;
 `],
   ["DigiKey column shows stock, price, time and attribution", "", `
     const p = REVIEW_DATA.projects[0], old = p.parts;
@@ -4060,6 +4578,303 @@ return true;
     if(Appearance.get().markStyle!=='recolour') return 'theme import reset marks';
     Appearance.reset(); if(Appearance.get().markStyle!=='outline') return 'reset';
     button.click(); return true;
+  `],
+  ["BR03 net selection masks", "v=board", `
+    ${MARK_STYLE_FIXTURE}
+    const p=proj(), saved=p.changes, savedNets=scene.nets, savedRef=object.reference, savedNum=object.number, savedNet=object.net;
+    let origSetAppearance=null;
+    const row={id:'c903',kind:'net-members',action:'modified',
+      detail:{kind:'members',beforeNets:['GND'],afterNets:['GND']},anchors:{base:[],head:[]}};
+    const padRow={id:'c904',kind:'board-pad-net',action:'modified',
+      detail:{kind:'pad-net',pin:'1',before:'NET_A',after:'NET_B'},
+      anchors:{
+        base:[{board:true,uuid:'style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.base}],
+        head:[
+          {board:false,uuid:'style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.head},
+          {board:true,uuid:'head-style',padUuid:'style',ref:'U1',pin:'1',commit:REVIEW_DATA.head}
+        ]
+      }};
+    try {
+      p.changes=[row,padRow];
+      scene.nets=[{id:0,name:''},{id:1,name:'GND'},{id:2,name:'NET_A'},{id:3,name:'NET_B'}];
+      object.reference='U1'; object.number='1'; object.net=1;
+      const mount=()=>{
+        disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
+        boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:p.changes,state:S,appearance:glAppearance});
+        boardView.useGL=true; S.s=row.id; boardDiff.render();
+      };
+      mount();
+      const before=JSON.stringify(Appearance.get());
+      let selected=0;
+      const drawOpts=[];
+      const appearances=[];
+      origSetAppearance=new Map();
+      for(const pane of boardDiff.panes) {
+        const draw=pane.renderer.draw.bind(pane.renderer);
+        pane.renderer.draw=opts=>{
+          if(opts.mask && opts.filter) {
+            drawOpts.push(opts);
+            if(opts.filter(object)) selected++;
+          }
+          return draw(opts);
+        };
+        if(pane.renderer.setAppearance) {
+          const origSet=pane.renderer.setAppearance.bind(pane.renderer);
+          origSetAppearance.set(pane,origSet);
+          pane.renderer.setAppearance=app=>{
+            appearances.push(app);
+            return origSet(app);
+          };
+        }
+      }
+      boardDiff.render();
+      if(!selected) return 'net selection did not reach neutral mask';
+      if(object.changeIds.join(',')!=='c0') return 'derived net stole scene identity';
+
+      const baseTint=appearances.some(a=>a.netColors?.GND && a.netColors.GND[0]===1 && a.netColors.GND[1]===0.3);
+      const headTint=appearances.some(a=>a.netColors?.GND && a.netColors.GND[0]===0.3 && a.netColors.GND[1]===1);
+      if(!baseTint || !headTint) return 'electricalLook netColors did not reach setAppearance per side';
+
+      // Verify pad-net anchor match and before/after side mapping
+      object.net=0; // No net name match: test pure anchor matching
+      S.s=padRow.id;
+      drawOpts.length=0;
+      appearances.length=0;
+      boardDiff.render();
+      if(drawOpts.length<2) return 'did not draw selection masks';
+
+      const padBaseTint=appearances.some(a=>a.netColors?.NET_A && a.netColors.NET_A[0]===1 && a.netColors.NET_A[1]===0.3);
+      const padHeadTint=appearances.some(a=>a.netColors?.NET_B && a.netColors.NET_B[0]===0.3 && a.netColors.NET_B[1]===1);
+      if(!padBaseTint || !padHeadTint) return 'pad-net electricalLook netColors did not reach setAppearance per side';
+
+      const [baseCall,headCall]=drawOpts.slice(-2);
+      const netAObj={net:2,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
+      const netBObj={net:3,changeUuid:'other',uuid:'other',reference:'U2',number:'2'};
+      const headObj={...object,changeUuid:'head-style'};
+      const badPinObj={...object,number:'2'};
+      const badRefObj={...object,reference:'U2'};
+      const badPadUuidObj={...object,uuid:'other-pad'};
+
+      if(!baseCall.filter(object)) return 'pad-net base anchor failed to match';
+      if(baseCall.filter(headObj)) return 'pad-net base anchor matched head uuid';
+      if(!headCall.filter(headObj)) return 'pad-net head anchor failed to match';
+      if(headCall.filter(object)) return 'pad-net head anchor matched base uuid or non-board anchor';
+
+      if(!baseCall.filter(netAObj) || baseCall.filter(netBObj)) return 'pad-net base side beforeNets mapping failed';
+      if(!headCall.filter(netBObj) || headCall.filter(netAObj)) return 'pad-net head side afterNets mapping failed';
+
+      if(baseCall.filter(badPinObj) || baseCall.filter(badRefObj)) return 'pad-net anchor matched wrong pin or ref';
+      if(baseCall.filter(badPadUuidObj)) return 'pad-net anchor matched wrong padUuid';
+      const anchor=padRow.anchors.base[0];
+      anchor.commit='0000000';
+      const staleCommit=baseCall.filter(object);
+      anchor.commit=REVIEW_DATA.base;
+      if(staleCommit) return 'pad-net anchor matched a different commit';
+      if(!baseCall.filter(object)) return 'pad-net anchor failed after commit restore';
+
+      anchor.sheet='/other/';
+      const staleSheet=baseCall.filter(object);
+      delete anchor.sheet;
+      if(staleSheet) return 'pad-net anchor matched wrong sheet';
+
+      // In-place mutation of scene.nets must be reflected in next render pass
+      S.s=row.id;
+      drawOpts.length=0;
+      scene.nets[1].name='OTHER';
+      boardDiff.render();
+      const [mutatedCall]=drawOpts.slice(-1);
+      if(mutatedCall?.filter(object)) return 'in-place scene.nets mutation returned stale name match';
+      scene.nets[1].name='GND';
+
+      // Test unguarded scene.nets access: missing scene.nets should not throw
+      delete scene.nets;
+      try {
+        baseCall.filter(object);
+      } catch(e) {
+        return 'scene without nets threw: '+e.message;
+      }
+
+      scene.nets=savedNets;
+      appearances.length=0;
+      S.s=null; boardDiff.render();
+      if(appearances.some(a=>a.netColors?.GND || a.netColors?.NET_A || a.netColors?.NET_B)) return 'temporary net color persisted in setAppearance';
+      return JSON.stringify(Appearance.get())===before || 'temporary colour persisted';
+    } finally {
+      p.changes=saved;
+      if(savedNets!==undefined) scene.nets=savedNets; else delete scene.nets;
+      if(savedRef!==undefined) object.reference=savedRef; else delete object.reference;
+      if(savedNum!==undefined) object.number=savedNum; else delete object.number;
+      if(savedNet!==undefined) object.net=savedNet; else delete object.net;
+      if(origSetAppearance) for(const [pane,origSet] of origSetAppearance) pane.renderer.setAppearance=origSet;
+      S.s=null; disposeBoardRenderers(); await draw();
+    }
+  `],
+  ["BR03 producer hotspot handoff", "", `
+    const fixture=${JSON.stringify(BR03_HOTSPOT_CONTRACT)}, p=proj(), oldSheets=p.sheets;
+    const saved=Object.fromEntries(Object.keys(fixture.blobs).map(id=>[id,{blob:D.blobs[id],cached:cache[id]}]));
+    try {
+      p.sheets=fixture.sheets;
+      for(const [id,blob] of Object.entries(fixture.blobs)) {D.blobs[id]=blob;delete cache[id];}
+      if(p.sheets[0].hotspots.base!==p.sheets[1].hotspots.base) return 'producer not revision-wide';
+      const row={anchors:{base:[{uuid:'placed',ref:'U1',pin:'12',sheet:'/left/'}],head:[]}};
+      const base=await electricalManifest('/left/','base'), head=await electricalManifest('/left/','head');
+      const right=await electricalManifest('/right/','base');
+      if(base?.sheet!=='/left/' || right?.sheet!=='/right/' || right.elements[0].ref!=='U2') return 'views adapter lost instance';
+      const pins=electricalPins(row,'base','/left/',base), expected=base.elements[0].pins.find(p=>p.number==='12');
+      if(pins.length!==1 || pins[0].ref!=='U1' || pins[0].number!=='12' || pins[0].x!==expected.x || pins[0].y!==expected.y) return 'base-only numeric pin lost';
+      if(electricalPins(row,'base','/right/',right).length || electricalPins(row,'head','/left/',head).length) return 'base pin leaked across instance/revision';
+      if(!base.elements[0].pins.some(p=>p.number==='1' && p.name==='123') || expected.name!=='456') return 'numeric pin names changed';
+      return true;
+    } finally {
+      p.sheets=oldSheets;
+      for(const [id,old] of Object.entries(saved)) {
+        old.blob===undefined?delete D.blobs[id]:D.blobs[id]=old.blob;
+        old.cached===undefined?delete cache[id]:cache[id]=old.cached;
+      }
+    }
+  `],
+  ["BR03 pin identity and missing hotspot compatibility", "", `
+    const r={anchors:{head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/',commit:D.head}],base:[]}};
+    const manifest={elements:[{uuid:'u',ref:'U1',unit:'1',pins:[{number:'1',name:'A',x:10,y:20}]}]};
+    const pins=electricalPins(r,'head','/a/',manifest);
+    if(pins.length!==1 || pins[0].x!==10 || pins[0].number!=='1') return 'wrong pin';
+    if(electricalPins(r,'head','/b/',manifest).length) return 'cross-instance highlight';
+    if(electricalPins(r,'base','/a/',null).length) return 'missing old manifest failed';
+    const p=proj(), sheets=p.sheets, row={...r,id:'c906',detail:{kind:'members'}};
+    const id='__br03_manifest';
+    // svgText's cache stores decoded-asset promises ({text}); provide the same revision-wide envelope as spec 01.
+    const previous=cache[id]; cache[id]=Promise.resolve({text:JSON.stringify({version:1,units:'mm',views:[
+      {sheet:'/a/',elements:manifest.elements},{sheet:'/b/',elements:manifest.elements}]})});
+    try {
+      p.sheets=[{path:'/a/',hotspots:{head:id}},{path:'/b/',hotspots:{head:id}}];
+      const view=await electricalManifest('/a/','head');
+      if(!view || electricalPins(row,'head','/a/',view).length!==1) return 'manifest envelope adapter';
+      const dock=document.createElement('div'); document.body.append(dock); await electricalControls(dock,row); dock.remove();
+      return dock.querySelector('[data-electrical-target]') ? true : 'missing member navigation control';
+    } finally {p.sheets=sheets; previous===undefined?delete cache[id]:cache[id]=previous;}
+  `],
+  ["BR03 inner layer fallback and saved selection", "v=board", `
+    const p=proj(), layers=p.board.layers, changes=p.changes, saved=S.s;
+    if(!layers.length) return 'required SVG board fixture absent';
+    const row={id:'c907',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu'},anchors:{base:[],head:[]}};
+    try {
+      p.board.layers=[...layers,{...layers[0],name:'In1_Cu'}]; p.changes=[...changes,row];
+      changeBoardAppearance({layers:{'In1.Cu':{visible:false}}});
+      S.layers=[]; await electricalTarget(row,{kind:'board'});
+      if(!S.layers.includes('In1_Cu') || S.layers.includes('In1.Cu')) return 'canonical/exported names confused';
+      if(!glAppearance().layers['In1.Cu']?.visible) return 'Appearance eye still hidden';
+      if(!currentView().layers.some(l=>l.name==='In1_Cu')) return 'SVG fallback lost inner layer';
+      const link=encodeState(), decoded=valid(decodeState('#'+link));
+      if(!decoded.layers?.includes('In1_Cu') || decoded.s!==row.id) return 'saved link loses selection';
+      await applyState(decodeState('#'+link));
+      return S.layers.includes('In1_Cu') && S.s===row.id || 'reload loses selected layer';
+    } finally {p.board.layers=layers; p.changes=changes; S.s=saved; await draw();}
+  `],
+  ["BR03 copper selection", "v=board", `
+    const p=proj(), saved=p.changes, appearance=structuredClone(Appearance.get());
+    const row={id:'c908',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu',
+      addedMm2:1,removedMm2:1,addedContours:[[[4,4],[5,4],[5,5],[4,5]]],
+      removedContours:[[[3,4],[4,4],[4,5],[3,5]]]},anchors:{base:[],head:[]}};
+    const object={kind:'pad',uuid:'inner',changeUuid:'inner',changeIds:[],layers:['In1.Cu'],net:1,category:'pads',side:'front',hidden:false,
+      box:[3000,4000,5000,5000],geometry:{primitive:{shape:'rect',center:[4000,4500],size:[2000,1000],angle:0}}};
+    const scene={version:1,units:'um',complete:true,warnings:[],bounds:[0,0,10000,10000],
+      layers:[{id:1,name:'In1.Cu',type:'signal',enabled:true}],nets:[{id:0,name:''},{id:1,name:'GND'}],objects:[object]};
+    const mount=mode=>{
+      disposeBoardRenderers(); const stage=document.querySelector('#stage'); stage.replaceChildren();
+      Object.assign(S,{m:mode,x:4,y:4,z:40,s:row.id,wipe:.4,blend:.35});
+      boardDiff=BoardDiff.mount({stage,scenes:{base:scene,head:scene},changes:p.changes,state:S,appearance:glAppearance});
+      boardView.useGL=true; boardView.panes=boardDiff.panes; boardDiff.render();
+    };
+    try {
+      p.changes=[row]; S.layers=['In1_Cu']; Appearance.patch({layers:{'In1.Cu':{visible:true}}});
+      for(const mode of ['overlay','side','wipe','blend','semantic']) {
+        mount(mode);
+        const paths=[...document.querySelectorAll('.copper-selection path')];
+        if(paths.length!==2 || !paths.some(e=>e.dataset.action==='added') || !paths.some(e=>e.dataset.action==='removed')) return mode+': missing signed contours';
+        if(mode==='side') for(const pane of boardDiff.panes) {
+          const expected=pane.sides[0]==='base'?'removed':'added';
+          if(pane.markHud.querySelector('path')?.dataset.action!==expected) return 'side sign ownership';
+        }
+        if(mode==='wipe' && !paths.every(e=>e.closest('svg').style.clipPath.includes('inset'))) return 'wipe contours not clipped';
+        if(mode==='blend' && !paths.some(e=>e.dataset.action==='added' && e.closest('svg').style.opacity==='0.35')) return 'blend alpha';
+        for(const flip of [false,true]) {
+          Appearance.patch({flip}); S.x+=.25; S.z+=3; boardDiff.render();
+          for(const pane of boardDiff.panes) for(const path of pane.markHud.querySelectorAll('.copper-selection path')) {
+            const pt=path.dataset.action==='added'?[4,4]:[3,4], expected=pane.renderer.worldToScreen(pt);
+            const actual=path.getAttribute('d').match(/[-+]?[0-9]*\\.?[0-9]+/g).slice(0,2).map(Number);
+            if(actual.length!==2 || !actual.every(Number.isFinite)) return 'invalid projected coordinates';
+            if(actual.some((n,i)=>Math.abs(n-expected[i])>.01)) return 'projection drift after pan zoom flip';
+          }
+        }
+        S.s=null; boardDiff.render();
+        if(document.querySelector('.copper-selection')) return 'clear selection leaves contours';
+      }
+      return true;
+    } finally {p.changes=saved; Appearance.patch(appearance); S.s=null; disposeBoardRenderers(); await draw();}
+  `],
+  ["BR03 fallback signed contours", "v=board", `
+    const p=proj(), changes=p.changes, failed=boardView.failed, layers=p.board.layers;
+    const row={id:'c909',kind:'copper',action:'modified',detail:{kind:'area',layer:'In1.Cu',
+      addedMm2:1,removedMm2:1,addedContours:[[[4,4],[5,4],[5,5],[4,5]]],
+      removedContours:[[[3,4],[4,4],[4,5],[3,5]]]},anchors:{base:[],head:[]}};
+    try {
+      boardView.failed=S.p; disposeBoardRenderers(); // same state as a real WebGL mount/context failure
+      p.board.layers=[...layers,{...layers[0],name:'In1_Cu'}]; p.changes=[row];
+      for(const mode of ['side','overlay','wipe','blend','semantic']) {
+        S.m=mode; await electricalTarget(row,{kind:'board'});
+        if(boardView.useGL) return 'WebGL was not disabled';
+        if(!S.layers.includes('In1_Cu')) return 'inner layer not selected';
+        const paths=[...document.querySelectorAll('.copper-selection-fallback path')];
+        if(paths.length!==2) return mode+': fallback signs missing';
+        for(const action of ['added','removed']) {
+          const path=paths.find(p=>p.dataset.action===action);
+          if(!path || (mode!=='semantic' && !path.closest('.stack.'+(action==='added'?'head':'base')))) return 'wrong revision sign';
+          const svg=path.ownerSVGElement, expected=action==='added'?4:3;
+          const point=new DOMPoint(expected,4).matrixTransform(svg.getScreenCTM());
+          const world=svg.closest('.world'), stack=svg.closest('.stack');
+          const matrix=svg.getScreenCTM();
+          if(!Number.isFinite(point.x) || !matrix || !world || (mode!=='semantic' && !stack)) return 'invalid world projection';
+          if(getComputedStyle(svg).display==='none' || !svg.getClientRects().length) return 'hidden contour';
+          if(!path.getAttribute('d').startsWith('M'+expected+' 4')) return 'mm coordinates lost';
+        }
+        if(mode==='wipe' && !document.querySelector('.stack.base').style.clipPath.includes('inset')) return 'fallback clip absent';
+        S.x+=.25; S.z+=3; apply();
+        if(document.querySelectorAll('.copper-selection-fallback path').length!==2) return 'pan zoom lost contours';
+        S.s=null; markSelected();
+        if(document.querySelector('.copper-selection-fallback')) return 'stale fallback selection';
+      }
+      return true;
+    } finally {p.changes=changes;p.board.layers=layers;boardView.failed=failed;S.s=null;await draw();}
+  `],
+  ["BR03 missing pin locations note", "", `
+    const p=proj(), sheets=p.sheets, row={id:'c910',anchors:{base:[],head:[{uuid:'u',ref:'U1',pin:'1',sheet:'/a/'}]}};
+    const id='__br03_bad_manifest', prior=cache[id], dock=document.createElement('div');document.body.append(dock);
+    try {
+      const cases=[['empty',{}],['missing-side',{base:id}],['missing-blob',{head:'__not_in_blobs'}],
+        ['malformed',{head:id},'{'],['missing-sheet',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/other/',elements:[]}]})],
+        ['unresolved-pin',{head:id},JSON.stringify({version:1,units:'mm',views:[{sheet:'/a/',elements:[{uuid:'u',ref:'U1',pins:[]}]}]})]];
+      for(const [name,hotspots,text] of cases) {
+        cache[id]=Promise.resolve({text:text||'{}'});p.sheets=[{path:'/a/',hotspots}];
+        await electricalControls(dock,row);
+        if(!dock.querySelector('.electrical-pin-unavailable')?.textContent.includes('Pin locations unavailable')) return name+': missing unavailable note';
+        if(dock.querySelector('img,script')) return name+': unsafe note';
+      }
+      return true;
+    } finally {dock.remove();p.sheets=sheets;prior===undefined?delete cache[id]:cache[id]=prior;}
+  `],
+  ["BR03 old report selection", "", `
+    const p=proj(), old=p.changes, summary=p.summary;
+    const row=old.find(r=>r.where && (r.where.board || r.where.sheet!=null));
+    if(!row) return 'required legacy component fixture absent';
+    try {
+      delete p.summary;
+      p.changes=old.map(r=>Object.fromEntries(Object.entries(r).filter(([k])=>
+        !['detail','anchors','weight','channel','document'].includes(k))));
+      await goTo(row.id);
+      const decoded=valid(decodeState('#'+encodeState()));
+      return S.s===row.id && decoded.s===row.id && document.querySelector('#stage .vp')
+        ? true : 'legacy v1 selection no longer renders';
+    } finally {p.changes=old; p.summary=summary; await draw();}
   `],
   ["board mark style survives reload and project changes", "v=board", `
     ${MARK_STYLE_FIXTURE}
@@ -7062,3 +7877,57 @@ CHECKS.push(...['parent-corrupt-reply','parent-delayed-reply'].map(fault=>["BR02
    frame.remove();Review3D.dispose();
  }
 `]));
+
+CHECKS.push(['Download dialog lists GitHub zips, exported files and safe commands', '', `
+  const saved = { links: D.links, run_id: D.run_id, repo: D.repo, downloads: proj().downloads, hosted: window.hostedBase };
+  const sha = c => 'https://github.com/o/r/commit/' + c.repeat(40);
+  const open = () => { document.querySelector('#downloads-open').click(); return document.querySelector('#downloads'); };
+  try {
+    D.links = { ...D.links, head: sha('b'), base: sha('a') }; D.run_id = '77'; D.repo = 'o/r';
+    proj().downloads = [
+      { kind: 'fab', label: 'For fabrication', bytes: 261000, sha256: '0'.repeat(64), path: '0/fab-P-bbbbbbb.zip', artifact: 'kicad-review-downloads-bbbbbbb' },
+      { kind: 'step', label: '3D model (STEP)', error: 'skipped: export took longer than 120 s' }];
+    let dlg = open();
+    if (!dlg.open) return 'dialog did not open';
+    const hrefs = [...dlg.querySelectorAll('a')].map(a => a.getAttribute('href'));
+    if (hrefs.join() !== ['b', 'a'].map(c => 'https://github.com/o/r/archive/' + c.repeat(40) + '.zip').join()) return 'archive links ' + hrefs;
+    const copy = dlg.querySelector('[data-copy]');
+    if (copy?.dataset.copy !== 'gh run download 77 -R o/r -n kicad-review-downloads-bbbbbbb -D kicad-review-downloads') return 'offline command ' + copy?.dataset.copy;
+    if (!dlg.textContent.includes('skipped: export took longer than 120 s') || !dlg.textContent.includes('255 KB')) return 'step reason or size missing';
+    dlg.close();
+    window.hostedBase = () => 'https://site.example/r/o/r/a/9';
+    dlg = open();
+    const hosted = [...dlg.querySelectorAll('a')].map(a => a.getAttribute('href')).filter(h => h.includes('/download/'));
+    if (hosted.join() !== 'https://site.example/r/o/r/a/9/download/0/fab' || dlg.querySelector('[data-copy]')) return 'hosted links ' + hosted;
+    dlg.close();
+    if (saved.hosted('https://site.example/s/guest-token/raw', true) !== '') return 'guest share exposed direct authenticated route';
+    window.hostedBase = () => saved.hosted('https://site.example/s/guest-token/raw', true);
+    dlg = open();
+    if (!dlg.querySelector('[data-copy]') || [...dlg.querySelectorAll('a')].some(a => a.href.includes('/download/'))) return 'guest must use authenticated gh command, never share token for downloads';
+    dlg.close();
+    window.hostedBase = saved.hosted;
+    const valid = {...proj().downloads[0]};
+    for (const [field, value] of [['artifact','x; echo bad'],['artifact','--help'],['path','0/../evil.glb'],['path','0/x;echo.glb']]) {
+      proj().downloads = [{...valid,[field]:value}]; dlg=open();
+      if (dlg.querySelector('[data-copy]')) return 'unsafe '+field+' produced a command';
+      dlg.close();
+    }
+    proj().downloads = [valid]; D.repo='-x/r'; dlg=open();
+    if (dlg.querySelector('[data-copy]')) return 'unsafe repository produced a command';
+    dlg.close(); D.repo='o/r';
+    D.run_id = '1; rm -rf ~'; dlg = open();
+    if (dlg.querySelector('[data-copy]')) return 'unsafe run id produced a command';
+    dlg.close();
+    proj().downloads = [{ kind: 'glb', label: '3D model (GLB)', path: '0/x.glb', artifact: 'a' }]; D.run_id = '77'; dlg = open();
+    if (dlg.textContent.includes('NaN')) return 'missing bytes rendered as NaN';
+    dlg.close();
+    delete proj().downloads; D.links = { ...D.links, head: '', base: '' }; dlg = open();
+    const text = dlg.textContent, anchors = dlg.querySelectorAll('a').length; dlg.close();
+    return text.includes('downloads.enabled = true') && anchors === 0 ? true : 'empty state ' + text;
+  } finally {
+    Object.assign(D, { links: saved.links, run_id: saved.run_id, repo: saved.repo }); window.hostedBase = saved.hosted;
+    if (saved.downloads) proj().downloads = saved.downloads; else delete proj().downloads;
+    document.querySelector('#downloads').close();
+  }
+`]);
+
