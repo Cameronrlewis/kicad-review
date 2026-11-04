@@ -280,3 +280,37 @@ test('BR06 poster load aborted by a closed session does not poison the shared po
   assert.equal(image.src, 'blob:p1');
   assert.equal(made, 1, 'the blob is decoded into one shared URL');
 });
+
+test('BR06 closing a 3D viewer never revokes the shared navigation poster URL', async () => {
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+  const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  const window = {REVIEW_DATA:{blobs:{poster:Buffer.from(gz).toString('base64')}}};
+  const document = {createElement:() => ({}), head:{appendChild() {}}, removeEventListener() {}};
+  let made = 0;
+  const revoked = [];
+  class Image { constructor() { this.dataset = {}; } decode() { return Promise.resolve(); } }
+  const URL = {createObjectURL:() => `blob:p${++made}`, revokeObjectURL:url => revoked.push(url)};
+  const source = readFileSync(new URL_('./review3d.js', import.meta.url), 'utf8')
+    .replace('let active = null, bundle;', 'let active = null, bundle; window.setTestSession = s => active = s;');
+  runInNewContext(source, {window, document, DOMException, Response, Blob, DecompressionStream, Uint8Array, atob, Image, URL,
+    clearTimeout, cancelAnimationFrame() {}});
+  const api = window.Review3D;
+  // The navigation card loads the head poster with no session (sheet view has none).
+  const nav = await api.poster3d('head', 'poster');
+  assert.equal(nav.src, 'blob:p1');
+  // A viewer opens, shows the same poster as its own fallback, and closes.
+  const session = {dead:false, abort:new AbortController(), pending:new Map(), urls:new Set(), worker:null,
+    resourceCounts:{workers:0, urls:0, pending:0}, animationFrames:new Set(), renderHooks:[], views:[], roots:[],
+    parses:new Map(), decodedModels:new Map(), decodedScenes:[], environments:new Map(),
+    state:{loadingBySide:{base:false, head:false}}};
+  window.setTestSession(session);
+  const own = await api.poster3d('head', 'poster', session);
+  assert.equal(own.src, nav.src, 'the viewer reuses the shared page-lifetime URL');
+  assert.equal(session.urls.has(nav.src), false, 'a session never owns a shared URL');
+  api.dispose();
+  assert.equal(session.dead, true);
+  assert.deepEqual(revoked, [], 'closing the viewer leaves the navigation poster URL valid');
+  // A later caller still gets the same live URL from the cache, not a fresh decode.
+  assert.equal((await api.poster3d('head', 'poster')).src, 'blob:p1');
+  assert.equal(made, 1);
+});
