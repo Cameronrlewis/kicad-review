@@ -2327,6 +2327,26 @@ return true;
     const u = window.Review3D.state.roots[1]?.getObjectByName('U4'), m=[];
     u?.traverse(n=>{if(n.isMesh)m.push(...[n.material].flat());});const faded=m.length&&m.every(m=>m.opacity===.12);
     return !!faded && document.querySelector('[data-mode="wipe"]').getAttribute("aria-disabled") === "true";`],
+  ["3D normalizes wipe mode to side", "v=3d&m=wipe", `
+    if (!REVIEW_DATA.projects[0].board.model3d) return "skip";
+    await new Promise(r => setTimeout(r, 1000));
+    const wipeBtn = document.querySelector('[data-mode="wipe"]');
+    const sideBtn = document.querySelector('[data-mode="side"]');
+    if (S.m !== "side") return "mode was " + S.m + " instead of side";
+    if (wipeBtn?.getAttribute("aria-disabled") !== "true") return "wipe button was not disabled";
+    if (wipeBtn?.getAttribute("aria-checked") === "true") return "wipe button was aria-checked";
+    if (wipeBtn?.getAttribute("tabindex") === "0") return "wipe button had tabindex 0";
+    if (sideBtn?.getAttribute("aria-checked") !== "true") return "side button was not aria-checked";
+    if (window.Review3D?.state?.mode !== "side") return "Review3D mode was " + window.Review3D?.state?.mode;
+    sideBtn.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    if (S.m !== "overlay") return "keyboard navigation did not advance from side to overlay: " + S.m;
+    sideBtn.click();
+    select('board');
+    S.m = 'wipe';
+    renderModes();
+    select('3d');
+    if (S.m !== "side") return "select(3d) from wipe did not normalize to side: " + S.m;
+    return true;`],
   ["loads sample", "", `return REVIEW_DATA.version === 1 && document.querySelector("#nav") !== null;`],
   ["header shows repo, revisions, review link and verdict", "", `
     // Bench: breadcrumb in the header, revisions and PR link in the review bar, verdict in the header readout.

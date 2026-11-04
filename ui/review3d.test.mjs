@@ -260,3 +260,42 @@ test('BR02 single renderer rejects a comparison fixture instead of skipping',asy
   });
   assert.equal(result,'fixture is not single mode');
 });
+
+test('BR02 3D view normalizes wipe mode to side in valid and select', () => {
+  const reviewSource = readFileSync(new URL('./review.js', import.meta.url), 'utf8');
+  const validFn = reviewSource.slice(reviewSource.indexOf('function valid(st) {'), reviewSource.indexOf('function applyState('));
+  const selectFn = reviewSource.slice(reviewSource.indexOf('function select(view) {'), reviewSource.indexOf('function decodeState('));
+
+  const validCtx = {
+    D: { projects: [{ board: { layers: [], model3d: { head: 'head-id' } }, sheets: [], changes: [], checks: [] }] },
+    boardAvailable: () => true,
+    modelAvailable: () => true,
+    MODES: { side: true, overlay: true, wipe: true, blend: true, semantic: true },
+    GROUPS3D: [],
+    LIGHT_RIGS3D: [],
+    window: { ThreeStudio: { normalizeLighting: x => x } }
+  };
+  runInNewContext(validFn, validCtx);
+  const normalized = validCtx.valid({ v: '3d', m: 'wipe' });
+  assert.equal(normalized.v, '3d');
+  assert.equal(normalized.m, 'side');
+
+  const S = { v: 'board', m: 'wipe' };
+  const selectCtx = {
+    S,
+    clearImageSelection: () => {},
+    renderInspector: () => {},
+    tabsChange: () => false,
+    stopPlacing: () => {},
+    renderModes: () => {},
+    renderNav: () => {},
+    renderPanel: () => {},
+    renderZoombar: () => {},
+    draw: () => {},
+    saveHash: () => {}
+  };
+  runInNewContext(selectFn, selectCtx);
+  selectCtx.select('3d');
+  assert.equal(S.v, '3d');
+  assert.equal(S.m, 'side');
+});

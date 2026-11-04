@@ -806,7 +806,7 @@ window.Review3D = (() => {
   async function show(stage, project, appState, {single = false} = {}) {
     window.Review3D.onStateChange?.({partSelection:null});
     dispose();
-    const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m;
+    const model = project.board.model3d || {}, sides = single ? ['head'] : ['base', 'head'], mode = appState.m === 'wipe' ? 'side' : appState.m;
     const session = active = {
       views:[], roots:[], changes:project.changes.filter(c => c.kind === 'footprint'),
       refs:new Set(), changesByRef:{}, indexedSides:new Set(), hiddenGroups:new Set(), groups:[], selected:[], dead:false, mode, single, allowedSides:sides,
@@ -820,7 +820,7 @@ window.Review3D = (() => {
       assembled:appState.assembled3d !== false, hidden:[], lighting:normalizeLighting(appState.lighting3d), hiddenBodies:false, visible:true, hostsBySide:{}, stage, project, appState
     };
     const state = window.Review3D.state = session.state = {
-      roots:session.roots, views:session.views, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
+      roots:session.roots, views:session.views, mode:session.mode, decodedScenes:session.decodedScenes, disposed:false, firstFrame:false, loading:false,
       revision:session.revision, assembled:session.assembled, lighting:session.lighting, modelDigests:{},
       readyBySide:{base:{frame:false},head:{frame:false}},
       loadingBySide:{base:false, head:false}, posterBySide:{base:null, head:null}, errorsBySide:{}, posterErrorsBySide:{},
