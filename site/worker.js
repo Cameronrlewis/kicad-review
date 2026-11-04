@@ -110,6 +110,9 @@ async function tokenRequest(env, fields) {
 }
 
 const refreshing = new Map();
+// Late requests still carrying the old cookie reuse a SUCCESSFUL rotation for a short grace window.
+// Errors are never kept. ponytail: isolate-local, like `refreshing`.
+const rotated = new Map(), ROTATION_GRACE_MS = 30_000;
 export async function session(request, env) {
   const stored = cookies(request).s;
   if (!stored) return null;
@@ -119,21 +122,25 @@ export async function session(request, env) {
   if (value.re <= Date.now()) return null;
   // GitHub refresh tokens are one-use: concurrent requests in this isolate share one rotation.
   // ponytail: isolate-local only; cross-isolate coalescing needs shared storage (KV/Durable Object).
-  let pending = refreshing.get(value.r);
+  for (const [token, entry] of rotated) if (entry.until <= Date.now()) rotated.delete(token);
+  let pending = rotated.get(value.r)?.renewed ?? refreshing.get(value.r);
   if (!pending) {
-    pending = tokenRequest(env, { grant_type: 'refresh_token', refresh_token: value.r })
-      .finally(() => refreshing.delete(value.r));
+    pending = tokenRequest(env, { grant_type: 'refresh_token', refresh_token: value.r }).then((refreshed) => {
+      if (!refreshed) return null;
+      const renewed = {
+        t: refreshed.access_token,
+        r: refreshed.refresh_token,
+        e: Date.now() + refreshed.expires_in * 1000,
+        re: Date.now() + refreshed.refresh_token_expires_in * 1000,
+        u: value.u,
+      };
+      rotated.set(value.r, { renewed, until: Date.now() + ROTATION_GRACE_MS });
+      return renewed;
+    }).finally(() => refreshing.delete(value.r));
     refreshing.set(value.r, pending);
   }
-  const refreshed = await pending;
-  if (!refreshed) return null;
-  const renewed = {
-    t: refreshed.access_token,
-    r: refreshed.refresh_token,
-    e: Date.now() + refreshed.expires_in * 1000,
-    re: Date.now() + refreshed.refresh_token_expires_in * 1000,
-    u: value.u,
-  };
+  const renewed = await pending;
+  if (!renewed || renewed.u !== value.u) return null;
   return {
     login: renewed.u,
     token: renewed.t,

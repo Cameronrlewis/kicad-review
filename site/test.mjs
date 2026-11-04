@@ -363,11 +363,17 @@ test('expired access tokens refresh once, while refresh errors clear the session
     assert.match(await response.text(), /Signed in as octocat/);
     assert.ok(cookieValue(response, 's'));
   } finally { restore(); }
-  restore = mockFetch(async () => tokenResponse({ error: 'bad_refresh' }));
+  // A token that never rotated successfully: errors clear the session and are never cached.
+  const refused = await seal({ t: 'old-token', r: 'refused-refresh', e: Date.now() - 1, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let failures = 0;
+  restore = mockFetch(async () => { failures += 1; return tokenResponse({ error: 'bad_refresh' }); });
   try {
-    const response = await call('/', { headers: { Cookie: `s=${expired}` } });
-    assert.match(await response.text(), /Sign in with GitHub/);
-    assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
+    for (const attempt of [1, 2]) {
+      const response = await call('/', { headers: { Cookie: `s=${refused}` } });
+      assert.match(await response.text(), /Sign in with GitHub/);
+      assert.match(cookies(response).join('\n'), /s=;.*Max-Age=0/);
+      assert.equal(failures, attempt);
+    }
   } finally { restore(); }
 });
 
@@ -391,6 +397,34 @@ test('concurrent near-expiry requests share one one-use refresh token rotation',
   } finally { restore(); }
 });
 
+
+test('a request with the old cookie arriving just after a completed rotation reuses its result instead of signing out', async () => {
+  const expiring = await seal({ t: 'old-token', r: 'staggered-refresh', e: Date.now() + 60_000, re: Date.now() + 7_200_000, u: 'octocat' }, env);
+  let refreshes = 0;
+  const restore = mockFetch(async (url) => {
+    if (url !== 'https://github.com/login/oauth/access_token') return new Response('{}', { status: 500 });
+    refreshes += 1;
+    // One-use refresh tokens: a second exchange of the consumed token is refused.
+    return refreshes === 1 ? tokenResponse({ access_token: 'new-token', refresh_token: 'new-refresh' }) : tokenResponse({ error: 'bad_refresh_token' });
+  });
+  try {
+    const first = await call('/', { headers: { Cookie: `s=${expiring}` } });
+    assert.match(await first.text(), /Signed in as octocat/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const late = await call('/', { headers: { Cookie: `s=${expiring}` } });
+    assert.equal(refreshes, 1);
+    assert.match(await late.text(), /Signed in as octocat/);
+    assert.equal((await open(cookieValue(late, 's'), env)).r, 'new-refresh');
+    // After the grace window the consumed token is exchanged again and its refusal signs out.
+    const realNow = Date.now, later = realNow() + 31_000;
+    Date.now = () => later;
+    try {
+      const expired = await call('/', { headers: { Cookie: `s=${expiring}` } });
+      assert.equal(refreshes, 2);
+      assert.match(await expired.text(), /Sign in with GitHub/);
+    } finally { Date.now = realNow; }
+  } finally { restore(); }
+});
 test('unsafe next is ignored and login text is HTML escaped', async () => {
   const login = await call('/login?next=//evil.com');
   const state = cookieValue(login, 'st');
@@ -539,7 +573,7 @@ test('review route hides inaccessible repositories behind the same HTML 404', as
 });
 
 test('review route shows the repository after a pull-access check and refreshes the session', async () => {
-  const sealed = await signedIn({ e: Date.now() - 1 });
+  const sealed = await signedIn({ e: Date.now() - 1, r: 'review-route-refresh' });
   let calls = 0;
   const restore = mockFetch(async (url, options = {}) => {
     calls += 1;
@@ -4189,7 +4223,7 @@ test('digest JSON uses gzip MIME and hosted raw takes declarations only from the
   } finally { restore(); }
 });
 test('private gzip responses preserve encodeBody manual through the wrapper', async () => {
-  const sealed = await signedIn({ e: Date.now() - 1 });
+  const sealed = await signedIn({ e: Date.now() - 1, r: 'gzip-wrapper-refresh' });
   const Original = globalThis.Response, encodings = new WeakMap(); let refreshes = 0;
   globalThis.Response = class extends Original {
     constructor(body, init) { super(body, init); encodings.set(this, init?.encodeBody); }
@@ -4221,7 +4255,8 @@ test('private gzip responses preserve encodeBody manual through the wrapper', as
       assert.equal((await open(refreshed, env)).t, 'access-secret');
       assert.deepEqual(Buffer.from(await r.arrayBuffer()), status === 200 ? gzipSync(imageText) : Buffer.alloc(0));
     }
-    assert.equal(refreshes, 2);
+    // The second request still carries the rotated cookie and reuses that rotation.
+    assert.equal(refreshes, 1);
   } finally { restore(); globalThis.Response = Original; }
 });
 for (const failure of ['open', 'close']) test(`browser cache test releases its HTTP listener when browser ${failure} fails`, () => {
