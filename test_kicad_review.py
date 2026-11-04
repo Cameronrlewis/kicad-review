@@ -10204,9 +10204,13 @@ def test_f3_malformed_sexpr():
             write("review", {"detect.json": json.dumps(det_bad)})
             out_bad = pathlib.Path("review/p_bad/base")
             out_bad.mkdir(parents=True, exist_ok=True)
-            with patch.object(kr, "load_settings", return_value=settings):
+            # Force a real cache path so the incomplete-identity guard inside cache_renders is what decides.
+            bad_cache = pathlib.Path(".render-cache", "a" * 40, kr.project_id(p_bad["dir"]), "forced")
+            with patch.object(kr, "load_settings", return_value=settings), \
+                 patch.object(kr, "render_cache", return_value=bad_cache):
                 kr.cache_renders()
-            assert not (cache / ".complete").exists() or kr.image_cache_complete(cache, p_bad, "base") is False
+            assert not bad_cache.exists() and not list(pathlib.Path(".render-cache").rglob(".complete")), \
+                list(pathlib.Path(".render-cache").rglob("*"))
         finally:
             os.chdir(old)
 
