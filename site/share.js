@@ -1,4 +1,5 @@
 import { currentBody } from './report-shell.js';
+import { reviewListName } from './report-kind.js';
 // Read-only, artifact-bound capabilities. No GitHub credential enters a URL or page.
 const enc = new TextEncoder();
 const b64url = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -75,9 +76,8 @@ export async function shareGeneration(gh, token, owner, repo) {
   if (typeof value !== 'string' || !/^(0|[1-9]\d{0,15})$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Invalid share state');
   return Number(value);
 }
-const reportName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 function validArtifact(artifact, now = Date.now()) {
-  return artifact && artifact.expired === false && typeof artifact.name === 'string' && reportName.test(artifact.name)
+  return artifact && artifact.expired === false && typeof artifact.name === 'string' && reviewListName.test(artifact.name)
     && typeof artifact.expires_at === 'string' && Number.isFinite(Date.parse(artifact.expires_at)) && Date.parse(artifact.expires_at) > now;
 }
 function json(deps, body, status = 200, active) {

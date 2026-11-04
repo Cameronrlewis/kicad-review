@@ -5,6 +5,7 @@ import site from './site.css';
 import { readinessClient } from './readiness-client.js';
 import { threadsClient } from './threads-client.js';
 import { threeClient } from './three-client.js';
+import { reviewName } from './report-kind.js';
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -183,7 +184,7 @@ export function commitsPage({ user, owner, repo, branch, branches, tag = '', tag
 
 export function reviewPage({ user, owner, repo, id, name, workflowRunId, pdf = false, pull = null, runStatus = null, runConclusion = null, share = false }) {
   const path = repoPath(owner, repo);
-  const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail)\.html$/.exec(name || '');
+  const match = reviewName.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
   const result = runStatus === 'completed' && runConclusion ? (runConclusion === 'success' ? '<span class="status status-pass">✓ run passing</span>' : `<span class="status status-fail">✕ run ${e(runConclusion.replace(/_/g, ' '))}</span>`)
     : runStatus ? `<span class="status">… run ${e(runStatus.replace(/_/g, ' '))}</span>`
@@ -376,7 +377,7 @@ function reportFrameScript(raw) {
 
 export function sharedPage({ token, name }) {
   const raw = `/s/${encodeURIComponent(token)}/raw`;
-  const match = /^kicad-review-([0-9a-f]{7}|none)-([0-9a-f]{7})-(?:pass|fail)\.html$/.exec(name || '');
+  const match = reviewName.exec(name || '');
   const revision = match ? `${match[1]} → ${match[2]}` : 'Review';
   return frame({ title: 'Shared review', navigation: false, reviewStatus: 'READ ONLY', crumbs: [{ label: 'Shared review' }], body: `<main class="review-page"><nav class="review-bar shared-bar" aria-label="Shared review">${revisionChips(match)}<span>Read-only shared review</span>${mergeBadge('Unavailable', 'Live merge readiness is unavailable for shared reviews.')}${reviewOverflow('<button disabled title="Unavailable in read-only shared reviews">History</button><button disabled title="Use Copy link to share this existing link">Share…</button><button disabled title="Unavailable in read-only shared reviews">Open run</button>')}</nav><div class="review-stage"><div id="review-loading" class="review-loading"><span class="spinner" aria-hidden="true"></span><span>Loading the review…</span></div><iframe id="review-report" src="${e(raw)}" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads" allow="clipboard-write" referrerpolicy="no-referrer" title="KiCad review report"></iframe></div></main>${reportFrameScript(raw)}` });
 }

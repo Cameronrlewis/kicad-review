@@ -2,7 +2,7 @@ import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from
 import { reportCsp, frameCsp } from './csp.js';
 import { currentReport, readStoredData } from './report-shell.js';
 import { reportCache } from './report-cache.js';
-import { verifyReportFamily } from './report-kind.js';
+import { verifyReportFamily, reviewListName } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
 import { deploymentPage, escapeHtml, sharedPage, sharedNotFoundPage, homePage, messagePage, reviewsPage, commitsPage, reviewPage, runPage, signedOutPage, historyPage, stages, stageForStep } from './pages.js';
 
@@ -224,7 +224,7 @@ async function pdfArtifact(owner, repo, id, token) {
     const result = await gh(`${root}/artifacts/${id}`, token);
     if (!result.ok) return null;
     const metadata = await result.json();
-    if (metadata.expired || !/^kicad-review-(?:[0-9a-f]{7}|none)-[0-9a-f]{7}-(?:pass|fail)\.html$/.test(metadata.name)) return null;
+    if (metadata.expired || !verifyReportFamily('comparison', metadata.name)) return null;
     const runId = metadata.workflow_run?.id;
     if (!/^\d{1,20}$/.test(String(runId))) return null;
     const list = await gh(`${root}/runs/${runId}/artifacts?per_page=100`, token);
@@ -543,11 +543,10 @@ async function artifactReport(request, env, owner, repo, id, active, raw, canSha
   }
 }
 
-const artifactName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
 function reviews(artifacts) {
-  return (artifacts || []).filter((artifact) => !artifact.expired && artifactName.test(artifact.name || ''))
+  return (artifacts || []).filter((artifact) => !artifact.expired && reviewListName.test(artifact.name || ''))
     .map((artifact) => {
-      const match = artifact.name.match(artifactName);
+      const match = artifact.name.match(reviewListName);
       return {
         ...artifact,
         base: match[1] || '?',
@@ -975,7 +974,7 @@ const routes = {
         return run(request, env, owner, repo, id, url);
       }
       const historyMatch = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/history$/);
-      if (request.method === 'GET' && historyMatch) return await historyRoute(request, env, { owner: historyMatch[1], repo: historyMatch[2], number: Number(historyMatch[3]) }, { access, gh, historyPage, sessionResponse, errorPage, artifactName });
+      if (request.method === 'GET' && historyMatch) return await historyRoute(request, env, { owner: historyMatch[1], repo: historyMatch[2], number: Number(historyMatch[3]) }, { access, gh, historyPage, sessionResponse, errorPage, artifactName: reviewListName });
 
       const readyRoute = url.pathname.match(/^\/r\/([^/]+)\/([^/]+)\/pull\/(\d{1,10})\/readiness$/);
       if (request.method === 'GET' && readyRoute) {
