@@ -6922,6 +6922,9 @@ CHECKS.push(
     renderHeader();
     const visible = el => el && el.getClientRects().length > 0;
     if (S.m !== 'side' || S.t !== 'checks') return 'forged mode or tab accepted: ' + S.m + ' ' + S.t;
+    const panes = [...document.querySelectorAll('#stage .vp')];
+    if (panes.length !== 1 || document.querySelector('#stage .stack.base') || !document.querySelector('#stage .stack.head')) return 'panes ' + panes.length;
+    if (!panes[0].querySelector('.tag').textContent.startsWith('Design · ')) return 'pane label ' + panes[0].querySelector('.tag').textContent;
     for (const el of document.querySelectorAll('[data-compare], #project-filter, .diff-mark-legend, .board-mark-key')) if (visible(el)) return 'comparison control visible: ' + (el.id || el.getAttribute('aria-label') || el.className);
     const tabs = [...document.querySelectorAll('#panel-tabs [data-tab]')].map(t => t.dataset.tab);
     if (tabs.includes('changes') || tabs.includes('threads') || !tabs.includes('checks')) return 'tabs ' + tabs;
@@ -6940,5 +6943,69 @@ CHECKS.push(
     const tabs = [...document.querySelectorAll('#panel-tabs [data-tab]')].map(t => t.dataset.tab);
     return !document.body.classList.contains('design-single') && !hidden.length && tabs.includes('changes') && tabs.includes('threads') && S.m === 'overlay'
       && document.querySelector('#report-review-bar').textContent.includes('BASE') || 'comparison report changed: ' + hidden.length + ' ' + tabs + ' ' + S.m;
+  `],
+);
+// ui/fixtures/vf-order-4.kicad_pcb through board_geometry(); test_kicad_review.py (DP-S8) keeps this equal to the fixture.
+const DESIGN_FOUR_LAYER_SCENE = '{"version":1,"units":"um","complete":true,"warnings":[],"bounds":[1000,4000,19000,6000],"layers":[{"id":2,"name":"B.Cu","type":"signal","enabled":true},{"id":6,"name":"In2.Cu","type":"signal","enabled":true},{"id":4,"name":"In1.Cu","type":"signal","enabled":true},{"id":0,"name":"F.Cu","type":"signal","enabled":true}],"nets":[{"id":0,"name":""}],"objects":[{"kind":"track","uuid":"00000000-0000-4000-8000-000000000001","changeUuid":"00000000-0000-4000-8000-000000000001","ref":"","layers":["F.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]},{"kind":"track","uuid":"00000000-0000-4000-8000-000000000002","changeUuid":"00000000-0000-4000-8000-000000000002","ref":"","layers":["In1.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]},{"kind":"track","uuid":"00000000-0000-4000-8000-000000000003","changeUuid":"00000000-0000-4000-8000-000000000003","ref":"","layers":["In2.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]},{"kind":"track","uuid":"00000000-0000-4000-8000-000000000004","changeUuid":"00000000-0000-4000-8000-000000000004","ref":"","layers":["B.Cu"],"net":0,"side":null,"category":"tracks","hidden":false,"geometry":{"segments":[[2000,5000,18000,5000,2000]]},"box":[1000,4000,19000,6000]}],"copperStack":["F.Cu","In1.Cu","In2.Cu","B.Cu"]}';
+CHECKS.push(
+  ["design page: every sheet, the board and all its layers stay reachable", "", `
+    ${TO_SINGLE}
+    const seen = [];
+    for (let i = 0; i < D.projects.length; i++) {
+      openProject(i); await applyState({p: i}); const p = proj();
+      const views = [...document.querySelectorAll('#nav [data-view]')].map(b => b.dataset.view);
+      for (const s of p.sheets) if (s.svg && !views.includes('sheet:' + s.path)) return 'sheet missing from the tree: ' + s.path;
+      if (boardAvailable(p) && !views.includes('board')) return 'board missing from the tree';
+      for (const view of views.filter(v => v !== '3d')) {
+        select(view); await draw();
+        const layers = document.querySelectorAll('#stage .stack.head .layer').length;
+        const expected = view === 'board' ? layersOn().length : 1;
+        if (!boardView.useGL && layers !== expected) return p.name + ' ' + view + ' drew ' + layers + ' of ' + expected;
+        if (document.querySelector('#stage .stack.base')) return 'base stack drawn in ' + view;
+        seen.push(p.name + ':' + view);
+      }
+    }
+    return seen.length >= D.projects.length || 'nothing visited';
+  `],
+  ["design page: a four-copper-layer board keeps KiCad stack order, flip and the single head pane", "", `
+    ${TO_SINGLE}
+    const scene = ${DESIGN_FOUR_LAYER_SCENE};
+    const bytes = new Uint8Array(await new Response(new Blob([JSON.stringify(scene)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.dp4 = btoa(String.fromCharCode(...bytes)); proj().board.geometry = {base: null, head: 'dp4'};
+    boardView.failed = null; Appearance.reset(); Object.assign(S, {v: 'board', m: 'side', t: 'appearance', x: 10, y: 5, z: 30}); renderPanel(); await draw();
+    if (!boardDiff || boardDiff.panes.length !== 1 || boardDiff.panes[0].sides.join() !== 'head') return 'panes ' + (boardDiff?.panes.length);
+    if (!boardDiff.panes[0].vp.querySelector('.tag').textContent.startsWith('Design · ')) return 'label';
+    const colour = expected => {
+      const r = boardView.renderers[0]; r.draw();
+      const q = r.worldToScreen([10, 5]), p = r.readPixel(Math.floor(q[0] * devicePixelRatio), r.gl.canvas.height - 1 - Math.floor(q[1] * devicePixelRatio));
+      return p.slice(0, 3).every((v, i) => Math.abs(v - KicadColors.layers[expected][i]) <= 1) || 'expected ' + expected + ' got ' + p;
+    };
+    for (const [patch, expected] of [[{activeLayer: null}, 'F.Cu'], [{activeLayer: null, flip: true}, 'B.Cu'], [{activeLayer: 'In1.Cu', flip: false}, 'In1.Cu'], [{activeLayer: 'In2.Cu'}, 'In2.Cu'], [{activeLayer: null}, 'F.Cu']]) {
+      Appearance.patch(patch); const r = colour(expected); if (r !== true) return JSON.stringify(patch) + ' ' + r;
+    }
+    // Exercise the actual Appearance control; isolate F.Cu over the same background.
+    Appearance.patch({activeLayer:null, flip:false, layers:Object.fromEntries(scene.copperStack.map(name => [name,{visible:name === 'F.Cu',opacity:1}]))});
+    renderPanel();
+    const control = document.querySelector('input[aria-label="F.Cu opacity"]');
+    if (!control) return 'missing actual F.Cu opacity control';
+    control.value = '50'; control.dispatchEvent(new Event('input',{bubbles:true}));
+    const renderer = boardView.renderers[0]; renderer.draw();
+    const pixel = x => { const q=renderer.worldToScreen([x,5]); return renderer.readPixel(Math.floor(q[0]*devicePixelRatio),renderer.gl.canvas.height-1-Math.floor(q[1]*devicePixelRatio)); };
+    const half = pixel(5);
+    control.value = '100'; control.dispatchEvent(new Event('input',{bubbles:true})); renderer.draw();
+    if (half.slice(0,3).every((v,i)=>Math.abs(v-pixel(5)[i])<=2)) return 'opacity input has no pixel effect';
+    // Two overlapping F.Cu tracks must composite once as a layer, not once per object.
+    const duplicate = structuredClone(scene.objects[0]); duplicate.uuid=duplicate.changeUuid='00000000-0000-4000-8000-000000000099';
+    duplicate.geometry.segments=[[8000,5000,18000,5000,2000]]; duplicate.box=[7000,4000,19000,6000]; scene.objects.push(duplicate);
+    const bytes2=new Uint8Array(await new Response(new Blob([JSON.stringify(scene)]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    D.blobs.dp4overlap=btoa(String.fromCharCode(...bytes2)); proj().board.geometry.head='dp4overlap'; await draw(); renderPanel();
+    const opacity=document.querySelector('input[aria-label="F.Cu opacity"]'); opacity.value='50'; opacity.dispatchEvent(new Event('input',{bubbles:true}));
+    const rr=boardView.renderers[0]; rr.draw();
+    const sample=x=>{const q=rr.worldToScreen([x,5]); return rr.readPixel(Math.floor(q[0]*devicePixelRatio),rr.gl.canvas.height-1-Math.floor(q[1]*devicePixelRatio));};
+    const once=sample(5), overlap=sample(10);
+    if (!once.slice(0,3).every((v,i)=>Math.abs(v-overlap[i])<=2)) return 'per-path attenuation: '+JSON.stringify({once,overlap});
+    const names = boardView.scenes[1].copperStack.join();
+    const hits = boardDiff.hits(boardDiff.panes[0].vp, {clientX: boardDiff.panes[0].vp.getBoundingClientRect().left + boardDiff.panes[0].vp.clientWidth / 2, clientY: boardDiff.panes[0].vp.getBoundingClientRect().top + boardDiff.panes[0].vp.clientHeight / 2});
+    return names === 'F.Cu,In1.Cu,In2.Cu,B.Cu' && hits.every(h => h.side === 'head') || 'stack ' + names;
   `],
 );

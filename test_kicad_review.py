@@ -6800,3 +6800,9 @@ assert "gh release upload design-thumbs -R \"$GITHUB_REPOSITORY\" --clobber revi
 assert "overwrite: true" in _wf_t.split("Upload thumbnail input")[1].split("retention-days: 1")[1][:50]
 assert "--prerelease" in _wf_t and "design-thumbs" in _wf_t
 print("ok DP-T3 thumbnail job wiring")
+
+# DP-S8: the four-layer scene in ui/checks.mjs is what board_geometry() makes of the fixture, so the browser check tests the real shape.
+_checks = pathlib.Path("ui/checks.mjs").read_text(encoding="utf-8")
+_literal = _dpre.search(r"const DESIGN_FOUR_LAYER_SCENE = '(.*)';", _checks).group(1)
+assert json.loads(_literal) == kr.board_geometry("ui/fixtures/vf-order-4.kicad_pcb"), "refresh DESIGN_FOUR_LAYER_SCENE from the fixture"
+print("ok DP-S8 four-layer scene matches the fixture")

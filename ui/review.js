@@ -117,7 +117,7 @@ function designBar(link) {   // commit, ref, date and subject of the design on s
     + (Number.isFinite(when) ? `<time class="muted" datetime="${esc(s.committedAt)}">${esc(new Date(when).toISOString().slice(0, 10))}</time>` : "")
     + (s.message ? `<span class="design-message" title="${esc(s.message)}">${esc(s.message)}</span>` : "");
 }
-const designLabel = () => `Design · ${String(D.head || "").slice(0, 7)}`;
+const designLabel = () => `Design · ${esc(String(D.head || "").slice(0, 7))}`;   // HTML: viewport() parses its label
 function renderHeader() {
   const v = checksVerdict(), short = s => (s || "nothing").slice(0, 7), L = D.links;
   const link = (href, text) => href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
@@ -886,7 +886,7 @@ async function draw() {
   else boardView.useGL = !!scenes && boardView.failed !== S.p;
   if (boardView.useGL) {
     appearanceSchematics.clear();
-    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) {
+    if (boardDiff && boardDiff.project === S.p && boardDiff.mode === S.m && boardDiff.single === single() && boardDiff.scenes.base === scenes[0] && boardDiff.scenes.head === scenes[1]) {
       const connected = $("#stage");
       boardGate(connected); noChangeNotice(connected);
       if (!placed()) fit(); else apply();
@@ -899,11 +899,11 @@ async function draw() {
     try {
       const project = S.p;
       let mounted;
-      mounted = BoardDiff.mount({stage,scenes:{base:scenes[0],head:scenes[1]},changes:proj().changes,state:S,appearance:glAppearance,onLost:()=>{
+      mounted = BoardDiff.mount({stage,scenes:{base:scenes[0],head:scenes[1]},changes:proj().changes,state:S,appearance:glAppearance,single:single() ? designLabel() : false,onLost:()=>{
         if (boardDiff === mounted && S.p === project) boardFallback("WebGL unavailable — showing SVG");
       },attachPanZoom});
       boardDiff = mounted;
-      boardDiff.project = project; boardDiff.mode = S.m; boardDiff.scenes = {base:scenes[0],head:scenes[1]};
+      boardDiff.project = project; boardDiff.mode = S.m; boardDiff.single = single(); boardDiff.scenes = {base:scenes[0],head:scenes[1]};
       boardView.panes = boardDiff.panes; boardView.renderers = boardDiff.panes.map(p=>p.renderer);
       for (const {renderer, canvas, scenes:present} of boardDiff.panes)
         trackAppearanceBoard(renderer, canvas, Object.values(present).some(Boolean));
@@ -1037,8 +1037,8 @@ async function drawSideGL(stage, view) {
 }
 async function drawSide(stage, view) {
   if (boardView.useGL && await drawSideGL(stage, view)) return;
-  viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
-  viewport(stage, "Head", view.kind).appendChild(await stack("head", view));
+  if (!single()) viewport(stage, "Base", view.kind).appendChild(await stack("base", view));
+  viewport(stage, single() ? designLabel() : "Head", view.kind).appendChild(await stack("head", view));
 }
 var MODES = { side: drawSide };
 
