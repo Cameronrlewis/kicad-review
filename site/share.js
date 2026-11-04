@@ -1,4 +1,4 @@
-import { currentBody } from './report-shell.js';
+import { currentBody, MAX_REPORT_BYTES } from './report-shell.js';
 // Read-only, artifact-bound capabilities. No GitHub credential enters a URL or page.
 const enc = new TextEncoder();
 const b64url = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -76,7 +76,6 @@ export async function shareGeneration(gh, token, owner, repo) {
   return Number(value);
 }
 const reportName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
-const MAX_REPORT_BYTES = 10 * 1024 * 1024;
 function validArtifact(artifact, now = Date.now()) {
   return artifact && artifact.expired === false && typeof artifact.name === 'string' && reportName.test(artifact.name)
     && (artifact.size_in_bytes == null || (Number.isSafeInteger(artifact.size_in_bytes) && artifact.size_in_bytes >= 0 && artifact.size_in_bytes <= MAX_REPORT_BYTES))

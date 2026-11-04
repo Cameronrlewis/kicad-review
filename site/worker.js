@@ -1,6 +1,6 @@
 import { createShare, serveShare, revokeShares, shareEnabled, downloadUrl } from './share.js';
 import { reportCsp, frameCsp } from './csp.js';
-import { currentReport, readStoredData } from './report-shell.js';
+import { currentReport, readStoredData, readReportText, MAX_REPORT_BYTES, IMAGE_ASSET_LIMITS, ASSET_3D_LIMITS } from './report-shell.js';
 import { reportCache } from './report-cache.js';
 import { verifyReportFamily } from './report-kind.js';
 export { readStoredData } from './report-shell.js';
@@ -249,10 +249,7 @@ async function pdfDownload(owner, repo, id, active) {
 }
 
 const downloadKinds = { fab: ['application/zip', /\.zip$/], pdf: ['application/pdf', /\.pdf$/], step: ['model/step', /\.step$/], glb: ['model/gltf-binary', /\.glb$/] };
-const MAX_REPORT_BYTES = 10 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 64 * 1024;
-const IMAGE_ASSET_LIMITS = { svg: 8 * 1024 * 1024, json: 4 * 1024 * 1024 };
-const ASSET_3D_LIMITS = { 'board.glb': 32 * 1024 * 1024, 'board-parts.json': 4 * 1024 * 1024 };
 
 function downloadError(active) {
   return sessionResponse(JSON.stringify({ error: 'Download unavailable' }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
@@ -319,11 +316,13 @@ export function assetFromReport(html, id, kind) {
   return assetFromData(readStoredData(html), id, kind);
 }
 
+const validBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+
 function assetFromData(data, id, kind, matched = false) {
   if (!/^[0-9a-f]{12}$/.test(id) || !['svg', 'json'].includes(kind)) return null;
   const meta = data?.assets?.[id], encoded = data?.blobs?.[id], max = IMAGE_ASSET_LIMITS[kind];
   if (meta?.kind !== kind || typeof encoded !== 'string' || !encoded.length || encoded.length > Math.ceil(max / 3) * 4) return null;
-  if (matched) return new Uint8Array(0);
+  if (matched) return validBase64.test(encoded.replace(/\s+/g, '')) ? new Uint8Array(0) : null;
   try {
     const bytes = unbase64(encoded);
     return bytes.length <= max ? bytes : null;
@@ -344,28 +343,6 @@ async function reportArtifact(owner, repo, id, active, repository) {
   if (metadata.expires_at != null && !Number.isFinite(Date.parse(metadata.expires_at))) return null;
   const expired = metadata.expired || (metadata.expires_at && Date.parse(metadata.expires_at) <= Date.now());
   return { base, metadata, expired: Boolean(expired) };
-}
-
-async function readReportText(response) {
-  const declared = response.headers.get('Content-Length');
-  if (!response.body || (declared != null && Number(declared) > MAX_REPORT_BYTES)) {
-    await response.body?.cancel();
-    throw new Error('Report unavailable');
-  }
-  const reader = response.body.getReader(), chunks = [];
-  for (let n = 0; ;) {
-    const { done, value } = await reader.read();
-    if (done) {
-      const out = new Uint8Array(n);
-      for (let offset = 0, i = 0; i < chunks.length; offset += chunks[i++].byteLength) out.set(chunks[i], offset);
-      return untext.decode(out);
-    }
-    if ((n += value.byteLength) > MAX_REPORT_BYTES) {
-      await reader.cancel();
-      throw new Error('Report unavailable');
-    }
-    chunks.push(value);
-  }
 }
 
 async function storedReport(artifact, active) {
@@ -472,9 +449,9 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
 }
 
 // Exactly `size` bytes or null; a wrong declared length or a longer body is never buffered whole.
-async function readExactly(response, size) {
+export async function readExactly(response, size, maxBytes = ASSET_3D_LIMITS['board.glb']) {
   const declared = response.headers.get('Content-Length');
-  if (!response.body || !Number.isSafeInteger(size) || size <= 0 || size > ASSET_3D_LIMITS['board.glb']) return null;
+  if (!response.body || !Number.isSafeInteger(size) || size <= 0 || size > maxBytes) return null;
   // A real Content-Encoding (not identity) reply's length counts encoded bytes; the read bound below still caps it.
   // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
   if (declared != null && (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase() === 'identity' && Number(declared) !== size) { await response.body.cancel(); return null; }
@@ -528,7 +505,7 @@ async function artifact3d(request, env, owner, repo, id, digest, kind) {
       // Share downloader's host policy; never forward GitHub authorization or follow further redirects.
       const body = await fetch(location, { redirect: 'manual' });
       if (!body.ok) return assetError();
-      const bytes = await readExactly(body, descriptor.bytes);
+      const bytes = await readExactly(body, descriptor.bytes, maxBytes);
       return bytes && bytes[0] === 31 && bytes[1] === 139 ? bytes : assetError();
     } catch { return assetError(); }
   });

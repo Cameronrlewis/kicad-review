@@ -3549,7 +3549,7 @@ for(const encoded of [true,false])test('BR02 broker gzip transport '+(encoded?'f
 });
 
 // Task 9.1: authenticated image delivery and the opaque-frame bridge.
-import { assetFromReport, readStoredData, privateAsset } from './worker.js';
+import { assetFromReport, readStoredData, privateAsset, readExactly } from './worker.js';
 const imageId = 'abcdef123456';
 const imageText = '<svg xmlns="http://www.w3.org/2000/svg"/>';
 const imageData = () => ({ version: 1, assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
@@ -4813,7 +4813,7 @@ test('BR02 image route rejects 64-character 3D model digests', async () => {
   } finally { restore(); }
 });
 
-import { lazy3dData, currentBody } from './report-shell.js';
+import { lazy3dData, currentBody, declaredAssets, MAX_REPORT_BYTES, IMAGE_ASSET_LIMITS, ASSET_3D_LIMITS } from './report-shell.js';
 import { verifyReportFamily } from './report-kind.js';
 test('BR02 lazy stripping is opt-in and retains blobs used outside 3D',async()=>{
   const digest='d'.repeat(64);
@@ -5394,13 +5394,68 @@ test('artifact size bounds reject oversized reports, 3D descriptors, manifest en
   let atobCalls = 0;
   globalThis.atob = value => { atobCalls++; return originalAtob(value); };
   try {
-    for (const [kind, maxBytes] of [['svg', 8 * 1024 * 1024], ['json', 4 * 1024 * 1024]]) {
+    for (const [kind, maxBytes] of [['svg', IMAGE_ASSET_LIMITS.svg], ['json', IMAGE_ASSET_LIMITS.json]]) {
       const maxEncoded = Math.ceil(maxBytes / 3) * 4;
+      const within = { version: 1, assets: { [imageId]: { kind } }, blobs: { [imageId]: 'A'.repeat(maxEncoded) } };
+      assert.deepEqual({ ...declaredAssets(within) }, { [imageId]: { kind } }, `${kind} at limit`);
       const data = { version: 1, assets: { [imageId]: { kind } }, blobs: { [imageId]: 'A'.repeat(maxEncoded + 4) } };
+      assert.deepEqual({ ...declaredAssets(data) }, {}, `${kind} over limit in declaredAssets`);
       assert.equal(assetFromReport(storedImageReport(data), imageId, kind), null, kind);
     }
     assert.equal(atobCalls, 0, 'atob must not be called on oversized encoded blobs');
   } finally { globalThis.atob = originalAtob; }
+  // 5. lazy3dData retains blobs whose descriptor exceeds ASSET_3D_LIMITS[kind] and strips those within limits.
+  for (const [field, key, kind, limit] of [['model3d', 'model', 'board.glb', ASSET_3D_LIMITS['board.glb']], ['parts3d', 'parts', 'board-parts.json', ASSET_3D_LIMITS['board-parts.json']]]) {
+    const makeLazyInput = bytes => ({
+      version: 1,
+      blobs: { slot: 'payload-base64' },
+      projects: [{ board: { [field]: { head: 'slot' }, assets3d: { head: { [key]: { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes } } } } }],
+    });
+    assert.equal(lazy3dData(makeLazyInput(limit)).blobs.slot, undefined, `${kind} stripped at limit`);
+    assert.equal(lazy3dData(makeLazyInput(limit + 1)).blobs.slot, 'payload-base64', `${kind} retained over limit`);
+  }
+  // 6. Share validArtifact size_in_bytes cap (createShare & serveShare) and currentBody Content-Length / streamed cap.
+  const token = await guestToken();
+  for (const size_in_bytes of [MAX_REPORT_BYTES + 1, -1, 1.5]) {
+    let restoreShare = shareCreationFetch({ metadata: { ...shareMeta(), size_in_bytes } });
+    try {
+      assert.equal((await worker.fetch(await sharePost('/r/Cameronrlewis/repo/a/123/share'), appEnv)).status, 410);
+    } finally { restoreShare(); }
+    restoreShare = guestFetch({ metadata: { ...shareMeta(), size_in_bytes } });
+    try {
+      assert.equal((await worker.fetch(request(`/s/${token}`), appEnv)).status, 404);
+    } finally { restoreShare(); }
+  }
+  await assert.rejects(() => currentBody(new Response('x', { headers: { 'Content-Length': String(MAX_REPORT_BYTES + 1) } })), /Report unavailable/);
+  let bodyPulls = 0;
+  const streamedOver = new Response(new ReadableStream({
+    pull(c) {
+      bodyPulls++;
+      c.enqueue(new Uint8Array(1024 * 1024));
+    },
+  }));
+  await assert.rejects(() => currentBody(streamedOver), /Report unavailable/);
+  assert.equal(bodyPulls, 11, 'streamed read cancels immediately past 10 MiB');
+  // 7. Sibling 3D artifact metadata size_in_bytes cap and readExactly cap per kind.
+  for (const [kind, key, limit] of [['board.glb', 'model', ASSET_3D_LIMITS['board.glb']], ['board-parts.json', 'parts', ASSET_3D_LIMITS['board-parts.json']]]) {
+    const data = { version: 1, projects: [{ board: { assets3d: { head: { [key]: { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes: 32 } } } } }] };
+    const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+    let zipDownloads = 0;
+    restore = mockFetch(async url => {
+      if (url.endsWith('/repo')) return accessibleRepo();
+      if (url.endsWith('/artifacts/44')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+      if (url.endsWith('/artifacts/44/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/3d-report44' } });
+      if (url === 'https://signed.example/3d-report44') return new Response(stored);
+      if (url.includes('/runs/9/artifacts?')) return Response.json({ artifacts: [{ id: 91, name: `kicad-3d-${digest}-${kind}.gz`, expired: false, size_in_bytes: limit + 1, workflow_run: { id: 9 } }] });
+      zipDownloads++; throw new Error(`must not download oversized sibling ${kind}: ${url}`);
+    });
+    try {
+      assert.equal((await call(`/r/Cameronrlewis/repo/a/44/3d/${digest}/${kind}`, { headers })).status, 404, kind);
+      assert.equal(zipDownloads, 0, kind);
+    } finally { restore(); }
+    assert.equal(await readExactly(new Response(new Uint8Array(4)), limit + 1, limit), null, `${kind} readExactly over maxBytes`);
+  }
+  assert.deepEqual(await readExactly(new Response(new Uint8Array([1, 2, 3, 4])), 4, ASSET_3D_LIMITS['board-parts.json']), new Uint8Array([1, 2, 3, 4]));
 });
 
 test('conditional asset requests validate access, expiry, descriptor and sibling liveness without downloading or decoding payloads', async () => {
@@ -5408,8 +5463,8 @@ test('conditional asset requests validate access, expiry, descriptor and sibling
   const gzModel = gzipSync('glTF-binary-payload');
   const data = {
     version: 1,
-    assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
-    blobs: { [imageId]: gzipSync(imageText).toString('base64') },
+    assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' }, deadbeef0001: { kind: 'svg', name: 'bad.svg' } },
+    blobs: { [imageId]: gzipSync(imageText).toString('base64'), deadbeef0001: '!malformed-base64!' },
     projects: [{ board: { assets3d: { head: { model: { digest: digest3d, artifactName: `kicad-3d-${digest3d}-board.glb.gz`, bytes: gzModel.length } } } } }],
   };
   const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
@@ -5437,12 +5492,15 @@ test('conditional asset requests validate access, expiry, descriptor and sibling
   const originalAtob = globalThis.atob;
   let atobCalls = 0;
   try {
-    // Conditional SVG request: validates descriptor without calling atob/unbase64 on the asset blob.
+    // Conditional SVG request: validates descriptor and base64 syntax without calling atob/unbase64 on the asset blob.
     const encodedBlob = data.blobs[imageId];
     globalThis.atob = value => { if (value === encodedBlob) atobCalls++; return originalAtob(value); };
     const svg304 = await call(`/r/Cameronrlewis/repo/a/55/assets/${imageId}.svg`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `W/"${imageId}"` } });
     assert.equal(svg304.status, 304);
     assert.equal(atobCalls, 0, 'conditional SVG 304 must not decode base64');
+    // Malformed base64 blob yields 404 even on conditional If-None-Match request.
+    const badSvg = await call('/r/Cameronrlewis/repo/a/55/assets/deadbeef0001.svg', { headers: { Cookie: `s=${sealed}`, 'If-None-Match': '"deadbeef0001"' } });
+    assert.equal(badSvg.status, 404, 'malformed base64 must fail closed with 404 on conditional request');
     // Conditional 3D request: validates descriptor and sibling liveness without requesting /zip or downloading the blob.
     const model304 = await call(`/r/Cameronrlewis/repo/a/55/3d/${digest3d}/board.glb`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${digest3d}"` } });
     assert.equal(model304.status, 304);
