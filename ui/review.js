@@ -1842,9 +1842,9 @@ function goTo(id) {
 async function electricalManifest(sheetPath, side) {
   const id = proj().sheets.find(s => s.path === sheetPath)?.hotspots?.[side];
   if (!id) return null;
-  try {
-    const m = JSON.parse(await svgText(id));
-    return m?.version === 1 && m.units === "mm" ? m.views?.find(v => v.sheet === sheetPath) || null : null;
+  try {   // the same validated manifest as inspection; a rejected one never reaches zoomTo
+    const m = decodedSheetHotspots.get(id) || validateImageManifest(await jsonAsset(id), "sheet");
+    return m.views.find(v => v.sheet === sheetPath) || null;
   } catch { return null; }
 }
 function electricalPins(row, side, sheetPath, manifest) {
