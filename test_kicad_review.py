@@ -1644,9 +1644,9 @@ for fields in ('[]', '["MPN", "Value"]'):
 print("ok CK-S4 settings validation")
 
 
-# Optional 3D export: off by default, opt-in settings, binary GLB blobs, missing-model report data, and no-op render decision.
+# Optional 3D export: off by default, opt-in settings, binary GLB blobs, and missing-model report data.
 import base64, gzip
-from kicad_review import build_project, board_changed, export_glb
+from kicad_review import build_project, export_glb
 here = os.getcwd()
 t = tempfile.mkdtemp()
 os.chdir(t)
@@ -1695,9 +1695,6 @@ assert {ref: (x["side"], x["reason"]) for ref, x in missing.items()} == {
 # 3D fallback blocks need geometry for unchanged as well as changed footprints.
 for x in missing.values():
     assert len(x["pos"]) == 3 and len(x["box"]) == 4 and x["layer"] in ("F.Cu", "B.Cu"), x
-assert not board_changed({"dir": "P", "name": "P"})
-write(t, {"head/P/P.kicad_pcb": "(kicad_pcb changed)"})
-assert board_changed({"dir": "P", "name": "P"})
 os.chdir(here)
 print("ok")
 

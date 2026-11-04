@@ -547,13 +547,6 @@ def render_fab(p, side, out, settings):
     pathlib.Path(out, "fab-limits.json").write_text(json.dumps({"sections": sections}, sort_keys=True), encoding="utf-8")
 
 
-def board_changed(p):
-    """Whether the project's board bytes differ between the two checked-out revisions."""
-    paths = [board_path(p, side) for side in ("base", "head")]
-    contents = [pathlib.Path(path).read_bytes() if os.path.exists(path) else None for path in paths]
-    return contents[0] != contents[1]
-
-
 def glb_inputs(p, side):
     """Board plus repository model assets; model-only edits must not reuse old exports."""
     pcb = pathlib.Path(board_path(p, side))
