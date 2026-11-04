@@ -661,8 +661,19 @@ export const CHECKS = [
         clearImageSelection();await draw();
         if(JSON.stringify(Appearance.get().netColors)!==JSON.stringify(look.netColors))return 'net colour not restored';
         if(Appearance.get().nets['12']?.color)return 'net colour not restored in nets: '+JSON.stringify(Appearance.get().nets['12'].color);
-        const persisted=JSON.parse(localStorage.getItem('kr.appearance.v1')||'{}').viewers?.[JSON.stringify([D.repo||location.pathname,proj().dir])];
-        if(persisted?.nets?.['12']?.color||persisted?.netColors?.['12'])return 'net colour persisted after selection cleared: '+JSON.stringify(persisted?.nets?.['12']||persisted?.netColors?.['12']);
+        const viewerKey=JSON.stringify([D.repo||location.pathname,proj().dir]);
+        const envelope=JSON.parse(localStorage.getItem('kr.appearance.v1')||'{}');
+        const persisted=envelope.viewers?.[viewerKey];
+        if(!persisted)return 'persisted viewer state missing for key: '+viewerKey;
+        if(persisted.nets?.['12']?.color||persisted.netColors?.['12'])return 'net colour persisted after selection cleared: '+JSON.stringify(persisted?.nets?.['12']||persisted?.netColors?.['12']);
+        const floatColor=[.5,.2,.1,1];
+        Appearance.patch({netColors:{'12':floatColor}});
+        selectImageNet('12');
+        if(Appearance.get().netColors['12']?.[0]!==1)return 'net highlight missing on pre-coloured net';
+        clearImageSelection();
+        if(JSON.stringify(Appearance.get().netColors['12'])!==JSON.stringify(floatColor))
+          return 'restoring net colour lost float precision: expected '+JSON.stringify(floatColor)+' got '+JSON.stringify(Appearance.get().netColors['12']);
+        Appearance.patch({nets:{'12':{color:null}}});
         if(!click([...document.querySelectorAll('#stage .vp')].at(-1),[5,8])||S.imageSelection.kind!=='pad'||S.imageSelection.pin!=='2'||inspectorProperties().head.pin!=='2')return 'pad number missing from inspection';
         await draw();
         if(!boardDiff&&!document.querySelector('#stage .image-selection g rect'))return 'exact fallback pad geometry overlay missing';
