@@ -11245,3 +11245,8 @@ _pcb_step = _pcb_wf[_pcb_wf.index("- name: Install PcbDraw\n"):].split("\n      
 assert "        continue-on-error: true" in _pcb_step, _pcb_step
 assert "::warning::PcbDraw could not be installed" in _pcb_step and "rm -rf .pydeps" in _pcb_step.split("::warning::")[0].split("||")[-1], _pcb_step
 print("ok Session E 9 a failed PcbDraw install only warns")
+
+# Session E 11: a snapshot whose review job later fails (say on a required ERC check) still gets its thumbnail.
+_thumb_head = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8").split("\n  design-thumbnails:\n")[1].split("steps:")[0]
+assert "    if: ${{ !cancelled() && needs.review.outputs.thumbnails == 'true' }}\n" in _thumb_head, _thumb_head
+print("ok Session E 11 thumbnails follow a failed review job")

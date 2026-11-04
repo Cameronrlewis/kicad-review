@@ -524,7 +524,8 @@ jobs:
 
   design-thumbnails:
     needs: review
-    if: needs.review.outputs.thumbnails == 'true'
+    # A failed review job (a required check) still made and uploaded its snapshot, so its thumbnail is still merged.
+    if: ${{ !cancelled() && needs.review.outputs.thumbnails == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
