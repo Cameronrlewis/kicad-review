@@ -1174,6 +1174,7 @@ function updateStatus() {
   coords?.classList.toggle("off-canvas",!current); coords?.toggleAttribute("data-sch-coordinates",sheet);
   const ids = changeCardIds(), at = ids.indexOf(S.s);
   statusText("[data-change]",`${at < 0 ? 0 : at+1}/${ids.length}`);
+  $("[data-change]").parentElement.hidden = single();   // no change stepper in a design report
   statusText("[data-zoom]",placed() ? `${(S.z / PX * 100).toFixed(0)}%` : "off canvas");
   statusText("[data-units]",units);
   if ($("#status-units").value !== units) $("#status-units").value = units;
@@ -1544,7 +1545,7 @@ function renderImageSearch() {
   $('#image-search-label').textContent=board?'Net search':ok?rows.length+' component'+(rows.length===1?'':'s'):'Components';
   const graph=board?currentImageGraph(imageSearchState.side):null;
   const partial=graph&&(Object.values(graph.truncated).some(Boolean)||Object.values(graph.unsupported||{}).some(n=>n>0));
-  const missing=['base','head'].some(side=>sideSelect.options[side==='base'?0:1].disabled);
+  const missing=!single()&&['base','head'].some(side=>sideSelect.options[side==='base'?0:1].disabled);
   $('#image-search-note').textContent=!ok?'Inspection unavailable for this report. Artwork and review lists remain available.':
     imageSearchState.note|| (partial?'Partial inspection: some geometry is unavailable.':missing?'Inspection available for '+imageSearchState.side+' only.':'');
   const facts=$('#image-board-facts');facts.hidden=!graph;
@@ -2022,7 +2023,7 @@ function renderChecks() {
   const names = [...order, ...p.checks.map(c => c.name).filter(n => !order.includes(n))];
   const configured = names.map(name => ({ name, check: byName.get(name), setting: D.settings?.checks?.[name] }));
   const ran = configured.filter(r => r.check && r.setting !== "off").map(r => r.check);
-  const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
+  const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c, new: !single() && v.new })));   // a design report has nothing new or fixed
   const totalNew = all.filter(v => v.new && !v.waived).length;
   const scope = single() ? "all" : state.scope ?? (totalNew ? "new" : "all");
   const checked = state.check && byName.has(state.check) ? state.check : "";
@@ -2032,10 +2033,10 @@ function renderChecks() {
       <span class="check-reason">${esc(check?.reason || "turned off in kicad-review.toml")}</span></button>`;
     const baselineOnly = !single() && D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
     const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
-    const newer = check.new_errors + check.new_warnings;
+    const newer = single() ? 0 : check.new_errors + check.new_warnings;
     return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
       <span class="check-heading"><span class="check-status">${status}</span><span class="check-title">${esc(check.title)} <small>${esc(check.level === "informational" ? "info" : "required")}</small></span>${baselineOnly ? '<span class="check-status-detail">· no new errors</span>' : ""}</span>
-      <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
+      <span class="check-counts">${check.errors} errors · ${check.warnings} warnings${check.waived ? ` · ${check.waived} waived` : ""}${newer ? ` <b class="check-new">+${newer} new</b>` : ""}${!single() && check.fixed ? ` <b class="check-fixed">${check.fixed} fixed</b>` : ""}</span></button>`;
   }).join("");
   let shown = all.filter(v => (!checked || v.check.name === checked) && (scope === "all" || v.new) && state[v.severity] && (!v.waived || state.waived) && (!state.q || JSON.stringify([v.type, v.description, v.items]).toLowerCase().includes(state.q.toLowerCase())));
   const totalShown = shown.length;
@@ -2189,7 +2190,7 @@ function referenceRanges(refs) {
 }
 function dockListTools(name, state) {
   const options = (values, current) => values.map(([v, label]) => `<option value="${v}" ${v === (current || "") ? "selected" : ""}>${label}</option>`).join("");
-  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "No groups"], ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
+  return `<div class="dock-list-tools"><input class="${name === "changes" ? "q" : ""}" type="search" data-list-search="${name}" aria-label="Search ${name}" placeholder="Search ${name}…" value="${esc(state.q || "")}"><select data-list-sort="${name}" aria-label="Sort ${name}">${options(name === "checks" ? [["", single() ? "Severity" : "New / severity"], ["rule", "Rule name"]] : [["", "Review order"], ["reference", "Reference"], ...(name === "changes" ? [["kind", "Kind"]] : [])], state.sort)}</select>${name === "parts" ? "" : `<select data-list-group="${name}" aria-label="Group ${name}">${options(name === "checks" ? [["", "Group: rule"], ["check", "Group: check"], ["severity", "Group: severity"]] : [["", "No groups"], ["kind", "Group: kind"], ["action", "Group: action"]], state.group)}</select>`}</div>`;
 }
 function renderPanel() {
   appearanceUI?.cancelPendingImports(); // preserve late-import invalidation without tearing down left controls
@@ -2628,7 +2629,7 @@ function renderInspector() {
     const label = ({ref:"Reference", value:"Value", kind:"Type", footprint:"Footprint", uuid:"UUID"})[key] || key;
     groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label).replace(/\./g, ".<wbr>")}</dt><dd>${changed ? `<del>${html(data.base[key], a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${html(data.head[key], b)}</ins>` : html(data.head[key], b)}</dd>`);
   }
-  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${!single() && data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", single() ? "Placement · current (mm)" : "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">${single() ? "Head only" : "Base → head"} · only data present in this report is shown.</span></p>'}</div>`;
+  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${!single() && data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", single() ? "Placement · current (mm)" : "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : `<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">${single() ? "Head only" : "Base → head"} · only data present in this report is shown.</span></p>`}</div>`;
   if(S.part3d) {
     const p=S.part3d,body=$("#insp-body"),box=p.box.map(n=>round3(n*1000));
     body.dataset.part3dInspector='';body.replaceChildren();
