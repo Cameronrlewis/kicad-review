@@ -5003,7 +5003,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
 });
 
 // ---- Design page: the newest snapshot for a branch, tag or commit ----
-import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery, scanHistory } from './design.js';
+import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery, scanHistory, CursorNotFoundError } from './design.js';
 import { designMissingPage, projectsPage, designsPage } from './pages.js';
 // The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
 const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
@@ -5560,8 +5560,10 @@ test('history cursor stays anchored to the selected ref across merge DAGs and re
 
   // Foreign cursor SHA (valid commit on another branch, not reachable from main) must not pivot off main
   calls.length = 0;
-  const foreignScan = await scanHistory(gh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', sha40(902));
-  assert.deepEqual(foreignScan, { rows: [], next: null, truncated: false });
+  await assert.rejects(
+    () => scanHistory(gh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', sha40(902)),
+    (err) => err instanceof CursorNotFoundError
+  );
   assert.equal(calls.filter((p) => p.includes(`/commits/${sha40(901)}`) || p.includes(`/commits/${sha40(902)}`)).length, 0, 'foreign commits are never inspected');
   const foreignRes = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${sha40(902)}`, route);
   assert.equal(foreignRes.status, 404, 'unrelated cursor SHA on designsRoute returns 404 instead of pivoting off main');
@@ -5628,4 +5630,56 @@ test('exhausted history with exactly 25 terminal matches returns next: null and 
   assert.equal(res25.truncated, false);
   const page25 = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh25(url.replace('https://api.github.com', ''))]])).text();
   assert.ok(!page25.includes('>Older<'), 'Older button is omitted when history is exhausted at 25 rows');
+});
+
+test('first commit exhausting detail budget advances scan with truncated true and documented ceiling', async () => {
+  // A single commit with 65 pages of files (6500 files, KiCad file at file 10).
+  // Detail budget exhausts at page 60 (MAX_SCAN = 60).
+  const hugeFiles = [
+    ...Array.from({ length: 9 }, (_, i) => ({ filename: `docs/f${i}.md` })),
+    { filename: 'A/A.kicad_sch' },
+    ...Array.from({ length: 6490 }, (_, i) => ({ filename: `extra/f${i}.md` })),
+  ];
+  const log = [{ sha: sha40(1), files: hugeFiles }, { sha: sha40(2), files: [{ filename: 'A/A.kicad_sch' }] }];
+  const calls = [];
+  const gh = historyGh(log, { calls });
+  const res = await scanHistory(gh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', '');
+  const detailCalls = calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p));
+  assert.equal(detailCalls.length, 60, 'detail budget is capped at 60 requests');
+  assert.equal(res.truncated, true);
+  assert.equal(res.rows.length, 1);
+  assert.equal(res.rows[0].sha, sha40(1));
+  assert.equal(res.next, sha40(1), 'advances past the incomplete first commit');
+});
+
+test('list page budget bounds cursor skip and unexhausted history returns 502 instead of false 404', async () => {
+  // Mock GitHub that responds with 60 pages of commits (all non-matching) and hasNextPage: true
+  const calls = [];
+  const mockGh = async (path) => {
+    calls.push(path);
+    if (path.includes('/git/trees/')) return json({ tree: [] });
+    if (path.includes('/releases/tags/design-thumbs')) return new Response('{}', { status: 404 });
+    const u = new URL(`https://x${path}`);
+    if (u.pathname.endsWith('/commits')) {
+      const pageNum = Number(u.searchParams.get('page') || 1);
+      // Return 100 commits per page, none matching cursor, Link: next always present
+      const items = Array.from({ length: 100 }, (_, i) => ({ sha: sha40((pageNum - 1) * 100 + i + 1000) }));
+      return new Response(JSON.stringify(items), {
+        headers: { 'Content-Type': 'application/json', Link: '<x>; rel="next"' },
+      });
+    }
+    return json({}, 404);
+  };
+
+  // scanHistory looking for cursor that is not in the first 50 pages throws history unavailable, not CursorNotFoundError
+  await assert.rejects(
+    () => scanHistory(mockGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', sha40(99999)),
+    (err) => !(err instanceof CursorNotFoundError) && err.message === 'history unavailable'
+  );
+  assert.equal(calls.filter((p) => p.includes('/commits?')).length, 50, 'bounded at MAX_LIST_PAGES list requests');
+
+  // designsRoute returns 502 (history unavailable), NOT 404 (cursor missing)
+  const route = [['/repos/Cameronrlewis/repo/', (url) => mockGh(url.replace('https://api.github.com', ''))]];
+  const res = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${sha40(99999)}`, route);
+  assert.equal(res.status, 502, 'list budget exhaustion returns 502, not 404');
 });

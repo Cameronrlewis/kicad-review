@@ -248,16 +248,29 @@ export async function designReleaseRoute(request, env, { owner, repo, tag, raw }
   }
 }
 
+export class CursorNotFoundError extends Error {
+  constructor(message = 'cursor not found') {
+    super(message);
+    this.name = 'CursorNotFoundError';
+  }
+}
+
 // The KiCad-change history of one project folder (owner decision 2026-10-26, decision 4): default-branch commits whose files
 // include a KiCad input of the folder, renames and deletions included. 25 rows a page. A filtered page cannot be found by
-// page number, so each page resumes from the last commit examined (the cursor). At most MAX_SCAN commits are examined per view.
+// page number, so each page resumes from the last commit examined (the cursor). At most MAX_SCAN commit-detail requests are
+// examined per view, and at most MAX_LIST_PAGES list pages are fetched.
 const MAX_SCAN = 60; // ponytail: 60 detail requests per view; the Older link resumes the scan, so no commit is skipped
 const PAGE_ROWS = 25;
-const MAX_LIST_PAGES = 50;
+const MAX_LIST_PAGES = 50; // ponytail: at most 50 commit-list requests (up to 5000 path-matching commits) per view
 export async function scanHistory(gh, token, root, ref, dir, cursor) {
   const rows = [], pathQuery = dir ? `&path=${enc(dir)}` : '', budget = { used: 0, max: MAX_SCAN };
-  let skipping = Boolean(cursor), last = cursor || '', progressed = false;
-  for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
+  let skipping = Boolean(cursor), last = cursor || '', progressed = false, listPages = 0;
+  for (let page = 1; ; page += 1) {
+    if (listPages >= MAX_LIST_PAGES) {
+      if (skipping) throw new Error('history unavailable');
+      return { rows, next: last, truncated: true };
+    }
+    listPages += 1;
     const response = await gh(`${root}/commits?sha=${enc(ref)}&per_page=100${page > 1 ? `&page=${page}` : ''}${pathQuery}`, token);
     if (!response.ok) throw new Error('history unavailable');
     const items = await response.json();
@@ -275,6 +288,7 @@ export async function scanHistory(gh, token, root, ref, dir, cursor) {
         if (changesProject(commit.files, dir)) {
           rows.push({ sha: item.sha, message: String(item.commit?.message || '').split('\n', 1)[0], author: item.author?.login || item.commit?.author?.name || '?', date: item.commit?.author?.date || '' });
         }
+        // ponytail: a commit with >6000 files that exhausts MAX_SCAN on its first examination is judged on its first 6000 files and advanced (next: item.sha) to prevent an infinite cursor loop; if KiCad files were only beyond file 6000, it is omitted.
         return { rows, next: item.sha, truncated: true };
       }
       last = item.sha; progressed = true;
@@ -287,15 +301,11 @@ export async function scanHistory(gh, token, root, ref, dir, cursor) {
       }
     }
     if (!hasNextPage || !items.length) {
-      const done = { rows, next: null, truncated: false };
-      if (skipping) Object.defineProperty(done, 'cursorMissing', { value: true });
-      return done;
+      if (skipping) throw new CursorNotFoundError();
+      return { rows, next: null, truncated: false };
     }
     if (!skipping && budget.used >= budget.max) return { rows, next: last, truncated: true };
   }
-  const done = { rows, next: null, truncated: false };
-  if (skipping) Object.defineProperty(done, 'cursorMissing', { value: true });
-  return done;
 }
 
 // The list's thumbnails: one release asset.
@@ -328,13 +338,12 @@ export async function designsRoute(request, env, { owner, repo, key }, deps) {
     if (first.status === 404 || first.status === 422) return errorPage(404, ...generic, back, allowed.s);
     if (!first.ok) return errorPage(502, 'Could not load the history', 'GitHub did not answer. Try again.', back, allowed.s);
     const tip = (await first.json())[0]?.sha || '';   // every Compare button compares with this commit
-    const scanned = await scanHistory(gh, allowed.s.token, root, ref, dir, cursor);
-    if (cursor && scanned.cursorMissing) return errorPage(404, ...generic, back, allowed.s);
-    const { rows, next, truncated } = scanned;
+    const { rows, next, truncated } = await scanHistory(gh, allowed.s.token, root, ref, dir, cursor);
     const thumbs = await thumbnailsFor(gh, allowed.s.token, root, dir, rows.map((r) => r.sha)); // Task 8A: never fails the page
     return sessionResponse(designsPage({ user: allowed.s.login, owner, repo, key, ref, rows, tip, next, truncated, thumbs,
       first: !cursor, started: url.searchParams.get('started') === '1' }), { headers: html }, allowed.s);
-  } catch {
+  } catch (err) {
+    if (err instanceof CursorNotFoundError) return errorPage(404, ...generic, back, allowed.s);
     return errorPage(502, 'Could not load the history', 'GitHub did not answer. Try again.', back, allowed.s);
   }
 }
