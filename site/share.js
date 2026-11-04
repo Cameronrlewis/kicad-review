@@ -76,8 +76,10 @@ export async function shareGeneration(gh, token, owner, repo) {
   return Number(value);
 }
 const reportName = /^kicad-review(?:-([0-9a-f]{7}|none)-([0-9a-f]{7})-(pass|fail))?\.html$/;
+const MAX_REPORT_BYTES = 10 * 1024 * 1024;
 function validArtifact(artifact, now = Date.now()) {
   return artifact && artifact.expired === false && typeof artifact.name === 'string' && reportName.test(artifact.name)
+    && (artifact.size_in_bytes == null || (Number.isSafeInteger(artifact.size_in_bytes) && artifact.size_in_bytes >= 0 && artifact.size_in_bytes <= MAX_REPORT_BYTES))
     && typeof artifact.expires_at === 'string' && Number.isFinite(Date.parse(artifact.expires_at)) && Date.parse(artifact.expires_at) > now;
 }
 function json(deps, body, status = 200, active) {

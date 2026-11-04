@@ -249,6 +249,10 @@ async function pdfDownload(owner, repo, id, active) {
 }
 
 const downloadKinds = { fab: ['application/zip', /\.zip$/], pdf: ['application/pdf', /\.pdf$/], step: ['model/step', /\.step$/], glb: ['model/gltf-binary', /\.glb$/] };
+const MAX_REPORT_BYTES = 10 * 1024 * 1024;
+const MAX_ENVELOPE_BYTES = 64 * 1024;
+const IMAGE_ASSET_LIMITS = { svg: 8 * 1024 * 1024, json: 4 * 1024 * 1024 };
+const ASSET_3D_LIMITS = { 'board.glb': 32 * 1024 * 1024, 'board-parts.json': 4 * 1024 * 1024 };
 
 function downloadError(active) {
   return sessionResponse(JSON.stringify({ error: 'Download unavailable' }), { status: 404, headers: { 'Content-Type': 'application/json; charset=utf-8' } }, active);
@@ -294,7 +298,7 @@ async function downloadFile(owner, repo, id, index, kind, active) {
     const [type, suffix] = downloadKinds[kind];
     const entries = await zipEntries(range, total);  // exactRange inside checks every 206 and Content-Range
     // Full-head provenance: the staged envelope carries the run's reviewed full head (collect_downloads writes it).
-    const envelope = entries.find((e) => e.name === `${index}/downloads.json`);
+    const envelope = entries.find((e) => e.name === `${index}/downloads.json` && e.size <= MAX_ENVELOPE_BYTES && e.bytes <= MAX_ENVELOPE_BYTES);
     const head = envelope ? (await new Response(await zipEntryStream(range, envelope)).json())?.head : null;
     if (!/^[0-9a-f]{40}$/.test(head) || !head.startsWith(head7) || bundle.workflow_run?.head_sha !== runHead
       || (family === 'design' && !verifyReportFamily('design', name, head))) return downloadError(active);
@@ -315,11 +319,15 @@ export function assetFromReport(html, id, kind) {
   return assetFromData(readStoredData(html), id, kind);
 }
 
-function assetFromData(data, id, kind) {
+function assetFromData(data, id, kind, matched = false) {
   if (!/^[0-9a-f]{12}$/.test(id) || !['svg', 'json'].includes(kind)) return null;
-  const meta = data?.assets?.[id], encoded = data?.blobs?.[id];
-  if (meta?.kind !== kind || typeof encoded !== 'string') return null;
-  try { return unbase64(encoded); } catch { return null; }
+  const meta = data?.assets?.[id], encoded = data?.blobs?.[id], max = IMAGE_ASSET_LIMITS[kind];
+  if (meta?.kind !== kind || typeof encoded !== 'string' || !encoded.length || encoded.length > Math.ceil(max / 3) * 4) return null;
+  if (matched) return new Uint8Array(0);
+  try {
+    const bytes = unbase64(encoded);
+    return bytes.length <= max ? bytes : null;
+  } catch { return null; }
 }
 
 // Shared raw-report/asset validation. The repository-scoped GitHub endpoint rejects
@@ -330,11 +338,34 @@ async function reportArtifact(owner, repo, id, active, repository) {
   if (result.status !== 200) return null;
   const metadata = await result.json();
   if (!metadata.name?.endsWith('.html')) return null;
+  if (metadata.size_in_bytes != null && (!Number.isSafeInteger(metadata.size_in_bytes) || metadata.size_in_bytes < 0 || metadata.size_in_bytes > MAX_REPORT_BYTES)) return null;
   if (repository?.id != null && metadata.workflow_run?.repository_id != null
     && metadata.workflow_run.repository_id !== repository.id) return null;
   if (metadata.expires_at != null && !Number.isFinite(Date.parse(metadata.expires_at))) return null;
   const expired = metadata.expired || (metadata.expires_at && Date.parse(metadata.expires_at) <= Date.now());
   return { base, metadata, expired: Boolean(expired) };
+}
+
+async function readReportText(response) {
+  const declared = response.headers.get('Content-Length');
+  if (!response.body || (declared != null && Number(declared) > MAX_REPORT_BYTES)) {
+    await response.body?.cancel();
+    throw new Error('Report unavailable');
+  }
+  const reader = response.body.getReader(), chunks = [];
+  for (let n = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const out = new Uint8Array(n);
+      for (let offset = 0, i = 0; i < chunks.length; offset += chunks[i++].byteLength) out.set(chunks[i], offset);
+      return untext.decode(out);
+    }
+    if ((n += value.byteLength) > MAX_REPORT_BYTES) {
+      await reader.cancel();
+      throw new Error('Report unavailable');
+    }
+    chunks.push(value);
+  }
 }
 
 async function storedReport(artifact, active) {
@@ -371,7 +402,7 @@ async function cachedReport(artifact, active) {
   // Share cold work too: a page's parallel raw/asset requests must not multiply peak memory.
   if (reportBuilds.has(flight)) return reportBuilds.get(flight);
   const build = buildTail.then(async () => {
-    const stored = await (await storedReport(artifact, active)).text();
+    const stored = await readReportText(await storedReport(artifact, active));
     const data = readStoredData(stored);
     // Only the authenticated wrapper's raw report is built here; guest/share keep embedded blobs.
     // Models are stripped only when artifact3d would serve them, so no report loses its 3D view.
@@ -395,22 +426,22 @@ function assetError() {
 }
 
 // 01 owns private image and 3D transport: `load` runs access and artifact validation on
-// every call, before any ETag comparison, and returns bytes or a failure Response.
+// every call, before any ETag response, and returns bytes or a failure Response.
 export async function privateAsset(request, digest, kind, load) {
-  const result = await load();
-  if (result instanceof Response) {
-    if (result.status >= 300 && result.status < 400 || result.headers.get('Location'))
-      return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store',
-        'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } });
-    const headers = new Headers(result.headers);
-    headers.set('Cache-Control', 'no-store');
-    return new Response(result.body, { status: result.status, headers });
-  }
   const headers = { 'Content-Type': kind === 'svg' ? 'image/svg+xml' : kind === 'board.glb' ? 'model/gltf-binary' : 'application/json',
     'Content-Security-Policy': "default-src 'none'; sandbox",
     'Content-Encoding': 'gzip', 'Cache-Control': 'private,no-cache', ETag: `"${digest}"`, Vary: 'Cookie', 'X-Content-Type-Options': 'nosniff' };
   const matched = (request.headers.get('If-None-Match') || '').split(',').some(tag =>
     tag.trim().replace(/^W\//, '') === headers.ETag || tag.trim() === '*');
+  const result = await load(matched);
+  if (result instanceof Response) {
+    if (result.status >= 300 && result.status < 400 || result.headers.get('Location'))
+      return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } });
+    const failureHeaders = new Headers(result.headers);
+    failureHeaders.set('Cache-Control', 'no-store');
+    return new Response(result.body, { status: result.status, headers: failureHeaders });
+  }
   return new Response(matched ? null : result, { status: matched ? 304 : 200, headers, encodeBody: 'manual' });
 }
 
@@ -428,13 +459,13 @@ async function readArtifactHtml(owner, repo, id, active, repository) {
 
 async function digestAsset(request, env, owner, repo, id, digest, kind) {
   let active;
-  const asset = await privateAsset(request, digest, kind, async () => {
+  const asset = await privateAsset(request, digest, kind, async (matched) => {
     const allowed = await access(request, env, owner, repo);
     if (allowed instanceof Response) return allowed;
     active = allowed.s;
     const stored = await readArtifactHtml(owner, repo, id, active, allowed.repo);
     if (stored instanceof Response) return stored;
-    return assetFromData(stored.data, digest, kind) || assetError();
+    return assetFromData(stored.data, digest, kind, matched) || assetError();
   });
   return sessionResponse(asset.body, { status: asset.status, headers: asset.headers,
     encodeBody: asset.headers.get('Content-Encoding') === 'gzip' ? 'manual' : 'automatic' }, active);
@@ -443,7 +474,7 @@ async function digestAsset(request, env, owner, repo, id, digest, kind) {
 // Exactly `size` bytes or null; a wrong declared length or a longer body is never buffered whole.
 async function readExactly(response, size) {
   const declared = response.headers.get('Content-Length');
-  if (!response.body) return null;
+  if (!response.body || !Number.isSafeInteger(size) || size <= 0 || size > ASSET_3D_LIMITS['board.glb']) return null;
   // A real Content-Encoding (not identity) reply's length counts encoded bytes; the read bound below still caps it.
   // ponytail: Task 12's deployed gate decides whether Workers decoding of such a reply needs handling; until then it fails closed on the gzip check.
   if (declared != null && (response.headers.get('Content-Encoding') || 'identity').trim().toLowerCase() === 'identity' && Number(declared) !== size) { await response.body.cancel(); return null; }
@@ -451,7 +482,12 @@ async function readExactly(response, size) {
   const chunks = [], reader = response.body.getReader();
   for (let n = 0; ;) {
     const { done, value } = await reader.read();
-    if (done) return n === size ? new Uint8Array(await new Blob(chunks).arrayBuffer()) : null;
+    if (done) {
+      if (n !== size) return null;
+      const out = new Uint8Array(size);
+      for (let offset = 0, i = 0; i < chunks.length; offset += chunks[i++].byteLength) out.set(chunks[i], offset);
+      return out;
+    }
     if ((n += value.length) > size) { await reader.cancel(); return null; }
     chunks.push(value);
   }
@@ -460,7 +496,7 @@ async function readExactly(response, size) {
 // 3D assets come only from the validated report's own run, named by a descriptor in its stored data.
 async function artifact3d(request, env, owner, repo, id, digest, kind) {
   let active;
-  const asset = await privateAsset(request, digest, kind, async () => {
+  const asset = await privateAsset(request, digest, kind, async (matched) => {
     const allowed = await access(request, env, owner, repo);
     if (allowed instanceof Response) return allowed;
     active = allowed.s;
@@ -470,9 +506,9 @@ async function artifact3d(request, env, owner, repo, id, digest, kind) {
       if (stored instanceof Response) return stored;
       const { metadata, data } = stored, run = String(metadata.workflow_run?.id);
       if (!served3d(metadata, data)) return assetError();
-      const key = kind === 'board.glb' ? 'model' : 'parts', name = `kicad-3d-${digest}-${kind}.gz`;
+      const key = kind === 'board.glb' ? 'model' : 'parts', name = `kicad-3d-${digest}-${kind}.gz`, maxBytes = ASSET_3D_LIMITS[kind];
       const descriptor = (Array.isArray(data.projects) ? data.projects : []).flatMap((p) => ['base', 'head'].map((side) => p?.board?.assets3d?.[side]?.[key]))
-        .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0);
+        .find((a) => a?.digest === digest && a.artifactName === name && Number.isSafeInteger(a.bytes) && a.bytes > 0 && a.bytes <= maxBytes);
       if (!descriptor) return assetError();
       const root = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions`, matches = [];
       for (let page = 1; ; page++) {
@@ -483,7 +519,9 @@ async function artifact3d(request, env, owner, repo, id, digest, kind) {
         if (artifacts.length < 100) break;
       }
       const [match] = matches;
-      if (matches.length !== 1 || match.expired || String(match.workflow_run?.id) !== run || !/^\d{1,20}$/.test(String(match.id))) return assetError();
+      if (matches.length !== 1 || match.expired || String(match.workflow_run?.id) !== run || !/^\d{1,20}$/.test(String(match.id))
+        || (match.size_in_bytes != null && (!Number.isSafeInteger(match.size_in_bytes) || match.size_in_bytes <= 0 || match.size_in_bytes > maxBytes))) return assetError();
+      if (matched) return new Uint8Array(0);
       const archive = await gh(`${root}/artifacts/${match.id}/zip`, active.token, { redirect: 'manual' });
       const location = archive.status === 302 ? downloadUrl(archive.headers.get('Location')) : null;
       if (!location) return assetError();

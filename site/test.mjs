@@ -5340,3 +5340,122 @@ test('download route requires sign-in and a numeric index and known kind', async
     for (const path of ['0/exe', '../fab', 'x/fab', '0/fab/extra']) assert.equal((await call(`/r/Cameronrlewis/repo/a/123/download/${path}`, { headers: { Cookie: `s=${sealed}` } })).status, 404, path);
   } finally { restore(); }
 });
+
+test('artifact size bounds reject oversized reports, 3D descriptors, manifest envelopes and embedded images before allocating', async () => {
+  const sealed = await signedIn(), headers = { Cookie: `s=${sealed}`, 'Sec-Fetch-Dest': 'iframe' };
+  let downloads = 0;
+  // 1. Oversized report metadata.size_in_bytes rejected before downloading /zip or blob.
+  let restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: 10 * 1024 * 1024 + 1 });
+    downloads++; throw new Error(`must not download oversized report ${url}`);
+  });
+  try {
+    assert.equal((await call('/r/Cameronrlewis/repo/a/42/raw', { headers })).status, 404);
+    assert.equal((await call(`/r/Cameronrlewis/repo/a/42/assets/${imageId}.svg`, { headers })).status, 404);
+    assert.equal(downloads, 0);
+  } finally { restore(); }
+  // Also reject oversized report body when metadata omits size_in_bytes.
+  restore = mockFetch(async url => {
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/42')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false });
+    if (url.endsWith('/artifacts/42/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/huge-report' } });
+    return new Response('x', { headers: { 'Content-Length': String(10 * 1024 * 1024 + 1) } });
+  });
+  try {
+    assert.equal((await call('/r/Cameronrlewis/repo/a/42/raw', { headers })).status, 404);
+  } finally { restore(); }
+  // 2. Oversized 3D asset descriptors (model > 32 MiB, parts > 4 MiB) rejected before listing or downloading sibling artifacts.
+  const digest = 'c'.repeat(64);
+  for (const [kind, key, limit] of [['board.glb', 'model', 32 * 1024 * 1024], ['board-parts.json', 'parts', 4 * 1024 * 1024]]) {
+    const data = { version: 1, projects: [{ board: { assets3d: { head: { [key]: { digest, artifactName: `kicad-3d-${digest}-${kind}.gz`, bytes: limit + 1 } } } } }] };
+    const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+    let siblingCalls = 0;
+    restore = mockFetch(async url => {
+      if (url.endsWith('/repo')) return accessibleRepo();
+      if (url.endsWith('/artifacts/43')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, workflow_run: { id: 9, repository_id: 5 } });
+      if (url.endsWith('/artifacts/43/zip')) return new Response(null, { status: 302, headers: { Location: 'https://signed.example/3d-report' } });
+      if (url === 'https://signed.example/3d-report') return new Response(stored);
+      siblingCalls++; throw new Error(`must not fetch sibling for oversized ${kind}: ${url}`);
+    });
+    try {
+      assert.equal((await call(`/r/Cameronrlewis/repo/a/43/3d/${digest}/${kind}`, { headers })).status, 404, kind);
+      assert.equal(siblingCalls, 0, kind);
+    } finally { restore(); }
+  }
+  // 3. Oversized manifest envelope (stored downloads.json > 64 KiB) rejected before reading entry payload.
+  const hugeEnvelopeZip = makeZip([{ name: '0/fab-P-bbbbbbb.zip', data: Buffer.from('PK-fab') }, { name: '0/downloads.json', data: Buffer.alloc(64 * 1024 + 1, 0x20) }]);
+  restore = downloadFetch({ zip: hugeEnvelopeZip });
+  try {
+    assert.equal((await call('/r/Cameronrlewis/repo/a/123/download/0/fab', { headers })).status, 404);
+  } finally { restore(); }
+  // 4. Oversized encoded image/JSON blobs rejected before atob (SVG > 4 * ceil(8 MiB / 3), JSON > 4 * ceil(4 MiB / 3)).
+  const originalAtob = globalThis.atob;
+  let atobCalls = 0;
+  globalThis.atob = value => { atobCalls++; return originalAtob(value); };
+  try {
+    for (const [kind, maxBytes] of [['svg', 8 * 1024 * 1024], ['json', 4 * 1024 * 1024]]) {
+      const maxEncoded = Math.ceil(maxBytes / 3) * 4;
+      const data = { version: 1, assets: { [imageId]: { kind } }, blobs: { [imageId]: 'A'.repeat(maxEncoded + 4) } };
+      assert.equal(assetFromReport(storedImageReport(data), imageId, kind), null, kind);
+    }
+    assert.equal(atobCalls, 0, 'atob must not be called on oversized encoded blobs');
+  } finally { globalThis.atob = originalAtob; }
+});
+
+test('conditional asset requests validate access, expiry, descriptor and sibling liveness without downloading or decoding payloads', async () => {
+  const sealed = await signedIn(), digest3d = 'c'.repeat(64);
+  const gzModel = gzipSync('glTF-binary-payload');
+  const data = {
+    version: 1,
+    assets: { [imageId]: { kind: 'svg', name: 'sheet.svg' } },
+    blobs: { [imageId]: gzipSync(imageText).toString('base64') },
+    projects: [{ board: { assets3d: { head: { model: { digest: digest3d, artifactName: `kicad-3d-${digest3d}-board.glb.gz`, bytes: gzModel.length } } } } }],
+  };
+  const stored = `<script>window.REVIEW_DATA = ${JSON.stringify(data)};</script>`;
+  let blobDownloads = 0, siblingLists = 0, siblingExpired = false;
+  const restore = mockFetch(async url => {
+    url = String(url);
+    if (url.endsWith('/repo')) return accessibleRepo();
+    if (url.endsWith('/artifacts/55')) return Response.json({ name: 'kicad-review-aaaaaaa-bbbbbbb-pass.html', expired: false, size_in_bytes: stored.length, updated_at: '2026-10-29T00:00:00Z', workflow_run: { id: 9, repository_id: 5 } });
+    if (url.endsWith('/artifacts/55/zip')) return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/report55' } });
+    if (url === 'https://artifact.actions.githubusercontent.com/report55') return new Response(stored);
+    if (url.includes('/runs/9/artifacts?')) {
+      siblingLists++;
+      return Response.json({ artifacts: [{ id: 91, name: `kicad-3d-${digest3d}-board.glb.gz`, expired: siblingExpired, workflow_run: { id: 9 } }] });
+    }
+    if (url.endsWith('/artifacts/91/zip')) {
+      blobDownloads++;
+      return new Response(null, { status: 302, headers: { Location: 'https://artifact.actions.githubusercontent.com/model91' } });
+    }
+    if (url === 'https://artifact.actions.githubusercontent.com/model91') {
+      blobDownloads++;
+      return new Response(gzModel);
+    }
+    throw new Error(`unexpected URL ${url}`);
+  });
+  const originalAtob = globalThis.atob;
+  let atobCalls = 0;
+  try {
+    // Conditional SVG request: validates descriptor without calling atob/unbase64 on the asset blob.
+    const encodedBlob = data.blobs[imageId];
+    globalThis.atob = value => { if (value === encodedBlob) atobCalls++; return originalAtob(value); };
+    const svg304 = await call(`/r/Cameronrlewis/repo/a/55/assets/${imageId}.svg`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `W/"${imageId}"` } });
+    assert.equal(svg304.status, 304);
+    assert.equal(atobCalls, 0, 'conditional SVG 304 must not decode base64');
+    // Conditional 3D request: validates descriptor and sibling liveness without requesting /zip or downloading the blob.
+    const model304 = await call(`/r/Cameronrlewis/repo/a/55/3d/${digest3d}/board.glb`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${digest3d}"` } });
+    assert.equal(model304.status, 304);
+    assert.equal(siblingLists, 1, 'conditional 3D 304 still checks sibling artifact liveness');
+    assert.equal(blobDownloads, 0, 'conditional 3D 304 must not request /zip or download the 3D blob');
+    // Expired sibling still denies conditional 3D request with 404.
+    siblingExpired = true;
+    const model404 = await call(`/r/Cameronrlewis/repo/a/55/3d/${digest3d}/board.glb`, { headers: { Cookie: `s=${sealed}`, 'If-None-Match': `"${digest3d}"` } });
+    assert.equal(model404.status, 404);
+    assert.equal(blobDownloads, 0);
+  } finally {
+    globalThis.atob = originalAtob;
+    restore();
+    (await import('./report-cache.js')).reportCache.clear();
+  }
+});
