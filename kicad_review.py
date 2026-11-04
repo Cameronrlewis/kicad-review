@@ -358,7 +358,7 @@ def render_side(src_dir, name, out, netlist=False):
                               '-o', f'{out}/sch{suffix}', sch)
                     resolved = set()
                     for pg in sheet_pages(src_dir, name):
-                        light = pathlib.Path(page_svg(out, name, pg))
+                        light = pathlib.Path(page_svg(out, pg))
                         path = light if theme == 'light' else pathlib.Path(out, 'sch-dark', light.name)
                         if not path.is_file():
                             raise ValueError('missing sheet export ' + str(path))
@@ -502,7 +502,7 @@ def fab_run_drc(source, target, board_bytes, project_bytes, rules_bytes, vendor=
     return fab_drc(pcb, target / "drc.json")["violations"]
 
 
-def render_fab(p, side, out, settings):
+def render_fab(p, side, out):
     source = pathlib.Path(board_path(p, side))
     for path in (source, source.with_suffix(".kicad_pro"), source.with_suffix(".kicad_dru")):
         fab_regular_input(path)
@@ -995,7 +995,7 @@ def cmd_render(args):
             render_side(posixpath.join(side, p["dir"]), p["name"], out, netlist=True)
             if fab_enabled(settings):
                 try:
-                    render_fab(p, side, out, settings)
+                    render_fab(p, side, out)
                 except (OSError, ValueError, RuntimeError) as exc:
                     sys.exit(f"Fab limits could not run for {p['name']}: {exc}")
             if side == "head" and settings["downloads"]["enabled"]:
@@ -4815,7 +4815,7 @@ def interface_findings(comps, nets, patterns, where_of):
     return out, {"detected": detected, "protected": [prot, total]}
 
 
-def page_svg(out_dir, name, page):
+def page_svg(out_dir, page):
     """The SVG kicad-cli wrote for a page: <project>-<sheet>-<subsheet>....svg, <project>.svg for the root."""
     path = f"{out_dir}/sch/{page['stem']}.svg"
     if not os.path.exists(path):  # never show a page as unchanged because its drawing is missing
@@ -5124,7 +5124,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
             for view in manifest['views']:
                 rel = theme_paths[side].get(view['sheet'], {}).get('light')
                 page = page_by_path.get(view['sheet'])
-                path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', p['name'], page)
+                path = str(pathlib.Path(out, side, rel)) if rel else page_svg(f'{out}/{side}', page)
                 text = svg_body(path)
                 if text:
                     view['viewBox'] = svg_viewbox(text)
@@ -5136,7 +5136,7 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, bom_sink=No
         for pg in pages_by_side[side]:
             entry = pages.setdefault(pg["path"], {**pg, "svg": {}})
             entry.update(pg)
-            entry["svg"][side] = svg_body(page_svg(f"{out}/{side}", p["name"], pg))
+            entry["svg"][side] = svg_body(page_svg(f"{out}/{side}", pg))
     sheets = []
     for pg in pages.values():
         texts = pg.pop("svg")

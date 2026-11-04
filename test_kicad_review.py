@@ -796,7 +796,7 @@ write(t, {"p/H.kicad_sch": "(kicad_sch " + sheet("A: x/y é", "a.kicad_sch", "u1
           "p/a.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u3") + ")",
           "p/b.kicad_sch": "(kicad_sch " + sheet("Power", "pw.kicad_sch", "u4") + ")", "p/pw.kicad_sch": '(kicad_sch (symbol (uuid "r1") (at 10 20 0) (property "Reference" "R1") (property "Value" "10k")))',
           **{f"out/sch/{f}": "<svg/>" for f in ("H.svg", "H-A: x_y é.svg", "H-A: x_y é-Power.svg", "H-B.svg", "H-B-Power.svg")}})
-found = {pg["path"]: page_svg(f"{t}/out", "H", pg) for pg in sheet_pages(f"{t}/p", "H")}
+found = {pg["path"]: page_svg(f"{t}/out", pg) for pg in sheet_pages(f"{t}/p", "H")}
 assert found == {"/": f"{t}/out/sch/H.svg", "/u1/": f"{t}/out/sch/H-A: x_y é.svg", "/u1/u3/": f"{t}/out/sch/H-A: x_y é-Power.svg",
                  "/u2/": f"{t}/out/sch/H-B.svg", "/u2/u4/": f"{t}/out/sch/H-B-Power.svg"}, found
 from kicad_review import sch_objects
@@ -8006,7 +8006,7 @@ def fab_test_render(root, outline_severity='error', missing_outline=False,
     p = {'name':'Four','dir':'','status':'modified'}
     output = root / 'report' / 'head'
     with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_drc',side_effect=fake_drc):
-        kr.render_fab(p,'head',str(output),settings)
+        kr.render_fab(p,'head',str(output))
     assert calls == ['board','jlcpcb','pcbway'], 'FAB-03 both vendor passes and one board pass'
     assert all(f.read_bytes() == text for f,text in originals.items()), 'FAB-03 source mutated'
     sections = {s['vendor']: s for s in json.loads((output / 'fab-limits.json').read_text())['sections']}
@@ -8107,7 +8107,7 @@ with tempfile.TemporaryDirectory() as td:
                 rows=[]  # .12 mm passes .09 mm vendor; real gate independently proves this.
             return {'coordinate_units':'mm','violations':rows}
         with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_drc',side_effect=attribution_drc):
-            kr.render_fab({'name':'Four'},'head',str(case/'out'),cfg)
+            kr.render_fab({'name':'Four'},'head',str(case/'out'))
         sections=json.loads((case/'out'/'fab-limits.json').read_text())['sections']
         for meta in sections:
             assert meta['violations']==[], (label, meta['vendor'])
@@ -8141,7 +8141,7 @@ with tempfile.TemporaryDirectory() as td:
         link = source.with_suffix(suffix); link.unlink(missing_ok=True); link.symlink_to(target)
         with patch.object(kr,'board_path',return_value=str(source)), patch.object(kr,'fab_context') as context, patch.object(kr,'fab_drc') as drc, patch.object(pathlib.Path,'read_text') as read_text, patch.object(pathlib.Path,'read_bytes') as read_bytes:
             try:
-                kr.render_fab({'name':'B'},'head',str(case/'out'),settings)
+                kr.render_fab({'name':'B'},'head',str(case/'out'))
                 raise AssertionError('FAB-03 symlink accepted: '+suffix)
             except RuntimeError as exc:
                 assert 'symlink' in str(exc)
@@ -8183,7 +8183,7 @@ with tempfile.TemporaryDirectory() as td:
     with patch.object(kr,'board_path',return_value=str(source)):
         try:
             if kr.fab_enabled(cfg):
-                kr.render_fab({'name':'Four'},'head',str(root/'out'),cfg)
+                kr.render_fab({'name':'Four'},'head',str(root/'out'))
             raise AssertionError('FAB-03 DRC off accepted')
         except ValueError as exc:
             assert 'requires checks.drc != "off"' in str(exc)
@@ -8225,11 +8225,11 @@ with tempfile.TemporaryDirectory() as td:
     cfg['fabrication']['check_limits'] = True
     with patch.object(kr, 'board_path', return_value=str(source)), patch.object(kr, 'fab_drc') as drc:
         for side in ('base', 'head'):
-            kr.render_fab({'name':'Absent'}, side, str(root / side), cfg)
+            kr.render_fab({'name':'Absent'}, side, str(root / side))
             assert json.loads((root / side / 'fab-limits.json').read_text()) == {
                 'sections': [], 'reason': f'no {side} board'}
         source.write_text('(kicad_pcb (layers (0 "F.Cu" signal)))')
-        kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'unsupported'), cfg)
+        kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'unsupported'))
         sections = json.loads((root / 'unsupported' / 'fab-limits.json').read_text())['sections']
         assert [s['vendor'] for s in sections] == ['jlcpcb', 'pcbway']
         assert all(s['unsupported'] and s['checked'] == [] and s['violations'] == [] for s in sections)
@@ -8243,7 +8243,7 @@ with tempfile.TemporaryDirectory() as td:
     table = root / 'profiles.json'; table.write_bytes(kr.FAB_TABLE.read_bytes())
     def audit_hash():
         with patch.object(kr, 'board_path', return_value=str(source)), patch.object(kr, 'FAB_TABLE', table):
-            kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'hash'), cfg)
+            kr.render_fab({'name':'Unsupported'}, 'head', str(root / 'hash'))
         return json.loads((root / 'hash' / 'fab-limits.json').read_text())['sections'][0]['inputHash']
     before = audit_hash()
     assert before == audit_hash()
@@ -8569,7 +8569,7 @@ def fab_four_report(root, board):
     # Read the Task 3 fixture and its generated project in place, unmodified.
     source=board.resolve()
     with patch.object(kr,'board_path',side_effect=fab_head_only(source)):
-        kr.render_fab(p,'head',str(root/'head'),cfg)
+        kr.render_fab(p,'head',str(root/'head'))
         checks=kr.fab_checks(p,cfg,str(root),{'active':{}})
     sections={s['vendor']:s for s in json.loads((root/'head'/'fab-limits.json').read_text())['sections']}
     jl=sections['jlcpcb']
