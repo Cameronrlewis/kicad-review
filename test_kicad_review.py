@@ -8494,17 +8494,19 @@ with _DpTmp() as t:
     assert kr._thumb_src_stem("") == "root" and kr._thumb_src_stem("a/b") != kr._thumb_src_stem("a_b")
 print("ok DP-T2 thumbnail index: cap, replace, skip")
 
-# DP-T3: the thumbnail job is separate, serialized per repository, and writes one release asset.
+# DP-T3: the thumbnail jobs are separate from the review; only the fold into the one release asset is serialized per repository.
 _wf_t = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
 assert "concurrency:\n      group: kicad-design-thumbs-${{ github.repository }}" in _wf_t
-_thumbs_job = _wf_t.split("design-thumbnails:")[1]
+_stage_t = _wf_t.split("\n  design-thumbnails:\n")[1].split("\n  design-thumbnail-index:\n")[0]
+_thumbs_job = _wf_t.split("\n  design-thumbnail-index:\n")[1]
 assert "cancel-in-progress: false" in _thumbs_job.split("steps:")[0]
-assert "timeout-minutes: 10" in _thumbs_job.split("steps:")[0]
-assert "permissions:\n      contents: write" in _thumbs_job.split("steps:")[0]
-assert "path: review/design" in _thumbs_job
+for job in (_stage_t, _thumbs_job):
+    assert "timeout-minutes: 10" in job.split("steps:")[0]
+    assert "permissions:\n      contents: write" in job.split("steps:")[0]
+assert "path: review/design" in _stage_t
 assert "assets=$(gh release view design-thumbs -R \"$GITHUB_REPOSITORY\" --json assets -q '.assets[].name')" in _thumbs_job
 assert "if echo \"$assets\" | grep -qx thumbs.json; then" in _thumbs_job
-assert "python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --plan review/design/thumbnail-plan.json" in _thumbs_job
+assert "python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --pending review/thumbs/staged" in _thumbs_job
 assert "gh release upload design-thumbs -R \"$GITHUB_REPOSITORY\" --clobber review/thumbs/thumbs.json" in _wf_t
 assert "overwrite: true" in _wf_t.split("Upload thumbnail input")[1].split("retention-days: 1")[1][:50]
 assert "--prerelease" in _wf_t and "design-thumbs" in _wf_t
@@ -11250,3 +11252,36 @@ print("ok Session E 9 a failed PcbDraw install only warns")
 _thumb_head = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8").split("\n  design-thumbnails:\n")[1].split("steps:")[0]
 assert "    if: ${{ !cancelled() && needs.review.outputs.thumbnails == 'true' }}\n" in _thumb_head, _thumb_head
 print("ok Session E 11 thumbnails follow a failed review job")
+
+# Session E 12: each run stages its own thumbnails under a unique name; one serialized fold merges every staged file,
+# so a fold job GitHub cancels while it waits (one pending job per concurrency group) loses nothing.
+with _DpTmp() as t:
+    pathlib.Path(t, "A.png").write_bytes(_dp_png)
+    stage = pathlib.Path(t, "staged")
+    for n, date in ((1, "2026-10-01T09:00:00+02:00"), (2, "2026-10-02T00:00:00Z"), (3, "2026-10-03T00:00:00+00:00")):
+        plan_path = pathlib.Path(t, f"plan{n}.json")
+        plan_path.write_text(json.dumps({"sha": f"{n:040x}", "committedAt": date, "projects": [{"dir": "A", "poster": "A.png"}]}))
+        with patch.dict(os.environ, {"GITHUB_RUN_ID": str(100 + n)}):
+            kr.cmd_thumbs(argparse.Namespace(index=None, plan=str(plan_path), stage=str(stage), pending=None))
+    assert sorted(os.listdir(stage)) == [f"thumb-{n:040x}-{100 + n}.json" for n in (1, 2, 3)], sorted(os.listdir(stage))
+    (stage / f"thumb-{'9' * 40}-1.json").write_text('{"v": 1, "sha": "not a sha"}')   # malformed: skipped with a notice
+    index_path = pathlib.Path(t, "thumbs.json"); index_path.write_text("{}")
+    fold = lambda: kr.cmd_thumbs(argparse.Namespace(index=str(index_path), plan=None, stage=None, pending=str(stage)))
+    with patch("sys.stderr", new_callable=io.StringIO) as _err:
+        fold()
+    assert "::notice::" in _err.getvalue()
+    folded = json.loads(index_path.read_text())
+    assert [e["sha"] for e in folded["projects"]["A"]] == [f"{n:040x}" for n in (3, 2, 1)], "newest commit first, whatever the fold order"
+    with patch("sys.stderr", new_callable=io.StringIO):
+        fold()   # a staged file whose delete failed is folded again: nothing changes
+    assert json.loads(index_path.read_text()) == folded
+_tw = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
+_stage_job = _tw.split("\n  design-thumbnails:\n")[1].split("\n  design-thumbnail-index:\n")[0]
+_fold_job = _tw.split("\n  design-thumbnail-index:\n")[1]
+assert "concurrency:" not in _stage_job, "making a commit's thumbnails is never serialized or dropped"
+assert 'python3 tools/kicad_review.py thumbs --plan review/design/thumbnail-plan.json --stage review/thumbs/staged' in _stage_job
+assert 'gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/staged/*.json' in _stage_job
+assert "    needs: design-thumbnails\n" in _fold_job and "concurrency:\n      group: kicad-design-thumbs-${{ github.repository }}\n      cancel-in-progress: false" in _fold_job
+assert "python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --pending review/thumbs/staged" in _fold_job
+assert _fold_job.index("--clobber review/thumbs/thumbs.json") < _fold_job.index("gh release delete-asset design-thumbs"), "staged files are deleted only after the index is uploaded"
+print("ok Session E 12 staged thumbnails survive a cancelled pending fold")

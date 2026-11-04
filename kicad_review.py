@@ -6043,10 +6043,10 @@ def _thumb_png(decoded, width, bg):
     return _png_rgb(tw, th, out)
 
 
-def thumbnail_index(index, plan, src_dir, cap=50):
-    """Adds each project's head poster to the index: newest first, one entry per sha, at most cap entries per folder.
-    A poster that is not a plain PNG gets a notice and no entry."""
-    index = index if index.get("v") == 1 else {"v": 1, "projects": {}}
+def thumbnail_entries(plan, src_dir):
+    """This commit's thumbnails, ready to stage: {v, sha, date, projects: {folder key: base64 PNG}}.
+    A poster that is not a plain PNG, or too detailed for the review site's limit, gets a notice and no entry."""
+    staged = {"v": 1, "sha": plan["sha"], "date": plan["committedAt"], "projects": {}}
     for project in plan["projects"]:
         key = project["dir"] or "."
         try:
@@ -6061,10 +6061,51 @@ def thumbnail_index(index, plan, src_dir, cap=50):
         if png is None:
             print("::notice::" + workflow_command_escape(f"No thumbnail for {key}: even a {THUMB_WIDTHS[-1]} px preview is over the review site's {THUMB_PNG_B64_MAX}-character limit"), file=sys.stderr)
             continue
-        entries = [e for e in index["projects"].get(key, []) if e["sha"] != plan["sha"]]
-        entries.insert(0, {"sha": plan["sha"], "date": plan["committedAt"], "png": base64.b64encode(png).decode("ascii")})
-        index["projects"][key] = entries[:cap]
+        staged["projects"][key] = base64.b64encode(png).decode("ascii")
+    return staged
+
+
+def _thumb_time(date):
+    """Sort key for an entry's commit date: aware ISO 8601 times compare exactly; an unreadable date sorts last."""
+    try:
+        when = datetime.datetime.fromisoformat(str(date).replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    return (when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)).timestamp()
+
+
+def fold_thumbnails(index, staged, cap=50):
+    """Folds staged commits into the index: one entry per sha, newest commit first, at most cap entries per folder.
+    Folding the same staged file twice changes nothing, so a staged file whose delete failed is harmless."""
+    index = index if index.get("v") == 1 and isinstance(index.get("projects"), dict) else {"v": 1, "projects": {}}
+    for item in staged:
+        for key, png in item["projects"].items():
+            entries = [e for e in index["projects"].get(key, []) if e["sha"] != item["sha"]]
+            entries.insert(0, {"sha": item["sha"], "date": item["date"], "png": png})
+            entries.sort(key=lambda e: _thumb_time(e.get("date")), reverse=True)  # stable: same-date entries keep fold order
+            index["projects"][key] = entries[:cap]
     return index
+
+
+def thumbnail_index(index, plan, src_dir, cap=50):
+    """Adds each project's head poster to the index (thumbnail_entries, then fold_thumbnails)."""
+    return fold_thumbnails(index, [thumbnail_entries(plan, src_dir)], cap)
+
+
+def staged_thumbnails(path):
+    """A staged thumbs file, or None (with a notice) when it is not what thumbnail_entries writes."""
+    try:
+        item = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        ok = (isinstance(item, dict) and item.get("v") == 1 and re.fullmatch(r"[0-9a-f]{40}", str(item.get("sha", "")))
+              and isinstance(item.get("date"), str) and len(item["date"]) <= 64 and isinstance(item.get("projects"), dict)
+              and all(isinstance(k, str) and 0 < len(k) <= 512 and isinstance(v, str)
+                      and re.fullmatch(r"[A-Za-z0-9+/=]{1,%d}" % THUMB_PNG_B64_MAX, v) for k, v in item["projects"].items()))
+    except (OSError, ValueError):
+        ok = False
+    if not ok:
+        print("::notice::" + workflow_command_escape(f"Skipped staged thumbnails {pathlib.Path(path).name}: not a thumbnails file"), file=sys.stderr)
+        return None
+    return item
 
 
 def _thumb_src_stem(folder):
@@ -6078,14 +6119,34 @@ def _thumb_src_stem(folder):
 
 
 def cmd_thumbs(args):
-    """Merge poster thumbnails from --plan into the --index JSON file."""
+    """--plan --stage DIR: write this commit's thumbnails to DIR/thumb-<sha>-<run id>.json (a unique name per run).
+    --index --pending DIR: fold every staged file in DIR into the --index JSON file. --index --plan: both at once."""
+    stage, pending = getattr(args, "stage", None), getattr(args, "pending", None)
+    if args.plan and stage:
+        with open(args.plan, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        if not re.fullmatch(r"[0-9a-f]{40}", str(plan.get("sha", ""))):
+            raise ValueError("invalid thumbnail plan")
+        run_id = os.environ.get("GITHUB_RUN_ID", "0")
+        run_id = run_id if re.fullmatch(r"\d{1,20}", run_id) else "0"
+        os.makedirs(stage, exist_ok=True)
+        staged = thumbnail_entries(plan, os.path.dirname(args.plan) or ".")
+        with open(os.path.join(stage, f"thumb-{plan['sha']}-{run_id}.json"), "w", encoding="utf-8") as fh:
+            json.dump(staged, fh, separators=(",", ":"))
+        return
+    if not args.index or not (args.plan or pending):
+        raise SystemExit("thumbs: use --plan with --stage, or --index with --pending (or --plan)")
     with open(args.index, encoding="utf-8") as fh:
         index = json.load(fh)
     if not isinstance(index, dict) or (index and (index.get("v") != 1 or not isinstance(index.get("projects"), dict))):
         raise ValueError("invalid thumbnail index")
-    with open(args.plan, encoding="utf-8") as fh:
-        plan = json.load(fh)
-    index = thumbnail_index(index, plan, os.path.dirname(args.plan) or ".")
+    if pending:
+        files = sorted(pathlib.Path(pending).glob("thumb-*.json"))
+        index = fold_thumbnails(index, [item for item in map(staged_thumbnails, files) if item])
+    else:
+        with open(args.plan, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        index = thumbnail_index(index, plan, os.path.dirname(args.plan) or ".")
     with open(args.index, "w", encoding="utf-8") as fh:
         json.dump(index, fh, separators=(",", ":"))
 
@@ -6863,9 +6924,11 @@ def main():
     p.set_defaults(func=cmd_report)
     p = sub.add_parser("snapshot", help="self-contained HTML report of the head design alone (needs [design] enabled)")
     p.set_defaults(func=cmd_snapshot)
-    p = sub.add_parser("thumbs", help="update the design-thumbs release index from review/design/thumbnail-plan.json")
-    p.add_argument("--index", required=True)
-    p.add_argument("--plan", required=True)
+    p = sub.add_parser("thumbs", help="stage this commit's thumbnails (--plan --stage) or fold staged ones into the design-thumbs index (--index --pending)")
+    p.add_argument("--index")
+    p.add_argument("--plan")
+    p.add_argument("--stage")
+    p.add_argument("--pending")
     p.set_defaults(func=cmd_thumbs)
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale
