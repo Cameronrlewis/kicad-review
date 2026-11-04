@@ -283,13 +283,12 @@ jobs:
 
       - name: Upload thumbnail input
         if: steps.snapshot.outputs.thumbnails == 'true'
-        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: kicad-design-thumb-input-${{ github.run_id }}-${{ github.run_attempt }}
+          name: design-thumbnail-input
           path: |
             review/design/thumbnail-plan.json
-            review/design/thumb-src/
+            review/design/thumb-src
           retention-days: 1
 
       # Private repositories cannot show artifact images in a comment, so the screenshots go to a separate
@@ -450,13 +449,13 @@ jobs:
           fi
           gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --notes-file review/release-notes.md
 
-  # Updates the single design-thumbs release asset one run at a time: no two uploads can clobber each other,
-  # and no snapshot run is cancelled (cancel-in-progress: false queues behind the active upload).
   design-thumbnails:
     needs: review
-    if: ${{ always() && !cancelled() && needs.review.outputs.thumbnails == 'true' }}
+    if: needs.review.outputs.thumbnails == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
     concurrency:
       group: kicad-design-thumbs-${{ github.repository }}
       cancel-in-progress: false
@@ -472,18 +471,19 @@ jobs:
       - name: Download thumbnail input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: kicad-design-thumb-input-${{ github.run_id }}-${{ github.run_attempt }}
+          name: design-thumbnail-input
+          path: review/design
 
-      - name: Update design-thumbs release asset
-        continue-on-error: true
+      - name: Merge the thumbnail into the design-thumbs release asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p review/thumbs
-          gh release download design-thumbs -R "$GITHUB_REPOSITORY" -p thumbs.json -D review/thumbs --clobber 2>/dev/null || true
-          python3 tools/kicad_review.py thumbs --existing review/thumbs/thumbs.json
-          gh release view design-thumbs -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
-            gh release create design-thumbs -R "$GITHUB_REPOSITORY" --prerelease --title "KiCad design thumbnails" \
-              --notes "Small board thumbnails for the KiCad changes list. Managed by kicad-review."
-          gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/thumbs.json ||
-            echo "::warning::Could not upload design thumbnails. Ensure the workflow has 'contents: write' permission."
+          gh release view design-thumbs -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 || gh release create design-thumbs -R "$GITHUB_REPOSITORY" --prerelease --title "Design thumbnails" --notes "Small board previews for the review site, written by the design snapshot job. Not a design."
+          if gh release view design-thumbs -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx thumbs.json; then
+            gh release download design-thumbs -R "$GITHUB_REPOSITORY" --pattern thumbs.json --dir review/thumbs --clobber
+          else
+            echo '{}' > review/thumbs/thumbs.json
+          fi
+          python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --plan review/design/thumbnail-plan.json
+          gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/thumbs.json

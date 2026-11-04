@@ -4008,130 +4008,137 @@ def cmd_report(args):
 
 
 DESIGN_DIR = "review/design"
-THUMB_SIZE = (200, 125)   # 8:5, matching 02's 1600x1000 still; displayed at 100x62 CSS px on 2x screens
-THUMB_KEEP = 60           # one full revision-list page per folder
 
 
-def _png_chunk(kind, data):
-    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+def _png_chunk(kind, body):
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
 
 
-def _png_decode(raw):
-    """8-bit non-interlaced RGB or RGBA PNG (the format kicad-cli pcb render writes) -> (w, h, channels, rows)."""
-    if raw[:8] != b"\x89PNG\r\n\x1a\n":
+def _png_decode(data):
+    """Unfiltered rows of an 8-bit, non-interlaced RGB or RGBA PNG: (width, height, bytes per pixel, rows). Anything else raises ValueError."""
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError("not a PNG")
-    pos, w, h, ch, idat = 8, 0, 0, 0, bytearray()
-    while pos < len(raw):
-        n = struct.unpack(">I", raw[pos:pos + 4])[0]
-        kind, body = raw[pos + 4:pos + 8], raw[pos + 8:pos + 8 + n]
-        pos += 12 + n
+    pos, idat, width, height = 8, b"", 0, 0
+    depth = ctype = interlace = comp = filt = None
+    while pos < len(data):
+        if pos + 8 > len(data):
+            raise ValueError("truncated PNG chunk header")
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        if pos + 12 + length > len(data):
+            raise ValueError("truncated PNG chunk body")
+        body = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
         if kind == b"IHDR":
-            w, h, depth, color, comp, filt, interlace = struct.unpack(">IIBBBBB", body)
-            ch = {2: 3, 6: 4}.get(color, 0)
-            if depth != 8 or not ch or comp or filt or interlace:
-                raise ValueError(f"unsupported PNG header: depth={depth} color={color} interlace={interlace}")
+            width, height, depth, ctype, comp, filt, interlace = struct.unpack(">IIBBBBB", body)
         elif kind == b"IDAT":
-            idat.extend(body)
+            idat += body
         elif kind == b"IEND":
             break
-    stride = w * ch
-    stream = zlib.decompress(bytes(idat))
-    if len(stream) != h * (1 + stride):
-        raise ValueError("unexpected PNG stream length")
-    rows, prev = [], bytearray(stride)
-    for y in range(h):
-        off = y * (1 + stride)
-        f, line = stream[off], bytearray(stream[off + 1:off + 1 + stride])
+    if width < 1 or height < 1 or depth != 8 or ctype not in (2, 6) or comp or filt or interlace:
+        raise ValueError("unsupported PNG")
+    bpp = 3 if ctype == 2 else 4
+    stride = width * bpp
+    raw = zlib.decompress(idat)
+    if len(raw) != height * (stride + 1):
+        raise ValueError("PNG size mismatch")
+    rows, prev, p = [], bytearray(stride), 0
+    for _ in range(height):
+        kind = raw[p]
+        line = bytearray(raw[p + 1:p + 1 + stride])
+        p += 1 + stride
         for i in range(stride):
-            a = line[i - ch] if i >= ch else 0
+            a = line[i - bpp] if i >= bpp else 0
             b = prev[i]
-            c = prev[i - ch] if i >= ch else 0
-            if f == 1:
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1:
                 line[i] = (line[i] + a) & 255
-            elif f == 2:
+            elif kind == 2:
                 line[i] = (line[i] + b) & 255
-            elif f == 3:
-                line[i] = (line[i] + ((a + b) >> 1)) & 255
-            elif f == 4:
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                pr = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
-                line[i] = (line[i] + pr) & 255
-            elif f != 0:
-                raise ValueError(f"unknown PNG filter {f}")
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif kind == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else (b if pb <= pc else c))) & 255
+            elif kind != 0:
+                raise ValueError("bad filter")
         rows.append(bytes(line))
         prev = line
-    return w, h, ch, rows
+    return width, height, bpp, rows
 
 
-def _png_rgb(w, h, rows):
-    raw = b"".join(b"\0" + r for r in rows)
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", zlib.compress(raw, 9)) + _png_chunk(b"IEND", b"")
+def _png_rgb(width, height, rows):
+    raw = b"".join(b"\0" + row for row in rows)
+    return (b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + _png_chunk(b"IDAT", zlib.compress(raw, 9)) + _png_chunk(b"IEND", b""))
 
 
-def poster_thumbnail(png_bytes, size=THUMB_SIZE, bg=(19, 22, 27)):
-    """Box-filter a 3D still to an RGB PNG thumbnail, compositing any alpha onto the dark canvas colour."""
-    w, h, ch, rows = _png_decode(png_bytes)
-    tw, th = size
+def poster_thumbnail(png, width=200):
+    """Box-averaged RGB thumbnail of a plain 8-bit PNG (the head poster). Pure Python, so it runs in the separate thumbnail job, never in the review job.
+    ponytail: a 1600 x 1000 poster takes seconds of Python; the thumbnail job is separate so it never delays a review."""
+    if width < 1:
+        raise ValueError("invalid thumbnail width")
+    w, h, bpp, rows = _png_decode(png)
+    tw = max(1, min(width, w))
+    th = max(1, round(h * tw / w))
     out = []
     for ty in range(th):
         y0, y1 = ty * h // th, max(ty * h // th + 1, (ty + 1) * h // th)
-        line = bytearray(tw * 3)
+        line = bytearray()
         for tx in range(tw):
             x0, x1 = tx * w // tw, max(tx * w // tw + 1, (tx + 1) * w // tw)
-            r = g = b = n = 0
+            acc, n = [0, 0, 0], 0
             for y in range(y0, y1):
-                row = rows[y]
                 for x in range(x0, x1):
-                    i = x * ch
-                    if ch == 4:
-                        a = row[i + 3]
-                        r += (row[i] * a + bg[0] * (255 - a)) // 255
-                        g += (row[i + 1] * a + bg[1] * (255 - a)) // 255
-                        b += (row[i + 2] * a + bg[2] * (255 - a)) // 255
-                    else:
-                        r += row[i]; g += row[i + 1]; b += row[i + 2]
+                    o = x * bpp
+                    acc[0] += rows[y][o]
+                    acc[1] += rows[y][o + 1]
+                    acc[2] += rows[y][o + 2]
                     n += 1
-            j = tx * 3
-            line[j], line[j + 1], line[j + 2] = r // n, g // n, b // n
+            line += bytes(v // n for v in acc)
         out.append(bytes(line))
     return _png_rgb(tw, th, out)
 
 
-def thumbnail_index(existing, sha, committed_at, thumbs, keep=THUMB_KEEP):
-    """Merge {dir: png_bytes} for one commit into the design-thumbs release index."""
-    projects = dict((existing or {}).get("projects") or {})
-    for folder, png in thumbs.items():
-        key = folder or "."
-        kept = [e for e in projects.get(key, []) if isinstance(e, dict) and e.get("sha") != sha]
-        kept.append({"sha": sha, "at": committed_at, "png": base64.b64encode(png).decode("ascii")})
-        kept.sort(key=lambda e: e.get("at") or "", reverse=True)
-        projects[key] = kept[:keep]
-    return {"v": 1, "projects": projects}
+def thumbnail_index(index, plan, src_dir, cap=50):
+    """Adds each project's head poster to the index: newest first, one entry per sha, at most cap entries per folder.
+    A poster that is not a plain PNG gets a notice and no entry."""
+    index = index if index.get("v") == 1 else {"v": 1, "projects": {}}
+    for project in plan["projects"]:
+        key = project["dir"] or "."
+        try:
+            poster = pathlib.Path(src_dir, project["poster"])
+            if not poster.is_file():
+                rel = pathlib.Path(src_dir, project["poster"].removeprefix(f"{DESIGN_DIR}/"))
+                poster = rel if rel.is_file() else pathlib.Path(project["poster"])
+            png = poster_thumbnail(poster.read_bytes())
+        except (OSError, ValueError, zlib.error, struct.error):
+            print(f"::notice::No thumbnail for {workflow_command_escape(key)}: its poster is not a plain 8-bit PNG", file=sys.stderr)
+            continue
+        entries = [e for e in index["projects"].get(key, []) if e["sha"] != plan["sha"]]
+        entries.insert(0, {"sha": plan["sha"], "date": plan["committedAt"], "png": base64.b64encode(png).decode("ascii")})
+        index["projects"][key] = entries[:cap]
+    return index
+
+
+def _thumb_src_stem(folder):
+    if not folder:
+        return "root"
+    if folder == "root":
+        return "_root"
+    return folder.replace("_", "__").replace("/", "_")
 
 
 def cmd_thumbs(args):
-    """Update review/thumbs/thumbs.json from review/design/thumbnail-plan.json and the previous index."""
-    with open("review/design/thumbnail-plan.json", encoding="utf-8") as fh:
+    """Merge poster thumbnails from --plan into the --index JSON file."""
+    with open(args.index, encoding="utf-8") as fh:
+        index = json.load(fh)
+    if not isinstance(index, dict) or (index and (index.get("v") != 1 or not isinstance(index.get("projects"), dict))):
+        raise ValueError("invalid thumbnail index")
+    with open(args.plan, encoding="utf-8") as fh:
         plan = json.load(fh)
-    existing = {}
-    if args.existing and os.path.isfile(args.existing):
-        try:
-            with open(args.existing, encoding="utf-8") as fh:
-                existing = json.load(fh)
-        except ValueError as e:
-            print(f"::warning::Existing thumbs.json could not be parsed ({workflow_command_escape(e)}); starting a fresh index.", file=sys.stderr)
-    thumbs = {}
-    for item in plan["projects"]:
-        try:
-            with open(item["poster"], "rb") as fh:
-                thumbs[item["dir"]] = poster_thumbnail(fh.read())
-        except (OSError, ValueError, zlib.error, struct.error) as e:
-            print(f"::warning::Thumbnail skipped for {workflow_command_escape(item['dir'] or '.')}: {workflow_command_escape(e)}", file=sys.stderr)
-    os.makedirs("review/thumbs", exist_ok=True)
-    with open("review/thumbs/thumbs.json", "w", encoding="utf-8") as fh:
-        json.dump(thumbnail_index(existing, plan["sha"], plan["committedAt"], thumbs), fh, separators=(",", ":"))
+    index = thumbnail_index(index, plan, os.path.dirname(args.plan) or ".")
+    with open(args.index, "w", encoding="utf-8") as fh:
+        json.dump(index, fh, separators=(",", ":"))
 
 
 def cmd_snapshot(args):
@@ -4175,7 +4182,7 @@ def cmd_snapshot(args):
         if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
             continue
         folder = p.get("dir", "")
-        dest = f"{DESIGN_DIR}/thumb-src/{(folder or '.').replace('/', '_')}.png"
+        dest = f"{DESIGN_DIR}/thumb-src/{_thumb_src_stem(folder)}.png"
         os.makedirs(f"{DESIGN_DIR}/thumb-src", exist_ok=True)
         with open(dest, "wb") as fh:
             fh.write(raw)
@@ -4818,7 +4825,8 @@ def main():
     p = sub.add_parser("snapshot", help="self-contained HTML report of the head design alone (needs [design] enabled)")
     p.set_defaults(func=cmd_snapshot)
     p = sub.add_parser("thumbs", help="update the design-thumbs release index from review/design/thumbnail-plan.json")
-    p.add_argument("--existing", default="")
+    p.add_argument("--index", required=True)
+    p.add_argument("--plan", required=True)
     p.set_defaults(func=cmd_thumbs)
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # comment text has → and —, whatever the locale

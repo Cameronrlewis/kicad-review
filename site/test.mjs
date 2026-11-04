@@ -5694,34 +5694,38 @@ test('list page budget bounds cursor skip and unexhausted history returns 502 in
   assert.equal(resAt50End.status, 502, 'cursor at end of page 50 with no progress returns 502 instead of self-looping Older link');
 });
 
-test('list thumbnails come from one release asset: 25 rows make at most 3 thumbnail requests', async () => {
-  const shas = Array.from({ length: 25 }, (_, k) => sha40(k + 1));
-  const index = { v: 1, projects: { A: [{ sha: shas[0], at: '2026-10-25T10:00:00Z', png: 'iVBORw0KGgo=' }, { sha: shas[5], at: '2026-10-20T10:00:00Z', png: 'QUJD' }] } };
-  const calls = [];
-  const gh = async (path) => {
-    calls.push(path);
-    if (path.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 88, name: 'thumbs.json' }] });
-    if (path.endsWith('/releases/assets/88')) return new Response(null, { status: 302, headers: { Location: 'https://objects.githubusercontent.com/thumbs.json' } });
-    throw Error('unexpected ' + path);
-  };
-  const restore = mockFetch(async (url) => { calls.push(url); return new Response(JSON.stringify(index)); });
-  try {
-    const map = await thumbnailsFor(gh, 't', '/repos/o/r', 'A', shas);
-    assert.equal(calls.length, 3, 'release lookup + asset redirect + signed body, whatever the row count');
-    assert.equal(map.get(shas[0]), 'iVBORw0KGgo=');
-    assert.equal(map.get(shas[5]), 'QUJD');
-    assert.equal(map.has(shas[1]), false);
-    const page = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main',
-      rows: [{ sha: shas[0], message: 'm', author: 'a', date: '' }, { sha: shas[1], message: 'm2', author: 'a', date: '' }],
-      tip: shas[0], next: null, truncated: false, thumbs: map, started: false, first: true });
-    assert.match(page, /<img alt="" width="200" height="125" src="data:image\/png;base64,iVBORw0KGgo=">/);
-    assert.match(page, /<span class="design-thumb-missing" aria-hidden="true"><\/span>/);
-  } finally { restore(); }
+test('list thumbnails cost at most three GitHub requests, however many rows there are, and never send the token to the signed URL', async () => {
+  const index = { v: 1, projects: { A: [{ sha: sha40(1), date: '2026-10-24T10:00:00Z', png: 'iVBORw0KGgo=' }] } };
+  for (const rows of [1, 25]) {
+    const seen = [];
+    const restore = mockFetch(async (url, options = {}) => {
+      seen.push({ url, auth: options.headers?.Authorization || null });
+      if (url.endsWith('/releases/tags/design-thumbs')) return json({ assets: [{ id: 555, name: 'thumbs.json' }] });
+      if (url.endsWith('/releases/assets/555')) return new Response(null, { status: 302, headers: { Location: 'https://thumbs.example/t.json?sig=1' } });
+      if (url === 'https://thumbs.example/t.json?sig=1') return json(index);
+      return new Response('{}', { status: 404 });
+    });
+    try {
+      const gh = async (path, token, init) => fetch(`https://api.github.com${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init?.headers || {}) } });
+      const shas = Array.from({ length: rows }, (_, i) => sha40(i + 1));
+      const found = await thumbnailsFor(gh, 'tok', '/repos/o/r', 'A', shas);
+      assert.equal(seen.length, 3, `${rows} rows`);
+      assert.equal(seen[2].auth, null, 'the signed URL never receives the token');
+      assert.equal(found.get(sha40(1)), 'iVBORw0KGgo=', 'the thumbnail for a listed commit is returned');
+      assert.equal(found.has(sha40(999)), false);
+      const page = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main',
+        rows: [{ sha: sha40(1), message: 'm', author: 'a', date: '' }, { sha: sha40(2), message: 'm2', author: 'a', date: '' }],
+        tip: sha40(1), next: null, truncated: false, thumbs: found, started: false, first: true });
+      assert.match(page, /<img alt="" width="200" height="125" src="data:image\/png;base64,iVBORw0KGgo=">/);
+      assert.match(page, /<span class="design-thumb-missing" aria-hidden="true"><\/span>/);
+    } finally { restore(); }
+  }
 });
 
-test('a missing or unreadable thumbnail asset leaves placeholders and never fails the list', async () => {
-  for (const status of [404, 500]) {
-    const map = await thumbnailsFor(async () => new Response('{}', { status }), 't', '/repos/o/r', 'A', [sha40(1)]);
-    assert.equal(map.size, 0);
-  }
+test('a missing thumbnail asset leaves every row a placeholder, and never fails the list', async () => {
+  const restore = mockFetch(async () => new Response('{}', { status: 404 }));
+  try {
+    const gh = async (path, token, init) => fetch(`https://api.github.com${path}`, init);
+    assert.equal((await thumbnailsFor(gh, 'tok', '/repos/o/r', 'A', [sha40(1)])).size, 0);
+  } finally { restore(); }
 });

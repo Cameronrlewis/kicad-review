@@ -6697,54 +6697,92 @@ with tempfile.TemporaryDirectory() as t:
         os.chdir(old_cwd)
 print("ok DP-S4D invalid settings default design to false")
 
-# DP-T1: a 1600x1000 3D still becomes a valid 200x125 RGB PNG thumbnail with no external tools.
+# DP-T1: the stdlib thumbnailer decodes every PNG filter type, box-averages the poster, and writes a PNG that decodes back.
 import argparse, struct, zlib
-def _dp_rgb_png(w, h, fn):
-    raw = b"".join(b"\0" + b"".join(bytes(fn(x, y)) for x in range(w)) for y in range(h))
-    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
-_still = _dp_rgb_png(1600, 1000, lambda x, y: (20, 110, 50, 255) if x < 800 else (180, 150, 40, 255))
-_thumb = kr.poster_thumbnail(_still)
-assert _thumb[:8] == b"\x89PNG\r\n\x1a\n" and len(_thumb) < 20_000, len(_thumb)
-_tw, _th, _tch, _trows = kr._png_decode(_thumb)
-assert (_tw, _th, _tch) == (200, 125, 3)
-assert tuple(_trows[60][:3]) == (20, 110, 50) and tuple(_trows[60][199 * 3:200 * 3]) == (180, 150, 40)
-print("ok DP-T1 200x125 PNG thumbnail from 1600x1000 still")
+def _dp_filter(rows, bpp, kinds):
+    out, prev = [], bytearray(len(rows[0]))
+    for row, kind in zip(rows, kinds):
+        enc = bytearray(len(row))
+        for i in range(len(row)):
+            a = row[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            pred = {0: 0, 1: a, 2: b, 3: (a + b) // 2}.get(kind)
+            if kind == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+            enc[i] = (row[i] - pred) & 255
+        out.append(bytes([kind]) + bytes(enc))
+        prev = row
+    return b"".join(out)
 
-# DP-T2: the thumbnail index updates one folder, keeps other folders, orders newest first and caps at 60 per folder.
-_idx = kr.thumbnail_index({"v": 1, "projects": {"other": [{"sha": "z" * 40, "at": "2026-01-01T00:00:00Z", "png": "OLD"}]}},
-                          sha="b" * 40, committed_at="2026-10-25T10:00:00Z",
-                          thumbs={"H": b"new-h"})
-assert _idx["projects"]["other"][0]["png"] == "OLD"
-assert _idx["projects"]["H"] == [{"sha": "b" * 40, "at": "2026-10-25T10:00:00Z", "png": _dpb64.b64encode(b"new-h").decode()}]
-for i in range(65):
-    _idx = kr.thumbnail_index(_idx, sha=f"{i:040x}", committed_at=f"2026-10-{(i % 28) + 1:02d}T00:00:00Z", thumbs={"H": b"x"})
-assert len(_idx["projects"]["H"]) == 60
-assert _idx["projects"]["H"][0]["at"] >= _idx["projects"]["H"][1]["at"]
-with _DpTmp() as _tt:
-    _old_cwd = os.getcwd()
+_dp_w, _dp_h = 4, 5
+_dp_rows = [bytes((x * 37 + y * 11 + k) & 255 for x in range(_dp_w) for k in range(3)) for y in range(_dp_h)]
+_dp_idat = zlib.compress(_dp_filter(_dp_rows, 3, [0, 1, 2, 3, 4]))
+_dp_png = (b"\x89PNG\r\n\x1a\n" + kr._png_chunk(b"IHDR", struct.pack(">IIBBBBB", _dp_w, _dp_h, 8, 2, 0, 0, 0))
+           + kr._png_chunk(b"IDAT", _dp_idat) + kr._png_chunk(b"IEND", b""))
+assert kr._png_decode(_dp_png)[3] == _dp_rows, "every filter type must unfilter to the original rows"
+thumb = kr.poster_thumbnail(_dp_png, width=2)
+tw, th, tbpp, trows = kr._png_decode(thumb)
+assert (tw, th) == (2, 2), (tw, th)
+block = [_dp_rows[y][0:3] for y in (0, 1)] + [_dp_rows[y][3:6] for y in (0, 1)]
+expected = bytes(sum(p[k] for p in block[:2] + [block[2]]) // 4 for k in range(3))
+assert trows[0][0:3] == bytes(((_dp_rows[0][0] + _dp_rows[1][0] + _dp_rows[0][3] + _dp_rows[1][3]) // 4,
+                               (_dp_rows[0][1] + _dp_rows[1][1] + _dp_rows[0][4] + _dp_rows[1][4]) // 4,
+                               (_dp_rows[0][2] + _dp_rows[1][2] + _dp_rows[0][5] + _dp_rows[1][5]) // 4)), "2 by 2 box average"
+for _bad_png in (
+    b"\x89PNG\r\n\x1a\nnot really",
+    b"\x89PNG\r\n\x1a\n" + kr._png_chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 0, 8, 2, 0, 0, 0)) + kr._png_chunk(b"IDAT", zlib.compress(b"")) + kr._png_chunk(b"IEND", b""),
+):
     try:
-        os.chdir(_tt)
-        os.makedirs("review/design/thumb-src", exist_ok=True)
-        pathlib.Path("review/design/thumb-src/Sub_Dir.png").write_bytes(_still)
-        pathlib.Path("review/design/thumbnail-plan.json").write_text(json.dumps({
-            "sha": "e" * 40, "committedAt": "2026-10-26T10:00:00Z",
-            "projects": [{"dir": "Sub/Dir", "poster": "review/design/thumb-src/Sub_Dir.png"}]
-        }))
-        pathlib.Path("prev.json").write_text(json.dumps({"v": 1, "projects": {"other": [{"sha": "a" * 40, "at": "2026-01-01T00:00:00Z", "png": "KEEP"}]}}))
-        kr.cmd_thumbs(argparse.Namespace(existing="prev.json"))
-        _written = json.loads(pathlib.Path("review/thumbs/thumbs.json").read_text())
-        assert _written["v"] == 1 and _written["projects"]["other"][0]["png"] == "KEEP"
-        assert _written["projects"]["Sub/Dir"][0]["sha"] == "e" * 40
-        assert _dpb64.b64decode(_written["projects"]["Sub/Dir"][0]["png"]) == _thumb
-    finally:
-        os.chdir(_old_cwd)
-print("ok DP-T2 thumbnail index merge, order and 60-entry cap")
+        kr.poster_thumbnail(_bad_png)
+        raise AssertionError("a broken or 0-dimension PNG must raise ValueError or zlib/struct errors")
+    except (ValueError, zlib.error, struct.error):
+        pass
+print("ok DP-T1 stdlib PNG filters, box average, refusal")
 
-# DP-T3: the thumbnail release write runs in its own non-cancelling concurrency group so two pushes never clobber each other.
+# DP-T2: the index keeps the newest 50 snapshots per folder, replaces a re-run sha, and skips a poster it cannot decode.
+with _DpTmp() as t:
+    pathlib.Path(t, "root.png").write_bytes(_dp_png)
+    pathlib.Path(t, "A.png").write_bytes(_dp_png)
+    pathlib.Path(t, "bad.png").write_bytes(b"not a png")
+    index = {}
+    for n in range(60):
+        plan = {"sha": f"{n:040x}", "committedAt": "2026-10-24T10:00:00Z", "projects": [{"dir": "", "poster": "root.png"}, {"dir": "A", "poster": "A.png"}]}
+        index = kr.thumbnail_index(index, plan, t)
+    assert len(index["projects"]["."]) == 50 and index["projects"]["."][0]["sha"] == f"{59:040x}" and index["projects"]["."][0]["date"] == "2026-10-24T10:00:00Z"
+    assert len(index["projects"]["A"]) == 50
+    again = kr.thumbnail_index(index, {"sha": f"{59:040x}", "committedAt": "x", "projects": [{"dir": "", "poster": "root.png"}]}, t)
+    assert len(again["projects"]["."]) == 50 and sum(1 for e in again["projects"]["."] if e["sha"] == f"{59:040x}") == 1
+    with patch("sys.stderr", new_callable=io.StringIO) as _err:
+        skipped = kr.thumbnail_index({}, {"sha": "a" * 40, "committedAt": "x", "projects": [{"dir": "B", "poster": "bad.png"}]}, t)
+    assert "B" not in skipped["projects"] and "::notice::No thumbnail for B:" in _err.getvalue()
+    _idx_path = pathlib.Path(t, "thumbs.json")
+    _plan_path = pathlib.Path(t, "thumbnail-plan.json")
+    _idx_path.write_text("{}")
+    _plan_path.write_text(json.dumps({"sha": "f" * 40, "committedAt": "2026-10-25T00:00:00Z", "projects": [{"dir": "A", "poster": "A.png"}]}))
+    kr.cmd_thumbs(argparse.Namespace(index=str(_idx_path), plan=str(_plan_path)))
+    _merged = json.loads(_idx_path.read_text())
+    assert _merged["v"] == 1 and _merged["projects"]["A"][0]["sha"] == "f" * 40
+    _idx_path.write_text("not json")
+    try:
+        kr.cmd_thumbs(argparse.Namespace(index=str(_idx_path), plan=str(_plan_path)))
+        raise AssertionError("unparseable index must raise")
+    except ValueError:
+        pass
+    assert kr._thumb_src_stem("") == "root" and kr._thumb_src_stem("a/b") != kr._thumb_src_stem("a_b")
+print("ok DP-T2 thumbnail index: cap, replace, skip")
+
+# DP-T3: the thumbnail job is separate, serialized per repository, and writes one release asset.
 _wf_t = pathlib.Path(".github/workflows/review.yml").read_text(encoding="utf-8")
 assert "concurrency:\n      group: kicad-design-thumbs-${{ github.repository }}" in _wf_t
-assert "cancel-in-progress: false" in _wf_t.split("kicad-design-thumbs-")[1].split("steps:")[0]
-assert 'gh release upload design-thumbs -R "$GITHUB_REPOSITORY" --clobber review/thumbs/thumbs.json' in _wf_t
+_thumbs_job = _wf_t.split("design-thumbnails:")[1]
+assert "cancel-in-progress: false" in _thumbs_job.split("steps:")[0]
+assert "timeout-minutes: 10" in _thumbs_job.split("steps:")[0]
+assert "permissions:\n      contents: write" in _thumbs_job.split("steps:")[0]
+assert "path: review/design" in _thumbs_job
+assert "if gh release view design-thumbs -R \"$GITHUB_REPOSITORY\" --json assets -q '.assets[].name' | grep -qx thumbs.json; then" in _thumbs_job
+assert "python3 tools/kicad_review.py thumbs --index review/thumbs/thumbs.json --plan review/design/thumbnail-plan.json" in _thumbs_job
+assert "gh release upload design-thumbs -R \"$GITHUB_REPOSITORY\" --clobber review/thumbs/thumbs.json" in _wf_t
 assert "--prerelease" in _wf_t and "design-thumbs" in _wf_t
-print("ok DP-T3 serialized design-thumbs release job")
+print("ok DP-T3 thumbnail job wiring")
