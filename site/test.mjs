@@ -5003,7 +5003,7 @@ test('BR02 measurement wrapper fixture keeps one opaque report frame that receiv
 });
 
 // ---- Design page: the newest snapshot for a branch, tag or commit ----
-import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery } from './design.js';
+import { findDesign, readSnapshot, readReleaseSnapshot, refOk, designName, projectKey, dirFromKey, projectsFromTree, changesProject, canonicalFolder, designQuery, scanHistory } from './design.js';
 import { designMissingPage, projectsPage, designsPage } from './pages.js';
 // The snapshot payload readSnapshot parses: one report for the whole commit, with every project folder listed.
 const payload = (sha, dirs = ['A', 'B']) => ({ mode: 'single', head: sha, snapshot: { sha, committedAt: '2026-10-24T10:00:00Z', message: 'Move R16 <b>bold</b>' }, projects: dirs.map((dir) => ({ dir })) });
@@ -5306,23 +5306,54 @@ test('designQuery and folder validation canonicalizes and re-encodes via project
 // lists both names (filename and previous_filename). The mock answers the three calls the route makes: the tip, the
 // path-filtered commit list resumed from a sha (GitHub semantics: the listing starts at that sha, which is included),
 // and the commit's files. `calls` records every path so the tests can count requests.
-function historyGh(log, { tree = [{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }], calls = [], thumbs = null } = {}) {
+function historyGh(log, { tree = [{ type: 'blob', path: 'A/A.kicad_pro' }, { type: 'blob', path: 'B/B.kicad_pro' }], calls = [], thumbs = null, refs = null } = {}) {
   const touches = (c, dir) => (c.files || []).some((f) => [f.filename, f.previous_filename].some((p) => p && (dir === '' || p === dir || p.startsWith(`${dir}/`))));
+  const bySha = new Map(log.map((c) => [c.sha, c]));
+  const hasDag = log.some((c) => Array.isArray(c.parents));
+  const branchSlice = (from) => {
+    const tip = refs && from in refs ? refs[from] : from === 'main' ? log[0]?.sha : from;
+    if (!tip || !bySha.has(tip)) return [];
+    if (!hasDag) {
+      const start = log.findIndex((c) => c.sha === tip);
+      return start < 0 ? [] : log.slice(start);
+    }
+    const reachable = new Set();
+    const queue = [tip];
+    while (queue.length) {
+      const sha = queue.shift();
+      if (!sha || reachable.has(sha) || !bySha.has(sha)) continue;
+      reachable.add(sha);
+      for (const p of bySha.get(sha).parents || []) queue.push(p);
+    }
+    return log.filter((c) => reachable.has(c.sha));
+  };
   return async (path) => {
     calls.push(path);
     if (path.includes('/git/trees/')) return json({ tree });
     if (path.includes('/releases/tags/design-thumbs')) return thumbs ?? new Response('{}', { status: 404 });
     const u = new URL(`https://x${path}`);
     const commitMatch = /\/commits\/([0-9a-f]{40})/.exec(u.pathname);
-    if (commitMatch) { const hit = log.find((c) => c.sha === commitMatch[1]); return hit ? json({ sha: hit.sha, files: hit.files || [] }) : json({}, 404); }
+    if (commitMatch) {
+      const hit = bySha.get(commitMatch[1]);
+      if (!hit) return json({}, 404);
+      const allFiles = hit.files || [];
+      const perPage = Number(u.searchParams.get('per_page') || 100);
+      const pageNum = Number(u.searchParams.get('page') || 1);
+      const offset = (pageNum - 1) * perPage;
+      const files = allFiles.slice(offset, offset + perPage);
+      return new Response(JSON.stringify({ sha: hit.sha, files }), {
+        headers: { 'Content-Type': 'application/json', ...(allFiles.length > offset + perPage ? { Link: '<x>; rel="next"' } : {}) },
+      });
+    }
     if (u.pathname.endsWith('/commits')) {
       const from = u.searchParams.get('sha');
       const perPage = Number(u.searchParams.get('per_page') || 30);
+      const pageNum = Number(u.searchParams.get('page') || 1);
+      const offset = (pageNum - 1) * perPage;
       const dir = u.searchParams.get('path') || '';
-      const start = Math.max(0, log.findIndex((c) => c.sha === from));
-      const hits = log.slice(start).filter((c) => !dir || touches(c, dir));
-      const page = hits.slice(0, perPage).map((c) => ({ sha: c.sha, author: { login: 'ada' }, commit: { message: c.message || `Change ${c.sha.slice(0, 7)}\nbody`, author: { date: '2026-10-01T00:00:00Z' } } }));
-      return new Response(JSON.stringify(page), { headers: { 'Content-Type': 'application/json', ...(hits.length > perPage ? { Link: '<x>; rel="next"' } : {}) } });
+      const hits = branchSlice(from).filter((c) => !dir || touches(c, dir));
+      const page = hits.slice(offset, offset + perPage).map((c) => ({ sha: c.sha, author: { login: 'ada' }, commit: { message: c.message || `Change ${c.sha.slice(0, 7)}\nbody`, author: { date: '2026-10-01T00:00:00Z' } } }));
+      return new Response(JSON.stringify(page), { headers: { 'Content-Type': 'application/json', ...(hits.length > offset + perPage ? { Link: '<x>; rel="next"' } : {}) } });
     }
     throw Error('unexpected ' + path);
   };
@@ -5477,4 +5508,124 @@ test('designsPage renders thumbnail image when thumbs has a hit, placeholder oth
   const emptyMap = new Map();
   const htmlMiss = designsPage({ user: 'u', owner: 'o', repo: 'r', key: 'A', ref: 'main', rows: [row], tip: tipSha, next: null, truncated: false, thumbs: emptyMap, started: false, first: true });
   assert.match(htmlMiss, /<span class="design-thumb-missing" aria-hidden="true"><\/span>/);
+});
+
+test('history cursor stays anchored to the selected ref across merge DAGs and rejects unrelated foreign cursor SHAs', async () => {
+  // Merge DAG on main:
+  // Root is sha40(1).
+  // First-parent mainline commits sha40(2)..sha40(6) (5 commits) descend from Root.
+  // Merged branch commits sha40(101)..sha40(124) (24 commits) also descend from Root, with newer timestamps than sha40(2)..sha40(6).
+  // Merge commit sha40(200) (main tip) has parents [sha40(6), sha40(124)].
+  // Unrelated foreign branch commits sha40(902) -> sha40(901) -> sha40(1) are NOT reachable from main.
+  const rootSha = sha40(1);
+  const mainLine = Array.from({ length: 5 }, (_, i) => {
+    const n = 6 - i;
+    return { sha: sha40(n), parents: [n === 2 ? rootSha : sha40(n - 1)], files: [{ filename: 'A/A.kicad_sch' }] };
+  });
+  const mergedBranch = Array.from({ length: 24 }, (_, i) => {
+    const n = 124 - i;
+    return { sha: sha40(n), parents: [n === 101 ? rootSha : sha40(n - 1)], files: [{ filename: 'A/A.kicad_sch' }] };
+  });
+  const mergeTip = { sha: sha40(200), parents: [sha40(6), sha40(124)], files: [{ filename: 'A/A.kicad_sch' }] };
+  const foreignBranch = [
+    { sha: sha40(902), parents: [sha40(901)], files: [{ filename: 'A/A.kicad_sch' }] },
+    { sha: sha40(901), parents: [rootSha], files: [{ filename: 'A/A.kicad_sch' }] },
+  ];
+  // Chronological order in repository: foreignBranch newest, then mergeTip, mergedBranch, mainLine, root
+  const dagLog = [
+    ...foreignBranch,
+    mergeTip,
+    ...mergedBranch,
+    ...mainLine,
+    { sha: rootSha, parents: [], files: [{ filename: 'A/A.kicad_sch' }] },
+  ];
+  const calls = [];
+  const gh = historyGh(dagLog, { calls, refs: { main: mergeTip.sha, feature: sha40(902) } });
+  const route = [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]];
+
+  // Page 1 on main returns mergeTip (1) + mergedBranch (24) = 25 rows; cursor is sha40(101) (whose only parent is rootSha)
+  const page1 = await (await designGet('/r/Cameronrlewis/repo/p/A/designs?ref=main', route)).text();
+  const rows1 = [...page1.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.equal(rows1.length, 25);
+  assert.equal(rows1[0], sha40(200));
+  assert.equal(rows1[24], sha40(101));
+  const cursor1 = /cursor=([0-9a-f]{40})">Older/.exec(page1)[1];
+  assert.equal(cursor1, sha40(101));
+
+  // Page 2 with cursor=sha40(101) must stay anchored to ref=main and NOT skip mainLine (sha40(6)..sha40(2))
+  const page2 = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${cursor1}`, route)).text();
+  const rows2 = [...page2.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.deepEqual(rows2, [sha40(6), sha40(5), sha40(4), sha40(3), sha40(2), rootSha], 'sibling branch commits across merge topology are preserved');
+  assert.ok(calls.filter((p) => p.includes('/commits?')).every((p) => p.includes('sha=main')), 'every commit list request stays anchored to sha=main');
+
+  // Foreign cursor SHA (valid commit on another branch, not reachable from main) must not pivot off main
+  calls.length = 0;
+  const foreignScan = await scanHistory(gh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', sha40(902));
+  assert.deepEqual(foreignScan, { rows: [], next: null, truncated: false });
+  assert.equal(calls.filter((p) => p.includes(`/commits/${sha40(901)}`) || p.includes(`/commits/${sha40(902)}`)).length, 0, 'foreign commits are never inspected');
+  const foreignRes = await designGet(`/r/Cameronrlewis/repo/p/A/designs?ref=main&cursor=${sha40(902)}`, route);
+  assert.equal(foreignRes.status, 404, 'unrelated cursor SHA on designsRoute returns 404 instead of pivoting off main');
+  const foreignText = await foreignRes.text();
+  assert.ok(!foreignText.includes(sha40(901)) && !foreignText.includes(sha40(902)), 'no foreign branch commit is rendered');
+});
+
+test('MAX_SCAN bounds total commit-detail HTTP requests across paginated commit details', async () => {
+  // 25 commits where each commit has 250 files (3 detail pages of 100, 100, 50 files), with the KiCad change on page 3.
+  const multiPageFiles = [
+    ...Array.from({ length: 249 }, (_, i) => ({ filename: `docs/f${i}.md` })),
+    { filename: 'A/A.kicad_sch' },
+  ];
+  const log = Array.from({ length: 25 }, (_, k) => ({ sha: sha40(25 - k), files: multiPageFiles }));
+  const calls = [];
+  const gh = historyGh(log, { calls });
+  const route = [['/repos/Cameronrlewis/repo/', (url) => gh(url.replace('https://api.github.com', ''))]];
+
+  const first = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', route)).text();
+  const detailCalls = calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p));
+  assert.equal(detailCalls.length, 60, 'at most 60 commit-detail HTTP requests per view even when commits paginate');
+  const rows1 = [...first.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.equal(rows1.length, 20, '20 commits x 3 detail pages = 60 detail requests');
+  assert.match(first, /Scanned 60 commits/);
+  const cursor = /cursor=([0-9a-f]{40})">Older/.exec(first)[1];
+  assert.equal(cursor, sha40(6), 'resumes after the 20th commit');
+
+  // Resuming with cursor scans the remaining 5 commits (15 detail requests) without skipping any commit
+  calls.length = 0;
+  const second = await (await designGet(`/r/Cameronrlewis/repo/p/A/designs?cursor=${cursor}`, route)).text();
+  const rows2 = [...second.matchAll(/\/p\/A\/design\/([0-9a-f]{40})"/g)].map((m) => m[1]);
+  assert.deepEqual(rows2, [sha40(5), sha40(4), sha40(3), sha40(2), sha40(1)]);
+  assert.equal(calls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 15);
+
+  // Mid-commit budget exhaustion: 19 commits x 3 pages (57 requests) + 1 commit x 2 pages (59 requests) + 1 commit needing 3 pages.
+  // The 21st commit hits the 60-request ceiling on its page 1, so it must not be skipped; cursor stays at the 20th commit.
+  const twoPageFiles = [
+    ...Array.from({ length: 149 }, (_, i) => ({ filename: `docs/f${i}.md` })),
+    { filename: 'A/A.kicad_sch' },
+  ];
+  const partialLog = [
+    ...Array.from({ length: 19 }, (_, k) => ({ sha: sha40(30 - k), files: multiPageFiles })),
+    { sha: sha40(11), files: twoPageFiles },
+    { sha: sha40(10), files: multiPageFiles },
+  ];
+  const partialCalls = [];
+  const partialGh = historyGh(partialLog, { calls: partialCalls });
+  const partialRes = await scanHistory(partialGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', '');
+  assert.equal(partialCalls.filter((p) => /\/commits\/[0-9a-f]{40}/.test(p)).length, 60, 'stops at 60 detail HTTP requests mid-commit');
+  assert.equal(partialRes.rows.length, 20);
+  assert.equal(partialRes.truncated, true);
+  assert.equal(partialRes.next, sha40(11), 'cursor stays at the last fully scanned commit so the incomplete commit is not skipped');
+  const resumedPartial = await scanHistory(partialGh, 't', '/repos/Cameronrlewis/repo', 'main', 'A', partialRes.next);
+  assert.deepEqual(resumedPartial.rows.map((r) => r.sha), [sha40(10)], 'resuming from cursor scans the previously incomplete commit in full');
+  assert.equal(resumedPartial.next, null);
+});
+
+test('exhausted history with exactly 25 terminal matches returns next: null and omits Older link', async () => {
+  const exact25 = Array.from({ length: 25 }, (_, k) => ({ sha: sha40(25 - k), files: [{ filename: 'A/A.kicad_sch' }] }));
+  const gh25 = historyGh(exact25);
+  const res25 = await scanHistory(gh25, 't', '/repos/Cameronrlewis/repo', 'main', 'A', '');
+  assert.equal(res25.rows.length, 25);
+  assert.equal(res25.next, null, 'no Older cursor when batch and GitHub pagination are exhausted at the 25th match');
+  assert.equal(res25.truncated, false);
+  const page25 = await (await designGet('/r/Cameronrlewis/repo/p/A/designs', [['/repos/Cameronrlewis/repo/', (url) => gh25(url.replace('https://api.github.com', ''))]])).text();
+  assert.ok(!page25.includes('>Older<'), 'Older button is omitted when history is exhausted at 25 rows');
 });
