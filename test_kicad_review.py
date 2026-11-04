@@ -5902,6 +5902,7 @@ with _DpTmp() as t:
         assert [c["action"] for c in compared["parts"]["changes"]] == ["added"] and compared["parts"]["lines"][0]["new_problems"]
         blobs = {}
         one = kr.build_project(project, blobs, settings, single=True)
+        assert all(not any(k in item for k in ("added", "action", "pos_before")) for item in one.get("objects", [])), one.get("objects")
         sheet = one["sheets"][0]
         assert sheet["svg"]["base"] is None and sheet["svg"]["head"] and sheet["status"] == "unchanged", sheet
         assert one["changes"] == [] and one["board"]["layers"][0]["svg"]["base"] is None, one["board"]

@@ -7036,3 +7036,21 @@ CHECKS.push(
     return ready('board') && !ready('sheet:'+sheet.path) || 'board renderer never became ready';
   `],
 );
+CHECKS.push(['design inspector: actual snapshot object and finding are absolute', '', `
+  if(D.mode!=='single' || D.snapshot?.message!=='Inspector fixture')return 'skip';
+  S.p=0; S.v='board'; S.m='side'; await draw();
+  for(let n=0;n<200&&!boardDiff?.scenes?.head;n++)await new Promise(r=>setTimeout(r,25));
+  const object=boardDiff?.scenes?.head?.objects?.find(o=>o.uuid==='00000000-0000-4000-8000-000000000001');
+  if(!object)return 'actual fixture track absent';
+  const finding=allViolations().find(v=>v.description==='Inspect fixture track');
+  if(!finding)return 'actual snapshot DRC finding absent';
+  for(const selected of [object,finding]) {
+    S.io=null; S.ig=selected===object?{object:{...object,side:'head'}}:null; S.s=selected===finding?finding.id:null;
+    renderInspector();
+    const dock=document.querySelector('#inspector');
+    if(!dock?.querySelector('dd') || !dock.textContent.includes('Placement · current (mm)'))return 'current inspector properties absent';
+    if(dock.querySelector('del,ins,.insp-arrow,.badge') || /base.*head/i.test(dock.textContent))return 'comparison markup in single inspector';
+    if(!inspectorProperties()?.head.uuid && selected===object)return 'current UUID absent';
+  }
+  return true;
+`]);

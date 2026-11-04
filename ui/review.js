@@ -2589,14 +2589,18 @@ function inspectorProperties() {
     flatten(base, change.before, "part."); flatten(head, change.after, "part.");
   }
   flatten(base, selected.before); flatten(head, selected.after);
-  for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
-  if (selected.action === "added" || selected.added) for (const k of Object.keys(base)) delete base[k];
-  if (selected.action === "removed" || selected.side === "base") for (const k of Object.keys(head)) delete head[k];
+  if (!single()) for (const [key, a, b] of selected.changes || []) { base[key] = a; head[key] = b; }
+  if (!single() && (selected.action === "added" || selected.added)) for (const k of Object.keys(base)) delete base[k];
+  if (!single() && (selected.action === "removed" || selected.side === "base")) for (const k of Object.keys(head)) delete head[k];
   // Position components get their own measured readouts; retain all other source fields.
   for (const target of [base, head]) if (Array.isArray(target.pos)) {
     target["X (mm)"] = target.pos[0]; target["Y (mm)"] = target.pos[1];
     if (target.pos.length > 2) target["Rotation (°)"] = target.pos[2];
     delete target.pos;
+  }
+  if (single()) {   // one revision: current values only, no change bookkeeping
+    for (const key of ["action", "added", "new", "pos_before", "before", "changes"]) delete head[key];
+    return {selected, base:Object.create(null), head};
   }
   return {selected, base, head};
 }
@@ -2609,18 +2613,18 @@ function renderInspector() {
   const html = (v, text) => flat(v) && v.length > 1 && v.every(x => x === String(x)) ? `<ul class="insp-list">${v.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : esc(text);
   const groups = Array.from({length:4}, () => ({main:[], geometry:[]}));
   const order = ["ref", "value", "Value", "kind", "footprint", "Footprint", "uuid", "X (mm)", "Y (mm)", "Rotation (°)", "position", "layer", "layers"];
-  const keys = data ? [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
+  const keys = data ? single() ? Object.keys(data.head) : [...new Set([...Object.keys(data.base), ...Object.keys(data.head)])] : [];
   keys.sort((a,b) => (order.includes(a) ? order.indexOf(a) : 100) - (order.includes(b) ? order.indexOf(b) : 100));
   if (data) for (const key of keys) {
     const k = key.toLowerCase(), leaf = k.split(".").at(-1);
     const group = /^(x \(mm\)|y \(mm\)|rotation|position|pos|box|layer|layers|angle|where|sheet|board|locked)/.test(leaf) ? 1
       : /net|pad|pin|clearance|drill|width|size|electrical|items|severity|description|check/.test(leaf) ? 2
       : /^(ref|refs|value|kind|type|uuid|id|footprint|changeuuid|changeids)$/.test(leaf) ? 0 : 3;
-    const a = value(data.base[key]), b = value(data.head[key]), changed = a !== b;
+    const a = value(data.base[key]), b = value(data.head[key]), changed = !single() && a !== b;
     const label = ({ref:"Reference", value:"Value", kind:"Type", footprint:"Footprint", uuid:"UUID"})[key] || key;
     groups[group][key.startsWith("geometry") ? "geometry" : "main"].push(`<dt>${esc(label).replace(/\./g, ".<wbr>")}</dt><dd>${changed ? `<del>${html(data.base[key], a)}</del> <span class="insp-arrow" aria-label="to">→</span> <ins>${html(data.head[key], b)}</ins>` : html(data.head[key], b)}</dd>`);
   }
-  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">Base → head · only data present in this report is shown.</span></p>'}</div>`;
+  dock.innerHTML = `<header class="insp-head"><span class="insp-label">Inspector</span><strong>${esc(title)}</strong>${!single() && data?.selected.action ? `<span class="badge ${esc(data.selected.action)}">${esc(data.selected.action)}</span>` : ""}<span class="insp-ticks"></span><button type="button" id="insp-toggle" aria-label="${inspectorClosed ? "Expand" : "Collapse"} inspector" aria-controls="insp-body" aria-expanded="${!inspectorClosed}" title="${inspectorClosed ? "Expand" : "Collapse"} inspector">${inspectorClosed ? "▴" : "▾"}</button></header><div id="insp-body" ${inspectorClosed ? "hidden" : ""}>${data ? groups.map((rows, i) => `<section class="insp-module"><h4>${["Identity", single() ? "Placement · current (mm)" : "Placement · base → head", "Electrical", "Fields & flags"][i]}</h4><dl>${rows.main.join("") || `<dt class="muted">${rows.geometry.length ? "See geometry" : "Not in report"}</dt>`}</dl>${rows.geometry.length ? `<details class="insp-geometry"><summary>Geometry · ${rows.geometry.length} properties</summary><dl>${rows.geometry.join("")}</dl></details>` : ""}</section>`).join("") : '<p class="insp-empty">Select an object, change or check finding to inspect its properties.<br><span class="muted">${single() ? "Head only" : "Base → head"} · only data present in this report is shown.</span></p>'}</div>`;
   if(S.part3d) {
     const p=S.part3d,body=$("#insp-body"),box=p.box.map(n=>round3(n*1000));
     body.dataset.part3dInspector='';body.replaceChildren();

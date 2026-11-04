@@ -3726,6 +3726,10 @@ def build_project(p, blobs, settings, waivers=None, change_offset=0, *, single=F
         attach_pcbdraw(board, out, blobs, allowed_sides)
     index = object_index(objs["base"], objs["head"], libraries=settings["libraries"]["enabled"]) if any(
         settings[name]["enabled"] for name in ("threads", "issues", "inventory", "libraries")) else None
+    if single and index is not None:   # one revision: nothing was added or moved
+        for item in index:
+            for key in ("added", "action", "pos_before"):
+                item.pop(key, None)
     libraries = None
     if settings["libraries"]["enabled"] and not single:
         roots = {side: posixpath.join(side, p["dir"]) for side in ("base", "head")}
