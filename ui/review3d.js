@@ -126,7 +126,7 @@ window.Review3D = (() => {
       });
     } catch (error) { return Promise.reject(error); }
   }
-  // One page-lifetime blob-URL cache for gzip blobs (posters, PcbDraw plots); revoked on pagehide, never by a viewer closing.
+  // One page-lifetime blob-URL cache for gzip blobs (posters, PcbDraw plots); revoked when the page unloads (not on entering the back/forward cache), never by a viewer closing.
   const blobLoads = new Map();
   const blobUrls = new Map();
   async function blobUrl(id, type, s = null) {
@@ -155,7 +155,8 @@ window.Review3D = (() => {
     return image;
   }
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-    window.addEventListener('pagehide', () => {
+    window.addEventListener('pagehide', event => {
+      if (event?.persisted) return;   // into the back/forward cache: a restored page still shows these images
       for (const url of blobUrls.values()) URL.revokeObjectURL(url);
       blobUrls.clear();
       blobLoads.clear();

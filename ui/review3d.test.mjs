@@ -314,3 +314,25 @@ test('BR06 closing a 3D viewer never revokes the shared navigation poster URL', 
   assert.equal((await api.poster3d('head', 'poster')).src, 'blob:p1');
   assert.equal(made, 1);
 });
+
+test('BR06 entering the back/forward cache keeps the shared poster URLs; a real unload releases them', async () => {
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+  const gz = new Uint8Array(await new Response(new Blob([png]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  const listeners = {};
+  const window = {REVIEW_DATA:{blobs:{poster:Buffer.from(gz).toString('base64')}}, addEventListener:(type, fn) => { (listeners[type] ||= []).push(fn); }};
+  const document = {createElement:() => ({}), head:{appendChild() {}}};
+  const module = {exports:{}};
+  let made = 0;
+  const revoked = [];
+  class Image { constructor() { this.dataset = {}; } decode() { return Promise.resolve(); } }
+  const URL = {createObjectURL:() => `blob:p${++made}`, revokeObjectURL:url => revoked.push(url)};
+  runInNewContext(readFileSync(new URL_('./review3d.js', import.meta.url), 'utf8'),
+    {window, document, DOMException, module, Response, Blob, DecompressionStream, Uint8Array, atob, Image, URL});
+  const first = await module.exports.poster3d('head', 'poster', null);
+  for (const fn of listeners.pagehide) fn({persisted:true});   // navigating away into the back/forward cache
+  assert.deepEqual(revoked, [], 'a page restored from the cache still shows its posters and plots');
+  assert.equal((await module.exports.poster3d('head', 'poster', null)).src, first.src);
+  assert.equal(made, 1);
+  for (const fn of listeners.pagehide) fn({persisted:false});
+  assert.deepEqual(revoked, [first.src], 'a real unload releases the URL');
+});
