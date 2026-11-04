@@ -114,7 +114,7 @@ export async function graphqlQuery(gh, token, query, variables) {
 
 export async function loadReviewThreads(gh, token, { owner, repo, name = repo, number }, initial = null) {
   const nodes = [];
-  let head = null, after;
+  let head = null, after, present = false;
   for (let page = 1; ; page++) {
     let data;
     if (page === 1 && initial !== null) {
@@ -133,9 +133,13 @@ export async function loadReviewThreads(gh, token, { owner, repo, name = repo, n
       if (data instanceof Response) return data;
     }
     const pr = data?.data?.repository?.pullRequest;
-    const rt = pr?.reviewThreads;
-    if (!Array.isArray(rt?.nodes)) return json({ error: 'GitHub did not answer. Try again.' }, 502);
     if (page === 1) head = pr?.headRefOid || null;
+    const rt = pr?.reviewThreads;
+    if (!Array.isArray(rt?.nodes)) {
+      if (page === 1) break;
+      return json({ error: 'GitHub did not answer. Try again.' }, 502);
+    }
+    present = true;
     nodes.push(...rt.nodes);
     const more = rt.pageInfo?.hasNextPage || (rt.totalCount > nodes.length && Boolean(rt.pageInfo?.endCursor));
     if (!more) {
@@ -145,7 +149,7 @@ export async function loadReviewThreads(gh, token, { owner, repo, name = repo, n
     if (page >= 10 || !rt.pageInfo?.endCursor) return json({ error: 'GitHub did not answer. Try again.' }, 502);
     after = rt.pageInfo.endCursor;
   }
-  return { ok: true, nodes, head };
+  return { ok: true, nodes, head, present };
 }
 
 export async function threadsRoute(request, env, { owner, repo, number, rest }, { access, gh }) {

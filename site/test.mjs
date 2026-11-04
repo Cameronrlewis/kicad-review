@@ -5709,6 +5709,26 @@ test('finding 11: thread listing cursor-paginates threads past 100 and comments 
   } finally { restore(); }
 });
 
+test('GET threads route returns 200 with empty list when PR is missing or has no reviewThreads', async () => {
+  const sealed = await signedIn({ t: 'access-secret' });
+  for (const data of [
+    { repository: { pullRequest: null } },
+    { repository: { pullRequest: { headRefOid: 'b'.repeat(40), reviewThreads: null } } },
+    { repository: null },
+  ]) {
+    const restore = mockFetch(async (url, options = {}) => {
+      if (url.endsWith('/repo')) return repoOk();
+      assert.equal(url, 'https://api.github.com/graphql');
+      return Response.json({ data });
+    });
+    try {
+      const response = await call('/r/Cameronrlewis/repo/pull/7/threads', { headers: { Cookie: `s=${sealed}` } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { threads: [], head: data.repository?.pullRequest?.headRefOid || null });
+    } finally { restore(); }
+  }
+});
+
 test('finding 12: issues route paginates open issues past 100 and fails closed when scan is incomplete', async () => {
   const unanchored = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, title: `Plain ${i + 1}`, html_url: `https://github.com/o/r/issues/${i + 1}`, state: 'open', body: 'no anchor' }));
   const anchoredOnPage2 = { number: 101, title: 'Tracked on page 2', html_url: 'https://github.com/o/r/issues/101', state: 'open', body: threadBody({ anchor, text: 'existing', link: 'https://site.example/r/o/r/a/1' }) };

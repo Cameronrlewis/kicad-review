@@ -32,7 +32,7 @@ export async function readinessRoute(request, env, { owner, repo, number }, { ac
     let list = null;
     if (threads) {
       const res = await loadReviewThreads(gh, token, { owner, repo, number }, threads).catch(() => null);
-      if (res && !(res instanceof Response) && Array.isArray(res.nodes)) {
+      if (res && !(res instanceof Response) && res.present && Array.isArray(res.nodes)) {
         try { list = parseThreads({ data: { repository: { pullRequest: { reviewThreads: { nodes: res.nodes } } } } }).filter((t) => !t.resolved); } catch { /* unreadable */ }
       }
     }
