@@ -6933,6 +6933,7 @@ CHECKS.push(
     if (!bar.textContent.includes('Move R16 <b>bold</b>') || bar.querySelector('b')) return 'message is not text';
     if (/NEW/.test(document.querySelector('#report-state').textContent) || document.querySelector('#nav .counts')) return 'compare words in single';
     if (document.querySelector('#nav').textContent.includes('Libraries') || document.querySelector('.no-change-notice')) return 'compare leftovers';
+    if (document.querySelector('[data-check-scope="new"]') || document.querySelector('.new-tag') || /\\+\\d+ new|fixed/.test(document.querySelector('#panel-body').textContent)) return 'new/fixed in checks';
     const status = document.querySelector('[data-view-mode]').textContent;
     return status === 'Design' || 'status ' + status;
   `],
@@ -7007,5 +7008,18 @@ CHECKS.push(
     const names = boardView.scenes[1].copperStack.join();
     const hits = boardDiff.hits(boardDiff.panes[0].vp, {clientX: boardDiff.panes[0].vp.getBoundingClientRect().left + boardDiff.panes[0].vp.clientWidth / 2, clientY: boardDiff.panes[0].vp.getBoundingClientRect().top + boardDiff.panes[0].vp.clientHeight / 2});
     return names === 'F.Cu,In1.Cu,In2.Cu,B.Cu' && hits.every(h => h.side === 'head') || 'stack ' + names;
+  `],
+);
+CHECKS.push(
+  ["design Parts: absolute BOM ignores stale changed filter", "t=parts", `
+    if(!proj().parts) return 'skip'; ${TO_SINGLE}
+    const parts=proj().parts; parts.changes=[]; parts.field_changes=[]; if(parts.coverage) parts.coverage.base=null;
+    S.partsFilter.changed=true; S.partsFilter.problems=false; S.partsFilter.q=''; S.t='parts'; rightTab='parts'; renderPanel();
+    const root=document.querySelector('#panel-body');
+    if(root.querySelector('[data-parts-filter="changed"]') || /Only changed|change from base/.test(root.innerHTML)) return 'comparison help/filter remains';
+    if(S.partsFilter.changed || root.querySelector('th')?.textContent==='Δ') return 'stale delta filter/column';
+    if(root.querySelectorAll('.parts-row').length!==parts.lines.length) return 'BOM rows missing';
+    root.querySelector('[data-parts-filter="problems"]').click();
+    return root.querySelectorAll('.parts-row').length===parts.lines.length && document.querySelectorAll('#panel-body .parts-row').length===parts.lines.filter(blocking).length || 'absolute problem filter changed';
   `],
 );

@@ -2011,13 +2011,13 @@ function renderChecks() {
   const ran = configured.filter(r => r.check && r.setting !== "off").map(r => r.check);
   const all = ran.flatMap(c => c.violations.map(v => ({ ...v, check: c })));
   const totalNew = all.filter(v => v.new && !v.waived).length;
-  const scope = state.scope ?? (totalNew ? "new" : "all");
+  const scope = single() ? "all" : state.scope ?? (totalNew ? "new" : "all");
   const checked = state.check && byName.has(state.check) ? state.check : "";
   const summary = configured.map(({ name, check, setting }) => {
     if (!check || setting === "off" || check.status === "not_run") return `<button class="check check-not-run" data-check-summary="${esc(name)}" aria-pressed="false">
       <span class="check-heading"><span class="check-status">— not run</span><span class="check-title">${esc(titles[name] || name)}</span></span>
       <span class="check-reason">${esc(check?.reason || "turned off in kicad-review.toml")}</span></button>`;
-    const baselineOnly = D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
+    const baselineOnly = !single() && D.settings?.fail_on === "new" && check.errors > 0 && check.new_errors === 0;
     const status = check.status === "fail" ? "✕ failing" : check.status === "warn" ? "! warnings" : "✓ passing";
     const newer = check.new_errors + check.new_warnings;
     return `<button class="check check-${esc(check.status)}" data-check-summary="${esc(name)}" aria-pressed="${checked === name}">
@@ -2046,7 +2046,7 @@ function renderChecks() {
     }).join("")}${vs.length > 200 ? `<p class="muted check-more">+${vs.length - 200} more</p>` : ""}</details>`;
   }).join("");
   return `${dockListTools("checks", state)}<div class="checks-summary">${summary}</div><div class="filters checks-filters">
-    <button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>
+    ${single() ? "" : `<button class="check-chip" data-check-scope="new" aria-pressed="${scope === "new"}">New in this change ${totalNew}</button>`}
     <button class="check-chip" data-check-scope="all" aria-pressed="${scope === "all"}">All ${all.length}</button>
     <button class="check-chip" data-check-severity="error" aria-pressed="${state.error}">Errors ${all.filter(v => v.severity === "error").length}</button>
     <button class="check-chip" data-check-severity="warning" aria-pressed="${state.warning}">Warnings ${all.filter(v => v.severity === "warning").length}</button>
@@ -2079,21 +2079,22 @@ function coverageHtml(parts) {
   const c = parts.coverage; if (!c) return "";
   return `<div class="bom-coverage" role="group" tabindex="0" aria-label="BOM coverage"><b>BOM</b>${Object.keys(c.head).map(f => {
     const [n, t] = c.head[f], d = c.base?.[f] ? n - c.base[f][0] : 0, pct = t ? Math.round(100 * n / t) : 100;
-    return `<span class="coverage-item${/^(lcsc|mpn|order ready)$/i.test(f) ? " primary" : ""}${n < t ? ' short' : ''}" title="${esc(f)}: ${n} / ${t} (${pct}%) · change from base ${d > 0 ? '+' : ''}${d}"><span class="sr-only">${n < t ? 'incomplete: ' : ''}</span>${esc(f)} <b>${pct}%</b><span class="sr-only"> ${n} / ${t} ${d > 0 ? '+' : ''}${d}</span></span>`;
+    return `<span class="coverage-item${/^(lcsc|mpn|order ready)$/i.test(f) ? " primary" : ""}${n < t ? ' short' : ''}" title="${esc(f)}: ${n} / ${t} (${pct}%)${single() ? "" : ` · change from base ${d > 0 ? '+' : ''}${d}`}"><span class="sr-only">${n < t ? 'incomplete: ' : ''}</span>${esc(f)} <b>${pct}%</b><span class="sr-only"> ${n} / ${t}${single() ? "" : ` ${d > 0 ? '+' : ''}${d}`}</span></span>`;
   }).join("")}</div>`;
 }
 function fieldChangesHtml(parts) {
-  const fc = parts.field_changes || [];
+  const fc = single() ? [] : parts.field_changes || [];
   return (fc.length ? `<table class="field-changes"><caption>Field changes</caption><thead><tr><th>Refs</th><th>Field</th><th>Base</th><th>Head</th></tr></thead><tbody>${fc.map(r =>
     `<tr><td>${esc(r.refs.join(", "))}</td><td>${esc(r.field)}</td><td>${esc(r.before ?? "—")}</td><td>${esc(r.after ?? "—")}</td></tr>`).join("")}</tbody></table>` : "")
     + (parts.dnp_mismatch?.length ? `<p class="dnp-mismatch">⚠ DNP differs between schematic and board: ${esc(parts.dnp_mismatch.join(", "))}</p>` : "");
 }
 function renderParts() {
-  const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter;
-  const changes = l => parts.changes.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
+  const parts = proj().parts, age = partsAge(parts.supplier), f = S.partsFilter, partChanges = single() ? [] : parts.changes;
+  if (single()) f.changed = false;   // a stale "Only changed" from a comparison link would hide the whole BOM
+  const changes = l => partChanges.filter(r => r.action !== "removed" && r.refs.some(ref => l.refs.includes(ref)));
   const rows = parts.lines.map(l => ({ line: l, changes: changes(l) }));
   // Removed lines are not in the head BOM; keep them visible for change review.
-  for (const r of parts.changes.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
+  for (const r of partChanges.filter(r => r.action === "removed")) rows.push({ line: { ...r.before, refs: r.refs }, changes: [r] });
   const shown = rows.filter(r => (!f.q || JSON.stringify(r.line).toLowerCase().includes(f.q.toLowerCase())) && (!f.problems || blocking(r.line)) && (!f.changed || r.changes.length))
     .sort((a, b) => f.sort === "reference" ? a.line.refs[0].localeCompare(b.line.refs[0], undefined, {numeric:true}) : Number(blocking(b.line)) - Number(blocking(a.line)));
   const counts = parts.supplier?.not_looked_up || {};
@@ -2103,8 +2104,8 @@ function renderParts() {
     ${parts.supplier?.fetched_at ? '<p class="parts-attribution parts-age">Stock and price from DigiKey</p>' : ""}
     ${parts.supplier?.error ? `<p class="parts-lookup-error parts-age">DigiKey lookup unavailable: ${esc(parts.supplier.error)}</p>` : ""}
     ${notLookedUp ? `<p class="parts-not-looked-up parts-age">${notLookedUp}.</p>` : ""}
-    <div class="filters checks-filters">${[["problems", "Only problems"], ["changed", "Only changed"]].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
-    <div class="parts-scroll"><table class="parts-table"><thead><tr>${["Δ", "Refs", "Value / MPN", "LCSC", "DigiKey", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
+    <div class="filters checks-filters">${[["problems", "Only problems"], ...(single() ? [] : [["changed", "Only changed"]])].map(([k, label]) => `<button class="check-chip" data-parts-filter="${k}" aria-pressed="${f[k]}">${label}</button>`).join("")}</div>
+    <div class="parts-scroll"><table class="parts-table"><thead><tr>${[...(single() ? [] : ["Δ"]), "Refs", "Value / MPN", "LCSC", "DigiKey", "PCBWay", "Datasheet"].map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${shown.map(({ line: l, changes: cs }) => {
       // A change row names only the refs it moved; the line's other refs did not change.
       const moved = [...new Set(cs.flatMap(r => r.refs))], refs = f.changed ? moved : l.refs;
       const changeText = field => {
@@ -2128,7 +2129,7 @@ function renderParts() {
       const stockText = product ? `<a href="${esc(product)}" rel="noopener noreferrer" target="_blank">${esc(stock)}</a>` : esc(stock);
       const stockHtml = stockText + (!parts.supplier?.skipped && supplier?.product_status ? `<small class="parts-footprint">${esc(supplier.product_status)}</small>` : "");
       const url = l.datasheet, sheet = /^https?:\/\//i.test(url || "") ? `<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">pdf</a>` : "—";
-      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}"><td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td><td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn ? `<span class="parts-mpn"> ${esc(l.mpn)}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
+      return `<tr class="parts-row${blocking(l) ? " problem" : ""}${cs.length ? " changed" : ""}${supplier?.status === "unavailable" ? " unavailable" : ""}">${single() ? "" : `<td title="${esc(cs.map(r => r.action).join(", "))}">${blocking(l) ? "⚠" : ""}${cs.map(r => ({added: "+", removed: "−", swapped: "~", value: "~", footprint: "~"})[r.action] || "").join("")}</td>`}<td class="parts-refs" title="${esc(refs.join(", "))}">${referenceRanges(refs) === refs.join(", ") ? refs.map(r => moved.includes(r) ? `<strong>${esc(r)}</strong>` : esc(r)).join(", ") : esc(referenceRanges(refs))}</td><td>${changeText("value")}${l.mpn ? `<span class="parts-mpn"> ${esc(l.mpn)}</span>` : ""}${cs.some(r => r.before && r.after && r.before.footprint !== r.after.footprint) ? `<small class="parts-footprint">footprint ${changeText("footprint")}</small>` : ""}${problems.length ? `<small class="parts-problems">${l.problems.map((p, i) => `<span class="problem-tag" tabindex="0" title="${esc(problems[i])}">${p.includes("lcsc") ? "LCSC" : p.includes("mpn") ? "MPN" : p === "placeholder" ? "VALUE" : "STOCK"}</span>`).join(" ")}</small>` : ""}</td><td>${changeText("lcsc")}</td><td class="parts-stock${age.stale ? " stale" : ""}">${stockHtml}</td><td title="${l.mpn ? "MPN supplied for PCBWay" : "MPN missing"}">${l.mpn ? "✔" : "—"}</td><td>${sheet}</td></tr>`;
     }).join("")}</tbody></table>${shown.length ? "" : '<p class="muted">No parts match these filters.</p>'}</div>${fieldChangesHtml(parts)}`;
 }
 function renderThreads() {
